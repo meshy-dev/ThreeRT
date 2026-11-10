@@ -370,6 +370,57 @@ fn the_hash_takes_one_nan() {
     assert_eq!(hash_bits(-0.0), (-0.0f32).to_bits(), "only NaNs are made one");
 }
 
+/// A query sees the world as the calls left it, with or without a tick since. (The broad phase is the last step's: it
+/// had no collider added since, and had a body moved by "pose" where it was, so a ray met it there and missed it
+/// where it is. Two events that arrive with no tick between them are the case: the second one's query must see what
+/// the first one added.)
+#[test]
+fn queries_see_what_the_calls_left_without_a_tick() {
+    let (mut b, mut s) = world();
+    ok(&mut b, &mut s, "collider", json!({ "id": 1000, "position": [0, -0.5, 0], "shape": { "type": "box", "halfExtents": [50, 0.5, 50] } }));
+    let ray = |x: f64| json!({ "origin": [x, 9, 0], "direction": [0, -1, 0], "all": true });
+    let ball = |x: f64| json!({ "shape": sphere(0.4), "position": [x, 9, 0], "direction": [0, -1, 0] });
+    // What the queries answer: the colliders a ray down at x passes through with their distances, the first one's
+    // normal, what a 0.4 m ball overlaps at (x, 2, 0), and what a ball lowered from 9 m meets, where and how far.
+    let seen = |b: &mut Bridge, s: &mut Objects, x: f64| -> Value {
+        let r = ok(b, s, "ray", ray(x));
+        let first = ok(b, s, "ray", json!({ "origin": [x, 9, 0], "direction": [0, -1, 0] }));
+        let o = ok(b, s, "overlap", json!({ "shape": sphere(0.4), "position": [x, 2, 0] }));
+        let w = ok(b, s, "sweep", ball(x));
+        let round = |v: &Value| (v.as_f64().unwrap() * 1e3).round() / 1e3;
+        json!({
+            "ray": r.as_array().unwrap().iter().map(|h| json!([h["collider"], round(&h["distance"])])).collect::<Vec<_>>(),
+            "first": [first["collider"], first["body"], round(&first["normal"][1])],
+            "overlap": o.as_array().unwrap().iter().map(|h| h["collider"].clone()).collect::<Vec<_>>(),
+            "sweep": [w["collider"], round(&w["distance"]), round(&w["point"][1]), round(&w["normal"][1])],
+        })
+    };
+    // A static collider, then a body with a box and a ball on top of it: seen at once, and the same after a tick.
+    let ground = json!({ "ray": [[1000, 9.0]], "first": [1000, null, 1.0], "overlap": [], "sweep": [1000, 8.6, 0.0, 1.0] });
+    assert_eq!(seen(&mut b, &mut s, 0.0), ground);
+    ok(&mut b, &mut s, "body", json!({ "id": 1, "position": [0, 2, 0], "gravityScale": 0 }));
+    ok(&mut b, &mut s, "collider", json!({ "id": 1, "body": 1, "shape": { "type": "box", "halfExtents": [0.5, 0.5, 0.5] } }));
+    ok(&mut b, &mut s, "collider", json!({ "id": 2, "body": 1, "position": [0, 0.75, 0], "shape": sphere(0.25) }));
+    let there = json!({ "ray": [[2, 6.0], [1, 6.5], [1000, 9.0]], "first": [2, 1, 1.0], "overlap": [1], "sweep": [2, 5.6, 3.0, 1.0] });
+    assert_eq!(seen(&mut b, &mut s, 0.0), there);
+    assert_eq!(ok(&mut b, &mut s, "ray", json!({ "origin": [0, 9, 0], "direction": [0, -1, 0], "skip": 1 }))["collider"], 1000, "its own ray passes through it");
+    run(&mut b, &mut s, 1);
+    assert_eq!(seen(&mut b, &mut s, 0.0), there);
+    // Moved by a call (turned upside down too: the ball is under the box now): it is where it was put, not where it was.
+    ok(&mut b, &mut s, "pose", json!({ "body": 1, "position": [5, 2, 0], "rotation": [1, 0, 0, 0] }));
+    let moved = json!({ "ray": [[1, 6.5], [2, 7.5], [1000, 9.0]], "first": [1, 1, 1.0], "overlap": [1], "sweep": [1, 6.1, 2.5, 1.0] });
+    assert_eq!(seen(&mut b, &mut s, 0.0), ground);
+    assert_eq!(seen(&mut b, &mut s, 5.0), moved);
+    run(&mut b, &mut s, 1);
+    assert_eq!(seen(&mut b, &mut s, 0.0), ground);
+    assert_eq!(seen(&mut b, &mut s, 5.0), moved);
+    // Removed: gone at once (as it was before).
+    ok(&mut b, &mut s, "remove", json!({ "collider": 2 }));
+    ok(&mut b, &mut s, "pose", json!({ "body": 1, "position": [5, 2, 0] }));
+    ok(&mut b, &mut s, "remove", json!({ "body": 1 }));
+    assert_eq!(seen(&mut b, &mut s, 5.0), ground);
+}
+
 /// A small generator of integers (the fuzz below is the same on every machine).
 struct Rng(u64);
 

@@ -814,9 +814,11 @@ mod tests {
         // (Weightless, so it stays where the queries expect it.)
         b.call(&mut s, "body", &json!({ "id": 7, "object": 2, "gravityScale": 0 })).unwrap();
         b.call(&mut s, "collider", &json!({ "id": 70, "body": 7, "shape": { "type": "box", "halfExtents": [0.25, 0.25, 0.25] }, "events": true })).unwrap();
-        assert!(b.call(&mut s, "ray", &json!({ "origin": [0, 10, 0], "direction": [0, -1, 0] })).unwrap().is_null(), "before a tick");
+        // (A query sees what the calls made, before any tick, and the same after one.)
+        let before = b.call(&mut s, "ray", &json!({ "origin": [0, 10, 0], "direction": [0, -1, 0] })).unwrap();
         run(&mut b, &mut s, 1);
         let h = b.call(&mut s, "ray", &json!({ "origin": [0, 10, 0], "direction": [0, -1, 0] })).unwrap();
+        assert_eq!((before["collider"].as_u64(), before["distance"].as_f64().map(|d| (d * 1e4).round())), (Some(70), Some(77500.0)), "before a tick: {before}");
         assert_eq!((h["collider"].as_u64(), h["body"].as_u64(), h["object"].as_u64()), (Some(70), Some(7), Some(2)));
         assert!((h["distance"].as_f64().unwrap() - 7.75).abs() < 1e-4 && h["normal"][1] == 1.0);
         let all = b.call(&mut s, "ray", &json!({ "origin": [0, 10, 0], "direction": [0, -1, 0], "all": true })).unwrap();

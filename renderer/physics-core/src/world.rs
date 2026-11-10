@@ -345,6 +345,11 @@ pub struct Physics {
     contacts_dropped: u64,
     /// What was taken out of the world after a tick, and why (`take_faults`).
     faults: Vec<Fault>,
+    /// Colliders the broad phase does not have right until the next step: those added since the last one (it does not
+    /// have them at all) and those of bodies moved by `set_pose` (it has them where they were). Queries leave them
+    /// out of the broad phase's answer and test them one by one where they are, so a query sees the world as the
+    /// calls left it, with or without a tick since.
+    fresh: std::collections::BTreeSet<ColliderId>,
 }
 
 impl Default for Physics {
@@ -371,6 +376,7 @@ impl Physics {
             contacts: Default::default(),
             contacts_dropped: 0,
             faults: vec![],
+            fresh: Default::default(),
         }
     }
 
@@ -434,6 +440,7 @@ impl Physics {
         let jointed = self.world.impulse_joints.attached_joints(h).next().is_some();
         self.world.remove_body_with_colliders(h, true);
         for c in &gone {
+            self.fresh.remove(c);
             if let Some((_, data)) = self.colliders.remove(c) {
                 self.shape_data -= data;
             }
@@ -479,6 +486,7 @@ impl Physics {
         let h = self.world.insert_collider(c.user_data(id as u128), parent);
         self.colliders.insert(id, (h, data));
         self.shape_data += data;
+        self.fresh.insert(id);
         Ok(id)
     }
 
@@ -486,6 +494,7 @@ impl Physics {
         if let Some((h, data)) = self.colliders.remove(&id) {
             self.world.remove_collider(h);
             self.shape_data -= data;
+            self.fresh.remove(&id);
         }
     }
 
@@ -606,6 +615,8 @@ impl Physics {
     pub fn step(&mut self) {
         self.world.step_with_events(&(), &self.events);
         self.ticks += 1;
+        // (The broad phase has every collider where it is now.)
+        self.fresh.clear();
         for e in self.events.0.lock().unwrap().drain(..) {
             // (A removed collider's contact ends without it: its id is no longer known.)
             let id = |h: ColliderHandle| self.world.colliders.get(h).map(|c| c.user_data as u32);
@@ -717,9 +728,12 @@ impl Physics {
     pub fn set_pose(&mut self, id: BodyId, position: [f32; 3], rotation: [f32; 4]) -> Result<(), String> {
         within(&position, MAX_COORD, "a body's position")?;
         let p = pose(position, rotation)?;
-        if let Some(b) = self.body_mut(id) {
-            b.set_position(p, true);
-        }
+        let Some(&h) = self.bodies.get(&id) else { return Ok(()) };
+        let b = &mut self.world.bodies[h];
+        b.set_position(p, true);
+        // (Until the next step the broad phase has its colliders where they were: `fresh`.)
+        let moved: Vec<ColliderId> = b.colliders().iter().filter_map(|&c| self.world.colliders.get(c)).map(|c| c.user_data as u32).collect();
+        self.fresh.extend(moved);
         Ok(())
     }
 
@@ -802,18 +816,30 @@ impl Physics {
         Some(Hit { collider, body, distance, point: point.to_array(), normal: normal.to_array() })
     }
 
-    /// The first collider a ray meets within `max` metres (the world as of the last step). `skip`: a body whose
-    /// colliders the ray passes through (the one that casts it).
+    /// The first collider a ray meets within `max` metres, in the world as the calls left it (`fresh`). `skip`: a body
+    /// whose colliders the ray passes through (the one that casts it).
     pub fn cast_ray(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>) -> Result<Option<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(None) };
-        let Some((h, i)) = self.world.cast_ray_and_get_normal(&ray, max, true, self.filter(skip)) else { return Ok(None) };
-        Ok(self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal))
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let mut best = self.world.cast_ray_and_get_normal(&ray, max, true, self.filter(skip, &settled)).and_then(|(h, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
+        for (h, c, at) in self.fresh(skip) {
+            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
+                best = Self::nearer(best, self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
+            }
+        }
+        Ok(best)
     }
 
     /// Every collider a ray passes through within `max` metres, nearest first, at most `limit` of them.
     pub fn cast_ray_all(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>, limit: usize) -> Result<Vec<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(vec![]) };
-        let mut hits: Vec<Hit> = self.world.intersect_ray(ray, max, true, self.filter(skip)).filter_map(|(h, _, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal)).collect();
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let mut hits: Vec<Hit> = self.world.intersect_ray(ray, max, true, self.filter(skip, &settled)).filter_map(|(h, _, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal)).collect();
+        for (h, c, at) in self.fresh(skip) {
+            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
+                hits.extend(self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
+            }
+        }
         // (Equal distances in collider order: the same answer on every machine.)
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.collider.cmp(&b.collider)));
         hits.truncate(limit);
@@ -839,10 +865,44 @@ impl Physics {
         shape.shared()
     }
 
-    fn filter(&self, skip: Option<BodyId>) -> QueryFilter<'_> {
-        match skip.and_then(|b| self.bodies.get(&b)) {
+    /// A query's filter over the broad phase: without `skip`'s colliders, and without the fresh ones (`settled`), which
+    /// the query tests itself.
+    fn filter<'a>(&self, skip: Option<BodyId>, settled: &'a impl Fn(ColliderHandle, &Collider) -> bool) -> QueryFilter<'a> {
+        let f = match skip.and_then(|b| self.bodies.get(&b)) {
             Some(&h) => QueryFilter::default().exclude_rigid_body(h),
             None => QueryFilter::default(),
+        };
+        // (Nothing fresh, as after every tick: the plain filter.)
+        if self.fresh.is_empty() {
+            f
+        } else {
+            f.predicate(settled)
+        }
+    }
+
+    /// The fresh colliders a query tests itself (not `skip`'s), each where it is now: on a body, at the body's pose
+    /// (its own world pose is the last step's until the next).
+    fn fresh(&self, skip: Option<BodyId>) -> impl Iterator<Item = (ColliderHandle, &Collider, Pose)> {
+        let skip = skip.and_then(|b| self.bodies.get(&b)).copied();
+        self.fresh.iter().filter_map(move |id| {
+            let h = self.colliders.get(id)?.0;
+            let c = self.world.colliders.get(h)?;
+            if !c.is_enabled() || (skip.is_some() && c.parent() == skip) {
+                return None;
+            }
+            let at = match (c.parent().and_then(|p| self.world.bodies.get(p)), c.position_wrt_parent()) {
+                (Some(b), Some(local)) => *b.position() * *local,
+                _ => *c.position(),
+            };
+            Some((h, c, at))
+        })
+    }
+
+    /// The nearer of two hits (equal distances: the lower collider id).
+    fn nearer(a: Option<Hit>, b: Option<Hit>) -> Option<Hit> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(if b.distance.total_cmp(&a.distance).then(b.collider.cmp(&a.collider)).is_lt() { b } else { a }),
+            (a, b) => a.or(b),
         }
     }
 
@@ -850,7 +910,14 @@ impl Physics {
     pub fn overlap(&self, shape: &Shape, position: [f32; 3], rotation: [f32; 4], skip: Option<BodyId>) -> Result<Vec<ColliderId>, String> {
         let s = Self::query_shape(shape)?;
         within(&position, MAX_COORD, "a query's position")?;
-        let mut out: Vec<ColliderId> = self.world.intersect_shape(pose(position, rotation)?, &*s.0, self.filter(skip)).map(|(_, c)| c.user_data as u32).collect();
+        let p = pose(position, rotation)?;
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let mut out: Vec<ColliderId> = self.world.intersect_shape(p, &*s.0, self.filter(skip, &settled)).map(|(_, c)| c.user_data as u32).collect();
+        for (_, c, at) in self.fresh(skip) {
+            if rapier3d::parry::query::intersection_test(&p, &*s.0, &at, c.shape()).is_ok_and(|i| i.intersecting) {
+                out.push(c.user_data as u32);
+            }
+        }
         out.sort_unstable();
         Ok(out)
     }
@@ -861,8 +928,16 @@ impl Physics {
         let p = pose(position, rotation)?;
         let Some((ray, max)) = Self::ray(position, direction, max)? else { return Ok(None) };
         let options = ShapeCastOptions { max_time_of_impact: max, target_distance: 0.0, stop_at_penetration: true, compute_impact_geometry_on_penetration: true };
-        let Some((h, hit)) = self.world.cast_shape(&p, ray.dir, &*s.0, options, self.filter(skip)) else { return Ok(None) };
-        Ok(self.hit(h, hit.time_of_impact, hit.witness1, hit.normal1))
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let mut best = self.world.cast_shape(&p, ray.dir, &*s.0, options, self.filter(skip, &settled)).and_then(|(h, hit)| self.hit(h, hit.time_of_impact, hit.witness1, hit.normal1));
+        for (h, c, at) in self.fresh(skip) {
+            // (As the broad phase's answer: the collider is the first shape, and what is its own is moved to the world.)
+            if let Ok(Some(hit)) = rapier3d::parry::query::cast_shapes(&at, Vector::ZERO, c.shape(), &p, ray.dir, &*s.0, options) {
+                let hit = hit.transform1_by(&at);
+                best = Self::nearer(best, self.hit(h, hit.time_of_impact, hit.witness1, hit.normal1));
+            }
+        }
+        Ok(best)
     }
 
     /// Tests only: the body's velocity made infinite behind the world's checks (as only Rapier itself could), so that
