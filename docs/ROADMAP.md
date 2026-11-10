@@ -348,8 +348,8 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          the objects' powers now. The 12 catalog scenes and 6 game rooms with every emitter on at load render
          byte-identical; Tokyo's 15:30 room does not.
        - GPU p50 at the 0.5 floor, main → this branch, per second of path (alternated runs):
-         - the Shiba fly-past: 17–18 → 10–12 ms by day, 20–22 → 12–12.5 ms from dusk;
-         - the Yasukuni-dōri drive: 16–18.4 → 11–13.5 ms once the first lamps are on (16:09).
+         - the Shiba fly-past: 14.6–17.9 → 8.9–12.5 ms by day, 20.0–21.7 → 12.2–12.8 ms from dusk;
+         - the Yasukuni-dōri drive: 15.0–18.4 → 10.7–13.5 ms once the first lamps are on (16:09).
        - In place against a fresh load (Shinjuku's east aerial, on main + ThreeRT#3 and #4): ΔE 0.49 → 0.08 at sunset,
          0.15 → 0.01 at civil dusk, 0.34 → 0 at night (bit for bit).
      - Status, part 1 (2026-11-10, branch `aerial-perspective`): the land beyond the area hazed into the sky.
