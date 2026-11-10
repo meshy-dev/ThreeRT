@@ -255,13 +255,16 @@ test("a body the engine takes out after a tick leaves its object without one, an
   const made = physics();
   const crateBody = made.filter((c) => c[0] === "body")[1][1].id as number;
   // The engine took the crate's body out (its colliders and joint with it) and reports it once.
-  engine.answers.faults = [{ body: crateBody, object: 2, reason: "its pose or velocity went non-finite" }];
+  engine.answers.faults = [{ body: crateBody, object: 2, kind: "nonFinite", reason: "its pose or velocity went non-finite" }];
+  let event = false;
+  crate.addEventListener("outofworld", () => (event = true));
   engine.answers.state = { removed: "its pose or velocity went non-finite" };
   assert.deepEqual(crate.getLinearVelocity().toArray(), [0, 0, 0], "a removed body reads as none");
   binding.deliverPhysicsEvents();
   engine.answers.faults = [];
   physics();
   assert.throws(() => binding.sync(), /took out the bodies of mesh_2 \(its pose or velocity went non-finite\)/);
+  assert.equal(event, false, "an error, not a body that left the world");
   // Nothing is sent for it (no removal: the engine has none; no body made again), and the crate reads as without one.
   assert.deepEqual(physics().filter((c) => c[0] !== "remove" || c[1].joint === undefined), [], "the joint's removal is the only call");
   crate.applyImpulse(new Vector3(0, 1, 0));
@@ -273,6 +276,38 @@ test("a body the engine takes out after a tick leaves its object without one, an
   crate.physics = { type: "dynamic" };
   binding.sync();
   assert.deepEqual(physics().map((c) => c[0]), ["body", "collider", "joint"]);
+});
+
+test("an object whose body leaves the world gets an event, and nothing is thrown", () => {
+  const { scene, engine, binding, physics } = world();
+  const ball = new Mesh(new SphereGeometry(0.5)), other = new Mesh(new SphereGeometry(0.5));
+  ball.physics = "dynamic";
+  other.physics = "dynamic";
+  scene.add(ball, other);
+  binding.sync();
+  const ids = physics().filter((c) => c[0] === "body").map((c) => c[1].id as number);
+  // It fell off the level: past the world's edge the engine takes the body out (an ordinary thing in a game).
+  const seen: string[] = [];
+  ball.addEventListener("outofworld", (e) => seen.push(`${e.type} ${e.target === ball}`));
+  other.addEventListener("outofworld", () => scene.remove(other));
+  engine.answers.faults = ids.map((body) => ({ body, object: 1, kind: "leftWorld", reason: "it left the world (past 1e6 m from the origin)" }));
+  binding.deliverPhysicsEvents();
+  engine.answers.faults = [];
+  assert.deepEqual(seen, ["outofworld true"]);
+  physics();
+  // No error; the ball is still in the scene, without a body (nothing is sent for it: the engine has none); the
+  // other one's listener removed it from the scene.
+  binding.sync();
+  assert.deepEqual(physics(), []);
+  assert.ok(scene.children.includes(ball) && !scene.children.includes(other));
+  ball.applyImpulse(new Vector3(0, 1, 0));
+  binding.sync();
+  assert.deepEqual(physics(), [], "no body: the impulse goes nowhere");
+  // Put back with its physics set again: a body again.
+  ball.position.set(0, 2, 0);
+  ball.physics = "dynamic";
+  binding.sync();
+  assert.deepEqual(physics().map((c) => c[0]), ["body", "collider"]);
 });
 
 test("a parent scaled anew makes the bodies below it anew at their new size, and their joints", () => {

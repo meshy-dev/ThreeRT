@@ -63,9 +63,10 @@ pub struct Bridge {
     ticked: bool,
     /// Time not yet stepped, s.
     behind: f64,
-    /// Bodies the world took out after a tick (`Physics::step`), by the caller's id, with the object they drove and
-    /// why: those not yet reported by "faults", and (for "state") the last `MAX_FAULTS` of them.
-    faults: Vec<(u32, Option<u32>, &'static str)>,
+    /// Bodies the world took out after a tick (`Physics::step`), by the caller's id, with the object they drove,
+    /// whether they left the world (or went non-finite) and why: those not yet reported by "faults", and (for
+    /// "state") the last `MAX_FAULTS` of them.
+    faults: Vec<(u32, Option<u32>, bool, &'static str)>,
     faulted: BTreeMap<u32, &'static str>,
 }
 
@@ -443,10 +444,11 @@ impl Bridge {
             ),
             // The world's hash and ticks (16 hex digits): the same calls at the same ticks give the same one.
             "hash" => json!({ "hash": format!("{:016x}", self.core.hash()), "ticks": self.core.ticks(), "bodies": self.core.bodies(), "contactsDropped": self.core.contacts_dropped() }),
-            // The bodies the world took out after a tick since the last call (`Physics::step`: a pose or velocity gone
-            // non-finite, past the world's edge), with the object each drove and why: [{body, object, reason}]. Their
-            // colliders and joints went with them; "state" on one answers {removed: why}.
-            "faults" => Value::Array(std::mem::take(&mut self.faults).into_iter().map(|(b, o, why)| json!({ "body": b, "object": o, "reason": why })).collect()),
+            // The bodies the world took out after a tick since the last call (`Physics::step`), with the object each
+            // drove and why: [{body, object, kind, reason}]. `kind` is "leftWorld" for a body past the world's edge (it
+            // fell off the level: nothing is wrong) and "nonFinite" for one whose pose, velocity or shape went
+            // non-finite (an error). Their colliders and joints went with them; "state" on one answers {removed: why}.
+            "faults" => Value::Array(std::mem::take(&mut self.faults).into_iter().map(|(b, o, left, why)| json!({ "body": b, "object": o, "kind": if left { "leftWorld" } else { "nonFinite" }, "reason": why })).collect()),
             other => return Err(format!("physics: unknown call \"{other}\"")),
         })
     }
@@ -588,7 +590,7 @@ impl Bridge {
         if self.faults.len() == MAX_FAULTS {
             self.faults.remove(0);
         }
-        self.faults.push((caller, object, f.reason));
+        self.faults.push((caller, object, f.left_world, f.reason));
         if self.faulted.len() == MAX_FAULTS {
             self.faulted.pop_first();
         }

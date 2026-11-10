@@ -38,6 +38,8 @@ lto = "thin"
 opt-level = 2
 
 # glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
-# not depend on the platform's math functions (third_party/glamx/PATCH.md).
+# not depend on the platform's math functions (third_party/glamx/PATCH.md). physics-core's own manifest has the same
+# table, but cargo only reads the one of the crate it builds: this one is what the renderer gets
+# (src/physics.rs `the_renderers_physics_steps_to_the_recorded_bits` fails without it).
 [patch.crates-io]
 glamx = { path = "third_party/glamx" }

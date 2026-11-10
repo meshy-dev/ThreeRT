@@ -175,6 +175,9 @@ pub struct Contact {
 pub struct Fault {
     pub body: Option<BodyId>,
     pub colliders: Vec<ColliderId>,
+    /// The body left the world (past `WORLD_EDGE`: it fell off the level, an ordinary thing in a game); otherwise its
+    /// state or a shape went non-finite (bad data or a blown-up simulation: an error the author should hear of).
+    pub left_world: bool,
     pub reason: &'static str,
 }
 
@@ -615,26 +618,26 @@ impl Physics {
             }
         }
         let q = self.world.quarantine();
-        let mut out: Vec<(RigidBodyHandle, &'static str)> = q.bodies().iter().map(|&h| (h, "its pose or velocity went non-finite")).collect();
+        let mut out: Vec<(RigidBodyHandle, bool, &'static str)> = q.bodies().iter().map(|&h| (h, false, "its pose or velocity went non-finite")).collect();
         let mut statics = vec![];
         for &c in q.colliders() {
             match self.world.colliders.get(c).and_then(|c| c.parent()) {
-                Some(p) => out.push((p, "its collider's shape went non-finite")),
+                Some(p) => out.push((p, false, "its collider's shape went non-finite")),
                 None => statics.push(c),
             }
         }
-        out.extend(self.world.active_bodies().filter(|(_, b)| b.is_dynamic() && !(b.translation().abs().max_element() <= WORLD_EDGE)).map(|(h, _)| (h, "it left the world (past 1e6 m from the origin)")));
+        out.extend(self.world.active_bodies().filter(|(_, b)| b.is_dynamic() && !(b.translation().abs().max_element() <= WORLD_EDGE)).map(|(h, _)| (h, true, "it left the world (past 1e6 m from the origin)")));
         for c in statics {
             if let Some(id) = self.world.colliders.get(c).map(|c| c.user_data as u32) {
                 self.remove_collider(id);
-                self.faults.push(Fault { body: None, colliders: vec![id], reason: "its shape went non-finite" });
+                self.faults.push(Fault { body: None, colliders: vec![id], left_world: false, reason: "its shape went non-finite" });
             }
         }
-        for (h, reason) in out {
+        for (h, left_world, reason) in out {
             let Some(id) = self.world.bodies.get(h).map(|b| b.user_data as u32) else { continue };
             if self.bodies.contains_key(&id) {
                 let colliders = self.remove_body(id);
-                self.faults.push(Fault { body: Some(id), colliders, reason });
+                self.faults.push(Fault { body: Some(id), colliders, left_world, reason });
             }
         }
     }

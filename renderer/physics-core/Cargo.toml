@@ -42,5 +42,8 @@ crate-type = ["cdylib"]
 
 # glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
 # not depend on the platform's math functions (third_party/glamx/PATCH.md).
+# NOTE: this table only works when physics-core itself is what cargo builds. A crate that depends on physics-core must
+# repeat it in its own manifest (the renderer's does), or it silently gets crates.io's glamx; and it needs a test that
+# steps `check::script` and `check::cases` to the recorded hashes, which is what shows a patch left out (PATCH.md).
 [patch.crates-io]
 glamx = { path = "../third_party/glamx" }

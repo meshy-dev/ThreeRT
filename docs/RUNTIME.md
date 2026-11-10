@@ -126,9 +126,16 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   | counts | 20,000 bodies, 40,000 colliders and joints; a trimesh 1 M triangles, a hull 4,096 points, all shapes 4 M points and triangles; 256 hits a ray; 8,192 contacts held between frames (the oldest go) |
 
   A triangle mesh is for fixed bodies only; a joint joins two different bodies; queries take a box, sphere or capsule.
-- What the simulation itself drives out of bounds is taken out: after a tick, a body whose pose or velocity is no
-  longer finite, or that is past 1,000 km from the origin, leaves the world with its colliders and joints. Its object
-  stays where it was, without a body until `physics` is set again, and the next sync throws once, naming it and why.
+- What the simulation itself drives out of bounds is taken out of the physics world after a tick, with its colliders
+  and joints. The object stays in the scene where its body last put it, without a body until its `physics` is set
+  again:
+  - A body more than 1,000 km from the origin left the world (it fell off the level; free fall gets there in 42
+    minutes, Rapier capping a body at 400 m/s). Nothing is wrong: its object gets an `outofworld` event (before the frame
+    script, as contacts do), and the game decides: `scene.remove(object)`, or put it back and set `physics` again.
+  - A body whose pose or velocity is no longer finite is an error (the simulation blew up): the next sync throws once,
+    naming the object and why.
+- A frame script (or its sync) that throws does not stop the world: in a window and in `live` the error is printed,
+  and that frame's physics ticks and commit are made all the same. A `serve` job with frames fails with the error.
 - A tick has no time bound yet: thousands of bodies made at one point take seconds (ROADMAP § 6 step 7, Open).
 - Queries: `Raycaster.intersectPhysics({ exclude })` (every body the ray passes through, nearest first, with the
   surface's normal) and `Shapecaster` (`overlap()`, `sweep(direction)`) for a box, sphere or capsule. They see the

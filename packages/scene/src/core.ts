@@ -394,7 +394,11 @@ export class Object3D {
     return s?.sleeping ?? false;
   }
 
-  /** three.js's EventDispatcher. The engine's events: "contactstart" / "contactend" (`physics.contacts`). */
+  /**
+   * three.js's EventDispatcher. The engine's events: "contactstart" / "contactend" (`physics.contacts`), and
+   * "outofworld" when the object's body got more than 1,000 km from the origin and was taken out of the physics world
+   * (the object stays in the scene, without a body until its `physics` is set again).
+   */
   addEventListener(type: string, listener: (e: ObjectEvent) => void): void {
     const all = (this._listeners ??= new Map());
     const l = all.get(type);

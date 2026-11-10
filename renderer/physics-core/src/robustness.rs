@@ -125,7 +125,7 @@ fn a_body_gone_non_finite_is_taken_out() {
     b.core.break_body(w);
     run(&mut b, &mut s, 1);
     assert_eq!(ok(&mut b, &mut s, "state", json!({ "body": 1 })), json!({ "removed": "its pose or velocity went non-finite" }));
-    assert_eq!(ok(&mut b, &mut s, "faults", json!({})), json!([{ "body": 1, "object": 1, "reason": "its pose or velocity went non-finite" }]));
+    assert_eq!(ok(&mut b, &mut s, "faults", json!({})), json!([{ "body": 1, "object": 1, "kind": "nonFinite", "reason": "its pose or velocity went non-finite" }]));
     assert_eq!(ok(&mut b, &mut s, "faults", json!({})), json!([]), "reported once");
     assert_eq!(b.bodies(), 2);
     assert!(b.call(&mut s, "joint", &json!({ "id": 2, "a": 1, "b": 2, "type": "spherical" })).unwrap_err().contains("unknown body"));
@@ -140,6 +140,8 @@ fn a_body_gone_non_finite_is_taken_out() {
     b.core.put_body(w, [0.0, -2.0 * WORLD_EDGE, 0.0]);
     run(&mut b, &mut s, 1);
     assert_eq!(ok(&mut b, &mut s, "state", json!({ "body": 3 }))["removed"], "it left the world (past 1e6 m from the origin)");
+    // Reported as having left the world, not as an error: a body that falls off the level is an ordinary thing.
+    assert_eq!(ok(&mut b, &mut s, "faults", json!({})), json!([{ "body": 3, "object": null, "kind": "leftWorld", "reason": "it left the world (past 1e6 m from the origin)" }]));
     run(&mut b, &mut s, 30);
 }
 

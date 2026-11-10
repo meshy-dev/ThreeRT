@@ -706,7 +706,9 @@ impl GameSession {
         }
     }
 
-    /// Runs the frame script and applies what it changed; true if that rebuilt the scene.
+    /// Runs the frame script and applies what it changed; true if that rebuilt the scene. A frame script (or its
+    /// sync) that throws does not stop the world: the frame's physics ticks are made and what changed is committed all
+    /// the same, then the error is returned (the window and `live` print it and go on).
     pub fn frame(&mut self, core: &mut crate::live::LiveCore, dt: f32) -> Result<bool> {
         if !self.host.has_frame() {
             // Wind sway and the physics follow the scene time with or without a frame script.
@@ -719,7 +721,7 @@ impl GameSession {
         let t = Instant::now();
         core.set_time(self.clock.tick(dt));
         self.host.world.borrow_mut().apply_sway(core.scene_time());
-        self.host.frame(dt)?;
+        let scripted = self.host.frame(dt);
         self.js_ms = t.elapsed().as_secs_f32() * 1000.0;
         // The physics' ticks after the frame script (its impulses and targets act in this frame's ticks).
         self.host.advance_physics(dt);
@@ -727,6 +729,7 @@ impl GameSession {
         let rebuilt = self.commit(core)?;
         self.commit_ms = tc.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = t.elapsed().as_secs_f32() * 1000.0;
+        scripted?;
         Ok(rebuilt)
     }
 }
@@ -815,6 +818,40 @@ mod tests {
         let h = ScriptHost::from_modules(scene, &runtime.replace("const defineGame = (g) => g", "const defineGame = (g) => ({ ...g, handlers: {}, setup: g.setup })")).unwrap();
         assert_eq!(h.info["handlers"], serde_json::json!([]), "a scene module is a game without handlers");
         assert!(ScriptHost::from_modules("import x from './nope.js';", runtime).is_err());
+    }
+
+    /// A frame whose script throws (as the binding's sync does once when the engine took out a body whose state went
+    /// non-finite, or a `physics` cannot be made a body): the error is returned, and the frame's physics tick and
+    /// commit are made all the same. (Skipped without a GPU.)
+    #[test]
+    fn a_frame_script_that_throws_does_not_stop_the_world() {
+        let g = match crate::gpu::Gpu::new() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        // The game above with a weightless body that drives the sign at 6 m/s, and a frame script that throws in its
+        // second frame.
+        let game = GAME.replace("return \"{}\";", "__engine.physics('body', { id: 1, object: 4, gravityScale: 0, linvel: [0, 0, 6] }); __engine.physics('collider', { id: 1, body: 1, shape: { type: 'sphere', radius: 0.5 } }); return \"{}\";").replace("frame: (dt) => { frames++; },", "frame: (dt) => { frames++; if (frames === 2) throw new Error('the sync threw'); },").replace(", map: 2 }", " }");
+        // (Without the sign's texture: its bytes are not an image.)
+        assert!(game.contains("__engine.physics") && game.contains("the sync threw") && !game.contains("map: 2"));
+        let bundle = std::env::temp_dir().join(format!("threert-frame-throws-{}.js", std::process::id()));
+        std::fs::write(&bundle, game).unwrap();
+        let started = GameSession::start(&bundle, "room", std::path::Path::new("."), g, &crate::default_presets_dir(), 64, 36);
+        std::fs::remove_file(&bundle).ok();
+        let (mut s, mut core) = started.unwrap();
+        let z = |s: &GameSession| s.host.world.borrow().objects[&4].position.z;
+        let ticks = |s: &GameSession| s.host.physics.borrow_mut().as_mut().unwrap().take_stats().ticks;
+        s.frame(&mut core, 1.0 / 60.0).unwrap();
+        assert_eq!(ticks(&s), 1);
+        assert!((z(&s) - 0.1).abs() < 1e-4, "{}", z(&s));
+        let e = s.frame(&mut core, 1.0 / 60.0).unwrap_err();
+        assert!(format!("{e:#}").contains("the sync threw"), "{e:#}");
+        assert_eq!(ticks(&s), 1, "the tick of the frame that threw");
+        assert!((z(&s) - 0.2).abs() < 1e-4, "{}", z(&s));
+        let c = s.host.world.borrow_mut().take_changes();
+        assert!(c.moved.is_empty() && !c.structural, "and its commit");
+        s.frame(&mut core, 1.0 / 60.0).unwrap();
+        assert!((z(&s) - 0.3).abs() < 1e-4, "{}", z(&s));
     }
 
     #[test]

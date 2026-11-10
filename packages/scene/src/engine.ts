@@ -850,7 +850,8 @@ export class SceneBinding {
    * The contacts since the last call, to their listeners: "contactstart" / "contactend" on each of the two objects
    * (`other`: the other one), then "contacts" on the scene with the whole batch (`contacts`: { a, b, started } in the
    * order they happened). One engine call, and none while no body in the scene reports contacts; before it, the bodies
-   * the engine took out (`takeFaults`: one call while the scene has bodies). The host calls it before the frame script.
+   * the engine took out (`takeFaults`: one call while the scene has bodies; "outofworld" on an object whose body left
+   * the world). The host calls it before the frame script.
    */
   deliverPhysicsEvents(): void {
     if (this.bodies) this.takeFaults();
@@ -870,14 +871,17 @@ export class SceneBinding {
   }
 
   /**
-   * The bodies the engine took out after a tick (a pose or velocity gone non-finite, past the world's edge; their
-   * colliders and joints went with them): each object is left without a body until its `physics` is set again, and
-   * the next sync throws once, naming them.
+   * The bodies the engine took out after a tick, their colliders and joints with them. Each object stays in the scene
+   * where its body last put it, without a body until its `physics` is set again.
+   * - One past the world's edge (1,000 km: it fell off the level) is nothing wrong: its object gets an "outofworld"
+   *   event, and the game removes it, or puts it back and sets its `physics` again.
+   * - One whose pose or velocity went non-finite is an error (bad numbers, or a simulation that blew up): the next
+   *   sync throws once, naming the objects.
    */
   private takeFaults(): void {
-    const list = JSON.parse(this.engine.physics("faults", {})) as { body: number; reason: string }[] | null;
+    const list = JSON.parse(this.engine.physics("faults", {})) as { body: number; kind?: string; reason: string }[] | null;
     if (!list?.length) return;
-    const names: string[] = [];
+    const names: string[] = [], left: Object3D[] = [];
     for (const f of list) {
       const o = physicsBodies.get(f.body);
       const b = o && this.objects.get(o);
@@ -891,9 +895,12 @@ export class SceneBinding {
       this.jointsDirty = true;
       this.bodies--;
       if (bb.contacts) this.contactBodies--;
-      names.push(`${b.name} (${f.reason})`);
+      if (f.kind === "leftWorld") left.push(o);
+      else names.push(`${b.name} (${f.reason})`);
     }
     if (names.length) this.bodyError ??= new Error(`physics: the engine took out the bodies of ${names.join(", ")}; each stays without one until its physics is set again`);
+    // (After the binding's side is in order: a listener may remove the object or give it a body again.)
+    for (const o of left) o.dispatchEvent({ type: "outofworld" });
   }
 
   /** What the object is: a change re-creates it in the engine. */

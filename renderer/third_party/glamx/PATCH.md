@@ -24,6 +24,32 @@ in other bits (`physics_core::check::cases`).
 
 - `src/lib.rs` allows unused imports (as a path dependency the crate's warnings show).
 
+## Every crate that is built must name the patch
+
+`[patch.crates-io]` only takes effect in the manifest of the crate (or workspace root) that cargo is building: a
+dependency's own `[patch]` is ignored. Today that is `renderer/Cargo.toml` and `renderer/physics-core/Cargo.toml`.
+**Any new crate that depends on physics-core (the web build's wasm crate, a tool, a bench) must repeat it in its own
+manifest**:
+
+```toml
+[patch.crates-io]
+glamx = { path = "<path to>/renderer/third_party/glamx" }
+```
+
+Left out, nothing fails to build: the crate silently gets crates.io's glamx and, with `std` anywhere in its graph,
+the platform's math functions again. What shows it is a test in that crate that steps physics-core's recorded script
+and cases and compares the hashes, as the renderer's does (`renderer/src/physics.rs`,
+`the_renderers_physics_steps_to_the_recorded_bits`):
+
+```rust
+use physics_core::check;
+assert_eq!(check::script(600), check::EXPECTED);
+assert_eq!(check::cases(), check::EXPECTED_CASES);
+```
+
+Every such crate needs that test (for a wasm crate: run in wasm32, as `tools/physics-determinism.ts` runs
+physics-core's). Without the patch the renderer's fails: `f66d349c1eae947a` against the recorded case hash.
+
 Nothing else differs from the published crate (`.github`, `.gitignore` and cargo's packaging files are left out).
 To update: copy the new version here, apply the same change, run `node tools/physics-determinism.ts` and
 `cargo test --release` in `renderer/physics-core` and `renderer`.

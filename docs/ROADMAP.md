@@ -3637,8 +3637,14 @@ benchmark level. The order follows the dependencies; a step that meets a further
          volume is refused.
        - After a tick, a body whose pose or velocity went non-finite (Rapier disables it, and a joint on it would
          panic a later tick), one whose collider did, and one past 1,000 km are taken out of the world with their
-         colliders and joints. The call `faults` reports each once, `state` answers `{ removed: why }`, and the
-         binding leaves the object without a body and throws once from the sync, naming it.
+         colliders and joints. The call `faults` reports each once with its kind, `state` answers `{ removed: why }`,
+         and the binding leaves the object in the scene without a body. A body that left the world is an ordinary
+         thing in a game (it fell off the level: 42 minutes of free fall, Rapier capping a body at 400 m/s): its
+         object gets an `outofworld` event and nothing is thrown. One
+         that went non-finite is an error: the next sync throws once, naming it.
+       - A frame script or sync that throws no longer costs the world a frame: `GameSession::frame` makes the
+         frame's ticks and commit all the same and returns the error after (before, both were skipped and the
+         frame's time was lost). A `serve` job with frames still fails with the error, as with any script error.
        - Memory: contacts nobody takes are held to 8,192 (the oldest go, counted); a trimesh to 1 M triangles, the
          world's shapes to 4 M points and triangles; queries take no trimesh.
        - Also: objects are placed at the body's own pose (not the call's numbers); a frame owing exactly 5 ticks keeps
@@ -3660,19 +3666,28 @@ benchmark level. The order follows the dependencies; a step that meets a further
          properties of convex hulls and of bodies of several colliders is the one that showed: 48 of the 1,000
          worlds ended in other bits natively (macOS arm64, whose acos differs from libm's on 8.8 % of inputs, its sin
          and cos on 0.012 %) than in wasm32. The first version of the check passed because its one hull happens to
-         agree. Rapier is also built without its `std` (it needs `alloc` only; no cost measured: 0.0285 against 0.0287
-         ms a tick), which is enough for physics-core's own build and not for the renderer's: the check now runs
-         both ways (`std-in-graph`), and the renderer has a test of its own.
+         agree. Rapier is also built without its `std` (it needs `alloc` only), which costs nothing measurable natively (ms
+         a tick, best / median of 30 runs, two rounds alternated: the script 0.0285–0.0287 / 0.0290–0.0292 without
+         `std` against 0.0287–0.0288 / 0.0290–0.0294 with; a pile of 1,000 boxes 0.349–0.355 / 0.353–0.357 against
+         0.351–0.356 / 0.354–0.358). It is enough for physics-core's own build and not for the renderer's: the check now runs
+         both ways (`std-in-graph`), and the renderer has a test of its own. `[patch.crates-io]` is read from the
+         manifest of the crate being built only, so every crate that depends on physics-core repeats it and has that
+         test (PATCH.md): the web build's wasm crate will be the next.
        - **Hinge limits centred.** Rapier takes the sine and cosine of a quarter of (min + max) the same way; the
          world hands it limits about 0, [-h, h] (of 0 they are exact), and turns the centre into the joint's frame
          with libm.
        - The other such calls on a 3D world's path are tested to change nothing on the platform the tests run on:
          the broad phase's BVH optimizer takes a log2 that depends on the collider count alone (every count checked),
          a convex hull's feature lookup the sine and cosine of one constant.
-       - What this does not give: a proof for platforms the tests have not run on (they run on macOS arm64 and
-         Linux x86-64), or for another version of Rapier, parry or glamx (the calls were found by reading their
-         sources: an update repeats that, and the recorded hashes show a change). The complete fix is theirs: those
-         calls made through simba. Step 9's replay rests on this for one build of the engine.
+       - Platforms measured: macOS arm64 natively (where the hashes were recorded), Linux x86-64 natively (CI:
+         `tools/physics-determinism.ts` there compares Linux's native build, wasm32 and the hashes recorded on macOS,
+         all three equal), and wasm32 under Node's V8 on both. Not measured: Windows, Linux arm64, a browser's own
+         wasm engine (the same wasm32 module; wasm's float arithmetic is specified, so no difference is expected),
+         and iOS / Android natively.
+       - What this does not give: a proof for platforms the tests have not run on, or for another version of Rapier,
+         parry or glamx (the calls were found by reading their sources: an update repeats that, and the recorded
+         hashes show a change). The complete fix is theirs: those calls made through simba. Step 9's replay rests on
+         this for one build of the engine.
      - **Hello world** (`games/physics/hello.game.ts`, catalog `physics-hello`; `threert-render play` to click in a
        window, `tools/physics-hello.ts` for the same game with scripted clicks): a click's ray is cast into the world
        (`Raycaster.intersectPhysics`); on something fixed (a triangle-mesh ground and rock, a wall, a ramp) a box with
