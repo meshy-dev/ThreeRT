@@ -7,6 +7,7 @@ import { hashString, seededRandom, withDeterminism } from "./random.ts";
 import { applyCommitted, canonicalJson, createStore, worldHash, type JsonObject, type Write, type World } from "./store.ts";
 import type { FrameFn } from "./frame.ts";
 import { isFailure, Transaction, type EmittedEvent, type GameEvent, type RenderRequest, type Snapshot } from "./tx.ts";
+import type { WorldHandler } from "./world.ts";
 
 export interface SetupContext {
   roomId: string;
@@ -41,29 +42,44 @@ export interface GameDefinition<S = JsonObject> {
    * matches the state. Never committed or replayed (see frame.ts).
    */
   frame?: FrameFn<S>;
-  /** Keyboard shortcuts of the native viewer and the playground: key ("R", "Space") -> handler. */
+  /**
+   * World handlers, by event type (world.ts): run on the node that owns the scene and the physics world as the event
+   * arrives, so they can change the scene at once (`world.scene.add(mesh)`, a ray, an impulse). An event may have a
+   * handler, a world handler, or both (the world handler first).
+   */
+  on?: Record<string, WorldHandler<S>>;
+  /** Keyboard shortcuts of the native viewer and the playground: key ("R", "Space") -> handler or world handler. */
   keys?: Record<string, string>;
 }
+
+/** What `defineGame` takes: a game, whose `handlers` may be left out when it has world handlers (`on`) only. */
+export type GameInput<S = JsonObject> = Omit<GameDefinition<S>, "handlers"> & Partial<Pick<GameDefinition<S>, "handlers">>;
 
 /** `keys`, defaulting to the conventional L / R / V shortcuts for handlers with those names. */
 export function gameKeys(game: GameDefinition<unknown>): Record<string, string> {
   if (game.keys) return { ...game.keys };
   const conventional: Record<string, string> = { L: "lights", R: "rain", V: "viewpoint" };
-  return Object.fromEntries(Object.entries(conventional).filter(([, h]) => typeof game.handlers[h] === "function"));
+  return Object.fromEntries(Object.entries(conventional).filter(([, h]) => typeof game.handlers[h] === "function" || typeof game.on?.[h] === "function"));
 }
 
-export function defineGame<S>(game: GameDefinition<S>): GameDefinition<S> {
-  if (!game || typeof game.setup !== "function") throw new TypeError("defineGame: setup(ctx) is required");
+export function defineGame<S>(input: GameInput<S>): GameDefinition<S> {
+  if (!input || typeof input.setup !== "function") throw new TypeError("defineGame: setup(ctx) is required");
+  if (input.on !== undefined && (!input.on || typeof input.on !== "object")) throw new TypeError("defineGame: on must be an object of world handlers");
+  for (const [type, h] of Object.entries(input.on ?? {})) if (typeof h !== "function") throw new TypeError(`defineGame: world handler "${type}" is not a function`);
+  // (A game of world handlers only needs no `handlers`: none are made for it here.)
+  if (input.handlers === undefined && input.on) input.handlers = {};
+  const game = input as GameDefinition<S>;
   if (!game.handlers || typeof game.handlers !== "object") throw new TypeError("defineGame: handlers are required");
   for (const [type, h] of Object.entries(game.handlers)) if (typeof h !== "function") throw new TypeError(`defineGame: handler "${type}" is not a function`);
   if (game.frame !== undefined && typeof game.frame !== "function") throw new TypeError("defineGame: frame must be a function");
-  for (const [key, h] of Object.entries(game.keys ?? {})) if (!game.handlers[h]) throw new TypeError(`defineGame: key "${key}" maps to unknown handler "${h}"`);
+  for (const [key, h] of Object.entries(game.keys ?? {})) if (!game.handlers[h] && !game.on?.[h]) throw new TypeError(`defineGame: key "${key}" maps to unknown handler "${h}"`);
   if (canonicalJson(game.state) !== canonicalJson(JSON.parse(JSON.stringify(game.state ?? {})))) throw new TypeError("defineGame: state must be plain JSON");
   return game;
 }
 
-export function describeGame(game: GameDefinition<unknown>): { handlers: string[]; tick: boolean; frame: boolean; keys: Record<string, string>; seed: number | null } {
-  return { handlers: Object.keys(game.handlers), tick: typeof game.tick === "function", frame: typeof game.frame === "function", keys: gameKeys(game), seed: game.seed ?? null };
+/** What a game has: `handlers` are the state's (a room runs them), `on` the world's (the node that owns the scene). */
+export function describeGame(game: GameDefinition<unknown>): { handlers: string[]; on: string[]; tick: boolean; frame: boolean; keys: Record<string, string>; seed: number | null } {
+  return { handlers: Object.keys(game.handlers), on: Object.keys(game.on ?? {}), tick: typeof game.tick === "function", frame: typeof game.frame === "function", keys: gameKeys(game), seed: game.seed ?? null };
 }
 
 /** The room's seed: the game's, else derived from the room id. */
@@ -102,7 +118,11 @@ export function executeEvent(game: GameDefinition<unknown>, snapshot: Snapshot, 
   const handler: Handler<unknown> | undefined =
     game.handlers[event.type] ?? (event.type === "tick" && tick ? (t, p) => tick(t, Number(p?.dt) || 0) : undefined);
   const empty = { writes: [], emits: [], renders: [] };
-  if (!handler) return { status: "error", reads: {}, ...empty, failure: `no handler for event type "${event.type}"` };
+  if (!handler) {
+    // (A room runs handlers only: an event that has a world handler alone has nothing to run here.)
+    const why = game.on?.[event.type] ? `"${event.type}" has a world handler (on) only: it runs on the node that owns the scene, not as a state transaction` : `no handler for event type "${event.type}"`;
+    return { status: "error", reads: {}, ...empty, failure: why };
+  }
   try {
     withDeterminism(event.ts, tx.random, () => {
       const r: unknown = handler(tx, structuredClone(event.payload));

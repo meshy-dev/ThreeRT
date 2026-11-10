@@ -392,11 +392,12 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     for _ in 0..frames.max(1) {
         core.advance_time(1.0 / 60.0);
         let swayed = host.world.borrow_mut().apply_sway(core.scene_time());
-        if host.has_frame() {
+        // (`frames`: also a game of world handlers, and a scene with bodies: its listeners get their events.)
+        if host.frames() {
             host.frame(1.0 / 60.0)?;
         }
         let physics = host.advance_physics(1.0 / 60.0);
-        if host.has_frame() || swayed || physics {
+        if host.frames() || swayed || physics {
             core.commit(&mut host.world.borrow_mut())?;
         }
         core.render(1, |_, _| {});

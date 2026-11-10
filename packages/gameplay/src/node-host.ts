@@ -4,7 +4,8 @@
 // publishes the entry points the renderer calls as `globalThis.__threert`:
 //
 //   setup(roomId, seed?)          build the scene (deterministic per seed), bind it, show the initial state
-//   event(type, payload, ts)      this node is the authority (local play): run the handler + follow-ups, commit
+//   event(type, payload, ts)      this node is the authority (local play): run the event's world handler (`on`,
+//                                 world.ts: it changes the scene at once), then its handler + follow-ups, commit
 //   commit(writes, seq)           the room is the authority: apply its committed state writes
 //   setState(state, seq)          replace the state (a render of a room's current state)
 //   state()                       the committed state and its sequence number
@@ -23,6 +24,7 @@ import {
 import { buildScene, describeGame, executeEvent, gameKeys, initialWorld, type GameDefinition } from "./game.ts";
 import { FrameRunner } from "./frame.ts";
 import { applyCommitted, commit, createStore, type Json, type JsonObject, type Store, type Write } from "./store.ts";
+import { runWorldHandler } from "./world.ts";
 
 export interface NodeHost {
   describe(): string;
@@ -76,13 +78,30 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
     },
 
     event(type, payload, ts) {
-      const { store } = live();
+      const { store, frames, binding } = live();
       const writes: Write[] = [];
       const log: string[] = [];
-      const queue: { type: string; payload: Json }[] = [{ type, payload: JSON.parse(payload) as Json }];
+      const first = { type, payload: JSON.parse(payload) as Json, id: ++eventId };
+      const queue: { type: string; payload: Json; id?: number }[] = [];
+      // The event's world handler (world.ts), on the state as committed before the event; then its handler, if it has
+      // one (an event with neither is the error it was), then the state events the world handler emitted.
+      const on = game.on?.[type];
+      const transacts = typeof game.handlers[type] === "function" || (type === "tick" && typeof game.tick === "function");
+      if (!on || transacts) queue.push(first);
+      if (on) {
+        const r = runWorldHandler(on, frames, store.seed, { id: first.id, type, payload: first.payload, ts });
+        log.push(r.error === undefined ? `✓ ${type} (world)` : `✗ ${type} (world): error ${r.error.split("\n")[0]}`);
+        queue.push(...r.emits);
+      }
+      // An event of a world handler alone changed no state: the engine follows the scene as the handler left it (also
+      // when it threw: the world does not stop), and the frame script has nothing new to show.
+      if (!queue.length) {
+        binding.sync();
+        return JSON.stringify({ writes, log, seq: store.seq });
+      }
       while (queue.length) {
         const ev = queue.shift()!;
-        const res = executeEvent(game, store, { id: ++eventId, type: ev.type, payload: ev.payload, ts });
+        const res = executeEvent(game, store, { id: ev.id ?? ++eventId, type: ev.type, payload: ev.payload, ts });
         if (res.status === "error") {
           log.push(`✗ ${ev.type}: error ${res.failure?.split("\n")[0]}`);
           continue;
