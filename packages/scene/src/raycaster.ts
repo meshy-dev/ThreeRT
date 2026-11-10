@@ -3,8 +3,12 @@
 // click's `target` and `instanceId`) is the same Moller-Trumbore test over the built scene; scene code has the scene
 // graph, not the GPU scene. Meshes (several materials included), instanced meshes (`instanceId`) and procedural meshes
 // (their boxes) are hit; as in three.js, hidden objects too, and back faces only of double-sided materials.
-import { InstancedMesh, Mesh, type Object3D, type PerspectiveCamera, ProceduralGeometry, ProceduralMesh } from "./core.ts";
-import { Box3, Matrix4, Ray, Vector2, Vector3 } from "./math.ts";
+//
+// The physics world answers too (ROADMAP § 6 step 7): `Raycaster.intersectPhysics` is the ray against the colliders of
+// the objects with `physics`, in the engine (its tree of them, not a walk over triangles here), and `Shapecaster` asks
+// what a shape overlaps or meets when moved. Both see the world as of its last tick.
+import { InstancedMesh, Mesh, type Object3D, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
+import { Box3, Matrix4, Quaternion, Ray, Vector2, Vector3 } from "./math.ts";
 import type { BufferGeometry } from "./geometry.ts";
 
 export interface Intersection {
@@ -16,6 +20,30 @@ export interface Intersection {
   faceIndex: number | null;
   uv?: Vector2;
   instanceId?: number;
+  /** The surface's normal at the point, in the world (hits of the physics world). */
+  normal?: Vector3;
+}
+
+/** What a query of the physics world leaves out: an object (the one that asks: its own body). */
+export interface PhysicsQueryOptions {
+  exclude?: Object3D;
+}
+
+interface PhysicsHit {
+  body: number | null;
+  distance: number;
+  point: [number, number, number];
+  normal: [number, number, number];
+}
+
+function physicsIntersection(h: PhysicsHit): Intersection | null {
+  const object = h.body === null ? undefined : physicsBodies.get(h.body);
+  return object ? { distance: h.distance, point: new Vector3(...h.point), object, face: null, faceIndex: null, normal: new Vector3(...h.normal) } : null;
+}
+
+function skipOf(o: PhysicsQueryOptions): { skip?: number } {
+  const id = o.exclude?._body?.id;
+  return id === undefined ? {} : { skip: id };
 }
 
 export class Raycaster {
@@ -42,6 +70,21 @@ export class Raycaster {
     const dir = new Vector3(coords.x * t * camera.aspect, coords.y * t, -1).transformDirection(camera.matrixWorld);
     this.ray.set(new Vector3().setFromMatrixPosition(camera.matrixWorld), dir);
     this.camera = camera;
+  }
+
+  /**
+   * The objects with `physics` the ray passes through, nearest first, between `near` and `far` (at most 10 km): the
+   * ray against their colliders in the physics world, with the point and the surface's normal there.
+   */
+  intersectPhysics(options: PhysicsQueryOptions = {}): Intersection[] {
+    const o = this.ray.origin, d = this.ray.direction;
+    const hits = physicsQuery("ray", { origin: [o.x, o.y, o.z], direction: [d.x, d.y, d.z], max: Math.min(this.far, 1e4), all: true, ...skipOf(options) }) as PhysicsHit[] | null;
+    const out: Intersection[] = [];
+    for (const h of hits ?? []) {
+      const i = h.distance >= this.near ? physicsIntersection(h) : null;
+      if (i) out.push(i);
+    }
+    return out;
   }
 
   intersectObject(object: Object3D, recursive = true, intersects: Intersection[] = []): Intersection[] {
@@ -117,5 +160,59 @@ export class Raycaster {
       if (h && (!best || h.distance < best.distance)) best = { ...h, k: k / 6 };
     }
     if (best) out.push({ distance: best.distance, point: best.point, object, face: null, faceIndex: best.k });
+  }
+}
+
+/** A shape to ask the physics world with (sizes in metres). */
+export type QueryShape =
+  | { type: "box"; halfExtents: readonly [number, number, number] }
+  | { type: "sphere"; radius: number }
+  | { type: "capsule"; halfHeight: number; radius: number };
+
+/**
+ * A shape placed in the physics world, as `Raycaster` is a ray: `overlap()` is the objects with `physics` whose
+ * colliders it touches where it is, `sweep(direction)` the first it meets when moved along a direction.
+ */
+export class Shapecaster {
+  shape: QueryShape;
+  readonly position = new Vector3();
+  readonly quaternion = new Quaternion();
+  /** How far `sweep` moves the shape, m. */
+  far: number;
+  constructor(shape: QueryShape, position?: Vector3, quaternion?: Quaternion, far = 1e4) {
+    this.shape = shape;
+    if (position) this.position.copy(position);
+    if (quaternion) this.quaternion.copy(quaternion);
+    this.far = far;
+  }
+
+  set(position: Vector3, quaternion?: Quaternion): void {
+    this.position.copy(position);
+    if (quaternion) this.quaternion.copy(quaternion);
+  }
+
+  private at(): Record<string, unknown> {
+    const p = this.position, q = this.quaternion;
+    return { shape: this.shape, position: [p.x, p.y, p.z], rotation: [q.x, q.y, q.z, q.w] };
+  }
+
+  /** The objects whose colliders the shape overlaps (each once). */
+  overlap(options: PhysicsQueryOptions = {}): Object3D[] {
+    const hits = physicsQuery("overlap", { ...this.at(), ...skipOf(options) }) as { body: number | null }[] | null;
+    const out = new Set<Object3D>();
+    for (const h of hits ?? []) {
+      const o = h.body === null ? undefined : physicsBodies.get(h.body);
+      if (o) out.add(o);
+    }
+    return [...out];
+  }
+
+  /**
+   * The first object the shape meets moved along `direction` by at most `far`: `distance` is how far it gets, `point`
+   * and `normal` where it touches. Null if the way is clear.
+   */
+  sweep(direction: Vector3, options: PhysicsQueryOptions = {}): Intersection | null {
+    const h = physicsQuery("sweep", { ...this.at(), direction: [direction.x, direction.y, direction.z], max: Math.min(this.far, 1e4), ...skipOf(options) }) as PhysicsHit | null;
+    return h ? physicsIntersection(h) : null;
   }
 }

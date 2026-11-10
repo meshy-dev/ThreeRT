@@ -31,9 +31,14 @@ jobs:
           workspaces: |
             renderer
             renderer/voxel-core
+            renderer/physics-core
       - run: cd renderer && cargo build --release --locked
       # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
       - run: rustup target add wasm32-unknown-unknown
       - run: cd renderer/voxel-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
       # Its edits are deterministic: the same script natively and in wasm32 leaves the same voxels (ROADMAP § 6 step 6).
       - run: node tools/voxel-determinism.ts
+      # The physics core (Rapier) builds for the browser too, passes its tests, and steps to the same bits natively and
+      # in wasm32 (ROADMAP § 6 step 7).
+      - run: cd renderer/physics-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
+      - run: node tools/physics-determinism.ts

@@ -305,6 +305,12 @@ export class ThreeEngine implements Engine {
 
   particlesSpawn(): void {}
 
+  physics(op: string): string {
+    // No physics in this baseline: driven objects stay where the scene put them.
+    this.notes.add(`physics ${op}`);
+    return "null";
+  }
+
   gridProgram(name: string): void {
     // Density grids belong to volumes, which this baseline does not draw.
     this.notes.add(`grid program ${name}`);

@@ -1,0 +1,28 @@
+[package]
+name = "physics-core"
+version = "0.1.0"
+edition = "2021"
+description = "ThreeRT's physics: rigid bodies, colliders, joints, contact events and scene queries on Rapier, stepped at a fixed tick. No GPU, file system or threads: it builds for wasm32 (players run the game in the browser)."
+license = "MIT"
+publish = false
+
+[features]
+default = ["enhanced-determinism"]
+# Rapier's cross-platform determinism (software math functions instead of the platform's): the same bits natively and
+# in wasm32. On by default: without it the two differ (docs/ROADMAP.md § 6 step 7, with what it costs; build with
+# --no-default-features to compare).
+enhanced-determinism = ["rapier3d/enhanced-determinism"]
+
+[dependencies]
+rapier3d = { version = "0.36.1", default-features = false, features = ["dim3", "f32", "std"] }
+# The bridge's calls carry JSON.
+serde_json = "1"
+
+# The determinism check (physics_core::check): the same script natively and as a wasm32 module (compared by
+# tools/physics-determinism.ts).
+[[example]]
+name = "determinism"
+
+[[example]]
+name = "determinism_wasm"
+crate-type = ["cdylib"]

@@ -195,6 +195,9 @@ pub struct Object {
     /// UE Mobility "Movable": scripts move it (and everything under it) without rebuilding the scene; its triangles
     /// are kept apart (dynamic BLASes) and re-transformed in place. Set by scene code, or by the first move.
     pub movable: bool,
+    /// A rigid body drives it (renderer/src/physics.rs): movable, and a mesh among them is placed as an instance of its
+    /// own BLAS, so a move is its TLAS transform and no triangle.
+    pub driven: bool,
     /// Wind sway (`windSway` in packages/scene): the renderer leans the object about its origin with scene time.
     pub sway: Option<Sway>,
     /// The sway's current rotation (identity without one), applied after the object's own rotation.
@@ -305,11 +308,15 @@ pub struct Changes {
     pub instanced: HashSet<u32>,
     /// Density grids created in this batch (their volume objects may not exist yet: `World::set_grid` keeps them).
     pub grids_new: BTreeSet<u32>,
+    /// Materials created in this batch that bring no texture and no material function: the live view adds them in
+    /// place (live.rs `add_materials`; a rebuild for one it cannot take), so an object added while the game runs may
+    /// come with a material of its own.
+    pub new_materials: BTreeSet<u32>,
 }
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -490,6 +497,10 @@ impl World {
             Some(old) if same_texture_refs(old, &m) && old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
                 self.changes.materials.insert(id);
             }
+            // A new one of plain parameters (no texture, no function, not a particle's): in place.
+            None if [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].iter().all(Option::is_none) && m.shader.is_none() && !m.transparent && !m.vertex_colors => {
+                self.changes.new_materials.insert(id);
+            }
             _ => self.changes.structural = true,
         }
         self.materials.insert(id, m);
@@ -537,7 +548,7 @@ impl World {
         }
         let o = match self.objects.remove(&id) {
             Some(o) => Object { name, parent, kind, cast_shadow, movable: movable || o.movable, ..o },
-            None => Object { name, parent, kind, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE, visible: true, cast_shadow, power: 1.0, custom: [0.0; 4], movable, sway: None, sway_rot: Quat::IDENTITY },
+            None => Object { name, parent, kind, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE, visible: true, cast_shadow, power: 1.0, custom: [0.0; 4], movable, driven: false, sway: None, sway_rot: Quat::IDENTITY },
         };
         self.objects.insert(id, o);
         if fresh {
@@ -557,6 +568,41 @@ impl World {
         (o.position, o.rotation, o.scale) = (position, rotation, scale);
         self.note_move(id);
         Ok(())
+    }
+
+    /// A rigid body drives object `id` from now on: it is movable, built as an instance where it can be (a rebuild,
+    /// once; none for an object this batch adds in place, which is placed as one: live.rs `edit_geometry`).
+    pub fn set_driven(&mut self, id: u32) -> Result<()> {
+        let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
+        if !o.driven {
+            o.driven = true;
+            o.movable = true;
+            if !self.changes.added.contains(&id) {
+                self.changes.structural = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// A rigid body's object at its new position and rotation (in its parent's space): `set_transform` with the scale
+    /// kept, and for a driven mesh without the questions a move of any object asks (a world of bodies moves thousands a
+    /// frame). False if there is no such object.
+    pub fn place_driven(&mut self, id: u32, position: Vec3, rotation: Quat) -> bool {
+        let Some(o) = self.objects.get_mut(&id) else { return false };
+        if o.position == position && o.rotation == rotation {
+            return true;
+        }
+        (o.position, o.rotation) = (position, rotation);
+        // (A driven mesh is movable and is not the camera: its move is a move. One added in this batch is placed where
+        // it is then, as `note_move` has it.)
+        if o.driven && matches!(o.kind, Kind::Mesh { .. }) {
+            if !self.changes.added.contains(&id) {
+                self.changes.moved.insert(id);
+            }
+        } else {
+            self.note_move(id);
+        }
+        true
     }
 
     /// Wind sway for an object (None: none, the object back at rest).
@@ -1157,6 +1203,43 @@ mod tests {
 
     fn mat() -> desc::Material {
         serde_json::from_value(serde_json::json!({ "name": "m", "color": [1, 1, 1], "opacity": 1, "metalness": 0, "roughness": 0.5, "emissive": [0, 0, 0], "emissiveIntensity": 1, "doubleSided": false })).unwrap()
+    }
+
+    /// What a game adds while it runs (ROADMAP § 6 step 7): a material without textures is added in place; a mesh a
+    /// rigid body will drive is placed in place and is movable from the start; its body's moves are moves in place.
+    #[test]
+    fn driven_objects_and_new_materials_in_place() {
+        let tri = || Geometry { positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], normals: vec![0.0; 9], uvs: vec![0.0; 6], indices: vec![0, 1, 2], groups: vec![], colors: vec![] };
+        let mesh = |material, own_blas| Kind::Mesh { geometry: 1, material, own_blas, materials: vec![] };
+        let mut w = World::default();
+        w.set_material(1, mat());
+        w.set_geometry(1, tri()).unwrap();
+        w.set_object(1, "still".into(), None, mesh(1, false), true, false).unwrap();
+        assert!(w.take_changes().structural, "the first commit builds the scene");
+        w.set_material(2, mat());
+        let c = w.take_changes();
+        assert!(!c.structural && c.any() && c.new_materials.contains(&2), "a new material of plain parameters: in place");
+        let mut textured = mat();
+        textured.map = Some(9);
+        w.set_material(3, textured);
+        assert!(w.take_changes().structural, "one with a texture: a rebuild");
+        // (The engine's `object` call gives a mesh a body will drive its own BLAS.)
+        w.set_object(2, "box".into(), None, mesh(2, true), true, false).unwrap();
+        w.set_driven(2).unwrap();
+        w.set_transform(2, Vec3::Y, Quat::IDENTITY, Vec3::ONE).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.added.contains(&2) && c.moved.is_empty(), "added in place, where it is");
+        assert!(w.objects[&2].driven && w.movable(2));
+        assert!(w.place_driven(2, Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY));
+        let c = w.take_changes();
+        assert!(!c.structural && c.moved.contains(&2) && w.objects[&2].position.y == 2.0, "its body's move: in place");
+        assert!(w.place_driven(2, Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY) && !w.take_changes().any(), "where it is already: nothing");
+        assert!(!w.place_driven(99, Vec3::ZERO, Quat::IDENTITY));
+        // An object the scene was built with becomes one a body drives: a rebuild, once.
+        w.set_driven(1).unwrap();
+        assert!(w.take_changes().structural && w.movable(1));
+        w.set_driven(1).unwrap();
+        assert!(!w.take_changes().any());
     }
 
     #[test]

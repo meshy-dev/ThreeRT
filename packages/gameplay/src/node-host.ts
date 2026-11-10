@@ -50,6 +50,7 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
   /** The scene follows the state (dt 0; `snap`: settled, no transitions), then the engine follows the scene. */
   const refresh = (now: number, snap = false) => {
     const { frames, binding } = live();
+    binding.deliverPhysicsEvents();
     frames.run(0, now, snap);
     binding.sync();
   };
@@ -118,6 +119,8 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
 
     frame(dt, now) {
       const { frames, binding } = live();
+      // The contacts of the ticks since the last frame, to their listeners, before the frame script.
+      binding.deliverPhysicsEvents();
       frames.run(dt, now);
       binding.sync();
     },

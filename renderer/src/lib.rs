@@ -17,6 +17,7 @@ pub mod sky;
 pub mod tables;
 pub mod texpack;
 pub mod view;
+pub mod physics;
 pub mod voxel;
 pub mod world;
 

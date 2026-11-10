@@ -80,6 +80,8 @@ pub struct ScriptHost {
     pub world: Rc<RefCell<World>>,
     /// The voxel engine's objects (`__engine.voxelLevel` / `voxelExplode`; renderer/src/voxel.rs).
     pub voxels: Rc<RefCell<crate::voxel::VoxelWorld>>,
+    /// The physics world (`__engine.physics`; renderer/src/physics.rs): None until scene code makes a physics call.
+    pub physics: Rc<RefCell<Option<crate::physics::PhysicsWorld>>>,
 }
 
 pub struct EventOut {
@@ -129,8 +131,20 @@ fn fail(ctx: &Ctx, e: anyhow::Error) -> rquickjs::Error {
 }
 
 /// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts.
-fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>) -> rquickjs::Result<()> {
+fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>) -> rquickjs::Result<()> {
     let e = Object::new(ctx.clone())?;
+    // Physics (renderer/src/physics.rs): one call, `physics(op, args)`, answering in JSON. The world is made by the
+    // first call; the engine steps it, scene code cannot.
+    let (p, w) = (physics.clone(), world.clone());
+    e.set("physics", Function::new(ctx.clone(), move |ctx: Ctx<'js>, op: String, args: Value<'js>| -> rquickjs::Result<String> {
+        let a: serde_json::Value = if args.is_undefined() || args.is_null() { serde_json::Value::Null } else { parse(&ctx, "physics", &args)? };
+        let out = p.borrow_mut().get_or_insert_with(Default::default).call(&mut w.borrow_mut(), &op, &a).map_err(|e| fail(&ctx, e))?;
+        Ok(out.to_string())
+    })?)?;
+    // The poses of the objects that bodies drive, by the slot the binding gave each body (7 floats: position, rotation
+    // xyzw, as scene code reads an object's): one copy for all a frame reads. Empty without a world.
+    let p = physics.clone();
+    e.set("physicsPoses", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, p.borrow().as_ref().map_or(vec![], |p| p.poses().to_vec())) })?)?;
     // The voxel engine's level and explosions (renderer/src/voxel.rs): the level is loaded natively once the session
     // knows the asset root; an explosion returns what it did as JSON.
     let v = voxels.clone();
@@ -241,13 +255,14 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     e.set("object", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
         let j = to_json(&d)?;
         let num = |k: &str| j[k].as_u64().map(|x| x as u32);
+        // `body`: a rigid body will drive it (physics.rs). A mesh is then an instance of its own BLAS, so one added while
+        // the game runs is placed in place and its moves are its instance's transform.
+        let body = j["body"].as_bool().unwrap_or(false);
         let kind = match j["kind"].as_str().unwrap_or("group") {
-            "mesh" => Kind::Mesh {
-                geometry: num("geometry").unwrap_or(0),
-                material: num("material").unwrap_or(0),
-                own_blas: j["dynamicGeometry"].as_bool().unwrap_or(false),
-                materials: j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()),
-            },
+            "mesh" => {
+                let materials: Vec<u32> = j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect());
+                Kind::Mesh { geometry: num("geometry").unwrap_or(0), material: num("material").unwrap_or(0), own_blas: j["dynamicGeometry"].as_bool().unwrap_or(false) || (body && materials.len() <= 1), materials }
+            }
             "model" => Kind::Model { uri: j["uri"].as_str().unwrap_or_default().to_string(), nodes: serde_json::from_value(j["nodes"].clone()).ok(), animation: serde_json::from_value(j["animation"].clone()).ok() },
             "light" => Kind::Light(serde_json::from_value(j["light"].clone()).map_err(|e| Exception::throw_type(&ctx, &format!("engine.object light: {e}")))?),
             "camera" => Kind::Camera(serde_json::from_value(j["camera"].clone()).map_err(|e| Exception::throw_type(&ctx, &format!("engine.object camera: {e}")))?),
@@ -293,7 +308,12 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
             },
             _ => Kind::Group,
         };
-        w.borrow_mut().set_object(id, j["name"].as_str().unwrap_or_default().to_string(), num("parent"), kind, j["castShadow"].as_bool().unwrap_or(true), j["movable"].as_bool().unwrap_or(false)).map_err(|e| fail(&ctx, e))
+        let mut w = w.borrow_mut();
+        w.set_object(id, j["name"].as_str().unwrap_or_default().to_string(), num("parent"), kind, j["castShadow"].as_bool().unwrap_or(true), j["movable"].as_bool().unwrap_or(false)).map_err(|e| fail(&ctx, e))?;
+        if body {
+            w.set_driven(id).map_err(|e| fail(&ctx, e))?;
+        }
+        Ok(())
     })?)?;
     let w = world.clone();
     e.set("transform", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, t: TypedArray<f32>| -> rquickjs::Result<()> {
@@ -406,13 +426,13 @@ impl ScriptHost {
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { _rt: rt, ctx, deadline, epoch, info: serde_json::Value::Null, world, voxels };
-        let (w, v) = (h.world.clone(), h.voxels.clone());
+        let mut h = ScriptHost { _rt: rt, ctx, deadline, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default() };
+        let (w, v, ph) = (h.world.clone(), h.voxels.clone(), h.physics.clone());
         let info: String = h.call(SETUP_MS, |ctx| {
             let g = ctx.globals();
             g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") }))?)?;
             g.set("__host_now", Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1000.0)?)?;
-            install_engine(ctx, &w, &v)?;
+            install_engine(ctx, &w, &v, &ph)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
             host(ctx)?.get::<_, Function>("describe")?.call(())
@@ -490,6 +510,25 @@ impl ScriptHost {
         })
     }
 
+    /// A frame of the physics world, if scene code made one: its ticks, and the objects its bodies drive placed
+    /// (renderer/src/physics.rs). True if there is a world (the caller commits what moved).
+    pub fn advance_physics(&self, dt: f32) -> bool {
+        match self.physics.borrow_mut().as_mut() {
+            Some(p) => {
+                p.advance(&mut self.world.borrow_mut(), dt as f64);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The physics world `ticks` ticks on (an offline render at a scene time).
+    pub fn settle_physics(&self, ticks: u32) {
+        if let Some(p) = self.physics.borrow_mut().as_mut() {
+            p.settle(&mut self.world.borrow_mut(), ticks);
+        }
+    }
+
     /// Runs the frame script for one rendered frame.
     pub fn frame(&self, dt: f32) -> Result<()> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
@@ -521,12 +560,25 @@ pub struct GameSession {
     pub setup_ms: f64,
     /// Frame script + commit cost of the last frame, ms.
     pub frame_ms: f32,
-    /// Of `frame_ms`, the frame script's own JavaScript (the rest: applying what it changed, `LiveCore::commit`).
+    /// Of `frame_ms`, the frame script's own JavaScript (the rest: the physics' ticks, and applying what both changed,
+    /// `LiveCore::commit`: `commit_ms`).
     pub js_ms: f32,
+    pub commit_ms: f32,
     /// Last handler log line (window title).
     pub status: String,
     /// The frame script's clock (`f.time`).
     clock: GameClock,
+    /// When the last click arrived, until its first frame is drawn (`click_shown`; THREERT_CLICK_LOG=1).
+    clicked: Option<Instant>,
+    /// Whether the last event's commit rebuilt the scene.
+    rebuilt: bool,
+}
+
+/// THREERT_CLICK_LOG=1: a click's chain timed on stderr (`click: ...`): the pick, the script (handler, frame script,
+/// binding; of which the physics world's calls), the commit, and the first frame after it.
+fn click_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("THREERT_CLICK_LOG").is_ok_and(|v| v == "1"))
 }
 
 /// The frame script's clock: the gameplay FrameRunner adds each frame's dt clamped to [0, 0.1] s, in f64. While a
@@ -549,7 +601,7 @@ impl GameSession {
         let setup_ms = host.setup(room, None)?;
         host.world.borrow_mut().take_changes();
         eprintln!("game: setup {setup_ms:.0} ms in the node runtime, {} objects, handlers {}, frame script {}", host.world.borrow().objects.len(), host.info["handlers"], host.has_frame());
-        Ok(GameSession { host, seq: 0, setup_ms, frame_ms: 0.0, js_ms: 0.0, status: String::new(), clock: GameClock::default() })
+        Ok(GameSession { host, seq: 0, setup_ms, frame_ms: 0.0, js_ms: 0.0, commit_ms: 0.0, status: String::new(), clock: GameClock::default(), clicked: None, rebuilt: false })
     }
 
     /// Loads the bundle, builds the scene in the runtime and opens a live view of it. Models and file textures resolve
@@ -597,6 +649,7 @@ impl GameSession {
         let e = self.host.event(kind, &payload)?;
         let t = Instant::now();
         let rebuilt = self.commit(core)?;
+        self.rebuilt = rebuilt;
         self.seq = e.seq;
         core.seq = e.seq;
         for l in &e.log {
@@ -614,20 +667,44 @@ impl GameSession {
         if !self.host.has_handler("click") {
             return Ok(None);
         }
+        let t0 = Instant::now();
         let Some((target, p, sub)) = core.pick(u, v) else { return Ok(None) };
+        let pick_ms = t0.elapsed().as_secs_f64() * 1e3;
         let r = |x: f32| (x * 1e4).round() / 1e4;
-        let mut payload = serde_json::json!({ "target": target, "point": [r(p.x), r(p.y), r(p.z)], "player": "you" });
+        // (`ray`: the view ray through the click, for a `Raycaster` in scene code: `raycaster.set(origin, direction)`.)
+        let (o, d) = core.ray(u, v);
+        let mut payload = serde_json::json!({ "target": target, "point": [r(p.x), r(p.y), r(p.z)], "player": "you", "ray": { "origin": o.to_array(), "direction": d.to_array() } });
         if let Some(i) = sub {
             payload["instanceId"] = i.into();
         }
-        self.event(core, "click", payload).map(Some)
+        if !click_log() {
+            return self.event(core, "click", payload).map(Some);
+        }
+        if let Some(p) = self.host.physics.borrow_mut().as_mut() {
+            p.take_call_ms();
+        }
+        let t1 = Instant::now();
+        let e = self.event(core, "click", payload)?;
+        let all = t1.elapsed().as_secs_f64() * 1e3;
+        let physics = self.host.physics.borrow_mut().as_mut().map_or(0.0, |p| p.take_call_ms());
+        eprintln!("click: pick {pick_ms:.3} ms, script {:.3} ms (the physics world's calls {physics:.3} ms), commit {:.3} ms ({})", e.ms, all - e.ms, if self.rebuilt { "rebuild" } else { "in place" });
+        self.clicked = Some(t0);
+        Ok(Some(e))
+    }
+
+    /// A frame was drawn: the first one after a click is timed (THREERT_CLICK_LOG=1).
+    pub fn click_shown(&mut self) {
+        if let Some(t) = self.clicked.take() {
+            eprintln!("click: first frame submitted {:.3} ms after the click", t.elapsed().as_secs_f64() * 1e3);
+        }
     }
 
     /// Runs the frame script and applies what it changed; true if that rebuilt the scene.
     pub fn frame(&mut self, core: &mut crate::live::LiveCore, dt: f32) -> Result<bool> {
         if !self.host.has_frame() {
-            // Wind sway follows the scene time with or without a frame script.
-            if self.host.world.borrow_mut().apply_sway(core.scene_time()) {
+            // Wind sway and the physics follow the scene time with or without a frame script.
+            let swayed = self.host.world.borrow_mut().apply_sway(core.scene_time());
+            if self.host.advance_physics(dt) || swayed {
                 return self.commit(core);
             }
             return Ok(false);
@@ -637,7 +714,11 @@ impl GameSession {
         self.host.world.borrow_mut().apply_sway(core.scene_time());
         self.host.frame(dt)?;
         self.js_ms = t.elapsed().as_secs_f32() * 1000.0;
+        // The physics' ticks after the frame script (its impulses and targets act in this frame's ticks).
+        self.host.advance_physics(dt);
+        let tc = Instant::now();
         let rebuilt = self.commit(core)?;
+        self.commit_ms = tc.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = t.elapsed().as_secs_f32() * 1000.0;
         Ok(rebuilt)
     }

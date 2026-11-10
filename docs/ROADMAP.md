@@ -3589,9 +3589,77 @@ benchmark level. The order follows the dependencies; a step that meets a further
        edit; quads no longer merge across chunks) or a BLAS per chunk (changes the trace cost of the whole level). It
        needs its own measurements and gate.
 7. **[ThreeRT] Physics and scene queries.** Rigid bodies, contacts, joints; ray, overlap and sweep queries for game
-   code. Native, a shape interface the engine can extend. Prototype on Rapier.
+   code. Native, a shape interface the engine can extend. On Rapier.
    - Acceptance: stacking and joint tests against expected results; zero cost to scenes without bodies; the CPU split
      in the frame log.
+   - **Done** (branch `physics`). A contract of ThreeRT for every kind of game; the voxel shape and debris bodies are
+     step 8.
+     - **The world is the engine's.** Rapier 0.36 behind `renderer/physics-core` (its own crate: no GPU, file system,
+       clock or thread; CI builds it for `wasm32-unknown-unknown` and runs its 19 tests): dynamic, fixed and kinematic
+       bodies; box, sphere, capsule, convex hull and static triangle-mesh colliders; fixed, hinge, slider, ball and
+       rope joints with limits and motors; contact events; ray (first hit or all), overlap and sweep queries; a shape
+       trait for the engine's own colliders (`CustomShape`: step 8's voxel shape). It is stepped at a fixed 1 / 60 s,
+       at most 5 ticks a frame, after the frame script; scripts cannot step it and never see Rapier.
+     - **The bridge** (`physics-core/src/bridge.rs`, also wasm32): scene code's calls (JSON; ids chosen by the
+       caller) and the scene objects that bodies drive, against a `Scene` trait the renderer's `World` implements. A
+       body's move goes from the world to the object's transform to its TLAS instance without passing through the
+       script: a mesh a body drives is an instance of its own BLAS (`move_instances`), one added while the game runs
+       is placed in place and moves the same way (no rebuild), and so does a new material without textures.
+     - **The script's surface is three.js's** (`packages/scene`). `mesh.physics = "dynamic"` (or `{ type, shape,
+       density | mass, friction, restitution, damping, ccd, sensor, contacts }`); in the scene the object has its body,
+       out of it none, whether the scene began with it or a script adds it. The collider is the geometry's: a box, a
+       sphere, a capsule, else the convex hull, or the triangles for a fixed body. `position` / `quaternion` /
+       `rotation` read the body's pose when read (one typed array for every body a frame, then each object its own
+       seven numbers, on first access); writing them moves the body (a kinematic one is driven there). `applyImpulse`,
+       `applyForce`, `setLinearVelocity`, ... are methods of the object. `HingeJoint`, `SliderJoint`, `BallJoint`,
+       `RopeJoint`, `FixedJoint` are objects that hold while they and their two objects are in the scene.
+       `Raycaster.intersectPhysics()` and `Shapecaster` (`overlap`, `sweep`) ask the world. Contacts come once a frame
+       as a batch: `contactstart` / `contactend` on the objects, `contacts` on the scene.
+     - **Expected numbers** (physics-core's tests): free fall by Rapier's own law (a tick in 4 substeps: g dt² (n² / 2
+       + n / 8) after n ticks, within 1 mm); five 1 m boxes rest as a column within 2 mm a contact; a box on a 20°
+       slope holds at friction 0.6 and slides at g (sin - mu cos) at 0.1; a weight on a hinge passes the bottom at
+       sqrt(2 g L) within 2 % and stays 1 m from it within 5 mm; a hinge stops at its limit (0.5 rad within 0.03); a
+       slider keeps its axis, reaches its motor's 1.5 m/s and stops at its limit; a rope holds at its length (2 m
+       within 2 cm), ball and fixed joints keep their anchors; joints join bodies as they are turned (a bar turned a
+       quarter is not wrenched into line); contact events; queries; kinematic bodies push. The
+       bridge's: a body drives its object (under a parent too), poses by slot, a force lasts its frame's ticks,
+       impulses at a point, what a call refuses, limits. Layer A: `physics/box-rest` (5 nits where the box rests; also
+       live), `physics/stack` (the strip above a three-box column: 0), `physics/hinge` (5 nits at the limit),
+       `physics/instance-live` (a body's box against a still one: 1.005).
+     - **Determinism:** Rapier needs its `enhanced-determinism` feature for the same bits natively and in wasm32:
+       without it the test script's hash is `b0b7de88021ed337` natively and `113d50eb06a47636` in wasm32, with it
+       `113d50eb06a47636` both (`tools/physics-determinism.ts`, CI). It costs 1–3 % on the script (0.029 ms a tick)
+       and 3–5 % on a pile of 1,000 boxes (0.35 → 0.36 ms a tick), natively. physics-core has it on. Step 9's replay can
+       rest on it for one build of the engine; across Rapier versions it is not promised.
+     - **Hello world** (`games/physics/hello.game.ts`, catalog `physics-hello`; `threert-render play` to click in a
+       window, `tools/physics-hello.ts` for the same game with scripted clicks): a click's ray is cast into the world
+       (`Raycaster.intersectPhysics`); on something fixed (a triangle-mesh ground and rock, a wall, a ramp) a box with
+       `physics = "dynamic"` is added off the surface and falls onto what is there; on a box, the box is kicked. The
+       scripted run adds 4 boxes (three end as a column at 0.250, 0.748 and 1.248 m), kicks one at 3 m/s (it slides
+       0.913 m; v² / 2 mu g = 0.917) and ends with every box asleep. A click's chain: the pick 0.001–0.004 ms, the
+       script (handler, frame script, binding) 0.30–0.54 ms of which the world's calls 0.007–0.053 ms, the commit
+       0.39–0.57 ms in place, the next frame submitted 3.8–4.1 ms after the click. The first box of a scene without
+       instances rebuilds it once (15–22 ms here: the kernel variant with instances).
+     - **What the boundary costs a frame** (`tools/bench-physics.ts`; every body moving every tick, the most it can
+       cost; M5 Pro, means of 120 frames, one run):
+
+       | bodies | step (Rapier) | sync to objects | commit (records, TLAS) | script, reads none | script, reads all |
+       | --- | --- | --- | --- | --- | --- |
+       | 0 | 0.007 ms | 0.0001 | 0.001 | 0.085 | 0.097 |
+       | 100 | 0.035 | 0.011 | 0.116 | 0.090 | 0.141 |
+       | 1,000 | 0.258 | 0.173 | 0.780 | 0.166 | 0.741 |
+       | 10,000 | 2.126 | 1.696 | 4.518 | 0.217 | 5.445 |
+
+       A script that reads nothing pays nothing for the bodies (the same scene without bodies: 0.079 / 0.090 / 0.339 ms
+       at 100 / 1,000 / 10,000 meshes). Reading a body's position and quaternion costs 0.5 µs, of which 0.28 µs is
+       reading the two properties of any object in QuickJS. Bodies asleep cost nothing natively (a pile of 10,000 at
+       rest: step 0.03 ms, sync 0.0003 ms, commit 0.003 ms).
+     - The frame log has `physics: { ticks, step, sync, bodies, moved }` and `commit`.
+     - **Open:** the first instance of a scene rebuilds it; a sleeping body does not follow a parent of its object that
+       moves; a query sees a collider from the tick after it was added; reading every body's pose every frame at
+       10,000 bodies is 5 ms of script (the typed array itself is not handed to scripts yet); a body made anew
+       (`physics` set again, the object re-parented or rescaled) starts at rest; where physics is authoritative, the
+       node or the room, is step 9's.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

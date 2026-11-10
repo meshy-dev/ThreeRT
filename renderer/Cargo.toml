@@ -6,6 +6,7 @@ description = "Native renderer for ThreeRT games: embedded scene runtime, GPU pa
 
 [dependencies]
 voxel-core = { path = "voxel-core" }
+physics-core = { path = "physics-core" }
 wgpu = "30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }

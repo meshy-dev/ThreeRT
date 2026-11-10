@@ -50,6 +50,188 @@ export function compatNotes(): string[] {
   return [...compat];
 }
 
+// ---------------------------------------------------------------------------------------------
+// Physics (ROADMAP § 6 step 7)
+//
+// An object with `physics` has a rigid body in the engine's physics world from the moment it is in the scene
+// (`scene.add`) until it leaves it (`scene.remove`), whether the scene began with it or a script adds it later:
+//
+//   const crate = new Mesh(new BoxGeometry(0.5, 0.5, 0.5), wood);
+//   crate.physics = "dynamic";            // or { type, shape, density, friction, ... }; "fixed" for what stands still
+//   scene.add(crate);                     // it falls, collides, can be hit by a ray and pushed
+//   crate.applyImpulse(new Vector3(0, 40, 0));
+//
+// The world is the engine's: it steps it 60 times a second, and scene code can neither step it nor reach into it.
+// A body moves its object in the engine, straight to what is drawn; nothing runs in the script for it. `position`,
+// `quaternion` and `rotation` of such an object read the body's pose when they are read (one call fetches every
+// body's pose for the frame, then each object takes its own on its first read); writing them moves the body there (a
+// kinematic body is driven there through the next tick and pushes what is in the way). Joints are objects too
+// (`HingeJoint`, ...: in the scene, they hold). `Raycaster.intersectPhysics` and `Shapecaster` ask the world.
+
+/** A collider's shape: from the mesh's geometry by name, or given (sizes in the object's own units). */
+export type PhysicsShape =
+  | "box" | "sphere" | "capsule" | "hull" | "mesh"
+  | { type: "box"; halfExtents: readonly [number, number, number] }
+  | { type: "sphere"; radius: number }
+  | { type: "capsule"; halfHeight: number; radius: number };
+
+export interface PhysicsDesc {
+  /** "dynamic" (default): moved by forces and contacts. "fixed": stands still. "kinematic": moved by the script. */
+  type?: "dynamic" | "fixed" | "kinematic";
+  /**
+   * Default: from the mesh's geometry. A `BoxGeometry` is a box, a `SphereGeometry` a sphere, a `CapsuleGeometry` a
+   * capsule (the last two under a uniform scale); any other geometry is its convex hull, or for a fixed body its
+   * triangles ("mesh"). "box" / "sphere" / "capsule" by name are the geometry's bounding box and what fits it. An
+   * object that is not a mesh needs a shape with sizes.
+   */
+  shape?: PhysicsShape;
+  /** kg / m³ (default 1000, water), or the body's mass in kg. */
+  density?: number;
+  mass?: number;
+  /** Default 0.5. */
+  friction?: number;
+  /** Default 0: no bounce. */
+  restitution?: number;
+  linearDamping?: number;
+  angularDamping?: number;
+  /** Default 1. */
+  gravityScale?: number;
+  /** Continuous collision detection, for small fast bodies. */
+  ccd?: boolean;
+  /** Default true: a body at rest sleeps (costs nothing) until something wakes it. */
+  canSleep?: boolean;
+  /** Touches without pushing: it reports contacts only. */
+  sensor?: boolean;
+  /** Report its contacts: "contactstart" / "contactend" events on the object, "contacts" on the scene. */
+  contacts?: boolean;
+}
+
+/** An event of an object (`addEventListener`). */
+export interface ObjectEvent {
+  type: string;
+  target?: Object3D;
+  [key: string]: unknown;
+}
+
+/** What a body's contact reports: on each of the two objects ("contactstart" / "contactend") with the other one. */
+export interface ContactEvent extends ObjectEvent {
+  other: Object3D;
+}
+
+/** @internal An object's body in the engine, kept on the object by the binding. */
+export interface BoundBody {
+  id: number;
+  /** Its place in the engine's table of poses (-1: none, a fixed body). */
+  slot: number;
+  /** The physics epoch its pose was last read in. */
+  epoch: number;
+  /** The binding's record of the transform the engine has (position, quaternion, scale). */
+  trs: Float64Array;
+  /** `rotation` is behind `quaternion` (set when a pose is read; `rotation` catches up when it is read). */
+  euler: boolean;
+}
+
+/** @internal A call on an object's body, sent at the binding's next sync (the body may not exist before it). */
+export interface PhysicsCommand {
+  op: "impulse" | "force" | "velocity";
+  object: Object3D;
+  args: Record<string, unknown>;
+}
+
+interface PhysicsEngine {
+  physics(op: string, args: object): string;
+  physicsPoses?(): Float32Array;
+}
+
+const physicsQueue: PhysicsCommand[] = [];
+/** @internal Body id -> its object (queries and contacts report bodies). */
+export const physicsBodies = new Map<number, Object3D>();
+let physicsEngine: PhysicsEngine | null = null;
+// The engine steps the world after each sync: poses read before it are stale after it.
+let physicsEpoch = 0;
+let poses: Float32Array | null = null;
+let posesEpoch = -1;
+
+/** @internal The engine whose world queries ask and poses come from (the binding's). */
+export function usePhysicsEngine(e: PhysicsEngine): void {
+  physicsEngine = e;
+}
+
+/** @internal The engine may have stepped the world: poses are read again. */
+export function physicsStepped(): void {
+  physicsEpoch++;
+}
+
+/** @internal The queued calls, taken (the binding's sync sends them). */
+export function takePhysicsCommands(): PhysicsCommand[] {
+  return physicsQueue.length ? physicsQueue.splice(0) : physicsQueue;
+}
+
+function physicsCommand(c: PhysicsCommand): void {
+  // (Calls on objects that never reach a scene are not kept without bound.)
+  if (physicsQueue.length >= 65536) physicsQueue.shift();
+  physicsQueue.push(c);
+}
+
+/** @internal A query answered now, against the world as of its last tick; null where there is no engine. */
+export function physicsQuery(op: "state" | "ray" | "overlap" | "sweep" | "contacts" | "hash", args: Record<string, unknown> = {}): unknown {
+  return physicsEngine ? JSON.parse(physicsEngine.physics(op, args)) : null;
+}
+
+/** The body's pose into the object's position and quaternion (and the binding's record: reading is not a write). */
+function pullPose(b: BoundBody, p: TrackedVector3, q: Quaternion): void {
+  b.epoch = physicsEpoch;
+  if (posesEpoch !== physicsEpoch) {
+    posesEpoch = physicsEpoch;
+    poses = physicsEngine?.physicsPoses?.() ?? null;
+  }
+  const at = b.slot * 7;
+  if (!poses || b.slot < 0 || at + 7 > poses.length) return;
+  const t = b.trs;
+  p._x = t[0] = poses[at];
+  p._y = t[1] = poses[at + 1];
+  p._z = t[2] = poses[at + 2];
+  q._x = t[3] = poses[at + 3];
+  q._y = t[4] = poses[at + 4];
+  q._z = t[5] = poses[at + 5];
+  q._w = t[6] = poses[at + 6];
+  b.euler = true;
+}
+
+/**
+ * @internal The object has body `b` in the engine. One that physics moves (a slot) reads its pose from it: `position`,
+ * `quaternion` and `rotation` become accessors of this object alone (objects without a body keep plain properties and
+ * pay nothing).
+ */
+export function bindBody(o: Object3D, b: BoundBody): void {
+  Object.defineProperty(o, "_body", { value: b, configurable: true, writable: true });
+  physicsBodies.set(b.id, o);
+  if (b.slot < 0) return;
+  const p = o.position as TrackedVector3, q = o.quaternion, r = o.rotation;
+  Object.defineProperty(o, "position", { configurable: true, enumerable: true, get: () => (b.epoch !== physicsEpoch && pullPose(b, p, q), p) });
+  Object.defineProperty(o, "quaternion", { configurable: true, enumerable: true, get: () => (b.epoch !== physicsEpoch && pullPose(b, p, q), q) });
+  Object.defineProperty(o, "rotation", {
+    configurable: true, enumerable: true,
+    get: () => {
+      if (b.epoch !== physicsEpoch) pullPose(b, p, q);
+      if (b.euler) {
+        b.euler = false;
+        r.setFromQuaternion(q, false);
+      }
+      return r;
+    },
+  });
+}
+
+/** @internal The object's body is gone: it keeps the pose it had, in plain properties again. */
+export function unbindBody(o: Object3D): void {
+  const b = o._body;
+  if (!b) return;
+  if (physicsBodies.get(b.id) === o) physicsBodies.delete(b.id);
+  if (b.slot >= 0) for (const k of ["position", "quaternion", "rotation"] as const) Object.defineProperty(o, k, { value: o[k], configurable: true, enumerable: true, writable: true });
+  o._body = undefined;
+}
+
 function restructured(): void {
   for (const t of trackers) t.structure = true;
 }
@@ -109,7 +291,7 @@ export interface SwayDesc {
 let objectIds = 0;
 
 /** What `Object3D.copy` does not take over as it is (transforms are copied by value, children cloned). */
-const COPY_SKIP = new Set(["parent", "children", "position", "quaternion", "rotation", "scale", "up", "matrix", "matrixWorld", "userData", "tags", "_id", "_autoId", "uuid"]);
+const COPY_SKIP = new Set(["parent", "children", "position", "quaternion", "rotation", "scale", "up", "matrix", "matrixWorld", "userData", "tags", "_id", "_autoId", "uuid", "_body", "_listeners"]);
 
 export class Object3D {
   readonly isObject3D = true;
@@ -148,6 +330,89 @@ export class Object3D {
    */
   get id(): string | number {
     return this._id ?? this._autoId;
+  }
+  declare private _physics: Readonly<PhysicsDesc> | null | undefined;
+  /** @internal */
+  declare _body: BoundBody | undefined;
+  declare private _listeners: Map<string, ((e: ObjectEvent) => void)[]> | undefined;
+
+  /**
+   * The object's rigid body (see "Physics" above): a description, or just its type. In the scene, the object has the
+   * body; out of it, or with `physics` null, it has none. To change a body, set `physics` again (the body is made
+   * anew).
+   */
+  get physics(): Readonly<PhysicsDesc> | null {
+    return this._physics ?? null;
+  }
+  set physics(v: PhysicsDesc | "dynamic" | "fixed" | "kinematic" | null) {
+    this._physics = v == null ? null : Object.freeze(typeof v === "string" ? { type: v } : { ...v });
+    touched(this);
+  }
+
+  /** An impulse (N s, world space) at the body's centre of mass, or at a point of the world (it then turns it too). */
+  applyImpulse(impulse: Vector3, point?: Vector3): this {
+    physicsCommand({ op: "impulse", object: this, args: { impulse: impulse.toArray(), ...(point ? { point: point.toArray() } : {}) } });
+    return this;
+  }
+  /** An angular impulse (N m s, world space). */
+  applyTorqueImpulse(torque: Vector3): this {
+    physicsCommand({ op: "impulse", object: this, args: { torque: torque.toArray() } });
+    return this;
+  }
+  /** A force (N, world space) on the body through the ticks of the frame that follows: call it every frame it acts. */
+  applyForce(force: Vector3): this {
+    physicsCommand({ op: "force", object: this, args: { force: force.toArray() } });
+    return this;
+  }
+  /** A torque (N m, world space) through the ticks of the frame that follows. */
+  applyTorque(torque: Vector3): this {
+    physicsCommand({ op: "force", object: this, args: { torque: torque.toArray() } });
+    return this;
+  }
+  /** The body's velocity (m/s, world space) set. */
+  setLinearVelocity(v: Vector3): this {
+    physicsCommand({ op: "velocity", object: this, args: { linvel: v.toArray() } });
+    return this;
+  }
+  /** The body's angular velocity (rad/s, world space) set. */
+  setAngularVelocity(v: Vector3): this {
+    physicsCommand({ op: "velocity", object: this, args: { angvel: v.toArray() } });
+    return this;
+  }
+  /** The body's velocity as of the last tick (zero without a body). */
+  getLinearVelocity(target = new Vector3()): Vector3 {
+    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { linvel: number[] } | null) : null;
+    return s ? target.fromArray(s.linvel) : target.set(0, 0, 0);
+  }
+  getAngularVelocity(target = new Vector3()): Vector3 {
+    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { angvel: number[] } | null) : null;
+    return s ? target.fromArray(s.angvel) : target.set(0, 0, 0);
+  }
+  /** The body is at rest and asleep (false without a body). */
+  get sleeping(): boolean {
+    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { sleeping: boolean } | null) : null;
+    return s?.sleeping ?? false;
+  }
+
+  /** three.js's EventDispatcher. The engine's events: "contactstart" / "contactend" (`physics.contacts`). */
+  addEventListener(type: string, listener: (e: ObjectEvent) => void): void {
+    const all = (this._listeners ??= new Map());
+    const l = all.get(type);
+    if (!l) all.set(type, [listener]);
+    else if (!l.includes(listener)) l.push(listener);
+  }
+  hasEventListener(type: string, listener: (e: ObjectEvent) => void): boolean {
+    return this._listeners?.get(type)?.includes(listener) ?? false;
+  }
+  removeEventListener(type: string, listener: (e: ObjectEvent) => void): void {
+    const l = this._listeners?.get(type);
+    if (l?.includes(listener)) l.splice(l.indexOf(listener), 1);
+  }
+  dispatchEvent(event: ObjectEvent): void {
+    const l = this._listeners?.get(event.type);
+    if (!l?.length) return;
+    event.target = this;
+    for (const f of [...l]) f(event);
   }
   set id(v: string | number | undefined) {
     this._id = v === undefined ? undefined : String(v);
@@ -481,9 +746,122 @@ export class Group extends Object3D {
   override type = "Group";
 }
 
+/** A joint's motor: it drives the joint toward `velocity` (rad/s, or m/s for a slider) with at most `maxForce`. */
+export interface JointMotor {
+  velocity: number;
+  /** How hard it holds the velocity (default 1e4). */
+  damping?: number;
+  /** N m (or N); default: no limit. */
+  maxForce?: number;
+}
+
+export interface JointParameters {
+  /** Where the joint holds each object, in the object's own space (default: its origin). */
+  anchorA?: Vector3;
+  anchorB?: Vector3;
+  /** The hinge's or slider's axis, in `bodyA`'s space. */
+  axis?: Vector3;
+  /** The hinge's angles (radians) or the slider's travel (m), from how the two objects are when joined: [min, max]. */
+  limits?: readonly [number, number] | null;
+  motor?: JointMotor | null;
+  /** A rope's length, m. */
+  length?: number;
+}
+
+/**
+ * A joint between two objects with bodies: an object itself, so it holds while it is in the scene (`scene.add(joint)`)
+ * and both its objects are, and lets go when it is removed. It joins the objects as they are turned when it is made (a
+ * door that stands open stays open; its anchors are pulled together if they are apart). After changing one that is in
+ * the scene, set `needsUpdate`.
+ */
+export class Joint extends Object3D {
+  readonly isJoint = true;
+  override type = "Joint";
+  bodyA: Object3D | null;
+  bodyB: Object3D | null;
+  readonly anchorA = new Vector3();
+  readonly anchorB = new Vector3();
+  constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
+    super();
+    this.bodyA = bodyA ?? null;
+    this.bodyB = bodyB ?? null;
+    if (params.anchorA) this.anchorA.copy(params.anchorA);
+    if (params.anchorB) this.anchorB.copy(params.anchorB);
+  }
+  set needsUpdate(v: boolean) {
+    if (v) touched(this);
+  }
+  /** @internal The engine's description of it, less its bodies and anchors. */
+  jointDesc(): Record<string, unknown> {
+    return { type: "fixed" };
+  }
+}
+
+/** Holds the two objects rigidly together at the anchors. */
+export class FixedJoint extends Joint {
+  override type = "FixedJoint";
+}
+
+/** A hinge: the objects turn about `axis` through the anchors (a door, a wheel). */
+export class HingeJoint extends Joint {
+  override type = "HingeJoint";
+  readonly axis = new Vector3(0, 1, 0);
+  limits: readonly [number, number] | null;
+  motor: JointMotor | null;
+  constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
+    super(bodyA, bodyB, params);
+    if (params.axis) this.axis.copy(params.axis);
+    this.limits = params.limits ?? null;
+    this.motor = params.motor ?? null;
+  }
+  override jointDesc(): Record<string, unknown> {
+    return { type: "revolute", axis: this.axis.toArray(), ...(this.limits ? { limits: [...this.limits] } : {}), ...(this.motor ? { motor: { ...this.motor } } : {}) };
+  }
+}
+
+/** A slider: `bodyB` moves along `axis` (a drawer, a lift). */
+export class SliderJoint extends Joint {
+  override type = "SliderJoint";
+  readonly axis = new Vector3(1, 0, 0);
+  limits: readonly [number, number] | null;
+  motor: JointMotor | null;
+  constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
+    super(bodyA, bodyB, params);
+    if (params.axis) this.axis.copy(params.axis);
+    this.limits = params.limits ?? null;
+    this.motor = params.motor ?? null;
+  }
+  override jointDesc(): Record<string, unknown> {
+    return { type: "prismatic", axis: this.axis.toArray(), ...(this.limits ? { limits: [...this.limits] } : {}), ...(this.motor ? { motor: { ...this.motor } } : {}) };
+  }
+}
+
+/** A ball joint: the anchors stay together, the objects turn freely about them. */
+export class BallJoint extends Joint {
+  override type = "BallJoint";
+  override jointDesc(): Record<string, unknown> {
+    return { type: "spherical" };
+  }
+}
+
+/** A rope: the anchors are never further apart than `length`. */
+export class RopeJoint extends Joint {
+  override type = "RopeJoint";
+  length: number;
+  constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
+    super(bodyA, bodyB, params);
+    this.length = params.length ?? 1;
+  }
+  override jointDesc(): Record<string, unknown> {
+    return { type: "rope", length: this.length };
+  }
+}
+
 export class Scene extends Object3D {
   readonly isScene = true;
   override type = "Scene";
+  /** The physics world's gravity, m/s². */
+  readonly gravity = new Vector3(0, -9.81, 0);
   /** Sky / image based lighting. Defaults to a physical atmosphere when a sun is present. */
   environment: Environment | null = null;
   /** three.js: what camera rays that miss show (a colour, sRGB as given; null: the environment). It lights nothing. */
