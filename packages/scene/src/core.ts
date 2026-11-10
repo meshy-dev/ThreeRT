@@ -173,7 +173,8 @@ function physicsCommand(c: PhysicsCommand): void {
   physicsQueue.push(c);
 }
 
-/** @internal A query answered now, against the world as of its last tick; null where there is no engine. */
+/** @internal A query answered now, against the world as the engine has it (what was synced, with or without a tick
+ *  since); null where there is no engine. */
 export function physicsQuery(op: "state" | "ray" | "overlap" | "sweep" | "contacts" | "hash", args: Record<string, unknown> = {}): unknown {
   return physicsEngine ? JSON.parse(physicsEngine.physics(op, args)) : null;
 }

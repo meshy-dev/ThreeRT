@@ -28,6 +28,9 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
   + `@threert/gameplay` + the node host in one script); in the cloud the agent's ES module plus the shared runtime
   module. A node builds the scene from it (deterministic per room seed).
 * **The world is the game state.** Handlers change `tx.state` only (OCC, log, replay). They never touch the scene.
+* **What lives only where the engine is has its own handlers.** The physics world exists on the node that owns the
+  scene, so an event that needs it (a click that casts a ray and adds a body) is handled there: `on[type](world, ev)`,
+  a world handler, changes the scene as the event arrives (World handlers, below).
 * **The scene is a function of the state.** `frame(f)` (an actor's Tick on a UE client) reads the committed state and
   sets the scene: transforms, visibility, `power`, light and material parameters, the environment, the camera, objects
   added or removed, plus animation (flicker, ramps). It runs every frame in Play, and with `dt = 0` after setup and
@@ -46,6 +49,7 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Live commit | `renderer/src/live.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera). Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
 | Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
 | Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
+| World handlers | `packages/gameplay/src/world.ts` | `on[type](world, ev)`: an event handled on this node, changing the scene at once. `WorldContext`: `scene`, `camera`, read-only `state`, `object(id)`, `time`, `now`, `random()`, `emit(type, payload)`. |
 | Frame scripts | `packages/gameplay/src/frame.ts` | `FrameContext`: `time`, `dt`, `snap`, `now`, read-only `state`, `scene`, `camera`, `object(id)`, `random()`. |
 | Game session | `renderer/src/script.rs` `GameSession` | A runtime + its live view: events, clicks (CPU pick → `click {target, point, ray: {origin, direction}}`, with `instanceId` on an `InstancedMesh`; `ray` is the view ray, for a `Raycaster`), frame script, the physics world's ticks, editor edits, each followed by a commit. Shared by `play`, `live` and the playground. |
 | Physics | `renderer/physics-core` (`Physics` on Rapier, `bridge::Bridge`), `renderer/src/physics.rs`, `packages/scene` (`Object3D.physics`, joints, `Raycaster.intersectPhysics`, `Shapecaster`) | The session's physics world, made by the first physics call (none: nothing runs). The engine steps it at 1 / 60 s after the frame script (at most 5 ticks a frame; offline renders step to their scene time) and places the objects of the bodies that moved: instances, so a move is a TLAS transform. Scripts cannot step it. See "Physics" below. |
@@ -70,6 +74,61 @@ root yet fails with `missing: [...]`; the node fetches them and retries.
 The playground runs the opened scene the same way: its host holds the `GameSession`; the Node backend keeps the
 catalog, the selection, the undo stack (Details edits as `{node, path, before, after}`) and the Play flow. Stop
 re-runs setup and replays the editor's edits (UE PIE: Play changes are discarded).
+
+## World handlers
+
+A handler is a transaction on the JSON state and may run in a room, where there is no scene and no physics world; the
+scene then follows the state in `frame`. For an event whose point is the scene itself, that is a detour: a click that
+adds a box had to be recorded in the state by a handler and acted on by the frame script. A world handler is the
+event's handler on the node that owns the scene:
+
+```ts
+export default defineGame({
+  state: {},
+  setup,
+  on: {
+    click(world, ev) {
+      raycaster.set(new Vector3(...ev.ray.origin), new Vector3(...ev.ray.direction));
+      const hit = raycaster.intersectPhysics()[0];
+      if (!hit) return;
+      const box = new Mesh(geometry, wood);
+      box.position.copy(hit.point).addScaledVector(hit.normal, 1.5);
+      box.physics = "dynamic";
+      world.scene.add(box);                      // in the engine, with its body, when the handler returns
+      world.emit("placed", { by: ev.player });   // a state transaction, if the game keeps a score: handlers.placed
+    },
+  },
+});
+```
+
+- **Where:** on the node that owns the scene and the physics world (`play`, `live`, the playground: wherever events
+  arrive at a node). Not in a room.
+- **When:** as the event arrives, synchronously, before the engine's next physics tick. What it changed goes to the
+  engine through the scene binding when it returns: no commit, and `frame` is not run again for it.
+- **The context** (`world`): `scene`, `camera`, the committed `state` (read-only), `object(id)`, `time` (the frame
+  clock, s), `now` (the event's time, ms), `random()` (the event's own stream; `Math.random` and `Date` in the handler
+  are the event's too), and `emit(type, payload)`, which starts a state transaction (`handlers[type]`).
+- **With `handlers[type]` for the same event:** the world handler runs first, on the state as committed before the
+  event; then the handler's transaction; then what the world handler emitted, in order; then the frame script shows
+  the new state. A room that is the authority runs `handlers` on its own, so neither may rely on the other having run.
+- **`keys`** map to either; `describe()` lists them as `on`; a game of world handlers only needs no `handlers`.
+- **Synchronous:** no await, as for handlers.
+- **A world handler that throws** does not stop the world, as a frame script that throws does not: what it had changed
+  is synced, the event's handler and the next tick run all the same, and the error is in the event's log.
+- **In a room:** they do not run. A node that follows a room gets committed state, not events; an event with a world
+  handler only, sent to a room, is an error there that says so. Who owns the physics when a room is the authority is
+  not decided (ROADMAP § 6 step 9); today world handlers are for a node that is its own authority.
+- **What they add is not in the game state.** A state restored on another node (`setState`, a render of a room's
+  state, `f.snap`) does not bring it back. Every change they make passes through the scene binding, which is where it
+  will be logged and replayed from (step 9); until then, keep in the state what must survive a restore.
+- **Queries and the scene's queue** (this holds for the frame script too):
+  - What a script changes in the scene (`scene.add`, a move, `physics = ...`, an impulse) reaches the engine when the
+    script returns. A query in the same handler asks the engine as it was before: it does not see the box the handler
+    just added.
+  - A query sees everything the engine has been told, with or without a physics tick since: the next event's query
+    sees that box, also when no frame passed between the two events, and a body moved by a script is found where it
+    was put.
+- An event with neither a handler nor a world handler is the error it was.
 
 ## Physics
 
@@ -141,14 +200,98 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
 - A tick has no time bound yet: thousands of bodies made at one point take seconds (ROADMAP § 6 step 7, Open).
 - Queries: `Raycaster.intersectPhysics({ exclude })` (every body the ray passes through, nearest first, with the
   surface's normal) and `Shapecaster` (`overlap()`, `sweep(direction)`) for a box, sphere or capsule. They see the
-  world as of its last tick.
-- Contacts (`physics.contacts`): once a frame, before the frame script, `contactstart` / `contactend` events on the two
-  objects (`event.other`) and one `contacts` event on the scene with the whole batch.
+  world as the engine has it, with or without a tick since the last change; what the running script itself changed
+  reaches the engine when it returns (World handlers, above).
+- Contacts (`physics.contacts`): once a frame, `contactstart` / `contactend` events on the two objects
+  (`event.other`) and one `contacts` event on the scene with the whole batch. They come before the frame script when
+  the game has one, and every frame without one too (a game of world handlers, or listeners added in `setup`): a
+  scene with bodies has the node host run every frame.
 - Cost: a body moves its object in the engine; no script runs for it. Poses reach the script only when read: the first
   read of a frame fetches one typed array of every body's pose, each object then takes its seven numbers on its own
   first read. Numbers: ROADMAP § 6 step 7.
 - The engine call under it is `__engine.physics(op, args)` (JSON; `renderer/physics-core/src/bridge.rs` lists the
   calls, `faults` and `state`'s `{ removed }` among them) and `__engine.physicsPoses()`.
+
+## The runtime's shape: Rust owns the world, the script engine is a guest
+
+Decided by the user on 2026-11-10, with the measurements below.
+
+- **Scripts are three.js-style TypeScript and nothing else.** An object is a `Mesh`; `mesh.physics = "dynamic"` and
+  `scene.add(mesh)` put it in the physics world. No world, no step, no sync loop in the script.
+- **Rust is the main runtime.** It owns the scene, the physics world, the voxel data and the fixed 1 / 60 s tick. The
+  script decides what to add, push and remove, and when.
+- **The boundary is four channels**, and it is the contract that stays when the script engine changes:
+
+  | channel | direction | when | for |
+  | --- | --- | --- | --- |
+  | commands | script → Rust | queued in the script, sent once when it returns (the scene binding's sync) | many small writes (`scene.add`, impulses, joints) in a defined order; what step 9 logs |
+  | poses | Rust → script | one table (7 floats a body), fetched at most once a tick; an object takes its own seven on first read | thousands of bodies move, the script reads a few; a body nobody reads costs the script nothing |
+  | events | Rust → script | batched, once a frame | contacts, bodies that left the world: no polling |
+  | queries | script ⇄ Rust | at once | rays, overlaps, sweeps: the script needs the answer to go on |
+
+  A body's pose goes from the physics to the renderer (instance record, TLAS) without passing through the script.
+- **The script engine can be swapped; the `Engine` interface is not tied to one.** Natively it is QuickJS embedded in
+  the Rust application, as now, and nothing in the design needs a JIT.
+- **On the web: layout C.** The Rust engine (scene, Rapier, voxels) is compiled to wasm, and the gameplay TypeScript
+  runs in the browser's own JS engine, calling the wasm module's exports: the same game code and the same four
+  channels, with the `Engine` interface implemented by the wasm exports and a thin layer of JS. Not built yet (it is
+  what follows the world handlers; ROADMAP § 6). The layouts considered:
+
+  | layout | what | why not / why |
+  | --- | --- | --- |
+  | A | everything in one wasm module: QuickJS compiled in beside the Rust engine | the same structure as native and a sandbox for free; scripts 1.5–1.8× slower than natively, heavy script code 190–478× slower than Rust, a C toolchain in the build; built and run in Node only (below) |
+  | B | three.js as the runtime in the browser, physics in JS | physics, voxel edits and every later system written twice, and no determinism shared with the native build |
+  | **C** | Rust engine in wasm, scripts in the browser's engine | **chosen.** One Rust engine, a pure Rust build, a call across the boundary costs about 1 ns, heavy script code about 3× Rust. The binding's glue is written a second time (wasm exports + thin JS), and isolating the script (a Worker or an iframe) is ours to do |
+- **Heavy computation has standard ways out of the script**, because QuickJS is an interpreter (natively too):
+  1. the engine's own operations in Rust (voxel edits, meshing, connectivity, procedural geometry, physics queries):
+     one call from the script;
+  2. WGSL program contracts (geometry functions, GPU particles, density-grid programs): the game gives a piece of
+     shader, the engine runs it on the GPU;
+  3. a wasm compute module the game brings (arrays in, arrays out): **not built**; it waits for a real need.
+
+  A script's time is in the frame log, so an author sees when their TypeScript is the cost.
+
+### The measurements behind it (runtime probe, 2026-11-10)
+
+Conditions: Apple M5 Pro, macOS 26.5, rustc 1.96, release profile as the renderer's; rquickjs 0.12.2 (QuickJS-ng
+0.15.1); **Node 24.21 (V8 13.6) stands in for a browser, and nothing was run in a real browser**; single-threaded,
+medians, on a machine another agent was using (load 3–5): differences under about 10 % are noise, and ratios are worth
+more than the milliseconds. The harness and the full report are not in the repository (a copy of the report is kept
+beside the checkout, `out/runtime-probe/REPORT.md`).
+
+| crossing the boundary | native QuickJS | QuickJS in wasm (in Node) | V8 calling a wasm export |
+| --- | ---: | ---: | ---: |
+| a call with no argument | 18 ns | 26 ns | 1.2 ns (3.0 ns without V8's inlining of the call) |
+| a call with three f64 | 37 ns | 67 ns | 0.9 ns (3.6 ns) |
+| reading 1,000 bodies' poses from one table | 0.096 ms | 0.148 ms | 0.005 ms |
+| reading 10,000 bodies' poses from one table | 0.94 ms | 1.48 ms | 0.051 ms |
+| reading 10,000 poses, a call and a new array per body | 4.24 ms | 4.18 ms | not measured |
+
+One table is 4.5× cheaper than a call per body, which is why poses are a table. Of QuickJS's 0.94 ms for 10,000
+poses, the script's own read loop is 0.97 ms (the same within noise): the interpreter reading the numbers is the
+cost, not the crossing. For orchestration, all three are enough in a 16.67 ms frame.
+
+| the same algorithm, ms (× native Rust) | heightfield 256², mesh | greedy mesh of 64³ voxels |
+| --- | ---: | ---: |
+| Rust, native | 0.58 (1×) | 1.25 (1×) |
+| Rust in wasm32, in Node | 0.65 (1.1×) | 1.92 (1.5×) |
+| JS in V8, warmed up | 1.64 (2.8×) | 4.05 (3.2×) |
+| JS in native QuickJS | 171 (295×) | 135 (108×) |
+| JS in QuickJS in wasm | 273–277 (472–478×) | 237–238 (190×) |
+| JS in Boa (a JS engine in Rust), native | 696 (1,202×) | 696 (557×) |
+
+Every configuration produced the same output hash. A 64³ mesh in QuickJS is 8 to 14 frames: hence the ways out
+above, natively as much as on the web. Authoring is checked natively (QuickJS), so under layout C a script is only
+ever faster for a player than it was for its author.
+
+Building a script engine into the wasm module (layout A), as far as it was taken:
+- rquickjs does not build for `wasm32-unknown-unknown` with plain cargo (no libc headers for the target). It builds
+  for `wasm32-wasip1` (wasi-sdk, fetched by its build script), and into one `wasm32-unknown-unknown` module beside
+  wasm-bindgen with a recipe (QuickJS's C compiled by wasi-sdk's clang, wasi-libc linked, five WASI imports shimmed in
+  JS): 1.2 MB, run in Node, same hashes.
+- Boa builds for `wasm32-unknown-unknown` with one feature (10.4 MB) and is 4–8× slower than QuickJS.
+- Not verified by the probe: a real browser; wgpu in the same module as a script engine; the software BVH traversal's
+  frame rate in a browser (WebGPU has no hardware ray queries: the web's largest unknown, whichever layout).
 
 ## Correctness
 

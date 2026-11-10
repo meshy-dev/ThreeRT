@@ -428,6 +428,10 @@ Where it runs (the user, 2026-11-10):
 
 - The GPU render farm (`/play`) only makes images for agents authoring in GPU-less sandboxes; nothing is streamed.
 - Players play in the browser, the client running the game (most likely #27's `web/`); native apps come later.
+- How (the user, 2026-11-10; docs/RUNTIME.md "The runtime's shape"): the Rust engine compiled to wasm, with the
+  gameplay TypeScript in the browser's own JS engine calling its exports (layout C). Natively the script engine stays
+  QuickJS, and nothing depends on a JIT. Scripts are three.js-style; Rust owns the scene, the physics and the voxels;
+  commands, poses, events and queries are the four channels between them. Not run in a real browser yet.
 - So voxel editing, meshing and physics (Rapier) build for wasm (`wasm32-unknown-unknown`: no wgpu, no file system,
   threads optional), and the browser has no ray queries (WebGPU). How the browser renders is the user's decision.
 - The triangle route's output renders in `web/` as it is: standard meshes or glTF with palette materials, each voxel's

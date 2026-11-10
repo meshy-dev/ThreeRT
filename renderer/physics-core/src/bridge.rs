@@ -408,7 +408,8 @@ impl Bridge {
                     _ => Value::Null,
                 }
             }
-            // Queries, against the world as of the last tick. {origin, direction, max?, skip?, all?}: the first hit (or
+            // Queries, against the world as the calls left it (`Physics::fresh`: with or without a tick since).
+            // {origin, direction, max?, skip?, all?}: the first hit (or
             // null), or with `all` every hit, nearest first.
             "ray" => {
                 let (o, d, max, skip) = (vec3(a, "origin", [0.0; 3])?, vec3(a, "direction", [0.0; 3])?, num(a, "max", 1e4)?, self.skip(a)?);
@@ -804,9 +805,8 @@ mod tests {
         assert!(s.at[&2].0[2] > 1.05, "pushed: {:?}", s.at[&2].0);
     }
 
-    /// Queries report the caller's ids and the scene objects (the world as of the last tick: a collider is seen from
-    /// the tick after it was added); a force acts through one frame's ticks only; contacts come in the order they
-    /// happened with their bodies.
+    /// Queries report the caller's ids and the scene objects (a collider is seen as soon as it is added, before any
+    /// tick); a force acts through one frame's ticks only; contacts come in the order they happened with their bodies.
     #[test]
     fn queries_forces_and_contacts() {
         let (mut b, mut s) = (Bridge::default(), scene());

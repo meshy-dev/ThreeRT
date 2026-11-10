@@ -2,7 +2,7 @@
 
 A real-time GPU path tracer for games and scenes written in a Three-like TypeScript DSL.
 
-- **Scenes** are written with `packages/scene`, a Three-like DSL. **Gameplay** uses `packages/gameplay`: Verse-inspired transactional handlers and per-frame scripts.
+- **Scenes** are written with `packages/scene`, a Three-like DSL. **Gameplay** uses `packages/gameplay`: Verse-inspired transactional handlers, per-frame scripts, and world handlers that change the scene as an event arrives.
 - That code runs inside the **native renderer**, `renderer/`: Rust and wgpu, a GPU path tracer with UE5-matched shading and post, and an embedded QuickJS runtime. Scene code drives the engine API directly; there is no scene interchange format.
 - **UE5 renders are the ground truth** (`ue5/`). **three.js** is the baseline it is compared against (`tools/three`, `compare/`).
 - **The voxel engine** around it is described in [`docs/VOXEL.md`](docs/VOXEL.md).
@@ -19,7 +19,7 @@ Mirror: [`doodlewind/ThreeRT`](https://github.com/doodlewind/ThreeRT).
 |---|---|
 | `renderer/` | The engine: Rust + wgpu path tracer, live viewport, denoiser, post, embedded QuickJS (`threert-render`); `renderer/voxel-core` and `renderer/physics-core` (Rapier; both also build for wasm32); `renderer/third_party/glamx` (a patched dependency of Rapier's, see its PATCH.md) |
 | `packages/scene` | The Three-like scene DSL (`@threert/scene`) |
-| `packages/gameplay` | Games: state, transactional handlers, frame scripts (`@threert/gameplay`) |
+| `packages/gameplay` | Games: state, transactional handlers, world handlers (`on`), frame scripts (`@threert/gameplay`) |
 | `packages/voxel` | The voxel engine's TypeScript side (`@threert/voxel`) |
 | `scenes/` | The reference catalog (Cornell box, material grid, Bistro, Zero Day, …) |
 | `games/` | Playable content: Kabukichō Night, Bistro slice / district / crowd, Zero Day, Tokyo, the voxel level, Light Room, … |
@@ -62,7 +62,7 @@ npm run test:render                       # the render test suite on the GPU
 
 **Scene code runs in the renderer** ([`docs/RUNTIME.md`](docs/RUNTIME.md)): `threert-render play out/bundles/kabukicho.js` runs the game inside the embedded QuickJS.
 - Setup builds the scene through the engine API.
-- Clicks and keys run handlers that commit game state.
+- Clicks and keys run handlers that commit game state, and world handlers (`on`) that change the scene at once.
 - The game's `frame` script (UE's Director Tick: neon flicker, wet / dry ramps, moods, power cut) derives the scene from that state every frame. Parameter changes rewrite GPU tables in place.
 
 **Tokyo** (`games/tokyo/`, `tools/tokyo/`): the open city, Shinjuku and Shiba, compiled by `tools/city` from public data. Live time of day uses the dynamic sky, windows switched by the clock, moonlight and the night sky.
