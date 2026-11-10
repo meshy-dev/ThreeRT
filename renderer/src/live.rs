@@ -3328,7 +3328,10 @@ impl LiveCore {
         // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
         let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, half.min(std::f32::consts::PI).cos()];
-        let e = &self.sc.tables;
+        // Power edits held back for the emitter worker land first (its job in flight was built for the old reference:
+        // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
+        self.land_powers_now();
+        let (e, b) = (&self.sc.tables, &mut self.sc.base);
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         self.g.queue.write_buffer(&self.sc.up.emitters, 0, bytemuck::cast_slice(&em));
         b.misc[1] = total;
