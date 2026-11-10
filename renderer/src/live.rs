@@ -492,6 +492,7 @@ impl DynamicSky {
 }
 
 /// Scenes with at least this many emitters rebuild their emitter CDF for power edits on a worker (`EmitterWorker`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const ASYNC_EMITTERS: usize = 100_000;
 
 /// Power edits in a scene with many emitters (a city's lamps and windows switching with the clock): the emitter CDF and
@@ -511,6 +512,7 @@ struct EmitterWorker {
     flight: Option<Vec<(usize, f32, f32)>>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct EmitterJob {
     materials: Vec<scene::GpuMaterial>,
     objects: Vec<[f32; 4]>,
@@ -531,6 +533,14 @@ struct EmitterBuilt {
 }
 
 impl EmitterWorker {
+    /// wasm32: none, and power edits rebuild in the frame as before (the browser's WebGPU device and buffers stay on
+    /// the thread that made them).
+    #[cfg(target_arch = "wasm32")]
+    fn new(_e: &tables::Tables, _device: &wgpu::Device) -> Option<EmitterWorker> {
+        None
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(e: &tables::Tables, device: &wgpu::Device) -> Option<EmitterWorker> {
         let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0);
         if e.emitter_tris.len() < ASYNC_EMITTERS || changing || std::env::var("THREERT_EMIT_SYNC").is_ok_and(|v| v == "1") {
