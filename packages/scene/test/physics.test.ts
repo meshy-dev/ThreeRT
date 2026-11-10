@@ -244,6 +244,35 @@ test("impulses, forces and velocities are calls on the object, sent once it has 
   assert.deepEqual([ghost.getLinearVelocity().toArray(), ghost.sleeping], [[0, 0, 0], false]);
 });
 
+test("a parent scaled anew makes the bodies below it anew at their new size, and their joints", () => {
+  const { scene, binding, physics } = world();
+  const post = new Mesh(new BoxGeometry(0.2, 2, 0.2));
+  post.physics = "fixed";
+  const group = new Group();
+  const inner = new Group();
+  const ball = new Mesh(new SphereGeometry(0.5));
+  ball.physics = "dynamic";
+  inner.add(ball);
+  group.add(inner);
+  const rope = new RopeJoint(post, ball, { length: 2, anchorB: new Vector3(0, 0.5, 0) });
+  scene.add(post, group, rope);
+  binding.sync();
+  physics();
+  // Moved, not scaled: nothing made anew.
+  group.position.set(1, 0, 0);
+  binding.sync();
+  assert.deepEqual(physics().filter((c) => c[0] !== "follow"), []);
+  // Scaled two levels up: the ball's body and collider made anew at twice the size, the rope anew with its anchor.
+  group.scale.set(2, 2, 2);
+  binding.sync();
+  const made = physics();
+  assert.deepEqual(made.map((c) => c[0]), ["remove", "body", "collider", "remove", "joint"]);
+  assert.deepEqual(made[2][1].shape, { type: "sphere", radius: 1 });
+  assert.deepEqual(made[4][1].anchor2, [0, 1, 0]);
+  binding.sync();
+  assert.deepEqual(physics(), []);
+});
+
 test("a joint holds while it and both its objects are in the scene", () => {
   const { scene, binding, physics } = world();
   const post = new Mesh(new BoxGeometry(0.2, 2, 0.2));

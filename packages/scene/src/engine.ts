@@ -539,7 +539,9 @@ export class SceneBinding {
       if (created) stats.created++;
       else stats.updated++;
     }
-    this.sendTransform(o, b, stats);
+    // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
+    // object's scale in the world): those under it are made anew at the new size.
+    if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o, stats);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
       this.engine.visible(b.id, o.visible);
@@ -639,17 +641,20 @@ export class SceneBinding {
     }
   }
 
-  private sendTransform(o: Object3D, b: Bound, stats: SyncStats): void {
+  /** Sends the object's transform if it changed. True if its scale did (and it had been sent before). */
+  private sendTransform(o: Object3D, b: Bound, stats: SyncStats): boolean {
     const q = resolveOrientation(o);
     const t = this.trs;
     t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
     t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
     t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
-    let moved = false, posed = false;
+    let moved = false, posed = false, scaled = false;
     for (let k = 0; k < 10; k++) {
       if (b.trs[k] !== t[k]) {
         moved = true;
         posed ||= k < 7;
+        // (NaN: never sent; the objects below are bound after it anyway.)
+        scaled ||= k >= 7 && !Number.isNaN(b.trs[k]);
         b.trs[k] = t[k];
       }
     }
@@ -658,6 +663,19 @@ export class SceneBinding {
       // Scene code moved an object that has a body: the body goes there (a kinematic one through the next tick).
       if (posed && b.body) this.engine.physics("follow", { body: b.body.id });
       stats.updated++;
+    }
+    return scaled;
+  }
+
+  /** The bodies of the objects below `o` checked against their scale in the world (`syncBody` makes anew only those
+   *  whose size changed). */
+  private rescaleBodiesBelow(o: Object3D, stats: SyncStats): void {
+    if (!this.bodies) return;
+    for (const c of o.children) {
+      c.traverse((d) => {
+        const bd = this.objects.get(d);
+        if (bd && (d.physics || bd.body)) this.syncBody(d, bd, stats);
+      });
     }
   }
 

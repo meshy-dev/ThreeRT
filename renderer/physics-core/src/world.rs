@@ -894,6 +894,12 @@ mod tests {
         let s = p.sweep(&Shape::Sphere(0.25), [0.0, 5.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 100.0, None).unwrap();
         assert_eq!(s.body, Some(b));
         assert!((s.distance - 3.75).abs() < 1e-3, "{s:?}");
+        // Its point and normal are the box's (as a ray's are), in world space: on the top, facing up.
+        assert!(dist(s.point, [0.0, 1.0, 0.0]) < 1e-3 && dist(s.normal, [0.0, 1.0, 0.0]) < 1e-4, "{s:?}");
+        // Sideways: it meets the box's side x = -0.5 after 4.25 m, at the side's point facing it, -x.
+        let s = p.sweep(&Shape::Sphere(0.25), [-5.0, 0.5, 0.2], [0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0], 100.0, None).unwrap();
+        assert!((s.distance - 4.25).abs() < 1e-3, "{s:?}");
+        assert!(dist(s.point, [-0.5, 0.5, 0.2]) < 1e-3 && dist(s.normal, [-1.0, 0.0, 0.0]) < 1e-4, "{s:?}");
         assert!(p.sweep(&Shape::Sphere(0.25), [0.0, 5.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 2.0, None).is_none());
     }
 
