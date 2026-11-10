@@ -1123,6 +1123,26 @@ struct FrameTimer {
 
 const TIMER_SLOTS: usize = 4;
 
+/// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
+const TIMER_GAP_MS: f32 = 2.0;
+
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, raster, particle pass pairs; zero: not run): from
+/// its first pass (particles, raster or trace) to the end of its post pass. The post pass follows the trace's command
+/// buffer within ~0.2 ms. In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that
+/// used the slot next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that
+/// begins more than TIMER_GAP_MS after the trace ends is counted by its own length (the passes' sum, not the span).
+fn frame_gpu_ms(t: &[u64; 8], period_ns: f32) -> Option<f32> {
+    let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
+    if t[3] <= start {
+        return None;
+    }
+    let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
+    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS {
+        return Some(ms(t[1] - start) + ms(t[3].saturating_sub(t[2])));
+    }
+    Some(ms(t[3] - start))
+}
+
 impl FrameTimer {
     fn new(d: &wgpu::Device) -> FrameTimer {
         let n = TIMER_SLOTS as u64;
@@ -1146,11 +1166,9 @@ impl FrameTimer {
                 let t: [u64; 8] = bytemuck::pod_read_unaligned(&buf.slice(..).get_mapped_range().unwrap()[..64]);
                 buf.unmap();
                 state.store(0, Ordering::Release);
-                // The frame starts at its first pass: particles, raster or trace (zero: not run).
-                let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min().unwrap_or(0);
                 let frame = self.frames[k];
-                if t[3] > start && latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0) {
-                    latest = Some(((t[3] - start) as f32 * period_ns * 1e-6, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
+                if let Some(ms) = frame_gpu_ms(&t, period_ns).filter(|_| latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0)) {
+                    latest = Some((ms, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
                 }
             }
         }
@@ -4247,6 +4265,26 @@ pub fn parse_scale(v: Option<&str>, default: Option<f32>) -> Result<Option<f32>>
         None => Ok(default),
         Some("auto") => Ok(None),
         Some(v) => v.parse::<f32>().map(|s| Some(s.clamp(0.25, 1.0))).map_err(|_| anyhow!("--scale must be a number or auto")),
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn a_post_pass_from_another_frame_counts_by_its_own_length() {
+        // Two frames of the crowd scene (ns, period 1): frame 453 as read, and frame 454, whose slot read frame 458's
+        // post pair (74.5 ms after its trace began).
+        let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0];
+        let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0];
+        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1.0).unwrap();
+        assert_eq!(ms(t453), (t453[3] - t453[0]) as f32 * 1e-6);
+        assert!((ms(t454) - (7.849166 + 5.660166)).abs() < 1e-3, "{}", ms(t454));
+        // The first pass is the frame's start; nothing timed, no measurement.
+        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1.0), None);
+        let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000];
+        assert_eq!(frame_gpu_ms(&particles_first, 1.0), Some(13.0));
     }
 }
 
