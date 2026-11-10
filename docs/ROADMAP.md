@@ -3644,7 +3644,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
          that went non-finite is an error: the next sync throws once, naming it.
        - A frame script or sync that throws no longer costs the world a frame: `GameSession::frame` makes the
          frame's ticks and commit all the same and returns the error after (before, both were skipped and the
-         frame's time was lost). A `serve` job with frames still fails with the error, as with any script error.
+         frame's time was lost), and the node host syncs the scene as the script left it, so the binding knows the
+         world stepped (the next frame reads fresh poses). A `serve` job with frames still fails with the error, as
+         with any script error.
+       - A call that is refused changes nothing: everything is checked before any of it acts.
        - Memory: contacts nobody takes are held to 8,192 (the oldest go, counted); a trimesh to 1 M triangles, the
          world's shapes to 4 M points and triangles; queries take no trimesh.
        - Also: objects are placed at the body's own pose (not the call's numbers); a frame owing exactly 5 ticks keeps

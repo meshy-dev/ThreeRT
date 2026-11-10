@@ -328,14 +328,16 @@ impl Bridge {
                 Value::Null
             }
             "remove" => {
-                if let Some(b) = opt_id(a, "body")?.and_then(|b| self.bodies.get(&b).copied()) {
+                // (All three read before any is removed: a call that is refused changes nothing.)
+                let (body, collider, joint) = (opt_id(a, "body")?, opt_id(a, "collider")?, opt_id(a, "joint")?);
+                if let Some(b) = body.and_then(|b| self.bodies.get(&b).copied()) {
                     self.forget_body(b);
                 }
-                if let Some(c) = opt_id(a, "collider")?.and_then(|c| self.colliders.remove(&c)) {
+                if let Some(c) = collider.and_then(|c| self.colliders.remove(&c)) {
                     self.core.remove_collider(c);
                     self.collider_ids.remove(&c);
                 }
-                if let Some(j) = opt_id(a, "joint")?.and_then(|j| self.joints.remove(&j)) {
+                if let Some(j) = joint.and_then(|j| self.joints.remove(&j)) {
                     self.core.remove_joint(j);
                 }
                 Value::Null
@@ -348,10 +350,7 @@ impl Bridge {
                 if a["point"].is_null() {
                     self.core.apply_impulse(b, j, t)?;
                 } else {
-                    let p = vec3(a, "point", [0.0; 3])?;
-                    // (Both checked before either acts.)
-                    self.core.apply_impulse(b, [0.0; 3], t)?;
-                    self.core.apply_impulse_at(b, j, p)?;
+                    self.core.apply_impulse_at(b, j, vec3(a, "point", [0.0; 3])?, t)?;
                 }
                 Value::Null
             }

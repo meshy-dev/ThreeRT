@@ -753,12 +753,15 @@ impl Physics {
         Ok(())
     }
 
-    /// An impulse (N s) at a point of the world: it turns the body as well, unless the point is its centre of mass.
-    pub fn apply_impulse_at(&mut self, id: BodyId, impulse: [f32; 3], point: [f32; 3]) -> Result<(), String> {
+    /// An impulse (N s) at a point of the world (it turns the body as well, unless the point is its centre of mass), and
+    /// an angular one (N m s). All of it is checked before any of it acts: a call that is refused changes nothing.
+    pub fn apply_impulse_at(&mut self, id: BodyId, impulse: [f32; 3], point: [f32; 3], torque: [f32; 3]) -> Result<(), String> {
         within(&impulse, MAX_IMPULSE, "an impulse")?;
         within(&point, MAX_COORD, "an impulse's point")?;
+        within(&torque, MAX_IMPULSE, "an angular impulse")?;
         if let Some(b) = self.body_mut(id) {
             b.apply_impulse_at_point(v(impulse), v(point), true);
+            b.apply_torque_impulse(v(torque), true);
         }
         Ok(())
     }

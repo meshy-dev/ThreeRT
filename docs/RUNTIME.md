@@ -135,7 +135,9 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   - A body whose pose or velocity is no longer finite is an error (the simulation blew up): the next sync throws once,
     naming the object and why.
 - A frame script (or its sync) that throws does not stop the world: in a window and in `live` the error is printed,
-  and that frame's physics ticks and commit are made all the same. A `serve` job with frames fails with the error.
+  the scene is synced as the script left it, and that frame's physics ticks and commit are made all the same (so the
+  next frame reads the bodies' new poses). A `serve` job with frames fails with the error.
+- A call the engine refuses changes nothing (an impulse with a torque whose point is out of bounds applies neither).
 - A tick has no time bound yet: thousands of bodies made at one point take seconds (ROADMAP § 6 step 7, Open).
 - Queries: `Raycaster.intersectPhysics({ exclude })` (every body the ray passes through, nearest first, with the
   surface's normal) and `Shapecaster` (`overlap()`, `sweep(direction)`) for a box, sphere or capsule. They see the

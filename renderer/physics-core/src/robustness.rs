@@ -145,6 +145,38 @@ fn a_body_gone_non_finite_is_taken_out() {
     run(&mut b, &mut s, 30);
 }
 
+/// A call that is refused changes nothing: an impulse at a point with a torque, whose point (or impulse) is out of
+/// bounds, used to apply the torque and wake the body before it was refused.
+#[test]
+fn a_refused_call_changes_nothing() {
+    let (mut b, mut s) = world();
+    ok(&mut b, &mut s, "body", json!({ "id": 1, "position": [0, 2, 0], "gravityScale": 0 }));
+    ok(&mut b, &mut s, "collider", json!({ "id": 1, "body": 1, "shape": sphere(0.3) }));
+    run(&mut b, &mut s, 200);
+    let before = ok(&mut b, &mut s, "state", json!({ "body": 1 }));
+    assert_eq!(before["sleeping"], true);
+    for a in [
+        json!({ "body": 1, "impulse": [0, 1, 0], "point": [0, 3e38, 0], "torque": [0, 5, 0] }),
+        json!({ "body": 1, "impulse": [3e38, 0, 0], "point": [0, 2, 0], "torque": [0, 5, 0] }),
+        json!({ "body": 1, "impulse": [3e38, 0, 0], "torque": [0, 5, 0] }),
+        json!({ "body": 1, "impulse": [0, 1, 0], "torque": [0, 3e38, 0] }),
+        json!({ "body": 1, "impulse": [0, 1, 0], "point": [0, 2, 0], "torque": [0, 3e38, 0] }),
+    ] {
+        assert!(b.call(&mut s, "impulse", &a).is_err(), "{a}");
+        assert!(b.call(&mut s, "force", &json!({ "body": 1, "force": [0, 1, 0], "torque": [3e38, 0, 0] })).is_err());
+        assert!(b.call(&mut s, "velocity", &json!({ "body": 1, "linvel": [0, 1, 0], "angvel": [3e38, 0, 0] })).is_err());
+        run(&mut b, &mut s, 1);
+        assert_eq!(ok(&mut b, &mut s, "state", json!({ "body": 1 })), before, "after {a}");
+    }
+    assert!(b.call(&mut s, "remove", &json!({ "body": 1, "collider": "x" })).is_err());
+    assert_eq!(ok(&mut b, &mut s, "state", json!({ "body": 1 })), before, "a remove that is refused removes nothing");
+    // Within bounds both act: the body turns and moves.
+    ok(&mut b, &mut s, "impulse", json!({ "body": 1, "impulse": [0, 1, 0], "point": [0, 2, 0], "torque": [0, 5, 0] }));
+    run(&mut b, &mut s, 1);
+    let after = ok(&mut b, &mut s, "state", json!({ "body": 1 }));
+    assert!(after["linvel"][1].as_f64().unwrap() > 0.0 && after["angvel"][1].as_f64().unwrap() > 0.0, "{after}");
+}
+
 /// A2: a joint from a body to itself (reachable from the binding: `new HingeJoint(a, a)`), then that body removed,
 /// panicked the next tick (impulse_joint_set.rs). It is refused; the review's sequence then ticks on.
 #[test]
