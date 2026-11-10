@@ -446,6 +446,13 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
      - rain: wet streets and puddles reflecting the city, and the rain curtain (Bistro's), measured on Tokyo;
      - fog and mist: height fog over the city, thickening and clearing;
      - overcast: cloud cover that dims and softens the sun and the sky;
+       - Engine side done (2026-11-11, branch `sky-cloud-cover`): `scene.cloudCover` (0..1), changed in place.
+         - The atmosphere's sky goes over to the CIE standard overcast sky, white. Its horizontal illuminance is 0.3 of
+           what the clear sky and sun give the ground (stratus pass 0.1–0.4).
+         - The sun's direct light is × (1 − cover), its mean share of time out of cloud.
+         - A night glow is 3× brighter off the cloud base (Kyba et al. 2011).
+         - The live view re-bakes the dynamic sky and relights the sun on a change, as for a sun move.
+         - Unit test `full_cover_is_the_cie_overcast_sky_lit_by_the_clear_day`.
      - volumetric clouds in the sky, their shadows moving over the city (the sky's bake and the sun's visibility
        through them);
      - transitions in real time: clear → overcast → rain → clearing, with the clock running.
