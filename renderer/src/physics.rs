@@ -108,9 +108,13 @@ impl PhysicsWorld {
     }
 
     /// Steps until the world has made `ticks` ticks in all (an offline render at a scene time; `Bridge::due_until`).
+    /// Settling is not a frame: with no tick due it does nothing, so the forces scene code applied (in setup, before a
+    /// live run's first frame) still act in the first frame's ticks instead of ending in an empty sync.
     pub fn settle(&mut self, w: &mut World, ticks: u32) {
         let ticks = self.bridge.due_until(ticks);
-        self.step(w, ticks);
+        if ticks > 0 {
+            self.step(w, ticks);
+        }
     }
 
     /// The frame's figures, and a fresh count for the next.
@@ -169,5 +173,22 @@ mod tests {
         w.remove(2);
         p.advance(&mut w, 1.0 / 60.0);
         assert_eq!(p.take_stats().bodies, 0);
+    }
+
+    /// A force applied before a live run (in setup) acts in its first frame's tick: settling at time 0 makes no tick
+    /// and does not end it (a frame without a tick does).
+    #[test]
+    fn settling_with_no_tick_keeps_the_forces() {
+        let mut w = world();
+        w.set_object(1, "box".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+        let mut p = PhysicsWorld::default();
+        p.call(&mut w, "body", &json!({ "id": 1, "object": 1, "slot": 0, "gravityScale": 0 })).unwrap();
+        p.call(&mut w, "collider", &json!({ "id": 1, "body": 1, "shape": { "type": "sphere", "radius": 0.5 }, "mass": 2 })).unwrap();
+        p.call(&mut w, "force", &json!({ "body": 1, "force": [0, 120, 0] })).unwrap();
+        p.settle(&mut w, 0);
+        assert_eq!(p.take_stats().ticks, 0);
+        p.advance(&mut w, 1.0 / 60.0);
+        let v = p.call(&mut w, "state", &json!({ "body": 1 })).unwrap()["linvel"][1].as_f64().unwrap();
+        assert!((v - 120.0 / 2.0 / 60.0).abs() < 1e-4, "120 N on 2 kg through one tick: {v}");
     }
 }
