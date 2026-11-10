@@ -190,6 +190,28 @@ mod tests {
         assert_eq!(format!("{:016x}", check::cases()), format!("{:016x}", check::EXPECTED_CASES));
     }
 
+    /// Two events with no tick between them: the body the first one's script added is in the engine once that script
+    /// returned (the binding's sync), and the second one's ray meets it, though the world has not stepped since.
+    #[test]
+    fn a_query_sees_a_body_added_since_the_last_tick() {
+        let mut w = world();
+        w.set_object(1, "box".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+        w.set_transform(1, Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+        let mut p = PhysicsWorld::default();
+        let ray = json!({ "origin": [0, 9, 0], "direction": [0, -1, 0] });
+        p.call(&mut w, "gravity", &json!({ "gravity": [0, -9.81, 0] })).unwrap();
+        p.advance(&mut w, 1.0 / 60.0);
+        assert!(p.call(&mut w, "ray", &ray).unwrap().is_null());
+        // The first event's sync.
+        p.call(&mut w, "body", &json!({ "id": 1, "object": 1, "slot": 0 })).unwrap();
+        p.call(&mut w, "collider", &json!({ "id": 1, "body": 1, "shape": { "type": "box", "halfExtents": [0.5, 0.5, 0.5] } })).unwrap();
+        // The second event's query, no `advance` between.
+        let hit = p.call(&mut w, "ray", &ray).unwrap();
+        assert_eq!((hit["object"].as_u64(), hit["body"].as_u64()), (Some(1), Some(1)), "{hit}");
+        assert!((hit["distance"].as_f64().unwrap() - 6.5).abs() < 1e-4, "{hit}");
+        assert_eq!(p.take_stats().ticks, 1);
+    }
+
     /// A force applied before a live run (in setup) acts in its first frame's tick: settling at time 0 makes no tick
     /// and does not end it (a frame without a tick does).
     #[test]
