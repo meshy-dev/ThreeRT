@@ -13,8 +13,15 @@ pub struct Shader {
     pub helpers: String,
 }
 
+/// A model's material function on its file's materials whose name starts with `prefix` (`GLTFModel.functions`).
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelFunction {
+    pub prefix: String,
+    pub shader: ShaderRef,
+}
+
 /// A material's binding to a material function: 32 parameter floats (8 vec4) and up to 8 textures.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct ShaderRef {
     /// Material function name.
     pub id: String,

@@ -1006,3 +1006,65 @@ export class SurfaceMaterial extends LibraryMaterial<SurfaceParameters> {
     );
   }
 }
+
+// ------------------------------------------------------------------------------------------------ wet layer
+
+const WET_LAYER = new MaterialFunction("std_wet_layer", {
+  params: { Wet: 1, PuddleAmount: 1, PuddleScale: 6 },
+  helpers: SURFACE_HELPERS,
+  code: `
+    let p = i.wp;
+    let ng = i.ng;
+    var col = base.base;
+    var rough = base.roughness;
+    var metal = base.metallic;
+    var spec = base.specular;
+    var n = base.normal;
+    // SurfaceMaterial's wetness (Lagarde), on the material's own shading.
+    let wet = clamp($Wet * i.wetness, 0.0, 1.0);
+    if (wet > 0.0) {
+        var pud = 0.0;
+        if ($PuddleAmount > 0.0 && ng.y > 0.6 && i.near) {
+            let hgt = std_fbm(p.xz / $PuddleScale) + 0.35 * (dot(col, vec3<f32>(0.2126, 0.7152, 0.0722)) - 0.1);
+            let level = 0.32 + 0.22 * $PuddleAmount * i.wetness;
+            pud = 1.0 - smoothstep(level - 0.03, level + 0.03, hgt);
+        }
+        let damp = max(wet, pud);
+        col *= mix(1.0, 0.5, damp * (1.0 - metal));
+        rough = mix(rough, min(rough, 0.14), wet);
+        n = normalize(mix(n, ng, 0.5 * wet));
+        rough = mix(rough, 0.02, pud);
+        col = mix(col, col * 0.6, pud);
+        metal = mix(metal, 0.0, pud);
+        spec = mix(spec, 0.5, pud);
+        n = normalize(mix(n, ng, pud));
+        if (i.rain > 0.0 && ng.y > 0.6 && i.depth == 0u) {
+            let g = std_ripples(p.xz, i.time) * i.rain * (0.015 + 0.1 * pud);
+            n = normalize(n - vec3<f32>(g.x, 0.0, g.y));
+        }
+    }
+    o.base = col;
+    o.roughness = rough;
+    o.metallic = metal;
+    o.specular = spec;
+    o.normal = n;`,
+});
+
+export interface WetLayerParameters {
+  /** Scales `scene.wetness` (1). */
+  wet?: number;
+  /** How much floods at full wetness (1; 0 = no puddles). */
+  puddles?: number;
+  /** Metres across a puddle field's noise (6). */
+  puddleScale?: number;
+}
+
+/**
+ * The rain on any material: `SurfaceMaterial`'s wetness as a layer on another material's own shading (its maps
+ * sampled). With `scene.wetness` the surface darkens and glosses; on up-facing ground puddles fill (mirror-flat), and
+ * `scene.rain` rings ripple in them. For a glTF file's materials: `new GLTFModel(uri, { functions: { ground:
+ * wetLayer() } })`.
+ */
+export function wetLayer(p: WetLayerParameters = {}): ShaderBinding {
+  return WET_LAYER.with({ Wet: p.wet ?? 1, PuddleAmount: p.puddles ?? 1, PuddleScale: p.puddleScale ?? 6 });
+}
