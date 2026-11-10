@@ -36,3 +36,8 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 2
+
+# glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
+# not depend on the platform's math functions (third_party/glamx/PATCH.md).
+[patch.crates-io]
+glamx = { path = "third_party/glamx" }

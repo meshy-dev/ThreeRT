@@ -14,9 +14,17 @@ default = ["enhanced-determinism"]
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
 
 [dependencies]
-rapier3d = { version = "0.36.1", default-features = false, features = ["dim3", "f32", "std"] }
+# Without Rapier's `std` (`alloc` is all it needs here), on purpose: with `std`, Rapier, parry and glamx call f32's own
+# sin / cos / acos / asin, the platform's, whatever `enhanced-determinism` says (it only reroutes the calls made
+# through simba and glam). Without it those calls go through simba, so through libm on every platform. The first to
+# differ was the eigen decomposition behind the mass properties of convex hulls and of bodies of several colliders
+# (glamx's eigen3.rs): 48 of 1,000 random worlds ended in other bits natively than in wasm32. `check::cases` and
+# tools/physics-determinism.ts hold it; a per-tick cost was not measurable.
+rapier3d = { version = "0.36.1", default-features = false, features = ["dim3", "f32", "alloc"] }
 # The bridge's calls carry JSON.
 serde_json = "1"
+# The math functions the world itself calls (a hinge's limits, world.rs), the same bits on every platform.
+libm = "0.2"
 
 # The determinism check (physics_core::check): the same script natively and as a wasm32 module (compared by
 # tools/physics-determinism.ts).
@@ -26,3 +34,8 @@ name = "determinism"
 [[example]]
 name = "determinism_wasm"
 crate-type = ["cdylib"]
+
+# glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
+# not depend on the platform's math functions (third_party/glamx/PATCH.md).
+[patch.crates-io]
+glamx = { path = "../third_party/glamx" }

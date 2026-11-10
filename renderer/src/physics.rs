@@ -180,6 +180,16 @@ mod tests {
         assert_eq!(p.take_stats().bodies, 0);
     }
 
+    /// The renderer's build of the physics steps to the recorded bits, as physics-core's own build and its wasm32
+    /// build do (tools/physics-determinism.ts): features that the renderer's other dependencies turn on in the shared
+    /// crates (num-traits' and glam's `std`) do not bring the platform's math functions into it.
+    #[test]
+    fn the_renderers_physics_steps_to_the_recorded_bits() {
+        use physics_core::check;
+        assert_eq!(format!("{:016x}", check::script(600)), format!("{:016x}", check::EXPECTED));
+        assert_eq!(format!("{:016x}", check::cases()), format!("{:016x}", check::EXPECTED_CASES));
+    }
+
     /// A force applied before a live run (in setup) acts in its first frame's tick: settling at time 0 makes no tick
     /// and does not end it (a frame without a tick does).
     #[test]

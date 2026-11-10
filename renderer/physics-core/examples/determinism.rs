@@ -1,5 +1,6 @@
 //! Prints the hash the determinism script leaves after 600 ticks (physics_core::check), natively.
 //! examples/determinism_wasm.rs gives the hash in wasm32 (tools/physics-determinism.ts compares them).
+//! `--cases`: the hash of every random case of physics_core::check instead (hulls, bodies of several colliders, joints).
 //! `--bench`: times it instead (the best and the median of 30 runs of the script, and of `check::pile(1000)`: a
 //! thousand boxes dropped in a heap, 300 ticks), ms per tick.
 fn main() {
@@ -17,6 +18,15 @@ fn main() {
         };
         let (s, p) = (time(&|| physics_core::check::script(600), 600.0), time(&|| physics_core::check::pile(1000, 300), 300.0));
         println!("script: best {:.4} median {:.4} ms/tick; pile of 1000: best {:.3} median {:.3} ms/tick", s.0, s.1, p.0, p.1);
+        return;
+    }
+    // `--cases`: every random case's hash, a line each ("kind seed hash").
+    if std::env::args().any(|a| a == "--cases") {
+        for (kind, &(_, n)) in physics_core::check::KINDS.iter().enumerate() {
+            for seed in 0..n {
+                println!("{kind} {seed} {:016x}", physics_core::check::case(kind as u32, seed));
+            }
+        }
         return;
     }
     println!("{:016x}", physics_core::check::script(600));

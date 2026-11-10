@@ -4,3 +4,9 @@
 pub extern "C" fn physics_determinism(ticks: u32) -> u64 {
     physics_core::check::script(ticks)
 }
+
+/// One random case's hash (physics_core::check::case).
+#[no_mangle]
+pub extern "C" fn physics_determinism_case(kind: u32, seed: u32) -> u64 {
+    physics_core::check::case(kind, seed)
+}

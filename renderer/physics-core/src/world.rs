@@ -528,12 +528,20 @@ impl Physics {
             }
         };
         let (a1, a2) = (v(anchor1), v(anchor2));
+        // The centre of a hinge's limits, rad (0: none, or limits about 0).
+        let mut centre = 0.0f32;
         let mut joint: GenericJoint = match d {
             JointDesc::Fixed { .. } => FixedJointBuilder::new().local_anchor1(a1).local_anchor2(a2).build().into(),
             JointDesc::Revolute { axis, limits: l, motor: m, .. } => {
                 let mut j = RevoluteJointBuilder::new(unit(*axis, "a joint's axis")?).local_anchor1(a1).local_anchor2(a2);
-                if let Some(l) = limits(l)? {
-                    j = j.limits(l);
+                // Limits go to Rapier centred, [-h, h], with their centre turned into the first body's joint frame
+                // below. Rapier takes the sine and cosine of a quarter of (min + max) with f32's own methods, the
+                // platform's libm wherever `std` is in the crate graph (0.024 % of angles then differ in the last bit
+                // between macOS and wasm32); of 0 they are exact everywhere, and the centre's are libm's here.
+                if let Some([min, max]) = limits(l)? {
+                    let half = (max - min) * 0.5;
+                    centre = (min + max) * 0.5;
+                    j = j.limits([-half, half]);
                 }
                 if let Some(m) = motor(m)? {
                     j = j.motor_velocity(m.velocity, m.damping).motor_max_force(m.max_force);
@@ -561,6 +569,12 @@ impl Physics {
         if matches!(d, JointDesc::Fixed { .. } | JointDesc::Revolute { .. } | JointDesc::Prismatic { .. }) {
             let (ra, rb) = (self.world.bodies[ha].position().rotation, self.world.bodies[hb].position().rotation);
             joint.local_frame2.rotation = (rb.inverse() * ra * joint.local_frame1.rotation).normalize();
+        }
+        // A hinge's limits centred: the first body's frame turned by the centre about the hinge (its x axis), so the
+        // angle Rapier reads is the hinge's less the centre, -centre as the bodies are now, and [-h, h] is [min, max].
+        if centre != 0.0 {
+            let (s, c) = libm::sincosf(centre * 0.5);
+            joint.local_frame1.rotation = (joint.local_frame1.rotation * Rotation::from_xyzw(s, 0.0, 0.0, c)).normalize();
         }
         let h = self.world.insert_impulse_joint(ha, hb, joint);
         let id = self.id();
@@ -1014,6 +1028,28 @@ mod tests {
         assert!(most < 0.53, "swung to {most} rad");
         let pos = p.pose(door).unwrap().0;
         assert!(((-(pos[1] - 5.0)).atan2(pos[0]) - 0.5).abs() < 0.03, "rests at {pos:?}");
+    }
+
+    /// Limits that are not about 0 (the world hands Rapier centred ones and turns the centre into the joint's frame):
+    /// the same door limited to [-0.9, -0.2] rad swings down to 0.9 rad and stops; limited to [0.2, 0.9] it is lifted
+    /// to its lower limit, 0.2 rad up, and its weight holds it there.
+    #[test]
+    fn revolute_limits_off_centre() {
+        for (min, max, rests) in [(-0.9, -0.2, 0.9), (0.2, 0.9, -0.2)] {
+            let mut p = Physics::default();
+            let post = fixed(&mut p, [0.0, 5.0, 0.0]);
+            let door = p.add_body(&BodyDesc { position: [0.5, 5.0, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+            p.add_collider(Some(door), &ColliderDesc::new(Shape::Box([0.5, 0.05, 0.4]))).unwrap();
+            let j = p.add_joint(post, door, &JointDesc::Revolute { anchor1: [0.0; 3], anchor2: [-0.5, 0.0, 0.0], axis: [0.0, 0.0, 1.0], limits: Some(Limits { min, max }), motor: None }).unwrap();
+            // What Rapier has: limits about 0, so the sine and cosine it takes of their centre are exact everywhere.
+            let l = p.world.impulse_joints.get(p.joints[&j]).unwrap().data.limits(JointAxis::AngX).unwrap();
+            assert_eq!(l.min, -l.max);
+            assert!((l.max - 0.35).abs() < 1e-6, "{l:?}");
+            run(&mut p, 400);
+            let pos = p.pose(door).unwrap().0;
+            let down = (-(pos[1] - 5.0)).atan2(pos[0]);
+            assert!((down - rests).abs() < 0.03, "limits [{min}, {max}]: rests {down} rad down, expected {rests}");
+        }
     }
 
     /// A slider along x: gravity does not take it off its axis (within 2 mm); its motor brings it to 1.5 m/s; it stops at
