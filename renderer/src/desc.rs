@@ -166,6 +166,9 @@ pub enum Sky {
         dynamic: bool,
         #[serde(default)]
         glow: Option<Vec3>,
+        /// The glow's light dome: radiance (nits, RGB) at the horizon and the elevation (radians) it falls to 1/e by.
+        #[serde(default)]
+        horizon_glow: Option<[f32; 4]>,
         /// Aerial perspective: the atmosphere's haze on the surfaces it lies in front of, at this multiple of its own
         /// density (0 = off; pathtrace.wgsl `aerial_tr`).
         #[serde(default)]

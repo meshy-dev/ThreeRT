@@ -399,6 +399,49 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          emitter CDF and refits the light tree over all 1.4 M emitters. A group therefore switches on every tile in one
          frame; making that update incremental is the next item.
        - Next for step 1a: the commit's cost, moonlight and the night sky.
+     - Status, part 3 (2026-11-10, branch `moonlight`): moonlight and the night sky.
+       - The moon (`games/tokyo/moon.ts`): a second directional light in the time-of-day rooms, where the moon stands
+         over Tokyo at that moment.
+         - Position by Schlyter's method: mean elements and the main perturbations, within a few arcminutes.
+         - Its light by phase: Allen's magnitude against the sun's, through the same air as the sun's (Rayleigh, Mie at
+           10×, ozone; Kasten and Young's air mass).
+         - Checked at November 2026's phases (`tools/tokyo/test/moon.test.ts`, USNO times): new on the 9th, first
+           quarter on the 17th, full on the 24th, 0.25 lx above the air.
+         - The rooms take a date (`-d20261124`); 2026-11-09 is a new moon.
+         - It is black while it is down, until civil dusk, and under starlight's 1 mlx.
+         - The full moon high over Shinjuku at 23:00 changes the city by ΔE 0.05 at EV 5 (0.2 lx against its lit
+           streets), as in photographs: the moonlight is lost in the city's light.
+       - The kernel skips a black directional light (no BSDF, no shadow ray), after the cone's random numbers, so
+         every other light sees the same ones.
+         - The moon while down, and the sun at night, cost nothing. Shiba from 16:18 to 17:36 live, GPU p50 with a
+           black moon: 14.30 / 14.33 ms without the skip, 13.58 / 13.61 with it (serverless-agent-test#130: 13.7).
+         - The 12 catalog scenes render byte-identical.
+       - The night sky: `SkyAtmosphere` `horizonGlow`, a light dome over the glow (nits at the horizon, falling to
+         1/e at `horizonGlowHeight`). `tests/render/sky-night-glow.ts`: 1.349 measured, 1.349 analytic.
+         - Tokyo's (`NIGHT_GLOW` in `games/tokyo`):
+           - 27 mcd/m² at the zenith (16.5 mag/arcsec², Tokyo's clear-night zenith measured from Sumida, 2010–11);
+           - a dome of 0.26 cd/m² more at the horizon, falling to 1/e by 3.5°;
+           - a violet-blue zenith and a warm dome.
+         - Set against photographs of the Shinjuku skyline at night (Wikimedia Commons, 2004 and 2005; not
+           committed):
+           - the sky at 1°, 7° and 15° reads 7.3 : 1.95 : 1, and the dome is shaped on that;
+           - the colours are the 2004 photograph's, white-balanced on its office windows;
+           - at the 2005 photograph's exposure (EV 3) our sky reads 4× brighter than its top of frame, whose blacks
+             are crushed, and darker than the 2004 one (a longer exposure).
+         - The static night rooms now have the same sky as the time-of-day rooms: the atmosphere with the sun 40°
+           down, and the glow. Before, a uniform blue sky lit the city from below the horizon too.
+         - The land beyond the area now fades into the dome by night (the aerial perspective's haze carries its light),
+           not a black band under the sky. At EV 5 the sky stays near black, as in photographs at that exposure.
+           Before and after, at EV 5 and as a long exposure: `docs/img/tokyo-night-sky.jpg`.
+     - The commit's cost (ThreeRT#3, first serverless-agent-test#135): a power edit rebuilt the emitter CDF and refit
+       the light tree in the frame, ~13–15 ms over Tokyo's 1.4 M emitters, ~90 times in the Shiba fly-past (the
+       street lamps and the window groups switching).
+       - Scenes with many emitters now rebuild both on a worker thread (`EmitterWorker`). The edits land with the
+         result, a few frames later.
+       - The fly-past's frame interval p95 went from 29.7 / 28.5 to 17.20 / 17.17 ms, and its commits over 5 ms from
+         91 to 0.
+     - Next for step 1a: the acceptance runs (the fly-past and a Shinjuku drive, 5 poses × 4 times, in place against a
+       fresh load, a clip).
   1b. **Weather on Tokyo.** States, and transitions between them, all in place (no rebuild):
      - rain: wet streets and puddles reflecting the city, and the rain curtain (Bistro's), measured on Tokyo;
      - fog and mist: height fog over the city, thickening and clearing;

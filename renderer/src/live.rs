@@ -442,11 +442,11 @@ struct DynamicSky {
 
 impl DynamicSky {
     fn new(world: &World, (w, h): (u32, u32), altitude: f32, env_nee_floor: f32) -> Option<DynamicSky> {
-        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, sun: Some(_), .. } = &world.environment.sky else {
+        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, horizon_glow, sun: Some(_), .. } = &world.environment.sky else {
             return None;
         };
         let atm = Arc::new(crate::sky::Atmosphere::earth(*rayleigh_scale, *mie_scale, *mie_anisotropy, glam::Vec3::from(*ground_albedo)));
-        let glow = glow.map(glam::Vec3::from).unwrap_or(glam::Vec3::ZERO);
+        let glow = crate::sky::glow_of(glow, horizon_glow);
         let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3)>();
         let (tx, done) = mpsc::channel();
         let a = atm.clone();
