@@ -1116,8 +1116,9 @@ struct FrameTimer {
     resolve: wgpu::Buffer,
     /// Per slot: readback buffer and its state (0 free, 1 mapping, 2 mapped).
     reads: Vec<(wgpu::Buffer, Arc<AtomicU32>)>,
-    /// Per slot: the frame it timed.
+    /// Per slot: the frame it timed, and that frame's samples per pixel (its traces; only the first is timestamped).
     frames: [u32; TIMER_SLOTS],
+    spps: [u32; TIMER_SLOTS],
     slot: usize,
 }
 
@@ -1128,17 +1129,20 @@ const TIMER_GAP_MS: f32 = 2.0;
 
 /// A frame's GPU time (ms) from its slot's timestamps (trace, post, raster, particle pass pairs; zero: not run): from
 /// its first pass (particles, raster or trace) to the end of its post pass. The post pass follows the trace's command
-/// buffer within ~0.2 ms. In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that
-/// used the slot next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that
-/// begins more than TIMER_GAP_MS after the trace ends is counted by its own length (the passes' sum, not the span).
-fn frame_gpu_ms(t: &[u64; 8], period_ns: f32) -> Option<f32> {
+/// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
+/// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
+/// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
+/// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
+/// its passes, the further traces at the first one's length.
+fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
     let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
     if t[3] <= start {
         return None;
     }
     let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
-    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS {
-        return Some(ms(t[1] - start) + ms(t[3].saturating_sub(t[2])));
+    let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
+    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
+        return Some(ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2])));
     }
     Some(ms(t[3] - start))
 }
@@ -1153,6 +1157,7 @@ impl FrameTimer {
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
             frames: [0; TIMER_SLOTS],
+            spps: [1; TIMER_SLOTS],
             slot: 0,
         }
     }
@@ -1167,7 +1172,7 @@ impl FrameTimer {
                 buf.unmap();
                 state.store(0, Ordering::Release);
                 let frame = self.frames[k];
-                if let Some(ms) = frame_gpu_ms(&t, period_ns).filter(|_| latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0)) {
+                if let Some(ms) = frame_gpu_ms(&t, self.spps[k], period_ns).filter(|_| latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0)) {
                     latest = Some((ms, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
                 }
             }
@@ -3423,6 +3428,7 @@ impl LiveCore {
                 }
                 if let Some(k) = slot {
                     t.frames[k] = self.frame;
+                    t.spps[k] = spp.max(1);
                 }
                 slot
             }
@@ -4278,13 +4284,18 @@ mod timer_tests {
         // post pair (74.5 ms after its trace began).
         let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0];
         let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0];
-        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1.0).unwrap();
+        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1, 1.0).unwrap();
         assert_eq!(ms(t453), (t453[3] - t453[0]) as f32 * 1e-6);
         assert!((ms(t454) - (7.849166 + 5.660166)).abs() < 1e-3, "{}", ms(t454));
         // The first pass is the frame's start; nothing timed, no measurement.
-        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1.0), None);
+        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1, 1.0), None);
         let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000];
-        assert_eq!(frame_gpu_ms(&particles_first, 1.0), Some(13.0));
+        assert_eq!(frame_gpu_ms(&particles_first, 1, 1.0), Some(13.0));
+        // 3 samples: two more traces (untimed) between the first and the post pass, a 16.2 ms gap: the span. The post
+        // pair of frame 458 under 3 samples: still out of place (trace 7.85 ms, gap 66.7 ms), counted as the passes.
+        let three = [1_000_000, 9_000_000, 25_200_000, 31_000_000, 0, 0, 0, 0];
+        assert_eq!(frame_gpu_ms(&three, 3, 1.0), Some(30.0));
+        assert!((frame_gpu_ms(&t454, 3, 1.0).unwrap() - (3.0 * 7.849166 + 5.660166)).abs() < 1e-3);
     }
 }
 
