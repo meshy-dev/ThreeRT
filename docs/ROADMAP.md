@@ -3798,6 +3798,19 @@ benchmark level. The order follows the dependencies; a step that meets a further
        0.33–0.62 ms before (0.30–0.54 ms in step 7's table), 0.16–0.37 ms now; the commit and the first frame after a
        click as before (0.29–0.53 ms in place, 3.9–4.0 ms). The frame's script time with no frame script is 0.083 ms
        mean (0.094 ms with the old frame script): the host's call, the events and an empty sync.
+   - **The engine's library for wasm32** (2026-11-11, branch `wasm32-engine`; the first half of layout C, after a
+     probe of what a browser can run).
+     - The probe (measured on an M5 Pro, Chrome 157, the real GPU): the kernel itself, with software traversal and
+       the native renderer's scene data, costs 0.98–1.08 × its native time in Chrome (hello 4.19 ms against 3.9 ms
+       a full-resolution sample pass, Kabukichō 70.3 against 66.8–68.0), and draws the same image. WebGPU's limit
+       on storage buffers a stage (8 by default, 10 in that Chrome) is under what the kernel (20) and the live
+       `temporal` / `post` / `dtemporal` passes (19 / 13 / 11) bind: the web build gets a merged layout generated
+       from the one source. What stands in the way is software traversal itself: one flat BVH, so every added or
+       moving object rebuilds the scene (hello: 9 ms a frame while a body moves; the voxel level: 7 s an explosion),
+       and it holds 2.1 GB of triangle data for the voxel level.
+     - This step: the library builds for `wasm32-unknown-unknown` with the native shell left out, the GPU from
+       futures, `web_time`, and file reads behind one module (docs/RUNTIME.md "The engine's library in a browser").
+       Natively the renders are byte-identical.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

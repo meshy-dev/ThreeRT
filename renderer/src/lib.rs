@@ -2,20 +2,25 @@
 //! `threert-render` CLI and by the native playground client).
 
 pub mod bvh;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod compare;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod denoise;
 pub mod desc;
+pub mod files;
 pub mod gpu;
 pub mod live;
 pub mod ltree;
 pub mod post;
 pub mod procasset;
 pub mod scene;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod script;
 pub mod skin;
 pub mod sky;
 pub mod tables;
 pub mod texpack;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod view;
 pub mod physics;
 pub mod voxel;
@@ -23,7 +28,7 @@ pub mod world;
 
 use glam::{Vec3, Vec3A};
 use std::path::PathBuf;
-use std::time::Instant;
+use web_time::Instant;
 
 /// `presets/` next to (an ancestor of) the executable, else ./presets.
 pub fn default_presets_dir() -> PathBuf {

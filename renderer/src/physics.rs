@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use glam::{Mat4, Quat, Vec3};
 use physics_core::bridge::{Bridge, Scene};
 use serde_json::Value;
-use std::time::Instant;
+use web_time::Instant;
 
 /// A frame's physics, for the frame log: the ticks stepped and their time, the time to place the driven objects, the
 /// bodies and how many of them moved.

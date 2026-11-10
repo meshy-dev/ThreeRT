@@ -3,7 +3,7 @@
 use crate::scene::Scene;
 use crate::GROUPS;
 use anyhow::{anyhow, Result};
-use std::time::Instant;
+use web_time::Instant;
 use wgpu::util::DeviceExt;
 
 pub struct Gpu {
@@ -883,18 +883,22 @@ fn stamp() {
 ";
 
 impl Gpu {
+    /// The GPU, waited for (the native shell; a browser has `new_async`: nothing may block there).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Result<Gpu> {
+        pollster::block_on(Self::new_async())
+    }
+
+    /// The adapter and the device come from futures: a browser resolves them from its event loop.
+    pub async fn new_async() -> Result<Gpu> {
         let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = backends;
         let instance = wgpu::Instance::new(desc);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow!("no GPU adapter: {e}"))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, force_fallback_adapter: false, compatible_surface: None, ..Default::default() })
+            .await
+            .map_err(|e| anyhow!("no GPU adapter: {e}"))?;
         let adapter_info = adapter.get_info();
         let mut limits = wgpu::Limits::default();
         let al = adapter.limits();
@@ -915,14 +919,14 @@ impl Gpu {
         if timestamps {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("threert"),
             required_features: features,
             required_limits: limits,
             // Ray queries are still flagged experimental in wgpu 30.
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
-        }))?;
+        }).await?;
         let base = include_str!("../shaders/pathtrace.wgsl");
         let src = if hwrt {
             let (head, rest) = base.split_once("// @trace-begin").unwrap();
@@ -2238,6 +2242,7 @@ impl Gpu {
         e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Offline translucency: the pass (translucent.wgsl) `spp` times at random points in each pixel, each with a fresh
     /// lighting estimate per hit; the mean (colour, transmittance) per pixel. Empty without translucent particles.
     fn render_translucent(&self, up: &Uploaded, base: Params, spp: u32) -> Result<Vec<[f32; 4]>> {
@@ -2283,6 +2288,7 @@ impl Gpu {
         Ok(out)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Render `spp` samples. `base` holds everything except the per-dispatch sample index.
     #[allow(clippy::too_many_arguments)]
     pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {

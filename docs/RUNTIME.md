@@ -293,6 +293,40 @@ Building a script engine into the wasm module (layout A), as far as it was taken
 - Not verified by the probe: a real browser; wgpu in the same module as a script engine; the software BVH traversal's
   frame rate in a browser (WebGPU has no hardware ray queries: the web's largest unknown, whichever layout).
 
+## The engine's library in a browser (wasm32)
+
+Layout C's first half: `renderer/` builds as a library for `wasm32-unknown-unknown` (CI builds it). Natively nothing
+changed: the same sources, the same shaders, byte-identical renders. What runs it in a page (the exports, the JS
+`Engine`, the canvas) is `renderer/web`, the step after this one.
+
+- **The native shell stays native:** the window (`view`, winit), the embedded script runtime (`script`, rquickjs: a
+  browser runs the game's TypeScript in its own engine), the denoiser (OIDN), image comparison, the headless runner
+  (`live::run`: stdin commands, frame log, snapshots), the offline render (`Gpu::render`) and the snapshot readbacks.
+  They are not compiled for wasm32.
+- **The GPU comes from futures:** `Gpu::new_async()`; the native `Gpu::new()` blocks on it. A browser resolves them
+  from its event loop, and nothing in the library may block there.
+- **Time** is `web_time::Instant`: std's natively (a re-export), `performance.now()` in a browser, where std's panics.
+- **Files** (`files.rs`): the library's reads go through one module. Natively the file system, as before. In a
+  browser the page fetches what the scene names (`World::files`) and hands the bytes over (`files::provide`) before
+  the scene is built; the two presets are compiled in. A glTF's external buffers and images are still read from disk
+  by the glTF crate: only GLB files (everything in one file) load in a browser.
+- **Waiting for the GPU.** wgpu's `poll(wait)` returns at once in a browser, and a buffer is mapped only after the
+  page's event loop turned. The 30 places that wait:
+
+  | where | what | in a browser |
+  | --- | --- | --- |
+  | `LiveCore::render`: at most two frames in flight | waits for the oldest submission | no wait (the page's frame callback paces) |
+  | `LiveCore::render`: GPU timestamps (`harvest`) | mapped asynchronously, read a later frame | works as it is |
+  | `LiveCore::render`: without timestamp queries, a frame timed by waiting for it | wait | reads ~0: dynamic resolution needs the `timestamp-query` feature there, or a fixed scale |
+  | `LiveCore::render`: `THREERT_PROFILE` | wait + map | not reachable (no environment) |
+  | `repose`, `repose_groups`, `edit_geometry`: `THREERT_PROFILE_BLAS` | wait | not reachable |
+  | `Gpu::upload`: after the uploads, and after the BLAS builds | wait | no wait; hardware RT is not in a browser |
+  | `Gpu::render`, `render_translucent` (offline), `read_hdr`, `read_signals`, `read_ev100`, `live::run`'s snapshots | wait + map + read | native only |
+- **Threads:** none in a browser. Scene builds (BVH, texture pages, model loading) run on the one thread (rayon falls
+  back to it). The dynamic sky's bake thread cannot start, so a sky whose sun moves keeps the sky it was built with.
+- Checked: the library's wasm32 build in CI; the physics' recorded hashes in the renderer's wasm32 graph
+  (`tools/physics-determinism.ts`). Not yet run in a page: that is `renderer/web`'s to show.
+
 ## Correctness
 
 * `threert-render edit-check` builds the GPU tables both ways for a list of events: edited in place, and built fresh
