@@ -2080,8 +2080,8 @@ impl LiveCore {
         self.lit_changed = self.frame.max(1);
     }
 
-    /// Before another emitter edit (`write_emitters`): the job in flight waited for and its result dropped, its edits
-    /// and those held back written into the objects (and uploaded), so the rebuild sees them all.
+    /// Before another emitter edit (`write_emitters`, a light-LOD rebuild): the job in flight waited for and its result
+    /// dropped, its edits and those held back written into the objects (and uploaded), so the rebuild sees them all.
     fn land_powers_now(&mut self) {
         let Some(w) = self.sc.emit.as_mut() else { return };
         let mut powers = vec![];
@@ -2094,6 +2094,9 @@ impl LiveCore {
         if !powers.is_empty() {
             e.put_powers(&powers);
             self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
+            // The lighting changed (as when a result lands): the history cap and the anti-lag restart.
+            self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
+            self.lit_changed = self.frame.max(1);
         }
     }
 
