@@ -849,10 +849,11 @@ export class SceneBinding {
   /**
    * The contacts since the last call, to their listeners: "contactstart" / "contactend" on each of the two objects
    * (`other`: the other one), then "contacts" on the scene with the whole batch (`contacts`: { a, b, started } in the
-   * order they happened). One engine call, and none while no body in the scene reports contacts. The host calls it
-   * before the frame script.
+   * order they happened). One engine call, and none while no body in the scene reports contacts; before it, the bodies
+   * the engine took out (`takeFaults`: one call while the scene has bodies). The host calls it before the frame script.
    */
   deliverPhysicsEvents(): void {
+    if (this.bodies) this.takeFaults();
     if (!this.contactBodies) return;
     const list = JSON.parse(this.engine.physics("contacts", {})) as { bodyA: number | null; bodyB: number | null; started: boolean }[] | null;
     if (!list?.length) return;
@@ -866,6 +867,33 @@ export class SceneBinding {
       b.dispatchEvent({ type, other: a });
     }
     if (contacts.length) this.scene.dispatchEvent({ type: "contacts", contacts });
+  }
+
+  /**
+   * The bodies the engine took out after a tick (a pose or velocity gone non-finite, past the world's edge; their
+   * colliders and joints went with them): each object is left without a body until its `physics` is set again, and
+   * the next sync throws once, naming them.
+   */
+  private takeFaults(): void {
+    const list = JSON.parse(this.engine.physics("faults", {})) as { body: number; reason: string }[] | null;
+    if (!list?.length) return;
+    const names: string[] = [];
+    for (const f of list) {
+      const o = physicsBodies.get(f.body);
+      const b = o && this.objects.get(o);
+      const bb = b?.body;
+      if (!o || !b || !bb || bb.id !== f.body) continue;
+      // (Gone in the engine already: only the binding's side is undone.)
+      if (bb.slot >= 0) this.freeSlots.push(bb.slot);
+      unbindBody(o);
+      b.body = null;
+      b.bodyFailed = o.physics;
+      this.jointsDirty = true;
+      this.bodies--;
+      if (bb.contacts) this.contactBodies--;
+      names.push(`${b.name} (${f.reason})`);
+    }
+    if (names.length) this.bodyError ??= new Error(`physics: the engine took out the bodies of ${names.join(", ")}; each stays without one until its physics is set again`);
   }
 
   /** What the object is: a change re-creates it in the engine. */

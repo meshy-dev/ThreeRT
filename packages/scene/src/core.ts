@@ -379,14 +379,14 @@ export class Object3D {
     physicsCommand({ op: "velocity", object: this, args: { angvel: v.toArray() } });
     return this;
   }
-  /** The body's velocity as of the last tick (zero without a body). */
+  /** The body's velocity as of the last tick (zero without a body, or for one the engine has just taken out). */
   getLinearVelocity(target = new Vector3()): Vector3 {
-    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { linvel: number[] } | null) : null;
-    return s ? target.fromArray(s.linvel) : target.set(0, 0, 0);
+    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { linvel?: number[] } | null) : null;
+    return s?.linvel ? target.fromArray(s.linvel) : target.set(0, 0, 0);
   }
   getAngularVelocity(target = new Vector3()): Vector3 {
-    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { angvel: number[] } | null) : null;
-    return s ? target.fromArray(s.angvel) : target.set(0, 0, 0);
+    const s = this._body ? (physicsQuery("state", { body: this._body.id }) as { angvel?: number[] } | null) : null;
+    return s?.angvel ? target.fromArray(s.angvel) : target.set(0, 0, 0);
   }
   /** The body is at rest and asleep (false without a body). */
   get sleeping(): boolean {

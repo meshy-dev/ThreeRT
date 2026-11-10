@@ -8,7 +8,7 @@
 //! objects), so creating one needs no answer. A body that drives an object may take a `slot`: `poses()` is then the
 //! table of every such object's position and rotation as the last sync left them, one copy for a whole frame's reads.
 
-use crate::{BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, Hit, JointDesc, JointId, Limits, Motor, Physics, Shape, TICK};
+use crate::{limits, BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, Hit, JointDesc, JointId, Limits, Motor, Physics, Shape, TICK};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -63,7 +63,14 @@ pub struct Bridge {
     ticked: bool,
     /// Time not yet stepped, s.
     behind: f64,
+    /// Bodies the world took out after a tick (`Physics::step`), by the caller's id, with the object they drove and
+    /// why: those not yet reported by "faults", and (for "state") the last `MAX_FAULTS` of them.
+    faults: Vec<(u32, Option<u32>, &'static str)>,
+    faulted: BTreeMap<u32, &'static str>,
 }
+
+/// The most faults "faults" holds until it is called, and "state" remembers.
+pub const MAX_FAULTS: usize = 1024;
 
 fn nums<const N: usize>(v: &Value) -> Option<[f32; N]> {
     let a = v.as_array().filter(|a| a.len() == N)?;
@@ -125,6 +132,8 @@ impl Default for Bridge {
             forced: vec![],
             ticked: false,
             behind: 0.0,
+            faults: vec![],
+            faulted: BTreeMap::new(),
         }
     }
 }
@@ -143,8 +152,8 @@ impl Bridge {
             let gid = id(s, "geometry")?;
             let (positions, indices) = scene.geometry(gid).ok_or_else(|| format!("physics: unknown geometry {gid}"))?;
             let k = vec3(s, "scale", [1.0; 3])?;
-            if positions.len() / 3 > MAX_MESH_VERTICES {
-                return Err(format!("physics: geometry {gid} has more than {MAX_MESH_VERTICES} vertices"));
+            if positions.len() / 3 > MAX_MESH_VERTICES || (!hull && indices.len() / 3 > limits::MAX_MESH_TRIANGLES) {
+                return Err(format!("physics: geometry {gid} has more than {MAX_MESH_VERTICES} vertices or {} triangles", limits::MAX_MESH_TRIANGLES));
             }
             let mut points: Vec<[f32; 3]> = positions.chunks_exact(3).map(|p| [p[0] * k[0], p[1] * k[1], p[2] * k[2]]).collect();
             if hull && points.len() > MAX_HULL_POINTS {
@@ -172,8 +181,10 @@ impl Bridge {
             }
             Some("trimesh") => {
                 let vertices = floats("vertices")?;
-                let idx = s["indices"].as_array().filter(|a| a.len() % 3 == 0).ok_or("physics: a trimesh needs indices, three a triangle")?;
-                let indices = idx.chunks(3).map(|t| Some([t[0].as_u64()? as u32, t[1].as_u64()? as u32, t[2].as_u64()? as u32])).collect::<Option<Vec<_>>>().ok_or("physics: trimesh indices must be whole numbers")?;
+                let idx = s["indices"].as_array().filter(|a| a.len() % 3 == 0 && a.len() / 3 <= limits::MAX_MESH_TRIANGLES).ok_or_else(|| format!("physics: a trimesh needs indices, three a triangle, at most {} triangles", limits::MAX_MESH_TRIANGLES))?;
+                // (An index past u32 is refused, not cut: 4294967296 is not vertex 0.)
+                let index = |x: &Value| x.as_u64().filter(|&i| i <= u32::MAX as u64).map(|i| i as u32);
+                let indices = idx.chunks(3).map(|t| Some([index(&t[0])?, index(&t[1])?, index(&t[2])?])).collect::<Option<Vec<_>>>().ok_or("physics: trimesh indices must be whole numbers below 2^32")?;
                 Shape::Trimesh { vertices, indices }
             }
             other => return Err(format!("physics: shape type {other:?} is none of box, sphere, capsule, convexHull, trimesh")),
@@ -184,7 +195,7 @@ impl Bridge {
     pub fn call(&mut self, scene: &mut impl Scene, op: &str, a: &Value) -> Result<Value, String> {
         Ok(match op {
             "gravity" => {
-                self.core.set_gravity(vec3(a, "gravity", [0.0, -9.81, 0.0])?);
+                self.core.set_gravity(vec3(a, "gravity", [0.0, -9.81, 0.0])?)?;
                 Value::Null
             }
             // {id, kind, object?, slot?, position?, rotation?, linvel?, angvel?, linearDamping?, angularDamping?,
@@ -230,9 +241,10 @@ impl Bridge {
                     can_sleep: a["canSleep"].as_bool().unwrap_or(true),
                     ccd: a["ccd"].as_bool().unwrap_or(false),
                 };
-                let b = self.core.add_body(&d).ok_or("physics: the body's numbers are not finite")?;
+                let b = self.core.add_body(&d)?;
                 self.bodies.insert(bid, b);
                 self.body_ids.insert(b, bid);
+                self.faulted.remove(&bid);
                 if let Some(o) = object {
                     if kind != BodyKind::Fixed {
                         scene.drive(o);
@@ -246,7 +258,8 @@ impl Bridge {
                             self.poses.resize(end, 0.0);
                         }
                     }
-                    self.place(scene, b, d.position, d.rotation);
+                    // (Where the body is: its rotation normalized, as the world keeps it.)
+                    self.place_at_body(scene, b);
                 }
                 Value::Null
             }
@@ -276,7 +289,7 @@ impl Bridge {
                     sensor: a["sensor"].as_bool().unwrap_or(false),
                     events: a["events"].as_bool().unwrap_or(false),
                 };
-                let c = self.core.add_collider(body, &d).ok_or("physics: the collider's shape cannot be built (sizes must be > 0, a hull needs 4 points with a volume)")?;
+                let c = self.core.add_collider(body, &d)?;
                 self.colliders.insert(cid, c);
                 self.collider_ids.insert(c, (cid, owner));
                 Value::Null
@@ -309,7 +322,7 @@ impl Bridge {
                     other => return Err(format!("physics: joint type {other:?} is none of fixed, revolute, prismatic, spherical, rope")),
                 };
                 let (ba, bb) = (self.body(a, "a")?, self.body(a, "b")?);
-                let j = self.core.add_joint(ba, bb, &d).ok_or("physics: the joint's numbers are bad (an axis must not be zero)")?;
+                let j = self.core.add_joint(ba, bb, &d)?;
                 self.joints.insert(jid, j);
                 Value::Null
             }
@@ -332,17 +345,19 @@ impl Bridge {
                 let b = self.body(a, "body")?;
                 let (j, t) = (vec3(a, "impulse", [0.0; 3])?, vec3(a, "torque", [0.0; 3])?);
                 if a["point"].is_null() {
-                    self.core.apply_impulse(b, j, t);
+                    self.core.apply_impulse(b, j, t)?;
                 } else {
-                    self.core.apply_impulse_at(b, j, vec3(a, "point", [0.0; 3])?);
-                    self.core.apply_impulse(b, [0.0; 3], t);
+                    let p = vec3(a, "point", [0.0; 3])?;
+                    // (Both checked before either acts.)
+                    self.core.apply_impulse(b, [0.0; 3], t)?;
+                    self.core.apply_impulse_at(b, j, p)?;
                 }
                 Value::Null
             }
             // {body, force?, torque?}: a force and a torque through the ticks of this frame (until the next `sync`).
             "force" => {
                 let b = self.body(a, "body")?;
-                self.core.add_force(b, vec3(a, "force", [0.0; 3])?, vec3(a, "torque", [0.0; 3])?);
+                self.core.add_force(b, vec3(a, "force", [0.0; 3])?, vec3(a, "torque", [0.0; 3])?)?;
                 if !self.forced.contains(&b) {
                     self.forced.push(b);
                 }
@@ -351,21 +366,20 @@ impl Bridge {
             // {body, linvel?, angvel?}: either velocity set, the other kept.
             "velocity" => {
                 let b = self.body(a, "body")?;
-                if let Some((v, w)) = self.core.velocity(b) {
-                    self.core.set_velocity(b, vec3(a, "linvel", v)?, vec3(a, "angvel", w)?);
-                }
+                let opt = |key: &str| -> Result<Option<[f32; 3]>, String> { if a[key].is_null() { Ok(None) } else { vec3(a, key, [0.0; 3]).map(Some) } };
+                self.core.set_velocity(b, opt("linvel")?, opt("angvel")?)?;
                 Value::Null
             }
             "pose" => {
                 let b = self.body(a, "body")?;
                 let (p, q) = (vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?);
-                self.core.set_pose(b, p, q);
-                self.place(scene, b, p, q);
+                self.core.set_pose(b, p, q)?;
+                self.place_at_body(scene, b);
                 Value::Null
             }
             // Where a kinematic body is after the next tick.
             "target" => {
-                self.core.set_kinematic_target(self.body(a, "body")?, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?);
+                self.core.set_kinematic_target(self.body(a, "body")?, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?)?;
                 Value::Null
             }
             // {body}: scene code moved the body's object. The body goes where the object is: at once (its velocity
@@ -374,16 +388,20 @@ impl Bridge {
                 let b = self.body(a, "body")?;
                 if let Some((p, q)) = self.drives.get(&b).and_then(|&(o, _)| scene.world_pose(o)) {
                     if self.core.is_kinematic(b) {
-                        self.core.set_kinematic_target(b, p, q);
+                        self.core.set_kinematic_target(b, p, q)?;
                         self.note_pose(scene, b);
                     } else {
-                        self.core.set_pose(b, p, q);
-                        self.place(scene, b, p, q);
+                        self.core.set_pose(b, p, q)?;
+                        self.place_at_body(scene, b);
                     }
                 }
                 Value::Null
             }
+            // {body}: its pose, velocities, sleeping and mass; for a body the world took out after a tick, {removed: why}.
             "state" => {
+                if let Some(why) = id(a, "body").ok().filter(|b| !self.bodies.contains_key(b)).and_then(|b| self.faulted.get(&b)) {
+                    return Ok(json!({ "removed": why }));
+                }
                 let b = self.body(a, "body")?;
                 match (self.core.pose(b), self.core.velocity(b)) {
                     (Some((p, q)), Some((v, av))) => json!({ "position": p, "rotation": q, "linvel": v, "angvel": av, "sleeping": self.core.sleeping(b), "mass": self.core.mass(b) }),
@@ -395,20 +413,20 @@ impl Bridge {
             "ray" => {
                 let (o, d, max, skip) = (vec3(a, "origin", [0.0; 3])?, vec3(a, "direction", [0.0; 3])?, num(a, "max", 1e4)?, self.skip(a)?);
                 if a["all"].as_bool().unwrap_or(false) {
-                    Value::Array(self.core.cast_ray_all(o, d, max, skip, MAX_HITS).into_iter().map(|h| self.hit(Some(h))).collect())
+                    Value::Array(self.core.cast_ray_all(o, d, max, skip, MAX_HITS)?.into_iter().map(|h| self.hit(Some(h))).collect())
                 } else {
-                    self.hit(self.core.cast_ray(o, d, max, skip))
+                    self.hit(self.core.cast_ray(o, d, max, skip)?)
                 }
             }
             // The colliders a shape overlaps: [{collider, body, object}].
             "overlap" => {
                 let s = Self::shape(scene, &a["shape"])?;
-                let hits = self.core.overlap(&s, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?, self.skip(a)?);
+                let hits = self.core.overlap(&s, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?, self.skip(a)?)?;
                 Value::Array(hits.iter().filter_map(|c| self.collider_ids.get(c)).map(|&(c, b)| json!({ "collider": c, "body": b, "object": self.object_of(b) })).collect())
             }
             "sweep" => {
                 let s = Self::shape(scene, &a["shape"])?;
-                let h = self.core.sweep(&s, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?, vec3(a, "direction", [0.0; 3])?, num(a, "max", 1e4)?, self.skip(a)?);
+                let h = self.core.sweep(&s, vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?, vec3(a, "direction", [0.0; 3])?, num(a, "max", 1e4)?, self.skip(a)?)?;
                 self.hit(h)
             }
             // The contacts begun and ended since the last call (colliders with `events`), in the order they happened:
@@ -424,7 +442,11 @@ impl Bridge {
                     .collect(),
             ),
             // The world's hash and ticks (16 hex digits): the same calls at the same ticks give the same one.
-            "hash" => json!({ "hash": format!("{:016x}", self.core.hash()), "ticks": self.core.ticks(), "bodies": self.core.bodies() }),
+            "hash" => json!({ "hash": format!("{:016x}", self.core.hash()), "ticks": self.core.ticks(), "bodies": self.core.bodies(), "contactsDropped": self.core.contacts_dropped() }),
+            // The bodies the world took out after a tick since the last call (`Physics::step`: a pose or velocity gone
+            // non-finite, past the world's edge), with the object each drove and why: [{body, object, reason}]. Their
+            // colliders and joints went with them; "state" on one answers {removed: why}.
+            "faults" => Value::Array(std::mem::take(&mut self.faults).into_iter().map(|(b, o, why)| json!({ "body": b, "object": o, "reason": why })).collect()),
             other => return Err(format!("physics: unknown call \"{other}\"")),
         })
     }
@@ -447,8 +469,15 @@ impl Bridge {
 
     /// Removes a body (the world's id) with its colliders and joints, and their ids.
     fn forget_body(&mut self, b: BodyId) {
-        for c in self.core.remove_body(b) {
-            if let Some((id, _)) = self.collider_ids.remove(&c) {
+        let gone = self.core.remove_body(b);
+        self.forget_ids(b, &gone);
+    }
+
+    /// Forgets the ids of a body the world no longer has (the world's id), of the colliders that went with it and of
+    /// its joints.
+    fn forget_ids(&mut self, b: BodyId, colliders: &[ColliderId]) {
+        for c in colliders {
+            if let Some((id, _)) = self.collider_ids.remove(c) {
                 self.colliders.remove(&id);
             }
         }
@@ -494,6 +523,25 @@ impl Bridge {
         true
     }
 
+    /// The object body `b` drives placed where the body is (`place`).
+    fn place_at_body(&mut self, scene: &mut impl Scene, b: BodyId) {
+        if let Some((p, q)) = self.core.pose(b) {
+            self.place(scene, b, p, q);
+        }
+    }
+
+    /// The scene removed these objects: the bodies that drove them go too (an awake body would find out when it next
+    /// placed its object; a sleeping one never would, and the object's id may be used again).
+    pub fn objects_removed(&mut self, objects: &[u32]) {
+        if self.driven.is_empty() {
+            return;
+        }
+        let doomed: Vec<BodyId> = objects.iter().filter(|o| self.driven.contains(o)).filter_map(|o| self.drives.iter().find(|(_, d)| d.0 == *o).map(|(&b, _)| b)).collect();
+        for b in doomed {
+            self.forget_body(b);
+        }
+    }
+
     /// A kinematic body's object was moved by scene code: its slot of `poses` is where the object is now.
     fn note_pose(&mut self, scene: &mut impl Scene, b: BodyId) {
         if let Some(&(o, Some(s))) = self.drives.get(&b) {
@@ -514,8 +562,45 @@ impl Bridge {
     /// One tick.
     pub fn tick(&mut self) {
         self.core.step();
+        for f in self.core.take_faults() {
+            self.fault(f);
+        }
         self.core.awake(&mut self.moved);
+        // (Made unique once it holds the bodies a few times over: an offline settle makes up to 36,000 ticks before
+        // its one sync, and 20,000 awake bodies would add 720 million entries.)
+        if self.moved.len() > 4 * self.core.bodies() + 1024 {
+            self.moved.sort_unstable();
+            self.moved.dedup();
+        }
         self.ticked = true;
+    }
+
+    /// What the world took out after a tick: its ids forgotten, and the body reported ("faults", "state").
+    fn fault(&mut self, f: crate::Fault) {
+        let Some(b) = f.body else {
+            self.forget_colliders(&f.colliders);
+            return;
+        };
+        let caller = self.body_ids.get(&b).copied();
+        let object = self.drives.get(&b).map(|d| d.0);
+        self.forget_ids(b, &f.colliders);
+        let Some(caller) = caller else { return };
+        if self.faults.len() == MAX_FAULTS {
+            self.faults.remove(0);
+        }
+        self.faults.push((caller, object, f.reason));
+        if self.faulted.len() == MAX_FAULTS {
+            self.faulted.pop_first();
+        }
+        self.faulted.insert(caller, f.reason);
+    }
+
+    fn forget_colliders(&mut self, colliders: &[ColliderId]) {
+        for c in colliders {
+            if let Some((id, _)) = self.collider_ids.remove(c) {
+                self.colliders.remove(&id);
+            }
+        }
     }
 
     /// After a frame's ticks (none, at a frame rate above the tick rate): places the objects of the bodies that moved
@@ -550,9 +635,11 @@ impl Bridge {
     pub fn due(&mut self, dt: f64) -> u32 {
         self.behind += if dt.is_finite() { dt.clamp(0.0, 0.25) } else { 0.0 };
         // (A frame of exactly one tick is one tick, whatever its f32 rounds to.)
-        let ticks = (((self.behind + 1e-6) / TICK as f64).floor() as u32).min(MAX_TICKS);
-        // (What a frame longer than `MAX_TICKS` leaves is dropped.)
-        self.behind = if ticks == MAX_TICKS { 0.0 } else { (self.behind - ticks as f64 * TICK as f64).max(0.0) };
+        let due = ((self.behind + 1e-6) / TICK as f64).floor() as u32;
+        // (What a frame owing more than `MAX_TICKS` leaves is dropped; one owing exactly that many keeps its remainder,
+        // or a steady 12 fps would lose a fifth of its time.)
+        let ticks = due.min(MAX_TICKS);
+        self.behind = if due > MAX_TICKS { 0.0 } else { (self.behind - ticks as f64 * TICK as f64).max(0.0) };
         ticks
     }
 
@@ -571,6 +658,10 @@ impl Bridge {
         self.core.hash()
     }
 }
+
+#[cfg(test)]
+#[path = "robustness.rs"]
+mod robustness;
 
 #[cfg(test)]
 mod tests {
@@ -795,7 +886,7 @@ mod tests {
             ("body", json!({ "id": 3, "slot": 0 }), "without an object"),
             ("collider", json!({ "id": 2, "shape": { "type": "sphere", "radius": 1 } }), "exists"),
             ("collider", json!({ "id": 3, "body": 9, "shape": { "type": "sphere", "radius": 1 } }), "unknown body"),
-            ("collider", json!({ "id": 3, "shape": { "type": "sphere", "radius": -1 } }), "cannot be built"),
+            ("collider", json!({ "id": 3, "shape": { "type": "sphere", "radius": -1 } }), "radius must be from 1e-3 to 1e4"),
             ("collider", json!({ "id": 3, "shape": { "type": "cone" } }), "none of box"),
             ("collider", json!({ "id": 3, "shape": { "type": "trimesh", "geometry": 9 } }), "unknown geometry"),
             ("joint", json!({ "id": 1, "a": 2, "b": 9, "type": "fixed" }), "unknown body"),

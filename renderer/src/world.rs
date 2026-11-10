@@ -865,8 +865,8 @@ impl World {
         Ok(())
     }
 
-    /// Removes an object and its descendants.
-    pub fn remove(&mut self, id: u32) {
+    /// Removes an object and its descendants. Returns their ids (those it had: the bodies that drove them go too).
+    pub fn remove(&mut self, id: u32) -> Vec<u32> {
         let mut doomed = vec![id];
         let mut k = 0;
         while k < doomed.len() {
@@ -883,15 +883,16 @@ impl World {
                 if !self.changes.added.remove(&only) {
                     self.changes.removed.insert(only);
                 }
-                return;
+                return doomed;
             }
         }
-        for d in doomed {
+        for &d in &doomed {
             self.instanced.remove(&d);
             if self.objects.remove(&d).is_some() {
                 self.changes.structural = true;
             }
         }
+        doomed
     }
 
     pub fn set_environment(&mut self, e: desc::Environment) {

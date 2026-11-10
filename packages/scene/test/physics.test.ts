@@ -244,6 +244,37 @@ test("impulses, forces and velocities are calls on the object, sent once it has 
   assert.deepEqual([ghost.getLinearVelocity().toArray(), ghost.sleeping], [[0, 0, 0], false]);
 });
 
+test("a body the engine takes out after a tick leaves its object without one, and the sync says so once", () => {
+  const { scene, engine, binding, physics } = world();
+  const post = new Mesh(new BoxGeometry(0.2, 2, 0.2));
+  post.physics = "fixed";
+  const crate = new Mesh(new BoxGeometry(1, 1, 1));
+  crate.physics = { type: "dynamic", contacts: true };
+  scene.add(post, crate, new HingeJoint(post, crate));
+  binding.sync();
+  const made = physics();
+  const crateBody = made.filter((c) => c[0] === "body")[1][1].id as number;
+  // The engine took the crate's body out (its colliders and joint with it) and reports it once.
+  engine.answers.faults = [{ body: crateBody, object: 2, reason: "its pose or velocity went non-finite" }];
+  engine.answers.state = { removed: "its pose or velocity went non-finite" };
+  assert.deepEqual(crate.getLinearVelocity().toArray(), [0, 0, 0], "a removed body reads as none");
+  binding.deliverPhysicsEvents();
+  engine.answers.faults = [];
+  physics();
+  assert.throws(() => binding.sync(), /took out the bodies of mesh_2 \(its pose or velocity went non-finite\)/);
+  // Nothing is sent for it (no removal: the engine has none; no body made again), and the crate reads as without one.
+  assert.deepEqual(physics().filter((c) => c[0] !== "remove" || c[1].joint === undefined), [], "the joint's removal is the only call");
+  crate.applyImpulse(new Vector3(0, 1, 0));
+  binding.sync();
+  assert.deepEqual(physics(), [], "an impulse on an object without a body goes nowhere");
+  assert.equal(crate.sleeping, false);
+  physics();
+  // Its physics set again: a body again, and the joint on it.
+  crate.physics = { type: "dynamic" };
+  binding.sync();
+  assert.deepEqual(physics().map((c) => c[0]), ["body", "collider", "joint"]);
+});
+
 test("a parent scaled anew makes the bodies below it anew at their new size, and their joints", () => {
   const { scene, engine, binding, physics } = world();
   const post = new Mesh(new BoxGeometry(0.2, 2, 0.2));
@@ -368,13 +399,13 @@ test("rays and shapes ask the physics world; contacts arrive as events, in batch
   binding.deliverPhysicsEvents();
   assert.deepEqual(seen, ["a contactstart b", "b contactstart a", "a contactend b"]);
   assert.equal(batch.length, 2);
-  assert.deepEqual(physics(), [["contacts", {}]]);
-  // No body reports contacts: no call.
+  assert.deepEqual(physics(), [["faults", {}], ["contacts", {}]]);
+  // No body reports contacts: no call for them (the faults' one stays while there are bodies).
   a.physics = "dynamic";
   binding.sync();
   engine.take();
   binding.deliverPhysicsEvents();
-  assert.deepEqual(physics(), []);
+  assert.deepEqual(physics(), [["faults", {}]]);
 });
 
 test("a scene without physics makes no physics call; gravity is sent when it is not the default", () => {

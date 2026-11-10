@@ -364,7 +364,14 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         w.borrow_mut().set_animation(id, a).map_err(|e| fail(&ctx, e))
     })?)?;
     let w = world.clone();
-    e.set("remove", Function::new(ctx.clone(), move |id: u32| w.borrow_mut().remove(id))?)?;
+    let p = physics.clone();
+    e.set("remove", Function::new(ctx.clone(), move |id: u32| {
+        let gone = w.borrow_mut().remove(id);
+        // (A body asleep would never find out its object went; the object's id may come again.)
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.objects_removed(&gone);
+        }
+    })?)?;
     let w = world.clone();
     e.set("environment", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> {
         let env: desc::Environment = parse(&ctx, "environment", &d)?;

@@ -77,6 +77,11 @@ impl PhysicsWorld {
         r
     }
 
+    /// The scene removed these objects: their bodies go (`Bridge::objects_removed`).
+    pub fn objects_removed(&mut self, objects: &[u32]) {
+        self.bridge.objects_removed(objects);
+    }
+
     pub fn take_call_ms(&mut self) -> f64 {
         std::mem::take(&mut self.call_ms)
     }
