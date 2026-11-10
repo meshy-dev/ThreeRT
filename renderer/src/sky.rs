@@ -269,7 +269,7 @@ const SKY_LIGHT_CUBE: f32 = 128.0;
 /// sky fades to black across one texel row of the side faces at the horizon (0.9 deg at a face's centre, 0.63 at its
 /// edges). UE's path tracer shows that fade below every horizon (Khronos layer B: the band beyond a 2 km ground plane).
 pub fn bake_atmosphere(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32) -> SkyBake {
-    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Vec3::ZERO)
+    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Glow::default())
 }
 
 /// The atmosphere's transmittance and multiple-scattering tables: they depend on the atmosphere alone, so a sky whose
@@ -282,9 +282,36 @@ impl SkyTables {
     }
 }
 
-/// `bake_atmosphere` with tables built once (`SkyTables`), plus `glow`: radiance (nits) added to every texel above the
-/// horizon, the night sky's light pollution, which the atmosphere alone does not give once the sun has set.
-pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Vec3) -> SkyBake {
+/// The night sky's glow (light pollution), which the atmosphere alone does not give once the sun has set: radiance
+/// (nits) added above the horizon, `uniform` everywhere and `horizon` at the horizon, falling off with elevation (1/e at
+/// `height` radians): a city's light dome.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Glow {
+    pub uniform: Vec3,
+    pub horizon: Vec3,
+    pub height: f32,
+}
+
+/// The glow of an atmosphere sky's description (`desc::Sky::Atmosphere` `glow`, `horizon_glow`).
+pub fn glow_of(uniform: &Option<[f32; 3]>, horizon: &Option<[f32; 4]>) -> Glow {
+    Glow { uniform: uniform.map(Vec3::from).unwrap_or(Vec3::ZERO), horizon: horizon.map_or(Vec3::ZERO, |h| Vec3::new(h[0], h[1], h[2])), height: horizon.map_or(0.0, |h| h[3]) }
+}
+
+impl Glow {
+    /// The glow at `elevation` radians (the horizon's below it).
+    pub fn at(&self, elevation: f32) -> Vec3 {
+        if self.horizon == Vec3::ZERO {
+            return self.uniform;
+        }
+        self.uniform + self.horizon * (-elevation.max(0.0) / self.height.max(1e-3)).exp()
+    }
+    pub fn is_zero(&self) -> bool {
+        self.uniform == Vec3::ZERO && self.horizon == Vec3::ZERO
+    }
+}
+
+/// `bake_atmosphere` with tables built once (`SkyTables`), plus the night sky's `glow` above the horizon.
+pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow) -> SkyBake {
     bake_atmosphere_with(a, &t.0, sun_dir, sun_lux, altitude_m, width, height, glow)
 }
 
@@ -295,7 +322,7 @@ pub fn sun_illuminance(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3) -> Vec3 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Vec3) -> SkyBake {
+fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow) -> SkyBake {
     // Planet frame: Z up. Map Y-up world -> planet frame (x, z, y).
     let to_planet = |d: Vec3| Vec3::new(d.x, d.z, d.y);
     let sun_p = to_planet(sun_dir).normalize();
@@ -316,7 +343,7 @@ fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec
             }
             let (dir, k) = if r < 0.5 { (Vec3::new(d.x, side / SKY_LIGHT_CUBE, d.z).normalize(), r + 0.5) } else { (d, 1.0) };
             let (l, _) = luts.integrate(a, pos, to_planet(dir), sun_p, 40, false, Some(()), false);
-            let l = (l * sun_lux + glow) * k;
+            let l = (l * sun_lux + glow.at(dir.y.clamp(-1.0, 1.0).asin())) * k;
             [l.x, l.y, l.z, 1.0]
         })
         .collect();

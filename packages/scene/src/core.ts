@@ -2021,18 +2021,28 @@ export class SkyAtmosphere {
   glow: Color = new Color(0x6b7fb3);
   glowIntensity = 0;
   /**
+   * The glow's light dome over a city: colour × `horizonGlowIntensity` nits at the horizon, on top of the glow, falling
+   * off with elevation (to 1/e at `horizonGlowHeight` radians). Off at 0.
+   */
+  horizonGlow: Color = new Color(0xffb46b);
+  horizonGlowIntensity = 0;
+  horizonGlowHeight = 0.06;
+  /**
    * Aerial perspective: the atmosphere's haze over the surfaces behind it, at this multiple of the atmosphere's own
    * density (Rayleigh and Mie, `rayleighScale` / `mieScale`). Distant land fades into the sky at the horizon behind
    * it, by day and by night (the glow). Off at 0 (the default): surfaces are seen through clear air.
    */
   aerialPerspective = 0;
-  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; aerialPerspective?: number } = {}) {
+  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; horizonGlow?: ColorLike; horizonGlowIntensity?: number; horizonGlowHeight?: number; aerialPerspective?: number } = {}) {
     this.sun = opts.sun ?? null;
     if (opts.groundAlbedo !== undefined) this.groundAlbedo = new Color(opts.groundAlbedo);
     if (opts.skyLightIntensity !== undefined) this.skyLightIntensity = opts.skyLightIntensity;
     if (opts.dynamic !== undefined) this.dynamic = opts.dynamic;
     if (opts.glow !== undefined) this.glow = new Color(opts.glow);
     if (opts.glowIntensity !== undefined) this.glowIntensity = opts.glowIntensity;
+    if (opts.horizonGlow !== undefined) this.horizonGlow = new Color(opts.horizonGlow);
+    if (opts.horizonGlowIntensity !== undefined) this.horizonGlowIntensity = opts.horizonGlowIntensity;
+    if (opts.horizonGlowHeight !== undefined) this.horizonGlowHeight = opts.horizonGlowHeight;
     if (opts.aerialPerspective !== undefined) this.aerialPerspective = opts.aerialPerspective;
   }
 }

@@ -396,7 +396,7 @@ pub enum SkyData {
     None,
     Color(Vec3),
     /// `dynamic`: baked at `sky::DYNAMIC_SKY` (the live view re-bakes it as the sun moves); `glow`: night-sky radiance.
-    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, sun_node: Option<usize>, dynamic: bool, glow: Vec3 },
+    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, sun_node: Option<usize>, dynamic: bool, glow: crate::sky::Glow },
     Gradient(crate::sky::Gradient),
 }
 
@@ -1688,7 +1688,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
 
     let env = &w.environment;
     let sky = match &env.sky {
-        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, .. } => {
+        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, .. } => {
             let sun_light = sun.and_then(|s| w.objects.get(&s).map(|o| (s, o)));
             let (sun_dir, sun_lux) = match sun_light.map(|(s, o)| (worlds.get(&s).copied().unwrap_or(Mat4::IDENTITY), &o.kind)) {
                 Some((m, Kind::Light(Light::Directional { color, intensity, .. }))) => (-m.transform_vector3(Vec3::NEG_Z).normalize(), Vec3::from(*color) * *intensity),
@@ -1705,7 +1705,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 ground: Vec3::from(*ground_albedo),
                 sun_node: idx,
                 dynamic: *dynamic,
-                glow: glow.map(Vec3::from).unwrap_or(Vec3::ZERO),
+                glow: crate::sky::glow_of(glow, horizon_glow),
             }
         }
         Sky::Color { color, intensity, .. } if *intensity > 0.0 => SkyData::Color(Vec3::from(*color) * *intensity),

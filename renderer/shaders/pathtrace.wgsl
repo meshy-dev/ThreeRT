@@ -1789,6 +1789,9 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         let phi = 2.0 * PI * rnd();
         let tb = basis(to_light);
         let l = tb * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        // A light gone black (a moon that has set, the sun at night) costs neither its BSDF nor its shadow ray. (After
+        // the cone's random numbers: every other light sees the same ones as before.)
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
         let f = eval_bsdf_k(s, lb, v, l, li.x.y);
         if (any(f > vec3<f32>(0.0))) {
             let vis = light_vis(li.ext.w >= 0.5, o, l, INF);
@@ -1900,6 +1903,7 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f3
     for (var i = 0u; i < P.counts2.x; i++) {
         let li = lights[i];
         let l = -li.dir.xyz;
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         if (li.ext.w < 0.5 || !occluded(x, l, INF)) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
     }
     // One shadow ray: either the local lights (RIS) or one emissive point, chosen with equal odds when both exist.
@@ -2141,6 +2145,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
         let phi = 2.0 * PI * rnd();
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         let ph = hg_phase(g, dot(l, d));
         let vis = light_vis(li.ext.w >= 0.5, x, l, INF);
         if (any(vis > vec3<f32>(0.0))) {
@@ -2237,6 +2242,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
         let phi = 2.0 * PI * rnd();
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         if (li.ext.w < 0.5 || !occluded(x, l, INF)) { sum += li.color.rgb * ph; }
     }
     let nd = P.counts2.x;
