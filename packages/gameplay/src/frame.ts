@@ -73,21 +73,31 @@ export class FrameRunner<S> {
     return this.ids.get(id);
   }
 
+  /** Seconds since the scene started on this node (what `f.time` is in the frame script). */
+  get clock(): number {
+    return this.time;
+  }
+
+  /** The committed state as a read-only snapshot, made anew per commit or replaced state (scene code cannot corrupt
+   *  the store). */
+  committed(): Readonly<S> {
+    if (this.frozen?.seq !== this.store.seq || this.frozen.src !== this.store.state) {
+      this.frozen = { seq: this.store.seq, src: this.store.state, state: deepFreeze(structuredClone(this.store.state)) as Readonly<S> };
+    }
+    return this.frozen.state;
+  }
+
   /** The frame script's clock set to `time` (s): a render of the game at that moment (`seek` in node-host.ts). */
   seek(time: number): void {
     this.time = Math.max(time, 0);
   }
 
   run(dt: number, now: number, snap = false): void {
-    if (!this.fn) return;
+    // (The clock runs without a frame script too: world handlers read it.)
     dt = Math.min(Math.max(dt, 0), 0.1);
     this.time += dt;
-    // Read-only snapshot of the committed state, refreshed per commit or replaced state (frame code cannot corrupt
-    // the store).
-    if (this.frozen?.seq !== this.store.seq || this.frozen.src !== this.store.state) {
-      this.frozen = { seq: this.store.seq, src: this.store.state, state: deepFreeze(structuredClone(this.store.state)) as Readonly<S> };
-    }
-    this.fn({ time: this.time, dt, snap, now, state: this.frozen.state, scene: this.scene, camera: this.camera, object: (id) => this.object(id), random: this.random });
+    if (!this.fn) return;
+    this.fn({ time: this.time, dt, snap, now, state: this.committed(), scene: this.scene, camera: this.camera, object: (id) => this.object(id), random: this.random });
   }
 }
 

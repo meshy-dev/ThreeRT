@@ -6,7 +6,9 @@
 //
 // The physics world answers too (ROADMAP § 6 step 7): `Raycaster.intersectPhysics` is the ray against the colliders of
 // the objects with `physics`, in the engine (its tree of them, not a walk over triangles here), and `Shapecaster` asks
-// what a shape overlaps or meets when moved. Both see the world as of its last tick.
+// what a shape overlaps or meets when moved. Both see the world as the engine has it, with or without a tick since
+// the last change; what the running script changed in the scene reaches the engine when it returns (docs/RUNTIME.md,
+// World handlers).
 import { InstancedMesh, Mesh, type Object3D, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
 import { Box3, Matrix4, Quaternion, Ray, Vector2, Vector3 } from "./math.ts";
 import type { BufferGeometry } from "./geometry.ts";

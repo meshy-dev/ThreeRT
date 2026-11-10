@@ -24,6 +24,21 @@ in other bits (`physics_core::check::cases`).
 
 - `src/lib.rs` allows unused imports (as a path dependency the crate's warnings show).
 
+## Upstream
+
+The same finding and the same kind of change are open upstream, not merged or released when this copy was made
+(2026-11-10):
+
+- dimforge/glamx issue #9, "SymmetricEigen3::eigenvalues calls platform acos/cos in std builds, breaking
+  enhanced-determinism": https://github.com/dimforge/glamx/issues/9
+- dimforge/glamx pull request #10, "Route eigenvalue trigonometry through ComplexField under std":
+  https://github.com/dimforge/glamx/pull/10
+- dimforge/rapier issue #1054 lists about twenty more platform math calls in Rapier and parry 0.36.1 / 0.31.1; which
+  of them our worlds reach, and what is done about each, is in docs/ROADMAP.md § 6 step 9.
+
+**Delete this copy and both `[patch.crates-io]` tables once a glamx release has the fix and Rapier uses it**; the
+recorded hashes (`physics_core::check`) and `tools/physics-determinism.ts` say whether the release behaves the same.
+
 ## Every crate that is built must name the patch
 
 `[patch.crates-io]` only takes effect in the manifest of the crate (or workspace root) that cargo is building: a

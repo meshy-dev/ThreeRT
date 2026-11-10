@@ -469,8 +469,18 @@ impl ScriptHost {
         self.info["keys"][key].as_str().map(String::from)
     }
 
+    /// The game handles events of this type: with a handler (a transaction on the state) or a world handler (`on`:
+    /// it changes the scene on this node; packages/gameplay/src/world.ts).
     pub fn has_handler(&self, name: &str) -> bool {
-        self.info["handlers"].as_array().is_some_and(|h| h.iter().any(|x| x == name))
+        ["handlers", "on"].iter().any(|k| self.info[k].as_array().is_some_and(|h| h.iter().any(|x| x == name)))
+    }
+
+    /// The node host runs every frame (`frame`): the game has a frame script, or world handlers (they read the
+    /// frame clock), or the scene has a physics world (its contacts and the bodies that left the world are delivered
+    /// to their listeners once a frame, whoever registered them: a frame script, a world handler or setup). A scene
+    /// with none of them pays nothing.
+    pub fn frames(&self) -> bool {
+        self.has_frame() || self.info["on"].as_array().is_some_and(|h| !h.is_empty()) || self.physics.borrow().is_some()
     }
 
     /// Builds and binds the scene (deterministic for a room id / seed); returns the time it took, ms.
@@ -710,7 +720,7 @@ impl GameSession {
     /// sync) that throws does not stop the world: the frame's physics ticks are made and what changed is committed all
     /// the same, then the error is returned (the window and `live` print it and go on).
     pub fn frame(&mut self, core: &mut crate::live::LiveCore, dt: f32) -> Result<bool> {
-        if !self.host.has_frame() {
+        if !self.host.frames() {
             // Wind sway and the physics follow the scene time with or without a frame script.
             let swayed = self.host.world.borrow_mut().apply_sway(core.scene_time());
             if self.host.advance_physics(dt) || swayed {
@@ -719,7 +729,10 @@ impl GameSession {
             return Ok(false);
         }
         let t = Instant::now();
-        core.set_time(self.clock.tick(dt));
+        // (A frame script's clock is the game's; a game without one keeps the view's own time, as before.)
+        if self.host.has_frame() {
+            core.set_time(self.clock.tick(dt));
+        }
         self.host.world.borrow_mut().apply_sway(core.scene_time());
         let scripted = self.host.frame(dt);
         self.js_ms = t.elapsed().as_secs_f32() * 1000.0;
@@ -852,6 +865,57 @@ mod tests {
         assert!(c.moved.is_empty() && !c.structural, "and its commit");
         s.frame(&mut core, 1.0 / 60.0).unwrap();
         assert!((z(&s) - 0.3).abs() < 1e-4, "{}", z(&s));
+    }
+
+    /// The input path knows a game's world handlers (`on`) as it knows its handlers, and the node host runs every
+    /// frame for a game that has them, or whose scene has a physics world, though it has no frame script.
+    #[test]
+    fn world_handlers_and_the_frames_of_a_game_without_a_frame_script() {
+        let plain = GAME.replace("handlers: [\"click\"], frame: true", "handlers: [\"hit\"], frame: false");
+        assert!(plain.contains("frame: false"));
+        let h = ScriptHost::new(&plain).unwrap();
+        assert!(h.has_handler("hit") && !h.has_handler("click") && !h.has_frame() && !h.frames(), "a scene with no script to run a frame for");
+        let on = plain.replace("handlers: [\"hit\"],", "handlers: [\"hit\"], on: [\"click\"],");
+        let h = ScriptHost::new(&on).unwrap();
+        assert!(h.has_handler("click") && h.has_handler("hit") && !h.has_handler("drag"));
+        assert!(!h.has_frame() && h.frames(), "world handlers read the frame clock");
+        // A physics world (made by the scene's first physics call): its events go to their listeners once a frame.
+        let bodies = plain.replace("return \"{}\";", "__engine.physics('gravity', { gravity: [0, -9.81, 0] }); return \"{}\";");
+        let h = ScriptHost::new(&bodies).unwrap();
+        assert!(!h.frames());
+        h.setup("room", None).unwrap();
+        assert!(h.frames());
+    }
+
+    /// A game without a frame script whose scene has bodies: the node host's `frame` runs every frame all the same
+    /// (it delivers the contacts and the bodies that left the world to their listeners), after which the physics
+    /// ticks; a scene with neither has no script run for it. (Skipped without a GPU.)
+    #[test]
+    fn a_scene_with_bodies_gets_its_frames_without_a_frame_script() {
+        for (physics, expected) in [(true, 3), (false, 0)] {
+            let g = match crate::gpu::Gpu::new() {
+                Ok(g) => g,
+                Err(e) => return eprintln!("skipped: {e}"),
+            };
+            let mut game = GAME.replace("handlers: [\"click\"], frame: true", "handlers: [\"click\"], frame: false").replace(", map: 2 }", " }");
+            if physics {
+                game = game.replace("return \"{}\";", "__engine.physics('body', { id: 1, object: 4, gravityScale: 0, linvel: [0, 0, 6] }); __engine.physics('collider', { id: 1, body: 1, shape: { type: 'sphere', radius: 0.5 } }); return \"{}\";");
+            }
+            let bundle = std::env::temp_dir().join(format!("threert-no-frame-script-{}-{physics}.js", std::process::id()));
+            std::fs::write(&bundle, game).unwrap();
+            let started = GameSession::start(&bundle, "room", std::path::Path::new("."), g, &crate::default_presets_dir(), 64, 36);
+            std::fs::remove_file(&bundle).ok();
+            let (mut s, mut core) = started.unwrap();
+            for _ in 0..3 {
+                s.frame(&mut core, 1.0 / 60.0).unwrap();
+            }
+            let frames: i32 = s.host.call(100, |ctx| ctx.eval("frames")).unwrap();
+            assert_eq!(frames, expected, "physics {physics}");
+            if physics {
+                let z = s.host.world.borrow().objects[&4].position.z;
+                assert!((z - 0.3).abs() < 1e-4, "three ticks at 6 m/s: {z}");
+            }
+        }
     }
 
     #[test]

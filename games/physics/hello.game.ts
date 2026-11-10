@@ -3,11 +3,11 @@
 // the ramp, the rock), a box with `physics = "dynamic"` is added to the scene 1.5 m off that surface along its normal:
 // it falls, lands on what is fixed and piles up with the boxes before it (click the same spot of the wall again and
 // they stack). Where it meets a box, the box is kicked along the ground, away from the camera.
-// The chain is the engine's whole path for gameplay physics: click -> the `click` handler records it in the game state
-// -> the frame script (run again right after the commit) casts the ray and calls `scene.add` -> the binding makes the
-// object and its body in the engine -> the engine steps the world and moves the object; nothing runs per object per
-// frame in the script. The scene: a ground plane and a rock that are triangle-mesh colliders, a wall and a ramp that
-// are boxes.
+// The chain is the engine's whole path for gameplay physics: click -> the `click` world handler (`on`: it runs on the
+// node that owns the scene as the event arrives) casts the ray and calls `world.scene.add` -> the binding makes the
+// object and its body in the engine when the handler returns -> the engine steps the world and moves the object.
+// There is no game state, no handler and no frame script: nothing runs per object per frame in the script. The scene:
+// a ground plane and a rock that are triangle-mesh colliders, a wall and a ramp that are boxes.
 //   node tools/bundle-game.ts games/physics/hello.game.ts -o out/bundles/physics-hello.js
 //   renderer/target/release/threert-render play out/bundles/physics-hello.js     (a window: click; R reports)
 //   node tools/physics-hello.ts                                                   (the same game, scripted clicks, numbers)
@@ -26,12 +26,9 @@ export const BOX = 0.5;
 export const DENSITY = 400;
 export const KICK = 3;
 
-interface State {
-  /** The clicks so far, and the last one's view ray. */
-  clicks: number;
-  ray: { origin: [number, number, number]; direction: [number, number, number] } | null;
-  /** Asks the frame script for a report (R). */
-  reports: number;
+/** A click's view ray, as the renderer sends it. */
+interface Click {
+  ray?: { origin: [number, number, number]; direction: [number, number, number] };
 }
 
 const COLOURS = [0xc8553d, 0x3d7ec8, 0x58a05c, 0xd9a441, 0x8a5cc8, 0x4fb3b3];
@@ -39,7 +36,7 @@ const geometry = new BoxGeometry(BOX, BOX, BOX);
 const materials = COLOURS.map((color, k) => new MeshStandardMaterial({ name: `box${k}`, color, roughness: 0.7 }));
 const raycaster = new Raycaster();
 const boxes: Mesh[] = [];
-let seen = 0, reported = 0, kicks = 0;
+let clicks = 0, kicks = 0;
 
 /** A mesh that stands still: a fixed body, its collider from its geometry (a box for a box, else its triangles). */
 function fixed(name: string, mesh: Mesh, at: [number, number, number]): Mesh {
@@ -49,13 +46,13 @@ function fixed(name: string, mesh: Mesh, at: [number, number, number]): Mesh {
   return mesh;
 }
 
-export default defineGame<State>({
-  state: { clicks: 0, ray: null, reports: 0 },
+export default defineGame({
+  state: {},
   keys: { R: "report" },
   setup: () => {
     // (Setup may run again in one runtime, the playground's Stop: the boxes of the scene before are not this one's.)
     boxes.length = 0;
-    [seen, reported, kicks] = [0, 0, 0];
+    [clicks, kicks] = [0, 0];
     const scene = new Scene();
     const sun = new DirectionalLight(0xffffff, 90000);
     sun.setSunAngles(50, 215);
@@ -76,16 +73,12 @@ export default defineGame<State>({
     scene.add(ground, wall, ramp, rock);
     return { scene, camera, options: { name: "physics-hello", width: CAMERA.width, height: CAMERA.height, preset: "cinematic" as const } };
   },
-  frame(f) {
-    if (f.snap) {
-      // (The state was set, not changed: nothing to act on.)
-      seen = f.state.clicks;
-      reported = f.state.reports;
-    }
-    if (f.state.clicks !== seen && f.state.ray) {
-      seen = f.state.clicks;
-      const origin = new Vector3(...f.state.ray.origin), direction = new Vector3(...f.state.ray.direction);
-      raycaster.set(origin, direction);
+  on: {
+    click(world, ev: Click) {
+      if (!ev.ray) return;
+      const click = ++clicks;
+      const direction = new Vector3(...ev.ray.direction);
+      raycaster.set(new Vector3(...ev.ray.origin), direction);
       const hit = raycaster.intersectPhysics()[0];
       if (hit && hit.object.physics?.type === "fixed" && hit.normal) {
         // Something that stands still: a new box off its surface. In the scene, it has its body.
@@ -93,31 +86,20 @@ export default defineGame<State>({
         box.name = `box${boxes.length}`;
         box.position.copy(hit.point).addScaledVector(hit.normal, OFF);
         box.physics = { type: "dynamic", density: DENSITY };
-        f.scene.add(box);
+        world.scene.add(box);
         boxes.push(box);
-        console.log(`hello ${JSON.stringify({ click: seen, add: box.name, on: hit.object.name, at: box.position.toArray() })}`);
+        console.log(`hello ${JSON.stringify({ click, add: box.name, on: hit.object.name, at: box.position.toArray() })}`);
       } else if (hit) {
         // A box: kicked along the ground, away from the camera.
         const push = new Vector3(direction.x, 0, direction.z).normalize().multiplyScalar(KICK * DENSITY * BOX ** 3);
         hit.object.applyImpulse(push);
         kicks++;
-        console.log(`hello ${JSON.stringify({ click: seen, kick: hit.object.name, from: hit.object.position.toArray(), impulse: push.toArray() })}`);
-      } else console.log(`hello ${JSON.stringify({ click: seen, miss: true })}`);
-    }
-    if (f.state.reports !== reported) {
-      reported = f.state.reports;
+        console.log(`hello ${JSON.stringify({ click, kick: hit.object.name, from: hit.object.position.toArray(), impulse: push.toArray() })}`);
+      } else console.log(`hello ${JSON.stringify({ click, miss: true })}`);
+    },
+    report() {
       const row = (o: Object3D) => ({ name: o.name, at: o.position.toArray().map((v) => Math.round(v * 1e4) / 1e4), speed: Math.round(o.getLinearVelocity().length() * 1e3) / 1e3, asleep: o.sleeping });
       console.log(`report ${JSON.stringify({ boxes: boxes.map(row), kicks })}`);
-    }
-  },
-  handlers: {
-    click(tx, ev: { ray?: State["ray"] }) {
-      tx.decide(!!ev.ray, "a click without its view ray");
-      tx.state.ray = ev.ray!;
-      tx.state.clicks++;
-    },
-    report(tx) {
-      tx.state.reports++;
     },
   },
 });

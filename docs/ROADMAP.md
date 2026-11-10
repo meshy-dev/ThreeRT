@@ -3655,9 +3655,11 @@ benchmark level. The order follows the dependencies; a step that meets a further
        - The review's fuzz (random calls, ordinary and absurd numbers; a small version is in the crate's tests):
          611 panics in 120,000 runs at its two mildest levels before, none in 210,000 runs at all five after.
      - **Determinism:** the same bits natively and in wasm32, in physics-core's own build and in the renderer's, on
-       what is checked: the script (`113d50eb06a47636`), 1,000 random worlds (tumbling convex hulls, bodies of
-       several colliders, hinges and sliders with limits and motors, a rope; `check::case`, folded hash
-       `9e16a6771fa8f317`), each compared (`tools/physics-determinism.ts`, CI), and 32,000 runs of the review's
+       what is checked: the script (`113d50eb06a47636`), 1,200 random worlds (tumbling convex hulls, bodies of
+       several colliders, hinges and sliders with limits and motors, a rope; and, added with the world handlers,
+       continuous collision detection on a triangle mesh, a kinematic body, fixed and ball joints, with the answers
+       of rays, sweeps and overlaps folded in; `check::case`, folded hash `6fd1eba4551b8d39`, `9e16a6771fa8f317`
+       for the first 1,000), each compared (`tools/physics-determinism.ts`, CI), and 32,000 runs of the review's
        random calls. It takes three things:
        - Rapier's `enhanced-determinism` (on in physics-core): without it none of the 1,000 worlds agree (the
          script: `dfdc13fb0be5cd0b` natively). It costs 1–3 % on the script (0.029 ms a tick) and 3–5 % on a pile of
@@ -3716,7 +3718,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
        rest: step 0.03 ms, sync 0.0003 ms, commit 0.003 ms).
      - The frame log has `physics: { ticks, step, sync, bodies, moved }` and `commit`.
      - **Open:** the first instance of a scene rebuilds it; a sleeping body does not follow a parent of its object that
-       moves; a query sees a collider from the tick after it was added; reading every body's pose every frame at
+       moves; reading every body's pose every frame at
        10,000 bodies is 5 ms of script (the typed array itself is not handed to scripts yet); a body made anew
        (`physics` set again, the object re-parented or rescaled) starts at rest; where physics is authoritative, the
        node or the room, is step 9's.
@@ -3724,15 +3726,79 @@ benchmark level. The order follows the dependencies; a step that meets a further
        bodies), not on what a tick costs: N one-metre dynamic boxes made at one point take 62 ms for their first tick
        at 250, 0.46 s at 500, 2.8 s at 1,000 and 45 s at 2,000 (M5 Pro, one run). It belongs to the security review
        before the cloud opens.
+   - **World handlers** (2026-11-10, branch `world-handlers`; the user's decision of that day, with the runtime's
+     shape: three.js-style scripts, Rust as the main runtime, four channels across the boundary, layout C on the web.
+     docs/RUNTIME.md has the decisions, the layouts considered and the probe's measurements).
+     - **`on[type](world, ev)`** (`packages/gameplay/src/world.ts`): an event's handler on the node that owns the
+       scene and the physics world. It runs as the event arrives, before the next tick, and what it changes goes to
+       the engine through the scene binding when it returns: no commit, no frame script run for it. Before, a handler
+       could only write the JSON state (it may run in a room, where there is no scene), so a click that adds a body was
+       recorded by a handler and acted on by the frame script.
+     - With `handlers[type]` too: the world handler first, on the state before the event; then the transaction; then
+       what the world handler emitted (`world.emit`, a state transaction). `keys` map to either; a game of world
+       handlers needs no `handlers`. One that throws does not stop the world (its changes are synced, the error is in
+       the event's log). In a room they do not run: an event with a world handler only is an error there.
+     - **Only local authority.** Who owns the physics when a room is the authority is a product question, not
+       decided. What a world handler adds is not in the game state, so a restored state does not have it (step 9).
+     - **Queries see what the engine was told, with or without a tick since.** Rapier's broad phase is the last
+       step's: a collider added since was not found, and a body moved by a call was found where it had been. Two
+       events with no tick between them (a frame rate above the tick rate) are where an author meets it. Colliders
+       added, or moved by a call, since the last step are now tested one by one beside the broad phase's answer
+       (`Physics::fresh`; nothing of Rapier's state is touched; with none, a query is what it was). What the running
+       script itself changed reaches the engine when it returns, so a handler's own query does not see what it just
+       added: the one rule left, in RUNTIME.md.
+     - **Events without a frame script.** The node host's `frame` now runs every frame for a game with a frame
+       script, with world handlers, or whose scene has a physics world, so contacts and `outofworld` reach their
+       listeners every frame (before: only when a handler committed). A scene with none of the three pays nothing.
+     - **Hello world** is rewritten: `on.click` casts the ray and adds the box; no state, no handler, no frame
+       script. `tools/physics-hello.ts` is unchanged and passes. A click's script time, two runs each on one build:
+       0.33–0.62 ms before (0.30–0.54 ms in step 7's table), 0.16–0.37 ms now; the commit and the first frame after a
+       click as before (0.29–0.53 ms in place, 3.9–4.0 ms). The frame's script time with no frame script is 0.083 ms
+       mean (0.094 ms with the old frame script): the host's call, the events and an empty sync.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
    - Acceptance: a room replayed from its log gives bit-identical world data.
+   - **The log carries world-hash checkpoints** (required by the supervisor of this line, 2026-11-10): at a fixed
+     period the hash of the world data and of the physics world (`Physics::hash`) is logged, and a node replaying
+     compares. The ends are not assumed to agree bit for bit: a difference is found at the first checkpoint after it
+     and placed between two checkpoints.
+   - **World handlers' changes are commands.** What `on` handlers do to the scene (step 7) is not in the game state;
+     it all leaves the script through the scene binding's sync, and that is where it is logged and replayed from. No
+     other way out of a world handler may be added.
    - From step 7, for the physics' part of the log:
      - It rests on step 7's determinism, which holds for one build of the engine on the platforms checked; a new
        platform or a new Rapier runs `tools/physics-determinism.ts` first.
+     - **Precondition: the platform math calls upstream knows of, against what our worlds reach** (dimforge/rapier
+       issue #1054 and its reproductions, for Rapier 0.36.1 / parry 0.31.1 / glamx 0.3.1; read 2026-11-10). We build
+       `rapier3d` with `dim3`, `f32`, `alloc` and `enhanced-determinism`: no `parallel`, no soft bodies, no multibody
+       joints, and a game's calls make bodies, the five impulse joints (limits on hinges and sliders, velocity motors),
+       box / sphere / capsule / hull / static trimesh colliders, CCD, contact events and ray / overlap / sweep queries.
+
+       | upstream item | call | on our path | what holds it |
+       | --- | --- | --- | --- |
+       | inertia diagonalization ("suspicious", no repro upstream) | glamx `eigen3.rs` acos, cos | **yes**: every convex hull and body of several colliders | patched (third_party/glamx); 48 of 1,000 worlds differed before; cases 0 and 1 |
+       | angular limits (2D repro) | `joint_constraint_helper.rs` sin_cos of the limits' centre, also the 3D line | **yes**: a hinge with limits | limits handed over centred, so the centre is 0 and exact (`add_joint`); case 2, `revolute_limits_off_centre` |
+       | BVH optimizer ("suspicious") | parry `bvh_optimize.rs` log2 | **yes**: the broad phase, every world | tested: the same subtree count with the platform's log2 and libm's for every collider count up to 80,000, on each platform the tests run on |
+       | arc geometry | parry `vector_ext.rs` `angle()` acos | no: its callers are a trimesh's pseudo normals (only with the `ORIENTED` / `FIX_INTERNAL_EDGES` flags) and arc generation | tested: a trimesh is built with no flags (`a_trimesh_has_no_pseudo_normals`); case 3 has a trimesh |
+       | revolute angle | `RevoluteJoint::angle()` asin | no: neither Rapier's solver nor we call it | |
+       | angular motor (2D repro) | `generic_joint_constraint_builder.rs` sin of a motor's target angle | no: the multibody path, and a position motor; ours are impulse joints with velocity motors (the impulse path's position motor uses simba's asin) | a position motor is not offered to games; adding one re-opens this |
+       | contact coefficients | `CoefficientCombineRule::Max` on ±0 | no: we never set a combine rule (the default averages, which IEEE defines) | |
+       | singular vectors | glamx `svd2.rs` | no: 2D | |
+       | deformation damping, elasticity, cloth bending, tear smoothing, plasticity, elastic cap, disk / tube geometry, rest angle (9 repros) | soft bodies | no: no soft body is made | |
+       | inverse kinematics | multibody | no | |
+       | missed tear | `parallel` and soft bodies | no | |
+       | Delaunay refinement, equal-key sorts ("suspicious") | soft bodies, spade | no (spade is not in our build) | |
+
+       Also read in the sources and not in upstream's list: a convex hull's feature lookup takes the sine and cosine of
+       one constant (tested equal to libm's); `Aabb::intersects_spiral` and the interval arithmetic under it have no
+       caller in our build; the remaining method-syntax calls are in 2D or test code. Case 3 of
+       `physics_core::check` (200 worlds: CCD on a trimesh, a kinematic body, fixed and ball joints, the answers of
+       queries) is the evidence for the rest of the path: 200 of 200 equal natively and in wasm32, both ways. A new
+       feature of the physics offered to games (soft bodies, position motors, multibody joints, another combine rule,
+       trimesh flags) is checked against this table first.
      - The log needs the tick each call was made at, and the syncs: a frame makes 0 to 5 ticks from the wall clock's
        `dt`, and a force lasts "the ticks of its frame", so the calls alone do not replay.
      - A body that drives an object starts at `Scene::world_pose`, which is the renderer's own glam arithmetic (not
