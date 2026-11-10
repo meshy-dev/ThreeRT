@@ -62,7 +62,7 @@ export interface CameraDesc {
 }
 
 export type SkyDesc =
-  | { type: "atmosphere"; /** the sun light's object */ sun: number | null; groundAlbedo: Vec3; rayleighScale: number; mieScale: number; mieAnisotropy: number; skyLightIntensity: number; /** the sun moves (time of day) */ dynamic?: boolean; /** night-sky glow, nits */ glow?: Vec3; /** aerial perspective: density multiple (0 = off) */ aerial?: number }
+  | { type: "atmosphere"; /** the sun light's object */ sun: number | null; groundAlbedo: Vec3; rayleighScale: number; mieScale: number; mieAnisotropy: number; skyLightIntensity: number; /** the sun moves (time of day) */ dynamic?: boolean; /** night-sky glow, nits */ glow?: Vec3; /** its light dome: nits at the horizon (RGB), the elevation (radians) it falls to 1/e by */ horizonGlow?: [number, number, number, number]; /** aerial perspective: density multiple (0 = off) */ aerial?: number }
   | { type: "color"; color: Vec3; /** nits */ intensity: number; skyLightIntensity: number }
   | { type: "hdri"; texture: number; intensity: number; rotation: number; skyLightIntensity: number }
   | {
@@ -1394,6 +1394,7 @@ export class SceneBinding {
       const a: SkyDesc = { type: "atmosphere", sun: sun ?? null, groundAlbedo: vec3(env.groundAlbedo), rayleighScale: env.rayleighScale, mieScale: env.mieScale, mieAnisotropy: env.mieAnisotropy, skyLightIntensity: env.skyLightIntensity };
       if (env.dynamic) a.dynamic = true;
       if (env.glowIntensity > 0) a.glow = vec3(env.glow).map((c) => c * env.glowIntensity) as Vec3;
+      if (env.horizonGlowIntensity > 0) a.horizonGlow = [...vec3(env.horizonGlow).map((c) => c * env.horizonGlowIntensity), env.horizonGlowHeight] as [number, number, number, number];
       if (env.aerialPerspective > 0) a.aerial = env.aerialPerspective;
       return a;
     }

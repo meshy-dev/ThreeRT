@@ -3,9 +3,13 @@
 // lamps (street lights, Tokyo Tower's bulbs and beacons) switching on, tile by tile, as the sun goes down. The sky is
 // `dynamic`: the live view moves the sun's light and re-bakes the sky in place, with no scene rebuild.
 //
-// Room id: "<area>[-<from>-<to>-<seconds>][-r<radius>]", e.g. "shiba-15.5-17.75-7-r1600": the clock runs from 15:30 to
-// 17:45 (JST) over the first 7 s of scene time, and only the tiles within 1600 m of the area's origin are loaded (Shiba's
-// origin is Tokyo Tower). Defaults: shiba, 15.5 -> 17.75 over 7 s, every tile.
+// Room id: "<area>[-<from>-<to>-<seconds>][-r<radius>][-d<yyyymmdd>]", e.g. "shiba-15.5-17.75-7-r1600": the clock runs
+// from 15:30 to 17:45 (JST) over the first 7 s of scene time, and only the tiles within 1600 m of the area's origin are
+// loaded (Shiba's origin is Tokyo Tower). Defaults: shiba, 15.5 -> 17.75 over 7 s, every tile, 2026-11-09 (a new moon:
+// "d20261124" gives a full one, "d20261117" the first quarter).
+//
+// The moon is a second directional light, where it stands at that moment, as bright as its phase and the air between
+// make it (./moon.ts): ~0.2 lx full and high; nothing while it is down, before civil dusk, or under 1 mlx (near new).
 //
 // Data: 3D city model, Project PLATEAU (MLIT Japan); elevation and aerial photos, GSI; roads and places,
 // © OpenStreetMap contributors (ODbL). Compiled tiles are a derived database under the ODbL: not to be published.
@@ -14,6 +18,7 @@ import { defineGame, type FrameContext } from "@threert/gameplay";
 import { WINDOW_NODES, windowSwitchAt, type AreaIndex } from "./area.ts";
 import shiba from "./areas/shiba.ts";
 import shinjuku from "./areas/shinjuku.ts";
+import { airTransmittance, moonAt } from "./moon.ts";
 import { tokyoSky } from "./tokyo.game.ts";
 
 const AREAS: Record<string, AreaIndex> = { shiba, shinjuku };
@@ -62,24 +67,49 @@ export function switchAt(x: number, z: number): number {
   return 1 - 4 * (h - Math.floor(h));
 }
 
-type Room = { area: AreaIndex; from: number; to: number; seconds: number; radius: number };
+type Room = { area: AreaIndex; from: number; to: number; seconds: number; radius: number; date: [number, number, number] };
 export function parseRoom(room: string): Room {
   const parts = room.split("-");
   const area = AREAS[parts[0]] ?? shiba;
   const r = parts.find((p) => /^r\d+$/.test(p));
-  const nums = parts.slice(1).filter((p) => !/^r\d+$/.test(p)).map(Number);
+  const d = parts.find((p) => /^d\d{8}$/.test(p));
+  const nums = parts.slice(1).filter((p) => !/^[rd]\d+$/.test(p)).map(Number);
   const [from = 15.5, to = 17.75, seconds = 7] = nums.length === 3 && nums.every(Number.isFinite) ? nums : [];
-  return { area, from, to, seconds, radius: r ? Number(r.slice(1)) : Infinity };
+  const date: [number, number, number] = d ? [Number(d.slice(1, 5)), Number(d.slice(5, 7)), Number(d.slice(7, 9))] : [2026, 11, 9];
+  return { area, from, to, seconds, radius: r ? Number(r.slice(1)) : Infinity, date };
 }
+
+/** The room's date at `hour` JST: UTC milliseconds, and the day of the year (1 = January 1st) for `sunAt`. */
+function moment(date: [number, number, number], hour: number): { utc: number; day: number } {
+  const midnight = Date.UTC(date[0], date[1] - 1, date[2]);
+  return { utc: midnight + (hour - 9) * 3600000, day: Math.round((midnight - Date.UTC(date[0], 0, 1)) / 86400000) + 1 };
+}
+
+/** The sun's illuminance above the atmosphere (lux), the moon's measured against it. */
+const SUN_LUX = 100000;
+/** Moonlight's colour (linear): sunlight off the moon's regolith, redder than the sun (B-V 0.92 against 0.65). */
+const MOON_RGB: [number, number, number] = [1, 0.86, 0.66];
 
 let room: Room = parseRoom("shiba");
 /** What the clock switches (lamps, window groups): the object, the sun elevation it comes on at, and whether it is on. */
 let lamps: { name: string; at: number; on?: boolean }[] = [];
 
-function place(sun: DirectionalLight, camera: PerspectiveCamera, t: number, lampOf: (name: string) => { power: number } | undefined) {
-  const s = sunAt(hourAt(t, room.from, room.to, room.seconds));
+function place(sun: DirectionalLight, moon: DirectionalLight | undefined, camera: PerspectiveCamera, t: number, lampOf: (name: string) => { power: number } | undefined) {
+  const hour = hourAt(t, room.from, room.to, room.seconds), at = moment(room.date, hour);
+  const s = sunAt(hour, undefined, undefined, at.day);
   sun.setSunAngles(s.elevation, s.azimuth);
   camera.setManualExposure(evAt(s.elevation));
+  if (moon) {
+    // The moon's light through the air (Tokyo's haze, tokyoSky). Black (the kernel then skips it) while it is down,
+    // until the sun is 6 degrees down (civil dusk: the sky gives lux of its own), and below starlight's 1 mlx (a moon
+    // a few days from new).
+    const m = moonAt(at.utc), tr = airTransmittance(m.elevation, 10);
+    const rgb = MOON_RGB.map((c, k) => c * tr[k]), y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    const lux = SUN_LUX * m.toSun * y;
+    moon.setSunAngles(Math.max(m.elevation, 0), m.azimuth);
+    if (y > 0) moon.color.setRGB(rgb[0] / y, rgb[1] / y, rgb[2] / y);
+    moon.intensity = s.elevation < -6 && lux >= 1e-3 ? lux : 0;
+  }
   // only what switches this frame is looked up and touched: a few hundred objects a frame cost the frame script 15-20 ms
   for (const l of lamps) {
     const on = s.elevation < l.at;
@@ -100,8 +130,11 @@ export function sceneFor(id: string) {
   const sun = new DirectionalLight(0xfff4e8, 100000);
   sun.name = "sun";
   scene.add(sun);
-  // The night sky's glow over a lit city once the sun has set (the atmosphere alone goes black).
-  scene.environment = tokyoSky(sun, { dynamic: true, glow: 0x6b7fb3, glowIntensity: 0.03 });
+  const moon = new DirectionalLight(0xffffff, 0);
+  moon.name = "moon";
+  scene.add(moon);
+  // The night sky's glow over a lit city once the sun has set (the atmosphere alone goes black): NIGHT_GLOW.
+  scene.environment = tokyoSky(sun, { dynamic: true });
   // The land beyond the area (not compiled): a plain plane below the lowest terrain, out to 100 km.
   const land = new Mesh(new PlaneGeometry(200000, 200000), new MeshStandardMaterial({ color: 0x3b3a36, roughness: 0.95 }));
   land.rotation.x = -Math.PI / 2;
@@ -137,7 +170,7 @@ export function sceneFor(id: string) {
   camera.position.set(900, 260, -900);
   camera.lookAt(0, 180, 0);
   scene.add(camera);
-  place(sun, camera, 0, (n) => scene.getObjectByName(n));
+  place(sun, moon, camera, 0, (n) => scene.getObjectByName(n));
   return { scene, camera, options: { name: `tokyo-${area.area}-tod`, width: 1280, height: 720 } };
 }
 
@@ -149,6 +182,6 @@ export default defineGame<Record<string, never>>({
     return sceneFor(ctx.roomId || "shiba");
   },
   frame(f: FrameContext<Record<string, never>>) {
-    place(f.object("sun") as DirectionalLight, f.camera, f.time, (n) => f.object(n));
+    place(f.object("sun") as DirectionalLight, f.object("moon") as DirectionalLight | undefined, f.camera, f.time, (n) => f.object(n));
   },
 });
