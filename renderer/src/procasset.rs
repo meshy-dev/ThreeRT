@@ -165,7 +165,7 @@ pub fn load(uri: &str, assets: &Path) -> Result<Arc<ProcBlob>> {
     if let Some(b) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(&key)) {
         return Ok(b.clone());
     }
-    let bytes = std::fs::read(&path).map_err(|e| anyhow!("procedural geometry {uri}: {e}"))?;
+    let bytes = crate::files::read(&path).map_err(|e| anyhow!("procedural geometry {uri}: {e}"))?;
     let b = Arc::new(ProcBlob::parse(&bytes).map_err(|e| anyhow!("procedural geometry {uri}: {e}"))?);
     let mut c = CACHE.lock().unwrap();
     let c = c.get_or_insert_with(std::collections::HashMap::new);

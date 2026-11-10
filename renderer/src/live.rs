@@ -23,14 +23,19 @@
 
 use crate::world::World;
 use crate::{gpu, post, prepare, scene, tables};
+// (The headless runner below, native only, is what uses all of it.)
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use anyhow::{anyhow, Result};
 use glam::Vec3;
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+use std::time::Duration;
+use web_time::Instant;
 
 pub struct LiveOpts {
     pub width: u32,
@@ -3739,6 +3744,7 @@ impl LiveCore {
         self.frame = self.frame.wrapping_add(1);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The last frame's linear HDR radiance (nits, before exposure and post), RGB per output pixel. Waits for the GPU.
     pub fn read_hdr(&self) -> Result<Vec<f32>> {
         let d = &self.g.device;
@@ -3753,6 +3759,7 @@ impl LiveCore {
         Ok(px)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The last frame's signals apart, linear RGB f32 per output pixel: diffuse (the composed image less the rest, so
     /// with the sun's direct light, which view mode 6 leaves out), specular (the specular denoiser's output: mode 7) and
     /// emission (what the camera saw directly). Without motion blur or depth of field they add up to
@@ -3791,6 +3798,7 @@ impl LiveCore {
         Ok([dif, spe, emi])
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// The exposure the last frame was shown at, EV100 (auto exposure: its adapted value).
     pub fn read_ev100(&self) -> Result<f32> {
         if self.sc.exposure_settings.ae2[3] <= 0.5 {
@@ -3951,6 +3959,7 @@ pub fn next_spp(spp: u32, gpu_ms: f32, fps: u32) -> u32 {
     target.clamp(1, 16).min(spp + 1).max(spp.saturating_sub(2).max(1))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Headless runner: renders at a fixed frame rate and saves snapshots on request (tools/bench-live.ts).
 pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     let (w, h) = (opts.width, opts.height);
@@ -4127,6 +4136,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Sleeps until `t` without trusting the timer's precision: macOS gives a process that is not a foreground app timer
 /// leeway of half the interval (a 16 ms sleep returned after 24, measured from a terminal-launched viewport and from
 /// plain Python alike). Pacing sleeps of the headless viewport overslept by ~5 ms once the GPU fit the frame: Bistro's
@@ -4147,6 +4157,7 @@ fn sleep_until(t: Instant) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_bgra(path: &Path, px: &[u8], w: u32, h: u32) {
     let rgba: Vec<u8> = px.chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
     if let Err(e) = image::save_buffer(path, &rgba, w, h, image::ColorType::Rgba8) {
@@ -4154,6 +4165,7 @@ pub fn save_bgra(path: &Path, px: &[u8], w: u32, h: u32) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_stdin_reader(cmd_tx: mpsc::Sender<Cmd>) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -4167,6 +4179,7 @@ fn spawn_stdin_reader(cmd_tx: mpsc::Sender<Cmd>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_cmd(line: &str) -> Option<Cmd> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let vec = |k: &str| v[k].as_array().map(|a| Vec3::new(a[0].as_f64().unwrap_or(0.0) as f32, a[1].as_f64().unwrap_or(0.0) as f32, a[2].as_f64().unwrap_or(0.0) as f32));
@@ -4200,6 +4213,7 @@ pub fn parse_cmd(line: &str) -> Option<Cmd> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let num = |name: &str, d: u32| -> Result<u32> { flag(name).map(|v| v.parse().map_err(|_| anyhow!("{name} must be a number"))).transpose().map(|v| v.unwrap_or(d)) };
@@ -4216,6 +4230,7 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// `--scale`: a fraction (0.25 .. 1) or `auto` (dynamic resolution).
 pub fn parse_scale(v: Option<&str>, default: Option<f32>) -> Result<Option<f32>> {
     match v {

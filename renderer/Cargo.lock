@@ -2366,6 +2366,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "voxel-core",
+ "web-time",
  "wgpu",
  "winit",
 ]
