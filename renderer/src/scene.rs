@@ -1037,7 +1037,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     if instancing && std::env::var("THREERT_POSE_SHARE").map_or(true, |v| v != "0") {
         let mut count: HashMap<PoseKey, usize> = HashMap::new();
         for id in &order {
-            let Kind::Model { uri, nodes, animation: Some(a), .. } = &w.objects[id].kind else { continue };
+            let Kind::Model { uri, nodes, animation: Some(a), functions } = &w.objects[id].kind else { continue };
             if !w.shown(*id) || worlds[id].determinant() <= 0.0 {
                 continue;
             }
@@ -1046,7 +1046,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             if !glb.animated() || (nodes.is_none() && glb.rigid()) {
                 continue;
             }
-            let key: PoseKey = (uri.clone(), nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop);
+            // (Copies with material functions share a pose only with the same functions: their own materials.)
+            let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+            let key: PoseKey = (file, nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop);
             *count.entry(key.clone()).or_default() += 1;
             pose_key_of.insert(*id, key);
         }
