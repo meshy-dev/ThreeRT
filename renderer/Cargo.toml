@@ -8,7 +8,6 @@ description = "Native renderer for ThreeRT games: embedded scene runtime, GPU pa
 voxel-core = { path = "voxel-core" }
 physics-core = { path = "physics-core" }
 wgpu = "30"
-pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,13 +16,28 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 glam = { version = "0.30", features = ["bytemuck"] }
 rayon = "1.10"
 anyhow = "1"
-winit = "0.30"
 half = { version = "2", features = ["bytemuck"] }
+# Procedural geometry data: content hashes (asset files and inline data alike; src/procasset.rs).
+sha2 = "0.10"
+
+# The clock of a frame: std's natively (a re-export, nothing changes), the page's `performance.now()` in a browser,
+# where std's `Instant` panics.
+web-time = "1.1"
+
+# The native shell only: the window, the embedded script runtime, blocking on the GPU's futures, the denoiser. The
+# engine's library builds without them for wasm32 (docs/RUNTIME.md "The engine's library in a browser"): there the
+# page owns the window and the event loop, and scripts run in the browser's own engine.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+winit = "0.30"
 oidn = { version = "2.5", optional = true }
 # Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
 rquickjs = "0.12"
-# Procedural geometry data: content hashes (asset files and inline data alike; src/procasset.rs).
-sha2 = "0.10"
+
+# tools/physics-determinism.ts: the physics' recorded hashes in this crate's wasm32 graph.
+[[example]]
+name = "physics_bits"
+crate-type = ["cdylib"]
 
 [features]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).

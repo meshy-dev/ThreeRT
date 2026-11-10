@@ -424,7 +424,7 @@ mod bench {
         let path = std::env::var("THREERT_SKIN_GLB").unwrap();
         let m = super::Model::new(gltf::import(&path).unwrap()).unwrap();
         let clip = m.clip_names()[0].clone();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let mut n = 0;
         for k in 0..100 {
             let a = crate::desc::Animation { clip: clip.clone(), time: k as f32 * 0.016, r#loop: true };
@@ -433,7 +433,7 @@ mod bench {
         eprintln!("{n} triangles: {:.3} ms per pose", t0.elapsed().as_secs_f64() * 1000.0 / 100.0);
         let a = crate::desc::Animation { clip, time: 0.3, r#loop: true };
         let tris = m.triangles(glam::Mat4::IDENTITY, None, Some(&a)).unwrap();
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let mut x = 0.0;
         for _ in 0..100 {
             for t in &tris {

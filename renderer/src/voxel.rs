@@ -21,7 +21,7 @@ use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::rc::Rc;
-use std::time::Instant;
+use web_time::Instant;
 use voxel_core::{decode, greedy_mesh, gravity_for, layout, to_fp, Edit, Granularity, Level, MeshPart, Placement, Shape, VoxelGrid, FALL_FP, RADII};
 
 /// A loose part of fewer voxels is debris, not an object (`voxel_core::MIN_PIECE`).
@@ -1096,7 +1096,7 @@ mod tests {
             }
             let blob = crate::procasset::ProcBlob::parse(&std::fs::read(&p).unwrap()).unwrap();
             let (g, corner, size) = voxel_core::decode(&blob.data).unwrap();
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let reps = 5;
             let mut faces = 0;
             for _ in 0..reps {

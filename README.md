@@ -77,7 +77,8 @@ npm run test:render                       # the render test suite on the GPU
 - `npm run typecheck`, `npm test`;
 - the renderer's release build;
 - the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
-- the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,000 random worlds).
+- the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
+- the engine library's wasm32 build.
 
 The GPU checks (`test:render`, the perf smoke, the benches) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 

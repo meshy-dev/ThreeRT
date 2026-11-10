@@ -62,8 +62,11 @@ assert_eq!(check::script(600), check::EXPECTED);
 assert_eq!(check::cases(), check::EXPECTED_CASES);
 ```
 
-Every such crate needs that test (for a wasm crate: run in wasm32, as `tools/physics-determinism.ts` runs
-physics-core's). Without the patch the renderer's fails: `f66d349c1eae947a` against the recorded case hash.
+Every such **native** crate needs that test. Without the patch the renderer's fails: `f66d349c1eae947a` against the
+recorded case hash. A crate built for wasm32 only (the web build) comes out right with or without the patch, because
+there an f32's own `acos` / `cos` are Rust's port of libm, the same functions the patch calls by name (measured:
+`renderer/examples/physics_bits.rs` gives the recorded hashes either way). It still names the patch, so the two
+builds have one source, and `tools/physics-determinism.ts` checks its hashes against the recorded ones.
 
 Nothing else differs from the published crate (`.github`, `.gitignore` and cargo's packaging files are left out).
 To update: copy the new version here, apply the same change, run `node tools/physics-determinism.ts` and
