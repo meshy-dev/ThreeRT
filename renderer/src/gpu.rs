@@ -669,6 +669,16 @@ impl Kernel {
                 functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
             }
             functions.push_str("        default { return base; }\n    }\n}\n");
+            // The translucency pass's (translucent.wgsl): only the functions of its particles' materials. With every
+            // function in it, the Metal compiler failed on Tokyo's kernel once the city's ground had one (wetLayer).
+            let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+            functions.push_str("fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {\n    switch f {\n");
+            for k in used {
+                if let Some((id, _, _)) = scene.shaders.get(k as usize) {
+                    functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
+                }
+            }
+            functions.push_str("        default { return base; }\n    }\n}\n");
         }
         let mut volume_functions = String::new();
         if !scene.volume_fns.is_empty() {

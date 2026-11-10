@@ -926,6 +926,7 @@ fn from_ue_vec(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y); }
 
 // @material-functions-begin
 fn material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
 // @material-functions-end
 
 fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
