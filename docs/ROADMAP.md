@@ -337,6 +337,21 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          where the truth's own noise allows (stated per pose);
        - in place against a fresh load of the same state (`tools/bench-sun.ts`, extended to Tokyo): ΔE ≤ 0.1;
        - a clip posted in the session.
+     - Found by the acceptance runs (2026-11-11, branch `light-tree-switchable`): light sampling was set up at load for
+       the lights on at that moment.
+       - A room loaded by day (its lamps and windows off) left them out of the light tree. Switched on at dusk, they were
+         drawn from the flat CDF beyond it, by power share alone, with no importance at the shading point and no
+         distance cut: shadow rays across the city.
+       - The sky's light-sampling floor (1 % of the emitters' mean radiance) also came from the lights on at load. The
+         room kept light-sampling a night sky that a room loaded at night does not.
+       - Both now count a switched-off emitter at full power (`switchable_power`); the tree's node powers are refit to
+         the objects' powers now. The 12 catalog scenes and 6 game rooms with every emitter on at load render
+         byte-identical; Tokyo's 15:30 room does not.
+       - GPU p50 at the 0.5 floor, main → this branch, per second of path (alternated runs):
+         - the Shiba fly-past: 17–18 → 10–12 ms by day, 20–22 → 12–12.5 ms from dusk;
+         - the Yasukuni-dōri drive: 16–18.4 → 11–13.5 ms once the first lamps are on (16:09).
+       - In place against a fresh load (Shinjuku's east aerial, on main + ThreeRT#3 and #4): ΔE 0.49 → 0.08 at sunset,
+         0.15 → 0.01 at civil dusk, 0.34 → 0 at night (bit for bit).
      - Status, part 1 (2026-11-10, branch `aerial-perspective`): the land beyond the area hazed into the sky.
        - `SkyAtmosphere({ aerialPerspective })` in `packages/scene`: the atmosphere's own haze over the surfaces behind it, at
          a multiple of its density. It is off by default (0); the kernel's `F_AERIAL` is compiled out where no scene
