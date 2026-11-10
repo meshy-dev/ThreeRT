@@ -335,3 +335,160 @@ fn the_hash_takes_one_nan() {
     assert_eq!(hash_bits(f32::from_bits(0xffc0_0000)), hash_bits(f32::from_bits(0x7fc0_0000)));
     assert_eq!(hash_bits(-0.0), (-0.0f32).to_bits(), "only NaNs are made one");
 }
+
+/// A small generator of integers (the fuzz below is the same on every machine).
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn chance(&mut self, p: f64) -> bool {
+        self.unit() < p
+    }
+    /// A number: ordinary (within ±scale) at level 0; at higher levels a quarter of them are 0 or of any size up to
+    /// 1e±4, 1e±9, 1e±20, 1e±40 (past f32: infinite once cast).
+    fn num(&mut self, level: u32, scale: f64) -> f64 {
+        if level == 0 || self.chance(0.75) {
+            return (self.unit() * 2.0 - 1.0) * scale;
+        }
+        if self.chance(0.1) {
+            return 0.0;
+        }
+        let e = [4, 9, 20, 40][level as usize - 1];
+        let x = 10f64.powi(self.below(2 * e + 1) as i32 - e as i32) * (1.0 + self.unit());
+        if self.chance(0.5) {
+            x
+        } else {
+            -x
+        }
+    }
+    fn v3(&mut self, level: u32, scale: f64) -> Value {
+        json!([self.num(level, scale), self.num(level, scale), self.num(level, scale)])
+    }
+    fn quat(&mut self, level: u32) -> Value {
+        json!([self.num(level, 1.0), self.num(level, 1.0), self.num(level, 1.0), self.num(level, 1.0)])
+    }
+    fn shape(&mut self, level: u32) -> Value {
+        let size = |r: &mut Rng| r.num(level, 1.0).abs() + if level == 0 { 0.05 } else { 0.0 };
+        match self.below(6) {
+            0 | 1 => json!({ "type": "box", "halfExtents": [size(self), size(self), size(self)] }),
+            2 => json!({ "type": "sphere", "radius": size(self) }),
+            3 => json!({ "type": "capsule", "halfHeight": if self.chance(0.2) { 0.0 } else { size(self) }, "radius": size(self) }),
+            4 => {
+                let flat = self.chance(0.15);
+                let points: Vec<f64> = (0..4 + self.below(12)).flat_map(|_| [self.num(level, 1.0), if flat { 0.0 } else { self.num(level, 1.0) }, self.num(level, 1.0)]).collect();
+                json!({ "type": "convexHull", "points": points })
+            }
+            _ => {
+                let n = 3 + self.below(8);
+                let vertices: Vec<f64> = (0..n * 3).map(|_| self.num(level, 3.0)).collect();
+                let indices: Vec<u64> = (0..(1 + self.below(8)) * 3).map(|_| self.below(n + 1)).collect();
+                json!({ "type": "trimesh", "vertices": vertices, "indices": indices })
+            }
+        }
+    }
+}
+
+/// Random calls with ordinary and with absurd numbers (a small version of the review's fuzz, whose 210,000 runs found
+/// the panics above: 611 of 120,000 at its two mildest levels before the fixes, none after): no call and no tick
+/// panics, the pose table stays finite, and the world's hash can always be taken.
+#[test]
+fn random_calls_never_panic() {
+    for level in 0..=4u32 {
+        for seed in 1..=300u64 {
+            let mut r = Rng((seed + level as u64 * 1_000_000).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let (mut b, mut s) = world();
+            if r.chance(0.8) {
+                ok(&mut b, &mut s, "collider", json!({ "id": 999, "position": [0, -0.5, 0], "shape": { "type": "box", "halfExtents": [50, 0.5, 50] }, "events": true }));
+            }
+            for _ in 0..100 {
+                let id = 1 + r.below(10);
+                let (op, a): (&str, Value) = match r.below(26) {
+                    0..=4 => {
+                        let kind = ["dynamic", "dynamic", "dynamic", "fixed", "kinematic"][r.below(5) as usize];
+                        let mut a = json!({ "id": id, "kind": kind, "ccd": r.chance(0.3), "canSleep": r.chance(0.7), "position": r.v3(level, 3.0) });
+                        if r.chance(0.4) {
+                            a["rotation"] = r.quat(level);
+                            a["linvel"] = r.v3(level, 10.0);
+                            a["angvel"] = r.v3(level, 10.0);
+                        }
+                        if r.chance(0.2) {
+                            a["linearDamping"] = json!(r.num(level, 2.0));
+                            a["gravityScale"] = json!(r.num(level, 2.0));
+                        }
+                        if r.chance(0.5) {
+                            a["object"] = json!(1 + r.below(12));
+                            a["slot"] = json!(r.below(14));
+                        }
+                        ("body", a)
+                    }
+                    5..=9 => {
+                        let mut a = json!({ "id": id + 100 * r.below(3), "shape": r.shape(level), "sensor": r.chance(0.15), "events": r.chance(0.5) });
+                        if r.chance(0.85) {
+                            a["body"] = json!(1 + r.below(10));
+                        }
+                        if r.chance(0.3) {
+                            a["position"] = r.v3(level, 1.0);
+                            a["rotation"] = r.quat(level);
+                            a[if r.chance(0.5) { "mass" } else { "density" }] = json!(r.num(level, 100.0));
+                            a["friction"] = json!(r.num(level, 2.0));
+                        }
+                        ("collider", a)
+                    }
+                    10..=12 => {
+                        let ty = ["fixed", "revolute", "prismatic", "spherical", "rope"][r.below(5) as usize];
+                        let mut a = json!({ "id": id, "a": 1 + r.below(10), "b": 1 + r.below(10), "type": ty, "length": r.num(level, 2.0).abs(), "anchor1": r.v3(level, 1.0), "anchor2": r.v3(level, 1.0) });
+                        if r.chance(0.5) {
+                            a["axis"] = r.v3(level, 1.0);
+                            a["limits"] = json!([r.num(level, 2.0), r.num(level, 2.0)]);
+                            a["motor"] = json!({ "velocity": r.num(level, 5.0), "damping": r.num(level, 1e4), "maxForce": r.num(level, 1e5) });
+                        }
+                        ("joint", a)
+                    }
+                    13 => ("remove", [json!({ "body": id }), json!({ "collider": id }), json!({ "joint": id })][r.below(3) as usize].clone()),
+                    14 => ("impulse", if r.chance(0.5) { json!({ "body": id, "impulse": r.v3(level, 500.0), "torque": r.v3(level, 50.0) }) } else { json!({ "body": id, "impulse": r.v3(level, 500.0), "point": r.v3(level, 3.0) }) }),
+                    15 => ("force", json!({ "body": id, "force": r.v3(level, 5000.0), "torque": r.v3(level, 500.0) })),
+                    16 => ("velocity", json!({ "body": id, "linvel": r.v3(level, 20.0), "angvel": r.v3(level, 20.0) })),
+                    17 => ("pose", json!({ "body": id, "position": r.v3(level, 3.0), "rotation": r.quat(level) })),
+                    18 => ("target", json!({ "body": id, "position": r.v3(level, 3.0), "rotation": r.quat(level) })),
+                    19 => {
+                        // The scene moves or removes an object; its body follows.
+                        let o = 1 + r.below(12) as u32;
+                        if r.chance(0.2) {
+                            s.at.remove(&o);
+                            b.objects_removed(&[o]);
+                        } else {
+                            s.at.insert(o, ([r.num(level, 3.0) as f32, r.num(level, 3.0) as f32, r.num(level, 3.0) as f32], [0.0, 0.0, 0.0, 1.0]));
+                        }
+                        ("follow", json!({ "body": id }))
+                    }
+                    20 => ("ray", json!({ "origin": r.v3(level, 5.0), "direction": r.v3(level, 1.0), "max": r.num(level, 100.0).abs(), "all": r.chance(0.5), "skip": id })),
+                    21 => ("overlap", json!({ "shape": r.shape(level), "position": r.v3(level, 3.0), "rotation": r.quat(level) })),
+                    22 => ("sweep", json!({ "shape": r.shape(level), "position": r.v3(level, 3.0), "rotation": r.quat(level), "direction": r.v3(level, 1.0), "max": r.num(level, 100.0).abs() })),
+                    23 => ("gravity", json!({ "gravity": r.v3(level, 20.0) })),
+                    24 => ([("contacts", Value::Null), ("faults", json!({})), ("hash", json!({}))][r.below(3) as usize]).clone(),
+                    _ => {
+                        for _ in 0..1 + r.below(5) {
+                            b.tick();
+                        }
+                        b.sync(&mut s);
+                        ("state", json!({ "body": id }))
+                    }
+                };
+                // (A call may be refused, with its reason; it may not panic.)
+                let _ = b.call(&mut s, op, &a);
+                assert!(b.poses().iter().all(|x| x.is_finite()), "level {level}, seed {seed}: a pose is not finite after {op} {a}");
+            }
+        }
+    }
+}

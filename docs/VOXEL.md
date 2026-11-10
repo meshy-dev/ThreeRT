@@ -469,8 +469,12 @@ Where it runs (the user, 2026-11-10):
     50 ms QuickJS budget cannot hold it: the engine owns the world and steps it at 1 / 60 s; a body moves its object's
     instance without the script; the script sets `physics` on objects, reads their poses when it wants them, and asks
     rays and shapes of the world.
-  - physics-core and its bridge to scene objects build for wasm32, with Rapier's `enhanced-determinism`: the same
-    bits natively and in the browser (1–5 % slower natively).
+  - physics-core and its bridge to scene objects build for wasm32. The same bits natively and in the browser on what
+    is checked (a script, 1,000 random worlds, in physics-core's build and the renderer's), with Rapier's
+    `enhanced-determinism` (1–5 % slower natively), a patched glamx and hinge limits handed over centred: Rapier's
+    crates otherwise take some math functions from the platform (ROADMAP § 6 step 7 has what is and is not shown).
+  - Game scripts cannot crash it: every number a call carries is bounded, and a body whose state goes non-finite is
+    taken out of the world and reported (RUNTIME.md, Physics).
   - The voxel collision shape is the engine's: physics-core's `CustomShape` is where it plugs in (step 8).
   - The prototype is Rapier / Parry's `Voxels` shape (dynamic voxel bodies, `setVoxel` edits, since 2025). Whether to
     keep it or write our own (TGS substepping, grid contacts) is decided by its measured cost on the benchmark.

@@ -266,6 +266,7 @@ name = "physics-core"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "num-traits",
  "rapier3d",
  "serde_json",
 ]

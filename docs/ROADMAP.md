@@ -3595,7 +3595,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
    - **Done** (branch `physics`). A contract of ThreeRT for every kind of game; the voxel shape and debris bodies are
      step 8.
      - **The world is the engine's.** Rapier 0.36 behind `renderer/physics-core` (its own crate: no GPU, file system,
-       clock or thread; CI builds it for `wasm32-unknown-unknown` and runs its 19 tests): dynamic, fixed and kinematic
+       clock or thread; CI builds it for `wasm32-unknown-unknown` and runs its 34 tests): dynamic, fixed and kinematic
        bodies; box, sphere, capsule, convex hull and static triangle-mesh colliders; fixed, hinge, slider, ball and
        rope joints with limits and motors; contact events; ray (first hit or all), overlap and sweep queries; a shape
        trait for the engine's own colliders (`CustomShape`: step 8's voxel shape). It is stepped at a fixed 1 / 60 s,
@@ -3626,11 +3626,53 @@ benchmark level. The order follows the dependencies; a step that meets a further
        impulses at a point, what a call refuses, limits. Layer A: `physics/box-rest` (5 nits where the box rests; also
        live), `physics/stack` (the strip above a three-box column: 0), `physics/hinge` (5 nits at the limit),
        `physics/instance-live` (a body's box against a still one: 1.005).
-     - **Determinism:** Rapier needs its `enhanced-determinism` feature for the same bits natively and in wasm32:
-       without it the test script's hash is `b0b7de88021ed337` natively and `113d50eb06a47636` in wasm32, with it
-       `113d50eb06a47636` both (`tools/physics-determinism.ts`, CI). It costs 1–3 % on the script (0.029 ms a tick)
-       and 3–5 % on a pile of 1,000 boxes (0.35 → 0.36 ms a tick), natively. physics-core has it on. Step 9's replay can
-       rest on it for one build of the engine; across Rapier versions it is not promised.
+     - **What a script can do to it** (2026-11-10, after a review of physics-core: game scripts are untrusted and call
+       `__engine.physics` directly, so the checks are in the world, not the binding; a panic in a tick is a crashed
+       renderer natively and a trap in wasm32).
+       - Every number of a body, collider, joint, call and query has a bound (`physics_core::limits`; the table is in
+         RUNTIME.md), and what is outside is refused with its reason. Rotations and axes of any finite size are
+         directions (1e20 squared overflowed into a zero quaternion).
+       - A trimesh is for fixed bodies and static colliders (an open one gave a dynamic body 60 mg with its centre of
+         mass far away); a joint joins two different bodies; a capsule under 1 mm long is its sphere; a hull with no
+         volume is refused.
+       - After a tick, a body whose pose or velocity went non-finite (Rapier disables it, and a joint on it would
+         panic a later tick), one whose collider did, and one past 1,000 km are taken out of the world with their
+         colliders and joints. The call `faults` reports each once, `state` answers `{ removed: why }`, and the
+         binding leaves the object without a body and throws once from the sync, naming it.
+       - Memory: contacts nobody takes are held to 8,192 (the oldest go, counted); a trimesh to 1 M triangles, the
+         world's shapes to 4 M points and triangles; queries take no trimesh.
+       - Also: objects are placed at the body's own pose (not the call's numbers); a frame owing exactly 5 ticks keeps
+         its remainder (12.5 fps made 562 ticks in 10 s); a body asleep when its object is removed goes with it.
+       - The review's fuzz (random calls, ordinary and absurd numbers; a small version is in the crate's tests):
+         611 panics in 120,000 runs at its two mildest levels before, none in 210,000 runs at all five after.
+     - **Determinism:** the same bits natively and in wasm32, in physics-core's own build and in the renderer's, on
+       what is checked: the script (`113d50eb06a47636`), 1,000 random worlds (tumbling convex hulls, bodies of
+       several colliders, hinges and sliders with limits and motors, a rope; `check::case`, folded hash
+       `9e16a6771fa8f317`), each compared (`tools/physics-determinism.ts`, CI), and 32,000 runs of the review's
+       random calls. It takes three things:
+       - Rapier's `enhanced-determinism` (on in physics-core): without it none of the 1,000 worlds agree (the
+         script: `dfdc13fb0be5cd0b` natively). It costs 1–3 % on the script (0.029 ms a tick) and 3–5 % on a pile of
+         1,000 boxes (0.35 → 0.36 ms a tick), natively.
+       - **A patched glamx** (`renderer/third_party/glamx`, PATCH.md). Rapier 0.36, parry 0.31 and glamx 0.3 call
+         sin, cos and acos with method syntax, which on an f32 is the type's own method, the platform's libm, in
+         every crate graph with `std` in it (any dependency that turns on `num-traits/std`: the renderer has several),
+         whatever `enhanced-determinism` or their own `std` feature say. The eigen decomposition behind the mass
+         properties of convex hulls and of bodies of several colliders is the one that showed: 48 of the 1,000
+         worlds ended in other bits natively (macOS arm64, whose acos differs from libm's on 8.8 % of inputs, its sin
+         and cos on 0.012 %) than in wasm32. The first version of the check passed because its one hull happens to
+         agree. Rapier is also built without its `std` (it needs `alloc` only; no cost measured: 0.0285 against 0.0287
+         ms a tick), which is enough for physics-core's own build and not for the renderer's: the check now runs
+         both ways (`std-in-graph`), and the renderer has a test of its own.
+       - **Hinge limits centred.** Rapier takes the sine and cosine of a quarter of (min + max) the same way; the
+         world hands it limits about 0, [-h, h] (of 0 they are exact), and turns the centre into the joint's frame
+         with libm.
+       - The other such calls on a 3D world's path are tested to change nothing on the platform the tests run on:
+         the broad phase's BVH optimizer takes a log2 that depends on the collider count alone (every count checked),
+         a convex hull's feature lookup the sine and cosine of one constant.
+       - What this does not give: a proof for platforms the tests have not run on (they run on macOS arm64 and
+         Linux x86-64), or for another version of Rapier, parry or glamx (the calls were found by reading their
+         sources: an update repeats that, and the recorded hashes show a change). The complete fix is theirs: those
+         calls made through simba. Step 9's replay rests on this for one build of the engine.
      - **Hello world** (`games/physics/hello.game.ts`, catalog `physics-hello`; `threert-render play` to click in a
        window, `tools/physics-hello.ts` for the same game with scripted clicks): a click's ray is cast into the world
        (`Raycaster.intersectPhysics`); on something fixed (a triangle-mesh ground and rock, a wall, a ramp) a box with
@@ -3660,12 +3702,24 @@ benchmark level. The order follows the dependencies; a step that meets a further
        10,000 bodies is 5 ms of script (the typed array itself is not handed to scripts yet); a body made anew
        (`physics` set again, the object re-parented or rescaled) starts at rest; where physics is authoritative, the
        node or the room, is step 9's.
+     - **Open, before game code from outside runs here:** a tick has no time bound. The limits are on counts (20,000
+       bodies), not on what a tick costs: N one-metre dynamic boxes made at one point take 62 ms for their first tick
+       at 250, 0.46 s at 500, 2.8 s at 1,000 and 45 s at 2,000 (M5 Pro, one run). It belongs to the security review
+       before the cloud opens.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
    - Acceptance: a room replayed from its log gives bit-identical world data.
+   - From step 7, for the physics' part of the log:
+     - It rests on step 7's determinism, which holds for one build of the engine on the platforms checked; a new
+       platform or a new Rapier runs `tools/physics-determinism.ts` first.
+     - The log needs the tick each call was made at, and the syncs: a frame makes 0 to 5 ticks from the wall clock's
+       `dt`, and a force lasts "the ticks of its frame", so the calls alone do not replay.
+     - A body that drives an object starts at `Scene::world_pose`, which is the renderer's own glam arithmetic (not
+       under `enhanced-determinism`): the log should carry the pose the body was made at, as it should carry a voxel
+       command's fixed-point shape (step 6).
 10. **[engine] The game API and effects.**
     - `packages/voxel`: voxel edits, bodies, joints, lights, scene queries and effects.
     - Fire and smoke on the existing volume and particle paths.

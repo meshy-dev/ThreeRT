@@ -12,6 +12,10 @@ default = ["enhanced-determinism"]
 # in wasm32. On by default: without it the two differ (docs/ROADMAP.md § 6 step 7, with what it costs; build with
 # --no-default-features to compare).
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
+# For the determinism check only (tools/physics-determinism.ts): puts `std` into the crate graph the way a larger
+# program's other dependencies do (the renderer's turn on `num-traits/std`), which is what brought the platform's math
+# functions into Rapier's crates (third_party/glamx/PATCH.md). The bits must be the same with it.
+std-in-graph = ["dep:num-traits"]
 
 [dependencies]
 # Without Rapier's `std` (`alloc` is all it needs here), on purpose: with `std`, Rapier, parry and glamx call f32's own
@@ -25,6 +29,7 @@ rapier3d = { version = "0.36.1", default-features = false, features = ["dim3", "
 serde_json = "1"
 # The math functions the world itself calls (a hinge's limits, world.rs), the same bits on every platform.
 libm = "0.2"
+num-traits = { version = "0.2", features = ["std"], optional = true }
 
 # The determinism check (physics_core::check): the same script natively and as a wasm32 module (compared by
 # tools/physics-determinism.ts).

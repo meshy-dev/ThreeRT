@@ -104,8 +104,32 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
 - Joints are objects: `FixedJoint`, `HingeJoint`, `SliderJoint`, `BallJoint`, `RopeJoint` (`anchorA` / `anchorB` in
   each object's space, `axis` in the first object's, `limits`, `motor`, `length`). They hold while they and both their
   objects are in the scene, and join the objects as they are turned when made (limits count from there).
-- A `physics` no body can be made from (a flat geometry's hull, a size of 0) throws from the sync once, names the
-  object, and leaves it without a body until `physics` is set again.
+- A `physics` no body can be made from (a flat geometry's hull, a size of 0, a number out of its bounds) throws from
+  the sync once, names the object, and leaves it without a body until `physics` is set again.
+- Game code is untrusted, so the engine checks every number (in `physics-core`, whoever calls it) and refuses a call
+  with one outside its bounds, with the reason:
+
+  | what | bound |
+  | --- | --- |
+  | positions (bodies, static colliders, joint anchors, impulse points, query origins, trimesh vertices) | within ±100 km |
+  | sizes (half extents, radii) | 1 mm to 10 km; a capsule under 1 mm long is its sphere |
+  | a collider's offset on its body, a convex hull's points | within ±10 km; a hull holds at least 1 mm³ |
+  | velocities set by a call | 10 km/s, 1,000 rad/s (Rapier itself caps what a body reaches at 400 m/s) |
+  | impulses, forces | 10⁶ N s (N m s), 10⁸ N (N m) |
+  | a collider's mass, density | 0, or 1 g to 10,000 t; 0, or 1 g/m³ to 100 t/m³ |
+  | gravity scale, gravity | ±100, ±1,000 m/s² a component |
+  | damping, friction, restitution | 0 to 1,000, 0 to 1,000, 0 to 1 |
+  | joint limits, a rope's length | within ±100 km (rad for a hinge), min ≤ max; 0 to 100 km |
+  | a motor | ±10 km/s (rad/s), damping 0 to 10⁹, a force from 0 |
+  | rotations, axes, directions | finite and not zero (any size: they are normalized) |
+  | a query's reach | cut to 1,000 km |
+  | counts | 20,000 bodies, 40,000 colliders and joints; a trimesh 1 M triangles, a hull 4,096 points, all shapes 4 M points and triangles; 256 hits a ray; 8,192 contacts held between frames (the oldest go) |
+
+  A triangle mesh is for fixed bodies only; a joint joins two different bodies; queries take a box, sphere or capsule.
+- What the simulation itself drives out of bounds is taken out: after a tick, a body whose pose or velocity is no
+  longer finite, or that is past 1,000 km from the origin, leaves the world with its colliders and joints. Its object
+  stays where it was, without a body until `physics` is set again, and the next sync throws once, naming it and why.
+- A tick has no time bound yet: thousands of bodies made at one point take seconds (ROADMAP § 6 step 7, Open).
 - Queries: `Raycaster.intersectPhysics({ exclude })` (every body the ray passes through, nearest first, with the
   surface's normal) and `Shapecaster` (`overlap()`, `sweep(direction)`) for a box, sphere or capsule. They see the
   world as of its last tick.
@@ -115,7 +139,7 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   read of a frame fetches one typed array of every body's pose, each object then takes its seven numbers on its own
   first read. Numbers: ROADMAP § 6 step 7.
 - The engine call under it is `__engine.physics(op, args)` (JSON; `renderer/physics-core/src/bridge.rs` lists the
-  calls) and `__engine.physicsPoses()`.
+  calls, `faults` and `state`'s `{ removed }` among them) and `__engine.physicsPoses()`.
 
 ## Correctness
 

@@ -17,7 +17,7 @@ Mirror: [`doodlewind/ThreeRT`](https://github.com/doodlewind/ThreeRT).
 
 | Dir | What |
 |---|---|
-| `renderer/` | The engine: Rust + wgpu path tracer, live viewport, denoiser, post, embedded QuickJS (`threert-render`); `renderer/voxel-core` (also builds for wasm32) |
+| `renderer/` | The engine: Rust + wgpu path tracer, live viewport, denoiser, post, embedded QuickJS (`threert-render`); `renderer/voxel-core` and `renderer/physics-core` (Rapier; both also build for wasm32); `renderer/third_party/glamx` (a patched dependency of Rapier's, see its PATCH.md) |
 | `packages/scene` | The Three-like scene DSL (`@threert/scene`) |
 | `packages/gameplay` | Games: state, transactional handlers, frame scripts (`@threert/gameplay`) |
 | `packages/voxel` | The voxel engine's TypeScript side (`@threert/voxel`) |
@@ -76,7 +76,8 @@ npm run test:render                       # the render test suite on the GPU
 `.github/workflows/ci.yml` runs on every push and PR:
 - `npm run typecheck`, `npm test`;
 - the renderer's release build;
-- the voxel core's wasm32 build and tests, and native / wasm32 edit determinism.
+- the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
+- the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,000 random worlds).
 
 The GPU checks (`test:render`, the perf smoke, the benches) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 
