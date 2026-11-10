@@ -1,0 +1,24 @@
+[package]
+name = "threert-playground"
+version = "0.1.0"
+edition = "2024"
+description = "ThreeRT Playground: native macOS editor client (PocketJS UI + the threert real-time renderer, one wgpu device)"
+publish = false
+
+[dependencies]
+threert-render = { path = "../../renderer" }
+pocket-web-render30 = { path = "../pocket-web-render30" }
+pocket-ui-surface = { path = "../vendor/pocketjs/engine/crates/pocket-ui-surface" }
+pocket-drivers = { path = "../vendor/pocketjs/engine/drivers" }
+pocket-mod = { path = "../vendor/pocketjs/engine/crates/pocket-mod" }
+pocket-spec = { path = "../vendor/pocketjs/engine/spec" }
+pocketjs-core = { path = "../vendor/pocketjs/engine/core" }
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+anyhow = "1"
+serde_json = "1"
+glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+log = "0.4"

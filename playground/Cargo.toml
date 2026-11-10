@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["host", "pocket-web-render30"]
+# PocketJS crates (path deps) belong to their own workspace.
+exclude = ["vendor"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2

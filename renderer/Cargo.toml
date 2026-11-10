@@ -1,0 +1,37 @@
+[package]
+name = "threert-render"
+version = "0.1.0"
+edition = "2021"
+description = "Native renderer for ThreeRT games: embedded scene runtime, GPU path tracer + UE5-matched post chain"
+
+[dependencies]
+voxel-core = { path = "voxel-core" }
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gltf = { version = "1.4", features = ["KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_materials_ior", "KHR_materials_transmission", "extensions"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "exr"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+rayon = "1.10"
+anyhow = "1"
+winit = "0.30"
+half = { version = "2", features = ["bytemuck"] }
+oidn = { version = "2.5", optional = true }
+# Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
+rquickjs = "0.12"
+# Procedural geometry data: content hashes (asset files and inline data alike; src/procasset.rs).
+sha2 = "0.10"
+
+[features]
+# Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
+oidn = ["dep:oidn"]
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+
+[profile.dev]
+opt-level = 2

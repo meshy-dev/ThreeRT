@@ -1,0 +1,87 @@
+{
+  "name": "preview",
+  "description": "Fast interactive preview: low sample count, same post chain.",
+  "intent": {
+    "gi": {
+      "method": "full",
+      "maxBounces": 3
+    },
+    "reflections": {
+      "method": "raytraced",
+      "maxRoughness": 0.6
+    },
+    "shadows": {
+      "method": "raytraced",
+      "soft": true
+    },
+    "antiAliasing": "supersampled"
+  },
+  "post": {
+    "tonemapper": {
+      "type": "ue-filmic",
+      "slope": 0.88,
+      "toe": 0.55,
+      "shoulder": 0.26,
+      "blackClip": 0.0,
+      "whiteClip": 0.04,
+      "toneCurveAmount": 1.0
+    },
+    "colorGrading": {
+      "expandGamut": 1.0,
+      "blueCorrection": 0.6,
+      "whiteTemp": 6500
+    },
+    "bloom": {
+      "intensity": 0.675,
+      "threshold": -1.0,
+      "sizeScale": 4.0,
+      "sizes": [
+        0.3,
+        1.0,
+        2.0,
+        10.0,
+        30.0,
+        64.0
+      ],
+      "tints": [
+        0.3465,
+        0.138,
+        0.1176,
+        0.066,
+        0.066,
+        0.061
+      ]
+    },
+    "vignette": 0.4,
+    "lensFlare": 0.0,
+    "filmGrain": 0.0,
+    "motionBlur": { "amount": 0.0 },
+    "autoExposure": {
+      "lowPercent": 10,
+      "highPercent": 90,
+      "histogramLogMin": -10,
+      "histogramLogMax": 20
+    }
+  },
+  "native": {
+    "spp": 32,
+    "maxBounces": 3,
+    "denoise": true,
+    "clampIndirect": 16.0,
+    "russianRouletteDepth": 2,
+    "energyCompensation": 0.0,
+    "_energyCompensationNote": "0 = UE 5.8 DefaultLit parity (measured vs UE path tracer); 1 = energy-conserving GGX (passes white furnace)"
+  },
+  "ue": {
+    "method": "lumen",
+    "scalability": 3,
+    "mrq": {
+      "spatialSamples": 1,
+      "temporalSamples": 1,
+      "warmupFrames": 16,
+      "antiAliasing": "TSR"
+    },
+    "postProcessVolume": {},
+    "cvars": {}
+  }
+}

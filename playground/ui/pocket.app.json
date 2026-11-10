@@ -1,0 +1,19 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "ai.meshy.threert.playground",
+  "title": "ThreeRT Playground",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": ["text.glyphs.baked", "input.buttons"],
+      "enhances": ["input.pointer", "display.viewport.live"]
+    }
+  },
+  "app": {
+    "entry": "main.tsx",
+    "output": "main",
+    "framework": "solid",
+    "theme": "./theme.json"
+  }
+}

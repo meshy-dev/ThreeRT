@@ -1,0 +1,15 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.cf-access-token
+.lody/
+dist/
+
+out/
+target/
+/assets
+playground/vendor/
+
+# Claude Code harness state (skills under .claude/skills are committed)
+.claude/*.lock

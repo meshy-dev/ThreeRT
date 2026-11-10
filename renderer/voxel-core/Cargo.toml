@@ -1,0 +1,17 @@
+[package]
+name = "voxel-core"
+version = "0.1.0"
+edition = "2021"
+description = "The voxel engine's objects: sparse bricks, their layout as procedural geometry data, carving, greedy meshing and splitting. No GPU, file system or threads: it builds for wasm32 (players run it in the browser)."
+license = "MIT"
+publish = false
+
+[dependencies]
+
+# The determinism check (voxel_core::check): the same script natively and as a wasm32 module (CI compares their hashes).
+[[example]]
+name = "determinism"
+
+[[example]]
+name = "determinism_wasm"
+crate-type = ["cdylib"]

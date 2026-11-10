@@ -1,0 +1,124 @@
+{
+  "name": "cinematic",
+  "description": "Offline-quality stills: full GI, ray traced reflections/shadows, UE5 filmic post. Default for agent screenshots.",
+  "intent": {
+    "gi": {
+      "method": "full",
+      "maxBounces": 8
+    },
+    "reflections": {
+      "method": "raytraced",
+      "maxRoughness": 1.0
+    },
+    "shadows": {
+      "method": "raytraced",
+      "soft": true
+    },
+    "antiAliasing": "supersampled"
+  },
+  "post": {
+    "tonemapper": {
+      "type": "ue-filmic",
+      "slope": 0.88,
+      "toe": 0.55,
+      "shoulder": 0.26,
+      "blackClip": 0.0,
+      "whiteClip": 0.04,
+      "toneCurveAmount": 1.0
+    },
+    "colorGrading": {
+      "expandGamut": 1.0,
+      "blueCorrection": 0.6,
+      "whiteTemp": 6500
+    },
+    "bloom": {
+      "intensity": 0.675,
+      "threshold": -1.0,
+      "sizeScale": 4.0,
+      "sizes": [
+        0.3,
+        1.0,
+        2.0,
+        10.0,
+        30.0,
+        64.0
+      ],
+      "tints": [
+        0.3465,
+        0.138,
+        0.1176,
+        0.066,
+        0.066,
+        0.061
+      ]
+    },
+    "vignette": 0.4,
+    "lensFlare": 0.0,
+    "filmGrain": 0.0,
+    "motionBlur": { "amount": 0.0 },
+    "autoExposure": {
+      "lowPercent": 10,
+      "highPercent": 90,
+      "histogramLogMin": -10,
+      "histogramLogMax": 20
+    }
+  },
+  "native": {
+    "spp": 256,
+    "maxBounces": 8,
+    "denoise": true,
+    "clampIndirect": 64.0,
+    "russianRouletteDepth": 3,
+    "energyCompensation": 0.0,
+    "_energyCompensationNote": "0 = UE 5.8 DefaultLit parity (measured vs UE path tracer); 1 = energy-conserving GGX (passes white furnace)"
+  },
+  "ue": {
+    "method": "lumen",
+    "scalability": 4,
+    "mrq": {
+      "spatialSamples": 1,
+      "temporalSamples": 16,
+      "warmupFrames": 64,
+      "antiAliasing": "TSR"
+    },
+    "postProcessVolume": {
+      "lumen_final_gather_quality": 4.0,
+      "lumen_scene_lighting_quality": 4.0,
+      "lumen_scene_detail": 4.0,
+      "lumen_reflection_quality": 4.0,
+      "lumen_max_reflection_bounces": 4,
+      "lumen_ray_lighting_mode": "HIT_LIGHTING_FOR_REFLECTIONS",
+      "lumen_max_trace_distance": 20000.0
+    },
+    "cvars": {
+      "r.Lumen.HardwareRayTracing": 1,
+      "r.Lumen.Reflections.MaxRoughnessToTrace": 1.0,
+      "r.Lumen.Reflections.HierarchicalScreenTraces.MaxIterations": 64,
+      "r.Lumen.ScreenProbeGather.DownsampleFactor": 8,
+      "r.Lumen.TranslucencyReflections.FrontLayer.Enable": 1,
+      "r.Shadow.Virtual.SMRT.RayCountDirectional": 16,
+      "r.Shadow.Virtual.SMRT.SamplesPerRayDirectional": 16,
+      "r.Shadow.Virtual.SMRT.RayCountLocal": 16,
+      "r.Shadow.Virtual.SMRT.SamplesPerRayLocal": 16,
+      "r.Shadow.Virtual.ResolutionLodBiasDirectional": -1.5,
+      "r.Shadow.Virtual.ResolutionLodBiasLocal": -1.0,
+      "r.ContactShadows": 1,
+      "r.TSR.History.ScreenPercentage": 200,
+      "r.ScreenPercentage": 100,
+      "r.MotionBlurQuality": 0,
+      "r.DepthOfFieldQuality": 4,
+      "r.SkyAtmosphere.FastSkyLUT": 0,
+      "r.SkyAtmosphere.AerialPerspectiveLUT.FastApplyOnOpaque": 0,
+      "r.SkyAtmosphere.SampleCountMax": 64,
+      "r.SkyLight.RealTimeReflectionCapture.TimeSlice": 0,
+      "r.Streaming.FullyLoadUsedTextures": 1,
+      "r.TextureStreaming": 0
+    },
+    "pathTracer": {
+      "spp": 1024,
+      "maxBounces": 8,
+      "denoise": true,
+      "maxPathIntensity": 64
+    }
+  }
+}

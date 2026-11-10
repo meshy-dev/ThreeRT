@@ -1,0 +1,30 @@
+{
+  "name": "threert",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p packages/scene && tsc -p packages/gameplay && tsc -p packages/voxel && tsc -p games && tsc -p tools && tsc -p tests",
+    "test": "node --test packages/*/test/*.test.ts tools/*/test/*.test.ts",
+    "scenes": "node tools/build-scenes.ts",
+    "test:render": "node tools/test-render.ts",
+    "test:layer-b": "node tools/test-layer-b.ts",
+    "runtime": "node tools/build-runtime.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.187.0",
+    "earcut": "^3.2.4",
+    "esbuild": "^0.28.2",
+    "pngjs": "^7.0.0",
+    "polygon-clipping": "^0.15.7",
+    "sharp": "^0.35.5",
+    "three": "^0.187.0",
+    "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "esbuild": true
+  }
+}
