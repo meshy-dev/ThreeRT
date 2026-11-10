@@ -98,6 +98,7 @@ export interface EnvironmentDesc {
   fog?: FogDesc;
   wetness?: number;
   rain?: number;
+  cloudCover?: number;
 }
 
 export interface MaterialDesc {
@@ -1372,6 +1373,7 @@ export class SceneBinding {
     }
     if (scene.wetness > 0) e.wetness = scene.wetness;
     if (scene.rain > 0) e.rain = scene.rain;
+    if (scene.cloudCover > 0) e.cloudCover = Math.min(1, scene.cloudCover);
     return e;
   }
 

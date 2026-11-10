@@ -269,7 +269,7 @@ const SKY_LIGHT_CUBE: f32 = 128.0;
 /// sky fades to black across one texel row of the side faces at the horizon (0.9 deg at a face's centre, 0.63 at its
 /// edges). UE's path tracer shows that fade below every horizon (Khronos layer B: the band beyond a 2 km ground plane).
 pub fn bake_atmosphere(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32) -> SkyBake {
-    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Glow::default())
+    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Glow::default(), 0.0)
 }
 
 /// The atmosphere's transmittance and multiple-scattering tables: they depend on the atmosphere alone, so a sky whose
@@ -310,19 +310,44 @@ impl Glow {
     }
 }
 
-/// `bake_atmosphere` with tables built once (`SkyTables`), plus the night sky's `glow` above the horizon.
-pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow) -> SkyBake {
-    bake_atmosphere_with(a, &t.0, sun_dir, sun_lux, altitude_m, width, height, glow)
-}
-
-/// The sun's illuminance at the ground (lux, RGB) for a sun of `sun_lux` above the atmosphere, as the bake gives it:
-/// what a directional sun light carries when it moves without a new bake.
-pub fn sun_illuminance(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3) -> Vec3 {
-    sun_lux * a.sun_transmittance_ue(sun_dir)
-}
-
+/// `bake_atmosphere` with tables built once (`SkyTables`), plus the night sky's `glow` above the horizon and a cloud
+/// `cover` (0..1, `overcast`).
 #[allow(clippy::too_many_arguments)]
-fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow) -> SkyBake {
+pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32) -> SkyBake {
+    bake_atmosphere_with(a, &t.0, sun_dir, sun_lux, altitude_m, width, height, glow, cover)
+}
+
+/// The sun's illuminance at the ground (lux, RGB) for a sun of `sun_lux` above the atmosphere under a cloud `cover`,
+/// as the bake gives it: what a directional sun light carries when it moves without a new bake.
+pub fn sun_illuminance(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3, cover: f32) -> Vec3 {
+    sun_lux * a.sun_transmittance_ue(sun_dir) * cloud_transmittance(cover)
+}
+
+/// The sun's direct light through a cloud deck of `cover` (0..1): the share of time it is not behind a cloud, as a mean
+/// (a thick deck passes no direct light).
+pub fn cloud_transmittance(cover: f32) -> f32 {
+    1.0 - cover.clamp(0.0, 1.0)
+}
+
+/// An overcast deck's diffuse transmittance: the ground's illuminance under full cover against what the clear sky and
+/// sun give it (stratus / nimbostratus pass 0.1-0.4 of it; a mid value).
+pub const OVERCAST_TRANSMITTANCE: f32 = 0.3;
+
+/// A city's light dome off a cloud base: clouds scatter the upward light back, overcast city skies read several times
+/// as bright as clear ones at night (Kyba et al. 2011, Berlin: up to ~10x at the zenith; a low value).
+pub const OVERCAST_GLOW: f32 = 3.0;
+
+/// The CIE standard overcast sky (ISO 15469 type 1): radiance at elevation `e` (radians) for a horizontal illuminance
+/// `e_h`: L(e) = L_z (1 + 2 sin e) / 3, with E_h = 7 pi L_z / 9.
+pub fn cie_overcast(e_h: Vec3, e: f32) -> Vec3 {
+    e_h * (9.0 / (7.0 * PI)) * ((1.0 + 2.0 * e.max(0.0).sin()) / 3.0)
+}
+
+/// With a cloud `cover`: the atmosphere's sky (and glow) blended with an overcast dome (`cie_overcast`) whose
+/// illuminance is OVERCAST_TRANSMITTANCE of what the clear sky and sun give the ground (their luminance, white), the
+/// glow at OVERCAST_GLOW x.
+#[allow(clippy::too_many_arguments)]
+fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32) -> SkyBake {
     // Planet frame: Z up. Map Y-up world -> planet frame (x, z, y).
     let to_planet = |d: Vec3| Vec3::new(d.x, d.z, d.y);
     let sun_p = to_planet(sun_dir).normalize();
@@ -339,15 +364,45 @@ fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec
             let side = d.x.abs().max(d.z.abs()).max(1e-6);
             let r = d.y / side * (0.5 * SKY_LIGHT_CUBE);
             if r <= -0.5 {
-                return [0.0, 0.0, 0.0, 1.0];
+                return [0.0, 0.0, 0.0, 0.0];
             }
             let (dir, k) = if r < 0.5 { (Vec3::new(d.x, side / SKY_LIGHT_CUBE, d.z).normalize(), r + 0.5) } else { (d, 1.0) };
             let (l, _) = luts.integrate(a, pos, to_planet(dir), sun_p, 40, false, Some(()), false);
             let l = (l * sun_lux + glow.at(dir.y.clamp(-1.0, 1.0).asin())) * k;
-            [l.x, l.y, l.z, 1.0]
+            // (w: the horizon fade's factor until the overcast blend below; 1 in the bake.)
+            [l.x, l.y, l.z, k]
         })
         .collect();
-    SkyBake { width, height, texels, sun_illuminance: sun_illuminance(a, sun_dir, sun_lux) }
+    let mut texels = texels;
+    let cover = cover.clamp(0.0, 1.0);
+    if cover > 0.0 {
+        // What the clear sky and the sun give a horizontal surface (texel solid angles of the equirectangular map).
+        let (dt, dp) = (PI / height as f32, 2.0 * PI / width as f32);
+        let e_sky: Vec3 = texels.iter().enumerate().map(|(i, t)| {
+            let theta = ((i as u32 / width) as f32 + 0.5) * dt;
+            Vec3::new(t[0], t[1], t[2]) * (theta.cos().max(0.0) * theta.sin() * dt * dp)
+        }).sum();
+        let e_sun = sun_illuminance(a, sun_dir, sun_lux, 0.0) * sun_dir.normalize().y.max(0.0);
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+        // (The glow's share is the night's, scaled apart.)
+        let e_glow: Vec3 = if glow.is_zero() { Vec3::ZERO } else {
+            (0..height).map(|y| {
+                let theta = (y as f32 + 0.5) * dt;
+                glow.at((PI / 2.0 - theta).max(-PI / 2.0)) * (theta.cos().max(0.0) * theta.sin() * dt * dp * width as f32)
+            }).sum()
+        };
+        let e_oc = Vec3::splat(lum(e_sky - e_glow + e_sun).max(0.0) * OVERCAST_TRANSMITTANCE);
+        for (i, t) in texels.iter_mut().enumerate() {
+            let e = PI / 2.0 - ((i as u32 / width) as f32 + 0.5) * dt;
+            let oc = (cie_overcast(e_oc, e) + glow.at(e.max(-PI / 2.0)) * OVERCAST_GLOW) * t[3];
+            let l = Vec3::new(t[0], t[1], t[2]).lerp(oc, cover);
+            *t = [l.x, l.y, l.z, t[3]];
+        }
+    }
+    for t in &mut texels {
+        t[3] = 1.0;
+    }
+    SkyBake { width, height, texels, sun_illuminance: sun_illuminance(a, sun_dir, sun_lux, cover) }
 }
 
 /// Analytic dome for night / overcast scenes (UE session: gradient + light-pollution glow + clouds as a sky light).
@@ -475,4 +530,51 @@ pub fn bake_gradient(g: &Gradient, width: u32, height: u32) -> SkyBake {
         })
         .collect();
     SkyBake { width, height, texels, sun_illuminance: Vec3::ZERO }
+}
+
+#[cfg(test)]
+mod overcast_tests {
+    use super::*;
+
+    #[test]
+    fn full_cover_is_the_cie_overcast_sky_lit_by_the_clear_day() {
+        let a = Atmosphere::earth(1.0, 10.0, 0.8, Vec3::splat(0.3));
+        let t = SkyTables::new(&a);
+        let (sun, lux) = (Vec3::new(0.3, 0.5, -0.8).normalize(), Vec3::splat(100_000.0));
+        let (w, h) = (256u32, 128u32);
+        let clear = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.0);
+        let oc = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 1.0);
+        let lum = |v: [f32; 4]| 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+        // Horizontal illuminance of a bake (+ its sun).
+        let e_h = |b: &SkyBake| -> f32 {
+            let (dt, dp) = (PI / h as f32, 2.0 * PI / w as f32);
+            let sky: f32 = b.texels.iter().enumerate().map(|(i, t)| {
+                let th = ((i as u32 / w) as f32 + 0.5) * dt;
+                lum(*t) * th.cos().max(0.0) * th.sin() * dt * dp
+            }).sum();
+            let s = b.sun_illuminance * sun.y;
+            sky + 0.2126 * s.x + 0.7152 * s.y + 0.0722 * s.z
+        };
+        // No direct sun; the ground gets OVERCAST_TRANSMITTANCE of the clear day's light.
+        assert_eq!(oc.sun_illuminance, Vec3::ZERO);
+        let ratio = e_h(&oc) / e_h(&clear);
+        assert!((ratio - OVERCAST_TRANSMITTANCE).abs() < 0.01, "{ratio}");
+        // The dome's shape: (1 + 2 sin e) / 3, zenith over 10 degrees up, the same in every azimuth; white.
+        let row = |e_deg: f32| (((90.0 - e_deg) / 180.0 * h as f32) as u32).min(h - 1);
+        let at = |r: u32, x: u32| oc.texels[(r * w + x) as usize];
+        let e_of = |r: u32| PI / 2.0 - (r as f32 + 0.5) * PI / h as f32;
+        let (z, ten) = (row(89.0), row(10.0));
+        let expect = (1.0 + 2.0 * e_of(z).sin()) / (1.0 + 2.0 * e_of(ten).sin());
+        for x in [0, w / 3, 2 * w / 3] {
+            let got = lum(at(z, x)) / lum(at(ten, x));
+            assert!((got / expect - 1.0).abs() < 1e-3, "{got} {expect}");
+            let c = at(ten, x);
+            assert!((c[0] - c[2]).abs() < 1e-3 * c[1], "{c:?}");
+        }
+        // Half cover: halfway in every texel, the sun at half.
+        let half = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.5);
+        assert!((half.sun_illuminance - clear.sun_illuminance * 0.5).length() < 1e-3 * clear.sun_illuminance.length());
+        let k = (ten * w + 7) as usize;
+        assert!((lum(half.texels[k]) - 0.5 * (lum(clear.texels[k]) + lum(oc.texels[k]))).abs() < 1e-3 * lum(clear.texels[k]));
+    }
 }
