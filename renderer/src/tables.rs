@@ -90,6 +90,13 @@ impl Tables {
             return Ok(None);
         }
         let mut d = Dirty::default();
+        // (The live view has added them before its geometry edits; here for the callers without one.)
+        if !c.new_materials.is_empty() {
+            if !self.add_materials(w, &c.new_materials) {
+                return Ok(None);
+            }
+            d.materials = true;
+        }
         for id in &c.powers {
             let o = w.objects.get(id).ok_or_else(|| anyhow!("unknown object {id}"))?;
             if let Some(&oi) = self.retained.objects.get(id) {
@@ -163,6 +170,32 @@ impl Tables {
 
     /// Whether a material may emit without a rebuild: it already has emitter entries, or (`emit_in_place`) its
     /// triangles can get them in place, queued in `started_emitting` (ROADMAP § 6 step 3).
+    /// Materials created since the build (`Changes::new_materials`: no texture, no function), as entries after the
+    /// scene's. False, and nothing added, if one of them cannot be: it emits, is glass or layered, or a cutout (the
+    /// build sorts triangles by those; the caller rebuilds).
+    pub fn add_materials(&mut self, w: &World, ids: &std::collections::BTreeSet<u32>) -> bool {
+        let mut fresh = vec![];
+        for id in ids {
+            if self.retained.materials.contains_key(id) {
+                continue;
+            }
+            let Some(m) = w.materials.get(id) else { return false };
+            let Ok(gm) = scene::build_material(*id, m, &w.textures, &self.retained.shaders, &mut |_, _| Err(anyhow!("a texture"))) else { return false };
+            if scene::material_class(&gm) != 0 {
+                return false;
+            }
+            fresh.push((*id, gm));
+        }
+        for (id, gm) in fresh {
+            let mi = self.materials.len() as u32;
+            self.retained.materials.insert(id, mi);
+            self.materials.push(gm);
+            // (What is drawn with it are instances' triangles: it cannot start emitting in place, `can_emit`.)
+            self.fixed_mats.insert(mi);
+        }
+        true
+    }
+
     fn can_emit(&mut self, mi: u32, m: &GpuMaterial) -> bool {
         let lum = 0.2126 * m.emissive[0] + 0.7152 * m.emissive[1] + 0.0722 * m.emissive[2];
         if lum <= 0.0 || self.emissive.contains(&mi) {

@@ -41,6 +41,9 @@ export class Vector3 {
   subVectors(a: Vector3, b: Vector3): this {
     return this.set(a.x - b.x, a.y - b.y, a.z - b.z);
   }
+  addScaledVector(v: Vector3, s: number): this {
+    return this.set(this.x + v.x * s, this.y + v.y * s, this.z + v.z * s);
+  }
   multiplyScalar(s: number): this {
     return this.set(this.x * s, this.y * s, this.z * s);
   }

@@ -1401,8 +1401,23 @@ impl LiveCore {
         if !changes.any() {
             return Ok(false);
         }
-        // Objects added in place are not in the move tables (their records follow the scene's): a move rebuilds.
-        if !changes.structural && changes.moved.iter().any(|id| self.sc.edit.placed.contains_key(id)) {
+        // New materials without textures: entries after the scene's, before the edits that place objects drawn with
+        // them (and the GPU's table with them, grown if it is full).
+        if !changes.new_materials.is_empty() && !changes.structural {
+            if self.sc.tables.add_materials(world, &changes.new_materials) {
+                self.upload_materials();
+                // (A clear coat, an unlit material: the kernel variant with it, compiled once.)
+                let (e, (tex, func, groups)) = (&self.sc.tables, self.sc.fixed_features);
+                self.sc.up.kernel.features = gpu::features_of(&e.materials, e.fog.as_ref(), tex, func, groups, self.sc.instance_features) | if e.aerial[0] > 0.0 { gpu::F_AERIAL } else { 0 };
+            } else {
+                self.fallback = Some("a new material that cannot be added in place (it emits, is glass or a cutout)".into());
+                self.fallbacks += 1;
+                changes.structural = true;
+            }
+        }
+        // Objects added in place are not in the move tables (their records follow the scene's): a move rebuilds. Not a
+        // mesh a body drives: it is an instance, and its record moves as the build's do (`placed_movable`).
+        if !changes.structural && changes.moved.iter().any(|id| self.sc.edit.placed.contains_key(id) && self.placed_movable(world, *id).is_none()) {
             self.fallback = Some("an object added in place moved".into());
             self.fallbacks += 1;
             changes.structural = true;
@@ -1466,8 +1481,8 @@ impl LiveCore {
                             // Movable models placed as instances move their transform (with a shared pose too); the rest
                             // re-transform triangles.
                             let r = &self.sc.tables.retained;
-                            match r.instance_of.get(&k) {
-                                Some(&i) if !changes.poses.contains(&k) || r.pose_member.contains_key(&k) => placed.push((k, i)),
+                            match r.instance_of.get(&k).copied().or_else(|| self.placed_movable(world, k)) {
+                                Some(i) if !changes.poses.contains(&k) || r.pose_member.contains_key(&k) => placed.push((k, i)),
                                 _ => {
                                     dynamic.insert(k);
                                 }
@@ -1581,10 +1596,10 @@ impl LiveCore {
             }
             return Ok(true);
         };
-        let (q, up, e) = (&self.g.queue, &self.sc.up, &mut self.sc.tables);
         if d.materials {
-            q.write_buffer(&up.materials, 0, bytemuck::cast_slice(&e.materials));
+            self.upload_materials();
         }
+        let (q, up, e) = (&self.g.queue, &self.sc.up, &mut self.sc.tables);
         if d.lights && !e.lights.is_empty() {
             q.write_buffer(&up.lights, 0, bytemuck::cast_slice(&crate::lights_with_groups(&e.lights)));
         }
@@ -1704,16 +1719,29 @@ impl LiveCore {
         let Some(accel) = self.sc.up.accel.as_mut() else { return false };
         let size = std::mem::size_of::<scene::GpuInstance>() as u64;
         let q = &self.g.queue;
+        // (Many records, a rigid body world's thousands a frame, are written as the one range that holds them: the
+        // records between are as the GPU has them.)
+        let merged = placed.len() > 32;
+        let (mut lo, mut hi) = (usize::MAX, 0usize);
         // (Instances the last update moved and this one does not catch up in `commit`.)
         for &(node, i) in placed {
             let w = world.world_matrix(node);
-            let inst = &mut self.sc.instances[i as usize];
+            // (A mesh an edit added in place keeps its instance with the edit's, `placed_movable`; its record and TLAS
+            // instance are where the build's are.)
+            let inst = match self.sc.edit.added.get_mut(&node) {
+                Some(Picked::Mesh(inst)) => inst,
+                _ => &mut self.sc.instances[i as usize],
+            };
             let old = self.sc.gpu_instances[i as usize];
             inst.world = w;
             let mut r = inst.gpu(old.info[0], old.info[3]);
             r.p = old.m;
             self.sc.gpu_instances[i as usize] = r;
-            q.write_buffer(&self.sc.up.instances, i as u64 * size, bytemuck::bytes_of(&r));
+            if merged {
+                (lo, hi) = (lo.min(i as usize), hi.max(i as usize));
+            } else {
+                q.write_buffer(&self.sc.up.instances, i as u64 * size, bytemuck::bytes_of(&r));
+            }
             let pivot = w.transform_point3(glam::Vec3::ZERO);
             let st = self.sc.tables.stride;
             let o = &mut self.sc.tables.objects[inst.object as usize * st];
@@ -1728,6 +1756,9 @@ impl LiveCore {
             }
             self.inst_moving.push(i);
         }
+        if merged {
+            q.write_buffer(&self.sc.up.instances, lo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[lo..=hi]));
+        }
         q.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         if build_tlas {
             let mut e = self.g.device.create_command_encoder(&Default::default());
@@ -1736,6 +1767,26 @@ impl LiveCore {
         }
         self.inst_moved = true;
         true
+    }
+
+    /// The material table to the GPU: written in place, or, with more materials than its buffer holds (materials added
+    /// while the game runs), into a buffer twice the size, the scene's bind group made over it.
+    fn upload_materials(&mut self) {
+        let bytes: &[u8] = bytemuck::cast_slice(&self.sc.tables.materials);
+        if bytes.len() as u64 > self.sc.up.materials.size() {
+            let usage = self.sc.up.materials.usage();
+            self.sc.up.materials = self.g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("materials"), size: (bytes.len() as u64 * 2).next_multiple_of(16), usage, mapped_at_creation: false });
+            self.g.rebind_scene(&mut self.sc.up);
+        }
+        self.g.queue.write_buffer(&self.sc.up.materials, 0, bytes);
+    }
+
+    /// The record of a mesh an edit added in place that moves as an instance does (`move_instances`): one a rigid body
+    /// drives, placed by its node's transform (an emitter mesh's triangles are in world space: it cannot).
+    fn placed_movable(&self, world: &World, id: u32) -> Option<u32> {
+        let &(_, record) = self.sc.edit.placed.get(&id)?;
+        let mesh = matches!(self.sc.edit.added.get(&id), Some(Picked::Mesh(_)));
+        (mesh && world.objects.get(&id).is_some_and(|o| o.driven) && !self.sc.tables.retained.emitter_mesh.contains_key(&id)).then_some(record as u32)
     }
 
     /// `update_instanced` with its fallback (the reason in the frame log, the scene rebuilt) and its CPU time; whether it
@@ -2496,6 +2547,7 @@ impl LiveCore {
                 drop_mesh_user(k, edit, tables, meshes);
             }
             tables.retained.own_instance.remove(id);
+            tables.retained.instance_of.remove(id);
             if let Some(k) = tables.retained.objects.remove(id).filter(|&k| k as usize >= edit.base.2) {
                 edit.objects.give(k as usize, 1);
             }
@@ -2653,6 +2705,10 @@ impl LiveCore {
                     let class = if emits { u32::from(gm.uv2[3] > 0.0) } else { scene::material_class(&gm) };
                     if class == 2 || (emits && capacity.is_some()) {
                         return Err("a glass or function material (an instanced mesh: emitting too)".into());
+                    }
+                    // (An emitter mesh's triangles are in world space: one a body moves is flattened by the build.)
+                    if emits && o.driven {
+                        return Err("an emitting mesh a rigid body drives (the build flattens it)".into());
                     }
                     if class == 1 && features & gpu::F_MASKED == 0 {
                         return Err("the scene's first cutout (kernel feature)".into());
@@ -3807,6 +3863,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
                 e.copy_buffer_to_buffer(out, 0, &staging, 0, (w * h * 4) as u64);
             }
         });
+        game.click_shown();
         let (hist, fno) = (core.history_len as u32, core.frame);
         syncs.retain(|(id, from)| {
             if fno > *from {
@@ -3850,7 +3907,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
             use std::io::Write;
             let line = serde_json::json!({
                 "t": start.elapsed().as_secs_f64() * 1e3, "interval": last_frame.elapsed().as_secs_f64() * 1e3, "start": t_frame.duration_since(prev_start).as_secs_f64() * 1e3,
-                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "scale": core.render_scale, "history": core.history_len,
+                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len,
             });
             writeln!(l, "{line}")?;
         }
@@ -4020,6 +4077,61 @@ mod instanced_tests {
         assert_eq!(picked(&core), None);
         core.rebuild(&w).unwrap();
         assert_eq!(picked(&core), None, "a rebuild agrees");
+    }
+
+    /// A mesh a rigid body drives, added while the game runs with a material the scene did not have (ROADMAP § 6 step
+    /// 7): placed in place, and its body's moves are its instance's transform, with no rebuild; a rebuild places it the
+    /// same and it goes on moving in place. (Skipped without a GPU with hardware RT.)
+    #[test]
+    fn driven_meshes_added_in_place_move_as_instances() {
+        let g = match gpu::Gpu::new() {
+            Ok(g) if g.hwrt => g,
+            other => return eprintln!("skipped: {}", other.map_or_else(|e| e.to_string(), |_| "no hardware RT".into())),
+        };
+        let mut w = World::default();
+        let mat = |r: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [r, r, r], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap();
+        w.set_material(1, mat(0.5));
+        let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: vec![0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+        w.set_geometry(2, quad(1.0)).unwrap();
+        w.set_geometry(3, quad(0.5)).unwrap();
+        let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: true, materials: vec![] };
+        w.set_object(10, "a".into(), None, mesh(2, 1), true, false).unwrap();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(4, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
+        let mut core = LiveCore::new(g, &w, Path::new("."), &crate::default_presets_dir(), 64, 36).unwrap();
+        w.take_changes();
+        let picked = |core: &LiveCore, u: f32| core.pick(u, 0.5).map(|p| p.0);
+        // The box and its material arrive together, as scene code adds them; its body is told of it right after.
+        let materials = core.sc.tables.materials.len();
+        w.set_material(5, mat(0.9));
+        w.set_object(11, "b".into(), None, mesh(3, 5), true, false).unwrap();
+        w.set_driven(11).unwrap();
+        w.set_transform(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        assert!(!core.commit(&mut w).unwrap(), "added in place, its material too");
+        assert_eq!(core.sc.tables.materials.len(), materials + 1);
+        assert_eq!(picked(&core, 0.5).as_deref(), Some("b"));
+        // Its body moves it 3 m to the side (u 0.95 of the image, 4 m from the camera): no rebuild, its record moved
+        // with the rows it had the frame before.
+        let record = core.sc.edit.placed[&11].1;
+        assert!(w.place_driven(11, Vec3::new(3.0, 0.0, 1.0), glam::Quat::IDENTITY));
+        assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
+        assert_eq!(core.fallbacks, 0);
+        assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95).as_deref()), (Some("a"), Some("b")));
+        let r = core.sc.gpu_instances[record];
+        assert_eq!((r.m[0][3], r.p[0][3]), (3.0, 0.0), "moved: last frame's rows kept");
+        // A rebuild places it as an instance too, and it moves on in place.
+        core.rebuild(&w).unwrap();
+        assert!(core.sc.tables.retained.instance_of.contains_key(&11) && core.sc.edit.placed.is_empty());
+        assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95).as_deref()), (Some("a"), Some("b")));
+        assert!(w.place_driven(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY));
+        assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
+        assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95)), (Some("b"), None));
+        // Removed in place.
+        w.remove(11);
+        assert!(!core.commit(&mut w).unwrap(), "removed in place");
+        assert_eq!(picked(&core, 0.5).as_deref(), Some("a"));
     }
 
     /// An instanced mesh's moved instances keep their previous-frame rows (motion vectors) through the commit that moves

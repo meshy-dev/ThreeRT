@@ -1,0 +1,49 @@
+[package]
+name = "physics-core"
+version = "0.1.0"
+edition = "2021"
+description = "ThreeRT's physics: rigid bodies, colliders, joints, contact events and scene queries on Rapier, stepped at a fixed tick. No GPU, file system or threads: it builds for wasm32 (players run the game in the browser)."
+license = "MIT"
+publish = false
+
+[features]
+default = ["enhanced-determinism"]
+# Rapier's cross-platform determinism (software math functions instead of the platform's): the same bits natively and
+# in wasm32. On by default: without it the two differ (docs/ROADMAP.md § 6 step 7, with what it costs; build with
+# --no-default-features to compare).
+enhanced-determinism = ["rapier3d/enhanced-determinism"]
+# For the determinism check only (tools/physics-determinism.ts): puts `std` into the crate graph the way a larger
+# program's other dependencies do (the renderer's turn on `num-traits/std`), which is what brought the platform's math
+# functions into Rapier's crates (third_party/glamx/PATCH.md). The bits must be the same with it.
+std-in-graph = ["dep:num-traits"]
+
+[dependencies]
+# Without Rapier's `std` (`alloc` is all it needs here), on purpose: with `std`, Rapier, parry and glamx call f32's own
+# sin / cos / acos / asin, the platform's, whatever `enhanced-determinism` says (it only reroutes the calls made
+# through simba and glam). Without it those calls go through simba, so through libm on every platform. The first to
+# differ was the eigen decomposition behind the mass properties of convex hulls and of bodies of several colliders
+# (glamx's eigen3.rs): 48 of 1,000 random worlds ended in other bits natively than in wasm32. `check::cases` and
+# tools/physics-determinism.ts hold it; a per-tick cost was not measurable.
+rapier3d = { version = "0.36.1", default-features = false, features = ["dim3", "f32", "alloc"] }
+# The bridge's calls carry JSON.
+serde_json = "1"
+# The math functions the world itself calls (a hinge's limits, world.rs), the same bits on every platform.
+libm = "0.2"
+num-traits = { version = "0.2", features = ["std"], optional = true }
+
+# The determinism check (physics_core::check): the same script natively and as a wasm32 module (compared by
+# tools/physics-determinism.ts).
+[[example]]
+name = "determinism"
+
+[[example]]
+name = "determinism_wasm"
+crate-type = ["cdylib"]
+
+# glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
+# not depend on the platform's math functions (third_party/glamx/PATCH.md).
+# NOTE: this table only works when physics-core itself is what cargo builds. A crate that depends on physics-core must
+# repeat it in its own manifest (the renderer's does), or it silently gets crates.io's glamx; and it needs a test that
+# steps `check::script` and `check::cases` to the recorded hashes, which is what shows a patch left out (PATCH.md).
+[patch.crates-io]
+glamx = { path = "../third_party/glamx" }

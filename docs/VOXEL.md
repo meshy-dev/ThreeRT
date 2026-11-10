@@ -39,9 +39,9 @@ What the research below sorts into each layer:
   - Incremental structure: adding or removing objects and replacing geometry without the full rebuild
     (`World::set_geometry` sets `structural`, `renderer/src/world.rs:242`; `LiveCore::rebuild` reloads the whole scene,
     `renderer/src/live.rs:1548`; ~0.7 s on Kabukichō, ROADMAP § 4).
-  - Physics and scene queries: rigid bodies, contacts, joints, ray / overlap / sweep queries, native (Rust). Today
-    there is no physics at all, and the only CPU ray cast is the click pick over every triangle
-    (`LiveCore::pick`, `renderer/src/live.rs:2142`).
+  - Physics and scene queries: rigid bodies, contacts, joints, ray / overlap / sweep queries, native (Rust). Done
+    (ROADMAP § 6 step 7): `renderer/physics-core` on Rapier, the three.js-style surface in `packages/scene`
+    (`mesh.physics`, joints as objects, `Raycaster.intersectPhysics`, `Shapecaster`).
   - Dynamic emission: any geometry can start or stop emitting without a rebuild. Today a material may only become
     emissive if it already had emitter triangles (`renderer/src/tables.rs:144`).
   - World data outside the replicated JSON game state: binary blocks on the node, changed by deterministic commands
@@ -465,8 +465,17 @@ Where it runs (the user, 2026-11-10):
     what reaches no anchor becomes a new object (a body from step 8 on; until then it falls and rests).
   - An edited object is meshed and uploaded again whole; by chunk is open.
 - **Physics:**
-  - Native, on the node, in ThreeRT's physics module. The frame script's 50 ms QuickJS budget cannot hold it.
-  - The voxel collision shape is the engine's.
+  - Native, on the node, in ThreeRT's physics module (`renderer/physics-core`, ROADMAP § 6 step 7). The frame script's
+    50 ms QuickJS budget cannot hold it: the engine owns the world and steps it at 1 / 60 s; a body moves its object's
+    instance without the script; the script sets `physics` on objects, reads their poses when it wants them, and asks
+    rays and shapes of the world.
+  - physics-core and its bridge to scene objects build for wasm32. The same bits natively and in the browser on what
+    is checked (a script, 1,000 random worlds, in physics-core's build and the renderer's), with Rapier's
+    `enhanced-determinism` (1–5 % slower natively), a patched glamx and hinge limits handed over centred: Rapier's
+    crates otherwise take some math functions from the platform (ROADMAP § 6 step 7 has what is and is not shown).
+  - Game scripts cannot crash it: every number a call carries is bounded, and a body whose state goes non-finite is
+    taken out of the world and reported (RUNTIME.md, Physics).
+  - The voxel collision shape is the engine's: physics-core's `CustomShape` is where it plugs in (step 8).
   - The prototype is Rapier / Parry's `Voxels` shape (dynamic voxel bodies, `setVoxel` edits, since 2025). Whether to
     keep it or write our own (TGS substepping, grid contacts) is decided by its measured cost on the benchmark.
 - **Assets:**

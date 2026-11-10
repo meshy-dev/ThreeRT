@@ -10,10 +10,11 @@
 import {
   AmbientLight, compatNote, DirectionalLight, Fog, FogExp2, GLTFModel, HDRIEnvironment, HemisphereLight, InstancedMesh, Light, MeshBasicMaterial, MaterialFunction, Mesh, MeshPhysicalMaterial, type MeshStandardMaterial, Object3D,
   type ParticleBinding, type ParticleFunction, Particles, GpuParticles, type ParticleProgram, type ParticleProgramBinding, type VolumeBinding, type VolumeFunction, VolumeMesh, type DensityGrid, type GridProgram, type GridProgramBinding, ProceduralMesh, ProceduralGeometry,
-  DataTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3,
-  type SceneChanges, type ShaderBinding, type SwayDesc,
+  DataTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
+  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint,
+  type SceneChanges, type ShaderBinding, type SwayDesc, type PhysicsDesc, type BoundBody,
 } from "./core.ts";
-import { BufferGeometry } from "./geometry.ts";
+import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
 import { Matrix4, Quaternion, Vector3 } from "./math.ts";
 
 export type Vec2 = [number, number];
@@ -145,8 +146,13 @@ export interface TextureDesc {
   offset: Vec2;
 }
 
-/** `movable`: UE Mobility "Movable" (present when true). */
-export type ObjectDesc =
+/**
+ * `movable`: UE Mobility "Movable" (present when true). `body` (present when true, any kind): a rigid body will drive
+ * the object (`Engine.physics`).
+ */
+export type ObjectDesc = { body?: boolean } & ObjectKindDesc;
+
+type ObjectKindDesc =
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "group" }
   /** `materials`: one per geometry group (three.js's material array; `material` is the first). */
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "mesh"; geometry: number; material: number; materials?: number[]; dynamicGeometry?: boolean }
@@ -195,6 +201,14 @@ export interface Engine {
   particlesSpawn(id: number, data: Float32Array): void;
   /** A volume function's WGSL (`fn vf_<name>`; pathtrace.wgsl `volume_function`). */
   volumeFunction(name: string, code: string, helpers: string): void;
+  /**
+   * A call on the physics world (renderer/physics-core/src/bridge.rs: body, collider, joint, remove, impulse, force,
+   * velocity, follow, gravity; queries state, ray, overlap, sweep, contacts, hash): its answer as JSON ("null" for
+   * commands). Ids of bodies, colliders and joints are the caller's. The engine steps the world; no call does.
+   */
+  physics(op: string, args: object): string;
+  /** The poses of the objects bodies drive, by the body's `slot`: 7 numbers each (position, quaternion xyzw). */
+  physicsPoses?(): Float32Array;
   /** A grid program's WGSL (`fn gp_<name>`; renderer/shaders/grid_sim.wgsl). */
   gridProgram(name: string, code: string, helpers: string): void;
   /** A density grid: its cells, the numbers a cell in `data` (1 or 4; null: zeros, or unchanged), its program. */
@@ -264,6 +278,10 @@ interface Bound {
   inst: { count: number; m: [unknown, number]; c: [unknown, number]; d: [unknown, number] } | null;
   /** Sync that last reached it in a walk of the graph. */
   epoch: number;
+  /** Its rigid body in the engine, and what it was made from (a change makes it anew). */
+  body: (BoundBody & { desc: Readonly<PhysicsDesc>; scale: Vec3; geometry: BufferGeometry | null; version: number; contacts: boolean }) | null;
+  /** The `physics` no body could be made from (not tried again until it is set again). */
+  bodyFailed: Readonly<PhysicsDesc> | null;
 }
 
 interface BoundMaterial {
@@ -331,6 +349,21 @@ export class SceneBinding {
   private readonly changes: SceneChanges = { objects: new Set(), structure: true };
   private readonly untrack: () => void;
   private epoch = 0;
+  // Physics: ids of bodies (a body's collider has its id) and joints, the slots of the engine's pose table, the joints
+  // in the scene with what the engine has of each, how many bodies report contacts, the gravity last sent.
+  private nextBody = 1;
+  private nextSlot = 0;
+  private readonly freeSlots: number[] = [];
+  private bodies = 0;
+  private contactBodies = 0;
+  private readonly joints = new Map<Joint, { id: number; key: string } | null>();
+  /** A joint or a body came, went or changed: the joints are looked at again. */
+  private jointsDirty = false;
+  /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
+  private bodyError: unknown = null;
+  /** Objects with bodies under a parent scaled anew in this sync: checked once every transform is sent. */
+  private rescaled = new Set<Object3D>();
+  private gravity = "0,-9.81,0";
 
   constructor(engine: Engine, scene: Scene, camera: PerspectiveCamera, options: RenderOptions = {}) {
     this.engine = engine;
@@ -381,6 +414,8 @@ export class SceneBinding {
       if (this.objects.get(this.camera)?.epoch !== epoch) visit(this.camera, null);
       for (const [o, b] of this.objects) {
         if (b.epoch === epoch) continue;
+        this.dropBody(o, b);
+        if (o instanceof Joint) this.dropJoint(o);
         this.engine.remove(b.id);
         this.objects.delete(o);
         this.byName.delete(b.name);
@@ -436,6 +471,14 @@ export class SceneBinding {
       this.engine.environment(env);
       stats.updated++;
     }
+    // (After every transform: a body made anew is placed where the renderer has its object, and an ancestor of it
+    // may have moved in this sync too.)
+    for (const r of this.rescaled) {
+      const b = this.objects.get(r);
+      if (b && (r.physics || b.body)) this.syncBody(r, b, stats);
+    }
+    this.rescaled.clear();
+    this.syncPhysics(stats);
     const o = this.options;
     const settings: SettingsDesc = {
       name: o.name ?? (this.scene.name || "scene"), preset: o.preset ?? "cinematic", width: o.width ?? 1280, height: o.height ?? 720,
@@ -446,6 +489,11 @@ export class SceneBinding {
       this.settingsKey = settingsKey;
       this.engine.settings(settings);
       stats.updated++;
+    }
+    if (this.bodyError !== null) {
+      const e = this.bodyError;
+      this.bodyError = null;
+      throw e;
     }
     return stats;
   }
@@ -477,7 +525,7 @@ export class SceneBinding {
       const created = !b;
       if (!b) {
         const name = this.uniqueName(o);
-        b = { id: this.nextId++, name, parent, kind, trs: new Float64Array(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0 };
+        b = { id: this.nextId++, name, parent, kind, trs: new Float64Array(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
         this.objects.set(o, b);
         this.byName.set(name, o);
         if (o instanceof Light) this.lights.set(o, b);
@@ -485,6 +533,8 @@ export class SceneBinding {
       }
       b.parent = parent;
       b.kind = kind;
+      // (Made anew in the engine: its body, if it has one, goes with the old one and is made again below.)
+      this.dropBody(o, b);
       this.engine.object(b.id, this.objectDesc(o, b));
       b.light = o instanceof Light ? lightValues(o, this.scratch).slice(0, LIGHT_VALUES) : null;
       b.camera = o instanceof PerspectiveCamera ? JSON.stringify(this.cameraDesc(o)) : "";
@@ -498,7 +548,10 @@ export class SceneBinding {
       if (created) stats.created++;
       else stats.updated++;
     }
-    this.sendTransform(o, b, stats);
+    // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
+    // object's scale in the world): those under it are made anew at the new size, once the sync has sent every
+    // transform.
+    if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
       this.engine.visible(b.id, o.visible);
@@ -532,6 +585,11 @@ export class SceneBinding {
         this.engine.animation(b.id, a);
         stats.updated++;
       }
+    }
+    if (o.physics || b.body) this.syncBody(o, b, stats);
+    if (o instanceof Joint) {
+      if (!this.joints.has(o)) this.joints.set(o, null);
+      this.jointsDirty = true;
     }
     if (o instanceof InstancedMesh) this.sendInstances(o, b, stats);
     if (o instanceof VolumeMesh && o.grid) {
@@ -593,23 +651,261 @@ export class SceneBinding {
     }
   }
 
-  private sendTransform(o: Object3D, b: Bound, stats: SyncStats): void {
+  /** Sends the object's transform if it changed. True if its scale did (and it had been sent before). */
+  private sendTransform(o: Object3D, b: Bound, stats: SyncStats): boolean {
     const q = resolveOrientation(o);
     const t = this.trs;
     t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
     t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
     t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
-    let moved = false;
-    for (let k = 0; k < 10; k++) if (b.trs[k] !== t[k]) { moved = true; b.trs[k] = t[k]; }
+    let moved = false, posed = false, scaled = false;
+    for (let k = 0; k < 10; k++) {
+      if (b.trs[k] !== t[k]) {
+        moved = true;
+        posed ||= k < 7;
+        // (NaN: never sent; the objects below are bound after it anyway.)
+        scaled ||= k >= 7 && !Number.isNaN(b.trs[k]);
+        b.trs[k] = t[k];
+      }
+    }
     if (moved) {
       this.engine.transform(b.id, t);
+      // Scene code moved an object that has a body: the body goes there (a kinematic one through the next tick).
+      if (posed && b.body) this.engine.physics("follow", { body: b.body.id });
       stats.updated++;
     }
+    return scaled;
+  }
+
+  /** The objects with bodies below `o`, to be checked against their scale in the world at the end of the sync
+   *  (`syncBody` makes anew only those whose size changed). */
+  private rescaleBodiesBelow(o: Object3D): void {
+    if (!this.bodies) return;
+    for (const c of o.children) {
+      c.traverse((d) => {
+        const bd = this.objects.get(d);
+        if (bd?.body || (bd && d.physics)) this.rescaled.add(d);
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------- physics
+
+  /** The object's rigid body: made when the object has `physics` and none yet, made anew when what it was made from
+   *  changed (the description, the object's scale in the world, the geometry its shape is from), removed without. */
+  private syncBody(o: Object3D, b: Bound, stats: SyncStats): void {
+    const d = o.physics;
+    const scale = worldScale(o);
+    const g = o instanceof Mesh ? o.geometry : null;
+    const bb = b.body;
+    if (bb && d === bb.desc && g === bb.geometry && (g?.version ?? 0) === bb.version && scale[0] === bb.scale[0] && scale[1] === bb.scale[1] && scale[2] === bb.scale[2]) return;
+    this.dropBody(o, b);
+    if (!d) {
+      b.bodyFailed = null;
+      return;
+    }
+    if (b.bodyFailed === d) return;
+    // A `physics` no body can be made from (a shape that cannot be, numbers that are not finite) leaves the object
+    // without one and nothing of it in the engine; the error is thrown once the whole scene is synced.
+    const id = this.nextBody++;
+    const kind = d.type ?? "dynamic";
+    const slot = kind === "fixed" ? -1 : (this.freeSlots.pop() ?? this.nextSlot++);
+    let made = false;
+    try {
+      const { shape, position } = this.colliderShape(o, d, scale, b.name);
+      for (const [k, v] of Object.entries(d)) if (typeof v === "number" && !Number.isFinite(v)) throw new TypeError(`${b.name}: physics.${k} must be a finite number`);
+      usePhysicsEngine(this.engine);
+      this.engine.physics("body", {
+        id, kind, object: b.id, ...(slot >= 0 ? { slot } : {}),
+        ...(d.linearDamping !== undefined ? { linearDamping: d.linearDamping } : {}), ...(d.angularDamping !== undefined ? { angularDamping: d.angularDamping } : {}),
+        ...(d.gravityScale !== undefined ? { gravityScale: d.gravityScale } : {}), ...(d.canSleep === false ? { canSleep: false } : {}), ...(d.ccd ? { ccd: true } : {}),
+      });
+      made = true;
+      this.engine.physics("collider", {
+        id, body: id, shape, ...(position ? { position } : {}),
+        ...(d.mass !== undefined ? { mass: d.mass } : d.density !== undefined ? { density: d.density } : {}),
+        ...(d.friction !== undefined ? { friction: d.friction } : {}), ...(d.restitution !== undefined ? { restitution: d.restitution } : {}),
+        ...(d.sensor ? { sensor: true } : {}), ...(d.contacts ? { events: true } : {}),
+      });
+    } catch (e) {
+      // (The body without its collider goes: it would move the object, and the engine would refuse the object another.)
+      if (made) this.engine.physics("remove", { body: id });
+      if (slot >= 0) this.freeSlots.push(slot);
+      b.bodyFailed = d;
+      this.bodyError ??= e;
+      return;
+    }
+    b.bodyFailed = null;
+    b.body = { id, slot, epoch: 0, trs: b.trs, euler: false, desc: d, scale, geometry: g, version: g?.version ?? 0, contacts: !!d.contacts };
+    bindBody(o, b.body);
+    this.jointsDirty = true;
+    this.bodies++;
+    if (d.contacts) this.contactBodies++;
+    stats.updated++;
+  }
+
+  private dropBody(o: Object3D, b: Bound): void {
+    const bb = b.body;
+    if (!bb) return;
+    this.engine.physics("remove", { body: bb.id });
+    if (bb.slot >= 0) this.freeSlots.push(bb.slot);
+    unbindBody(o);
+    b.body = null;
+    this.jointsDirty = true;
+    this.bodies--;
+    if (bb.contacts) this.contactBodies--;
+  }
+
+  private dropJoint(j: Joint): void {
+    const bj = this.joints.get(j);
+    if (bj) this.engine.physics("remove", { joint: bj.id });
+    this.joints.delete(j);
+  }
+
+  /** The collider of an object's body: the engine's shape description and where it sits in the body. */
+  private colliderShape(o: Object3D, d: Readonly<PhysicsDesc>, scale: Vec3, name: string): { shape: Record<string, unknown>; position?: Vec3 } {
+    const fixed = d.type === "fixed";
+    const size = [Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2])];
+    const uniform = Math.abs(size[0] - size[1]) <= 1e-6 * size[0] && Math.abs(size[0] - size[2]) <= 1e-6 * size[0];
+    let s = d.shape;
+    if (s !== undefined && typeof s !== "string") {
+      // Given sizes, in the object's units.
+      if (s.type === "box") return { shape: { type: "box", halfExtents: [s.halfExtents[0] * size[0], s.halfExtents[1] * size[1], s.halfExtents[2] * size[2]] } };
+      const k = Math.max(size[0], size[1], size[2]);
+      if (s.type === "sphere") return { shape: { type: "sphere", radius: s.radius * k } };
+      if (s.type === "capsule") return { shape: { type: "capsule", halfHeight: s.halfHeight * size[1], radius: s.radius * Math.max(size[0], size[2]) } };
+      throw new TypeError(`${name}: physics.shape must be "box", "sphere", "capsule", "hull", "mesh" or a box / sphere / capsule with sizes`);
+    }
+    if (!(o instanceof Mesh)) throw new TypeError(`${name}: physics on an object that is not a mesh needs a shape with sizes ({ type: "box", halfExtents }, ...)`);
+    const g = o.geometry;
+    s ??= g instanceof BoxGeometry ? "box" : g instanceof SphereGeometry && uniform ? "sphere" : g instanceof CapsuleGeometry && uniform ? "capsule" : fixed ? "mesh" : "hull";
+    if (s === "hull" || s === "mesh") {
+      if (s === "mesh" && !fixed) throw new TypeError(`${name}: a "mesh" shape (the geometry's triangles) is for fixed bodies; a body that moves takes "hull" or a box / sphere / capsule`);
+      return { shape: { type: s === "hull" ? "convexHull" : "trimesh", geometry: this.geometryId(g), scale } };
+    }
+    // The geometry's bounding box, and what fits it.
+    if (!g.boundingBox) g.computeBoundingBox();
+    const { min, max } = g.boundingBox!;
+    const position: Vec3 = [(min.x + max.x) / 2 * scale[0], (min.y + max.y) / 2 * scale[1], (min.z + max.z) / 2 * scale[2]];
+    // (A flat geometry, a plane, is a thin box.)
+    const h = [Math.max((max.x - min.x) / 2 * size[0], 1e-3), Math.max((max.y - min.y) / 2 * size[1], 1e-3), Math.max((max.z - min.z) / 2 * size[2], 1e-3)];
+    const centred = position.every((v) => Math.abs(v) < 1e-9);
+    const at = centred ? {} : { position };
+    if (s === "box") return { shape: { type: "box", halfExtents: h }, ...at };
+    if (s === "sphere") return { shape: { type: "sphere", radius: Math.max(h[0], h[1], h[2]) }, ...at };
+    if (s === "capsule") {
+      const radius = Math.max(h[0], h[2]);
+      return h[1] - radius > 1e-6 ? { shape: { type: "capsule", halfHeight: h[1] - radius, radius }, ...at } : { shape: { type: "sphere", radius }, ...at };
+    }
+    throw new TypeError(`${name}: physics.shape must be "box", "sphere", "capsule", "hull", "mesh" or a box / sphere / capsule with sizes`);
+  }
+
+  /** Gravity, the joints, and the calls scene code queued on objects' bodies, now that the bodies exist. */
+  private syncPhysics(stats: SyncStats): void {
+    const gv = this.scene.gravity;
+    const gravity = `${gv.x},${gv.y},${gv.z}`;
+    if (gravity !== this.gravity) {
+      if (![gv.x, gv.y, gv.z].every(Number.isFinite)) throw new TypeError("scene.gravity must be finite numbers");
+      this.gravity = gravity;
+      this.engine.physics("gravity", { gravity: [gv.x, gv.y, gv.z] });
+      stats.updated++;
+    }
+    // A joint holds while it and both its objects' bodies are in the scene; whatever it was made from changing (a body
+    // made anew included) makes it anew.
+    const joints = this.jointsDirty ? this.joints : [];
+    this.jointsDirty = false;
+    for (const [j, bj] of joints) {
+      const a = j.bodyA ? this.objects.get(j.bodyA) : undefined, b = j.bodyB ? this.objects.get(j.bodyB) : undefined;
+      let key = "";
+      let desc: Record<string, unknown> | null = null;
+      if (a?.body && b?.body) {
+        const [sa, sb] = [a.body.scale, b.body.scale];
+        desc = {
+          ...j.jointDesc(), a: a.body.id, b: b.body.id,
+          anchor1: [j.anchorA.x * sa[0], j.anchorA.y * sa[1], j.anchorA.z * sa[2]], anchor2: [j.anchorB.x * sb[0], j.anchorB.y * sb[1], j.anchorB.z * sb[2]],
+        };
+        key = JSON.stringify(desc);
+      }
+      if (key === (bj?.key ?? "")) continue;
+      if (bj) this.engine.physics("remove", { joint: bj.id });
+      if (desc) {
+        const id = this.nextBody++;
+        this.engine.physics("joint", { id, ...desc });
+        this.joints.set(j, { id, key });
+      } else this.joints.set(j, null);
+      stats.updated++;
+    }
+    for (const c of takePhysicsCommands()) {
+      const body = this.objects.get(c.object)?.body;
+      // (An object without a body, or out of the scene by now: nothing to act on.)
+      if (!body) continue;
+      this.engine.physics(c.op, { body: body.id, ...c.args });
+      stats.updated++;
+    }
+    // The engine steps the world after a sync: objects read their bodies' poses afresh.
+    if (this.bodies) physicsStepped();
+  }
+
+  /**
+   * The contacts since the last call, to their listeners: "contactstart" / "contactend" on each of the two objects
+   * (`other`: the other one), then "contacts" on the scene with the whole batch (`contacts`: { a, b, started } in the
+   * order they happened). One engine call, and none while no body in the scene reports contacts; before it, the bodies
+   * the engine took out (`takeFaults`: one call while the scene has bodies; "outofworld" on an object whose body left
+   * the world). The host calls it before the frame script.
+   */
+  deliverPhysicsEvents(): void {
+    if (this.bodies) this.takeFaults();
+    if (!this.contactBodies) return;
+    const list = JSON.parse(this.engine.physics("contacts", {})) as { bodyA: number | null; bodyB: number | null; started: boolean }[] | null;
+    if (!list?.length) return;
+    const contacts: { a: Object3D; b: Object3D; started: boolean }[] = [];
+    for (const c of list) {
+      const a = c.bodyA === null ? undefined : physicsBodies.get(c.bodyA), b = c.bodyB === null ? undefined : physicsBodies.get(c.bodyB);
+      if (!a || !b) continue;
+      contacts.push({ a, b, started: c.started });
+      const type = c.started ? "contactstart" : "contactend";
+      a.dispatchEvent({ type, other: b });
+      b.dispatchEvent({ type, other: a });
+    }
+    if (contacts.length) this.scene.dispatchEvent({ type: "contacts", contacts });
+  }
+
+  /**
+   * The bodies the engine took out after a tick, their colliders and joints with them. Each object stays in the scene
+   * where its body last put it, without a body until its `physics` is set again.
+   * - One past the world's edge (1,000 km: it fell off the level) is nothing wrong: its object gets an "outofworld"
+   *   event, and the game removes it, or puts it back and sets its `physics` again.
+   * - One whose pose or velocity went non-finite is an error (bad numbers, or a simulation that blew up): the next
+   *   sync throws once, naming the objects.
+   */
+  private takeFaults(): void {
+    const list = JSON.parse(this.engine.physics("faults", {})) as { body: number; kind?: string; reason: string }[] | null;
+    if (!list?.length) return;
+    const names: string[] = [], left: Object3D[] = [];
+    for (const f of list) {
+      const o = physicsBodies.get(f.body);
+      const b = o && this.objects.get(o);
+      const bb = b?.body;
+      if (!o || !b || !bb || bb.id !== f.body) continue;
+      // (Gone in the engine already: only the binding's side is undone.)
+      if (bb.slot >= 0) this.freeSlots.push(bb.slot);
+      unbindBody(o);
+      b.body = null;
+      b.bodyFailed = o.physics;
+      this.jointsDirty = true;
+      this.bodies--;
+      if (bb.contacts) this.contactBodies--;
+      if (f.kind === "leftWorld") left.push(o);
+      else names.push(`${b.name} (${f.reason})`);
+    }
+    if (names.length) this.bodyError ??= new Error(`physics: the engine took out the bodies of ${names.join(", ")}; each stays without one until its physics is set again`);
+    // (After the binding's side is in order: a listener may remove the object or give it a body again.)
+    for (const o of left) o.dispatchEvent({ type: "outofworld" });
   }
 
   /** What the object is: a change re-creates it in the engine. */
   private kindKey(o: Object3D): string {
-    return `${this.kindOf(o)}${o.movable ? ":movable" : ""}`;
+    return `${this.kindOf(o)}${o.movable ? ":movable" : ""}${drivenByBody(o) ? ":body" : ""}`;
   }
 
   private kindOf(o: Object3D): string {
@@ -632,7 +928,7 @@ export class SceneBinding {
   }
 
   private objectDesc(o: Object3D, b: Bound): ObjectDesc {
-    const base = { name: b.name, parent: b.parent, castShadow: o.castShadow, ...(o.movable ? { movable: true } : {}) };
+    const base = { name: b.name, parent: b.parent, castShadow: o.castShadow, ...(o.movable ? { movable: true } : {}), ...(drivenByBody(o) ? { body: true } : {}) };
     if (o instanceof InstancedMesh) {
       const g = o.geometry;
       const geometry = g instanceof ProceduralGeometry ? this.proceduralId(g) : this.geometryId(g);
@@ -1169,6 +1465,24 @@ export function lightDesc(l: Light): LightDesc {
   throw new Error(`unsupported light ${l.type}`);
 }
 
+/** A rigid body moves the object: it has `physics` that is not a fixed body's. */
+function drivenByBody(o: Object3D): boolean {
+  const d = o.physics;
+  return d !== null && d.type !== "fixed";
+}
+
+/** The object's scale in the world: its own times its ancestors' (as if none of them turned a non-uniform one). */
+function worldScale(o: Object3D): Vec3 {
+  let x = 1, y = 1, z = 1;
+  for (let c: Object3D | null = o; c; c = c.parent) {
+    const s = c.scale;
+    x *= s.x;
+    y *= s.y;
+    z *= s.z;
+  }
+  return [x, y, z];
+}
+
 /** Local quaternion; targeted lights are re-aimed so that their local -Z points at the target. */
 function resolveOrientation(o: Object3D): Quaternion {
   if (!((o instanceof DirectionalLight || o instanceof SpotLight) && o.target)) return o.quaternion;
@@ -1203,6 +1517,7 @@ export class RecordingEngine implements Engine {
   particleProgram(...a: Parameters<Engine["particleProgram"]>) { this.calls.push(["particleProgram", ...a]); }
   particlesSpawn(...a: Parameters<Engine["particlesSpawn"]>) { this.calls.push(["particlesSpawn", ...a]); }
   volumeFunction(...a: Parameters<Engine["volumeFunction"]>) { this.calls.push(["volumeFunction", ...a]); }
+  physics(...a: Parameters<Engine["physics"]>) { this.calls.push(["physics", ...a]); return "null"; }
   gridProgram(...a: Parameters<Engine["gridProgram"]>) { this.calls.push(["gridProgram", ...a]); }
   densityGrid(...a: Parameters<Engine["densityGrid"]>) { this.calls.push(["densityGrid", ...a]); }
   gridSources(...a: Parameters<Engine["gridSources"]>) { this.calls.push(["gridSources", ...a]); }

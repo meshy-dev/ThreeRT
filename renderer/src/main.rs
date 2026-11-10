@@ -366,6 +366,8 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     if host.has_frame() {
         host.seek(start)?;
     }
+    // The physics world as it is where the frames start (as `render` has it at its scene time); the frames step it on.
+    host.settle_physics((start.max(0.0) * 60.0).round() as u32);
     let mut w = host.world.borrow_mut();
     w.take_changes();
     let missing: Vec<String> = w.files().into_iter().filter(|f| !job.game.assets.join(f).is_file()).collect();
@@ -393,7 +395,8 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
         if host.has_frame() {
             host.frame(1.0 / 60.0)?;
         }
-        if host.has_frame() || swayed {
+        let physics = host.advance_physics(1.0 / 60.0);
+        if host.has_frame() || swayed || physics {
             core.commit(&mut host.world.borrow_mut())?;
         }
         core.render(1, |_, _| {});
@@ -429,6 +432,8 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     if host.has_frame() {
         host.seek(job.time.unwrap_or(0.0))?;
     }
+    // The physics world as it is after the job's scene time (60 ticks a second from the setup's world).
+    host.settle_physics((job.time.unwrap_or(0.0).max(0.0) * 60.0).round() as u32);
     timings.push(("script_ms".into(), script_ms));
     let mut sc = {
         let mut w = host.world.borrow_mut();

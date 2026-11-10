@@ -47,7 +47,8 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
 | Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
 | Frame scripts | `packages/gameplay/src/frame.ts` | `FrameContext`: `time`, `dt`, `snap`, `now`, read-only `state`, `scene`, `camera`, `object(id)`, `random()`. |
-| Game session | `renderer/src/script.rs` `GameSession` | A runtime + its live view: events, clicks (CPU pick → `click {target, point}`, with `instanceId` on an `InstancedMesh`), frame script, editor edits, each followed by a commit. Shared by `play`, `live` and the playground. |
+| Game session | `renderer/src/script.rs` `GameSession` | A runtime + its live view: events, clicks (CPU pick → `click {target, point, ray: {origin, direction}}`, with `instanceId` on an `InstancedMesh`; `ray` is the view ray, for a `Raycaster`), frame script, the physics world's ticks, editor edits, each followed by a commit. Shared by `play`, `live` and the playground. |
+| Physics | `renderer/physics-core` (`Physics` on Rapier, `bridge::Bridge`), `renderer/src/physics.rs`, `packages/scene` (`Object3D.physics`, joints, `Raycaster.intersectPhysics`, `Shapecaster`) | The session's physics world, made by the first physics call (none: nothing runs). The engine steps it at 1 / 60 s after the frame script (at most 5 ticks a frame; offline renders step to their scene time) and places the objects of the bodies that moved: instances, so a move is a TLAS transform. Scripts cannot step it. See "Physics" below. |
 
 ## Entry points
 
@@ -69,6 +70,85 @@ root yet fails with `missing: [...]`; the node fetches them and retries.
 The playground runs the opened scene the same way: its host holds the `GameSession`; the Node backend keeps the
 catalog, the selection, the undo stack (Details edits as `{node, path, before, after}`) and the Play flow. Stop
 re-runs setup and replays the editor's edits (UE PIE: Play changes are discarded).
+
+## Physics
+
+Scene code describes bodies on objects, three.js style; the engine owns the world (ROADMAP § 6 step 7).
+
+```ts
+const crate = new Mesh(new BoxGeometry(0.5, 0.5, 0.5), wood);
+crate.position.set(0, 3, 0);
+crate.physics = "dynamic";                       // or { type, shape, density | mass, friction, restitution, ccd, ... }
+scene.add(crate);                                // in the scene it has its body; scene.remove(crate) ends it
+
+const frame = new Mesh(new BoxGeometry(0.1, 2, 0.1), wood), door = new Mesh(new BoxGeometry(1, 2, 0.05), wood);
+frame.physics = "fixed";
+door.physics = "dynamic";
+door.position.set(0.55, 0, 0);
+scene.add(frame, door, new HingeJoint(frame, door, { anchorA: new Vector3(0.05, 0, 0), anchorB: new Vector3(-0.5, 0, 0), limits: [-1.5, 1.5] }));
+
+raycaster.set(origin, direction);                // or setFromCamera
+const hit = raycaster.intersectPhysics()[0];     // { object, point, normal, distance }
+if (hit) hit.object.applyImpulse(new Vector3(0, 40, 0), hit.point);
+crate.position.y;                                // the body's pose, read when asked
+crate.position.set(0, 5, 0);                     // a write moves the body there
+```
+
+- Bodies: `"dynamic"`, `"fixed"`, `"kinematic"` (moved by the script through its `position` / `quaternion`; it pushes
+  dynamic bodies). The collider comes from the mesh's geometry (`BoxGeometry` a box, `SphereGeometry` a sphere,
+  `CapsuleGeometry` a capsule, any other its convex hull, or its triangles for a fixed body) and the object's scale;
+  `shape` overrides it. An object that is not a mesh takes a shape with sizes. A hidden object keeps its body.
+- Methods of the object: `applyImpulse(impulse, point?)`, `applyTorqueImpulse`, `applyForce` / `applyTorque` (for the
+  frame's ticks: call them every frame they act), `setLinearVelocity`, `setAngularVelocity`, `getLinearVelocity`,
+  `getAngularVelocity`, `sleeping`. `scene.gravity` is the world's.
+- Joints are objects: `FixedJoint`, `HingeJoint`, `SliderJoint`, `BallJoint`, `RopeJoint` (`anchorA` / `anchorB` in
+  each object's space, `axis` in the first object's, `limits`, `motor`, `length`). They hold while they and both their
+  objects are in the scene, and join the objects as they are turned when made (limits count from there).
+- A `physics` no body can be made from (a flat geometry's hull, a size of 0, a number out of its bounds) throws from
+  the sync once, names the object, and leaves it without a body until `physics` is set again.
+- Game code is untrusted, so the engine checks every number (in `physics-core`, whoever calls it) and refuses a call
+  with one outside its bounds, with the reason:
+
+  | what | bound |
+  | --- | --- |
+  | positions (bodies, static colliders, joint anchors, impulse points, query origins, trimesh vertices) | within ±100 km |
+  | sizes (half extents, radii) | 1 mm to 10 km; a capsule under 1 mm long is its sphere |
+  | a collider's offset on its body, a convex hull's points | within ±10 km; a hull holds at least 1 mm³ |
+  | velocities set by a call | 10 km/s, 1,000 rad/s (Rapier itself caps what a body reaches at 400 m/s) |
+  | impulses, forces | 10⁶ N s (N m s), 10⁸ N (N m) |
+  | a collider's mass, density | 0, or 1 g to 10,000 t; 0, or 1 g/m³ to 100 t/m³ |
+  | gravity scale, gravity | ±100, ±1,000 m/s² a component |
+  | damping, friction, restitution | 0 to 1,000, 0 to 1,000, 0 to 1 |
+  | joint limits, a rope's length | within ±100 km (rad for a hinge), min ≤ max; 0 to 100 km |
+  | a motor | ±10 km/s (rad/s), damping 0 to 10⁹, a force from 0 |
+  | rotations, axes, directions | finite and not zero (any size: they are normalized) |
+  | a query's reach | cut to 1,000 km |
+  | counts | 20,000 bodies, 40,000 colliders and joints; a trimesh 1 M triangles, a hull 4,096 points, all shapes 4 M points and triangles; 256 hits a ray; 8,192 contacts held between frames (the oldest go) |
+
+  A triangle mesh is for fixed bodies only; a joint joins two different bodies; queries take a box, sphere or capsule.
+- What the simulation itself drives out of bounds is taken out of the physics world after a tick, with its colliders
+  and joints. The object stays in the scene where its body last put it, without a body until its `physics` is set
+  again:
+  - A body more than 1,000 km from the origin left the world (it fell off the level; free fall gets there in 42
+    minutes, Rapier capping a body at 400 m/s). Nothing is wrong: its object gets an `outofworld` event (before the frame
+    script, as contacts do), and the game decides: `scene.remove(object)`, or put it back and set `physics` again.
+  - A body whose pose or velocity is no longer finite is an error (the simulation blew up): the next sync throws once,
+    naming the object and why.
+- A frame script (or its sync) that throws does not stop the world: in a window and in `live` the error is printed,
+  the scene is synced as the script left it, and that frame's physics ticks and commit are made all the same (so the
+  next frame reads the bodies' new poses). A `serve` job with frames fails with the error.
+- A call the engine refuses changes nothing (an impulse with a torque whose point is out of bounds applies neither).
+- A tick has no time bound yet: thousands of bodies made at one point take seconds (ROADMAP § 6 step 7, Open).
+- Queries: `Raycaster.intersectPhysics({ exclude })` (every body the ray passes through, nearest first, with the
+  surface's normal) and `Shapecaster` (`overlap()`, `sweep(direction)`) for a box, sphere or capsule. They see the
+  world as of its last tick.
+- Contacts (`physics.contacts`): once a frame, before the frame script, `contactstart` / `contactend` events on the two
+  objects (`event.other`) and one `contacts` event on the scene with the whole batch.
+- Cost: a body moves its object in the engine; no script runs for it. Poses reach the script only when read: the first
+  read of a frame fetches one typed array of every body's pose, each object then takes its seven numbers on its own
+  first read. Numbers: ROADMAP § 6 step 7.
+- The engine call under it is `__engine.physics(op, args)` (JSON; `renderer/physics-core/src/bridge.rs` lists the
+  calls, `faults` and `state`'s `{ removed }` among them) and `__engine.physicsPoses()`.
 
 ## Correctness
 

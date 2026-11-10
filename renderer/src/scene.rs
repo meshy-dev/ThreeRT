@@ -1060,8 +1060,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         let shown = w.shown(*id);
         let flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
         match &n.kind {
-            Kind::Mesh { geometry, material, own_blas: true, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && !w.movable(*id) && m.determinant() > 0.0 => {
-                // Its own BLAS (scene code's `dynamicGeometry`): placed like a model instance, its geometry's triangles
+            Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() > 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
+                // Its own BLAS (scene code's `dynamicGeometry`, or a mesh a rigid body drives: its moves are the
+                // instance's transform, `retained.instance_of`): placed like a model instance, its geometry's triangles
                 // in model space in the pool, shared by the objects of the same geometry and material. Glass, emissive
                 // and function materials are flattened (as a model's would be), so they are never instanced.
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
@@ -1092,11 +1093,15 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         retained.objects.insert(*id, oi);
                         retained.own_instance.insert(*id, instances.len() as u32);
+                        if n.driven {
+                            retained.instance_of.insert(*id, instances.len() as u32);
+                        }
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
                     }
                     continue;
                 }
-                if emits_only(&materials[mat as usize]) {
+                // (A driven emitter's triangles cannot stay in world space: it is flattened, dynamic, below.)
+                if emits_only(&materials[mat as usize]) && !n.driven {
                     // An emitting material: its own BLAS too, but its triangles in world space (placed at identity,
                     // never shared), so they are light-sampled as flattened triangles are and can be edited in place
                     // (live.rs `edit_geometry`; ROADMAP § 6 step 3).
@@ -1120,7 +1125,12 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     continue;
                 }
                 put_colors(&mut vcolors, tris.len(), vc.then(|| tri_colors(g, false, None)));
-                append_arrays(g, m, mat, flags, None, &mut tris, &mut tri_flags, &mut attrs);
+                // (A driven mesh that cannot be an instance (glass, emissive, a material function): dynamic triangles,
+                // re-transformed in place as any movable mesh's.)
+                append_arrays(g, m, mat, if n.driven { flags | TRI_DYNAMIC } else { flags }, None, &mut tris, &mut tri_flags, &mut attrs);
+                if n.driven {
+                    retained.dynamic.insert(*id, DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
+                }
             }
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {
                 // Copies of one geometry: one shared mesh (one BLAS), an instance and an object entry per copy, the

@@ -120,3 +120,30 @@ test("game keys default to the conventional handlers and must name a handler", (
   assert.deepEqual(gameKeys(g), { L: "lights", R: "rain" });
   assert.throws(() => defineGame({ ...coinGame, keys: { X: "nope" } }), /unknown handler "nope"/);
 });
+
+test("a frame script that throws: the engine still follows the scene, and the script's error is the one thrown", () => {
+  // (Counted from the first frame after setup, which runs the frame script too.)
+  let counting = false, frame = 0;
+  const game = defineGame({
+    ...coinGame,
+    frame(f) {
+      if (counting) frame++;
+      (f.object("coin_a") as Mesh).power = 10 + frame;
+      if (frame > 0 && frame % 2 === 0) throw new Error(`frame ${frame} threw`);
+    },
+  });
+  const engine = new RecordingEngine();
+  const host = installNodeHost(game, engine);
+  host.setup("node");
+  engine.take();
+  counting = true;
+  host.frame(1 / 60, 0);
+  assert.deepEqual(engine.take().map((c) => [c[0], c[2]]), [["power", 11]]);
+  // The frame that throws: what the script did before it threw reaches the engine in that frame (the engine steps the
+  // physics and draws the frame all the same; the binding's sync is also what tells objects to read their bodies'
+  // poses afresh), and the error is the script's.
+  assert.throws(() => host.frame(1 / 60, 0), /frame 2 threw/);
+  assert.deepEqual(engine.take().map((c) => [c[0], c[2]]), [["power", 12]]);
+  host.frame(1 / 60, 0);
+  assert.deepEqual(engine.take().map((c) => [c[0], c[2]]), [["power", 13]]);
+});

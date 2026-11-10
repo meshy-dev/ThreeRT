@@ -50,6 +50,7 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
   /** The scene follows the state (dt 0; `snap`: settled, no transitions), then the engine follows the scene. */
   const refresh = (now: number, snap = false) => {
     const { frames, binding } = live();
+    binding.deliverPhysicsEvents();
     frames.run(0, now, snap);
     binding.sync();
   };
@@ -118,8 +119,25 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
 
     frame(dt, now) {
       const { frames, binding } = live();
-      frames.run(dt, now);
-      binding.sync();
+      // The contacts of the ticks since the last frame, to their listeners, before the frame script.
+      binding.deliverPhysicsEvents();
+      // A frame script that throws does not stop the engine (it steps the physics and draws the frame all the same),
+      // so the engine still follows the scene as the script left it: the binding learns that the world stepped (objects
+      // read their bodies' poses afresh next frame) and what listeners did reaches the engine. The script's error is
+      // the one thrown; the sync's own, if it has one too, is logged.
+      let failed: { error: unknown } | null = null;
+      try {
+        frames.run(dt, now);
+      } catch (error) {
+        failed = { error };
+      }
+      try {
+        binding.sync();
+      } catch (error) {
+        if (!failed) throw error;
+        console.error(error);
+      }
+      if (failed) throw failed.error;
     },
 
     seek(time, now) {

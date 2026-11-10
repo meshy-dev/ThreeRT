@@ -25,6 +25,8 @@ export const GAMES: Record<string, string> = {
   "bistro-district": "games/bistro-district/bistro-district.game.ts",
   // three.js's official instancing examples, their code unchanged (ROADMAP § 6 step 2e): 1,000 instances turning.
   "instancing": "games/instancing/instancing.game.ts",
+  // Physics hello world (ROADMAP § 6 step 7): click adds a box with a rigid body, click a box kicks it.
+  "physics-hello": "games/physics/hello.game.ts",
 };
 const TITLES: Record<string, string> = { "bistro-district": "Bistro District (3 × 3)", "bistro-slice": "Bistro Night · C slice", "zero-day-animated": "Zero Day (animated)", kabukicho: "Kabukichō Night", "kabukicho-district": "Kabukichō District (3 × 3)", "kabukicho-district-row": "Kabukichō District (middle row)" };
 
