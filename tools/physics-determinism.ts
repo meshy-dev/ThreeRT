@@ -10,6 +10,8 @@
 // feature: what a larger program's other dependencies do, the renderer's among them), where Rapier's crates take
 // f32's own math functions unless they are kept from it (renderer/third_party/glamx/PATCH.md). Without the patch the
 // first run passes and the second fails.
+// Then the renderer's dependency graph, built for wasm32 (renderer/examples/physics_bits.rs), against the recorded
+// hashes: the engine's library in a browser.
 // `--without` builds without Rapier's `enhanced-determinism` instead and reports (the hashes differ; no exit code).
 //   node tools/physics-determinism.ts [--without]      (needs the wasm32-unknown-unknown target)
 import { execFileSync } from "node:child_process";
@@ -54,6 +56,16 @@ for (const [label, features] of builds) {
   });
   console.log(`physics determinism${label}: cases: native ${hex(folded)}, recorded ${constant("EXPECTED_CASES")}`);
   failed ||= hex(folded) !== constant("EXPECTED_CASES");
+}
+// The renderer's own dependency graph built for wasm32 (the engine's library in a browser): the same recorded hashes.
+// (It holds the wasm32 side; a glamx patch left out shows natively, in the renderer's own test, not here.)
+if (!without) {
+  const renderer = join(import.meta.dirname, "../renderer");
+  execFileSync("cargo", ["build", "--release", "--locked", "--quiet", "--target", "wasm32-unknown-unknown", "--example", "physics_bits"], { cwd: renderer, stdio: ["ignore", "ignore", "inherit"] });
+  const bits = await WebAssembly.instantiate(readFileSync(join(renderer, "target/wasm32-unknown-unknown/release/examples/physics_bits.wasm")), {});
+  const [script, cases] = [hex((bits.instance.exports.physics_script as () => bigint)()), hex((bits.instance.exports.physics_cases as () => bigint)())];
+  console.log(`physics determinism (the renderer's graph, wasm32): script ${script}, cases ${cases}`);
+  failed ||= script !== constant("EXPECTED") || cases !== constant("EXPECTED_CASES");
 }
 if (without) process.exit(0);
 if (failed) {

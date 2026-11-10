@@ -700,9 +700,8 @@ impl TexCache {
 /// Identity of a file version: (path, length, mtime). Assets and textures rarely change, so they are parsed /
 /// decoded once per process.
 pub(crate) fn file_key(path: &Path) -> String {
-    let m = std::fs::metadata(path).ok();
-    let mtime = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-    format!("{}|{}|{mtime}", path.display(), m.map_or(0, |m| m.len()))
+    let (len, mtime) = crate::files::version(path);
+    format!("{}|{len}|{mtime}", path.display())
 }
 
 /// Process-wide parse / decode caches (bounded: cleared when they grow past a working set).
@@ -757,7 +756,7 @@ fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image
         world::TextureSource::File(uri) => {
             let path = assets.join(uri);
             let key = file_key(&path);
-            Ok((key.clone(), cached_image(&key, || Ok(image::open(&path).with_context(|| format!("texture {uri}"))?.to_rgba8()))?))
+            Ok((key.clone(), cached_image(&key, || crate::files::image(&path).with_context(|| format!("texture {uri}")))?))
         }
         world::TextureSource::Encoded(bytes) => {
             let key = bytes_key("encoded", bytes);
@@ -781,7 +780,7 @@ pub fn model_gltf(uri: &str, assets: &Path) -> Result<Arc<skin::Model>> {
 fn import_gltf(path: &Path) -> gltf::Result<skin::Gltf> {
     use rayon::prelude::*;
     let base = path.parent().unwrap_or_else(|| Path::new("./"));
-    let gltf::Gltf { document, blob } = gltf::Gltf::open(path)?;
+    let gltf::Gltf { document, blob } = crate::files::gltf(path)?;
     let buffers = gltf::import_buffers(&document, Some(base), blob)?;
     let images = document.images().collect::<Vec<_>>().into_par_iter().map(|i| gltf::image::Data::from_source(i.source(), Some(base), &buffers)).collect::<gltf::Result<Vec<_>>>()?;
     Ok((document, buffers, images))
@@ -900,9 +899,9 @@ pub fn card_material(color: [f32; 3], intensity: f32) -> GpuMaterial {
 
 /// Builds the GPU scene from the engine's world. Asset files (models, file textures) resolve against `assets`.
 pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<Scene> {
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let st = &w.settings;
-    let mut preset_json: serde_json::Value = serde_json::from_slice(&std::fs::read(presets_dir.join(format!("{}.json", st.preset))).with_context(|| format!("preset {}", st.preset))?)?;
+    let mut preset_json: serde_json::Value = serde_json::from_slice(&crate::files::preset(presets_dir, &st.preset).with_context(|| format!("preset {}", st.preset))?)?;
     if let Some(o) = &st.overrides {
         desc::merge_json(&mut preset_json, o);
     }
