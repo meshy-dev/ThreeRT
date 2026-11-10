@@ -245,7 +245,7 @@ test("impulses, forces and velocities are calls on the object, sent once it has 
 });
 
 test("a parent scaled anew makes the bodies below it anew at their new size, and their joints", () => {
-  const { scene, binding, physics } = world();
+  const { scene, engine, binding, physics } = world();
   const post = new Mesh(new BoxGeometry(0.2, 2, 0.2));
   post.physics = "fixed";
   const group = new Group();
@@ -271,6 +271,16 @@ test("a parent scaled anew makes the bodies below it anew at their new size, and
   assert.deepEqual(made[4][1].anchor2, [0, 1, 0]);
   binding.sync();
   assert.deepEqual(physics(), []);
+  // Scaled while an object between them moves (changed after it, so synced after it): the ball's body is made once
+  // that move is sent, where the renderer then has the ball.
+  group.scale.set(3, 3, 3);
+  inner.position.set(0, 2, 0);
+  binding.sync();
+  const calls = engine.take();
+  const innerId = (calls.find((c) => c[0] === "transform" && (c[2] as number[])[1] === 2) as [string, number] | undefined)?.[1];
+  const moved = calls.findIndex((c) => c[0] === "transform" && c[1] === innerId);
+  const body = calls.findIndex((c) => c[0] === "physics" && c[1] === "body");
+  assert.ok(innerId !== undefined && moved >= 0 && body > moved, `the inner group's move (call ${moved}) before the ball's new body (call ${body})`);
 });
 
 test("a joint holds while it and both its objects are in the scene", () => {

@@ -361,6 +361,8 @@ export class SceneBinding {
   private jointsDirty = false;
   /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
   private bodyError: unknown = null;
+  /** Objects with bodies under a parent scaled anew in this sync: checked once every transform is sent. */
+  private rescaled = new Set<Object3D>();
   private gravity = "0,-9.81,0";
 
   constructor(engine: Engine, scene: Scene, camera: PerspectiveCamera, options: RenderOptions = {}) {
@@ -469,6 +471,13 @@ export class SceneBinding {
       this.engine.environment(env);
       stats.updated++;
     }
+    // (After every transform: a body made anew is placed where the renderer has its object, and an ancestor of it
+    // may have moved in this sync too.)
+    for (const r of this.rescaled) {
+      const b = this.objects.get(r);
+      if (b && (r.physics || b.body)) this.syncBody(r, b, stats);
+    }
+    this.rescaled.clear();
     this.syncPhysics(stats);
     const o = this.options;
     const settings: SettingsDesc = {
@@ -540,8 +549,9 @@ export class SceneBinding {
       else stats.updated++;
     }
     // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
-    // object's scale in the world): those under it are made anew at the new size.
-    if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o, stats);
+    // object's scale in the world): those under it are made anew at the new size, once the sync has sent every
+    // transform.
+    if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
       this.engine.visible(b.id, o.visible);
@@ -667,14 +677,14 @@ export class SceneBinding {
     return scaled;
   }
 
-  /** The bodies of the objects below `o` checked against their scale in the world (`syncBody` makes anew only those
-   *  whose size changed). */
-  private rescaleBodiesBelow(o: Object3D, stats: SyncStats): void {
+  /** The objects with bodies below `o`, to be checked against their scale in the world at the end of the sync
+   *  (`syncBody` makes anew only those whose size changed). */
+  private rescaleBodiesBelow(o: Object3D): void {
     if (!this.bodies) return;
     for (const c of o.children) {
       c.traverse((d) => {
         const bd = this.objects.get(d);
-        if (bd && (d.physics || bd.body)) this.syncBody(d, bd, stats);
+        if (bd?.body || (bd && d.physics)) this.rescaled.add(d);
       });
     }
   }
