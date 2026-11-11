@@ -2,7 +2,8 @@
 // run twice in lockstep (every frame 1 / 60 s, so both runs tick alike) through the same events: the explosions of
 // `singles` (0.5 to 4 m, ground and walls), the saw cut of `fell` (trees, posts, cars and buildings cut loose, falling
 // and landing) and the 4 m `crater`. The level's hash (`voxelHash`: every object's placement, state and voxels) is
-// logged after each; the two runs must agree, and the hash must change from event to event. Exit 1 otherwise.
+// logged after each, and with it the physics world's (ROADMAP § 6 step 8: the loose parts are rigid bodies, so where
+// they are is the physics'); the two runs must agree, and the hash must change from event to event. Exit 1 otherwise.
 // (voxel-core's own check, native against wasm32, is tools/voxel-determinism.ts.) The GPU lock is held.
 //   node tools/voxel-determinism-level.ts
 import { execFileSync } from "node:child_process";
@@ -36,7 +37,8 @@ async function run(): Promise<string[]> {
     await step(2);
   }
   await live.quit();
-  return live.lines.map((l) => /hash ([0-9a-f]{16}) frame/.exec(l)?.[1]).filter((h): h is string => !!h);
+  // (Since step 8 the line has the physics world's hash too: where the parts that came loose are, bit for bit.)
+  return live.lines.map((l) => /hash ([0-9a-f]{16})(?: physics ([0-9a-f]{16}))? frame/.exec(l)).filter((m): m is RegExpExecArray => !!m).map((m) => (m[2] ? `${m[1]}+${m[2]}` : m[1]));
 }
 
 const [a, b] = [await run(), await run()];

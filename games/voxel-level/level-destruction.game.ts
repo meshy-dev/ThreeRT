@@ -29,7 +29,7 @@
 //   node tools/voxel-level/generate.ts --granularity object && node tools/bundle-game.ts games/voxel-level/level-destruction.game.ts
 import { BoxGeometry, Color, DirectionalLight, GpuParticles, InstancedMesh, MaterialFunction, Mesh, MeshStandardMaterial, ParticleProgram, SimulatedSmoke, PerspectiveCamera, PlaneGeometry, ProceduralGeometry, ProceduralMesh, Scene, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
-import { VOXEL_BRICKS, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
+import { VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
 import { nativeObjects, nativePalette } from "./native.ts";
 import { EDGE, PALETTE, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
 
@@ -206,14 +206,17 @@ class Dust {
 }
 
 /** `debris`: the removed voxels thrown out as instances (`Debris`; logged per explosion), or "dust": as GPU particles.
- *  `smoke`: the cells of the simulated smoke's grid. Falling objects are logged per frame as `batch {...}`. */
-export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false) {
+ *  `smoke`: the cells of the simulated smoke's grid. `physics` (ROADMAP § 6 step 8; on by default): the level
+ *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
+ *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
+ *  per frame as `batch {...}`. */
+export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true) {
   const keys = cameraPath(seed);
   const at = spots(seed);
   // The ground points of the eight trees nearest ahead of the camera (`topple`).
   const [camX, , camZ] = keys[0].pos;
   const trunks = levelPlan(seed).props.filter((p) => p.kind === "tree").map((p) => toScene(p.x, p.y, p.z)).filter((p) => p[2] > camZ + 4).sort((a, b) => Math.hypot(a[0] - camX, a[2] - camZ) - Math.hypot(b[0] - camX, b[2] - camZ)).slice(0, 8);
-  let next = 0, fired = 0, frames = 0, last = -1;
+  let next = 0, fired = 0, frames = 0, last = -1, hadBodies = false;
   const flying = debris === true ? new Debris(seed) : null;
   const dust = debris === "dust" ? new Dust() : null;
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
@@ -257,17 +260,22 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       const fn = new ProceduralMesh(new ProceduralGeometry(VOXEL_BRICKS, [0, 0, 0, 0.1, 0.1, 0.1], new Array(12).fill(0)), ground);
       fn.visible = false;
       scene.add(fn);
-      voxelLevel({ route, palette: nativePalette(false), function: VOXEL_BRICKS.name, objects: nativeObjects(seed), debris: !!debris, ...(dust ? { occupancy: 0.2 } : {}) });
+      voxelLevel({ route, palette: nativePalette(false), function: VOXEL_BRICKS.name, objects: nativeObjects(seed), debris: !!debris, physics, ...(dust ? { occupancy: 0.2 } : {}) });
       if (flying) scene.add(flying.mesh);
       if (dust) scene.add(dust.node);
       if (cloud) scene.add(cloud);
-      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}`, width: 1280, height: 720, preset: "cinematic" as const } };
+      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}${physics ? "" : "-lattice"}`, width: 1280, height: 720, preset: "cinematic" as const } };
     },
     frame(f) {
       frames++;
       flying?.step(f.dt);
       const b = voxelFrame(f.dt) as VoxelFrame; // (the level is loaded by the first frame)
       if (b.batches > 0 || (b.settled ?? 0) > 0) console.log(`batch ${JSON.stringify(b)}`);
+      if (physics && frames % 30 === 0) {
+        const bodies = voxelBodies();
+        if (bodies.length > 0 || hadBodies) console.log(`bodies ${JSON.stringify({ frame: frames, n: bodies.length, asleep: bodies.filter((x) => x.asleep).length, voxels: bodies.reduce((n, x) => n + x.voxels, 0), largest: bodies.reduce((n, x) => Math.max(n, x.voxels), 0) })}`);
+        hadBodies = bodies.length > 0;
+      }
       const s = f.state.scenario;
       if (!s) return;
       const t = (frames - f.state.started) / 60; // frames since the scenario began, at 60 per second of frame script
@@ -333,7 +341,11 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       fell: (tx) => { tx.state.scenario = "fell"; tx.state.started = frames; last = -1; },
       topple: (tx) => { tx.state.scenario = "topple"; tx.state.started = frames; last = -1; },
       // The level's hash, logged (`hash <16 hex digits>`): the same events at the same frames give the same one.
-      hash: () => { console.log(`hash ${voxelHash()} frame ${frames}`); },
+      // With physics, the physics world's hash too (the bodies' poses and velocities, bit for bit).
+      hash: () => {
+        const world = physics ? (JSON.parse((globalThis as { __engine?: { physics?: (op: string, a: object) => string } }).__engine?.physics?.("hash", {}) ?? "{}") as { hash?: string }).hash : undefined;
+        console.log(`hash ${voxelHash()}${world ? ` physics ${world}` : ""} frame ${frames}`);
+      },
     },
   });
 }
