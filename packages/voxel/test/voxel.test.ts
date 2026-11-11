@@ -269,6 +269,15 @@ test("a voxel body the engine took out before the objects noticed: every call do
       ["paint", () => va.paint({ sphere: [0, 0, 0, 1] }, 1)], ["carve", () => va.carve({ box: [0, 0, 0, 1, 1, 1] })], ["addVoxels", () => va.addVoxels({ box: [0, 0, 0, 1, 1, 1] }, 1)],
     ];
     for (const [name, f] of calls) assert.doesNotThrow(f, name);
+    // Each reader first, on a body nobody has looked at since the engine took it out.
+    for (const read of [(o: InstanceType<typeof VoxelBody>) => o.getLinearVelocity(), (o: InstanceType<typeof VoxelBody>) => o.getAngularVelocity(), (o: InstanceType<typeof VoxelBody>) => o.sleeping, (o: InstanceType<typeof VoxelBody>) => o.position]) {
+      const id = 2 ** 30 + 50 + engine.bodies.length;
+      engine.bodies.push({ body: id });
+      const o = voxelBodies().find((x) => x.body === id)!;
+      engine.takeOut(id, "cap");
+      assert.doesNotThrow(() => read(o));
+      assert.equal(o.gone, true);
+    }
     assert.deepEqual([va.gone, va.goneReason, va.physics, va.getLinearVelocity().toArray(), va.position.toArray()], [true, "fell", null, [0, 0, 0], [0, 1, 0]]);
     // An edit of the level that carves one away: its object is gone as soon as the edit returns.
     engine.voxelEdit = () => (engine.takeOut(b, "carved"), "{}");

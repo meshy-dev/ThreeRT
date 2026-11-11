@@ -12,7 +12,7 @@
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
 // all of it off (no collider; loose parts fall straight down until they rest, as before); `collide: false` on an
 // object leaves that object without a collider.
-import { bindBody, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, type Vector3 } from "@threert/scene";
+import { bindBody, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
 
 export type Hardness = "soft" | "medium" | "hard" | "indestructible";
 
@@ -222,6 +222,16 @@ export class VoxelBody extends Object3D {
   }
   override setAngularVelocity(v: Vector3): this {
     return this.call("velocity", { angvel: v.toArray() });
+  }
+  // (The readers too: `Object3D`'s would throw on a body the engine took out before the objects noticed.)
+  override getLinearVelocity(target?: Vector3): Vector3 {
+    return this.ask(() => super.getLinearVelocity(target), undefined) ?? (target ?? new Vector3Ctor()).set(0, 0, 0);
+  }
+  override getAngularVelocity(target?: Vector3): Vector3 {
+    return this.ask(() => super.getAngularVelocity(target), undefined) ?? (target ?? new Vector3Ctor()).set(0, 0, 0);
+  }
+  override get sleeping(): boolean {
+    return this.ask(() => super.sleeping, false);
   }
 
   /** The exposed voxels of this body inside the shape take palette entry `material`. */
