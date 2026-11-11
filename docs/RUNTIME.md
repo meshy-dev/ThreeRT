@@ -235,7 +235,7 @@ Decided by the user on 2026-11-10, with the measurements below.
 - **On the web: layout C.** The Rust engine (scene, Rapier, voxels) is compiled to wasm, and the gameplay TypeScript
   runs in the browser's own JS engine, calling the wasm module's exports: the same game code and the same four
   channels, with the `Engine` interface implemented by the wasm exports and a thin layer of JS ("The engine in a
-  browser" below: built, run in Node, not yet in a browser). The layouts considered:
+  browser" below: built, and measured in Chrome on the physics hello world). The layouts considered:
 
   | layout | what | why not / why |
   | --- | --- | --- |
@@ -329,8 +329,9 @@ changed: the same sources, the same shaders, byte-identical renders. What runs i
 
 ## The engine in a browser (`renderer/web`)
 
-Layout C's second half. **Status (2026-11-11): built, and run in Node; not yet run in a browser.** Everything below
-that needs a GPU is marked so. The first runs on a GPU wait for the loop guard (below) and for the user's word.
+Layout C's second half: the physics hello world runs in Chrome (2026-11-11), the same game file and the same numbers
+as natively. Measured on hello world only; larger scenes, and scenes that edit themselves, wait for the two-level
+tree (ROADMAP § 6).
 
 - **The module** (`renderer/web`, a `cdylib` for `wasm32-unknown-unknown`, wasm-bindgen): the engine's world, the
   voxels, the physics and the live view. Its exports are of two kinds:
@@ -364,8 +365,10 @@ that needs a GPU is marked so. The first runs on a GPU wait for the loop guard (
   sound data. On 2026-11-11 two dispatches that did not end took this machine's display down (WindowServer's
   watchdog; software traversal under the atomic tests, at two scenes without a triangle). A page's shader runs on the
   player's GPU beside everything else, so **a browser's kernel always has the guard**: every loop body counts the
-  invocation's iterations and leaves past a limit (65,536). The arithmetic is untouched. What it stops it counts: the
-  count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
+  invocation's iterations and leaves past a limit (65,536; a page can set it). No formula changes, but the image is
+  not bit-identical to the kernel's without the guard: the compiler arranges the arithmetic of the functions it is in
+  differently (hello world, one sample: 354 of 43,200 numbers differ, by at most 2 × 10⁻⁷ of their value). What it
+  stops it counts: the count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
   render in which it moved is an error, and anything but 0 means wrong pixels. Natively it is off unless
   `THREERT_LOOP_GUARD=<limit>`. The live passes need none: their loops are counted loops over constants and clamped
   parameters.
@@ -380,24 +383,95 @@ that needs a GPU is marked so. The first runs on a GPU wait for the loop guard (
 
 Checked without a GPU:
 - `tools/web-engine.ts` (CI): the module in Node (V8), `__engine` made by the page's code, the game bundle, the
-  physics hello world's five clicks (as view rays) and frames, and the native test's checks. It passes, and prints
-  what the native test prints: boxes at rest at (−1.000, 0.250, −0.305), (−1.011, 0.748, −0.300), (−1.002, 1.248,
-  −0.300), the kicked one 0.913 m along the kick (0.917 predicted).
+  physics hello world's five clicks (as view rays) and frames, and the native test's checks; the engine API one for
+  one with `install_engine` (35 functions natively, in the page's `__engine`, in the module's exports).
 - The generator's and the guard's tests (naga), the tree walk, the web crate's wasm32 build (CI).
 
-Measured so far (Apple M5 Pro):
+### Measured in a browser (2026-11-11)
 
-| | |
-| --- | --- |
-| the module | 7.3 MiB (gzip 2.3 MiB, brotli 1.5 MiB); wasm-bindgen's JavaScript and the page's 104 KiB (17 KiB); no `wasm-opt` |
-| hello world natively, merged layout against the layout as written, offline, software traversal | the same bytes (HDR and PNG) |
-| hello world's scripted test natively in the merged layout (`THREERT_MERGED=1 node tools/physics-hello.ts`) | the same game numbers; the two checks software traversal fails either way (every box and every move rebuilds) |
+Apple M5 Pro, Chrome 157.0.8103.40 driven by Playwright (`node tools/web-hello.ts`; a Chrome of its own profile),
+its WebGPU adapter `apple` / `metal-3`, not a fallback adapter (the machine's GPU). The adapter allows 10 storage
+buffers a stage; the device was asked for 8 and got 8. Loop guard on (65,536; its count 0 in every run below).
+1280 × 720 traced at half (the dynamic resolution's floor), other applications holding 15–40 % of the GPU. The runs
+and their order are in `out/web-probe/gpu-runs.md` (kept beside the checkout).
 
-Not measured yet (`tools/web-hello.ts`, written, not run): the scripted test in Chrome and its numbers against the
-native run's; frame times in a browser (still, a body moving, a rebuild; the page's time split into script, engine
-calls, physics, commit and rebuild, recording; the GPU's and the trace's); the first frame and the shaders' compile;
-the boundary's cost in Chrome; the merged layout's and the guard's cost natively against the layout as written; the
-atomic tests in the merged layout.
+**The scripted test** (`tools/physics-hello.ts`'s: 822 frames in lockstep, five clicks at the same view
+coordinates through the page's click path, the same checks): passes at 640 × 360 and at 1280 × 720, after a first
+step of 14 frames at 160 × 90. **The report and the clicks' log are the native run's, number for number**: boxes at rest at (−1.0002, 0.2498, −0.3052),
+(−1.0109, 0.7481, −0.2996), (−1.0023, 1.2475, −0.3001), the kicked one at (1.7011, 0.2499, 1.6092), 0.913 m along the
+kick (0.917 predicted), all asleep. The same ticks give the same bits: nothing to explain away. A real mouse click on
+the canvas adds its box 1.1–1.3 cm from where it was aimed (a mouse lands on whole pixels). The canvas against a
+native live snapshot of the same frame count ± 1: 1.2 of 255 a channel, mean.
+
+**Frame times**, ms p50 / p95, the same five clicks in real time, content at 60 fps (two runs; the second's figures):
+
+| | still | a body moves |
+| --- | --- | --- |
+| frame interval | 16.67 / 17.29 | 16.67 / 25.0 |
+| the page's own time in a frame | 0.29 / 0.81 | 16.7 / 18.0 |
+| of it: the node host's `frame` (script) | 0.08 / 0.20 | 0.05 / 0.08 |
+| engine calls made by the script | 1 a frame (not timed apart: the table below) | the same |
+| physics: step and scene sync, in wasm | 0.02 / 0.06 | 0.06 / 0.12 |
+| commit | 0.005 / 0.01 | 16.5 / 17.7 |
+| of it: **rebuilding the scene** (software traversal, every frame a body moves) | 0 | **16.5 / 17.7** |
+| recording the frame (the passes, the canvas) | 0.16 / 0.46 | 0.09 / 0.12 |
+| GPU | 6.6 / 8.2 | 6.1 / 8.1 |
+| of it: the trace | 2.1 / 2.8 | 1.7 / 2.7 |
+
+- Still, a frame is the GPU's 6.6 ms and 0.3 ms of the page. Natively, the same view under software traversal:
+  6.9–8.0 ms of GPU (trace 1.5–1.7), so the browser's frame is the native one within the noise of this machine;
+  hardware traversal 4.7 (1.0).
+- **Every frame in which a body moves spends the whole 16.7 ms rebuilding the scene** in the page (natively under
+  software traversal: 9.0 ms, on every core; hardware traversal: nothing, the body's instance moves in place). The
+  interval holds 60 fps at p50 and slips at p95. This is the cost hello world ships with until software traversal
+  edits in place.
+- A click that adds a box: pick 0.03–0.3 ms, the handler 0.4–1.6 ms, the commit 16.6–24.1 ms (a rebuild; natively
+  under software traversal 8.8–10.7 ms, under hardware traversal 0.2–0.6 ms in place after the first box).
+
+**Opening the view:** the module fetched and instantiated 21–65 ms; `setup` 7.4–8.1 ms (28 engine calls); `start`
+1.13 s, of which **1.08 s is the sky's bake on the page's one thread** (natively 37–40 ms on every core) and 3–4 ms
+the adapter and the device. **The first frame:** its work done on the GPU 26 ms after it was recorded when the
+browser has compiled the kernel before; **1.43–1.44 s** with a kernel it has not (measured by giving the page a guard
+limit it had not had, a new constant in the kernel's source; a fresh browser profile is not enough, the system keeps
+compiled shaders across profiles). The live passes' own first compile was not separated.
+
+**The boundary in Chrome** (`?bench=1`; a world of 10,000 objects with a body each, ticked once), ns a call, the best
+of five runs; beside it the same module in Node 24 (`tools/web-engine.ts --bench`):
+
+| call | Chrome 157 | Node 24 |
+| --- | ---: | ---: |
+| `visible(id, bool)` | 38 | 39 |
+| `power(id, number)` | 39 | 40 |
+| `transform(id, Float32Array(10))` | 54 | 55 |
+| `customData(id, [4])` | 95 | 98 |
+| `material(id, desc)` (JSON) | 1,190–1,200 | 1,410 |
+| `object(id, desc)` (JSON) | 790–800 | 910 |
+| `physics("state", { body })` (JSON both ways) | 1,490–1,520 | 1,590 |
+| `physics("impulse", { body, impulse })` | 590 | 610 |
+| `physics("ray", …)` in that world | 1,700–1,740 | 1,860 |
+| `physicsPoses()` for 10,000 bodies, not read (70,000 floats copied out) | 20,000–21,600 | 25,100 |
+| 1,000 bodies' poses fetched and read | 0.05–0.07 ms | 0.05 ms |
+| 10,000 bodies' poses fetched and read | 0.30–0.32 ms | 0.30 ms |
+
+The runtime probe's "a call costs about 1 ns" was an empty export; these are the engine's own calls, with the work
+they do (a lookup, the change sets, for a descriptor its JSON). A scalar call is 40 ns, a descriptor about a
+microsecond, 10,000 poses 0.3 ms (QuickJS natively: 0.94 ms). One finding beside the boundary: a physics query
+tests every collider added since the last tick one by one, so in a world that has never ticked a ray over 1,000
+bodies costs 42 µs (after a tick: 1.7 µs over 10,000).
+
+**Natively, the merged layout and the guard** (hello world, software traversal): offline, the merged layout's bytes
+are the layout's as written (with the guard in both; and without it in both); live, the scripted test's report in
+the merged layout with the guard is the hardware run's number for number. Their cost on this scene is inside the
+run-to-run spread (GPU ms a frame p50, each twice: as written 8.0, 6.9; merged 6.3, 7.0; as written + guard 7.1,
+6.1; merged + guard 10.2, 6.7): a 106-triangle frame is not where a trace's cost shows.
+
+**Size:** the module 7.34 MiB (gzip 2.28 MiB, brotli 1.51 MiB; no `wasm-opt`), wasm-bindgen's JavaScript and the
+page's 105 KiB (brotli 17 KiB), hello world's bundle 230 KiB (brotli 53 KiB).
+
+**Not measured:** any scene but hello world in a browser; the merged layout's and the guard's cost on a scene whose
+trace is the frame (Kabukichō); the atomic tests in the merged layout as a suite (two of them alone: the scenes
+without a triangle, both layouts, the tests' answers); Safari and Firefox (nothing Chrome-only was written: WebGPU
+through wgpu, default limits except buffer sizes, timestamp queries only if the adapter has them).
 
 ## Correctness
 

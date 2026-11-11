@@ -2711,7 +2711,7 @@ impl Gpu {
         // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
         if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs)?) {
             if now != before {
-                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
+                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
             }
         }
         let t_tl = Instant::now();

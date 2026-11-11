@@ -3888,8 +3888,8 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - This step: the library builds for `wasm32-unknown-unknown` with the native shell left out, the GPU from
        futures, `web_time`, and file reads behind one module (docs/RUNTIME.md "The engine's library in a browser").
        Natively the renders are byte-identical.
-   - **The engine in a browser** (2026-11-11, branch `web-hello`; the second half of layout C. **In progress: built
-     and run in Node, not yet run in a browser**).
+   - **The engine in a browser** (2026-11-11, branch `web-hello`; the second half of layout C: the physics hello
+     world runs in Chrome to the native run's numbers).
      - `renderer/web`: the wasm module (the engine API's 35 exports, one for one with the native `__engine`, on the
        same code, `renderer/src/api.rs`; the session's), the page (`__engine` over the exports, the node host called
        as `GameSession` calls it, the canvas' clicks) and `tools/build-web.ts`. The game bundle is the native one.
@@ -3906,8 +3906,17 @@ benchmark level. The order follows the dependencies; a step that meets a further
        what it stops counted and read back; always on in a browser, `THREERT_LOOP_GUARD` natively.
      - `tools/web-engine.ts` (CI): the module in Node with the page's `__engine` and the native bundle runs the
        physics hello world's script to the native test's numbers.
-     - To do, on a GPU: `tools/web-hello.ts` (Playwright, Chrome): the scripted test, frame times, the boundary's
-       cost; the merged layout's cost natively; docs/RUNTIME.md "The engine in a browser".
+     - **In Chrome 157 on the machine's GPU** (`tools/web-hello.ts`, Playwright; docs/RUNTIME.md "Measured in a
+       browser"): the scripted test passes at 1280 × 720 and its report is the native run's number for number. A
+       still frame is 6.6 ms of GPU and 0.3 ms of the page (natively under software traversal 6.9–8.0 ms of GPU).
+       **Every frame in which a body moves rebuilds the scene: 16.5 ms in the page** (9.0 natively), and a click that
+       adds a box 17–24 ms: what hello world ships with until software traversal edits in place. The view opens in
+       1.13 s, 1.08 s of it the sky's bake on one thread; a kernel the browser has not compiled takes 1.4 s before
+       the first frame, 26 ms after that. Engine calls cost 40 ns (a scalar) to about a microsecond (a descriptor),
+       10,000 poses 0.3 ms. The module is 7.3 MiB (1.5 MiB with brotli).
+     - Open: the two-level tree (in-place edits under software traversal: the rebuild above); the sky's bake off
+       the page's thread or smaller; the kernel's compile at load instead of at the first frame; a scene larger
+       than hello world in a browser, and the merged layout's cost on one natively; other browsers.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.
