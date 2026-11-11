@@ -11,8 +11,9 @@ import { camera, result, sceneWithSky, type Region, type TestMeta } from "./lib.
 import { test as base } from "./voxel-cut-body.ts";
 import { cut, level } from "./voxel-cut-falls.ts";
 
-/** The block's place in the image (x -0.7 .. -0.5 m, y 0.4 .. 1.0 m; the camera of voxel/cut-falls). */
-const BLOCK: Region = [0.412, 0.75, 0.43, 0.85];
+/** The block's place in the image (x -0.7 .. -0.5 m, y 0.4 .. 1.0 m; the camera of voxel/cut-falls): at 160 x 90 its
+ *  three columns of pixels. */
+const BLOCK: Region = [0.4135, 0.75, 0.428, 0.85];
 
 export const test: TestMeta = {
   ...base, id: "voxel/body-gone", temporal: true, time: undefined, live: 200,
