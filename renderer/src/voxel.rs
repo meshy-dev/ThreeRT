@@ -2184,6 +2184,48 @@ mod tests {
         println!("retired for the cap: {}", v.retired);
     }
 
+    /// The trees of the benchmark level cut at the trunk (the destruction game's `topple`): what each crown does as a
+    /// body, a second at a time: its speed, its spin, whether it sleeps; and the step's time.
+    #[test]
+    #[ignore = "a measurement: VOXEL_PHYSICS=<bundle.js>"]
+    fn voxel_level_topple() {
+        let Ok(bundle) = std::env::var("VOXEL_PHYSICS") else { return println!("VOXEL_PHYSICS=<bundle.js>") };
+        let assets = assets();
+        let host = crate::script::ScriptHost::new(&std::fs::read_to_string(&bundle).unwrap()).unwrap();
+        host.setup("r", None).unwrap();
+        let (mut v, mut w, mut ph) = (host.voxels.borrow_mut(), host.world.borrow_mut(), host.physics.borrow_mut());
+        v.realize(&mut w, &mut ph, &assets).unwrap().unwrap();
+        w.take_changes();
+        // (The game's eight trunks with seed 1, as its `trunks` gives them; an explosion of 0.6 m at 0.8 m up each.)
+        let trunks = [[-100.6f32, 9.3, -92.0], [-103.9, 9.1, -93.0], [-86.7, 9.8, -91.1], [-105.9, 9.2, -88.8], [-89.3, 10.0, -88.1], [-105.8, 9.2, -86.5], [-88.1, 10.1, -87.0], [-83.9, 10.0, -90.7]];
+        for t in trunks {
+            let at = Vec3::new(t[0], t[1] + 0.8, t[2]);
+            let e = v.explode(&mut w, &mut ph, at, 0.6).unwrap();
+            println!("a trunk cut at {at:?}: {} voxels carved, {} parts of {} voxels", e["voxels"], e["pieces"], e["piece_voxels"]);
+            w.take_changes();
+            for _ in 0..30 {
+                crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+                w.take_changes();
+            }
+        }
+        for second in 1..=20 {
+            let mut step = vec![];
+            for _ in 0..60 {
+                crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+                step.push(ph.as_mut().unwrap().take_stats().step_ms);
+                w.take_changes();
+            }
+            step.sort_by(f64::total_cmp);
+            let p = ph.as_ref().unwrap();
+            let each: Vec<String> = v.bodies.values().map(|b| {
+                let (at, _, asleep) = p.bridge_ref().engine_pose(b.body).unwrap();
+                let (lin, ang) = p.bridge_ref().engine_velocity_of(b.body).unwrap();
+                format!("{}{} y {:.2} v {:.3} w {:.3}", b.grid.count(), if asleep { " asleep" } else { "" }, at[1], Vec3::from(lin).length(), Vec3::from(ang).length())
+            }).collect();
+            println!("  second {second}: step p50 {:.3} ms; {}", step[30], each.join(" | "));
+        }
+    }
+
     /// Meshing time on the benchmark level's files (`cargo test --release voxel_mesh_timing -- --ignored --nocapture`;
     /// THREERT_ASSETS: the asset root, default ../assets): every terrain tile (64 x 64 columns) and building part,
     /// median and maximum.
