@@ -119,7 +119,7 @@ links from where they are served (`js/site.js` `packageLinks`):
 | `brand/` | The mark ("Three bounces": the three.js triangle, tilted as three.js draws it, and the closed light path inside it, which is three.js's own inner triangle) and its variants. `js/mark.js` draws it live in the lockup and on the landing page, and turns the path on hover |
 | `media/` | The renders, WebP, and the hero clip, H.264. Generated; never retouched |
 | `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
-| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, disk images from R2, static assets) and its config (threert.dev) |
+| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, disk images from R2, byte ranges for the clips, static assets) and its config (threert.dev) |
 | `releases/`, `play/` | Generated, not committed (above) |
 
 ## Media

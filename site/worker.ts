@@ -1,5 +1,6 @@
-// The site on Cloudflare Workers: static assets (out/site, built by site/tools/build.ts) on threert.dev, and the
-// clients' disk images from R2. www.threert.dev redirects to the apex.
+// The site on Cloudflare Workers: static assets (out/site, built by site/tools/build.ts) on threert.dev, the clients'
+// disk images from R2, and byte ranges for the clips (media/**.mp4), which the assets alone do not answer.
+// www.threert.dev redirects to the apex.
 //
 // Why R2: the disk image (releases/ThreeRT-<version>-macos-arm64.dmg, about 32 MiB with the `threert` command line in
 // it) is over the 25 MiB a file that static assets take, and the client is closed source, so it has no public
@@ -66,6 +67,48 @@ async function image(request: Request, env: Env, key: string): Promise<Response>
   return new Response(object.body, { headers });
 }
 
+/** The bytes a `Range: bytes=...` header asks of a file of `size` bytes: [start, end] inclusive, "unsatisfiable", or
+ *  null when there is no single range to answer (no header, another unit, several ranges: the whole file then). */
+export function byteRange(header: string | null, size: number): [number, number] | "unsatisfiable" | null {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header?.trim() ?? "");
+  if (!m || (m[1] === "" && m[2] === "")) return null;
+  if (m[1] === "") {
+    const n = Number(m[2]);
+    return n > 0 && size > 0 ? [Math.max(0, size - n), size - 1] : "unsatisfiable";
+  }
+  const start = Number(m[1]), end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+  return start < size && start <= end ? [start, end] : "unsatisfiable";
+}
+
+/** media/**.mp4 -> true: the clips the pages play. */
+export const isClip = (pathname: string) => /^\/media\/[A-Za-z0-9._\/-]+\.mp4$/.test(pathname);
+
+/**
+ * A clip, with byte ranges. Static assets answer a Range request with the whole file, and Safari (every browser on an
+ * iPhone) plays a video only from a server that answers 206: it asks for bytes 0-1 first and gives up otherwise. The
+ * clips are a few MiB, so the range is cut out of the asset here.
+ */
+async function clip(request: Request, env: Env): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.delete("range");
+  const asset = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers }));
+  const out = new Headers(asset.headers);
+  out.set("accept-ranges", "bytes");
+  if (asset.status !== 200 || request.method !== "GET") return new Response(asset.body, { status: asset.status, headers: out });
+  if (!request.headers.has("range")) return new Response(asset.body, { headers: out });
+  const bytes = await asset.arrayBuffer();
+  const range = byteRange(request.headers.get("range"), bytes.byteLength);
+  if (range === null) return new Response(bytes, { headers: out });
+  if (range === "unsatisfiable") {
+    out.set("content-range", `bytes */${bytes.byteLength}`);
+    out.delete("content-length");
+    return new Response(null, { status: 416, headers: out });
+  }
+  out.set("content-range", `bytes ${range[0]}-${range[1]}/${bytes.byteLength}`);
+  out.set("content-length", String(range[1] - range[0] + 1));
+  return new Response(bytes.slice(range[0], range[1] + 1), { status: 206, headers: out });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -75,6 +118,7 @@ export default {
     }
     const key = imageKey(url.pathname);
     if (key) return image(request, env, key);
+    if (isClip(url.pathname)) return clip(request, env);
     return env.ASSETS.fetch(request);
   },
 };
