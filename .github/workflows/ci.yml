@@ -58,8 +58,9 @@ jobs:
           # voxel-core and its determinism check.
           job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
           # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
-          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file).
-          job physics '^(renderer/(physics-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$)|tools/physics-determinism\.ts$)'
+          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file;
+          # the voxel bodies' script it runs there: voxel-core and the renderer's voxel and physics adapters).
+          job physics '^(renderer/(physics-core/|voxel-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$|src/(voxel|physics)\.rs$)|tools/physics-determinism\.ts$)'
           # The engine's library for wasm32: the same as the renderer's.
           job wasm '^(renderer/|presets/)' '^renderer/web/'
           # The browser module (renderer/web, on the engine's library) and tools/web-engine.ts: the module in Node with

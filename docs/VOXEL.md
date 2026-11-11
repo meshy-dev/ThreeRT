@@ -338,6 +338,65 @@ along the camera path, 2 rounds with an A/A; memory from an offline frame.
   colours are for palettes of many colours in one material: a `.vox` model's up to 255 colours of one material are one
   mesh instead of up to 255, and the browser's three.js draws one mesh per class.
 
+### Voxel bodies (ROADMAP § 6 step 8; 2026-11-11, CPU only so far)
+
+The level collides and what comes loose is a rigid body. Code: `renderer/physics-core` (`Shape::Voxels`,
+`Physics::edit_voxels`), `renderer/voxel-core` (`Edit::cleared`, `Level::take`), `renderer/src/voxel.rs` (the
+level's colliders, the bodies). **No GPU run of it has been made yet**; every figure here is the CPU's, on this
+Mac, release builds.
+
+**The shape** is parry's `Voxels` (8³ chunks, a byte a cell, each cell knowing its neighbours), for the fixed
+level and for the moving parts. Measured against the others on Rapier (`physics-core/examples/voxel_shapes.rs`: a
+ground of 427 k cells of 0.1 m; pieces of 6³ cells with holes, about 200 solid):
+
+| the fixed ground | build | memory | an edit of 2,080 cells |
+| --- | --- | --- | --- |
+| voxels | 26 ms | 1.3 MiB | 0.10 ms, in place |
+| a compound of boxes (cells merged greedily) | 2.9 ms | 0.3 MiB | 3.7 ms: the object built again |
+| a triangle mesh of the faces | 107 ms | 53.7 MiB | 105 ms: built again |
+
+| 100 pieces dropped in a heap: moving / fixed | a tick while they fall: mean, worst | asleep after 15 s |
+| --- | --- | --- |
+| voxels / voxels | 1.38, 4.7 ms | 100 |
+| boxes / voxels | 1.66, 5.9 ms | 98 |
+| hull / voxels | 0.44, 2.4 ms | 29 |
+| voxels / triangle mesh | – | 0: all fell through the ground |
+| boxes / boxes | 0.46, 1.5 ms | 94 |
+
+Voxels against voxels: 400 pieces 7.1 ms a tick while they fall (at worst 19), 1,000 pieces 22.6 ms (52); asleep,
+0. The same bits natively and in wasm32.
+
+**The level's colliders.** Every object gets a fixed collider at load; an edit takes out the cells the object lost
+(`Edit::cleared`: by the cells, not by the object's size). A collider holds the object's cells within 4 of a cell
+that is not solid, a shell; an edit brings in the cells it bared, the neighbouring terrain tiles' too. On the
+benchmark level (4,172 objects; 515 M solid cells, 480 M of them the terrain's 1,600 tiles down to the bedrock):
+
+| colliders of | cells | build | memory |
+| --- | --- | --- | --- |
+| every solid cell | 515.3 M | 26.0 s | 1,279 MiB |
+| the shell | 61.6 M | 6.9 s (finding the cells 2.3) | 455 MiB |
+
+Still large: see ROADMAP § 6 step 8, "Open".
+
+**An edit on the level, on the CPU** (`voxel.rs` `voxel_level_physics`; at the foot of the largest building part):
+
+| edit | voxels | all | carve | colliders | meshes | parts and bodies |
+| --- | --- | --- | --- | --- | --- | --- |
+| explosion, 0.5 m | 296 | 5.1 ms | 0.13 | 0.89 | 4.00 | – |
+| 1 m | 2,857 | 6.3 ms | 0.27 | 1.33 | 4.72 | – |
+| 2 m | 19,919 | 9.0 ms | 0.64 | 2.54 | 5.76 | – |
+| 4 m | 144,344 | 19.2 ms | 2.69 | 8.38 | 8.06 | – |
+| the cut of 30 x 30 m, 1 m thick | 577,519 | 123 ms | 24.3 | 44.3 | 41.4 | 12.6: six bodies of 112,889 voxels, the largest 95,694 |
+
+After the cut the physics steps in 1.5 ms a frame (p95 1.8) while the parts fall and land, all six sleep within
+five seconds, and then it is 0. In step 6 the same cut cost 26–28 ms a frame for as long as the building fell (its
+vertices written again every frame); now a part moves by its transform.
+
+**A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /
+2,400 / 7,800 kg/m³ unless the entry names one), drawn by driven objects. A carve reaches it through its pose; what
+is cut off is a body of its own. At most 512 at once (`maxBodies`): past it the oldest sleeping one goes, its voxels
+debris. A settled body stays a body.
+
 ## Two published designs for destructible voxel worlds
 
 - **Dense grids and a world occupancy volume** (the raster-era design):

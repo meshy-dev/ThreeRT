@@ -211,6 +211,21 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   first read. Numbers: ROADMAP § 6 step 7.
 - The engine call under it is `__engine.physics(op, args)` (JSON; `renderer/physics-core/src/bridge.rs` lists the
   calls, `faults` and `state`'s `{ removed }` among them) and `__engine.physicsPoses()`.
+- **Voxels** (ROADMAP § 6 step 8; docs/VOXEL.md "Voxel bodies"): a voxel level collides without a `physics` on
+  anything. Its objects are fixed colliders of their voxels and what an edit cuts loose is a dynamic body, both of
+  the engine's own shape (`physics_core::Shape::Voxels`: parry's voxel shape; a collider's cells are changed where
+  it is by `Physics::edit_voxels`, at a cost by the cells that change). Rays, shape casts and contacts report them
+  like any collider. They are **the engine's bodies**: their ids are from 2^30 up, scene code cannot make or remove
+  one (`body`, `collider` and `remove` refuse those ids), and can name one in every other call; `voxelBodies()`
+  (`packages/voxel`) lists the bodies with their ids. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  cells, each within 2^20 cells and 100 km of the shape's origin.
+  - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
+    (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it
+    lies on a plane of the lattice and runs along it), and a ball against voxels goes through parry's general voxel
+    contacts (its own function for that pair makes Rapier's solver panic when a contact goes). Neither touches a
+    world without voxel shapes: step 7's worlds end in the bits they did.
+  - Cost: asleep, nothing. While they move, Rapier's step on one thread: 1.4 ms a tick for a hundred jagged pieces
+    of 200 voxels in a heap, 1.5 ms for one building part of 96 k voxels landing.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 

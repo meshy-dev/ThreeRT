@@ -4048,9 +4048,62 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - Bodies at rest on one another have no GPU number (no game makes a pile yet): step 8's first measurement.
      - Under software traversal a rigid group's pose still rebuilds the scene every frame (`zero-day-animated`:
        2.6 s a frame), as before step 7b.
-8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
-   - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
-   - Then the decision: keep Rapier or write our own.
+8. **[engine] Voxel bodies.** The level collides, and what an edit leaves hanging on nothing is a rigid body (it
+   replaces step 6's fall through the lattice). Native first: the acceptance is under hardware traversal; software
+   traversal has to work (bodies are units, no rebuild) and gets one set of figures; a browser is not part of this
+   step. Design: docs/VOXEL.md "Voxel bodies"; docs/RUNTIME.md "Physics" (the voxel shape, the engine's own bodies).
+   - Scope:
+     - **The collision shape**, on step 7's `Shape`: parry's `Voxels`, for the level's objects (fixed) and for the
+       loose parts (moving), chosen against a compound of boxes, a triangle mesh and a convex hull by measurement.
+     - **The level collides by default**: every object a fixed collider of its voxels, edited by the cells an edit
+       cleared; rays and shape casts of the physics world meet it. `physics: false` on the level is step 6 as it
+       was; `collide: false` on an object leaves it out. Ordinary meshes still declare `physics`.
+     - **Loose parts are rigid bodies**: mass from their voxels and each palette entry's density; they tumble, land
+       on the level and on one another, and sleep; they move as instances (no vertex is written again).
+     - **Debris**: parts under 8 voxels stay the game's particles; at most 512 voxel bodies (`maxBodies`), past it
+       the oldest sleeping one goes, its voxels debris.
+     - **A body stays a body** when it has settled (asleep it costs no tick; turned, it does not fit the lattice,
+       and writing it back would lose voxels). The cap bounds them.
+     - **Edits reach bodies**: a carve cuts a body where it is, as it is turned; what is cut off is a body of its own.
+     - **Determinism and robustness** as in step 7: wasm32 builds in CI; a class of voxel worlds in `check::cases`
+       and the adapter's own script, native against wasm32; a fuzz of calls on voxel shapes.
+   - Acceptance (hardware traversal): a 4 m explosion's frame ≤ 50 ms and 60 fps after it; a building cut loose
+     falls, lands and sleeps within 16.7 ms a frame; about a hundred bodies with room to spare, and the number at
+     which 60 fps is lost; the CPU split (physics step, placing, meshes, colliders) recorded; scenes without voxel
+     bodies unchanged (the catalog's bytes, `renderer/shaders`, step 7's physics tests and hello world).
+   - **Status: the CPU side is done (branch `voxel-bodies`, 2026-11-11); no GPU run of it has been made.**
+     - Done: `Shape::Voxels`, `Physics::edit_voxels` and the world's own ray at voxel shapes (physics-core); the
+       bridge's engine bodies and colliders (ids from 2^30 up: scene code names them and cannot make or remove
+       them); `voxel_core::Edit::cleared` and `Level::take`; in renderer/src/voxel.rs the level's colliders, the
+       bodies, their sync, the carve of bodies, the cap; `voxelBodies()` in `packages/voxel`.
+     - Measured on the CPU (this Mac; docs/VOXEL.md has the tables): voxels against the other shapes; on the
+       benchmark level, colliders of 61.6 M cells in 6.9 s and 455 MiB; an explosion of 4 m 19 ms (of it the
+       colliders 8.4); the 30 x 30 m cut 123 ms, and the building part it frees (95,694 voxels) then costs the
+       physics 1.5 ms a frame while it falls (step 6: 26–28 ms a frame of vertices written again) and nothing once
+       asleep.
+     - Three faults of Rapier 0.36 / parry 0.31 with voxel shapes, each with a test and a way round in physics-core
+       (none patches the crates): the solver panics on a ball against voxels (parry's function for that pair keeps
+       no workspace; the pair now goes through its general voxel function); parry's ray misses voxels along a
+       lattice plane (the world walks the cells itself); a shape edited where it sits keeps stale contacts (the
+       collider is taken out and put back).
+     - Determinism: 300 voxel worlds and the adapter's script end in the same bits natively and in wasm32 (the
+       physics job in CI); step 7's worlds end in the bits they did.
+   - Open:
+     - **Every GPU run**: the acceptance's frame times, the falling parts on the real level, the old voxel tests
+       (three expect the fall through the lattice), software traversal with units.
+     - **The level's colliders cost 6.9 s of load and 455 MiB** on the benchmark level (a shell of the cells within
+       4 of the open; every solid cell was 26 s and 1.3 GiB). Next: objects of one file sharing a shape until
+       edited, a thinner shell for terrain, or building them after the first frame.
+     - The script surface is `voxelBodies()` and the bodies' ids in physics calls and hits; a voxel body as an
+       object with `.physics` in three's style is not designed (step 10).
+     - Paint and added voxels do not reach bodies. A body's mass is spread evenly over its cells (one density, its
+       voxels' mean).
+     - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
+       jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
+     - A browser: a small voxel scene with bodies in Chrome is not run in this step.
+     - The two faults above are to be reported upstream.
+   - Then the decision: keep Rapier or write our own. So far Rapier does what the step needs on both ends (the
+     same bits natively and in wasm32, voxel against voxel resting and sleeping), with the three faults above.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
    - Acceptance: a room replayed from its log gives bit-identical world data.
@@ -4058,6 +4111,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
      period the hash of the world data and of the physics world (`Physics::hash`) is logged, and a node replaying
      compares. The ends are not assumed to agree bit for bit: a difference is found at the first checkpoint after it
      and placed between two checkpoints.
+   - **The voxel world now depends on the physics' determinism** (step 8): where a loose part comes to rest, and so
+     which voxels a later edit carves from it, is the physics world's doing. A replay needs the physics' bits to
+     agree wherever the voxels' must; the checkpoints above cover both hashes, and step 8's checks hold native
+     against wasm32 for voxel shapes.
    - **World handlers' changes are commands.** What `on` handlers do to the scene (step 7) is not in the game state;
      it all leaves the script through the scene binding's sync, and that is where it is logged and replayed from. No
      other way out of a world handler may be added.

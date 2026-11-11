@@ -131,6 +131,12 @@ impl PhysicsWorld {
         }
     }
 
+    /// Time the engine spent placing what its own bodies stand for (the voxel bodies' objects: voxel.rs
+    /// `sync_bodies`), counted with the frame's sync.
+    pub fn add_sync_ms(&mut self, ms: f64) {
+        self.stats.sync_ms += ms;
+    }
+
     /// The frame's figures, and a fresh count for the next.
     pub fn take_stats(&mut self) -> Stats {
         std::mem::take(&mut self.stats)

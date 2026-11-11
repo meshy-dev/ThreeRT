@@ -80,7 +80,9 @@ pub fn voxel_bodies(v: &VoxelWorld, p: &Option<PhysicsWorld>) -> String {
 pub fn physics_advance(p: &mut Option<PhysicsWorld>, v: &mut VoxelWorld, w: &mut World, dt: f64) -> bool {
     let Some(p) = p.as_mut() else { return false };
     p.advance(w, dt);
+    let t = web_time::Instant::now();
     v.sync_bodies(w, p);
+    p.add_sync_ms(t.elapsed().as_secs_f64() * 1e3);
     true
 }
 
