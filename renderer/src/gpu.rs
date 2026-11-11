@@ -599,6 +599,23 @@ impl<'a> Top<'a> {
         }
     }
 
+    /// A procedural object's instance at `slot` (its AABB BLAS). Hardware traversal only: software traversal finds
+    /// procedural objects by their records (`trace_procs`), and its edits of them rebuild the scene.
+    pub fn place_blas(&mut self, slot: usize, blas: &wgpu::Blas, world: glam::Mat4, custom: u32, mask: u8) {
+        if let Top::Hw(a) = self {
+            a.tlas[slot] = Some(wgpu::TlasInstance::new(blas, tlas_rows(world), custom, mask));
+        }
+    }
+
+    /// Whether instanced mesh `k` can be placed: always under hardware traversal (its BLAS); under software traversal
+    /// if it has a tree (a mesh that deforms has none: its instances are flattened).
+    pub fn has_mesh(&self, k: u32) -> bool {
+        match self {
+            Top::Hw(_) => true,
+            Top::Sw(u) => u.root(k).is_some(),
+        }
+    }
+
     /// The instance at `slot`, if there is one, placed by `world` now; with `shown`, its mask too (hidden or not,
     /// casting shadows or not).
     pub fn moved(&mut self, slot: usize, world: glam::Mat4, shown: Option<(bool, bool)>) {

@@ -370,52 +370,53 @@ impl Units {
     }
 }
 
+/// The kernel's traversal on the CPU, for tests (here and lib.rs): what the kernel binds, read through accessors that
+/// refuse an index outside their buffer, every loop iteration counted.
 #[cfg(test)]
-mod tests {
+pub(crate) mod cpu {
     use super::*;
-    use glam::{Quat, Vec3};
 
-    const INF: f32 = 3.0e38;
-    const NO_INST: u32 = 0xffff_ffff;
-    const TRACE_CLOSEST: u32 = 0;
-    const TRACE_SHADOW: u32 = 1;
-    const TRACE_ANY: u32 = 2;
+    pub(crate) const INF: f32 = 3.0e38;
+    pub(crate) const NO_INST: u32 = 0xffff_ffff;
+    pub(crate) const TRACE_CLOSEST: u32 = 0;
+    pub(crate) const TRACE_SHADOW: u32 = 1;
+    pub(crate) const TRACE_ANY: u32 = 2;
 
     #[derive(Clone, Copy, Debug, PartialEq)]
-    struct Hit {
-        t: f32,
-        tri: u32,
-        inst: u32,
+    pub(crate) struct Hit {
+        pub(crate) t: f32,
+        pub(crate) tri: u32,
+        pub(crate) inst: u32,
     }
 
     /// What the kernel binds, on the CPU: every read through `node`, `vert`, `record`, which refuse an index outside
     /// their buffer; every loop iteration counted against `budget` (the loop guard's role: the walk must end).
-    struct Kernel<'a> {
-        nodes: &'a [GpuNode],
-        tri_verts: &'a [[f32; 4]],
-        instances: &'a [GpuInstance],
+    pub(crate) struct Kernel<'a> {
+        pub(crate) nodes: &'a [GpuNode],
+        pub(crate) tri_verts: &'a [[f32; 4]],
+        pub(crate) instances: &'a [GpuInstance],
         /// `P.motion.y`, `P.motion.z`.
-        top: u32,
-        units: u32,
-        steps: std::cell::Cell<u64>,
-        budget: u64,
+        pub(crate) top: u32,
+        pub(crate) units: u32,
+        pub(crate) steps: std::cell::Cell<u64>,
+        pub(crate) budget: u64,
         /// The deepest the shared stack got.
-        deepest: std::cell::Cell<usize>,
+        pub(crate) deepest: std::cell::Cell<usize>,
     }
 
-    type Walk<T> = Result<T, String>;
+    pub(crate) type Walk<T> = Result<T, String>;
 
     impl Kernel<'_> {
-        fn node(&self, i: u32) -> Walk<GpuNode> {
+        pub(crate) fn node(&self, i: u32) -> Walk<GpuNode> {
             self.nodes.get(i as usize).copied().ok_or(format!("reads node {i} of {}", self.nodes.len()))
         }
-        fn vert(&self, i: u32) -> Walk<Vec3A> {
+        pub(crate) fn vert(&self, i: u32) -> Walk<Vec3A> {
             self.tri_verts.get(i as usize).map(|v| Vec3A::new(v[0], v[1], v[2])).ok_or(format!("reads vertex {i} of {}", self.tri_verts.len()))
         }
-        fn record(&self, i: u32) -> Walk<GpuInstance> {
+        pub(crate) fn record(&self, i: u32) -> Walk<GpuInstance> {
             self.instances.get(i as usize).copied().ok_or(format!("reads record {i} of {}", self.instances.len()))
         }
-        fn step(&self) -> Walk<()> {
+        pub(crate) fn step(&self) -> Walk<()> {
             self.steps.set(self.steps.get() + 1);
             if self.steps.get() > self.budget {
                 return Err("does not stop".into());
@@ -424,7 +425,7 @@ mod tests {
         }
 
         /// pathtrace.wgsl `ray_aabb`.
-        fn ray_aabb(o: Vec3A, inv_d: Vec3A, bmin: [f32; 3], bmax: [f32; 3], tmax: f32) -> f32 {
+        pub(crate) fn ray_aabb(o: Vec3A, inv_d: Vec3A, bmin: [f32; 3], bmax: [f32; 3], tmax: f32) -> f32 {
             let t0 = (Vec3A::from(bmin) - o) * inv_d;
             let t1 = (Vec3A::from(bmax) - o) * inv_d;
             let (tmin_v, tmax_v) = (t0.min(t1), t0.max(t1));
@@ -438,7 +439,7 @@ mod tests {
         }
 
         /// pathtrace.wgsl `intersect_tri`: (t, u, v), t = INF for a miss.
-        fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, tmax: f32) -> Walk<f32> {
+        pub(crate) fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, tmax: f32) -> Walk<f32> {
             let (v0, e1, e2) = (self.vert(i * 3)?, self.vert(i * 3 + 1)?, self.vert(i * 3 + 2)?);
             let pv = d.cross(e2);
             let det = e1.dot(pv);
@@ -463,22 +464,22 @@ mod tests {
             Ok(t)
         }
 
-        fn inv(d: Vec3A) -> Vec3A {
+        pub(crate) fn inv(d: Vec3A) -> Vec3A {
             Vec3A::ONE / Vec3A::select(d.abs().cmplt(Vec3A::splat(1e-20)), Vec3A::splat(1e-20), d)
         }
 
         /// pathtrace.wgsl `proc_dir`, `proc_point`.
-        fn proc_dir(r: &GpuInstance, d: Vec3A) -> Vec3A {
+        pub(crate) fn proc_dir(r: &GpuInstance, d: Vec3A) -> Vec3A {
             let n = |k: usize| Vec3A::new(r.n[k][0], r.n[k][1], r.n[k][2]);
             n(0) * d.x + n(1) * d.y + n(2) * d.z
         }
-        fn proc_point(r: &GpuInstance, p: Vec3A) -> Vec3A {
+        pub(crate) fn proc_point(r: &GpuInstance, p: Vec3A) -> Vec3A {
             Self::proc_dir(r, p - Vec3A::new(r.m[0][3], r.m[1][3], r.m[2][3]))
         }
 
         /// pathtrace.wgsl `trace`, the still scene's tree (no cutouts: the scenes here have none), then the units as
         /// `kernel_source` splices them in.
-        fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
+        pub(crate) fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
             let mut hit = Hit { t: tmax_in, tri: 0xffff_ffff, inst: NO_INST };
             let inv_d = Self::inv(d);
             let (mut stack, mut sp, mut node) = ([0u32; STACK], 0usize, 0u32);
@@ -536,7 +537,7 @@ mod tests {
         }
 
         /// shaders/trace_units.wgsl `trace_units`, statement for statement.
-        fn trace_units(&self, o: Vec3A, d: Vec3A, hit_in: Hit, mode: u32) -> Walk<Hit> {
+        pub(crate) fn trace_units(&self, o: Vec3A, d: Vec3A, hit_in: Hit, mode: u32) -> Walk<Hit> {
             let mut hit = hit_in;
             if self.units == 0 {
                 return Ok(hit);
@@ -641,6 +642,13 @@ mod tests {
             Ok(hit)
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpu::*;
+    use super::*;
+    use glam::{Quat, Vec3};
 
     /// The transcriptions above are the shaders': the statements they follow are still there, in this order. A change
     /// to either walk fails here, and the transcription is to follow it.
