@@ -366,6 +366,22 @@ ground of 427 k cells of 0.1 m; pieces of 6³ cells with holes, about 200 solid)
 Voxels against voxels: 400 pieces 7.1 ms a tick while they fall (at worst 19), 1,000 pieces 22.6 ms (52); asleep,
 0. The same bits natively and in wasm32.
 
+**On several threads** (an experiment: `physics-core --features parallel`, Rapier's parallel solver with
+`enhanced-determinism`; native only, off by default). The same heaps, a tick while they fall, mean and worst, ms:
+
+| pieces | sequential | 2 threads | 4 | 8 | 15 |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 0.10, 0.99 | 0.08, 0.42 | 0.08, 0.41 | 0.09, 0.48 | 0.08, 0.59 |
+| 100 | 1.24, 3.84 | 0.74, 2.27 | 0.49, 1.71 | 0.47, 2.08 | 0.51, 2.04 |
+| 400 | 6.69, 17.75 | 3.72, 9.26 | 2.25, 6.12 | 1.68, 5.32 | 1.52, 6.58 |
+| 1,000 | 20.48, 50.81 | – | 6.27, 15.44 | 4.29, 12.76 | 3.66, 13.67 |
+
+Each row ends in the same bits at every thread count and sequentially (a hash of every piece's pose and velocity
+after 900 ticks); so do the determinism check's 1,500 random worlds; 20,000 random voxel worlds step without a
+panic. The sequential native build is what wasm32 agrees with, so a parallel native build would agree with a
+browser too. Not turned on: ROADMAP § 6 step 8, "Open". (Rapier's contact recycling stays on: with it off a heap
+of 400 pieces does not come to rest, 79 asleep after 15 s.)
+
 **The level's colliders.** Every object gets a fixed collider at load; an edit takes out the cells the object lost
 (`Edit::cleared`: by the cells, not by the object's size). A collider holds the object's cells within 4 of a cell
 that is not solid, a shell; an edit brings in the cells it bared, the neighbouring terrain tiles' too. On the

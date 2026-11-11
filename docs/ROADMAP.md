@@ -4102,6 +4102,12 @@ benchmark level. The order follows the dependencies; a step that meets a further
        (voxel bodies as objects with `.physics`, paint and added voxels on bodies, mass by cell).
      - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
        jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
+     - **Rapier's parallel solver** (`physics-core`'s `parallel` feature: native only, off by default; an
+       experiment, docs/VOXEL.md "Voxel bodies"): in everything run it steps to the sequential build's bits at 1,
+       2, 4, 8 and 15 threads (the 1,500 random worlds, heaps of up to 1,000 voxel pieces, 20,000 voxel worlds
+       without a panic), and a heap of 400 pieces costs 2.3 ms a tick on 4 threads for 6.7 sequential (1,000:
+       6.3 for 20.5). No default is changed: whether the native build turns it on, and on how many threads, is
+       decided with the GPU runs; if it does, the determinism check in CI gets a parallel native build.
      - A browser: a small voxel scene with bodies in Chrome is not run in this step.
      - The two faults above are to be reported upstream.
    - Then the decision: keep Rapier or write our own. So far Rapier does what the step needs on both ends (the
