@@ -3915,12 +3915,12 @@ benchmark level. The order follows the dependencies; a step that meets a further
        1.13 s, 1.08 s of it the sky's bake on one thread; a kernel the browser has not compiled takes 1.4 s before
        the first frame, 26 ms after that. Engine calls cost 40 ns (a scalar) to about a microsecond (a descriptor),
        10,000 poses 0.3 ms. The module is 7.3 MiB (1.5 MiB with brotli).
-     - Open, first: **a frame in which a body moves costs the page 16.7 ms, 16.4–16.6 of it the rebuild** (9.0
-       natively under software traversal, nothing under hardware traversal): in-place edits under software
-       traversal, the two-level tree, the next step. Then: the browser's image is not bit-identical to the native
-       one (the guard changes the kernel's last bits; natively it is off and the catalog is byte-identical to main);
-       1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame; a
-       scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
+     - Open, first: **a frame in which a body moves costs the page 16.7 ms, 16.4–16.6 of it the rebuild** (9.0 natively
+       under software traversal, nothing under hardware traversal): in-place edits under software traversal, the
+       two-level tree, the next step (step 7b: 0.84 ms now, no rebuild). Then: the browser's image is not bit-identical
+       to the native one (the guard changes the kernel's last bits; natively it is off and the catalog is byte-identical
+       to main); 1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame;
+       a scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
        2026-11-11 is not confirmed; other browsers.
 7b. **[ThreeRT] In-place edits under software traversal (a two-level tree).** Decided by the user on 2026-11-11, before
    step 8: a browser has no ray queries, and under software traversal every added object and every frame in which
@@ -3939,23 +3939,57 @@ benchmark level. The order follows the dependencies; a step that meets a further
    - Every GPU run of the new walk has the loop guard, natively too (what hung on 2026-11-11 is not confirmed, so
      another path that does not end may exist); whether software traversal has it by default natively is decided
      with its measured cost.
-   - **Status: built and tested on the CPU; nothing run on a GPU yet** (branch `sw-two-level`, 2026-11-11).
-     - Done, without a GPU: `renderer/src/units.rs` (mesh trees, the top tree, where they go in the node buffer,
-       the checks made where a tree is written), `shaders/trace_units.wgsl` (spliced into software traversal by a
-       source feature, `F_UNITS`; `pathtrace.wgsl` not edited), `prepare` keeping instances as units, and the edits
-       in place through `gpu::Top` (the TLAS or the units), so `move_instances`, `update_instanced` and
-       `edit_geometry` are one path under both traversals. The CPU tests of the acceptance pass (the walks
-       transcribed from the shaders and compared with their lines; random scenes under random edits against brute
-       force; a prepared scene with units against the same scene flattened; broken and stale trees refused), and
-       every scene without units is handed the sources main hands it (`the_default_sources_are_untouched`).
-     - Not done: every GPU run. No image has been made with units, natively or in a browser; none of the
-       acceptance's measurements exists (hello world's two checks and its frame in Chrome, the voxel level's
-       triangle data, load, explosion and still frame, the pile of debris, Kabukichō's frame time).
-     - Open: whether a native kernel with units has the loop guard by default (the supervisor's decision, with the
-       measured cost); the edit room and the tree ranges do not grow under software traversal (an edit that finds
-       them full rebuilds the scene: how many explosions that is on the level is to be measured); procedural
-       edits, posed models and rigid groups' poses still rebuild under software traversal; the cost of overlapping
-       units (each one a ray's box meets is walked); a scene with more than 2^18 instances is flattened, as before.
+   - **Status: runs natively and in Chrome on the machine's GPU** (branch `sw-two-level`, 2026-11-11; every run with
+     the loop guard, which stopped nothing). The figures and their tables: docs/RUNTIME.md "Software traversal with
+     units", "Measured".
+     - Done: `renderer/src/units.rs` (mesh trees, the top tree, where they go in the node buffer, the checks made
+       where a tree is written), `shaders/trace_units.wgsl` (spliced into software traversal by a source feature,
+       `F_UNITS`; `pathtrace.wgsl` not edited), `prepare` keeping instances as units, and the edits in place through
+       `gpu::Top` (the TLAS or the units), so `move_instances`, `update_instanced` and `edit_geometry` are one path
+       under both traversals. `THREERT_UNITS=0` flattens, as before.
+     - The acceptance:
+       - The CPU tests pass (the walks transcribed from the shaders and compared with their lines; random scenes
+         under random edits against brute force; a prepared scene with units against the same scene flattened;
+         broken and stale trees refused), before the first GPU run.
+       - Scenes without units: the sources handed to wgpu are main's (`the_default_sources_are_untouched`, hardware
+         traversal's among them); flattened, the catalog's 23 bundles are byte-identical to main under software
+         traversal; under hardware traversal 18 are, and the other five (Bistro's three, Zero Day's two) differ
+         from main as two runs of main differ from each other ("Known issues": hardware traversal's ties).
+       - Hello world: `tools/physics-hello.ts` passes under software traversal, the two checks that failed among
+         them. In Chrome a frame in which a body moves costs the page **0.84 ms (was 16.7)** and none rebuilds the
+         scene (295 did); a click that adds a box commits in 0.6–0.8 ms (18–24) after the first.
+       - The voxel level under software traversal: triangle data **310.9 MiB (2,098)**, first frame after 5.2 s
+         (11.6), an explosion **2.5–4.5 ms in place (6.9–7.9 s)**; a still frame's trace **7.85 ms (4.58): 71 %
+         longer**.
+       - Kabukichō (352 units): triangle data 55 MiB (634), first frame 1.55 s (3.3); the trace 13.9 ms (12.0):
+         **16 % longer**, and with it the view misses 60 Hz on this machine (17.2 ms a frame).
+       - The guard on Kabukichō, main's kernel: +1.23 ms of trace (11 %); the merged layout +0.13 ms.
+       - The atomic tests under software traversal, as written and merged: 147 of 170 pass; the 23 that fail fail
+         on main's build too (particles and translucency, which software traversal does not draw; `surface/windows`;
+         `volume/lighting` and its offline twin).
+     - Two faults the GPU runs found, fixed, each with a CPU test since: a scene of units alone drew a mesh's first
+       triangle at the origin (the still tree's leaf named triangle 0); a mesh written again in place kept its
+       units' old boxes (`voxel/cut-falls-live`: a falling part cut off).
+     - Not done: the pile of debris (overlap measured where it is worst) and explosions until the room is full:
+       neither was among the GPU runs agreed for this step. A kernel with units has not run without the guard.
+       Nothing but hello world has run in a browser.
+     - Open:
+       - **The still frame's cost** (37 % of hello world's trace, 16 % of Kabukichō's, 71 % of the voxel level's).
+         Nothing was tuned: the top tree is built by median splits, every unit's ray is transformed, and every ray
+         enters the top tree. An SAH top tree and a path for units that have not moved are the first things to try;
+         until then a scene that only stands still is cheaper flattened (`THREERT_UNITS=0`), at its memory and
+         load time.
+       - Whether a catalog scene with models is rendered with units offline under software traversal (as built:
+         yes; its bytes are then not main's, the picture is), or only live and in a browser.
+       - Whether native software traversal has the loop guard by default (the supervisor's decision; it costs 11 %
+         of Kabukichō's trace, and what hung on 2026-11-11 is still not confirmed).
+       - The edit room and the tree ranges do not grow under software traversal: an edit that finds them full
+         rebuilds the scene (seen: 1,100 instances added to a room of 1,024 records). How many explosions that is
+         on the level is not measured.
+       - Procedural edits, posed models and rigid groups' poses still rebuild under software traversal; a scene
+         with more than 2^18 instances is flattened, as before.
+       - The 23 atomic tests that fail under software traversal on main: `surface/windows` and the two
+         `volume/lighting` tests are not explained by a missing feature.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

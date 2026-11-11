@@ -380,10 +380,11 @@ tree (ROADMAP § 6).
   **that it is what kept the two dispatches from returning is not confirmed**: the sequence that hung, run again on
   a build without the fix and with the guard, passed (the bytes after the buffer ended the walk that time; a hang
   needs them to be a box the ray meets and a count or child indices that do not end).
-- **What a browser does not have.** Hardware ray queries, so software traversal: no particles of either kind, no
-  translucency pass, and no in-place edits (every added object and every frame a body moves rebuilds the scene; the
-  two-level tree is the step after this one). The denoiser (OIDN, offline only), the offline render, snapshots and
-  the profile's readbacks. The dynamic sky's bake thread (a sky whose sun moves keeps the sky it was built with).
+- **What a browser does not have.** Hardware ray queries, so software traversal: no particles of either kind and no
+  translucency pass. Edits in place it has had since the step after this one, for model instances ("Software
+  traversal with units" below; before it every added object and every frame a body moved rebuilt the scene). The
+  denoiser (OIDN, offline only), the offline render, snapshots and the profile's readbacks. The dynamic sky's bake
+  thread (a sky whose sun moves keeps the sky it was built with).
 
 Checked without a GPU:
 - `tools/web-engine.ts` (CI): the module in Node (V8), `__engine` made by the page's code, the game bundle, the
@@ -393,10 +394,13 @@ Checked without a GPU:
 
 ### Measured in a browser (2026-11-11)
 
+This section is the build before units (every instance flattened). With units a frame in which a body moves costs
+the page 0.84 ms and none rebuilds the scene: "Software traversal with units", "Measured", below.
+
 Three things first:
-- **A frame in which a rigid body moves costs the page 16.7 ms, 16.4–16.6 of it rebuilding the scene** (p50; natively
-  under software traversal 9.0 ms, under hardware traversal nothing). The CPU side alone fills a 60 fps frame. It is
-  what the next step, in-place edits under software traversal, is for.
+- **A frame in which a rigid body moves cost the page 16.7 ms, 16.4–16.6 of it rebuilding the scene** (p50; natively
+  under software traversal 9.0 ms, under hardware traversal nothing). The CPU side alone filled a 60 fps frame. It
+  is what the next step, in-place edits under software traversal, was for.
 - **The browser's image is not bit-identical to the native one.** A browser's kernel has the loop guard, and the
   kernel with the guard differs from the kernel without it in the last bits (rounding: 354 of 43,200 numbers of a
   one-sample hello world, by at most 2 × 10⁻⁷ of their value). Natively the guard is off by default, so native
@@ -484,15 +488,16 @@ run-to-run spread (GPU ms a frame p50, each twice: as written 8.0, 6.9; merged 6
 **Size:** the module 7.34 MiB (gzip 2.28 MiB, brotli 1.51 MiB; no `wasm-opt`), wasm-bindgen's JavaScript and the
 page's 105 KiB (brotli 17 KiB), hello world's bundle 230 KiB (brotli 53 KiB).
 
-**Not measured:** any scene but hello world in a browser; the merged layout's and the guard's cost on a scene whose
-trace is the frame (Kabukichō); the atomic tests in the merged layout as a suite (two of them alone: the scenes
-without a triangle, both layouts, the tests' answers); Safari and Firefox (nothing Chrome-only was written: WebGPU
-through wgpu, default limits except buffer sizes, timestamp queries only if the adapter has them).
+**Not measured:** any scene but hello world in a browser; Safari and Firefox (nothing Chrome-only was written:
+WebGPU through wgpu, default limits except buffer sizes, timestamp queries only if the adapter has them). Measured
+since, natively (below, "Software traversal with units"): the merged layout's and the guard's cost on a scene whose
+trace is the frame (Kabukichō), and the atomic tests under software traversal as a suite, in both layouts.
 
 ## Software traversal with units (in-place edits without ray queries)
 
-ROADMAP § 6 step 7b. **Status: built and tested on the CPU; nothing here has run on a GPU yet** (no image, no
-time: the measurements this section will carry are listed in the ROADMAP step).
+ROADMAP § 6 step 7b. **Status: runs natively and in Chrome on this machine's GPU** (2026-11-11; every run with the
+loop guard, which stopped nothing). What it costs and what it saves is under "Measured" at the end of this section:
+edits and memory are what the step was for; **a still frame's trace is 16–71 % longer than the flattened scene's**.
 
 **What there was.** Software traversal (a browser's only one) walked one flat tree over every triangle in world
 space. Instances were written out into it (`flatten_instances`), so adding or moving anything rebuilt the scene, and a
@@ -501,17 +506,20 @@ names a record with the instance's rows; hardware traversal fills it), and alrea
 procedural objects (`trace_procs`: the ray into the object's space, a tree of its own).
 
 **What there is now.** Under software traversal an instance stays an instance: a **unit**.
-- **The still scene is the flat tree it was**, walked first, exactly as before.
+- **The still scene is the flat tree it was**, walked first, exactly as before. (A scene whose triangles are all
+  units' has for it a leaf of one triangle without area, put after the meshes' triangles: the tree over nothing's
+  leaf names triangle 0, which with units is a mesh's first, in model space.)
 - **A mesh's tree** is built once over its triangles in model space, where they already are (the pool hardware
   traversal builds its BLASes from; under software traversal the mesh's triangles are put in its tree's order, a
   cutout triangle carrying its flag). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
   (child indices count from its root, leaf triangles from its mesh's first).
 - **A unit** is the instance's kernel record (160 B), as under hardware traversal, with two of its unused words
   filled: its mesh tree's root, and whether it casts shadows.
-- **The top tree** is over the units' world boxes, one unit a leaf. It is rebuilt whole on the CPU whenever a unit
-  is added, moved or removed (as the TLAS is under hardware traversal) and written into its own range of the node
-  buffer. Its root and the number of units reach the kernel in two words of the frame's parameters
-  (`Params.motion.z`, `.w`, as bits; no binding, no buffer more).
+- **The top tree** is over the units' world boxes, one unit a leaf. A unit's box is its mesh's tree's bounds under the
+  unit's transform, read when the top tree is built (so a mesh written again where it was moves its units' boxes with
+  it). It is rebuilt whole on the CPU whenever a unit is added, moved or removed (as the TLAS is under hardware
+  traversal) and written into its own range of the node buffer. Its root and the number of units reach the kernel in two
+  words of the frame's parameters (`Params.motion.z`, `.w`, as bits; no binding, no buffer more).
 - **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
   unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. The hit it returns
   is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
@@ -539,7 +547,10 @@ unit walk: one rebuild, as hardware traversal's first instance is); an edit of a
 a rigid group's pose (their triangles are in the still tree); an instance of a mesh that deforms; **room that is
 full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
 triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
-edit replaces stays behind until the next rebuild, under both); a top tree that is refused (below).
+edit replaces stays behind until the next rebuild, under both; a scene with units and no geometry of its own to
+edit gets the records and object entries alone, so an instance of a mesh it has is added in place and a mesh it
+has not rebuilds it); a top tree that is refused (below). The edit log names the reason (`rebuild (edit room:
+records (software traversal's does not grow))`).
 
 **Why the loops end.** A walk follows indices it reads, so the trees are checked on the CPU where they are written
 (`units.rs`): every child index is greater than its parent's and inside its tree's range, a leaf's triangles inside
@@ -576,8 +587,88 @@ stack is dropped (geometry missed, never a hang), and the builders' bounds mean 
   (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers.
 
 **The loop guard.** A browser's kernel always has it (`merged::guard`). Natively it is `THREERT_LOOP_GUARD`, off by
-default; every native GPU run of a kernel with units is made with it until the walk has run enough to say otherwise,
-and whether a native kernel with units has it by default is open (ROADMAP § 6 step 7b).
+default; every GPU run of a kernel with units so far was made with it (8,192 or 65,536 iterations an invocation),
+and it stopped nothing in any of them. On Kabukichō it costs the flattened kernel 1.2 ms of trace a frame (11 %;
+below). Whether native software traversal has it by default is open (ROADMAP § 6 step 7b). `tools/test-render.ts`
+fails a run in which the guard stopped a live test's frames (an offline render it stops is an error already).
+
+### Measured (2026-11-11)
+
+Apple M5 Pro; natively `THREERT_HWRT=0` with `THREERT_LOOP_GUARD` 65,536 unless said; "flat" is the same build with
+`THREERT_UNITS=0` (every instance flattened: main's kernel, and main's bytes on the catalog); live views
+1280 × 720 traced at half. The runs, their order and their limits are in `out/web-probe/gpu-runs-b.md` (kept beside
+the checkout). Other applications held part of the GPU throughout; figures are p50, two launches where a spread is
+given.
+
+**Hello world in Chrome** (`tools/web-hello.ts --frames`; Chrome 157, the page's guard), ms p50 / p95:
+
+| | units | flat (the section above) |
+| --- | --- | --- |
+| a frame in which a body moves: the page's time | **0.84 / 1.07** | 16.73 / 17.99 |
+| of it the commit | 0.08 / 0.10 | 16.49 / 17.68 (the rebuild) |
+| frames that rebuilt the scene | 0 of 1,173 | 295 of about 1,180 |
+| a click that adds a box: commit | the first 31.6 (one rebuild, into the kernel with units), then **0.79, 0.73, 0.64** | 18.5–24.1 |
+| the trace, still / a body moves | 2.55 / 2.66 | 2.08 / 1.72 |
+| frame GPU, still / a body moves | 6.59 / 6.73 | 6.60 / 6.15 |
+
+The scripted test passes (640 × 360 and 1280 × 720), its report and clicks the native run's number for number; it
+now checks that no frame rebuilds the scene and that only the first box's click does.
+
+**Hello world natively** (`tools/physics-hello.ts`, merged layout): every check passes, the two that software
+traversal failed among them (the commits `rebuild, in place × 4`; one rebuild). A frame in which a body moves:
+commit 0.02 ms (flat 8.65), frame CPU 4.6 ms (8.9); a click's commit 0.25–0.35 ms in place (9.1–9.6). The trace is
+1.40–1.42 ms where flat's is 1.01–1.04 (**+0.38 ms, 37 %**, the same with one box as with four: every ray reads the
+top tree where the still scene is a ground and a wall).
+
+**The voxel level** (10,459 units of 6,410 meshes; flattened, 13.2 M triangles):
+
+| | units | flat |
+| --- | --- | --- |
+| triangle data (vertices, attributes, nodes) | **310.9 MiB** | 2,098.2 MiB |
+| trees built at load (`bvh_ms`) | 333 ms | 5,378 ms |
+| first frame after | 5.2 s | 11.6 s |
+| an explosion (0.5–4 m; 4–20 chunk meshes placed) | **2.5–4.5 ms, in place** (1.8–2.0 of it the trees) | 6.9–7.9 s (the scene rebuilt) |
+| still frame: the trace | **7.85 ms** | 4.58 ms |
+| still frame: GPU | 11.2 ms | 7.9 ms |
+
+The still frame is where units cost: **+71 % trace**. The level is 10,459 placed chunks side by side and stacked,
+whose boxes touch and overlap, under a top tree built by median splits; flattened they are one SAH tree. Not done:
+a better top tree (SAH), a unit whose transform is the identity walked without transforming the ray. Not measured:
+a pile of debris (boxes that overlap deeply), explosions until the room is full.
+
+**Kabukichō** (352 units of 19 building meshes):
+
+| | units | flat |
+| --- | --- | --- |
+| offline, 320 × 180, 64 spp: the trace | 394.8 ms | 336.2 ms (units +17 %) |
+| trees built (`bvh_ms`) | 89 ms | 1,635 ms |
+| triangle data | 55.0 MiB | 634.1 MiB |
+| live, guard on: frame GPU / the trace | 17.18 / 13.88 ms | 15.35 / 12.01 ms (units **+1.87 ms, 16 %**) |
+| the same in the merged layout | 17.44 / 14.10 ms | 15.66 / 12.28 ms |
+| first frame, second launch | 1.55 s | 3.3 s |
+
+With units the view misses 60 Hz on this machine (frame interval 17.2–17.5 ms; flat 16.65). The images are not the
+same bytes as flat's (a unit's ray is intersected in model space, and the emitter table follows the triangles'
+order): at 64 spp the means are 0.69371 and 0.69395, 20-pixel blocks 0.5 % apart (p50), unbiased; hardware
+traversal's image of the same render is as far from both.
+
+**The guard and the merged layout on a scene whose trace is the frame** (Kabukichō flat, main's kernel, live; frame
+GPU / the trace, ms): as written 14.11 / 10.78; merged 14.29 / 10.91; as written with the guard 15.35 / 12.01;
+merged with the guard 15.66 / 12.28. **The guard: +1.23 ms of trace (11 %). The merged layout: +0.13 ms, with the
+guard +0.27.** (On hello world both were inside the spread.) A kernel with units was not run without the guard.
+
+**The atomic tests under software traversal** (170, a family a command, guard on; the first whole run of the suite
+under software traversal on this machine): 147 pass and 23 fail, as written and in the merged layout alike, **and
+the same 23 fail on main's build**: the 18 `particles/*` and `gpu-particles/*` tests and `translucent/depth`,
+`translucent/order` (software traversal draws no particles and has no translucency pass), `surface/windows`
+(0.3934 for 0.4234), `volume/lighting` and `volume/lighting-offline` (6 for 1). The suite found one fault of units:
+`voxel/cut-falls-live` drew a falling part cut off at the box it had before it fell (a unit kept the bounds its
+mesh had when added; now the box is the tree's, above). Before that the first GPU run found another: a scene of
+units alone drew a mesh's first triangle at the origin (the still leaf, above). Both have CPU tests now.
+
+**How each kind of edit went** (the atomic edit tests one by one, the edit log): instances added, moved and removed,
+a model's second copy, a new mesh, vertex colours, emitters added and removed: in place. A rebuild, with its reason
+in the log: 1,100 specks added to a scene with room for 1,024 records; a procedural object edited or moved.
 
 ## Correctness
 
