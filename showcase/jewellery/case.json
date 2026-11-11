@@ -1,0 +1,30 @@
+{
+  "id": "jewellery",
+  "industry": "Commerce",
+  "title": "Jeweller’s Window",
+  "caption": "Gold, diamonds and pearls, turning under the lights",
+  "blurb": "Three rings and a string of pearls on a polished black plinth under a jeweller’s soft boxes, at real size and built entirely in code. The gold mirrors the lights and the other pieces, each stone is a 57-facet brilliant cut whose light goes in, bounces off the back facets and comes out again, and it all stays right when you change the metal or the stone.",
+  "controls": [
+    {
+      "input": "Click a piece",
+      "does": "brings the camera close; again to return"
+    },
+    {
+      "input": "M",
+      "does": "yellow gold, rose gold, platinum"
+    },
+    {
+      "input": "G",
+      "does": "diamond, ruby, sapphire, emerald"
+    },
+    {
+      "input": "Space",
+      "does": "stops and resumes the turn"
+    },
+    {
+      "input": "B",
+      "does": "back to the whole display"
+    }
+  ],
+  "credits": []
+}

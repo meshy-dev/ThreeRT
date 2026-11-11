@@ -85,6 +85,18 @@
   .tricks svg.mark { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
   @media (prefers-reduced-motion: reduce) { .tricks svg.mark .pulse { display: none; } }
 
+  /* ---- Beyond games: the cases the Showcase hosts, by field ---- */
+  .beyond { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
+  .beyond a { position: relative; display: block; border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--line); background: #000; aspect-ratio: 4 / 3; text-decoration: none; isolation: isolate; }
+  .beyond a img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.6s var(--ease); }
+  .beyond a:hover img { transform: scale(1.04); }
+  .beyond a::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(6, 7, 9, 0.94) 0%, rgba(6, 7, 9, 0.7) 30%, rgba(6, 7, 9, 0) 68%); z-index: 1; }
+  .beyond .t { position: absolute; z-index: 2; left: 16px; right: 16px; bottom: 14px; }
+  .beyond .t small { display: block; font: 500 11.5px/1 var(--font-mono); color: var(--tungsten); margin-bottom: 7px; }
+  .beyond .t b { display: block; font: 600 19px/1.15 var(--font-sans); letter-spacing: -0.025em; color: var(--bone); }
+  .beyond .t span { display: block; margin-top: 4px; font-size: 13.5px; color: var(--bone-2); }
+  #beyond[hidden] { display: none; }
+
   /* ---- Everywhere: one scene, a rail to two renderers, every screen ---- */
   .root { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--ink-2); font: 500 13px var(--font-mono); color: var(--bone); position: relative; z-index: 1; }
   .root img { width: 18px; height: 18px; }
@@ -281,6 +293,17 @@
   </div>
 </section>
 
+<section id="beyond" style="padding-top:40px" hidden>
+  <div class="wrap">
+    <div class="sec-head">
+      <h2 class="h-1">Not only games.<br><span class="mute">Light for everyone.</span></h2>
+      <p class="lede">Lighting of this quality used to take a studio and a render farm. The same engine now runs a physics lesson, a jeweller’s counter, a flat you might buy and a museum hall, live, on the laptop or phone you already own.</p>
+    </div>
+    <div class="beyond" id="beyondGrid"></div>
+    <p style="margin-top:28px"><a class="btn ghost" href="showcase/#cases">Open the cases</a></p>
+  </div>
+</section>
+
 <section class="tricks">
   <svg class="mark rv" viewBox="0 0 64 64" aria-hidden="true" data-mark>
     <defs><linearGradient id="ry" x1="11.59" y1="32" x2="32" y2="12.36" gradientUnits="userSpaceOnUse"><stop offset="0" style="stop-color:var(--ember)"/><stop offset=".5" style="stop-color:var(--tungsten)"/><stop offset="1" style="stop-color:var(--filament)"/></linearGradient><filter id="gl" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
@@ -314,11 +337,19 @@
 
 <script type="module">
   import { $, $$, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
-  import { downloadButtons } from "./js/site.js";
+  import { downloadButtons, packages, packageLinks } from "./js/site.js";
 
   // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
   reveal();
   const guard = (name, f) => { try { const r = f(); if (r?.catch) r.catch((e) => console.error(`${name}:`, e)); } catch (e) { console.error(`${name}:`, e); } };
+  // The cases the Showcase hosts (play/index.json, the games with an `industry`): a host without them shows nothing here.
+  guard("cases", async () => {
+    const cases = ((await packages())?.games ?? []).filter((g) => g.industry && g.thumb);
+    if (!cases.length) return;
+    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    $("#beyondGrid").innerHTML = cases.map((g) => `<a href="showcase/#case-${esc(g.id)}"><img src="${esc(packageLinks(g.id).thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy"><span class="t"><small>${esc(g.industry)}</small><b>${esc(g.title)}</b><span>${esc(g.caption ?? "")}</span></span></a>`).join("");
+    $("#beyond").hidden = false;
+  });
 
   // The download buttons name the visitor's platform (they link to the download page either way).
   guard("download", () => downloadButtons());

@@ -43,7 +43,7 @@ the same footer links. The markup is repeated in each page; change it in all fou
 | Page | What is on it |
 |---|---|
 | `index.html` | The landing page (below). Its two buttons, in the hero and at the end: **Download** (to `download/`, named for the visitor's platform by `js/site.js`) and **GitHub**. |
-| `showcase/` | Bistro night and Zero-Day as camera moves (the committed media), then **Open on your device**: a card for each example package in `play/` with an "Open in ThreeRT" link, the same game as three.js, and a QR code for the iPhone app. |
+| `showcase/` | Bistro night and Zero-Day as camera moves (the committed media); **Not only games**: the cases (education, commerce, architecture, culture: the packages in `play/` with an `industry`, written in `showcase/` at the repo root), each with what it shows, how to play with it, its links and QR code, and a filter by field; then **Open on your device**: a card for each of the other example packages. The cases' credits go in the footer. |
 | `download/` | ThreeRT for macOS (the build `releases/latest.json` names) and ThreeRT for iPhone (a TestFlight or App Store link once `ios.url` is set), then how a client loads a game: `threert dev`, scan, traced and live. |
 | `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format, links to the reference documents in `docs/` on GitHub. |
 
@@ -62,7 +62,9 @@ the same footer links. The markup is repeated in each page; change it in all fou
 6. **What a ray finds:** four close-ups.
 7. **Traced where it can be, three.js everywhere else:** the native client on ray-tracing hardware and the same scene
    as three.js in any browser or WebView, drawn as live three.js device models at real proportions.
-8. **Just light.**
+8. **Not only games:** the cases the Showcase hosts, as a strip of pictures (from `play/index.json`; nothing on a
+   host without them).
+9. **Just light.**
 
 ## The two generated directories
 

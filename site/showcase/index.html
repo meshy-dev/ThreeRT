@@ -31,6 +31,28 @@
   .pk .qr { width: 92px; height: 92px; padding: 6px; border-radius: 10px; }
   .pk .acts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   .pk .addr { grid-column: 1 / -1; font: 400 11.5px/1.5 var(--font-mono); color: var(--mute); overflow-wrap: anywhere; }
+  /* ---- Cases: what the engine does outside games, by industry ---- */
+  #cases { scroll-margin-top: 96px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
+  .filters button { appearance: none; font: 500 13.5px/1 var(--font-sans); color: var(--bone-2); background: transparent; border: 1px solid var(--line-2); border-radius: 999px; padding: 9px 14px; cursor: pointer; transition: color 0.2s, border-color 0.2s, background 0.2s; }
+  .filters button:hover { color: var(--bone); border-color: var(--bone-2); }
+  .filters button[aria-pressed="true"] { color: var(--ink-0); background: var(--bone); border-color: var(--bone); }
+  .cases { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  .case { padding: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; scroll-margin-top: 88px; }
+  .case[hidden] { display: none; }
+  .case .thumb { position: relative; display: block; aspect-ratio: 16 / 9; background: #000; }
+  .case .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .case .ind { position: absolute; top: 14px; left: 14px; display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 8px; background: rgba(8, 9, 11, 0.66); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font: 500 12px/1 var(--font-mono); color: var(--bone); }
+  .case .ind i { width: 7px; height: 7px; border-radius: 50%; background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .case .body { padding: 24px 26px 26px; display: grid; grid-template-columns: 1fr auto; gap: 18px 22px; align-content: start; }
+  .case h3 { font: 600 27px/1.1 var(--font-sans); letter-spacing: -0.03em; }
+  .case .blurb { margin-top: 10px; color: var(--bone-2); font-size: 15px; line-height: 1.6; max-width: 54ch; }
+  .case .ctl { grid-column: 1 / -1; list-style: none; margin: 0; padding: 16px 0 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 8px 22px; font-size: 13.5px; line-height: 1.5; color: var(--mute); }
+  .case .ctl b { color: var(--bone-2); font-weight: 500; }
+  .case .qr { width: 104px; height: 104px; padding: 7px; border-radius: 11px; }
+  .case .acts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  @media (max-width: 1100px) { .cases { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .case .qr { display: none; } .case .body { grid-template-columns: 1fr; padding: 20px; } .case .ctl { grid-template-columns: 1fr; } .case h3 { font-size: 23px; } }
   .open-note { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 10px 28px; }
   .open-note[hidden] { display: none; }
   @media (max-width: 1100px) { .feat, .feat.flip { grid-template-columns: 1fr; gap: 22px; } .feat.flip .txt { order: 0; } .pk { grid-template-columns: 1fr 1fr; } }
@@ -51,7 +73,7 @@
   <div class="wrap">
     <span class="eyebrow">Showcase</span>
     <h1 class="h-1">Production scenes.<br><span class="mute">Every light traced.</span></h1>
-    <p class="lede">Two scenes the industry uses to test renderers, with the camera moving and all of their lighting path-traced. Then small ones you can open yourself.</p>
+    <p class="lede">Two scenes the industry uses to test renderers, with the camera moving and all of their lighting path-traced. Then <a href="#cases">what the same engine does outside games</a>, and small scenes you can open yourself.</p>
   </div>
 </header>
 
@@ -80,11 +102,22 @@
   </div>
 </section>
 
+<section class="sec" id="cases" hidden>
+  <div class="wrap">
+    <div class="sec-top rv">
+      <h2 class="h-2">Not only games.</h2>
+      <p class="lede">Lighting of this quality used to take a studio, a render farm and a night of waiting. The same engine now runs a physics lesson, a jeweller’s counter, a flat you might buy and a museum hall, live, on the laptop or phone you already own. Each case below is one file of scene code: open it and try it.</p>
+    </div>
+    <div class="filters" id="filters" role="group" aria-label="Cases by field"></div>
+    <div class="cases" id="caseGrid"></div>
+  </div>
+</section>
+
 <section class="sec" id="open">
   <div class="wrap">
     <div class="sec-top rv">
       <h2 class="h-2">Open on your device.</h2>
-      <p class="lede">Each of these is a package on this site: scene code at tutorial size and the files it reads. ThreeRT fetches it and traces it on your GPU. The same package opens as three.js in this browser.</p>
+      <p class="lede">The hello-world scenes and a small game. Like the cases above, each is a package on this site: scene code at tutorial size and the files it reads. ThreeRT fetches it and traces it on your GPU. The same package opens as three.js in this browser.</p>
     </div>
     <div class="pk" id="pk"><p class="fine">Looking for the packages on this host…</p></div>
     <div class="open-note fine" id="openNote" hidden>
@@ -104,6 +137,7 @@
     <div class="note">
       <p><sup>1</sup> 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine.</p>
       <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+      <p id="caseCredits" hidden></p>
     </div>
   </div>
 </footer>
@@ -125,7 +159,41 @@
       pk.outerHTML = `<p class="fine">No example packages are published on this host yet. The examples also ship inside the client: <a href="../download/">download ThreeRT</a> and open its library.</p>`;
       return;
     }
-    pk.innerHTML = games.map((g) => {
+    // Cases (a game with an `industry`: the client's release writes it from the engine's showcase/) get their own
+    // section, with what each shows and how to play with it; the rest are the hello-world packages below.
+    const cases = games.filter((g) => g.industry), rest = games.filter((g) => !g.industry);
+    if (cases.length) {
+      const fields = [...new Set(cases.map((g) => g.industry))];
+      $("#caseGrid").innerHTML = cases.map((g) => {
+        const l = packageLinks(g.id);
+        return `<article class="card case" id="case-${esc(g.id)}" data-field="${esc(g.industry)}">
+          <a class="thumb" href="${esc(l.web)}" aria-label="${esc(g.title)} as three.js in this browser"><img src="${esc(l.thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy"><span class="ind"><i></i>${esc(g.industry)}</span></a>
+          <div class="body">
+            <div><h3>${esc(g.title)}</h3><p class="blurb">${esc(g.blurb ?? g.caption ?? "")}</p></div>
+            <div class="qr" data-id="${esc(g.id)}"></div>
+            <div class="acts"><a class="btn primary sm" href="${esc(l.open)}">Open in ThreeRT</a><a class="btn ghost sm" href="${esc(l.web)}">three.js in the browser</a></div>
+            ${g.controls?.length ? `<ul class="ctl">${g.controls.map((c) => `<li><b>${esc(c.input)}</b> ${esc(c.does)}</li>`).join("")}</ul>` : ""}
+          </div>
+        </article>`;
+      }).join("");
+      $("#filters").innerHTML = [`<button type="button" aria-pressed="true" data-field="">All</button>`, ...fields.map((f) => `<button type="button" aria-pressed="false" data-field="${esc(f)}">${esc(f)}</button>`)].join("");
+      $("#filters").addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        for (const x of $$("#filters button")) x.setAttribute("aria-pressed", String(x === b));
+        for (const c of $$("#caseGrid .case")) c.hidden = !!b.dataset.field && c.dataset.field !== b.dataset.field;
+      });
+      $("#cases").hidden = false;
+      // What the cases use that is not ours: named here, as their licences ask.
+      const seen = new Set(), credits = cases.flatMap((g) => g.credits ?? []).filter((c) => !seen.has(c.what + c.by) && seen.add(c.what + c.by));
+      if (credits.length) {
+        $("#caseCredits").innerHTML = "In the cases: " + credits.map((c) => `${c.url ? `<a href="${esc(c.url)}" rel="noopener">${esc(c.what)}</a>` : esc(c.what)}, ${esc(c.by)} (${esc(c.licence)})`).join("; ") + ".";
+        $("#caseCredits").hidden = false;
+      }
+      // Arriving at a case's own address (#case-<id>), now that it exists.
+      if (location.hash.startsWith("#case")) document.getElementById(location.hash.slice(1))?.scrollIntoView();
+    }
+    pk.innerHTML = rest.map((g) => {
       const l = packageLinks(g.id);
       return `<article class="card">
         <a class="thumb" href="${esc(l.web)}" aria-label="${esc(g.title)} as three.js in this browser">${g.thumb ? `<img src="${esc(l.thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy">` : ""}<span class="kind">${g.kind === "game" ? "game" : "scene"}</span></a>
@@ -139,7 +207,7 @@
     }).join("");
     $("#openNote").hidden = false;
     if (!reachable()) $("#openNote").insertAdjacentHTML("beforeend", `<span>This page is on ${esc(location.hostname)}, which a phone cannot reach. Serve with <code>bun site/serve.ts --lan</code> and open the LAN address.</span>`);
-    for (const el of $$("#pk .qr")) {
+    for (const el of $$("#pk .qr, #caseGrid .qr")) {
       const g = games.find((x) => x.id === el.dataset.id), l = packageLinks(g.id);
       try { el.innerHTML = await qrSvg(l.qr, `QR code: open ${g.title} on a phone`); } catch (e) { console.error("qr:", e); el.remove(); }
     }

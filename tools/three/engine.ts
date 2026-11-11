@@ -55,7 +55,9 @@ interface Tex {
 /** Feature -> count of scene elements that use something three.js cannot express (reported per scene). */
 export type Dropped = Record<string, number>;
 
-const SHADOW = { directional: 4096, spot: 2048, point: 1024, maxPoint: 4, maxSpot: 8, radius: 2 };
+// maxTotal: a shadow map is a texture unit in every lit material's shader, next to the material's own maps and the
+// environment, and WebGL promises 16 units: with 8 spot and 4 point shadows a textured material stopped compiling.
+const SHADOW = { directional: 4096, spot: 2048, point: 1024, maxPoint: 4, maxSpot: 8, maxTotal: 8, radius: 2 };
 
 /**
  * Emissive surfaces light nothing in three.js, so the adapter does what a three.js developer would do by hand: point
@@ -623,6 +625,9 @@ export class ThreeEngine implements Engine {
     switch (l.type) {
       case "directional": {
         const dl = new THREE.DirectionalLight();
+        // three.js starts these lights one unit up (Object3D.DEFAULT_UP); the pose is the node's, so the light sits at
+        // its origin. (For a spot light the offset moved the cone a metre off its lamp.)
+        dl.position.set(0, 0, 0);
         dl.target.position.set(0, 0, -1);
         dl.add(dl.target);
         dl.shadow.mapSize.set(SHADOW.directional, SHADOW.directional);
@@ -639,6 +644,7 @@ export class ThreeEngine implements Engine {
       }
       case "spot": {
         const sl = new THREE.SpotLight();
+        sl.position.set(0, 0, 0);
         sl.decay = 2;
         sl.target.position.set(0, 0, -1);
         sl.add(sl.target);
@@ -858,6 +864,13 @@ export class ThreeEngine implements Engine {
     };
     shadowed("PointLight", SHADOW.maxPoint);
     shadowed("SpotLight", SHADOW.maxSpot);
+    // And together: the directional lights keep theirs, the rest go to the spot and point lights nearest the camera.
+    const casting = lights.filter((l) => l.castShadow && (l.type === "DirectionalLight" || l.type === "SpotLight" || l.type === "PointLight"));
+    const dist = (l: THREE.Light) => (l.type === "DirectionalLight" ? -1 : l.getWorldPosition(new THREE.Vector3()).distanceTo(camPos));
+    casting.sort((a, b) => dist(a) - dist(b)).slice(SHADOW.maxTotal).forEach((l) => {
+      l.castShadow = false;
+      this.drop(`shadows over the total budget (${SHADOW.maxTotal})`, l.name);
+    });
 
     // Directional shadow: an orthographic frustum around the shadow-casting geometry near the camera.
     const box = new THREE.Box3();
