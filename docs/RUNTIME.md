@@ -47,7 +47,7 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Scene binding | `packages/scene/src/engine.ts` `SceneBinding` | Keeps the engine in step with a DSL scene. Objects report their own changes (core.ts change tracking: transforms, visibility, power, shadow flag, mesh geometry / material, add / remove), so a sync visits only what changed. Lights, cameras and materials are compared against what was last sent. |
 | World | `renderer/src/world.rs` | The engine's objects, resources, environment and settings, and what changed since the last commit: parameter changes (power, light / material parameters, environment, camera) or structural ones. Asset paths must stay inside the asset root (game code is untrusted on nodes). |
 | Live commit | `renderer/src/live.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera). Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
-| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
+| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. The time the engine spends inside a voxel call (`voxelExplode`, `voxelEdit`, `voxelFrame`) is the engine's, not the script's: the deadline moves by it. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
 | Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
 | World handlers | `packages/gameplay/src/world.ts` | `on[type](world, ev)`: an event handled on this node, changing the scene at once. `WorldContext`: `scene`, `camera`, read-only `state`, `object(id)`, `time`, `now`, `random()`, `emit(type, payload)`. |
 | Frame scripts | `packages/gameplay/src/frame.ts` | `FrameContext`: `time`, `dt`, `snap`, `now`, read-only `state`, `scene`, `camera`, `object(id)`, `random()`. |
@@ -228,7 +228,10 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
     contacts (its own function for that pair makes Rapier's solver panic when a contact goes). Neither touches a
     world without voxel shapes: step 7's worlds end in the bits they did.
   - Cost: asleep, nothing. While they move, Rapier's step on one thread: 1.4 ms a tick for a hundred jagged pieces
-    of 200 voxels in a heap, under 0.5 ms for one building part of 96 k voxels landing.
+    of 200 voxels in a heap, under 0.5 ms for one building part of 96 k voxels landing. On the benchmark level
+    (hardware traversal) 60 fps holds to about a hundred large bodies moving at once: the step is then 10–13 ms.
+    Rapier's parallel solver gives the same bits and a third of that on 4 threads; it is not on (ROADMAP § 6 step
+    8, "Open").
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
