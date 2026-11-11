@@ -193,6 +193,28 @@ test("a voxel body in the scene's physics: a ray's hit has its object, a joint t
     engine.answers.contacts = [{ a: part + 1, b: level, bodyA: part, bodyB: null, started: true }, { a: 3, b: part + 1, bodyA: crateBody, bodyB: part, started: true }];
     binding.deliverPhysicsEvents();
     assert.deepEqual(met, [engineColliders, crate], "with the level (its colliders are on no body: `engineColliders`) and with a scene object");
+    // A part just cut loose, never listed yet, in a contact with a scene object that listens: it gets its object.
+    const crateMet: unknown[] = [];
+    crate.physics = { type: "dynamic", contacts: true };
+    binding.sync();
+    const crate2 = engine.physicsCalls().filter((c) => c[0] === "body").at(-1)![1].id;
+    crate.addEventListener("contactstart", (e) => crateMet.push(e.other));
+    const fresh = part + 10;
+    engine.bodies = [...engine.bodies, { body: fresh, collider: fresh + 1, voxels: 40, asleep: false, position: [0, 0, 0], rotation: [0, 0, 0, 1] }];
+    engine.answers.contacts = [{ a: 3, b: fresh + 1, bodyA: crate2, bodyB: fresh, started: true }];
+    binding.deliverPhysicsEvents();
+    assert.ok(crateMet[0] instanceof VoxelBody && (crateMet[0] as { body: number }).body === fresh, "the new part's object");
+    // Carved away by its own edit: the edit notices it is gone; its "gone" event still comes at the frame's events.
+    const f = crateMet[0] as InstanceType<typeof VoxelBody>;
+    let fGone: unknown = null;
+    f.addEventListener("gone", (e) => (fGone = e.reason));
+    engine.gone = [[fresh, "carved"]];
+    engine.bodies = engine.bodies.filter((b) => (b as { body: number }).body !== fresh);
+    f.carve({ box: [-1, -1, -1, 1, 1, 1] });
+    assert.deepEqual([f.gone, fGone], [true, null], "gone at once, the event with the frame's");
+    engine.answers.contacts = [];
+    binding.deliverPhysicsEvents();
+    assert.equal(fGone, "carved");
     // Retired for the cap: gone, with the reason, at the frame's events; a call does nothing afterwards.
     engine.gone = [[part, "cap"]];
     engine.bodies = [];

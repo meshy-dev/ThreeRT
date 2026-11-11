@@ -122,6 +122,8 @@ export type VoxelBodyGone = "cap" | "carved" | "fell";
 const registry = new Map<number, VoxelBody>();
 /** Objects that listen for contacts (the binding then asks the engine for them each frame). */
 let listening = 0;
+/** Objects retired since the frame's events were last delivered, and why: their "gone" events, whoever noticed. */
+let pendingGone: { o: VoxelBody; reason: VoxelBodyGone }[] = [];
 const CONTACTS = new Set(["contactstart", "contactend"]);
 
 /**
@@ -276,11 +278,11 @@ export interface VoxelBodyEdit {
   gone: boolean;
 }
 
-/** The engine's list of bodies taken in: objects made for new ones, the gone ones retired (with the engine's reasons).
- *  Returns the "gone" events to dispatch. */
-function refresh(): { o: VoxelBody; reason: VoxelBodyGone }[] {
+/** The engine's list of bodies taken in: objects made for new ones, the gone ones retired (with the engine's reasons),
+ *  their "gone" events kept for the frame's events (`pendingGone`), whichever call noticed. */
+function refresh(): void {
   const e = engine();
-  const out: { o: VoxelBody; reason: VoxelBodyGone }[] = [];
+  const out = pendingGone;
   for (const [body, reason] of JSON.parse(e?.voxelGone?.() ?? "[]") as [number, VoxelBodyGone][]) {
     const o = registry.get(body);
     if (o) {
@@ -288,7 +290,7 @@ function refresh(): { o: VoxelBody; reason: VoxelBodyGone }[] {
       out.push({ o, reason });
     }
   }
-  if (!e?.voxelBodies) return out;
+  if (!e?.voxelBodies) return;
   const seen = new Set<number>();
   for (const r of JSON.parse(e.voxelBodies()) as BodyRecord[]) {
     seen.add(r.body);
@@ -303,7 +305,6 @@ function refresh(): { o: VoxelBody; reason: VoxelBodyGone }[] {
       out.push({ o, reason: "carved" });
     }
   }
-  return out;
 }
 
 /** The registry, known to `@threert/scene` (hits, joints, the frame's events). */
@@ -312,7 +313,11 @@ function register(): void {
     object: (body) => registry.get(body) ?? (body >= 2 ** 30 ? (refresh(), registry.get(body)) : undefined),
     bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
     frame: () => {
-      if (registry.size) for (const { o, reason } of refresh()) o.dispatchEvent({ type: "gone", reason });
+      if (registry.size) refresh();
+      // (Every "gone" since the last frame's events, noticed here or by any call in between.)
+      const gone = pendingGone;
+      pendingGone = [];
+      for (const { o, reason } of gone) o.dispatchEvent({ type: "gone", reason });
       return listening > 0;
     },
   });
@@ -403,11 +408,11 @@ export function voxelFrame(dt: number): VoxelFrame | { queued: true } {
 
 /** The voxel bodies there are now (loose parts the physics world moves), oldest first, as objects (`VoxelBody`): the
  *  same object for the same body each time. Bodies gone since the last call are retired here too (their "gone" event
- *  comes with the frame's events). */
+ *  comes with the frame's next events, as for every way a body is found gone). */
 export function voxelBodies(): VoxelBody[] {
   const e = engine();
   if (!e?.voxelBodies) throw new Error("voxelBodies: needs the renderer's native voxels");
-  for (const { o, reason } of refresh()) queueMicrotask?.(() => o.dispatchEvent({ type: "gone", reason }));
+  refresh();
   return [...registry.values()].sort((a, b) => a.body - b.body);
 }
 

@@ -871,8 +871,10 @@ export class SceneBinding {
     const list = JSON.parse(this.engine.physics("contacts", {})) as { a?: number; b?: number; bodyA: number | null; bodyB: number | null; started: boolean }[] | null;
     if (!list?.length) return;
     const contacts: { a: Object3D; b: Object3D; started: boolean }[] = [];
-    // (A collider on no body is the voxel level's, when it is one of the engine's: `engineColliders`.)
-    const of = (body: number | null, collider: number | undefined) => (body !== null ? physicsBodies.get(body) : collider !== undefined && collider >= ENGINE_IDS ? engineColliders : undefined);
+    // (An engine body with no object yet, a part just cut loose, gets one from the hook; a collider on no body is the
+    // voxel level's, when it is one of the engine's: `engineColliders`.)
+    const of = (body: number | null, collider: number | undefined) =>
+      body !== null ? (physicsBodies.get(body) ?? (body >= ENGINE_IDS ? getEngineBodies()?.object(body) : undefined)) : collider !== undefined && collider >= ENGINE_IDS ? engineColliders : undefined;
     for (const c of list) {
       const a = of(c.bodyA, c.a), b = of(c.bodyB, c.b);
       if (!a || !b) continue;
