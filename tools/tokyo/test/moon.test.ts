@@ -32,3 +32,7 @@ test("the air between: clear-ish overhead, reddened and dim at the horizon, noth
   assert.ok(low[0] < 0.5 && low[2] < low[0] / 3);
   assert.deepEqual(airTransmittance(-1), [0, 0, 0]);
 });
+
+// CI routing check (temporary PR, closed unmerged): a failing test must fail `ts`, and `threert` with it.
+import { test as failsOnPurpose } from "node:test";
+failsOnPurpose("CI routing check: fails on purpose", () => { throw new Error("on purpose"); });
