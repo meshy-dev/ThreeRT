@@ -578,3 +578,4 @@ mod overcast_tests {
         assert!((lum(half.texels[k]) - 0.5 * (lum(clear.texels[k]) + lum(oc.texels[k]))).abs() < 1e-3 * lum(clear.texels[k]));
     }
 }
+// CI routing check: a renderer-only change (temporary PR, closed unmerged).
