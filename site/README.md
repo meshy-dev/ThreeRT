@@ -49,7 +49,10 @@ the same footer links. The markup is repeated in each page; change it in all fou
 
 ### The landing page
 
-1. **Hero:** Bistro night, three.js | ThreeRT under one draggable divider. "Path tracing at 60 fps."
+1. **Hero:** Bistro night along its own camera move, three.js | ThreeRT under one draggable divider, as a clip
+   (60 fps, a 12 s loop; `media/bistro/hero.mp4`, `hero-720.mp4`, both sides in one file so they cannot drift). Its first frame is
+   what shows until it plays, and where it does not: reduced motion, a data saver, autoplay refused. A button pauses
+   it. "Path tracing at 60 fps."
 2. **ThreeRT = Three + RT:** Ray Tracing, Real Time, Runtime.
 3. **Hello world looks right:** an auto-advancing reel of three starter scenes, the ThreeRT source next to its output
    (three.js as written | ThreeRT with every setting at its default).
@@ -110,11 +113,11 @@ links from where they are served (`js/site.js` `packageLinks`):
 |---|---|
 | `index.html`, `showcase/`, `download/`, `docs/` | The pages (sections, their styles and their script) |
 | `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the nav and footer, the comparison and player components, the cards, steps and QR tiles of the inner pages |
-| `js/threert.js` | The wipe comparison, the synced camera-move player, the code highlighter |
+| `js/threert.js` | The wipe comparison (and the clip that can play over its two stills), the synced camera-move player, the code highlighter |
 | `js/site.js` | What the pages share: the visitor's platform, the release and the packages on this host, their links, QR codes |
 | `js/devices.js` | The 3D device rows (three.js), with a still fallback when WebGL is off |
 | `brand/` | The mark ("Three bounces": the three.js triangle, tilted as three.js draws it, and the closed light path inside it, which is three.js's own inner triangle) and its variants. `js/mark.js` draws it live in the lockup and on the landing page, and turns the path on hover |
-| `media/` | The renders, WebP. Generated; never retouched |
+| `media/` | The renders, WebP, and the hero clip, H.264. Generated; never retouched |
 | `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
 | `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, disk images from R2, static assets) and its config (threert.dev) |
 | `releases/`, `play/` | Generated, not committed (above) |
@@ -129,5 +132,21 @@ bun site/tools/media.ts            # out/ -> site/media (stills, camera-move fra
 bun site/tools/device-stills.ts    # the 3D device rows -> site/media/devices (headless Chrome, software WebGL)
 ```
 
-The numbers behind the page (Apple M5, 1280 × 720, 2026-11-08) are in [`docs/COMPARE.md`](../docs/COMPARE.md).
+The hero clip is recorded apart, on the machine at hand (it needs Bistro in the asset store: `bun scripts/orca.ts
+bistro`, and ffmpeg):
+
+```bash
+node tools/site-hero.ts --probe --width 1600 --height 900 --reach 2.2 --scale auto   # the scale 60 fps holds here
+node tools/site-hero.ts --width 1600 --height 900 --reach 2.2 --scale 0.5            # record at that scale, fixed
+node tools/site-hero.ts --probe --width 1600 --height 900 --reach 2.2 --scale 0.5    # its GPU times, back to back
+bun site/tools/hero.ts             # out/site-hero -> site/media/bistro/hero*.mp4, hero-*.webp, hero.json
+```
+
+Every frame of the clip is one frame the live renderer drew, in lockstep at 60 fps; the probe draws the same move
+back to back, as on screen, with nothing else on the GPU, and `media/bistro/hero.json` keeps what it measured. The
+landing page's footnote quotes that file (machine, size, scale, GPU ms): change the footnote when the clip changes.
+The one committed was recorded on an Apple M3 Max: 1600 × 900 at render scale 0.5 (1920 × 1080 does not hold 60 fps
+there: 22 ms a frame at the lowest scale), a slow 2.2 s stretch of the scene's camera move taken in 6 s.
+
+The numbers behind the rest of the page (Apple M5, 1280 × 720, 2026-11-08) are in [`docs/COMPARE.md`](../docs/COMPARE.md).
 Amazon Lumberyard Bistro and Zero-Day are from NVIDIA's ORCA (CC BY 4.0); the credits are in the page's footer.
