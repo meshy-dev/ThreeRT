@@ -525,9 +525,12 @@ impl GameSession {
         Self::load(bundle, room)?.open_loaded(assets, core)
     }
 
-    /// Files the built scene reads from the asset root (models, file textures, procedural assets).
+    /// Files the built scene reads from the asset root (models, file textures, procedural assets) and the voxel level
+    /// it asked for (`voxelLevel`, loaded later by `realize_voxels`), sorted, each once.
     pub fn files(&self) -> Vec<String> {
-        self.host.world.borrow().files()
+        let mut set: std::collections::BTreeSet<String> = self.host.world.borrow().files().into_iter().collect();
+        set.extend(self.host.voxels.borrow().files());
+        set.into_iter().collect()
     }
 
     /// Opens the first live view of a loaded session (`load_code`).
