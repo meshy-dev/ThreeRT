@@ -16,19 +16,25 @@ pub struct Gpu {
     pub adapter_info: wgpu::AdapterInfo,
     /// Kernel source (hardware or software traversal spliced in); scenes with material functions get their own module.
     source: String,
-    module: wgpu::ShaderModule,
-    /// By (material-function code hash, the source-patching features: `kernel_source`).
-    modules: std::sync::Mutex<std::collections::HashMap<(u64, u32), wgpu::ShaderModule>>,
+    /// The kernel as written (none in the merged layout: its sources are written for their arrays' lengths).
+    module: Option<wgpu::ShaderModule>,
+    /// The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers. Natively with
+    /// THREERT_MERGED=1 (software traversal, the device held to eight too).
+    pub merged: bool,
+    /// By (material-function code hash, the source-patching features: `kernel_source`, the merged layout's lengths).
+    modules: std::sync::Mutex<std::collections::HashMap<(u64, u32, Option<crate::merged::Caps>), wgpu::ShaderModule>>,
     pipeline_layout: wgpu::PipelineLayout,
     /// Kernel variants by (feature mask, material-function code hash, LIVE): `FEAT` compiles out the features a scene
     /// does not use (they cost registers even when idle); `LIVE` = one fresh sample per dispatch for the viewport.
-    pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool), wgpu::ComputePipeline>>,
+    pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool, Option<crate::merged::Caps>), wgpu::ComputePipeline>>,
     layout: wgpu::BindGroupLayout,
     /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
     /// the emitter reservoirs (`reservoirs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`, one-entry
     /// cache, one reservoir).
     pub vis_layout: wgpu::BindGroupLayout,
     pub no_vis: wgpu::BindGroup,
+    /// `no_vis`'s buffers (the merged layout: an offline kernel's source is written for their lengths).
+    no_vis_bufs: KernelBufs,
     pub no_vis_view: wgpu::TextureView,
     /// Binding 19 of scenes without density grids (one cell), and the grid pass's bind group layout (grid_sim.wgsl).
     no_grid_view: wgpu::TextureView,
@@ -43,7 +49,7 @@ pub struct Gpu {
     tl_pipeline_layout: Option<wgpu::PipelineLayout>,
     tl_pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool), TranslucentPipelines>>,
     /// The live media passes (pathtrace.wgsl `media_train`, `media_composite`) by kernel variant and entry point.
-    media_passes: std::sync::Mutex<std::collections::HashMap<(u32, u64, &'static str), wgpu::ComputePipeline>>,
+    media_passes: std::sync::Mutex<std::collections::HashMap<(u32, u64, &'static str, Option<crate::merged::Caps>), wgpu::ComputePipeline>>,
     /// The procedural blobs of the last upload (`upload_procs`).
     proc_cache: std::sync::Mutex<Option<ProcCache>>,
     /// The last upload's procedural BLASes by geometry hash (read-only once built; another upload may share them), with
@@ -157,6 +163,16 @@ pub struct PendingProc {
     size: wgpu::BlasAABBGeometrySizeDescriptor,
 }
 
+/// The kernel's bindings of the seven tables the merged layout holds in one (merged.rs `TABLES`, in its order).
+const MERGED_TABLE_BINDINGS: [u32; 7] = [4, 5, 6, 14, 15, 17, 18];
+
+impl Uploaded {
+    /// The seven tables, in merged.rs `TABLES`' order.
+    fn table_buffers(&self) -> [&wgpu::Buffer; 7] {
+        [&self.materials, &self.lights, &self.emitters, &self.bg_parts.texinfo, &self.objects, &self.instances, &self.media]
+    }
+}
+
 /// What the scene bind group holds besides `Uploaded`'s buffers (`Gpu::rebind_scene` makes it again).
 pub struct BindParts {
     pub nodes: wgpu::Buffer,
@@ -172,6 +188,9 @@ pub struct BindParts {
 pub struct Uploaded {
     pub bg: wgpu::BindGroup,
     pub bg_parts: BindParts,
+    /// The merged layout (merged.rs): the buffer of the kernel's `MergedTables`, the seven tables below as its arrays
+    /// (`Gpu::sync_tables` copies them there each frame; their lengths: `kernel.caps`).
+    pub tables: Option<wgpu::Buffer>,
     pub accum: wgpu::Buffer,
     pub params: wgpu::Buffer,
     pub width: u32,
@@ -607,6 +626,55 @@ pub fn kernel_source(src: &str, features: u32) -> String {
     s
 }
 
+/// The loop guard's limit, if the kernel is to have one (merged.rs `guard`: every loop of it bounded, so a dispatch
+/// ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where the kernel is otherwise as
+/// written; always in a browser, where a dispatch that does not end is the player's whole GPU.
+pub fn loop_guard() -> Option<u32> {
+    match LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {}
+        n => return Some(n),
+    }
+    match std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok()) {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => cfg!(target_arch = "wasm32").then_some(1 << 16),
+    }
+}
+
+/// The loop guard's limit as a page set it (0: not set), before the GPU is opened: a browser has no environment.
+static LOOP_GUARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the loop guard's limit (a page's first runs of a new kernel take a low one); 0 leaves it as it is. Before
+/// `Gpu::new_async`: the limit is in the kernels' source.
+pub fn set_loop_guard(limit: u32) {
+    if limit > 0 {
+        LOOP_GUARD.store(limit, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
+/// software one's place and the translucency pass after it.
+pub fn kernel_base(hwrt: bool) -> String {
+    let base = include_str!("../shaders/pathtrace.wgsl");
+    if hwrt {
+        let (head, rest) = base.split_once("// @trace-begin").unwrap();
+        let (_, tail) = rest.split_once("// @trace-end").unwrap();
+        format!("enable wgpu_ray_query;\n{head}{}{tail}{}", include_str!("../shaders/trace_hw.wgsl"), include_str!("../shaders/translucent.wgsl"))
+    } else {
+        base.to_string()
+    }
+}
+
+/// A kernel source as it is compiled: with the loop guard if there is one, its count in `MergedLive` (the merged
+/// layout) or in a buffer of its own (group 1, `merged::GUARD_BINDING`).
+fn guarded(src: &str, merged: bool) -> String {
+    match loop_guard() {
+        None => src.to_string(),
+        Some(n) if merged => crate::merged::guard(src, n, "ML.loop_guard_trips"),
+        Some(n) => crate::merged::guard(&format!("{src}\n{}", crate::merged::guard_decl()), n, crate::merged::GUARD_TRIPS.name),
+    }
+}
+
 pub fn tlas_rows(w: glam::Mat4) -> [f32; 12] {
     let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
     let [r0, r1, r2] = [row(0), row(1), row(2)];
@@ -616,23 +684,53 @@ pub fn tlas_rows(w: glam::Mat4) -> [f32; 12] {
 /// Entries of the live radiance cache (pathtrace.wgsl CACHE_SIZE).
 pub const CACHE_SIZE: u64 = 1 << 18;
 
+/// A buffer, or a range of one: in the merged layout (merged.rs) several of the engine's buffers are ranges of the one
+/// buffer a binding holds.
+#[derive(Clone)]
+pub struct Buf {
+    pub buffer: wgpu::Buffer,
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl Buf {
+    pub fn whole(buffer: wgpu::Buffer) -> Buf {
+        let size = buffer.size();
+        Buf { buffer, offset: 0, size }
+    }
+
+    /// As a binding (a whole buffer: `as_entire_binding`).
+    pub fn binding(&self) -> wgpu::BindingResource<'_> {
+        if self.offset == 0 && self.size == self.buffer.size() {
+            self.buffer.as_entire_binding()
+        } else {
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.buffer, offset: self.offset, size: std::num::NonZeroU64::new(self.size) })
+        }
+    }
+
+    pub fn clear(&self, e: &mut wgpu::CommandEncoder) {
+        e.clear_buffer(&self.buffer, self.offset, Some(self.size));
+    }
+}
+
 /// The radiance cache's storage (pathtrace.wgsl): voxel keys, this frame's training sums, resolved values.
+#[derive(Clone)]
 pub struct CacheBuffers {
-    pub keys: wgpu::Buffer,
-    pub acc: wgpu::Buffer,
-    pub val: wgpu::Buffer,
+    pub keys: Buf,
+    pub acc: Buf,
+    pub val: Buf,
 }
 
 impl CacheBuffers {
     pub fn new(d: &wgpu::Device, entries: u64) -> CacheBuffers {
-        let b = |label, size| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let b = |label, size| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
         CacheBuffers { keys: b("cache keys", entries * 4), acc: b("cache sums", entries * 32), val: b("cache values", entries * 32) }
     }
 
     /// Empties the cache (a different world).
     pub fn clear(&self, e: &mut wgpu::CommandEncoder) {
         for b in [&self.keys, &self.acc, &self.val] {
-            e.clear_buffer(b, 0, None);
+            b.clear(e);
         }
     }
 }
@@ -642,17 +740,54 @@ pub fn reservoirs(d: &wgpu::Device, pixels: u64) -> wgpu::Buffer {
     d.create_buffer(&wgpu::BufferDescriptor { label: Some("reservoirs"), size: pixels * 64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
 }
 
-/// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache, the emitter reservoirs and the
-/// reflection resolve's inputs (live.rs `Targets::refl`).
-pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView, cache: &CacheBuffers, resv: &wgpu::Buffer, refl: &wgpu::Buffer, motion: &wgpu::Buffer, direct: &wgpu::Buffer) -> wgpu::BindGroup {
-    fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-        wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+/// The kernel's group-1 buffers: the radiance cache, the emitter reservoirs, and what the live passes read of a trace
+/// (live.rs `Targets`): the specular-lobe rays, the motion vectors, the directional lights' direct light. In the
+/// merged layout they are ranges of one buffer, the arrays of the kernel's `MergedLive` (merged.rs `KERNEL_LIVE`).
+pub struct KernelBufs {
+    pub cache: CacheBuffers,
+    pub resv: Buf,
+    pub refl: Buf,
+    pub motion: Buf,
+    pub direct: Buf,
+    /// The loop guard's count (merged.rs `guard`: its first word, the invocations a loop of which was stopped): with
+    /// the guard, and always in the merged layout (the last array of `MergedLive`).
+    pub guard: Option<Buf>,
+    /// The merged layout: the one buffer, and its arrays' lengths.
+    pub merged: Option<(wgpu::Buffer, [u32; 7])>,
+}
+
+impl KernelBufs {
+    /// For a cache of `entries`, reservoirs for `pixels` and the live passes' three of these bytes.
+    pub fn new(d: &wgpu::Device, merged: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
+        if !merged {
+            let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
+            let guard = loop_guard().map(|_| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
+            return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
+        }
+        let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
+        let caps: [u32; 7] = std::array::from_fn(|k| crate::merged::live_cap(k, bytes[k]));
+        let (at, size) = crate::merged::live_layout(&caps);
+        let buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("merged live"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let b = |k: usize| Buf { buffer: buffer.clone(), offset: at[k], size: bytes[k] };
+        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, resv: b(3), refl: b(4), motion: b(5), direct: b(6), guard: Some(b(7)), merged: Some((buffer, caps)) }
     }
-    d.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("vis"),
-        layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }, e(1, &cache.keys), e(2, &cache.acc), e(3, &cache.val), e(4, resv), e(5, refl), e(6, motion), e(7, direct)],
-    })
+}
+
+/// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache, the emitter reservoirs and the
+/// reflection resolve's inputs (`KernelBufs`); in the merged layout, the texture and the one buffer.
+pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView, b: &KernelBufs) -> wgpu::BindGroup {
+    fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry { binding, resource: b.binding() }
+    }
+    let tex = wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) };
+    match &b.merged {
+        Some((buffer, _)) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::KERNEL_LIVE_BINDING, resource: buffer.as_entire_binding() }] }),
+        None => {
+            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(4, &b.resv), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
+            entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
+            d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &entries })
+        }
+    }
 }
 
 /// Whether a material function's WGSL (`fn mf_<name>(...) -> MatOut { var o = base; ... return o; }`) can change its
@@ -678,6 +813,9 @@ pub struct Kernel {
     /// The scene's geometry functions and their dispatch (pathtrace.wgsl `geometry_function`), spliced like `functions`.
     pub geometry_functions: String,
     pub hash: u64,
+    /// The merged layout (merged.rs): the lengths of the merged structs' arrays this kernel's source is written for
+    /// (the tables': `Gpu::upload`; group 1's: an offline render's `no_vis`, a live view's `KernelBufs`).
+    pub caps: Option<crate::merged::Caps>,
 }
 
 impl Kernel {
@@ -767,7 +905,18 @@ impl Kernel {
         functions.hash(&mut h);
         volume_functions.hash(&mut h);
         geometry_functions.hash(&mut h);
-        Kernel { features: features(scene, groups), functions, volume_functions, geometry_functions, hash: h.finish() }
+        Kernel { features: features(scene, groups), functions, volume_functions, geometry_functions, hash: h.finish(), caps: None }
+    }
+
+    /// The kernel as written (no feature, no function of a scene's), in the merged layout for arrays of `caps`'
+    /// lengths: the radiance cache's resolve.
+    fn plain(caps: crate::merged::Caps) -> Kernel {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for _ in 0..3 {
+            String::new().hash(&mut h);
+        }
+        Kernel { features: 0, functions: String::new(), volume_functions: String::new(), geometry_functions: String::new(), hash: h.finish(), caps: Some(caps) }
     }
 }
 
@@ -960,14 +1109,18 @@ impl Gpu {
         limits.max_buffer_size = al.max_buffer_size;
         limits.max_texture_array_layers = al.max_texture_array_layers;
         limits.max_texture_dimension_2d = al.max_texture_dimension_2d;
-        limits.max_storage_buffers_per_shader_stage = al.max_storage_buffers_per_shader_stage.min(31);
+        // The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers; natively with
+        // THREERT_MERGED=1, on software traversal (what a browser has) and the device held to the same eight (a
+        // layout with more does not validate).
+        let merged = cfg!(target_arch = "wasm32") || std::env::var("THREERT_MERGED").is_ok_and(|v| v == "1");
+        limits.max_storage_buffers_per_shader_stage = if merged { crate::merged::STORAGE_BUFFERS } else { al.max_storage_buffers_per_shader_stage.min(31) };
         // Storage + uniform buffers together (the live passes bind 29; Metal allows 31).
         limits.max_buffers_and_acceleration_structures_per_shader_stage = al.max_buffers_and_acceleration_structures_per_shader_stage.min(31);
         limits.max_acceleration_structures_per_shader_stage = al.max_acceleration_structures_per_shader_stage;
         limits.max_blas_geometry_count = al.max_blas_geometry_count;
         limits.max_blas_primitive_count = al.max_blas_primitive_count;
         limits.max_tlas_instance_count = al.max_tlas_instance_count;
-        let hwrt = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) && std::env::var("THREERT_HWRT").map(|v| v != "0").unwrap_or(true);
+        let hwrt = !merged && adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) && std::env::var("THREERT_HWRT").map(|v| v != "0").unwrap_or(true);
         let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let mut features = if hwrt { wgpu::Features::EXPERIMENTAL_RAY_QUERY } else { wgpu::Features::empty() };
         if timestamps {
@@ -981,21 +1134,14 @@ impl Gpu {
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
         }).await?;
-        let base = include_str!("../shaders/pathtrace.wgsl");
-        let src = if hwrt {
-            let (head, rest) = base.split_once("// @trace-begin").unwrap();
-            let (_, tail) = rest.split_once("// @trace-end").unwrap();
-            format!("enable wgpu_ray_query;\n{head}{}{tail}{}", include_str!("../shaders/trace_hw.wgsl"), include_str!("../shaders/translucent.wgsl"))
-        } else {
-            base.to_string()
-        };
+        let src = kernel_base(hwrt);
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
-        let module = unsafe {
+        let module = (!merged).then(|| unsafe {
             device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(src.as_str().into()) },
+                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false).into()) },
                 wgpu::ShaderRuntimeChecks::unchecked(),
             )
-        };
+        });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -1048,25 +1194,34 @@ impl Gpu {
         if hwrt {
             entries.push(wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None });
         }
+        // The merged layout: the seven tables are one binding, the first of theirs (merged.rs `TABLES`).
+        if merged {
+            entries.retain(|e| !MERGED_TABLE_BINDINGS[1..].contains(&e.binding));
+        }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
-        let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vis"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    count: None,
-                },
-                storage(1, false),
-                storage(2, false),
-                storage(3, false),
-                storage(4, false),
-                storage(5, false),
-                storage(6, false),
-                storage(7, false),
-            ],
-        });
+        let mut vis_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            },
+            storage(1, false),
+            storage(2, false),
+            storage(3, false),
+            storage(4, false),
+            storage(5, false),
+            storage(6, false),
+            storage(7, false),
+        ];
+        // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
+        // As written, a kernel with the guard has the count in a buffer of its own.
+        if merged {
+            vis_entries.truncate(2);
+        } else if loop_guard().is_some() {
+            vis_entries.push(storage(crate::merged::GUARD_BINDING, false));
+        }
+        let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
         let one = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no vis"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -1091,7 +1246,8 @@ impl Gpu {
                 storage(6, true),
             ],
         });
-        let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &CacheBuffers::new(&device, 1), &reservoirs(&device, 1), &reservoirs(&device, 1), &reservoirs(&device, 1), &reservoirs(&device, 1));
+        let no_vis_bufs = KernelBufs::new(&device, merged, 1, 1, 64, 64, 64);
+        let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
             let st = |b: u32| wgpu::BindGroupLayoutEntry { binding: b, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
@@ -1111,14 +1267,14 @@ impl Gpu {
         } else {
             (None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, source: src, module, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
     pub fn pipeline(&self, k: &Kernel, live: bool) -> wgpu::ComputePipeline {
         let mut cache = self.pipelines.lock().unwrap();
         cache
-            .entry((k.features, k.hash, live))
+            .entry((k.features, k.hash, live, k.caps))
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", if live { 1.0 } else { 0.0 }), ("FEAT", k.features as f64)];
@@ -1137,11 +1293,12 @@ impl Gpu {
     /// The kernel module for a scene: the shared one, or with its material functions spliced in.
     fn kernel_module(&self, k: &Kernel) -> wgpu::ShaderModule {
         let patches = k.features & F_SOURCE;
-        if patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty() {
-            return self.module.clone();
+        assert_eq!(self.merged, k.caps.is_some(), "a kernel of the merged layout has its arrays' lengths");
+        if let (Some(m), true) = (&self.module, patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty()) {
+            return m.clone();
         }
         let mut mods = self.modules.lock().unwrap();
-        mods.entry((k.hash, patches))
+        mods.entry((k.hash, patches, k.caps))
             .or_insert_with(|| {
                 let splice = |src: &str, marker: &str, code: &str| -> String {
                     if code.is_empty() {
@@ -1153,9 +1310,11 @@ impl Gpu {
                 };
                 let base = kernel_source(&self.source, patches);
                 let src = splice(&splice(&splice(&base, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
+                // The merged layout: the same source, its buffers merged for this kernel's arrays (merged.rs).
+                let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
                 unsafe {
                     self.device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(src.as_str().into()) },
+                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged).into()) },
                         wgpu::ShaderRuntimeChecks::unchecked(),
                     )
                 }
@@ -1168,7 +1327,7 @@ impl Gpu {
     pub fn media_pipeline(&self, k: &Kernel, entry: &'static str) -> wgpu::ComputePipeline {
         let mut cache = self.media_passes.lock().unwrap();
         cache
-            .entry((k.features, k.hash, entry))
+            .entry((k.features, k.hash, entry, k.caps))
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", 1.0), ("FEAT", k.features as f64)];
@@ -1220,11 +1379,17 @@ impl Gpu {
     }
 
     /// The radiance cache's per-frame resolve (pathtrace.wgsl `cache_resolve`; kernel bind groups).
-    pub fn cache_resolve_pipeline(&self) -> wgpu::ComputePipeline {
+    pub fn cache_resolve_pipeline(&self, bufs: &KernelBufs) -> wgpu::ComputePipeline {
+        // (The merged layout: the kernel written for these buffers' lengths, and the least tables.)
+        let module = match (&self.module, &bufs.merged) {
+            (Some(m), _) => m.clone(),
+            (None, Some((_, live))) => self.kernel_module(&Kernel::plain(crate::merged::Caps { tables: crate::merged::TABLE_MIN, live: *live })),
+            (None, None) => unreachable!("the merged layout's group 1 is one buffer"),
+        };
         self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("cache resolve"),
             layout: Some(&self.pipeline_layout),
-            module: &self.module,
+            module: &module,
             entry_point: Some("cache_resolve"),
             compilation_options: Default::default(),
             cache: None,
@@ -1265,7 +1430,8 @@ impl Gpu {
             }
         }
         let view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        let info = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tex_info"), contents: bytemuck::cast_slice(&packed.info), usage: wgpu::BufferUsages::STORAGE });
+        // (The merged layout copies it into the tables' buffer, `sync_tables`.)
+        let info = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tex_info"), contents: bytemuck::cast_slice(&packed.info), usage: if self.merged { wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::STORAGE } });
         timings.push(("texture_pages_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
         *cache = Some((key, view.clone(), info.clone()));
         (view, info)
@@ -1278,6 +1444,8 @@ impl Gpu {
         let d = &self.device;
         let t0 = Instant::now();
         // Empty tables still bind one zeroed element (the largest is a material, 368 B).
+        // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
+        // triangle without area; bvh.rs `EMPTY`.)
         let buf = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
             let data: &[u8] = if bytes.is_empty() { &[0u8; 512] } else { bytes };
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
@@ -1630,7 +1798,16 @@ impl Gpu {
         if let Some(a) = &accel {
             bg_entries.push(wgpu::BindGroupEntry { binding: 13, resource: a.tlas.as_binding() });
         }
+        // The merged layout: the tables' one buffer in their place (merged.rs).
+        let tables = self.merged.then(|| self.tables_buffer([&b_mats, &b_lights, &b_emit, &b_texinfo, &b_objects, &b_instances, &b_media]));
+        if let Some((t, _)) = &tables {
+            bg_entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
+            bg_entries.push(e(crate::merged::TABLES_BINDING, t));
+        }
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &bg_entries });
+        let mut kernel = Kernel::new(scene, groups);
+        kernel.caps = tables.as_ref().map(|t| crate::merged::Caps { tables: t.1, live: self.no_vis_bufs.merged.as_ref().expect("merged").1 });
+        let tables = tables.map(|t| t.0);
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
         let translucent = match &accel {
             Some(_) if !scene.trans_tris.is_empty() => {
@@ -1743,7 +1920,7 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
-        Ok(Uploaded { bg, bg_parts, accum: b_accum, params: b_params, width: w, height: h, kernel: Kernel::new(scene, groups), materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2288,7 +2465,60 @@ impl Gpu {
         if let Some(a) = &up.accel {
             entries.push(wgpu::BindGroupEntry { binding: 13, resource: a.tlas.as_binding() });
         }
-        up.bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries });
+        // The merged layout: the tables' buffer, a larger one if a table outgrew its array (the kernel's source then
+        // has the new lengths: compiled on its next use).
+        let now: [u32; 7] = std::array::from_fn(|k| crate::merged::table_cap(k, up.table_buffers()[k].size()));
+        let tables = match (&up.tables, &up.kernel.caps) {
+            (Some(t), Some(caps)) if now == caps.tables => Some(t.clone()),
+            (Some(_), Some(_)) => Some(self.tables_buffer(up.table_buffers()).0),
+            _ => None,
+        };
+        if let Some(t) = &tables {
+            entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
+            entries.push(e(crate::merged::TABLES_BINDING, t));
+        }
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries });
+        drop(entries);
+        up.bg = bg;
+        if let (Some(_), Some(caps)) = (&tables, &mut up.kernel.caps) {
+            caps.tables = now;
+        }
+        up.tables = tables;
+    }
+
+    /// The loop guard's count as the GPU has it now (None: no guard): the invocations it stopped since the buffers
+    /// were made. Waits for the GPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn guard_trips(&self, bufs: &KernelBufs) -> Result<Option<u32>> {
+        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard().is_some()) else { return Ok(None) };
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = self.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(&g.buffer, g.offset, &read, 0, 4);
+        self.queue.submit([e.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        let n = u32::from_le_bytes(read.slice(..).get_mapped_range()?[..4].try_into().expect("four bytes"));
+        Ok(Some(n))
+    }
+
+    /// The buffer of the merged layout's `MergedTables` for these seven tables (merged.rs `TABLES`' order), and its
+    /// arrays' lengths.
+    fn tables_buffer(&self, tables: [&wgpu::Buffer; 7]) -> (wgpu::Buffer, [u32; 7]) {
+        let caps: [u32; 7] = std::array::from_fn(|k| crate::merged::table_cap(k, tables[k].size()));
+        let (_, size) = crate::merged::offsets(&crate::merged::TABLES, &caps);
+        (self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("merged tables"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), caps)
+    }
+
+    /// The merged layout: the tables as they are now, copied into the struct's buffer. The renderer writes the tables
+    /// where it always did; the passes that read the scene read this copy, so it is made in their encoder, before
+    /// them, each frame (the tables are small: a few copies of kilobytes).
+    pub fn sync_tables(&self, up: &Uploaded, e: &mut wgpu::CommandEncoder) {
+        let (Some(t), Some(caps)) = (&up.tables, &up.kernel.caps) else { return };
+        let (at, _) = crate::merged::offsets(&crate::merged::TABLES, &caps.tables);
+        for (k, src) in up.table_buffers().into_iter().enumerate() {
+            let room = crate::merged::TABLES[k].stride * caps.tables[k] as u64;
+            e.copy_buffer_to_buffer(src, 0, t, at[k], src.size().min(room));
+        }
     }
 
     pub fn rebuild_tlas(&self, accel: &Accel, e: &mut wgpu::CommandEncoder) {
@@ -2454,11 +2684,13 @@ impl Gpu {
         }
         let (b_accum, b_params, bg) = (&up.accum, &up.params, &up.bg);
         let accum_size = b_accum.size();
+        let stopped_before = self.guard_trips(&self.no_vis_bufs)?;
 
 
         let t1 = Instant::now();
         let mut enc = d.create_command_encoder(&Default::default());
         enc.clear_buffer(b_accum, 0, None);
+        self.sync_tables(&up, &mut enc);
         self.queue.submit([enc.finish()]);
         // One dispatch per sample; params are rewritten between submissions. Batch a few per submit.
         let batch = 4u32;
@@ -2482,6 +2714,12 @@ impl Gpu {
             self.device.poll(wgpu::PollType::wait_indefinitely())?;
         }
         timings.push(("trace_ms".into(), t1.elapsed().as_secs_f64() * 1000.0));
+        // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
+        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs)?) {
+            if now != before {
+                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
+            }
+        }
         let t_tl = Instant::now();
         let overlay = self.render_translucent(&up, base, spp)?;
         if up.translucent.is_some() {
@@ -2560,6 +2798,37 @@ mod tests {
 
     /// The source-patching features (`kernel_source`) find their anchors in pathtrace.wgsl, once each, alone and all
     /// together; no feature leaves the source as it is.
+    /// The native default (no merged layout, no loop guard): what is handed to wgpu is the source as it was before
+    /// either existed. `guarded` gives a kernel back untouched; the live passes are their file. Prints the sources'
+    /// SHA-256 (`--nocapture`), which docs/WORKFLOW.md's gate compares with main's (PR #13).
+    #[test]
+    fn the_default_sources_are_untouched() {
+        use sha2::{Digest, Sha256};
+        if std::env::var("THREERT_LOOP_GUARD").is_ok() {
+            return;
+        }
+        assert_eq!(loop_guard(), None);
+        let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let live = include_str!("../shaders/live.wgsl");
+        assert_eq!(crate::live::live_source(false), live);
+        println!("source live {}", sha(&crate::live::live_source(false)));
+        for hwrt in [false, true] {
+            let base = kernel_base(hwrt);
+            assert_eq!(guarded(&base, false), base);
+            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false)));
+            // Every combination of the features that patch the source (`kernel_source`), each as compiled.
+            let bits = [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID];
+            let mut all = Sha256::new();
+            for m in 0..32u32 {
+                let f = bits.iter().enumerate().filter(|(k, _)| m >> k & 1 == 1).fold(0, |a, (_, b)| a | b);
+                let src = kernel_source(&base, f);
+                assert_eq!(guarded(&src, false), src);
+                all.update(guarded(&src, false).as_bytes());
+            }
+            println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
+        }
+    }
+
     #[test]
     fn kernel_source_finds_its_anchors() {
         let base = include_str!("../shaders/pathtrace.wgsl");

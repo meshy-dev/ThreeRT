@@ -8,10 +8,8 @@
 //! monotonic clock and the engine API. Memory is capped and every call runs under a time budget (the interrupt
 //! handler aborts it).
 
-use crate::desc;
-use crate::world::{Geometry, Kind, Settings, Texture, TextureSource, World};
+use crate::world::World;
 use anyhow::{anyhow, Result};
-use glam::{Quat, Vec3};
 use rquickjs::{CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime, TypedArray, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -130,86 +128,57 @@ fn fail(ctx: &Ctx, e: anyhow::Error) -> rquickjs::Error {
     Exception::throw_message(ctx, &format!("{e:#}"))
 }
 
-/// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts.
+/// A failed engine call as the exception scene code catches (`api::Error`).
+fn thrown(ctx: &Ctx, e: crate::api::Error) -> rquickjs::Error {
+    match e {
+        crate::api::Error::Type(m) => Exception::throw_type(ctx, &m),
+        crate::api::Error::Other(e) => fail(ctx, e),
+    }
+}
+
+/// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts: each call's arguments out of QuickJS,
+/// then what the call does (api.rs: the same code a browser's exports run, renderer/web).
 fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>) -> rquickjs::Result<()> {
+    use crate::api;
     let e = Object::new(ctx.clone())?;
     // Physics (renderer/src/physics.rs): one call, `physics(op, args)`, answering in JSON. The world is made by the
     // first call; the engine steps it, scene code cannot.
     let (p, w) = (physics.clone(), world.clone());
     e.set("physics", Function::new(ctx.clone(), move |ctx: Ctx<'js>, op: String, args: Value<'js>| -> rquickjs::Result<String> {
         let a: serde_json::Value = if args.is_undefined() || args.is_null() { serde_json::Value::Null } else { parse(&ctx, "physics", &args)? };
-        let out = p.borrow_mut().get_or_insert_with(Default::default).call(&mut w.borrow_mut(), &op, &a).map_err(|e| fail(&ctx, e))?;
-        Ok(out.to_string())
+        api::physics(&mut p.borrow_mut(), &mut w.borrow_mut(), &op, &a).map_err(|e| thrown(&ctx, e))
     })?)?;
     // The poses of the objects that bodies drive, by the slot the binding gave each body (7 floats: position, rotation
     // xyzw, as scene code reads an object's): one copy for all a frame reads. Empty without a world.
     let p = physics.clone();
-    e.set("physicsPoses", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, p.borrow().as_ref().map_or(vec![], |p| p.poses().to_vec())) })?)?;
+    e.set("physicsPoses", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, api::physics_poses(&p.borrow()).to_vec()) })?)?;
     // The voxel engine's level and explosions (renderer/src/voxel.rs): the level is loaded natively once the session
     // knows the asset root; an explosion returns what it did as JSON.
     let v = voxels.clone();
-    e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> {
-        let d: crate::voxel::LevelDesc = parse(&ctx, "voxelLevel", &d)?;
-        v.borrow_mut().request(d).map_err(|e| fail(&ctx, e))
-    })?)?;
+    e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::voxel_level(&mut v.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> {
-        let out = v.borrow_mut().explode(&mut w.borrow_mut(), glam::Vec3::new(x as f32, y as f32, z as f32), r as f32).map_err(|e| fail(&ctx, e))?;
-        Ok(out.to_string())
-    })?)?;
+    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
     // An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`), and the level's
     // hash (16 hex digits; "" before a level): the same commands give the same hash.
     let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> {
-        let j: serde_json::Value = parse(&ctx, "voxelEdit", &d)?;
-        let op = crate::voxel::EditOp::parse(&j).map_err(|e| fail(&ctx, e))?;
-        let out = v.borrow_mut().edit(&mut w.borrow_mut(), &op).map_err(|e| fail(&ctx, e))?;
-        Ok(out.to_string())
-    })?)?;
+    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let v = voxels.clone();
-    e.set("voxelHash", Function::new(ctx.clone(), move || -> String { v.borrow().hash().map_or(String::new(), |h| format!("{h:016x}")) })?)?;
+    e.set("voxelHash", Function::new(ctx.clone(), move || -> String { api::voxel_hash(&v.borrow()) })?)?;
     let v = voxels.clone();
     e.set("voxelDebris", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, v.borrow_mut().take_debris()) })?)?;
     let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> {
-        let out = v.borrow_mut().frame(&mut w.borrow_mut(), dt).map_err(|e| fail(&ctx, e))?;
-        Ok(out.to_string())
-    })?)?;
+    e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> { api::voxel_frame(&mut v.borrow_mut(), &mut w.borrow_mut(), dt).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     // (…, groups?, colors?): the optional arguments as the rest (rquickjs takes seven parameters at most).
     e.set("geometry", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, p: TypedArray<f32>, n: TypedArray<f32>, uv: TypedArray<f32>, idx: TypedArray<u32>, rest: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
         let opt = |k: usize| rest.0.get(k).filter(|v| !v.is_null() && !v.is_undefined());
-        let groups = match opt(0) {
-            Some(v) => AsRef::<[u32]>::as_ref(&TypedArray::<u32>::from_value(v.clone())?).chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-            None => vec![],
-        };
-        let colors = match opt(1) {
-            Some(v) => AsRef::<[f32]>::as_ref(&TypedArray::<f32>::from_value(v.clone())?).to_vec(),
-            None => vec![],
-        };
-        let g = Geometry { positions: AsRef::<[f32]>::as_ref(&p).to_vec(), normals: AsRef::<[f32]>::as_ref(&n).to_vec(), uvs: AsRef::<[f32]>::as_ref(&uv).to_vec(), indices: AsRef::<[u32]>::as_ref(&idx).to_vec(), groups, colors };
-        w.borrow_mut().set_geometry(id, g).map_err(|e| fail(&ctx, e))
+        let groups = opt(0).map(|v| TypedArray::<u32>::from_value(v.clone())).transpose()?;
+        let colors = opt(1).map(|v| TypedArray::<f32>::from_value(v.clone())).transpose()?;
+        api::geometry(&mut w.borrow_mut(), id, p.as_ref(), n.as_ref(), uv.as_ref(), idx.as_ref(), groups.as_ref().map(|g| g.as_ref()), colors.as_ref().map(|c| c.as_ref())).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
     e.set("texture", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value, data: Option<TypedArray<u8>>| -> rquickjs::Result<()> {
-        let j = to_json(&d)?;
-        let pair = |k: &str, def: f32| -> [f32; 2] { [0, 1].map(|i| j[k][i].as_f64().map_or(def, |x| x as f32)) };
-        let source = match (data, j["uri"].as_str()) {
-            (Some(bytes), _) if j["size"].is_array() => {
-                let (width, height) = (j["size"][0].as_u64().unwrap_or(0) as u32, j["size"][1].as_u64().unwrap_or(0) as u32);
-                let rgba = AsRef::<[u8]>::as_ref(&bytes).to_vec();
-                if rgba.len() != width as usize * height as usize * 4 {
-                    return Err(Exception::throw_type(&ctx, &format!("engine.texture: {} bytes are not {width}x{height} RGBA8 pixels", rgba.len())));
-                }
-                TextureSource::Pixels { width, height, rgba: Arc::new(rgba) }
-            }
-            (Some(bytes), _) => TextureSource::Encoded(Arc::new(AsRef::<[u8]>::as_ref(&bytes).to_vec())),
-            (None, Some(uri)) => TextureSource::File(uri.to_string()),
-            (None, None) => return Err(Exception::throw_type(&ctx, "engine.texture: needs a uri or data")),
-        };
-        let t = Texture { source, srgb: j["srgb"].as_bool().unwrap_or(true), wrap: j["wrap"].as_bool().unwrap_or(true), repeat: pair("repeat", 1.0), offset: pair("offset", 0.0) };
-        w.borrow_mut().set_texture(id, t).map_err(|e| fail(&ctx, e))?;
-        Ok(())
+        api::texture(&mut w.borrow_mut(), id, &to_json(&d)?, data.as_ref().map(|d| d.as_ref())).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
     e.set("shader", Function::new(ctx.clone(), move |name: String, code: String, helpers: String| w.borrow_mut().set_shader(&name, code, helpers))?)?;
@@ -226,10 +195,8 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     let w = world.clone();
     e.set("densityGrid", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, d: Value<'js>, data: Value<'js>| -> rquickjs::Result<()> {
         let j: serde_json::Value = parse(&ctx, "densityGrid", &d)?;
-        let n = |k: usize| j["size"][k].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
-        let program = j["program"]["id"].as_str().map(|id| (id.to_string(), j["program"]["params"].as_array().map_or(vec![], |a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())));
         let data = if data.is_null() || data.is_undefined() { None } else { Some(TypedArray::<f32>::from_value(data)?) };
-        w.borrow_mut().set_grid(id, [n(0), n(1), n(2)], j["channels"].as_u64().unwrap_or(1) as u32, data.as_ref().map(|d| d.as_ref()), program).map_err(|e| fail(&ctx, e))
+        api::density_grid(&mut w.borrow_mut(), id, &j, data.as_ref().map(|d| d.as_ref())).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
     e.set("gridSources", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, data: TypedArray<f32>| -> rquickjs::Result<()> { w.borrow_mut().add_grid_sources(id, data.as_ref()).map_err(|e| fail(&ctx, e)) })?)?;
@@ -246,84 +213,11 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         w.borrow_mut().set_proc_asset(id, function, uri).map_err(|e| fail(&ctx, e))
     })?)?;
     let w = world.clone();
-    e.set("material", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let m: desc::Material = parse(&ctx, "material", &d)?;
-        w.borrow_mut().set_material(id, m);
-        Ok(())
-    })?)?;
+    e.set("material", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::material(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
-    e.set("object", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let j = to_json(&d)?;
-        let num = |k: &str| j[k].as_u64().map(|x| x as u32);
-        // `body`: a rigid body will drive it (physics.rs). A mesh is then an instance of its own BLAS, so one added while
-        // the game runs is placed in place and its moves are its instance's transform.
-        let body = j["body"].as_bool().unwrap_or(false);
-        let kind = match j["kind"].as_str().unwrap_or("group") {
-            "mesh" => {
-                let materials: Vec<u32> = j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect());
-                Kind::Mesh { geometry: num("geometry").unwrap_or(0), material: num("material").unwrap_or(0), own_blas: j["dynamicGeometry"].as_bool().unwrap_or(false) || (body && materials.len() <= 1), materials }
-            }
-            "model" => Kind::Model { uri: j["uri"].as_str().unwrap_or_default().to_string(), nodes: serde_json::from_value(j["nodes"].clone()).ok(), animation: serde_json::from_value(j["animation"].clone()).ok(), functions: serde_json::from_value(j["functions"].clone()).unwrap_or_default() },
-            "light" => Kind::Light(serde_json::from_value(j["light"].clone()).map_err(|e| Exception::throw_type(&ctx, &format!("engine.object light: {e}")))?),
-            "camera" => Kind::Camera(serde_json::from_value(j["camera"].clone()).map_err(|e| Exception::throw_type(&ctx, &format!("engine.object camera: {e}")))?),
-            "volume" => Kind::Volume {
-                function: j["volume"]["id"].as_str().unwrap_or_default().to_string(),
-                params: j["volume"]["params"].as_array().map_or(vec![], |a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()),
-                shape: if j["shape"].as_str() == Some("sphere") { 1 } else { 0 },
-                majorant: j["majorant"].as_f64().unwrap_or(0.0) as f32,
-                g: j["g"].as_f64().unwrap_or(0.0) as f32,
-                homogeneous: j["homogeneous"].as_bool().unwrap_or(false),
-                grid: num("grid"),
-            },
-            "instanced" => Kind::Instanced {
-                geometry: num("geometry").unwrap_or(0),
-                procedural: j["procedural"].as_bool().unwrap_or(false),
-                materials: j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()),
-                capacity: num("count").unwrap_or(0),
-            },
-            "procedural" => Kind::Procedural {
-                geometry: num("geometry").unwrap_or(0),
-                materials: j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect()),
-            },
-            "gpuParticles" => Kind::GpuParticles {
-                capacity: num("capacity").unwrap_or(0).min(1 << 21),
-                program: j["program"]["id"].as_str().unwrap_or_default().to_string(),
-                params: j["program"]["params"].as_array().map_or(vec![], |a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()),
-                material: num("material").unwrap_or(0),
-                emitter_area: j["emitterArea"].as_f64().unwrap_or(0.0) as f32,
-                rate: (j["rate"].as_f64().unwrap_or(0.0) as f32).max(0.0),
-                collide: crate::world::ParticleCollide {
-                    plane: j["collide"]["plane"].as_f64().map(|v| v as f32),
-                    voxels: j["collide"]["voxels"].as_bool().unwrap_or(false),
-                    restitution: (j["collide"]["restitution"].as_f64().unwrap_or(0.3) as f32).clamp(0.0, 1.0),
-                    friction: (j["collide"]["friction"].as_f64().unwrap_or(0.4) as f32).clamp(0.0, 1.0),
-                },
-            },
-            "particles" => Kind::Particles {
-                count: num("count").unwrap_or(0),
-                emitter: j["emitter"]["id"].as_str().unwrap_or_default().to_string(),
-                params: j["emitter"]["params"].as_array().map_or(vec![], |a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()),
-                material: num("material").unwrap_or(0),
-                emitter_area: j["emitterArea"].as_f64().unwrap_or(0.0) as f32,
-            },
-            _ => Kind::Group,
-        };
-        let mut w = w.borrow_mut();
-        w.set_object(id, j["name"].as_str().unwrap_or_default().to_string(), num("parent"), kind, j["castShadow"].as_bool().unwrap_or(true), j["movable"].as_bool().unwrap_or(false)).map_err(|e| fail(&ctx, e))?;
-        if body {
-            w.set_driven(id).map_err(|e| fail(&ctx, e))?;
-        }
-        Ok(())
-    })?)?;
+    e.set("object", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::object(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
-    e.set("transform", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, t: TypedArray<f32>| -> rquickjs::Result<()> {
-        let t: &[f32] = t.as_ref();
-        if t.len() < 10 {
-            return Err(Exception::throw_type(&ctx, "engine.transform: needs 10 numbers"));
-        }
-        let q = Quat::from_xyzw(t[3], t[4], t[5], t[6]);
-        w.borrow_mut().set_transform(id, Vec3::new(t[0], t[1], t[2]), if q.length_squared() > 0.0 { q.normalize() } else { Quat::IDENTITY }, Vec3::new(t[7], t[8], t[9])).map_err(|e| fail(&ctx, e))
-    })?)?;
+    e.set("transform", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, t: TypedArray<f32>| -> rquickjs::Result<()> { api::transform(&mut w.borrow_mut(), id, t.as_ref()).map_err(|e| thrown(&ctx, e)) })?)?;
     // An instanced mesh's instances: count drawn, then matrices (16 numbers each), colours (3) and per-instance data
     // (4) for its whole capacity, each null to keep what it had (world.rs `set_instances` checks them).
     let w = world.clone();
@@ -336,61 +230,29 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     let w = world.clone();
     e.set("power", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, p: f64| w.borrow_mut().set_power(id, p as f32).map_err(|e| fail(&ctx, e)))?)?;
     let w = world.clone();
-    e.set("customData", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, v: Vec<f64>| {
-        let mut c = [0.0f32; 4];
-        for (k, x) in v.iter().take(4).enumerate() {
-            c[k] = *x as f32;
-        }
-        w.borrow_mut().set_custom(id, c).map_err(|e| fail(&ctx, e))
-    })?)?;
+    e.set("customData", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, v: Vec<f64>| api::custom_data(&mut w.borrow_mut(), id, &v).map_err(|e| thrown(&ctx, e)))?)?;
     let w = world.clone();
     e.set("sway", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let s: Option<crate::world::Sway> = if d.is_null() || d.is_undefined() { None } else { Some(parse(&ctx, "sway", &d)?) };
-        w.borrow_mut().set_sway(id, s).map_err(|e| fail(&ctx, e))
+        let j = if d.is_null() || d.is_undefined() { None } else { Some(to_json(&d)?) };
+        api::sway(&mut w.borrow_mut(), id, j.as_ref()).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
-    e.set("light", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let l: desc::Light = parse(&ctx, "light", &d)?;
-        w.borrow_mut().set_light(id, l).map_err(|e| fail(&ctx, e))
-    })?)?;
+    e.set("light", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::light(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
-    e.set("camera", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let c: desc::Camera = parse(&ctx, "camera", &d)?;
-        w.borrow_mut().set_camera_desc(id, c).map_err(|e| fail(&ctx, e))
-    })?)?;
+    e.set("camera", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::camera(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     e.set("animation", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
-        let a: Option<desc::Animation> = if d.is_null() || d.is_undefined() { None } else { Some(parse(&ctx, "animation", &d)?) };
-        w.borrow_mut().set_animation(id, a).map_err(|e| fail(&ctx, e))
+        let j = if d.is_null() || d.is_undefined() { None } else { Some(to_json(&d)?) };
+        api::animation(&mut w.borrow_mut(), id, j.as_ref()).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
     let p = physics.clone();
-    e.set("remove", Function::new(ctx.clone(), move |id: u32| {
-        let gone = w.borrow_mut().remove(id);
-        // (A body asleep would never find out its object went; the object's id may come again.)
-        if let Some(p) = p.borrow_mut().as_mut() {
-            p.objects_removed(&gone);
-        }
-    })?)?;
+    e.set("remove", Function::new(ctx.clone(), move |id: u32| api::remove(&mut w.borrow_mut(), &mut p.borrow_mut(), id))?)?;
     let w = world.clone();
-    e.set("environment", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> {
-        let env: desc::Environment = parse(&ctx, "environment", &d)?;
-        w.borrow_mut().set_environment(env);
-        Ok(())
-    })?)?;
+    e.set("environment", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::environment(&mut w.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     e.set("settings", Function::new(ctx.clone(), move |d: Value| -> rquickjs::Result<()> {
-        let j = to_json(&d)?;
-        let s = Settings {
-            name: j["name"].as_str().unwrap_or("scene").to_string(),
-            preset: j["preset"].as_str().unwrap_or("cinematic").to_string(),
-            overrides: Some(j["overrides"].clone()).filter(|o| !o.is_null()),
-            width: j["width"].as_u64().unwrap_or(1280) as u32,
-            height: j["height"].as_u64().unwrap_or(720) as u32,
-            time: j["time"].as_f64().unwrap_or(0.0) as f32,
-            camera: j["camera"].as_u64().map(|c| c as u32),
-        };
-        w.borrow_mut().set_settings(s);
+        api::settings(&mut w.borrow_mut(), &to_json(&d)?);
         Ok(())
     })?)?;
     ctx.globals().set("__engine", e)
@@ -750,6 +612,8 @@ impl GameSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::TextureSource;
+    use glam::Vec3;
 
     // A hand-written bundle: what the binding (packages/scene/src/engine.ts) does, reduced to engine calls.
     const GAME: &str = r#"

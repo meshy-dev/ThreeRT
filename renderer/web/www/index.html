@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ThreeRT</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0c0e; color: #c9ccd1; font: 13px/1.4 ui-monospace, Menlo, monospace; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+      /* The view keeps its own pixels and its shape; the page shows it as large as fits. */
+      canvas { max-width: 100vw; max-height: calc(100vh - 32px); aspect-ratio: 16 / 9; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" width="1280" height="720"></canvas>
+    <div id="status">loading</div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

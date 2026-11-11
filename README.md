@@ -79,9 +79,10 @@ npm run test:render                       # the render test suite on the GPU
 - the renderer's release build;
 - the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
 - the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
-- the engine library's wasm32 build.
+- the engine library's wasm32 build, the browser module's (`renderer/web`), and the physics hello world on that
+  module in Node (`tools/web-engine.ts`: no browser, no GPU).
 
-The GPU checks (`test:render`, the perf smoke, the benches) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 
 ## Assets and third-party content
 

@@ -32,6 +32,7 @@ jobs:
             renderer
             renderer/voxel-core
             renderer/physics-core
+            renderer/web
       - run: cd renderer && cargo build --release --locked
       # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
       - run: rustup target add wasm32-unknown-unknown
@@ -44,3 +45,13 @@ jobs:
       - run: node tools/physics-determinism.ts
       # The engine's library builds for the browser (wasm32; docs/RUNTIME.md "The engine's library in a browser").
       - run: cd renderer && cargo build --release --locked --lib --target wasm32-unknown-unknown
+      # And the module a page loads: the engine's exports for the browser's JavaScript (renderer/web; docs/RUNTIME.md
+      # "The engine in a browser"). Running it needs a browser with a GPU: tools/web-hello.ts, on a developer's machine.
+      - run: cd renderer/web && cargo build --release --locked --target wasm32-unknown-unknown
+      # The browser's side of it without a browser or a GPU: the module in Node, the page's `__engine` over its exports,
+      # the game bundle the native runtime loads, the physics hello world's script and its checks (tools/web-engine.ts).
+      # wasm-bindgen's CLI writes the module's JavaScript; its version is the crate's (renderer/web/Cargo.toml).
+      - run: |
+          V=$(grep -o 'wasm-bindgen = "=[0-9.]*"' renderer/web/Cargo.toml | grep -o '[0-9][0-9.]*')
+          wasm-bindgen --version 2>/dev/null | grep -q "$V" || cargo install wasm-bindgen-cli --version "$V" --locked
+      - run: node tools/web-engine.ts
