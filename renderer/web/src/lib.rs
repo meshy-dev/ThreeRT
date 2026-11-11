@@ -50,6 +50,9 @@ struct View {
     fps: u32,
     /// Lockstep (a scripted test): a frame's own time is the `dt` it is given, whatever the page's clock says.
     lockstep: bool,
+    /// The first frame: when its recording began (the page's clock, ms) and, once the GPU has finished it, how long
+    /// that took (f64 bits; 0: not yet). The kernels and the passes are compiled by the browser when they first run.
+    first: (f64, std::sync::Arc<std::sync::atomic::AtomicU64>),
 }
 
 thread_local! {
@@ -406,7 +409,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, 
     });
     let on = |k: &str| info[k].as_array().is_some_and(|a| !a.is_empty());
     let scene_cam = core.scene_camera();
-    VIEW.set(Some(View { core, surface, blit, blit_bg, clock: 0.0, has_frame: info["frame"].as_bool().unwrap_or(false), has_on: on("on"), scene_cam, fps: fps.max(1), lockstep: false }));
+    VIEW.set(Some(View { core, surface, blit, blit_bg, clock: 0.0, has_frame: info["frame"].as_bool().unwrap_or(false), has_on: on("on"), scene_cam, fps: fps.max(1), lockstep: false, first: (0.0, Default::default()) }));
     Ok(out.to_string())
 }
 
@@ -499,20 +502,29 @@ pub fn frame_end(dt: f32) -> Result<String, JsValue> {
         });
         v.core.g.queue.present(tex);
         let p3 = now();
+        if v.first.0 == 0.0 {
+            v.first.0 = p2;
+            let done = v.first.1.clone();
+            v.core.g.queue.on_submitted_work_done(move || done.store((web_time_now() - p2).to_bits(), std::sync::atomic::Ordering::Relaxed));
+        }
         v.core.govern_resolution(v.fps);
         let physics = engine(|e| e.physics.as_mut().map(|p| p.take_stats()));
+        // (The frame's rebuilds and why, summed over its commits, an event's included; then cleared, as the native
+        // runner does when it logs a frame.)
+        let (rebuild_ms, fallback) = (std::mem::take(&mut v.core.rebuild_ms), v.core.fallback.take());
+        (v.core.edit_ms, v.core.instanced_ms) = (0.0, 0.0);
         Ok(json!({
             "physics": physics.map(|s| json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved })),
             "physics_ms": p1 - p0,
             "commit_ms": p2 - p1,
             "rebuilt": rebuilt,
-            "rebuild_ms": v.core.rebuild_ms,
+            "rebuild_ms": rebuild_ms,
             "render_ms": p3 - p2,
             "gpu_ms": v.core.gpu_ms,
             "trace_ms": v.core.gpu_trace_ms,
             "scale": v.core.render_scale,
             "frame": v.core.frame,
-            "fallback": v.core.fallback,
+            "fallback": fallback,
             "guard_trips": v.core.guard_trips,
         })
         .to_string())
@@ -565,6 +577,13 @@ pub fn tick(dt: f32) -> String {
         e.world.take_changes();
         json!(e.physics.as_mut().map(|p| { let s = p.take_stats(); json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) })).to_string()
     })
+}
+
+/// How long the GPU took over the view's first frame, ms from the start of its recording to its last pass done
+/// (0 until then): the first use of every pipeline, so the browser's compile of the kernel and the live passes.
+#[wasm_bindgen(js_name = firstFrame)]
+pub fn first_frame() -> f64 {
+    VIEW.with_borrow(|v| v.as_ref().map_or(0.0, |v| f64::from_bits(v.first.1.load(std::sync::atomic::Ordering::Relaxed))))
 }
 
 /// The physics world's hash (16 hex digits; "" without a world): the same calls and ticks give the same hash natively

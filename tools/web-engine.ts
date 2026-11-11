@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { BOX, CAMERA, KICK, OFF, WALL_Z } from "../games/physics/hello.game.ts";
 import { repoRoot } from "./bundle-game.ts";
 import { buildWeb, describeBuild } from "./lib/web.ts";
+import { bench } from "../renderer/web/www/bench.ts";
 import { webEngine, type EngineExports } from "../renderer/web/www/engine.ts";
 
 type V3 = [number, number, number];
@@ -35,6 +36,16 @@ const engine = webEngine(wasm);
 const natives = [...readFileSync(join(repoRoot, "renderer/src/script.rs"), "utf8").matchAll(/\be\.set\("(\w+)"/g)].map((m) => m[1]).sort();
 const here = Object.keys(engine).sort();
 const exported = here.filter((k) => typeof (wasm as unknown as Record<string, unknown>)[k] === "function");
+
+// `--bench [n]`: the boundary's cost on this module in Node (renderer/web/www/bench.ts, what the page runs with
+// `?bench=1`), each part's time as it ends; then nothing else.
+if (args.includes("--bench")) {
+  const n = Number(opt("--bench")) || 10000;
+  const t = performance.now();
+  const r = bench(engine, n, () => wasm.tick(1 / 60), (what, ms) => console.log(`  ${what}: ${ms.toFixed(0)} ms`));
+  console.log(`web engine: the boundary in Node ${process.version}, ${((performance.now() - t) / 1000).toFixed(1)} s: ${JSON.stringify(r, null, 1)}`);
+  process.exit(0);
+}
 
 // The game: one script, as the page evaluates it; its console is the test's record.
 const lines: string[] = [];

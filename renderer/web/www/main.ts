@@ -13,7 +13,8 @@
 // (the traced resolution's share, default 0: dynamic, toward `fps`), `fps` (default 60), `lockstep=1` (no frame runs
 // by itself: `threert.run(n, dt)` runs them, for scripted tests), `guard` (the loop guard's limit, iterations an
 // invocation: default 65536; a new kernel's first runs take less), `bench=1` (no game: `threert.bench()`).
-import { webEngine, type EngineExports, type WebEngine } from "./engine.ts";
+import { webEngine, type EngineExports } from "./engine.ts";
+import { bench } from "./bench.ts";
 import type { FrameRow } from "./frame.ts";
 
 /** The session's exports (renderer/web/src/lib.rs) and wasm-bindgen's initialiser. */
@@ -22,6 +23,8 @@ interface Module extends EngineExports {
   provide(path: string, bytes: Uint8Array): void;
   start(canvas: HTMLCanvasElement, width: number, height: number, info: string, scale: number, fps: number, guard: number): Promise<string>;
   setLockstep(on: boolean): void;
+  tick(dt: number): string;
+  firstFrame(): number;
   frameBegin(dt: number): boolean;
   frameEnd(dt: number): string;
   click(u: number, v: number): string | undefined;
@@ -44,8 +47,13 @@ const status = (text: string) => {
   if (el) el.textContent = text;
 };
 
+/** How far the page has got, for a test that waits on it: `module`, `game`, `setup`, `start` (inside the module's
+ *  `start`: the GPU), `running`. */
+const stage = (s: string) => Object.assign(window, { threertStage: s });
+
 async function main() {
   const t0 = performance.now();
+  stage("module");
   // (A URL the bundler does not follow: wasm-bindgen's module is served beside this one.)
   const wasm = (await import(new URL("./pkg/threert_web.js", import.meta.url).href)) as Module;
   await wasm.default();
@@ -72,11 +80,12 @@ async function main() {
   (globalThis as { __engine?: unknown }).__engine = engine;
 
   if (params.get("bench") === "1") {
-    Object.assign(window, { threert: { bench: (n: number) => bench(webEngine(wasm), n) } });
+    Object.assign(window, { threert: { bench: (n: number) => bench(webEngine(wasm), n, () => wasm.tick(1 / 60)) } });
     status("bench");
     return;
   }
 
+  stage("game");
   // The game: one script, as the native runtime evaluates it.
   await new Promise<void>((ok, fail) => {
     const s = document.createElement("script");
@@ -99,6 +108,7 @@ async function main() {
   canvas.width = width;
   canvas.height = height;
   const fps = num("fps", 60);
+  stage("start");
   const t2 = performance.now();
   const info = JSON.parse(await wasm.start(canvas, width, height, JSON.stringify(describe), num("scale", 0), fps, num("guard", 0))) as Record<string, unknown>;
   const t_start = performance.now() - t2;
@@ -187,6 +197,8 @@ async function main() {
     click,
     event: (type: string, payload: unknown = {}) => event(type, JSON.stringify(payload)),
     physicsHash: () => wasm.physicsHash(),
+    /** The GPU's time over the first frame, ms (0 until it is done): the pipelines' compile. */
+    firstFrame: () => wasm.firstFrame(),
     /** The loop guard's count as last read back (null: the kernel has no guard). */
     guardTrips: () => frames.at(-1)?.guard_trips ?? null,
   };
@@ -203,70 +215,13 @@ async function main() {
     const row = frame(Math.min(since / 1000, 0.1), since);
     if (row.frame % 30 === 0) status(`${(info.adapter as { name: string }).name} · ${(1000 / since).toFixed(0)} fps · GPU ${row.gpu_ms.toFixed(1)} ms · scale ${row.scale.toFixed(2)}${row.guard_trips ? ` · LOOP GUARD: ${row.guard_trips} invocations stopped, the image is wrong` : ""}`);
   };
-  requestAnimationFrame((now) => {
-    last = now;
+  // (The first callback's own time may be from before `start` held the thread: the clock's now instead.)
+  requestAnimationFrame(() => {
+    last = performance.now();
     requestAnimationFrame(tick);
   });
   status("running");
-}
-
-/** The boundary's cost in this browser: each kind of engine call timed over many (ns a call), and the pose table of
- *  `n` bodies read (ms). The engine's world gets `n` objects with a body each. */
-function bench(e: WebEngine, n: number) {
-  const tri = [new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]), new Float32Array([0, 0, 1, 0, 0, 1]), new Uint32Array([0, 1, 2])] as const;
-  e.geometry(1, ...tri);
-  const mat = { name: "m", color: [1, 1, 1], opacity: 1, metalness: 0, roughness: 0.5, emissive: [0, 0, 0], emissiveIntensity: 0, doubleSided: false };
-  e.material(2, mat as never);
-  const desc = (k: number) => ({ name: `o${k}`, parent: null, castShadow: true, kind: "mesh", geometry: 1, material: 2 });
-  const trs = new Float32Array([0, 0, 0, 0, 0, 0, 1, 1, 1, 1]);
-  const t_build = performance.now();
-  for (let k = 0; k < n; k++) {
-    e.object(10 + k, desc(k) as never);
-    trs[0] = (k % 100) * 2;
-    trs[1] = 1;
-    trs[2] = Math.floor(k / 100) * 2;
-    e.transform(10 + k, trs);
-    e.physics("body", { id: k + 1, object: 10 + k, slot: k, gravityScale: 0 });
-    e.physics("collider", { id: k + 1, body: k + 1, shape: { type: "sphere", radius: 0.5 } });
-  }
-  const build_ms = performance.now() - t_build;
-  /** ns a call: the best of five runs of `count` calls. */
-  const time = (count: number, f: (k: number) => void) => {
-    let best = Infinity;
-    for (let r = 0; r < 5; r++) {
-      const t = performance.now();
-      for (let k = 0; k < count; k++) f(k);
-      best = Math.min(best, performance.now() - t);
-    }
-    return Math.round((best / count) * 1e6 * 10) / 10;
-  };
-  let sink = 0;
-  const calls = {
-    "visible(id, bool)": time(1e6, (k) => e.visible(10 + (k % n), true)),
-    "power(id, number)": time(1e6, (k) => e.power(10 + (k % n), 1)),
-    "transform(id, Float32Array(10))": time(2e5, (k) => e.transform(10 + (k % n), trs)),
-    "customData(id, [4])": time(2e5, (k) => e.customData(10 + (k % n), [1, 2, 3, 4])),
-    "material(id, desc)": time(5e4, () => e.material(2, mat as never)),
-    "object(id, desc)": time(5e4, (k) => e.object(10 + (k % n), desc(k % n) as never)),
-    'physics("state", { body })': time(5e4, (k) => (sink += e.physics("state", { body: 1 + (k % n) }).length)),
-    'physics("impulse", { body, impulse })': time(5e4, (k) => (sink += e.physics("impulse", { body: 1 + (k % n), impulse: [0, 0, 0] }).length)),
-    'physics("ray", { origin, direction })': time(2e4, () => (sink += e.physics("ray", { origin: [0.2, 9, 0.1], direction: [0, -1, 0] }).length)),
-    "physicsPoses(), not read": time(2e3, () => (sink += e.physicsPoses().length)),
-  };
-  /** ms to fetch the table and read every body's seven numbers: the best of 20. */
-  const read = (m: number) => {
-    let best = Infinity;
-    for (let r = 0; r < 20; r++) {
-      const t = performance.now();
-      const p = e.physicsPoses();
-      for (let k = 0; k < m * 7; k++) sink += p[k];
-      best = Math.min(best, performance.now() - t);
-    }
-    return Math.round(best * 1e4) / 1e4;
-  };
-  const poses: Record<string, number> = {};
-  for (const m of [1000, 10000]) if (m <= n) poses[`${m} bodies' poses read from the table, ms`] = read(m);
-  return { bodies: n, build_ms, calls_ns: calls, poses, isolated: crossOriginIsolated, sink };
+  stage("running");
 }
 
 main().catch((e) => {

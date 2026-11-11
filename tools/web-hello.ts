@@ -82,6 +82,10 @@ const GUARD_FIRST = Number(opt("--guard") ?? 8192);
 // (the traced share of it, default 0.5).
 const [VW, VH] = (opt("--view") ?? `${CAMERA.width}x${CAMERA.height}`).split("x").map(Number);
 const VIEW = `width=${VW}&height=${VH}&scale=${opt("--scale") ?? "0.5"}`;
+// A tab of the context's own stays open throughout: closing a window's last tab and opening the next page races with
+// Chrome's new-tab page (the test's page then never loads).
+const keep = context.pages()[0] ?? (await context.newPage());
+await keep.goto("about:blank");
 const failures: string[] = [];
 const check = (ok: boolean, what: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures.push(what); };
 const out: Record<string, unknown> = { build: { wasm: build.wasm, js: build.js, game: build.game } };
@@ -96,6 +100,7 @@ type Session = {
   click(u: number, v: number): unknown;
   event(type: string, payload?: unknown): unknown;
   guardTrips(): number | null;
+  firstFrame(): number;
   bench(n: number): unknown;
 };
 /** What the callbacks below use of the page (they run there; this file is checked without the DOM's types). */
@@ -115,7 +120,12 @@ async function open(query: string): Promise<{ page: Page; lines: string[]; info:
     page.waitForFunction(() => "threert" in globalThis || "threertError" in globalThis, undefined, { timeout: TIMEOUT }).then(() => true),
     new Promise<boolean>((ok) => setTimeout(() => ok(false), TIMEOUT)),
   ]).catch(() => false);
-  if (!ready) throw new Stuck(`the page did not open its view (${query}); its console: ${lines.slice(-5).join(" | ")}`);
+  if (!ready) {
+    // How far the page got (main.ts `threertStage`): nothing means its script never ran (no GPU work on it); "start"
+    // means it is inside the module's `start`, on the GPU.
+    const stage = await Promise.race([page.evaluate(() => (globalThis as { threertStage?: string }).threertStage ?? null), new Promise<string>((ok) => setTimeout(() => ok("(no answer)"), 5000))]).catch(() => "(no answer)");
+    throw new Stuck(`the page did not open its view (${query}); it is at ${page.url()}, stage ${stage}${stage === null ? " (its script never ran: not a GPU job)" : ""}; its console: ${lines.slice(-5).join(" | ")}`);
+  }
   const error = await inPage(page, "reading the page's error", () => (globalThis as { threertError?: string }).threertError);
   if (error) throw new Error(`the page failed: ${error}`);
   const info = query.includes("bench=1") ? {} : await inPage(page, "reading the view's info", () => (globalThis as unknown as { threert: Session }).threert.info);
@@ -147,18 +157,27 @@ try {
     check(info.merged === true && (info.limits as { maxStorageBuffersPerShaderStage: number }).maxStorageBuffersPerShaderStage === 8, "the device was asked for eight storage buffers a stage, the merged layout fits them");
     check(typeof info.loop_guard === "number", `the kernel has the loop guard (${info.loop_guard} iterations an invocation)`);
     // One frame first, alone; then nine, then a few more for the count (it is read back a frame or two late).
+    const t_first = performance.now();
     const first = await inPage(page, "the first frame at 160 x 90", () => (globalThis as unknown as { threert: Session }).threert.run(1));
+    // (Until the browser's own next frame after it: with a kernel it has not compiled before, this is where it waits.)
+    const first_wall = performance.now() - t_first;
     const more = await inPage(page, "thirteen more frames", () => (globalThis as unknown as { threert: Session }).threert.run(13));
     const trips = await inPage(page, "reading the loop guard's count", () => (globalThis as unknown as { threert: Session }).threert.guardTrips());
     check(first + more === 14 && trips === 0, `fourteen frames drawn at 160 x 90, the loop guard stopped nothing (${trips})`);
-    out.small = { gpu, adapter, info };
+    // This page is the run's first: its first frame is every pipeline's first use in this browser session (`--cold`:
+    // in this profile, so the shaders' compile; else what the browser kept of it).
+    const compile = await inPage(page, "reading the first frame's time", () => (globalThis as unknown as { threert: Session }).threert.firstFrame());
+    const row0 = await inPage(page, "reading the first frame's row", () => (globalThis as unknown as { threert: Session }).threert.frames[0]);
+    console.log(`web hello: the first frame: ${r3(first_wall)} ms until the browser's next frame after it (the page's own time in it ${r3(row0.begin + row0.script + row0.end)} ms, recording ${r3(row0.render_ms)}); its work done on the GPU ${r3(compile)} ms after it was recorded`);
+    out.small = { gpu, adapter, info, first_frame_gpu_ms: compile, first_frame_wall_ms: first_wall, first_frame: row0, cold: has("--cold") };
     await page.screenshot({ path: join(repoRoot, "out/web/hello-small.png") });
     await page.close();
     if (failures.length || has("--small")) throw new Error(failures.length ? "the small run failed: nothing larger is run" : "small");
   }
 
   // 2. The scripted test in lockstep (1280 x 720 traced at half unless told otherwise): tools/physics-hello.ts's steps.
-  {
+  // (`--skip-scripted`: not this time; the frame-time page is then the first with its kernel.)
+  if (!has("--skip-scripted")) {
     const { page, lines, info } = await open(`${VIEW}&lockstep=1`);
     // (`run` stops early if the loop guard stops anything: then the frames are short of what was asked, and it shows below.)
     const step = (n: number) => inPage(page, `${n} frames`, (k: number) => (globalThis as unknown as { threert: Session }).threert.run(k), n);
@@ -239,7 +258,7 @@ try {
       await sleep(2500);
     }
     await sleep(3000);
-    const data = await inPage(page, "reading the frames", () => { const s = (globalThis as unknown as { threert: Session }).threert; return { frames: s.frames, clicks: s.clicks, trips: s.guardTrips() }; });
+    const data = await inPage(page, "reading the frames", () => { const s = (globalThis as unknown as { threert: Session }).threert; return { frames: s.frames, clicks: s.clicks, trips: s.guardTrips(), first: s.firstFrame() }; });
     await page.close();
     const F = data.frames;
     // The first frames (pipelines compiled on first use, caches filling) apart; then still frames, frames in which a
@@ -263,9 +282,10 @@ try {
     const table = [rows("still", steady.filter((f) => !f.rebuilt && !(f.physics && f.physics.moved > 0))), rows("a body moves", steady.filter((f) => f.physics && f.physics.moved > 0)), rows("rebuilt", steady.filter((f) => f.rebuilt))];
     console.log("web hello: frame times, ms p50 / p95 (interval; of the page's time: script, engine calls [most, p50, p95], physics, commit, of which rebuild, recording; GPU, of which trace)");
     for (const t of table) console.log(`  ${JSON.stringify(t)}`);
-    console.log(`  first frames' intervals: ${F.slice(0, 6).map((f) => r3(f.interval)).join(", ")} ms; load: ${JSON.stringify(info.ms)}; ${JSON.stringify(info.load)}`);
+    console.log(`  the first frame on the GPU (every pipeline's first use: the shaders' compile): ${r3(data.first)} ms; first frames' intervals: ${F.slice(0, 6).map((f) => r3(f.interval)).join(", ")} ms; load: ${JSON.stringify(info.ms)}; ${JSON.stringify(info.load)}`);
+    console.log(`  the clicks: ${JSON.stringify((data.clicks as ({ pick_ms: number; script_ms: number; commit_ms: number; rebuilt: boolean } | null)[]).map((c) => c && { pick: r3(c.pick_ms), script: r3(c.script_ms), commit: r3(c.commit_ms), rebuilt: c.rebuilt }))}`);
     check(data.trips === 0, `the loop guard stopped nothing in ${F.length} frames (${data.trips})`);
-    out.frames = { info, table, first: F.slice(0, 30), clicks: data.clicks };
+    out.frames = { info, table, first: F.slice(0, 30), clicks: data.clicks, first_frame_gpu_ms: data.first };
   }
 
   // 4. The boundary's cost in this browser (no GPU: the engine's world and physics alone).
