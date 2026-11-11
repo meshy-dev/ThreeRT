@@ -1,0 +1,67 @@
+{
+  "id": "showroom",
+  "industry": "Commerce",
+  "title": "Boutique Showroom",
+  "caption": "A shop to walk through, lit by its window and its spots",
+  "blurb": "A small boutique with six real products on plinths and shelves: click one and the camera walks over for a close look. The only lights are the sun through the shop window and the shop’s own lamps, so the warm bounce off the terrazzo, the soft shadow under each product and the reflections in the floor are traced as you watch, by day and in the evening.",
+  "controls": [
+    {
+      "input": "Click a product",
+      "does": "walks the camera to it; again to step back"
+    },
+    {
+      "input": "N, P",
+      "does": "next and previous product"
+    },
+    {
+      "input": "C",
+      "does": "changes the colour of the sneaker or the chair"
+    },
+    {
+      "input": "M",
+      "does": "day to evening and back"
+    },
+    {
+      "input": "O or Space",
+      "does": "back to the whole shop"
+    }
+  ],
+  "credits": [
+    {
+      "what": "Sneaker: Materials Variants Shoe (textures resized, colourways split into nodes)",
+      "by": "Shopify",
+      "licence": "CC BY 4.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/MaterialsVariantsShoe"
+    },
+    {
+      "what": "Sunglasses: Sunglasses Khronos (logos removed, lens material replaced by plain dark glass)",
+      "by": "Eric Chadwick, Darmstadt Graphics Group GmbH",
+      "licence": "CC BY 4.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/SunglassesKhronos"
+    },
+    {
+      "what": "Table lamp: Iridescence Lamp (textures resized)",
+      "by": "Eric Chadwick, Wayfair, LLC",
+      "licence": "CC BY 4.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IridescenceLamp"
+    },
+    {
+      "what": "Chair: Sheen Chair",
+      "by": "Eric Chadwick, Wayfair, LLC",
+      "licence": "CC0 1.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/SheenChair"
+    },
+    {
+      "what": "Boom box: Boom Box",
+      "by": "Microsoft",
+      "licence": "CC0 1.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/BoomBox"
+    },
+    {
+      "what": "Water bottle: Water Bottle",
+      "by": "Microsoft",
+      "licence": "CC0 1.0",
+      "url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/WaterBottle"
+    }
+  ]
+}

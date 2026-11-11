@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ThreeRT — Every light, traced. At 60 fps.</title>
+<title>ThreeRT — Path tracing at 60 fps.</title>
 <meta name="description" content="ThreeRT path-traces all lighting in real time behind a three.js-style API: Amazon Lumberyard Bistro and Beeple's Zero-Day at 60 fps, and three.js everywhere else.">
 <link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="css/threert.css">
@@ -16,11 +16,13 @@
   .hero .cmp .lab.a { left: 32px; } .hero .cmp .lab.b { right: 32px; }
   .hero .cmp::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(90deg, rgba(6,7,9,.86) 0%, rgba(6,7,9,.55) 34%, rgba(6,7,9,0) 62%), linear-gradient(180deg, rgba(6,7,9,.7) 0%, rgba(6,7,9,0) 16%), linear-gradient(0deg, rgba(6,7,9,.6) 0%, rgba(6,7,9,0) 16%); }
   .hero .cmp .knob { top: 74%; }
+  .hero .cmp .pp { right: auto; left: 50%; bottom: 30px; margin-left: -17px; }
   .hero .copy { position: absolute; z-index: 7; left: 0; right: 0; top: 132px; pointer-events: none; }
   .hero .copy .wrap { display: grid; gap: 24px; }
   .hero .copy a { pointer-events: auto; }
   .hero h1 .l2 { display: block; }
   .hero .cta { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
+  .hero .plat { margin-top: -10px; color: var(--bone-2); }
 
   section { padding: 128px 0; }
   .sec-head { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: end; margin-bottom: 48px; }
@@ -80,8 +82,20 @@
   .tricks .no { font: 600 clamp(28px, 4vw, 56px)/1.14 var(--font-sans); letter-spacing: -.04em; color: #3a3e47; }
   .tricks .no s { text-decoration-thickness: 2px; text-decoration-color: var(--ember); }
   .tricks .yes { margin-top: 26px; font: 640 clamp(56px, 8vw, 116px)/1 var(--font-sans); letter-spacing: -.055em; }
-  .tricks svg.orbit { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
-  @media (prefers-reduced-motion: reduce) { .tricks svg.orbit .pulse { display: none; } }
+  .tricks svg.mark { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
+  @media (prefers-reduced-motion: reduce) { .tricks svg.mark .pulse { display: none; } }
+
+  /* ---- Beyond games: the cases the Showcase hosts, by field ---- */
+  .beyond { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
+  .beyond a { position: relative; display: block; border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--line); background: #000; aspect-ratio: 4 / 3; text-decoration: none; isolation: isolate; }
+  .beyond a img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.6s var(--ease); }
+  .beyond a:hover img { transform: scale(1.04); }
+  .beyond a::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(6, 7, 9, 0.94) 0%, rgba(6, 7, 9, 0.7) 30%, rgba(6, 7, 9, 0) 68%); z-index: 1; }
+  .beyond .t { position: absolute; z-index: 2; left: 16px; right: 16px; bottom: 14px; }
+  .beyond .t small { display: block; font: 500 11.5px/1 var(--font-mono); color: var(--tungsten); margin-bottom: 7px; }
+  .beyond .t b { display: block; font: 600 19px/1.15 var(--font-sans); letter-spacing: -0.025em; color: var(--bone); }
+  .beyond .t span { display: block; margin-top: 4px; font-size: 13.5px; color: var(--bone-2); }
+  #beyond[hidden] { display: none; }
 
   /* ---- Everywhere: one scene, a rail to two renderers, every screen ---- */
   .root { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--ink-2); font: 500 13px var(--font-mono); color: var(--bone); position: relative; z-index: 1; }
@@ -90,15 +104,16 @@
   .branch { position: relative; }
   .branch + .branch { margin-top: 18px; }
   .branch::before { content: ""; position: absolute; left: -45.5px; top: 50%; width: 44px; height: 1.5px; background: rgba(236, 232, 225, .3); }
-  .branch.rt-b::before { background: var(--tungsten); box-shadow: 0 0 10px rgba(255, 180, 84, .6); }
+  .branch.rt-b::before { background: var(--tungsten); box-shadow: 0 0 10px color-mix(in srgb, var(--tungsten) 60%, transparent); }
   .branch:last-child::after { content: ""; position: absolute; left: -48px; top: calc(50% + 1.5px); bottom: -4px; width: 8px; background: var(--ink-0); }
   .tier { border: 1px solid var(--line); border-radius: 22px; padding: 24px 24px 22px 30px; background: var(--ink-1); display: grid; grid-template-columns: 280px 1fr; gap: 24px; align-items: center; overflow: hidden; }
-  .tier.rt-tier { border-color: color-mix(in srgb, var(--tungsten) 45%, transparent); background: radial-gradient(70% 90% at 70% 0%, rgba(255, 140, 50, 0.13), transparent 70%), var(--ink-1); }
+  .tier.rt-tier { border-color: color-mix(in srgb, var(--tungsten) 45%, transparent); background: radial-gradient(70% 90% at 70% 0%, var(--halo), transparent 70%), var(--ink-1); }
   .tier h3 { font: 600 28px var(--font-sans); letter-spacing: -.035em; }
   .tier .req { display: block; margin-top: 8px; font: 500 12px var(--font-mono); color: var(--mute); }
   .tier .sub { margin-top: 14px; color: var(--bone-2); font-size: 15px; }
   .tier ul { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 9px; }
   .tier li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; color: var(--bone-2); font-size: 14.5px; }
+  .tier li a { color: var(--bone); }
   .tier li::before { content: ""; width: 7px; height: 7px; margin-top: 8px; border-radius: 50%; background: var(--c-three); }
   .rt-tier li::before { background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
   .shelf3d { position: relative; height: 300px; min-width: 0; }
@@ -111,7 +126,6 @@
   .payoff p { color: var(--bone-2); font-size: 16px; }
 
   .tricks .cta { display: flex; justify-content: center; gap: 12px; margin-top: 44px; }
-  .note { font: 400 12px/1.6 var(--font-mono); color: var(--mute); }
 
   @media (max-width: 1100px) {
     .sec-head, .motion, .details, .tier, .payoff, .rtx ol { grid-template-columns: 1fr; } .rtx li + li { padding-left: 0; border-left: 0; } .rtx .big { flex-direction: column; align-items: flex-start; }
@@ -119,25 +133,30 @@
     .reel { grid-template-columns: 1fr; } .reel .left { border-right: 0; border-bottom: 1px solid var(--line); min-height: 300px; } .reel .story { grid-template-columns: 1fr 1fr 1fr auto; }
     .shelf { flex-wrap: wrap; }
   }
+  /* A phone: nothing wider than the screen (the wordmark scales with it; the left-side picker scrolls in place). */
+  @media (max-width: 700px) {
+    .rtx .big h2 { font-size: 25vw; }
+    .pick { max-width: calc(100% - 28px); overflow-x: auto; scrollbar-width: none; }
+  }
 </style>
 </head>
 <body>
 
-<nav class="nav overlay">
+<nav class="nav overlay" aria-label="Site">
   <div class="wrap">
-    <a class="logo" href="#"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
-    <div class="links"><a href="#hello">Hello world</a><a href="#compare">vs three.js</a><a href="#motion">Motion</a><a href="#everywhere">Everywhere</a></div>
-    <a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT" style="height:38px;font-size:14px">GitHub</a>
+    <a class="logo" href="./" aria-label="ThreeRT home"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="showcase/">Showcase</a><a href="download/">Download</a><a href="docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 1h6v6M9 1 1 9"/></svg></a></div>
   </div>
 </nav>
 
 <header class="hero">
-  <div class="cmp" id="hero" data-a="media/bistro/tuned.webp" data-b="media/bistro/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="44" data-intro></div>
+  <div class="cmp" id="hero" data-a="media/bistro/hero-three.webp" data-b="media/bistro/hero-rt.webp" data-video="media/bistro/hero.mp4" data-video-sm="media/bistro/hero-720.mp4" data-la="three.js" data-lb="ThreeRT" data-x="44" data-intro></div>
   <div class="copy">
     <div class="wrap">
-      <h1 class="h-display">Every light, traced.<span class="l2 ray-text">At 60 fps.</span></h1>
-      <p class="lede" style="max-width:52ch">The first three.js-style engine to fully path-trace industry-standard scenes in real time.<sup>1</sup></p>
-      <div class="cta"><a class="btn primary" href="#hello">See it in a hello world</a><a class="btn ghost" href="#everywhere">Runs everywhere</a></div>
+      <h1 class="h-display">Path tracing<span class="l2 ray-text">at 60 fps.</span></h1>
+      <p class="lede" style="max-width:52ch">ThreeRT is the first three.js-style engine to fully path-trace industry-standard scenes in real time.<sup>1</sup></p>
+      <div class="cta"><a class="btn primary" href="download/" data-dl><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg><span>Download</span></a><a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT" rel="noopener"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>GitHub</a></div>
+      <p class="plat">macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
     </div>
   </div>
 </header>
@@ -250,7 +269,7 @@
             <div>
               <h3>Native client</h3><span class="req">hardware ray tracing</span>
               <p class="sub">Every light path traced, at 60 fps.</p>
-              <ul><li>Dynamic resolution holds the frame rate</li><li>Installs like any game client</li></ul>
+              <ul><li>Dynamic resolution holds the frame rate</li><li><span>Installs like any game client: <a href="download/">macOS and iPhone</a></span></li></ul>
             </div>
             <div class="shelf3d" id="shelfNative"></div>
           </div>
@@ -274,39 +293,66 @@
   </div>
 </section>
 
+<section id="beyond" style="padding-top:40px" hidden>
+  <div class="wrap">
+    <div class="sec-head">
+      <h2 class="h-1">Not only games.<br><span class="mute">Light for everyone.</span></h2>
+      <p class="lede">Lighting of this quality used to take a studio and a render farm. The same engine now runs a physics lesson, a jeweller’s counter, a flat you might buy and a museum hall, live, on the laptop or phone you already own.</p>
+    </div>
+    <div class="beyond" id="beyondGrid"></div>
+    <p style="margin-top:28px"><a class="btn ghost" href="showcase/#cases">Open the cases</a></p>
+  </div>
+</section>
+
 <section class="tricks">
-  <svg class="orbit rv" viewBox="0 0 64 64" aria-hidden="true">
-    <defs><linearGradient id="ry" x1="10" y1="56" x2="54" y2="20" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FF6A13"/><stop offset=".5" stop-color="#FFB454"/><stop offset="1" stop-color="#FFEBC4"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
-    <path d="M32 8.967 L58 54 L6 54 Z" fill="none" stroke="#ECE8E1" stroke-width="2" stroke-linejoin="round" opacity=".9"/>
-    <path d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="url(#ry)" stroke-width="1.8" stroke-linejoin="round" opacity=".35"/>
-    <path class="pulse" d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="#FFEBC4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" stroke-dasharray="9 91" filter="url(#gl)"><animate attributeName="stroke-dashoffset" from="100" to="0" dur="2.4s" repeatCount="indefinite"/></path>
+  <svg class="mark rv" viewBox="0 0 64 64" aria-hidden="true" data-mark>
+    <defs><linearGradient id="ry" x1="11.59" y1="32" x2="32" y2="12.36" gradientUnits="userSpaceOnUse"><stop offset="0" style="stop-color:var(--ember)"/><stop offset=".5" style="stop-color:var(--tungsten)"/><stop offset="1" style="stop-color:var(--filament)"/></linearGradient><filter id="gl" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
+    <rect width="64" height="64" fill="none" pointer-events="all"/>
+    <path d="M18.39 59.5 L4.78 4.5 L59.22 20.21 Z" fill="none" style="stroke:var(--bone)" stroke-width="2" stroke-linejoin="round" opacity=".9"/>
+    <g class="trail"></g>
+    <path data-ray="main" d="M11.59 32 L32 12.36 L38.81 39.86 Z" fill="url(#ry)" fill-opacity=".1" stroke="url(#ry)" stroke-width="1.8" stroke-linejoin="round" opacity=".45"/>
+    <path data-ray class="pulse" d="M11.59 32 L32 12.36 L38.81 39.86 Z" fill="none" style="stroke:var(--filament)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" stroke-dasharray="9 91" filter="url(#gl)"><animate attributeName="stroke-dashoffset" from="100" to="0" dur="2.4s" repeatCount="indefinite"/></path>
   </svg>
   <div class="wrap">
     <div class="no rv"><s>Shadow maps.</s> <s>Light probes.</s> <s>Lightmaps.</s><br><s>Screen-space GI.</s> <s>Baking.</s></div>
     <div class="yes rv">Just <span class="ray-text">light</span>.</div>
-    <div class="cta rv"><a class="btn primary" href="#hello">Start with hello world</a><a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT/tree/main/docs">Read the docs</a></div>
+    <div class="cta rv"><a class="btn primary" href="download/" data-dl><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg><span>Download</span></a><a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT" rel="noopener"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>GitHub</a></div>
+    <p class="plat rv" style="margin-top:16px">macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
   </div>
 </section>
 
 <footer class="foot">
   <div class="wrap cols">
     <div>
-      <a class="logo" href="#"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <a class="logo" href="./" aria-label="ThreeRT home"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
       <p style="margin-top:14px">Real-time path tracing behind a three.js-style API.</p>
+      <div class="site"><a href="showcase/">Showcase</a><a href="download/">Download</a><a href="docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
     </div>
     <div class="note">
-      <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine.</p>
-      <p style="margin-top:12px">Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+      <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine. The clip at the top of this page is ThreeRT live on an Apple M3 Max at 1600 × 900 (render scale 0.5), every frame as it drew it: 12.8 ms of GPU time a frame at the median, 14.8 ms at the 95th percentile, none over 16.7 ms.</p>
+      <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
     </div>
   </div>
 </footer>
 
 <script type="module">
   import { $, $$, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
+  import { downloadButtons, packages, packageLinks } from "./js/site.js";
 
   // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
   reveal();
   const guard = (name, f) => { try { const r = f(); if (r?.catch) r.catch((e) => console.error(`${name}:`, e)); } catch (e) { console.error(`${name}:`, e); } };
+  // The cases the Showcase hosts (play/index.json, the games with an `industry`): a host without them shows nothing here.
+  guard("cases", async () => {
+    const cases = ((await packages())?.games ?? []).filter((g) => g.industry && g.thumb);
+    if (!cases.length) return;
+    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    $("#beyondGrid").innerHTML = cases.map((g) => `<a href="showcase/#case-${esc(g.id)}"><img src="${esc(packageLinks(g.id).thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy"><span class="t"><small>${esc(g.industry)}</small><b>${esc(g.title)}</b><span>${esc(g.caption ?? "")}</span></span></a>`).join("");
+    $("#beyond").hidden = false;
+  });
+
+  // The download buttons name the visitor's platform (they link to the download page either way).
+  guard("download", () => downloadButtons());
 
   guard("comparisons", () => {
     compare($("#hero"));

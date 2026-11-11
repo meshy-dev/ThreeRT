@@ -1,0 +1,81 @@
+{
+  "id": "museum",
+  "industry": "Culture",
+  "title": "Sculpture Gallery",
+  "caption": "A daylit museum room you can walk through",
+  "blurb": "One room of a museum at real scale: a scanned marble bust, two bronzes and a porcelain horse on stone plinths under a glass ceiling, with paintings from The Met on the walls. The light under a chin is daylight that came down through the ceiling and bounced off the parquet; in the evening the room is lit only by what its spots throw back.",
+  "controls": [
+    {
+      "input": "Click a sculpture or a painting",
+      "does": "walks up to it; click elsewhere to return"
+    },
+    {
+      "input": "D, A",
+      "does": "next and previous exhibit"
+    },
+    {
+      "input": "L",
+      "does": "daylight to evening and back"
+    },
+    {
+      "input": "Space",
+      "does": "back to the hall"
+    }
+  ],
+  "credits": [
+    {
+      "what": "Marble Bust 01 (3D scan)",
+      "by": "Rico Cilliers / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/marble_bust_01"
+    },
+    {
+      "what": "Lion Head (bronze, 3D model)",
+      "by": "Tina / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/lion_head"
+    },
+    {
+      "what": "Horse Head (bronze, 3D model)",
+      "by": "Tina / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/horse_head"
+    },
+    {
+      "what": "Horse Statue 01 (porcelain, 3D scan)",
+      "by": "Rico Cilliers / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/horse_statue_01"
+    },
+    {
+      "what": "Herringbone Parquet (floor texture)",
+      "by": "Sergej Majboroda, Jenelle van Heerden / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/herringbone_parquet"
+    },
+    {
+      "what": "Plastered Wall 04 (wall texture)",
+      "by": "Rob Tuytel / Poly Haven",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/plastered_wall_04"
+    },
+    {
+      "what": "The Death of Socrates, 1787 (painting)",
+      "by": "Jacques Louis David; image: The Metropolitan Museum of Art, Open Access",
+      "licence": "CC0 1.0 (public domain)",
+      "url": "https://www.metmuseum.org/art/collection/search/436105"
+    },
+    {
+      "what": "The Harvesters, 1565 (painting)",
+      "by": "Pieter Bruegel the Elder; image: The Metropolitan Museum of Art, Open Access",
+      "licence": "CC0 1.0 (public domain)",
+      "url": "https://www.metmuseum.org/art/collection/search/435809"
+    },
+    {
+      "what": "View from Mount Holyoke, Northampton, Massachusetts, after a Thunderstorm (The Oxbow), 1836 (painting)",
+      "by": "Thomas Cole; image: The Metropolitan Museum of Art, Open Access",
+      "licence": "CC0 1.0 (public domain)",
+      "url": "https://www.metmuseum.org/art/collection/search/10497"
+    }
+  ]
+}

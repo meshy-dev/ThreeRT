@@ -44,6 +44,12 @@ texdir = os.path.join(out, "textures")
 os.makedirs(texdir, exist_ok=True)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
+# Blender 5.1's FBX importer sets lamp.cycles.cast_shadow when Cycles is loaded, and Cycles' light settings no longer
+# have it: the import of any FBX with a light stops there. Nothing here renders with Cycles, so it is unloaded first
+# (the importer checks for lamp.cycles); the lights themselves are removed below.
+import addon_utils
+if addon_utils.check("cycles")[1]:
+    addon_utils.disable("cycles")
 bpy.ops.import_scene.fbx(filepath=os.path.abspath(args.fbx), use_image_search=False, use_anim=not args.no_animations)
 print(f"orca: imported {args.fbx} in {time.time() - t0:.1f} s", flush=True)
 

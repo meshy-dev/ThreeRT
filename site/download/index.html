@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download ThreeRT — macOS and iPhone</title>
+<meta name="description" content="ThreeRT for macOS and for iPhone and iPad: the clients that open ThreeRT games and path-trace them on your own GPU.">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/threert.css">
+<style>
+  .dl { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: stretch; }
+  .dl .card { display: grid; grid-template-rows: auto auto 1fr auto; gap: 22px; }
+  .dl .top { display: flex; align-items: center; gap: 16px; }
+  .dl .glyph { flex: none; width: 52px; height: 52px; border-radius: 14px; border: 1px solid var(--line-2); display: grid; place-items: center; color: var(--bone); background: var(--ink-2); }
+  .dl h2 { font: 600 28px/1.1 var(--font-sans); letter-spacing: -0.035em; }
+  .dl .req { display: block; margin-top: 6px; font: 500 12px var(--font-mono); color: var(--mute); }
+  .dl .act { display: grid; gap: 14px; justify-items: start; padding-top: 22px; border-top: 1px solid var(--line); }
+  .dl .act .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
+  .dl details { font: 400 12px/1.6 var(--font-mono); color: var(--mute); max-width: 100%; }
+  .dl details summary { cursor: pointer; }
+  .dl details p { margin-top: 6px; overflow-wrap: anywhere; color: var(--bone-2); }
+  .dl .ios-get { display: flex; gap: 20px; align-items: center; }
+  .how .lede { max-width: 62ch; }
+  .term { margin-top: 44px; display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; align-items: stretch; }
+  .term pre { margin: 0; font-size: 12.5px; line-height: 1.75; }
+  .term pre .d { color: #5f646d; } .term pre .ok { color: #9ccf7a; } .term pre .t { color: var(--tungsten); } .term pre b { color: var(--bone); font-weight: 600; }
+  .term .scan { display: grid; grid-template-columns: auto 1fr; gap: 22px; align-items: center; }
+  .term .scan h3 { font: 600 20px/1.2 var(--font-sans); letter-spacing: -0.02em; }
+  .term .scan p { margin-top: 8px; color: var(--bone-2); font-size: 14.5px; }
+  .any { margin-top: 56px; padding-top: 36px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: end; }
+  .any h3 { font: 620 clamp(26px, 3vw, 40px)/1.08 var(--font-sans); letter-spacing: -0.04em; }
+  .any p { color: var(--bone-2); font-size: 16px; }
+  @media (max-width: 1100px) { .dl, .term, .any { grid-template-columns: 1fr; } .any { gap: 18px; } }
+  @media (max-width: 520px) { .term .scan { grid-template-columns: 1fr; } .dl .ios-get { flex-direction: column; align-items: flex-start; } }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="../showcase/">Showcase</a><a href="../download/" aria-current="page">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 1h6v6M9 1 1 9"/></svg></a></div>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Download</span>
+    <h1 class="h-1">The client traces it.<br><span class="mute">On your own GPU.</span></h1>
+    <p class="lede">ThreeRT games are code. The client fetches a game from a link, a dev server or a QR code and path-traces it on the device in front of you. The clients are free.</p>
+  </div>
+</header>
+
+<section class="sec">
+  <div class="wrap">
+    <div class="dl">
+      <div class="card lit" id="mac">
+        <div class="top">
+          <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="4.5" y="5" width="17" height="11.5" rx="1.6"/><path d="M2 20.5h22"/></svg></div>
+          <div><h2>ThreeRT for macOS</h2><span class="req">macOS 14 or later · Apple silicon</span></div>
+        </div>
+        <ul class="ticks">
+          <li>Opens games from <code>threert://</code> links, from dev servers on your network and from its own library of examples</li>
+          <li>Hardware ray tracing on M3 and later; dynamic resolution holds the frame rate</li>
+          <li>A game plays as soon as it opens: drag to orbit, click to play, <kbd>⌘R</kbd> to reload, <kbd>⌘S</kbd> for a screenshot</li>
+          <li>Carries the <code>threert</code> command line: <b>Install threert</b> in its library puts it on your PATH</li>
+        </ul>
+        <span></span>
+        <div class="act" id="macAct">
+          <p class="fine">Looking for the build on this host…</p>
+          <noscript><p class="fine">The download link is filled in by a script. With scripts off, the build is at <a href="../releases/latest.json">releases/latest.json</a>.</p></noscript>
+        </div>
+      </div>
+
+      <div class="card" id="ios">
+        <div class="top">
+          <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="7.5" y="2.5" width="11" height="21" rx="2.6"/><path d="M11.5 5.2h3"/></svg></div>
+          <div><h2>ThreeRT for iPhone</h2><span class="req">iOS 17 or later · iPhone and iPad</span></div>
+        </div>
+        <ul class="ticks">
+          <li>Scan the QR code that <code>threert dev</code> or ThreeRT for macOS shows, and that game opens on the phone</li>
+          <li>iPhone 15 Pro and later trace with hardware ray queries; other Metal GPUs trace in compute</li>
+          <li>One finger orbits, two pan, a pinch zooms, a tap plays; shake to reload</li>
+        </ul>
+        <span></span>
+        <div class="act" id="iosAct">
+          <p class="fine">Looking for the build on this host…</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec how">
+  <div class="wrap">
+    <div class="sec-top">
+      <h2 class="h-2">Scan, and it runs.</h2>
+      <p class="lede">The client is a runtime, not one game. Like Expo Go for an app, it loads whatever project you point it at, and it loads it again every time you save.</p>
+    </div>
+    <ol class="steps">
+      <li><h3>Run <code>threert dev</code></h3><p>It bundles your game on every save, serves it on your network and prints a QR code.</p></li>
+      <li><h3>Scan the code</h3><p>With ThreeRT on the iPhone. On the Mac that runs the dev server, ThreeRT for macOS opens the game by itself.</p></li>
+      <li><h3>Traced, and live</h3><p>The same code is path-traced on the device. Save a change and every connected client reloads. The game’s logs print in your terminal.</p></li>
+    </ol>
+    <div class="term">
+      <pre class="code" aria-label="What threert dev prints"><span class="d">$</span> <b>threert dev</b>
+<span class="ok">✓</span> built <span class="d">3f2a9c1e · 412 KiB · 38 ms</span>
+
+  <b>ThreeRT dev server</b> <span class="d">·</span> my-game
+  <span class="d">Local  </span> http://127.0.0.1:8790
+  <span class="d">iPhone </span> <span class="t">threert://192.168.1.23:8790</span> <span class="d">(scan with the ThreeRT app)</span>
+  <span class="d">Web    </span> http://192.168.1.23:8790/ <span class="d">(three.js, any browser)</span>
+
+  <span class="ok">✓</span> opened in ThreeRT for macOS
+  <span class="d">editing game.ts — every save rebuilds and reloads every client</span></pre>
+      <div class="card scan">
+        <div class="qr" data-qr="threert://192.168.1.23:8790" data-label="An example of a dev server QR code"></div>
+        <div>
+          <h3>A link is all a game needs</h3>
+          <p>The code carries <code>threert://</code> and the dev server’s address. This one holds the example address from the terminal output; yours has your machine’s.</p>
+        </div>
+      </div>
+    </div>
+    <div class="any">
+      <h3>No ray tracing? <span class="ray-text">Still the same game.</span></h3>
+      <p>A device the client cannot trace on, and every browser, opens the same game as three.js: the dev server and every published package serve that page next to the code. See it on the <a href="../showcase/">examples</a>.</p>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <p style="margin-top:14px">Real-time path tracing behind a three.js-style API.</p>
+      <div class="site"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
+    </div>
+    <div class="note">
+      <p>ThreeRT for macOS and ThreeRT for iPhone are free to use. The engine they run is open source: <a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">taichi-dev/ThreeRT</a>.</p>
+      <p>Mac, macOS, iPhone, iPad and TestFlight are trademarks of Apple Inc.</p>
+    </div>
+  </div>
+</footer>
+
+<script type="module">
+  import { guard, release, macUrl, megabytes, qrTiles, qrSvg, platform } from "../js/site.js";
+
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const DL = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg>`;
+
+  guard("qr", () => qrTiles());
+
+  guard("release", async () => {
+    const r = await release();
+    const mac = document.querySelector("#macAct"), ios = document.querySelector("#iosAct");
+
+    // macOS: the disk image this host carries.
+    const m = r?.macos;
+    if (m?.file) {
+      const trusted = m.signed === "developer-id" && m.notarized === true;
+      mac.innerHTML = `
+        <div class="row"><a class="btn primary" href="${esc(macUrl(m))}" download>${DL}<span>Download for macOS</span></a>
+          <span class="kv"><span><b>${esc(r.version)}</b></span><span>${megabytes(m.size)}</span>${r.date ? `<span>${esc(r.date)}</span>` : ""}</span></div>
+        ${trusted ? "" : `<p class="fine">This build is not notarized by Apple yet, so macOS stops it the first time. Open <b>System Settings → Privacy &amp; Security</b> and choose <b>Open Anyway</b> (on macOS 14: right-click the app, then <b>Open</b>). macOS remembers the choice.</p>`}
+        <details><summary>${esc(m.file)} · SHA-256</summary><p>${esc(m.sha256 ?? "")}</p></details>`;
+    } else {
+      mac.innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">No build on this host</span></div>
+        <p class="fine">No macOS build is published on this host yet.</p>`;
+    }
+
+    // iPhone: a link once the beta is open; until then, say so.
+    const i = r?.ios;
+    if (i?.url) {
+      const where = i.channel === "appstore" ? "the App Store" : "TestFlight";
+      ios.innerHTML = `<div class="ios-get"><div class="qr" id="iosQr"></div>
+        <div style="display:grid;gap:12px;justify-items:start"><a class="btn primary" href="${esc(i.url)}" rel="noopener"><span>Get it on ${where}</span></a>
+        <p class="fine">On a Mac? Point the iPhone’s camera at the code.</p></div></div>`;
+      document.querySelector("#iosQr").innerHTML = await qrSvg(i.url, `ThreeRT for iPhone on ${where}`);
+    } else {
+      ios.innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">TestFlight beta not open yet</span></div>
+        <p class="fine">The iPhone app has no public build yet. Its TestFlight link will be on this page when the beta opens.</p>`;
+    }
+
+    // Lead with the visitor's own platform.
+    if (platform() === "ios") document.querySelector(".dl").prepend(document.querySelector("#ios"));
+  });
+</script>
+</body>
+</html>

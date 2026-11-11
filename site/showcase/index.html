@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreeRT Showcase — scenes traced in real time, and examples to open</title>
+<meta name="description" content="Amazon Lumberyard Bistro and Beeple's Zero-Day path-traced at 60 fps, and example games you can open in ThreeRT for macOS and iPhone or as three.js in this browser.">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/threert.css">
+<style>
+  .feat { display: grid; grid-template-columns: 1.55fr 1fr; gap: 36px; align-items: center; }
+  .feat + .feat { margin-top: 72px; }
+  .feat.flip { grid-template-columns: 1fr 1.55fr; }
+  .feat.flip .txt { order: -1; }
+  .feat h2 { font: 620 clamp(32px, 3.6vw, 52px)/1 var(--font-sans); letter-spacing: -0.045em; }
+  .feat .by { display: block; margin-top: 10px; font: 500 12px/1.5 var(--font-mono); color: var(--mute); }
+  .feat p.d { margin-top: 18px; color: var(--bone-2); font-size: 16px; max-width: 46ch; }
+  .feat .ticks { margin-top: 20px; }
+  .feat .ticks li::before { background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .feat .more { margin-top: 22px; font-size: 14.5px; color: var(--mute); }
+  .feat .more a { color: var(--bone); }
+
+  .pk { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .pk .card { padding: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; }
+  .pk .thumb { position: relative; display: block; aspect-ratio: 16 / 9; background: #000; }
+  .pk .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .pk .kind { position: absolute; top: 12px; left: 12px; padding: 5px 9px; border-radius: 7px; background: rgba(8, 9, 11, 0.66); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font: 500 11.5px/1 var(--font-mono); color: var(--bone); }
+  .pk .body { padding: 20px 22px 22px; display: grid; grid-template-columns: 1fr auto; gap: 16px 18px; align-content: start; }
+  .pk h3 { font: 600 21px/1.15 var(--font-sans); letter-spacing: -0.025em; }
+  .pk .cap2 { margin-top: 7px; color: var(--bone-2); font-size: 14.5px; }
+  .pk .qr { width: 92px; height: 92px; padding: 6px; border-radius: 10px; }
+  .pk .acts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .pk .addr { grid-column: 1 / -1; font: 400 11.5px/1.5 var(--font-mono); color: var(--mute); overflow-wrap: anywhere; }
+  /* ---- Cases: what the engine does outside games, by industry ---- */
+  #cases { scroll-margin-top: 96px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
+  .filters button { appearance: none; font: 500 13.5px/1 var(--font-sans); color: var(--bone-2); background: transparent; border: 1px solid var(--line-2); border-radius: 999px; padding: 9px 14px; cursor: pointer; transition: color 0.2s, border-color 0.2s, background 0.2s; }
+  .filters button:hover { color: var(--bone); border-color: var(--bone-2); }
+  .filters button[aria-pressed="true"] { color: var(--ink-0); background: var(--bone); border-color: var(--bone); }
+  .cases { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  .case { padding: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; scroll-margin-top: 88px; }
+  .case[hidden] { display: none; }
+  .case .thumb { position: relative; display: block; aspect-ratio: 16 / 9; background: #000; }
+  .case .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .case .ind { position: absolute; top: 14px; left: 14px; display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 8px; background: rgba(8, 9, 11, 0.66); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font: 500 12px/1 var(--font-mono); color: var(--bone); }
+  .case .ind i { width: 7px; height: 7px; border-radius: 50%; background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .case .body { padding: 24px 26px 26px; display: grid; grid-template-columns: 1fr auto; gap: 18px 22px; align-content: start; }
+  .case h3 { font: 600 27px/1.1 var(--font-sans); letter-spacing: -0.03em; }
+  .case .blurb { margin-top: 10px; color: var(--bone-2); font-size: 15px; line-height: 1.6; max-width: 54ch; }
+  .case .ctl { grid-column: 1 / -1; list-style: none; margin: 0; padding: 16px 0 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 8px 22px; font-size: 13.5px; line-height: 1.5; color: var(--mute); }
+  .case .ctl b { color: var(--bone-2); font-weight: 500; }
+  .case .qr { width: 104px; height: 104px; padding: 7px; border-radius: 11px; }
+  .case .acts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  @media (max-width: 1100px) { .cases { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .case .qr { display: none; } .case .body { grid-template-columns: 1fr; padding: 20px; } .case .ctl { grid-template-columns: 1fr; } .case h3 { font-size: 23px; } }
+  .open-note { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 10px 28px; }
+  .open-note[hidden] { display: none; }
+  @media (max-width: 1100px) { .feat, .feat.flip { grid-template-columns: 1fr; gap: 22px; } .feat.flip .txt { order: 0; } .pk { grid-template-columns: 1fr 1fr; } }
+  /* A phone cannot scan its own screen: the codes are for a second device. */
+  @media (max-width: 700px) { .pk { grid-template-columns: 1fr; } .pk .qr, .open-note .scan { display: none; } .pk .body { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="../showcase/" aria-current="page">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 1h6v6M9 1 1 9"/></svg></a></div>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Showcase</span>
+    <h1 class="h-1">Production scenes.<br><span class="mute">Every light traced.</span></h1>
+    <p class="lede">Two scenes the industry uses to test renderers, with the camera moving and all of their lighting path-traced. Then <a href="#cases">what the same engine does outside games</a>, and small scenes you can open yourself.</p>
+  </div>
+</header>
+
+<section class="sec">
+  <div class="wrap">
+    <div class="feat rv">
+      <div class="seqp" data-scene="../media/bistro" data-la="three.js · 54 fps" data-lb="ThreeRT · 60 fps"></div>
+      <div class="txt">
+        <h2>Bistro night</h2>
+        <span class="by">Amazon Lumberyard Bistro · ORCA</span>
+        <p class="d">A street corner after dark. The string lights, the shop signs and the lamps are the light sources: each one lights the square in its own colour.</p>
+        <ul class="ticks"><li>Every emitter is a light</li><li>Warm light from the shop window and the wall lamp spills across the facade and the pavement</li></ul>
+        <p class="more">Drag the divider: three.js on the left, ThreeRT on the right, the same camera path.<sup>1</sup></p>
+      </div>
+    </div>
+    <div class="feat flip rv">
+      <div class="seqp" data-scene="../media/zero-day" data-la="three.js · 12 fps" data-lb="ThreeRT · 60 fps"></div>
+      <div class="txt">
+        <h2>Zero-Day</h2>
+        <span class="by">Beeple · ORCA</span>
+        <p class="d">A hall of machines lit by ten thousand small emitters. Each adds its own light, highlight and shadow, and the floor mirrors the machines and their lights.</p>
+        <ul class="ticks"><li>Ten thousand small lights</li><li>Reflections of the whole scene, including the parts the camera never sees</li></ul>
+        <p class="more">The stills, side by side with three.js at its strongest: <a href="../#compare">against three.js at full power</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="cases" hidden>
+  <div class="wrap">
+    <div class="sec-top rv">
+      <h2 class="h-2">Not only games.</h2>
+      <p class="lede">Lighting of this quality used to take a studio, a render farm and a night of waiting. The same engine now runs a physics lesson, a jeweller’s counter, a flat you might buy and a museum hall, live, on the laptop or phone you already own. Each case below is one file of scene code: open it and try it.</p>
+    </div>
+    <div class="filters" id="filters" role="group" aria-label="Cases by field"></div>
+    <div class="cases" id="caseGrid"></div>
+  </div>
+</section>
+
+<section class="sec" id="open">
+  <div class="wrap">
+    <div class="sec-top rv">
+      <h2 class="h-2">Open on your device.</h2>
+      <p class="lede">The hello-world scenes and a small game. Like the cases above, each is a package on this site: scene code at tutorial size and the files it reads. ThreeRT fetches it and traces it on your GPU. The same package opens as three.js in this browser.</p>
+    </div>
+    <div class="pk" id="pk"><p class="fine">Looking for the packages on this host…</p></div>
+    <div class="open-note fine" id="openNote" hidden>
+      <span><b style="color:var(--bone-2)">Open in ThreeRT</b> needs the client: <a href="../download/">download it for macOS or iPhone</a>.</span>
+      <span class="scan">On a phone, scan a code with the ThreeRT app.</span>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <p style="margin-top:14px">Real-time path tracing behind a three.js-style API.</p>
+      <div class="site"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
+    </div>
+    <div class="note">
+      <p><sup>1</sup> 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine.</p>
+      <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+      <p id="caseCredits" hidden></p>
+    </div>
+  </div>
+</footer>
+
+<script type="module">
+  import { $, $$, sequence, reveal } from "../js/threert.js";
+  import { guard, packages, packageLinks, qrSvg, reachable } from "../js/site.js";
+
+  reveal();
+  guard("camera moves", () => { for (const el of $$(".seqp")) sequence(el); });
+
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+  // The packages this host carries (play/index.json). A host without them gets a note, not an empty grid.
+  guard("packages", async () => {
+    const pk = $("#pk"), index = await packages();
+    const games = index?.games ?? [];
+    if (!games.length) {
+      pk.outerHTML = `<p class="fine">No example packages are published on this host yet. The examples also ship inside the client: <a href="../download/">download ThreeRT</a> and open its library.</p>`;
+      return;
+    }
+    // Cases (a game with an `industry`: the client's release writes it from the engine's showcase/) get their own
+    // section, with what each shows and how to play with it; the rest are the hello-world packages below.
+    const cases = games.filter((g) => g.industry), rest = games.filter((g) => !g.industry);
+    if (cases.length) {
+      const fields = [...new Set(cases.map((g) => g.industry))];
+      $("#caseGrid").innerHTML = cases.map((g) => {
+        const l = packageLinks(g.id);
+        return `<article class="card case" id="case-${esc(g.id)}" data-field="${esc(g.industry)}">
+          <a class="thumb" href="${esc(l.web)}" aria-label="${esc(g.title)} as three.js in this browser"><img src="${esc(l.thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy"><span class="ind"><i></i>${esc(g.industry)}</span></a>
+          <div class="body">
+            <div><h3>${esc(g.title)}</h3><p class="blurb">${esc(g.blurb ?? g.caption ?? "")}</p></div>
+            <div class="qr" data-id="${esc(g.id)}"></div>
+            <div class="acts"><a class="btn primary sm" href="${esc(l.open)}">Open in ThreeRT</a><a class="btn ghost sm" href="${esc(l.web)}">three.js in the browser</a></div>
+            ${g.controls?.length ? `<ul class="ctl">${g.controls.map((c) => `<li><b>${esc(c.input)}</b> ${esc(c.does)}</li>`).join("")}</ul>` : ""}
+          </div>
+        </article>`;
+      }).join("");
+      $("#filters").innerHTML = [`<button type="button" aria-pressed="true" data-field="">All</button>`, ...fields.map((f) => `<button type="button" aria-pressed="false" data-field="${esc(f)}">${esc(f)}</button>`)].join("");
+      $("#filters").addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        for (const x of $$("#filters button")) x.setAttribute("aria-pressed", String(x === b));
+        for (const c of $$("#caseGrid .case")) c.hidden = !!b.dataset.field && c.dataset.field !== b.dataset.field;
+      });
+      $("#cases").hidden = false;
+      // What the cases use that is not ours: named here, as their licences ask.
+      const seen = new Set(), credits = cases.flatMap((g) => g.credits ?? []).filter((c) => !seen.has(c.what + c.by) && seen.add(c.what + c.by));
+      if (credits.length) {
+        $("#caseCredits").innerHTML = "In the cases: " + credits.map((c) => `${c.url ? `<a href="${esc(c.url)}" rel="noopener">${esc(c.what)}</a>` : esc(c.what)}, ${esc(c.by)} (${esc(c.licence)})`).join("; ") + ".";
+        $("#caseCredits").hidden = false;
+      }
+      // Arriving at a case's own address (#case-<id>), now that it exists.
+      if (location.hash.startsWith("#case")) document.getElementById(location.hash.slice(1))?.scrollIntoView();
+    }
+    pk.innerHTML = rest.map((g) => {
+      const l = packageLinks(g.id);
+      return `<article class="card">
+        <a class="thumb" href="${esc(l.web)}" aria-label="${esc(g.title)} as three.js in this browser">${g.thumb ? `<img src="${esc(l.thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy">` : ""}<span class="kind">${g.kind === "game" ? "game" : "scene"}</span></a>
+        <div class="body">
+          <div><h3>${esc(g.title)}</h3><p class="cap2">${esc(g.caption ?? "")}</p></div>
+          <div class="qr" data-id="${esc(g.id)}"></div>
+          <div class="acts"><a class="btn primary sm" href="${esc(l.open)}">Open in ThreeRT</a><a class="btn ghost sm" href="${esc(l.web)}">three.js in the browser</a></div>
+          <div class="addr">${esc(l.open)}</div>
+        </div>
+      </article>`;
+    }).join("");
+    $("#openNote").hidden = false;
+    if (!reachable()) $("#openNote").insertAdjacentHTML("beforeend", `<span>This page is on ${esc(location.hostname)}, which a phone cannot reach. Serve with <code>bun site/serve.ts --lan</code> and open the LAN address.</span>`);
+    for (const el of $$("#pk .qr, #caseGrid .qr")) {
+      const g = games.find((x) => x.id === el.dataset.id), l = packageLinks(g.id);
+      try { el.innerHTML = await qrSvg(l.qr, `QR code: open ${g.title} on a phone`); } catch (e) { console.error("qr:", e); el.remove(); }
+    }
+  });
+</script>
+</body>
+</html>

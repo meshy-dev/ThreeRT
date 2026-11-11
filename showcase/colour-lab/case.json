@@ -1,0 +1,30 @@
+{
+  "id": "colour-lab",
+  "industry": "Education",
+  "title": "Colour Lab",
+  "caption": "Red, green and blue lamps; cyan, magenta and yellow shadows",
+  "blurb": "Three lamps shine on a white screen: it is white where all three land, and every object casts three shadows, each the colour of the two lamps that still reach it. Nothing is painted. The colours, and the shadow edges that soften as a lamp grows, come from tracing three lights.",
+  "controls": [
+    {
+      "input": "Click a lamp",
+      "does": "switches it on or off"
+    },
+    {
+      "input": "R, G, B",
+      "does": "switch the red, green and blue lamps"
+    },
+    {
+      "input": "S",
+      "does": "changes the size of the lamps: small is sharp, large is soft"
+    },
+    {
+      "input": "D",
+      "does": "moves the lamps together or apart"
+    },
+    {
+      "input": "Click the ring",
+      "does": "turns it, and its three shadows"
+    }
+  ],
+  "credits": []
+}
