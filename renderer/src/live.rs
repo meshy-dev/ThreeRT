@@ -2377,7 +2377,7 @@ impl LiveCore {
             let mut pose: Option<&crate::desc::Animation> = None;
             for (id, _) in &pg.members {
                 let Some(o) = world.objects.get(id) else { return Ok(false) };
-                let crate::world::Kind::Model { uri, nodes, animation: Some(a) } = &o.kind else { return Ok(false) };
+                let crate::world::Kind::Model { uri, nodes, animation: Some(a), .. } = &o.kind else { return Ok(false) };
                 if !world.shown(*id) || *uri != pg.uri || *nodes != pg.nodes || pose.is_some_and(|p| p != a) {
                     return Ok(false);
                 }
@@ -2887,11 +2887,14 @@ impl LiveCore {
                     (record, gpu, blas, entry)
                 }
                 Kind::Mesh { materials, .. } if materials.len() > 1 => return Err("a mesh with several materials".into()),
-                Kind::Model { uri, nodes, animation } => {
+                Kind::Model { uri, nodes, animation, functions } => {
                     // A static model already in the scene: another instance of its mesh (one not in it brings materials
                     // and textures, which load with a rebuild).
                     if animation.is_some() {
                         return Err("an animated model".into());
+                    }
+                    if !functions.is_empty() {
+                        return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
                     if features & gpu::F_INST == 0 || m.determinant() <= 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("a model the build would flatten (mirrored, instancing off, or the scene's first instance)".into());

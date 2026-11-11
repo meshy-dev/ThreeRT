@@ -471,6 +471,16 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        - in place against a fresh load ΔE ≤ 0.1;
        - Tokyo lines in the perf suite: the Shiba fly-past clear and in rain;
        - a clip (a clear afternoon into a storm at dusk) posted in the session.
+     - Status, part 1 (2026-11-11, branch `gltf-material-functions`): the engine side of the rain on the city.
+       - `GLTFModel.functions`: material functions on a glTF file's own materials, by name prefix (the compiled tiles'
+         ground, roads and roofs are glTF materials with the aerial photos as maps). Set at build; the model has its
+         own copies of the file's materials and meshes. Their triangles are flattened per placement, as every
+         material-function triangle is: on Tokyo 15.2 M of 17.8 M.
+       - `wetLayer()`: `SurfaceMaterial`'s wetness (Lagarde; puddles on up-facing ground, rain ripples) as a layer on
+         another material's shading. `surface/wet-layer-gltf`: 0.556 against 0.549 analytic.
+       - The translucency pass compiles only its particles' material functions: with every function of Tokyo's kernel
+         in it, the Metal compiler failed on the `translucent` pipeline once the ground had wetLayer and the rain
+         curtain was in the scene.
   Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7.
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;

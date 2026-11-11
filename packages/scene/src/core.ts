@@ -1771,11 +1771,18 @@ export class GLTFModel extends Object3D {
   uri: string;
   /** Only these glTF nodes (by name, with their transforms in the file); all when null. */
   nodes: string[] | null;
+  /**
+   * Material functions on the file's own materials, by material name prefix (the first that matches): the function
+   * gets the glTF material's shading (`base`, its maps sampled) and changes it, e.g. `WetLayer` on a city's ground.
+   * Set at build: changing them rebuilds the scene.
+   */
+  functions: Record<string, ShaderBinding> | null;
   declare private _animation: AnimationPose | null;
-  constructor(uri: string, opts: { nodes?: string[]; animation?: AnimationPose } = {}) {
+  constructor(uri: string, opts: { nodes?: string[]; animation?: AnimationPose; functions?: Record<string, ShaderBinding> } = {}) {
     super();
     this.uri = uri;
     this.nodes = opts.nodes ?? null;
+    this.functions = opts.functions ?? null;
     this.animation = opts.animation ?? null;
   }
   get animation(): AnimationPose | null {

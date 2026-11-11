@@ -125,7 +125,8 @@ pub enum Kind {
     /// `materials`: one per geometry group (three.js's material array; empty: `material` for every triangle).
     Mesh { geometry: u32, material: u32, own_blas: bool, materials: Vec<u32> },
     /// glTF asset (path relative to the asset root), optionally only some of its nodes (by name).
-    Model { uri: String, nodes: Option<Vec<String>>, animation: Option<desc::Animation> },
+    /// `functions`: material functions on its materials, by name prefix (`GLTFModel.functions`).
+    Model { uri: String, nodes: Option<Vec<String>>, animation: Option<desc::Animation>, functions: Vec<desc::ModelFunction> },
     Light(desc::Light),
     Camera(desc::Camera),
     /// `count` particles: each a quad that the particle function `emitter` (with `params`, 8 vec4) places every frame
@@ -1371,7 +1372,7 @@ mod tests {
         w.set_object(1, "a".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         w.set_object(2, "cam".into(), None, Kind::Group, false, false).unwrap();
         for bad in ["../x.glb", "/etc/passwd", "a/../../b", "https://x/y.glb", ""] {
-            assert!(w.set_object(9, "m".into(), None, Kind::Model { uri: bad.into(), nodes: None, animation: None }, true, false).is_err(), "{bad}");
+            assert!(w.set_object(9, "m".into(), None, Kind::Model { uri: bad.into(), nodes: None, animation: None, functions: vec![] }, true, false).is_err(), "{bad}");
         }
         w.settings.camera = Some(2);
         assert!(w.take_changes().structural);

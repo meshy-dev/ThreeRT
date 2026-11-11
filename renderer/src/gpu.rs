@@ -637,6 +637,19 @@ pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &w
     })
 }
 
+/// Whether a material function's WGSL (`fn mf_<name>(...) -> MatOut { var o = base; ... return o; }`) can change its
+/// result's `field`: it names `o.<field>`, or uses `o` otherwise than as `o.<another field>` (a whole assignment, a
+/// pointer passed on) beyond its declaration and its return.
+fn writes_field(code: &str, field: &str) -> bool {
+    if code.contains(&format!("o.{field}")) {
+        return true;
+    }
+    let body = code.replacen("var o = base;", "", 1).replace("return o;", "");
+    let b = body.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    (0..b.len()).any(|k| b[k] == b'o' && (k == 0 || !ident(b[k - 1])) && b.get(k + 1).is_none_or(|&c| !ident(c) && c != b'.'))
+}
+
 /// What the path-tracing kernel is specialised on: the scene's feature mask and its material functions (WGSL).
 #[derive(Clone)]
 pub struct Kernel {
@@ -669,6 +682,29 @@ impl Kernel {
                 functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
             }
             functions.push_str("        default { return base; }\n    }\n}\n");
+            // The translucency pass's (translucent.wgsl): only the functions of its particles' materials. With every
+            // function in it, the Metal compiler failed on Tokyo's kernel once the city's ground had one (wetLayer).
+            let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+            functions.push_str("fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {\n    switch f {\n");
+            for k in used {
+                if let Some((id, _, _)) = scene.shaders.get(k as usize) {
+                    functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
+                }
+            }
+            functions.push_str("        default { return base; }\n    }\n}\n");
+            // The sites that read one field of the result (alpha tests: `opacity`; emitter sampling: `emissive`): only
+            // the functions that can change it; for the others the result's field is `base`'s. Each site inlines its
+            // dispatch, and a function's code costs the kernel there even where it never runs (wetLayer's puddles:
+            // ~0.8 ms on Tokyo, dry).
+            for (name, field) in [("alpha_material_function", "opacity"), ("emissive_material_function", "emissive")] {
+                functions.push_str(&format!("fn {name}(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    switch f {{\n"));
+                for (k, (id, code, _)) in scene.shaders.iter().enumerate() {
+                    if writes_field(code, field) {
+                        functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
+                    }
+                }
+                functions.push_str("        default { return base; }\n    }\n}\n");
+            }
         }
         let mut volume_functions = String::new();
         if !scene.volume_fns.is_empty() {
@@ -2400,6 +2436,19 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn material_functions_by_the_fields_they_write() {
+        let f = |body: &str| format!("fn mf_x(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n{body}\n    return o;\n}}\n");
+        let wet = f("    o.base = base.base * 0.5;\n    o.roughness = 0.1;\n    o.normal = i.ng;");
+        assert!(!writes_field(&wet, "emissive") && !writes_field(&wet, "opacity"));
+        assert!(writes_field(&f("    o.emissive = vec3<f32>(1.0);"), "emissive"));
+        assert!(writes_field(&f("    o.opacity *= 0.5;"), "opacity"));
+        // A whole assignment or a pointer passed on may change any field.
+        assert!(writes_field(&f("    o = base;"), "emissive"));
+        assert!(writes_field(&f("    helper(&o);"), "opacity"));
+        assert!(!writes_field(&f("    let no = 1.0;\n    o.base = vec3<f32>(no);"), "opacity"));
+    }
+
     use super::*;
 
     /// The kernel features are one bit each, no two the same (`override FEAT` gets them all, the source-patching ones
