@@ -11,6 +11,8 @@
 //   --native out.json   compare with the native test's numbers (node tools/physics-hello.ts --json out.json)
 //   --json out.json     everything measured
 //   --headless          no window (Chrome's new headless; WebGPU there is not checked on every version)
+//   --guard N           the loop guard's limit for every page (default: 8192 for the small step, the page's 65536 after)
+//   --cold              a fresh browser profile: the shaders compiled again (the first visit's times)
 //
 // A GPU job that does not end takes this machine's display with it (2026-11-11), and a page's shader runs on the same
 // GPU as everything else. So: the kernel in the page has the loop guard (renderer/src/merged.rs `guard`), and its
@@ -72,6 +74,9 @@ const context = await chromium.launchPersistentContext(profile, {
   // Timestamp queries at full resolution (the frame's GPU time); nothing else is switched.
   args: ["--enable-webgpu-developer-features"],
 });
+// The loop guard's limit for the small first step (hello world's tree has 77 nodes: a sample is a few hundred
+// iterations); the page's default, 65,536, after it.
+const GUARD_FIRST = Number(opt("--guard") ?? 8192);
 const failures: string[] = [];
 const check = (ok: boolean, what: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures.push(what); };
 const out: Record<string, unknown> = { build: { wasm: build.wasm, js: build.js, game: build.game } };
@@ -97,7 +102,9 @@ async function open(query: string): Promise<{ page: Page; lines: string[]; info:
   const lines: string[] = [];
   page.on("console", (m) => lines.push(m.text()));
   page.on("pageerror", (e) => lines.push(`pageerror: ${e.message}`));
-  await page.goto(`${url}?${query}`, { timeout: TIMEOUT });
+  // (`--guard N`: the loop guard's limit for every page of this run, not only the small first step's.)
+  const guard = has("--guard") && !query.includes("guard=") ? `&guard=${GUARD_FIRST}` : "";
+  await page.goto(`${url}?${query}${guard}`, { timeout: TIMEOUT });
   const ready = await Promise.race([
     page.waitForFunction(() => "threert" in globalThis || "threertError" in globalThis, undefined, { timeout: TIMEOUT }).then(() => true),
     new Promise<boolean>((ok) => setTimeout(() => ok(false), TIMEOUT)),
@@ -122,7 +129,7 @@ const pair = (xs: number[]) => [r3(q(xs, 0.5)), r3(q(xs, 0.95))];
 try {
   // 1. Small: the kernel's first frames in this browser, 320 x 180, in lockstep.
   {
-    const { page, info } = await open("width=320&height=180&scale=1&lockstep=1");
+    const { page, info } = await open(`width=320&height=180&scale=1&lockstep=1&guard=${GUARD_FIRST}`);
     const adapter = info.adapter as { name: string; type: string; backend: string };
     // What the browser itself says of the adapter (a fallback adapter is a software one: not what this measures).
     const gpu = await inPage(page, "asking the browser for its adapter", async () => {

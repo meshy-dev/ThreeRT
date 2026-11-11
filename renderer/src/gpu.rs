@@ -630,10 +630,25 @@ pub fn kernel_source(src: &str, features: u32) -> String {
 /// ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where the kernel is otherwise as
 /// written; always in a browser, where a dispatch that does not end is the player's whole GPU.
 pub fn loop_guard() -> Option<u32> {
+    match LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {}
+        n => return Some(n),
+    }
     match std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok()) {
         Some(0) => None,
         Some(n) => Some(n),
         None => cfg!(target_arch = "wasm32").then_some(1 << 16),
+    }
+}
+
+/// The loop guard's limit as a page set it (0: not set), before the GPU is opened: a browser has no environment.
+static LOOP_GUARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the loop guard's limit (a page's first runs of a new kernel take a low one); 0 leaves it as it is. Before
+/// `Gpu::new_async`: the limit is in the kernels' source.
+pub fn set_loop_guard(limit: u32) {
+    if limit > 0 {
+        LOOP_GUARD.store(limit, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

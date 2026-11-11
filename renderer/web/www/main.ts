@@ -11,7 +11,8 @@
 //
 // URL parameters: `game` (the bundle, default game.js), `width` / `height` (the view, default 1280 x 720), `scale`
 // (the traced resolution's share, default 0: dynamic, toward `fps`), `fps` (default 60), `lockstep=1` (no frame runs
-// by itself: `threert.step(n, dt)` runs them, for scripted tests), `bench=1` (no game: `threert.bench()`).
+// by itself: `threert.run(n, dt)` runs them, for scripted tests), `guard` (the loop guard's limit, iterations an
+// invocation: default 65536; a new kernel's first runs take less), `bench=1` (no game: `threert.bench()`).
 import { webEngine, type EngineExports, type WebEngine } from "./engine.ts";
 import type { FrameRow } from "./frame.ts";
 
@@ -19,7 +20,7 @@ import type { FrameRow } from "./frame.ts";
 interface Module extends EngineExports {
   default(): Promise<unknown>;
   provide(path: string, bytes: Uint8Array): void;
-  start(canvas: HTMLCanvasElement, width: number, height: number, info: string, scale: number, fps: number): Promise<string>;
+  start(canvas: HTMLCanvasElement, width: number, height: number, info: string, scale: number, fps: number, guard: number): Promise<string>;
   setLockstep(on: boolean): void;
   frameBegin(dt: number): boolean;
   frameEnd(dt: number): string;
@@ -99,7 +100,7 @@ async function main() {
   canvas.height = height;
   const fps = num("fps", 60);
   const t2 = performance.now();
-  const info = JSON.parse(await wasm.start(canvas, width, height, JSON.stringify(describe), num("scale", 0), fps)) as Record<string, unknown>;
+  const info = JSON.parse(await wasm.start(canvas, width, height, JSON.stringify(describe), num("scale", 0), fps, num("guard", 0))) as Record<string, unknown>;
   const t_start = performance.now() - t2;
 
   const handles = (type: string) => [describe.handlers, describe.on].some((h) => h?.includes(type));
@@ -178,7 +179,7 @@ async function main() {
     run: async (n: number, dt = 1 / 60) => {
       let done = 0;
       while (done < n && !frames.at(-1)?.guard_trips) {
-        for (let k = 0; k < 8 && done < n; k++, done++) frame(dt, 0);
+        for (let k = 0; k < 2 && done < n; k++, done++) frame(dt, 0);
         await new Promise(requestAnimationFrame);
       }
       return done;

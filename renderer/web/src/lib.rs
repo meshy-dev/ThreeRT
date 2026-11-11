@@ -317,11 +317,13 @@ pub fn provide(path: &str, bytes: Vec<u8>) {
 
 /// Opens the live view of the world the game's setup built (the node host's `setup` ran before this) on `canvas`, at
 /// `width` x `height` (the view's own pixels; the canvas may be larger). `info`: the node host's `describe()`.
+/// `guard`: the loop guard's limit, iterations an invocation (0: 65,536; it cannot be switched off here).
 /// `scale`: the traced resolution's share of the view's, 0 for dynamic resolution toward `fps`. Resolves to what it
 /// opened, as JSON: the adapter, the device's limits that matter here, the times of the load.
 #[wasm_bindgen]
-pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, info: String, scale: f32, fps: u32) -> Result<String, JsValue> {
+pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, info: String, scale: f32, fps: u32, guard: u32) -> Result<String, JsValue> {
     hook();
+    gpu::set_loop_guard(guard);
     let t0 = js_sys::Date::now();
     let info: Value = serde_json::from_str(&info).map_err(failed)?;
     let g = gpu::Gpu::new_async().await.map_err(failed)?;
