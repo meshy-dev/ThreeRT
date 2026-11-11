@@ -954,8 +954,10 @@ impl Gpu {
             .await
             .map_err(|e| anyhow!("no GPU adapter: {e}"))?;
         let adapter_info = adapter.get_info();
-        let mut limits = wgpu::Limits::default();
         let al = adapter.limits();
+        // The defaults, lowered where the adapter cannot meet them (the iOS Simulator's GPU allows 15 inter-stage
+        // variables, not 16); on desktop GPUs this changes nothing.
+        let mut limits = wgpu::Limits::default().or_worse_values_from(&al);
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
         limits.max_texture_array_layers = al.max_texture_array_layers;
