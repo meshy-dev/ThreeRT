@@ -117,6 +117,10 @@ pub struct Environment {
     /// Rain intensity 0..1 (material functions' `i.rain`: ripples on wet surfaces).
     #[serde(default)]
     pub rain: f32,
+    /// Cloud cover 0..1 of an atmosphere sky (`sky::bake_atmosphere_tables`: an overcast dome, the sun dimmed), changed
+    /// in place.
+    #[serde(default, rename = "cloudCover")]
+    pub cloud_cover: f32,
 }
 
 /// Exponential height fog (UE ExponentialHeightFog): extinction `density * exp(-heightFalloff * (y - height))`.

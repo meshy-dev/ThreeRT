@@ -508,14 +508,14 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
             static LAST: std::sync::Mutex<Option<(Vec<u32>, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
             let alt = sc.camera.position.y.max(0.0);
             let (bw, bh) = if *dynamic { sky::DYNAMIC_SKY } else { (1024, 512) };
-            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32].iter().map(|f| f.to_bits()).collect();
+            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32, sc.cloud_cover].iter().map(|f| f.to_bits()).collect();
             let mut last = LAST.lock().unwrap();
             let bake = match last.as_ref() {
                 Some((k, b)) if *k == key => b.clone(),
                 _ => {
                     let atm = sky::Atmosphere::earth(*rayleigh, *mie, *mie_g, *ground);
-                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() {
-                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow)
+                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() || sc.cloud_cover > 0.0 {
+                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow, sc.cloud_cover)
                     } else {
                         sky::bake_atmosphere(&atm, *sun_dir, *sun_lux, alt, bw, bh)
                     });

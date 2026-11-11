@@ -878,6 +878,12 @@ export class Scene extends Object3D {
   wetness = 0;
   /** Rain intensity 0..1 (ripples on wet ground). */
   rain = 0;
+  /**
+   * Cloud cover 0..1 of a `SkyAtmosphere` sky, changed in place: the sky goes over to an overcast dome (CIE standard
+   * overcast, lit by what the clear sky and sun would give the ground), the sun's direct light dims to nothing, and a
+   * city's night glow brightens off the cloud base.
+   */
+  cloudCover = 0;
 }
 
 // ---------------------------------------------------------------------------------------------

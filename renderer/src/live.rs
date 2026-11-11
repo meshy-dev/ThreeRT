@@ -441,7 +441,8 @@ const SKY_THREADS: usize = 3;
 /// trails the sun by one bake (~10–40 ms at `sky::DYNAMIC_SKY`). Lockstep runs wait for it, so they repeat.
 struct DynamicSky {
     atm: Arc<crate::sky::Atmosphere>,
-    ask: mpsc::Sender<(glam::Vec3, glam::Vec3)>,
+    /// (sun direction, sun illuminance above the atmosphere, cloud cover)
+    ask: mpsc::Sender<(glam::Vec3, glam::Vec3, f32)>,
     done: mpsc::Receiver<(gpu::EnvMap, Vec<f32>, f32)>,
     /// The brightest sky texel from which the environment is light-sampled (`Prepared::env_nee_floor`).
     env_nee_floor: f32,
@@ -454,7 +455,7 @@ impl DynamicSky {
         };
         let atm = Arc::new(crate::sky::Atmosphere::earth(*rayleigh_scale, *mie_scale, *mie_anisotropy, glam::Vec3::from(*ground_albedo)));
         let glow = crate::sky::glow_of(glow, horizon_glow);
-        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3)>();
+        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3, f32)>();
         let (tx, done) = mpsc::channel();
         let a = atm.clone();
         std::thread::Builder::new()
@@ -465,8 +466,8 @@ impl DynamicSky {
                     Some(p) => p.install(|| crate::sky::SkyTables::new(&a)),
                     None => crate::sky::SkyTables::new(&a),
                 };
-                let bake = |sun: (glam::Vec3, glam::Vec3)| {
-                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow);
+                let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
+                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
                     let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
@@ -1107,6 +1108,8 @@ pub struct LiveCore {
     pub gpu_blas_ms: f32,
     /// CPU time the last `render` spent waiting for the oldest frame in flight (ms; frame log `wait`): GPU-bound frames.
     pub cpu_wait_ms: f32,
+    /// The cloud cover the sky and the sun light were made with (`move_sun`).
+    sky_cover: f32,
 }
 
 /// GPU time per frame from timestamp queries (start of the first trace pass .. end of the post pass), read back a few
@@ -1482,8 +1485,9 @@ impl LiveCore {
         let restir = std::env::var("THREERT_RESTIR").is_ok_and(|v| v == "1");
         let resv = gpu::reservoirs(&g.device, if restir { w as u64 * h as u64 } else { 1 });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &cache.as_ref().map_or_else(|| gpu::CacheBuffers::new(&g.device, 1), |c| gpu::CacheBuffers { keys: c.bufs.keys.clone(), acc: c.bufs.acc.clone(), val: c.bufs.val.clone() }), &resv, &targets.refl, &targets.motion, &targets.direct);
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0 };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0 };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
+        core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
         Ok(core)
     }
@@ -1759,7 +1763,9 @@ impl LiveCore {
             self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
             self.lit_changed = self.frame.max(1);
         }
-        if changes.sun {
+        // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
+        if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
+            self.sky_cover = self.sc.tables.cloud_cover;
             self.move_sun(world);
         }
         if changes.exposure {
@@ -1778,7 +1784,8 @@ impl LiveCore {
             self.sc.sky = DynamicSky::new(world, size, alt, floor);
         }
         let Some(sky) = self.sc.sky.as_ref() else { return };
-        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux);
+        let cover = self.sc.tables.cloud_cover;
+        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux, cover);
         let e = &mut self.sc.tables;
         if let (Some(idx), Some(o)) = (e.light_index.get(&id), world.objects.get(&id)) {
             if let crate::world::Kind::Light(l) = &o.kind {
@@ -1791,7 +1798,7 @@ impl LiveCore {
                 }
             }
         }
-        let _ = sky.ask.send((dir, lux));
+        let _ = sky.ask.send((dir, lux, cover));
         if self.fixed_dt.is_some() {
             if let Ok(b) = sky.done.recv() {
                 self.put_sky(b);

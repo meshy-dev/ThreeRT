@@ -387,7 +387,7 @@ impl Default for World {
             geometry_fns: BTreeMap::new(),
             proc_geometries: HashMap::new(),
             instanced: HashMap::new(),
-            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, wetness: 0.0, rain: 0.0 },
+            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, wetness: 0.0, rain: 0.0, cloud_cover: 0.0 },
             settings: Settings::default(),
             changes: Changes { structural: true, ..Default::default() },
         }

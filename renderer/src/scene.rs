@@ -445,6 +445,8 @@ pub struct Scene {
     /// Global wetness and rain intensity (0..1).
     pub wetness: f32,
     pub rain: f32,
+    /// Cloud cover (0..1) of an atmosphere sky.
+    pub cloud_cover: f32,
     pub preset: desc::Preset,
     pub stats: HashMap<&'static str, f64>,
     /// Triangle ranges per object (name, first, end), in `tris` order: picking and selection outlines.
@@ -1808,6 +1810,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         fog: env.fog.clone(),
         wetness: env.wetness.clamp(0.0, 1.0),
         rain: env.rain.clamp(0.0, 1.0),
+        cloud_cover: env.cloud_cover.clamp(0.0, 1.0),
         preset,
         stats,
         tri_nodes,
