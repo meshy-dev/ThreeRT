@@ -426,7 +426,8 @@ pub fn live(src: &str) -> String {
 /// frame. No formula changes, but the image is not bit-identical to the kernel's without the guard: the compiler
 /// arranges the arithmetic of the functions it is in differently (hello world, one sample a pixel: 354 of 43,200
 /// numbers differ, by at most 2 x 10^-7 of their value). Between the two layouts, guard or not, the bytes are equal.
-/// `THREERT_LOOP_GUARD=<limit>` natively (`gpu::loop_guard`); a browser's kernel always has it.
+/// `THREERT_LOOP_GUARD=<limit>` natively (`gpu::loop_guard_of`: a kernel with units has it with nothing set); a
+/// browser's kernel always has it.
 ///
 /// A stopped loop is counted, not hidden: the invocation that reaches the limit adds one to the first word of `trips`
 /// (an `array<atomic<u32>, 4>` the source can name: `ML.loop_guard_trips` in the merged layout, the buffer `guard_decl`

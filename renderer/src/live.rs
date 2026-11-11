@@ -1215,9 +1215,9 @@ pub struct LiveCore {
     pub cpu_wait_ms: f32,
     /// The cloud cover the sky and the sun light were made with (`move_sun`).
     sky_cover: f32,
-    /// The loop guard (merged.rs `guard`), if the kernel has it: the invocations it has stopped at its limit since the
-    /// view was made, as last read back (a frame or two behind, without waiting). Above zero: frames with wrong
-    /// pixels, a traversal that did not end on the scene's data. None without the guard.
+    /// The loop guard (merged.rs `guard`), if a kernel of this session may have it: the invocations it has stopped at
+    /// its limit since the view was made, as last read back (a frame or two behind, without waiting). Above zero:
+    /// frames with wrong pixels, a traversal that did not end on the scene's data. None without the guard.
     pub guard_trips: Option<u32>,
     /// Its readback: the buffer and its state (0 free, 1 mapping, 2 mapped), as the frame timer's.
     guard_read: Option<(wgpu::Buffer, Arc<AtomicU32>)>,
@@ -2662,6 +2662,12 @@ impl LiveCore {
         }
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
+    }
+
+    /// `guard_trips` for the frame log: None while the scene's kernel has no guard. Natively with nothing set that is
+    /// a scene without units (`gpu::loop_guard_of`): under software traversal the first unit brings the guard.
+    pub fn guard_count(&self) -> Option<u32> {
+        self.guard_trips.filter(|_| gpu::loop_guard_of(self.sc.up.kernel.features & gpu::F_UNITS != 0).is_some())
     }
 
     /// The edit room as the frame log reports it (`room`): triangles, records and object entries in use and held (GPU
@@ -4408,7 +4414,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
             use std::io::Write;
             let line = serde_json::json!({
                 "t": start.elapsed().as_secs_f64() * 1e3, "interval": last_frame.elapsed().as_secs_f64() * 1e3, "start": t_frame.duration_since(prev_start).as_secs_f64() * 1e3,
-                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_trips,
+                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_count(),
             });
             writeln!(l, "{line}")?;
         }

@@ -370,9 +370,10 @@ tree (ROADMAP § 6).
   not bit-identical to the kernel's without the guard: the compiler arranges the arithmetic of the functions it is in
   differently (hello world, one sample: 354 of 43,200 numbers differ, by at most 2 × 10⁻⁷ of their value). What it
   stops it counts: the count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
-  render in which it moved is an error, and anything but 0 means wrong pixels. Natively it is off unless
-  `THREERT_LOOP_GUARD=<limit>`. The live passes need none: their loops are counted loops over constants and clamped
-  parameters.
+  render in which it moved is an error, and anything but 0 means wrong pixels. Natively `THREERT_LOOP_GUARD=<limit>`
+  sets it; with nothing set a kernel with units has it (65,536; `THREERT_LOOP_GUARD=0` takes it out) and every other
+  kernel has none, as before ("Software traversal with units"). The live passes need none: their loops are counted
+  loops over constants and clamped parameters.
 - **A tree over nothing** (`bvh.rs`). A node with `count: 0` is an interior node to the kernel, and the one-node tree
   of a scene without triangles had itself and the bytes after its buffer for children. It is now a leaf of triangle
   0, which an empty vertex buffer's zeros make a triangle without area; a procedural object without boxes is left out
@@ -496,8 +497,35 @@ trace is the frame (Kabukichō), and the atomic tests under software traversal a
 ## Software traversal with units (in-place edits without ray queries)
 
 ROADMAP § 6 step 7b. **Status: runs natively and in Chrome on this machine's GPU** (2026-11-11; every run with the
-loop guard, which stopped nothing). What it costs and what it saves is under "Measured" at the end of this section:
-edits and memory are what the step was for; **a still frame's trace is 16–71 % longer than the flattened scene's**.
+loop guard, which stopped nothing). Edits and memory are what the step was for; a still frame pays for them.
+
+**Where units are used.** In a live session and in a browser (the wasm build), by default. **An offline render
+(`threert-render render`) under software traversal flattens every instance, as before this step: its kernel and its
+bytes are main's with nothing set.** `THREERT_UNITS=1` gives an offline render units; `THREERT_UNITS=0` flattens a
+live session too (the A/B). Why the line is there (decided 2026-11-11):
+- an offline render under software traversal is the reference render, and what the catalog's byte gate compares; the
+  gate runs with no variable set, and stays a comparison with main's bytes;
+- what units give (the triangle data of each mesh held once, a faster load, edits in place) is what a session that
+  edits and a browser need; an offline render builds its scene once and edits nothing;
+- no catalog scene with models but Kabukichō has been rendered with units on the GPU.
+
+**What a still frame costs** (software traversal, live, 1280 × 720 traced at half, this machine, guard on in both
+columns; the tables and the rest are under "Measured" at the end of this section):
+
+| scene | the trace, units / flat | frame GPU, units / flat | 60 Hz (16.7 ms) |
+| --- | --- | --- | --- |
+| hello world (natively) | 1.40–1.42 / 1.01–1.04 ms: **+37 %** | in Chrome 6.59 / 6.60 ms (its trace 2.55 / 2.08) | held by both |
+| the voxel level (10,459 units) | 7.85 / 4.58 ms: **+71 %** | 11.2 / 7.9 ms | held by both |
+| Kabukichō (352 units) | 13.88 / 12.01 ms: **+16 %** | 17.18 / 15.35 ms | **missed with units** (a frame every 17.2–17.5 ms; flat 16.65) |
+
+Against what main's live session ran on Kabukichō under software traversal with nothing set (flat, no guard: 14.11 ms
+of GPU a frame, 10.78 of trace), the session's default now (units, the guard) is 3.1 ms a frame more, 1.2 of it the
+guard as measured on the flat kernel. Nothing of the unit walk was tuned; that is the next thing to do (ROADMAP § 6
+step 7b, "Open").
+
+**Not run** (each needs a GPU run outside the ones agreed for this step): a kernel with units without the guard; a
+catalog scene with units, offline or live, but Kabukichō; explosions on the voxel level until the edit room is full;
+a pile of debris, where units' boxes overlap most.
 
 **What there was.** Software traversal (a browser's only one) walked one flat tree over every triangle in world
 space. Instances were written out into it (`flatten_instances`), so adding or moving anything rebuilt the scene, and a
@@ -527,8 +555,10 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   for scenes that have units under software traversal (`F_UNITS`, a source feature, as vertex colours are). A scene
   without units is handed the source it was handed before, byte for byte; hardware traversal's source never
   contains it.
-- Still flattened, as before: meshes that deform (a pose shared by a crowd), and every instance of a scene with more
-  of them than a top tree holds (2^18). `THREERT_UNITS=0` flattens everything, as before this step (the A/B).
+- Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
+  of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
+  goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
+  step (the A/B).
 
 **Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
 its BLASes, or the units), so the engine's path is the same under both traversals (`live.rs` `move_instances`,
@@ -578,27 +608,40 @@ stack is dropped (geometry missed, never a hang), and the builders' bounds mean 
 - random scenes and random sequences of adding a mesh, adding, moving and removing units, removing a mesh: after each
   step, for closest, shadow and any-hit rays, no read outside a buffer, an end within the nodes there are, and the
   closest hit brute force over every triangle finds;
-- a scene prepared with units (`prepare`, what the renderer uploads) against the same scene flattened, ray for ray:
+- a scene prepared with units (`prepare_live`, what a session uploads) against the same scene flattened, ray for ray:
   a hit where there was one, at the same distance to 2 × 10⁻⁴ (a unit's triangles are met in its own space), and
   the same shadow rays blocked;
 - broken trees (a child at or before its parent, a cycle, a range outside, a leaf over 16, a record that is no unit)
   refused; a record naming a tree that is gone refused;
 - the sources handed to wgpu for every scene without units: the hashes main has
-  (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers.
+  (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers;
+- an offline render of a scene with instances: no unit, no `F_UNITS`, and the triangle and node bytes the flattened
+  scene has, unless `THREERT_UNITS=1` (`an_offline_render_has_no_units_unless_told`);
+- the guard's default: a kernel with units has it at 65,536 with nothing set and none at `THREERT_LOOP_GUARD=0`, a
+  kernel without units is the source it was (`a_kernel_with_units_has_the_loop_guard`; naga validates the guarded
+  kernel with units as written).
 
-**The loop guard.** A browser's kernel always has it (`merged::guard`). Natively it is `THREERT_LOOP_GUARD`, off by
-default; every GPU run of a kernel with units so far was made with it (8,192 or 65,536 iterations an invocation),
-and it stopped nothing in any of them. On Kabukichō it costs the flattened kernel 1.2 ms of trace a frame (11 %;
-below). Whether native software traversal has it by default is open (ROADMAP § 6 step 7b). `tools/test-render.ts`
-fails a run in which the guard stopped a live test's frames (an offline render it stops is an error already).
+**The loop guard.** A browser's kernel always has it (`merged::guard`). **Natively a kernel with units has it with
+nothing set** (65,536 iterations an invocation; `THREERT_LOOP_GUARD=0` takes it out, `=<limit>` sets another): what
+hung on 2026-11-11 is not confirmed, the unit walk is new, and no kernel with units has run without it. A native
+kernel without units has none unless `THREERT_LOOP_GUARD` says so, as before (its source and every existing byte
+unchanged); whether all of native software traversal gets it is not decided here. Every GPU run of a kernel with
+units so far had it (8,192 or 65,536), and it stopped nothing in any of them. On Kabukichō it costs the flattened
+kernel 1.2 ms of trace a frame (11 %; below). What it does when it stops something is unchanged: an offline render
+is an error, a live session counts it in the frame log (`guard`; `null` while the scene's kernel has none, as
+before a scene's first unit), and `tools/test-render.ts` fails a run in which it stopped a live test's frames.
+Under software traversal as written the guard's count has its binding and buffer whether or not the scene's kernel
+names it (not at `THREERT_LOOP_GUARD=0`), so a scene's first unit brings the guard without another layout.
 
 ### Measured (2026-11-11)
 
 Apple M5 Pro; natively `THREERT_HWRT=0` with `THREERT_LOOP_GUARD` 65,536 unless said; "flat" is the same build with
-`THREERT_UNITS=0` (every instance flattened: main's kernel, and main's bytes on the catalog); live views
-1280 × 720 traced at half. The runs, their order and their limits are in `out/web-probe/gpu-runs-b.md` (kept beside
-the checkout). Other applications held part of the GPU throughout; figures are p50, two launches where a spread is
-given.
+`THREERT_UNITS=0` (every instance flattened: main's kernel, and main's bytes on the catalog); live views 1280 × 720
+traced at half. These runs were made while an offline render had units by default too; the offline figures with units
+below are what `THREERT_UNITS=1` gives now. Run again with the defaults as they are (nothing set but
+`THREERT_HWRT=0`): the last paragraph of this section. The runs, their order and their limits are in
+`out/web-probe/gpu-runs-b.md` (kept beside the checkout). Other applications held part of the GPU throughout; figures
+are p50, two launches where a spread is given.
 
 **Hello world in Chrome** (`tools/web-hello.ts --frames`; Chrome 157, the page's guard), ms p50 / p95:
 
@@ -640,7 +683,7 @@ a pile of debris (boxes that overlap deeply), explosions until the room is full.
 
 | | units | flat |
 | --- | --- | --- |
-| offline, 320 × 180, 64 spp: the trace | 394.8 ms | 336.2 ms (units +17 %) |
+| offline, 320 × 180, 64 spp: the trace (units: `THREERT_UNITS=1`) | 394.8 ms | 336.2 ms (units +17 %) |
 | trees built (`bvh_ms`) | 89 ms | 1,635 ms |
 | triangle data | 55.0 MiB | 634.1 MiB |
 | live, guard on: frame GPU / the trace | 17.18 / 13.88 ms | 15.35 / 12.01 ms (units **+1.87 ms, 16 %**) |
@@ -658,10 +701,19 @@ merged with the guard 15.66 / 12.28. **The guard: +1.23 ms of trace (11 %). The 
 guard +0.27.** (On hello world both were inside the spread.) A kernel with units was not run without the guard.
 
 **The atomic tests under software traversal** (170, a family a command, guard on; the first whole run of the suite
-under software traversal on this machine): 147 pass and 23 fail, as written and in the merged layout alike, **and
-the same 23 fail on main's build**: the 18 `particles/*` and `gpu-particles/*` tests and `translucent/depth`,
-`translucent/order` (software traversal draws no particles and has no translucency pass), `surface/windows`
-(0.3934 for 0.4234), `volume/lighting` and `volume/lighting-offline` (6 for 1). The suite found one fault of units:
+under software traversal on this machine; made while offline tests had units too): 147 pass and 23 fail, as written
+and in the merged layout alike, **and the same 23 fail on main's build, with the same values**:
+- particles, which software traversal does not draw (docs/MATERIAL_FUNCTIONS.md: they need ray queries):
+  `particles/count-zero`, `emissive-spark`, `emissive-spark-nominal`, `emissive-unsampled`, `follow-emitter`,
+  `hidden-in-place-live`, `instance-data`, `lit-normal`, `lit-orientation`, `motion-repose`, `node-custom`,
+  `quad-placement`, `shown-in-place-live` (13; `particles/burst-not-yet` expects nothing drawn and passes);
+  `gpu-particles/beside-particles`, `plane`, `voxels`, `voxels-live`, `voxels-side` (5); `translucent/depth`,
+  `translucent/order` (translucent particles);
+- `volume/lighting`, `volume/lighting-offline` (6 for 1): their subject is one translucent particle in front of a
+  6-nit wall, so these two are the same missing particles: the region reads the wall;
+- `surface/windows` (0.3934 for 0.4234): not explained. Its scene is one plane with the library's facade windows
+  and no instance, so its kernel on this branch is main's source byte for byte.
+The last three are in ROADMAP "Known issues"; they are the other line's to fix. The suite found one fault of units:
 `voxel/cut-falls-live` drew a falling part cut off at the box it had before it fell (a unit kept the bounds its
 mesh had when added; now the box is the tree's, above). Before that the first GPU run found another: a scene of
 units alone drew a mesh's first triangle at the origin (the still leaf, above). Both have CPU tests now.
@@ -669,6 +721,21 @@ units alone drew a mesh's first triangle at the origin (the still leaf, above). 
 **How each kind of edit went** (the atomic edit tests one by one, the edit log): instances added, moved and removed,
 a model's second copy, a new mesh, vertex colours, emitters added and removed: in place. A rebuild, with its reason
 in the log: 1,100 specks added to a scene with room for 1,024 records; a procedural object edited or moved.
+
+**With the defaults as they are now** (units live and in a browser, flat offline, the guard with units; run after
+the rule above was built in):
+- Hello world natively with nothing set but `THREERT_HWRT=0` (`tools/physics-hello.ts`): every check; the commits
+  `rebuild, in place × 4`; 812 of 823 frames' kernel has the guard (the eleven before the first box have a kernel
+  without units, and the log's `guard` is `null`), and it stopped nothing.
+- The catalog offline under software traversal, `THREERT_UNITS` not set: **23 of 23 bundles byte-identical to main**
+  (HDR and PNG, 320 × 180, 4 spp). Both builds ran with `THREERT_LOOP_GUARD=65536`, as every GPU run of this step;
+  that the kernel without the guard is main's too is the source hashes' test.
+- `cargo test --release` whole (78 pass), the atomic tests under hardware traversal (170 pass), and the scripted
+  test in Chrome (every check, the guard 0 in 826 frames, no frame rebuilt, the report the native run's): as before.
+- Not run again: the perf smoke and the catalog under hardware traversal (18 of 23 identical; `bistro`,
+  `bistro-slice`, `bistro-district`, `zero-day`, `zero-day-animated` differ from main in 1,884 / 133 / 80 / 9,507 /
+  8,850 of 57,600 pixels, and main from main in 1,782 / 1,095 / 125 / 7,988 / 10,426: ROADMAP "Known issues",
+  hardware traversal's ties). Hardware traversal's sources, layouts and buffers are not touched by the rule.
 
 ## Correctness
 
