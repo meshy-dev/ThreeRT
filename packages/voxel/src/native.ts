@@ -176,7 +176,13 @@ export function voxelDebris(): Float32Array {
   return e.voxelDebris();
 }
 
-/** Once a frame: the falling objects move (60 ticks a second) and come to rest. */
+/**
+ * Once a frame, on a level without physics (`physics: false`): the falling objects move (60 ticks a second) and come
+ * to rest. On a level that collides (the default) there is nothing for it to move: what comes loose is a body of the
+ * physics world, which the engine steps by the frame's clock and scene code cannot step. So `voxelFrame` calls in
+ * setup after an edit settle nothing there: a live run's bodies fall from its first frame, and an offline render at
+ * a scene time (`time`) has the world stepped that far (tests/render/voxel-cut-body.ts).
+ */
 export function voxelFrame(dt: number): VoxelFrame | { queued: true } {
   const e = engine();
   if (!e?.voxelFrame) throw new Error("voxelFrame: needs the renderer's native voxels");

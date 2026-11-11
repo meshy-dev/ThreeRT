@@ -172,7 +172,11 @@ struct VoxelBody {
 }
 
 /// What scene code asked of the level before it was loaded (in setup: edits and the ticks after them, so the live
-/// view and the offline render start from the same world), done once it is (`realize`).
+/// view and the offline render start from the same world), done once it is (`realize`). The ticks are the lattice's
+/// (`frame`: parts falling cell by cell on a level without physics). On a level that collides a queued edit's loose
+/// parts are bodies as soon as it is replayed and the queued ticks have nothing to move: the physics world is
+/// stepped by the engine's clock only (`api::physics_advance`, `physics_settle` for an offline render's scene time),
+/// never from scene code, so that a live run and an offline one tick it alike.
 enum Queued {
     Edit(EditOp),
     Frame(f64),
@@ -1934,8 +1938,15 @@ mod tests {
         .unwrap();
         v.request(d).unwrap();
         assert_eq!(v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [-0.5, 0.8, -0.5, 0.5, 1.0, 0.5] }))).unwrap()["queued"], true);
+        // (Ticks asked for in setup after the cut are the lattice's: on a level that collides they move nothing. The
+        // body is where the cut left it until the engine steps the physics world.)
+        for _ in 0..60 {
+            assert_eq!(v.frame(&mut w, 1.0 / 60.0).unwrap()["queued"], true);
+        }
         let r = v.realize(&mut w, &mut ph, &assets()).unwrap().unwrap();
-        assert_eq!((r["explosions"].as_u64(), v.bodies()), (Some(1), 1), "{r}");
+        assert_eq!((r["explosions"].as_u64(), r["frames"].as_u64(), v.bodies()), (Some(1), Some(60), 1), "{r}");
+        let spawned = w.objects[&v.objects[*v.bodies.keys().next().unwrap()].as_ref().unwrap().parts[0].1].position;
+        assert!((spawned - Vec3::new(-0.2, 1.0, -0.2)).length() < 1e-4, "{spawned}");
         // (The two posts are one file: one shape between their colliders until the cut gave the lower one its own.)
         assert_eq!(r["colliders"].as_u64(), Some(3));
         crate::api::physics_settle(&mut ph, &mut v, &mut w, 120);
