@@ -214,7 +214,7 @@ class Dust {
  *  `smoke`: the cells of the simulated smoke's grid. `physics` (ROADMAP § 6 step 8; on by default): the level
  *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
  *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
- *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (400 unless given). */
+ *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (300 unless given). */
 export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number) {
   const keys = cameraPath(seed);
   const at = spots(seed);

@@ -4060,7 +4060,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
        was; `collide: false` on an object leaves it out. Ordinary meshes still declare `physics`.
      - **Loose parts are rigid bodies**: mass from their voxels and each palette entry's density; they tumble, land
        on the level and on one another, and sleep; they move as instances (no vertex is written again).
-     - **Debris**: parts under 8 voxels stay the game's particles; at most 400 voxel bodies (`maxBodies`). At the
+     - **Debris**: parts under 8 voxels stay the game's particles; at most 300 voxel bodies (`maxBodies`). At the
        cap a new part takes the place of the body that matters least (asleep before awake, then the fewest voxels,
        then the oldest; never one the same edit carved or made: a body being cut keeps its larger part), if that
        body is no larger than the part; else the part is debris. What goes is debris.
@@ -4087,11 +4087,13 @@ benchmark level. The order follows the dependencies; a step that meets a further
          about a hundred on one** (`THREERT_PHYSICS_THREADS=1`: at 100–149 moving the step is 10–14 ms and a
          frame's CPU 14–18 ms; from 150 every frame is over). What takes the frame is Rapier's step; placing the
          parts is under 0.2 ms, the GPU's frame does not change. The bodies are the same in every frame either way.
-       - **The cap is 400 bodies, measured**: a scenario that makes more than 500 holds the count at the cap, and
-         with every one of 400 in the air a frame's CPU is 13.1 ms at the median, 14.9 at p95, no frame of 1,094
-         over 16.7 ms. At 512 the count holds too but a frame is then 16.3 ms at the median and 5 of 22 such frames
-         are over (the worst 19.0 ms). With the parallel solver off the cap to set is 128 (about at the frame: 7
-         frames of 1,095 over, the worst 22.0 ms).
+       - **The cap is 300 bodies, measured**: a scenario that makes more than 500 holds the count at the cap, and
+         with every one of 300 in the air a frame's CPU is 10.7–10.9 ms at the median, 12.8–13.2 at p95, and no
+         frame of 1,094 is over 16.7 ms on account of the physics (two runs; one stray frame each with a step under
+         1 ms). At 400 the frame holds in two runs of four and goes over in the others on 2 and 3 frames of 1,094
+         (17.0–19.3 ms, with 320–400 moving); at 512 a frame is 16.3 ms at the median with all moving, 5 of 22 such
+         frames over. With the parallel solver off the cap to set is 128 (about at the frame: 7 frames of 1,095
+         over, the worst 22.0 ms).
        - The CPU split of an edit (the 4 m crater: carve 2.4, colliders 6.5, meshes 7.5, commit 3.9 ms; the cut:
          carve 21.6, colliders 15.3, meshes 5.3, parts and bodies 27.8, commit 37.7, the first physics step 5.6).
        - Scenes without voxel bodies: the catalog's 25 bundles are byte-identical to main's under software
@@ -4173,7 +4175,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
        machines and CPU families beyond CI's, worlds with joints and thousands of bodies at once, long runs of
        large heaps. wasm32 stays sequential (no threads here), and the bits agree. Step 9's checkpoints are what
        would find a difference in the field.
-     - **The cap of 400 is this machine's** (an M5 Pro's four threads): a slower machine holds fewer at 60 fps, and
+     - **The cap of 300 is this machine's** (an M5 Pro's four threads): a slower machine holds fewer at 60 fps, and
        nothing adapts it. A level can set `maxBodies`. Asleep, bodies cost nothing, and a game's bodies seldom all
        move at once.
      - **A large cut's own frame is over 50 ms**: 117 ms for the cut of 30 x 30 m (the scene's commit of the new

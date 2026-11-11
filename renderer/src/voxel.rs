@@ -36,10 +36,11 @@ const TILE: i32 = 64;
 const TICK_RATE: f64 = 60.0;
 const MAX_TICKS: u32 = 8;
 /// The most voxel bodies a level holds unless it says otherwise (`LevelDesc::max_bodies`): past it one goes, its
-/// voxels debris (`add_body` says which, and when the new part is debris instead). 400 is what was measured to hold 60 fps with every one of them
-/// in the air at once, natively on 4 threads (docs/VOXEL.md "Voxel bodies": 512 is just past the frame; with the
-/// physics on one thread, `THREERT_PHYSICS_THREADS=1`, 128 is about at it).
-pub const MAX_BODIES: usize = 400;
+/// voxels debris (`add_body` says which, and when the new part is debris instead). 300 is what was measured to hold
+/// 60 fps with every one of them in the air at once, natively on 4 threads (docs/VOXEL.md "Voxel bodies": at 400 a
+/// few frames of a thousand went over; with the physics on one thread, `THREERT_PHYSICS_THREADS=1`, 128 is about at
+/// the frame).
+pub const MAX_BODIES: usize = 300;
 /// The most edits and frames scene code can ask for before the level is loaded (in setup), kept until it is: they are
 /// outside the script engine's memory, so they are counted. 4,096: a setup that cuts a level into its starting state
 /// takes a few dozen edits and a second of frames (the tests: one cut and 60 frames); one that asks for thousands is

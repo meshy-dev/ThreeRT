@@ -239,7 +239,7 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   - **Natively the world is stepped by Rapier's parallel solver**, in a pool of the physics' own: 4 threads, or the
     machine's performance cores when it has fewer; `THREERT_PHYSICS_THREADS` sets another count, and 1 (0, off) is
     sequential. It gives the sequential build's bits (which are wasm32's) at a third of the step's time: about
-    450–500 bodies moving in a frame, and a level's cap of 400 voxel bodies (`maxBodies`) by measurement. wasm32
+    450–500 bodies moving in a frame, and a level's cap of 300 voxel bodies (`maxBodies`) by measurement. wasm32
     is sequential. How far "the bits do not depend on the thread count" was checked, and what was not: docs/VOXEL.md
     "Voxel bodies", ROADMAP § 6 step 8 "Open".
   - **A step is waited for with a kick** (`physics.rs` `in_pool`): Rapier's parallel step, made on a pool's worker,

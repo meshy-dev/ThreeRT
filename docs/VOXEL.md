@@ -445,7 +445,7 @@ vertices written again every frame); now a part moves by its transform.
 
 **A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /
 2,400 / 7,800 kg/m³ unless the entry names one), drawn by driven objects. A carve reaches it through its pose; what
-is cut off is a body of its own. At most 400 at once (`maxBodies`; the number is measured, below). At the cap a
+is cut off is a body of its own. At most 300 at once (`maxBodies`; the number is measured, below). At the cap a
 new part takes the place of the body that matters least: asleep before awake, then the fewest voxels, then the
 oldest, and never one the same edit carved or made (a body being cut keeps its larger part and its id; its chips do
 not push out the bodies the same cut is going through). It does so only if that body has no more voxels than the
@@ -473,25 +473,23 @@ frame for as long as it lasted. The level's load is 10.7 s to the first frame wi
 **How many bodies a frame holds, and the cap.** `shatter-dense`: the cut of `fell`, then 120 cuts 0.2 m thick half a
 metre apart, twenty a second, through what fell: slabs, then columns of buildings, tens to thousands of voxels
 each, in one heap, more than 500 of them. **The default configuration** (the parallel solver on 4 threads) with
-the default cap of 400: the count reaches 400 and stays there to the end of the run. Frames without an edit, by the
-bodies that moved in them (physics step and the frame's CPU time, p50 / p95):
+the default cap of 300: the count reaches 300 and stays there to the end of the run. Frames without an edit, by the
+bodies that moved in them (physics step and the frame's CPU time, p50 / p95; two runs, the same bodies in every
+frame, the second's figures in brackets):
 
 | bodies moving | frames | physics step | frame CPU | frames over 16.7 ms |
 | --- | --- | --- | --- | --- |
-| 0–49 | 242 | 0.30 / 1.70 ms | 5.5 / 7.5 ms | 0 |
-| 50–99 | 50 | 2.09 / 2.90 | 7.2 / 8.8 | 0 |
-| 100–149 | 41 | 3.42 / 4.31 | 8.3 / 9.4 | 0 |
-| 150–199 | 8 | 4.76 / 5.11 | 9.1 / 10.0 | 0 |
-| 200–249 | 8 | 5.32 / 5.74 | 9.4 / 10.4 | 0 |
-| 250–299 | 4 | 5.89 / 5.96 | 10.2 / 10.2 | 0 |
-| 300–349 (the heap at rest, still awake) | 625 | 0.79 / 2.66 | 6.3 / 8.7 | 0 |
-| 350–399 | 85 | 6.74 / 9.21 | 10.7 / 13.6 | 0 |
-| 400–449 (every body of the cap in the air or landing) | 31 | 8.86 / 9.40 | 13.1 / 14.9 | 0 |
+| 0–49 | 661 | 0.36 / 0.77 ms | 5.7 / 7.8 ms | 0 |
+| 50–99 | 66 | 1.97 / 3.20 | 7.4 / 9.6 | 0 |
+| 100–149 | 78 | 3.30 / 4.64 | 8.1 / 10.2 | 1 (a step of 0.8 ms) |
+| 150–199 | 63 | 1.15 / 4.75 | 6.9 / 9.8 | 0 |
+| 200–249 | 123 | 1.85 / 5.12 | 8.0 / 9.9 | 0 |
+| 250–299 (every body of the cap in the air or landing) | 103 | 5.92 / 7.71 (6.18 / 8.23) | 10.7 / 12.8 (10.9 / 13.2) | 0 (0) |
 
-**No frame of 1,094 is over 16.7 ms** (the worst 16.7; a second run, with nothing set but the scenario, has one
-of 17.8 ms while the heap lies still and the step is 0.8 ms: not the physics). That is why the cap is 400. With a cap of 512 the count
-holds at 512 as well, but with all of them in the air a frame is 16.3 ms at the median and 5 of 22 such frames are
-over (16.8–17.4 ms; the worst frame of the run 19.0 ms with 499 moving): just past the frame.
+**No frame of 1,094 is over 16.7 ms on account of the physics** in either run (each has one stray, 17.9 and 17.2
+ms, with a step under 1 ms). That is why the cap is 300. With a cap of 400 the count holds too, and with every body
+in the air a frame is 13.1–13.2 ms at the median and 14.9–16.0 at p95, but in two runs of four a few frames go over
+(2 and 3 of 1,094, 17.0–19.3 ms, with 320–400 moving); with 512, 16.3 ms at the median and 5 of 22 such frames over.
 
 The same scenario with the cap at 512, sequential (`THREERT_PHYSICS_THREADS=1`) against the default's 4 threads:
 
