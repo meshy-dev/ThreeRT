@@ -58,8 +58,10 @@ jobs:
           # voxel-core and its determinism check.
           job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
           # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
-          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file).
-          job physics '^(renderer/(physics-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$)|tools/physics-determinism\.ts$)'
+          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file;
+          # the voxel bodies' script it runs there: voxel-core, the renderer's voxel and physics adapters, and the api
+          # and world they go through).
+          job physics '^(renderer/(physics-core/|voxel-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$|src/(voxel|physics|api|world)\.rs$)|tools/physics-determinism\.ts$)'
           # The engine's library for wasm32: the same as the renderer's.
           job wasm '^(renderer/|presets/)' '^renderer/web/'
           # The browser module (renderer/web, on the engine's library) and tools/web-engine.ts: the module in Node with
@@ -92,6 +94,14 @@ jobs:
         with:
           workspaces: renderer
       - run: cd renderer && cargo build --release --locked
+      # The voxel bodies and the physics on the CPU, through the engine's own path (ROADMAP § 6 step 8), on the
+      # physics' own threads as the renderer steps (src/physics.rs `in_pool`; tools/physics-determinism.ts steps from
+      # outside any pool, which is not that path): the recorded hashes at 2 and 4 threads (native parallel = native
+      # sequential = wasm32 = recorded), then 10 runs of a fuzz of edits and calls with its checks and a small world
+      # stepped back to back a million times, which is where the step hung. A step that does not return in 30 s fails
+      # the job (the example's watchdog), it is not waited for.
+      - run: cd renderer && THREERT_PHYSICS_THREADS=2 cargo run --release --locked --example physics_fuzz -- --bits --runs 0 --stress 0
+      - run: cd renderer && THREERT_PHYSICS_THREADS=4 cargo run --release --locked --example physics_fuzz -- --bits --runs 10 --stress 1000000
 
   voxel:
     name: "voxel: wasm32, tests, determinism"

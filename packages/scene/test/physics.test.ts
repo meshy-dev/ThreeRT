@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  BoxGeometry, CapsuleGeometry, Group, HingeJoint, IcosahedronGeometry, Mesh, type Object3D, PerspectiveCamera, PlaneGeometry, Raycaster, RecordingEngine, RopeJoint, Scene, SceneBinding,
+  BoxGeometry, CapsuleGeometry, engineColliders, Group, HingeJoint, IcosahedronGeometry, Mesh, type Object3D, PerspectiveCamera, PlaneGeometry, Raycaster, RecordingEngine, RopeJoint, Scene, SceneBinding,
   Shapecaster, SphereGeometry, Vector3, type ContactEvent, type ObjectDesc,
 } from "../src/index.ts";
 
@@ -441,6 +441,19 @@ test("rays and shapes ask the physics world; contacts arrive as events, in batch
   engine.take();
   binding.deliverPhysicsEvents();
   assert.deepEqual(physics(), [["faults", {}]]);
+  // The engine's own colliders (a voxel level's objects and loose parts: ids from 2^30 up) are no scene object's: a
+  // hit on one has `engineColliders` for its object, the collider's id, and the body's when it is on one.
+  const E = 2 ** 30;
+  engine.answers.ray = [
+    { collider: E + 3, body: null, object: null, distance: 4, point: [0, 0, 4], normal: [0, 0, -1] },
+    { collider: E + 8, body: E + 7, object: null, distance: 6, point: [0, 0, 6], normal: [0, 0, -1] },
+  ];
+  const voxels = ray.intersectPhysics();
+  assert.deepEqual(voxels.map((h) => [h.object === engineColliders, h.collider, h.body, h.distance]), [[true, E + 3, undefined, 4], [true, E + 8, E + 7, 6]]);
+  engine.answers.overlap = [{ collider: E + 3, body: null, object: null }, { collider: E + 8, body: E + 7, object: null }, { collider: 9, body: null, object: null }];
+  assert.deepEqual(probe.overlap().map((o) => o.name), ["engine colliders"], "once; a static collider of no object is still left out");
+  engine.answers.sweep = { collider: E + 8, body: E + 7, object: null, distance: 0.5, point: [0, 2, 0], normal: [0, 1, 0] };
+  assert.deepEqual([probe.sweep(new Vector3(0, -1, 0))?.body, probe.sweep(new Vector3(0, -1, 0))?.object.name], [E + 7, "engine colliders"]);
 });
 
 test("a scene without physics makes no physics call; gravity is sent when it is not the default", () => {

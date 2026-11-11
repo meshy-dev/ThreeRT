@@ -47,7 +47,7 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Scene binding | `packages/scene/src/engine.ts` `SceneBinding` | Keeps the engine in step with a DSL scene. Objects report their own changes (core.ts change tracking: transforms, visibility, power, shadow flag, mesh geometry / material, add / remove), so a sync visits only what changed. Lights, cameras and materials are compared against what was last sent. |
 | World | `renderer/src/world.rs` | The engine's objects, resources, environment and settings, and what changed since the last commit: parameter changes (power, light / material parameters, environment, camera) or structural ones. Asset paths must stay inside the asset root (game code is untrusted on nodes). |
 | Live commit | `renderer/src/live.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera). Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
-| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
+| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. The time the engine spends inside a voxel call (`voxelExplode`, `voxelEdit`, `voxelFrame`) is the engine's, not the script's: the deadline moves by it as measured, up to 250 ms an entry; past that it counts against the script, and a voxel call made after the deadline throws "interrupted" at once. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
 | Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
 | World handlers | `packages/gameplay/src/world.ts` | `on[type](world, ev)`: an event handled on this node, changing the scene at once. `WorldContext`: `scene`, `camera`, read-only `state`, `object(id)`, `time`, `now`, `random()`, `emit(type, payload)`. |
 | Frame scripts | `packages/gameplay/src/frame.ts` | `FrameContext`: `time`, `dt`, `snap`, `now`, read-only `state`, `scene`, `camera`, `object(id)`, `random()`. |
@@ -211,6 +211,45 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   first read. Numbers: ROADMAP § 6 step 7.
 - The engine call under it is `__engine.physics(op, args)` (JSON; `renderer/physics-core/src/bridge.rs` lists the
   calls, `faults` and `state`'s `{ removed }` among them) and `__engine.physicsPoses()`.
+- **Voxels** (ROADMAP § 6 step 8; docs/VOXEL.md "Voxel bodies"): a voxel level collides without a `physics` on
+  anything. Its objects are fixed colliders of their voxels and what an edit cuts loose is a dynamic body, both of
+  the engine's own shape (`physics_core::Shape::Voxels`: parry's voxel shape; a collider's cells are changed where
+  it is by `Physics::edit_voxels`, at a cost by the cells that change). Rays, shape casts and contacts report them
+  like any collider. They are **the engine's bodies**: their ids are from 2^30 up, scene code cannot make or remove
+  one (`body`, `collider` and `remove` refuse those ids), and can name one in every other call; `voxelBodies()`
+  (`packages/voxel`) lists the bodies with their ids, and `voxelImpulse(body, impulse, point?)` pushes one. A hit of
+  `Raycaster.intersectPhysics` or of a `Shapecaster` on one of them has `engineColliders` for its `object` (they
+  are no scene object's) and carries `collider` and, on a body, `body`: the id those calls take. **On the voxel
+  level `hit.object.physics` is null and there is no `body`; on a voxel body there is a `body`.** So hello world's
+  test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
+  `hit.object === engineColliders && hit.body === undefined`. A level that collides is in the physics world, and
+  the queries ask it, whether or not any scene object has `physics` (`tests/render/voxel-cut-body-push.ts`: a
+  ray's hit on a body, its `body` into `voxelImpulse`, the part thrown). (A voxel body as an object with `.physics`
+  is ROADMAP § 6 step 10's.) A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  cells, each within 2^20 cells and 100 km of the shape's origin.
+  - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
+    (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it
+    lies on a plane of the lattice and runs along it), and a ball against voxels goes through parry's general voxel
+    contacts (its own function for that pair makes Rapier's solver panic when a contact goes). Neither touches a
+    world without voxel shapes: step 7's worlds end in the bits they did.
+  - Cost: asleep, nothing. While they move, Rapier's step on one thread: 1.4 ms a tick for a hundred jagged pieces
+    of 200 voxels in a heap, under 0.5 ms for one building part of 96 k voxels landing. On the benchmark level
+    (hardware traversal) one thread holds 60 fps to about a hundred large bodies moving at once (the step is then
+    10–13 ms).
+  - **Natively the world is stepped by Rapier's parallel solver**, in a pool of the physics' own: 4 threads, or the
+    machine's performance cores when it has fewer; `THREERT_PHYSICS_THREADS` sets another count, and 1 (0, off) is
+    sequential. It gives the sequential build's bits (which are wasm32's) at a third of the step's time: about
+    450–500 bodies moving in a frame, and a level's cap of 300 voxel bodies (`maxBodies`) by measurement. wasm32
+    is sequential. How far "the bits do not depend on the thread count" was checked, and what was not: docs/VOXEL.md
+    "Voxel bodies", ROADMAP § 6 step 8 "Open".
+  - **A step is waited for with a kick** (`physics.rs` `in_pool`): Rapier's parallel step, made on a pool's worker,
+    can strand a job on that worker's deque and wait for it for good (about once in 10^5 steps when steps are
+    microseconds apart). While the step is out, the waiting thread injects an empty job into the pool every 0.5 ms,
+    which wakes a worker that then takes the stranded one. The frame log's `physics.kicks` counts them (long steps
+    get a few; they change nothing). `THREERT_PHYSICS_KICK=off` waits without, to reproduce the hang;
+    `cargo run --release --example physics_fuzz` is the CPU check, with a watchdog.
+  - Ids in a call (`body`, `collider`, `skip`, ...) are whole numbers however they are written: scene code hands
+    back an id it read from an answer as a double.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 

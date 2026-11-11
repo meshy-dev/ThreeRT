@@ -50,6 +50,11 @@ pub mod limits {
     pub const MAX_SHAPE_DATA: usize = 1 << 22;
     /// Contact events held until `take_contacts`: past this the oldest go (and are counted).
     pub const MAX_CONTACTS: usize = 8192;
+    /// A voxel shape: its cells' size, m; each cell's coordinates (so the shape reaches at most 2^20 cells from its
+    /// origin, and `size` x that within `MAX_COORD`); the cells one shape holds.
+    pub const VOXEL_SIZE: [f32; 2] = [1e-2, 1e2];
+    pub const MAX_VOXEL_COORD: i32 = 1 << 20;
+    pub const MAX_VOXELS: usize = 1 << 24;
 }
 use limits::*;
 
@@ -106,7 +111,28 @@ pub enum Shape {
     /// triangles as if they bounded a volume: a few grams with the centre of mass far away, which a dynamic body
     /// cannot take.)
     Trimesh { vertices: Vec<[f32; 3]>, indices: Vec<[u32; 3]> },
+    /// Solid cells of a lattice of cubes `size` metres wide: cell (x, y, z) fills from (x, y, z) x size to (x + 1,
+    /// y + 1, z + 1) x size in the collider's space. The engine's shape for voxel objects (ROADMAP § 6 step 8): the
+    /// level's, fixed, and the parts that come loose, which move. Its cells can be changed where it is
+    /// (`Physics::edit_voxels`). On a moving body its mass is its cells' volume at the collider's density, its centre
+    /// of mass and inertia those of the cells.
+    Voxels { size: f32, cells: Vec<[i32; 3]> },
+    /// A voxel shape made once (`SharedVoxels::new`) and given to several colliders: they share its cells until one
+    /// of them is edited, which then gets cells of its own (`Physics::edit_voxels`). Objects of one voxel file placed
+    /// many times: one shape's memory and build for all of them.
+    SharedVoxels(SharedVoxels),
     Custom(Box<dyn CustomShape>),
+}
+
+/// A voxel shape that colliders can share (`Shape::SharedVoxels`). Cloning it is another reference to the same cells.
+#[derive(Clone)]
+pub struct SharedVoxels(SharedShape);
+
+impl SharedVoxels {
+    /// As `Shape::Voxels { size, cells }`, with its checks.
+    pub fn new(size: f32, cells: Vec<[i32; 3]>) -> Result<SharedVoxels, String> {
+        Shape::Voxels { size, cells }.shared().map(SharedVoxels)
+    }
 }
 
 /// A collider: its shape, its pose relative to its body (or in the world without one), and its material.
@@ -313,8 +339,164 @@ impl Shape {
                 }
                 SharedShape::trimesh(vertices.iter().map(|&p| v(p)).collect(), indices.clone()).map_err(|e| format!("physics: the trimesh cannot be built ({e})"))
             }
+            Shape::Voxels { size, cells } => {
+                between(*size, VOXEL_SIZE[0], VOXEL_SIZE[1], "a voxel shape's cell size")?;
+                if cells.is_empty() || cells.len() > MAX_VOXELS {
+                    return Err(format!("physics: a voxel shape needs from 1 to {MAX_VOXELS} cells"));
+                }
+                voxel_cells(*size, cells)?;
+                let cells: Vec<IVector> = cells.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect();
+                Ok(SharedShape::voxels(Vector::splat(*size), &cells))
+            }
+            Shape::SharedVoxels(s) => Ok(s.0.clone()),
             Shape::Custom(c) => Ok(c.shared()),
         }
+    }
+}
+
+/// A voxel shape's cells are within `MAX_VOXEL_COORD` of its origin, and no further than `MAX_COORD` metres.
+fn voxel_cells(size: f32, cells: &[[i32; 3]]) -> Result<(), String> {
+    let most = (MAX_VOXEL_COORD as f32).min(MAX_COORD / size) as i32;
+    if cells.iter().all(|c| c.iter().all(|&x| x >= -most && x < most)) {
+        Ok(())
+    } else {
+        Err(format!("physics: a voxel shape's cells must be within ±{most} of its origin"))
+    }
+}
+
+/// Contacts between a voxel shape and a ball, found as between a voxel shape and any other shape. Parry has a
+/// function of its own for the pair (contact_manifolds_voxels_ball.rs), the only one of its voxel functions that
+/// keeps no workspace; and a pair without a workspace is to Rapier 0.36 a pair of one manifold whose place in its
+/// list never changes, so the solver keeps a reference to it from one step to the next. A ball on voxels has a
+/// manifold a cell it touches: when one went, the solver came to "stale ContactRef manifold ordinal" and panicked
+/// (a ball rolling on a voxel ground: `voxel_worlds_never_panic`, `random_calls_on_voxel_shapes_never_panic`). The
+/// general function keeps a workspace, which is what tells Rapier to look the pair's manifolds up afresh. Every
+/// other pair is parry's own dispatch, so a world without voxel shapes is stepped bit for bit as it was.
+struct VoxelsWithBalls;
+
+mod dispatch {
+    use super::VoxelsWithBalls;
+    use rapier3d::parry::math::{Pose, Real, Vector};
+    use rapier3d::parry::query::details::{contact_manifolds_voxels_shape_shapes, NonlinearRigidMotion, NormalConstraints, ShapeCastOptions};
+    use rapier3d::parry::query::{ClosestPoints, Contact, ContactManifold, ContactManifoldsWorkspace, DefaultQueryDispatcher, PersistentQueryDispatcher, QueryDispatcher, ShapeCastHit, ShapeDistance, ShapeIntersection, Unsupported};
+    use rapier3d::parry::shape::Shape;
+
+    impl QueryDispatcher for VoxelsWithBalls {
+        fn intersection_test(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape) -> Result<ShapeIntersection, Unsupported> {
+            Err(Unsupported)
+        }
+        fn distance(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape) -> Result<ShapeDistance, Unsupported> {
+            Err(Unsupported)
+        }
+        fn contact(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Real) -> Result<Option<Contact>, Unsupported> {
+            Err(Unsupported)
+        }
+        fn closest_points(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Real) -> Result<ClosestPoints, Unsupported> {
+            Err(Unsupported)
+        }
+        fn cast_shapes(&self, _: &Pose, _: Vector, _: &dyn Shape, _: &dyn Shape, _: ShapeCastOptions) -> Result<Option<ShapeCastHit>, Unsupported> {
+            Err(Unsupported)
+        }
+        fn cast_shapes_nonlinear(&self, _: &NonlinearRigidMotion, _: &dyn Shape, _: &NonlinearRigidMotion, _: &dyn Shape, _: Real, _: Real, _: bool) -> Result<Option<ShapeCastHit>, Unsupported> {
+            Err(Unsupported)
+        }
+    }
+
+    impl<M: Default + Clone + Send + Sync, C: Default + Copy + Send + Sync> PersistentQueryDispatcher<M, C> for VoxelsWithBalls {
+        fn contact_manifolds(&self, pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape, prediction: Real, manifolds: &mut Vec<ContactManifold<M, C>>, workspace: &mut Option<ContactManifoldsWorkspace>) -> Result<(), Unsupported> {
+            if (g1.as_voxels().is_some() && g2.as_ball().is_some()) || (g1.as_ball().is_some() && g2.as_voxels().is_some()) {
+                contact_manifolds_voxels_shape_shapes(&DefaultQueryDispatcher, pos12, g1, g2, prediction, manifolds, workspace);
+                return Ok(());
+            }
+            Err(Unsupported)
+        }
+        fn contact_manifold_convex_convex(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Option<&dyn NormalConstraints>, _: Option<&dyn NormalConstraints>, _: Real, _: &mut ContactManifold<M, C>) -> Result<(), Unsupported> {
+            Err(Unsupported)
+        }
+    }
+}
+
+/// A ray against a voxel shape placed at `at`, the cells walked one by one (Amanatides and Woo): the distance to the
+/// first solid cell within `max` and the normal of the face it is entered by (a ray that starts in a solid cell: 0,
+/// and against the ray). Parry's own (ray_voxels.rs) tests each cell's box with the ray and takes the next cell by
+/// the box's bounds, both in floating point: **a ray that lies on a plane of the lattice and runs along it misses
+/// every cell** (straight down at x = 1.5 onto cells of 0.1 m, which is where a game asks for the ground). Here a
+/// point belongs to the cell its coordinates floor to, the cell is stepped as an integer, and a cell that is solid
+/// is a hit.
+fn voxel_ray(v: &rapier3d::parry::shape::Voxels, at: &Pose, ray: &Ray, max: f32) -> Option<(f32, Vector)> {
+    let size = v.voxel_size().x;
+    let (o, d) = (at.inverse_transform_point(ray.origin).to_array(), at.inverse_transform_vector(ray.dir).to_array());
+    let [lo, hi] = v.domain();
+    let (lo, hi) = (lo.to_array(), hi.to_array());
+    // The stretch of the ray inside the box of the shape's cells.
+    let (mut t0, mut t1, mut entered) = (0.0f32, max, 3usize);
+    for a in 0..3 {
+        let (min, max) = (lo[a] as f32 * size, hi[a] as f32 * size);
+        if d[a] == 0.0 {
+            if o[a] < min || o[a] >= max {
+                return None;
+            }
+            continue;
+        }
+        let (ta, tb) = ((min - o[a]) / d[a], (max - o[a]) / d[a]);
+        let (near, far) = (ta.min(tb), ta.max(tb));
+        if near > t0 {
+            (t0, entered) = (near, a);
+        }
+        t1 = t1.min(far);
+    }
+    if !(t0 <= t1) {
+        return None;
+    }
+    // The cell the ray is in there, held inside the box (it enters on a face, to rounding).
+    let mut cell = [0i32; 3];
+    for a in 0..3 {
+        cell[a] = (((o[a] + d[a] * t0) / size).floor() as i32).clamp(lo[a], hi[a] - 1);
+    }
+    let normal = |axis: usize| {
+        let mut n = [0.0f32; 3];
+        if axis < 3 {
+            n[axis] = if d[axis] > 0.0 { -1.0 } else { 1.0 };
+            at.transform_vector(Vector::new(n[0], n[1], n[2]))
+        } else {
+            -ray.dir.normalize_or_zero()
+        }
+    };
+    let mut t = t0;
+    let mut axis = entered;
+    // (At most every cell of the box's three sides: the walk leaves the box.)
+    loop {
+        if v.voxel_state(IVector::new(cell[0], cell[1], cell[2])).is_some_and(|s| !s.is_empty()) {
+            return Some((t, normal(axis)));
+        }
+        // The next lattice plane on each axis; the nearest is crossed (the lower axis first when they are equal).
+        let mut next = (f32::INFINITY, 3usize);
+        for a in 0..3 {
+            if d[a] != 0.0 {
+                let plane = (cell[a] + (d[a] > 0.0) as i32) as f32 * size;
+                let ta = ((plane - o[a]) / d[a]).max(t);
+                if ta < next.0 {
+                    next = (ta, a);
+                }
+            }
+        }
+        if next.1 == 3 || next.0 > t1 {
+            return None;
+        }
+        (t, axis) = next;
+        cell[axis] += if d[axis] > 0.0 { 1 } else { -1 };
+        if cell[axis] < lo[axis] || cell[axis] >= hi[axis] {
+            return None;
+        }
+    }
+}
+
+/// A ray against a collider's shape placed at `at` (the collider's pose, or where a fresh one is): the distance and
+/// the normal. Parry's answer, but for a voxel shape (`voxel_ray`).
+fn shape_ray(c: &Collider, at: &Pose, ray: &Ray, max: f32) -> Option<(f32, Vector)> {
+    match c.shape().as_voxels() {
+        Some(v) => voxel_ray(v, at, ray, max),
+        None => c.shape().cast_ray_and_get_normal(at, ray, max, true).map(|i| (i.time_of_impact, i.normal)),
     }
 }
 
@@ -336,6 +518,8 @@ pub struct Physics {
     /// Each collider with its shape's data (`Shape::data`), and their sum.
     colliders: BTreeMap<ColliderId, (ColliderHandle, usize)>,
     shape_data: usize,
+    /// The voxel colliders there are: rays are cast at them here (`voxel_ray`), not by the broad phase's query.
+    voxel_colliders: std::collections::BTreeSet<ColliderId>,
     joints: BTreeMap<JointId, ImpulseJointHandle>,
     /// The kinematic bodies (`awake`: the islands hold dynamic ones only).
     kinematic: std::collections::BTreeSet<BodyId>,
@@ -361,6 +545,10 @@ impl Default for Physics {
 impl Physics {
     pub fn new(gravity: [f32; 3]) -> Physics {
         let mut world = PhysicsWorld::new();
+        {
+            use rapier3d::parry::query::{DefaultQueryDispatcher, QueryDispatcher};
+            world.narrow_phase = NarrowPhase::with_query_dispatcher(VoxelsWithBalls.chain(DefaultQueryDispatcher));
+        }
         world.gravity = v(gravity);
         world.integration_parameters.dt = TICK;
         Physics {
@@ -369,6 +557,7 @@ impl Physics {
             bodies: BTreeMap::new(),
             colliders: BTreeMap::new(),
             shape_data: 0,
+            voxel_colliders: Default::default(),
             joints: BTreeMap::new(),
             kinematic: Default::default(),
             next: 0,
@@ -441,6 +630,7 @@ impl Physics {
         self.world.remove_body_with_colliders(h, true);
         for c in &gone {
             self.fresh.remove(c);
+            self.voxel_colliders.remove(c);
             if let Some((_, data)) = self.colliders.remove(c) {
                 self.shape_data -= data;
             }
@@ -487,6 +677,9 @@ impl Physics {
         self.colliders.insert(id, (h, data));
         self.shape_data += data;
         self.fresh.insert(id);
+        if matches!(d.shape, Shape::Voxels { .. } | Shape::SharedVoxels(_)) {
+            self.voxel_colliders.insert(id);
+        }
         Ok(id)
     }
 
@@ -495,6 +688,7 @@ impl Physics {
             self.world.remove_collider(h);
             self.shape_data -= data;
             self.fresh.remove(&id);
+            self.voxel_colliders.remove(&id);
         }
     }
 
@@ -602,6 +796,96 @@ impl Physics {
 
     pub fn has_collider(&self, id: ColliderId) -> bool {
         self.colliders.contains_key(&id)
+    }
+
+    /// Changes a voxel collider's cells: `clear` emptied, then `fill` made solid (cells already so are left). What it
+    /// costs is by the cells named, not by the shape's size (a shape other colliders share is copied first, once). A
+    /// moving body's mass, centre of mass and inertia follow its cells; every body touching the collider is woken
+    /// (what rested on a cell that is gone must fall). Returns the solid cells it has now. **With none left the
+    /// collider is gone** (an empty shape meets nothing, and a moving body of no mass cannot be stepped: the caller
+    /// removes a body left without colliders). Err: no such collider, not a voxel shape, a cell out of bounds;
+    /// nothing is changed then.
+    ///
+    /// The collider is taken out of Rapier and put back with its cells changed, under the same id. Changed where it
+    /// sits (`Collider::shape_mut`), its pairs would keep the contacts found on the old cells for as long as they
+    /// do not move (Rapier's contact recycling: a pair that has hardly moved is not looked at again), and what
+    /// rested on a cell that is gone would rest on nothing. Put back, it meets everything anew.
+    pub fn edit_voxels(&mut self, id: ColliderId, clear: &[[i32; 3]], fill: &[[i32; 3]]) -> Result<usize, String> {
+        let &(h, data) = self.colliders.get(&id).ok_or("physics: unknown collider")?;
+        let size = match self.world.colliders[h].shape().as_voxels() {
+            Some(v) => v.voxel_size().x,
+            None => return Err("physics: not a voxel collider".into()),
+        };
+        voxel_cells(size, clear)?;
+        voxel_cells(size, fill)?;
+        // What touches it now, before it goes.
+        let touching: Vec<RigidBodyHandle> = self
+            .world
+            .narrow_phase
+            .contact_pairs_with(h)
+            .filter_map(|p| self.world.colliders.get(if p.collider1 == h { p.collider2 } else { p.collider1 }).and_then(|c| c.parent()))
+            .collect();
+        let parent = self.world.colliders[h].parent();
+        let mut c = self.world.remove_collider(h).expect("the collider is there");
+        let voxels = c.shape_mut().as_voxels_mut().expect("a voxel shape");
+        // (A cell that is already as asked is left alone: a look, not an edit.)
+        let solid = |v: &rapier3d::parry::shape::Voxels, k: IVector| v.voxel_state(k).is_some_and(|s| !s.is_empty());
+        for k in clear {
+            let k = IVector::new(k[0], k[1], k[2]);
+            if solid(voxels, k) {
+                voxels.set_voxel(k, false);
+            }
+        }
+        for k in fill {
+            let k = IVector::new(k[0], k[1], k[2]);
+            if !solid(voxels, k) {
+                voxels.set_voxel(k, true);
+            }
+        }
+        let left = voxels.voxels().filter(|v| !v.state.is_empty()).count();
+        for b in touching.into_iter().chain(parent) {
+            if let Some(b) = self.world.bodies.get_mut(b) {
+                b.wake_up(true);
+            }
+        }
+        if left == 0 || left > MAX_VOXELS {
+            self.colliders.remove(&id);
+            self.shape_data -= data;
+            self.fresh.remove(&id);
+            self.voxel_colliders.remove(&id);
+            return if left == 0 { Ok(0) } else { Err(format!("physics: a voxel shape holds at most {MAX_VOXELS} cells (the collider is gone)")) };
+        }
+        let h = self.world.insert_collider(c, parent);
+        if let Some(p) = parent {
+            // (Its mass now, not at the next step: a collider put on a body adds its mass to what the body had, and
+            // the one taken out is taken off only when the world is stepped.)
+            let world = &mut self.world;
+            world.bodies[p].recompute_mass_properties_from_colliders(&world.colliders);
+        }
+        self.colliders.insert(id, (h, data));
+        // (The broad phase does not have it until the next step: queries test it where and as it is.)
+        self.fresh.insert(id);
+        Ok(left)
+    }
+
+    /// The memory the world's voxel shapes hold, bytes (parry's own count of each: cells, chunk tables, their tree).
+    /// A shape several colliders share is counted once.
+    pub fn voxel_bytes(&self) -> usize {
+        let mut seen = std::collections::BTreeSet::new();
+        self.voxel_colliders
+            .iter()
+            .filter_map(|id| {
+                let shape = self.world.colliders.get(self.colliders.get(id)?.0)?.shared_shape();
+                let first = seen.insert(std::sync::Arc::as_ptr(&shape.0) as *const () as usize);
+                shape.as_voxels().filter(|_| first).map(|v| v.total_memory_size())
+            })
+            .sum()
+    }
+
+    /// A voxel collider's solid cells, counted; None if it is none.
+    pub fn voxels(&self, id: ColliderId) -> Option<usize> {
+        let &(h, _) = self.colliders.get(&id)?;
+        self.world.colliders.get(h)?.shape().as_voxels().map(|v| v.voxels().filter(|v| !v.state.is_empty()).count())
     }
 
     pub fn has_joint(&self, id: JointId) -> bool {
@@ -820,11 +1104,11 @@ impl Physics {
     /// whose colliders the ray passes through (the one that casts it).
     pub fn cast_ray(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>) -> Result<Option<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(None) };
-        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32)) && c.shape().as_voxels().is_none();
         let mut best = self.world.cast_ray_and_get_normal(&ray, max, true, self.filter(skip, &settled)).and_then(|(h, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
-        for (h, c, at) in self.fresh(skip) {
-            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
-                best = Self::nearer(best, self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
+        for (h, c, at) in self.fresh(skip).chain(self.voxels_on(&ray, max, skip)) {
+            if let Some((t, n)) = shape_ray(c, &at, &ray, max) {
+                best = Self::nearer(best, self.hit(h, t, ray.point_at(t), n));
             }
         }
         Ok(best)
@@ -833,17 +1117,32 @@ impl Physics {
     /// Every collider a ray passes through within `max` metres, nearest first, at most `limit` of them.
     pub fn cast_ray_all(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>, limit: usize) -> Result<Vec<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(vec![]) };
-        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32)) && c.shape().as_voxels().is_none();
         let mut hits: Vec<Hit> = self.world.intersect_ray(ray, max, true, self.filter(skip, &settled)).filter_map(|(h, _, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal)).collect();
-        for (h, c, at) in self.fresh(skip) {
-            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
-                hits.extend(self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
+        for (h, c, at) in self.fresh(skip).chain(self.voxels_on(&ray, max, skip)) {
+            if let Some((t, n)) = shape_ray(c, &at, &ray, max) {
+                hits.extend(self.hit(h, t, ray.point_at(t), n));
             }
         }
         // (Equal distances in collider order: the same answer on every machine.)
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.collider.cmp(&b.collider)));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// The settled voxel colliders whose boxes a ray passes within `max` (the broad phase's tree; not `skip`'s), each
+    /// where it is: the rays' own test of them (`voxel_ray`). None in a world without voxel shapes.
+    fn voxels_on<'a>(&'a self, ray: &'a Ray, max: f32, skip: Option<BodyId>) -> impl Iterator<Item = (ColliderHandle, &'a Collider, Pose)> + 'a {
+        let skip = skip.and_then(|b| self.bodies.get(&b)).copied();
+        let any = !self.voxel_colliders.is_empty();
+        let tree = self.world.query_pipeline().bvh;
+        tree.leaves(move |node: &rapier3d::parry::partitioning::BvhNode| any && node.aabb().intersects_local_ray(ray, max)).filter_map(move |leaf| {
+            let (c, h) = self.world.colliders.get_unknown_gen(leaf)?;
+            if !c.is_enabled() || c.shape().as_voxels().is_none() || self.fresh.contains(&(c.user_data as u32)) || (skip.is_some() && c.parent() == skip) {
+                return None;
+            }
+            Some((h, c, *c.position()))
+        })
     }
 
     /// A query's ray and reach (cut to `MAX_QUERY_DISTANCE`); None for a reach of 0 or less (it meets nothing).
@@ -872,8 +1171,8 @@ impl Physics {
             Some(&h) => QueryFilter::default().exclude_rigid_body(h),
             None => QueryFilter::default(),
         };
-        // (Nothing fresh, as after every tick: the plain filter.)
-        if self.fresh.is_empty() {
+        // (Nothing fresh, as after every tick, and no voxel shape: the plain filter.)
+        if self.fresh.is_empty() && self.voxel_colliders.is_empty() {
             f
         } else {
             f.predicate(settled)
@@ -1334,6 +1633,194 @@ mod tests {
         assert!((p.mass(hull).unwrap() - 0.6 * 0.4 * 0.6 * 1000.0).abs() < 1.0);
     }
 
+    /// Cells `lo..hi` (hi exclusive).
+    fn block(lo: [i32; 3], hi: [i32; 3]) -> Vec<[i32; 3]> {
+        (lo[0]..hi[0]).flat_map(|x| (lo[1]..hi[1]).flat_map(move |y| (lo[2]..hi[2]).map(move |z| [x, y, z]))).collect()
+    }
+
+    /// Voxel shapes (step 8): a block of cells rests on a ground of cells where its cells end, and sleeps; another
+    /// rests on it; mass, centre of mass and a ray are the cells'.
+    #[test]
+    fn voxel_shapes_rest_and_stack() {
+        let mut p = Physics::default();
+        // A ground of cells of 0.1 m, 4 m a side, its top at y = 0.3.
+        let ground = p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: block([-20, 0, -20], [20, 3, 20]) })).unwrap();
+        // Blocks of 4 x 3 x 4 cells whose cells start at the body's origin: 0.4 x 0.3 x 0.4 m.
+        let lump = |p: &mut Physics, at: [f32; 3]| {
+            let b = p.add_body(&BodyDesc { position: at, ..Default::default() }).unwrap();
+            let c = p.add_collider(Some(b), &ColliderDesc { density: 2000.0, ..ColliderDesc::new(Shape::Voxels { size: 0.1, cells: block([0, 0, 0], [4, 3, 4]) }) }).unwrap();
+            (b, c)
+        };
+        let (a, ca) = lump(&mut p, [0.0, 0.6, 0.0]);
+        let (b, _) = lump(&mut p, [0.05, 1.4, 0.05]);
+        assert!((p.mass(a).unwrap() - 48.0 * 0.001 * 2000.0).abs() < 1e-2, "{:?}", p.mass(a));
+        assert_eq!((p.voxels(ca), p.voxels(ground)), (Some(48), Some(40 * 40 * 3)));
+        run(&mut p, 240);
+        let (ya, yb) = (p.pose(a).unwrap().0[1], p.pose(b).unwrap().0[1]);
+        assert!((ya - 0.3).abs() < 5e-3 && (yb - 0.6).abs() < 1e-2, "{ya}, {yb}");
+        assert!(p.sleeping(a) && p.sleeping(b));
+        // It stood where it fell: no drift, no turn.
+        let (pa, qa) = p.pose(a).unwrap();
+        assert!(pa[0].abs() < 5e-3 && pa[2].abs() < 5e-3 && qa[3] > 0.9999, "{pa:?} {qa:?}");
+        // A ray down onto the upper block, and one beside both onto the ground.
+        let hit = p.cast_ray([0.2, 5.0, 0.2], [0.0, -1.0, 0.0], 10.0, None).unwrap().unwrap();
+        assert!(hit.body == Some(b) && (hit.point[1] - 0.9).abs() < 1e-2 && hit.normal[1] > 0.99, "{hit:?}");
+        let hit = p.cast_ray([1.5, 5.0, 1.5], [0.0, -1.0, 0.0], 10.0, None).unwrap().unwrap();
+        assert!(hit.collider == ground && (hit.point[1] - 0.3).abs() < 1e-3, "{hit:?}");
+        // A ball swept down meets the ground's cells; a box over the blocks overlaps both.
+        let hit = p.sweep(&Shape::Sphere(0.2), [-1.0, 3.0, -1.0], [0.0, 0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 10.0, None).unwrap().unwrap();
+        assert!(hit.collider == ground && (hit.distance - 2.5).abs() < 1e-2, "{hit:?}");
+        assert_eq!(p.overlap(&Shape::Box([0.1, 1.0, 0.1]), [0.2, 0.8, 0.2], [0.0, 0.0, 0.0, 1.0], None).unwrap().len(), 3);
+    }
+
+    /// A voxel shape's cells are changed where it is: the ground carved under a sleeping block wakes it and it
+    /// falls to the new floor (a query sees the pit before any tick); a block carved weighs what is left, and one
+    /// carved to nothing is gone; bad edits change nothing.
+    #[test]
+    fn voxel_shapes_are_edited() {
+        let mut p = Physics::default();
+        let ground = p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: block([-20, 0, -20], [20, 6, 20]) })).unwrap();
+        let b = p.add_body(&BodyDesc { position: [-0.2, 0.7, -0.2], ..Default::default() }).unwrap();
+        let c = p.add_collider(Some(b), &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: block([0, 0, 0], [4, 4, 4]) })).unwrap();
+        run(&mut p, 180);
+        assert!((p.pose(b).unwrap().0[1] - 0.6).abs() < 5e-3 && p.sleeping(b), "{:?}", p.pose(b));
+        // A pit 0.8 m wide and three cells deep under it.
+        let left = p.edit_voxels(ground, &block([-4, 3, -4], [4, 6, 4]), &[]).unwrap();
+        assert_eq!(left, 40 * 40 * 6 - 8 * 8 * 3);
+        assert!(!p.sleeping(b), "woken");
+        let hit = p.cast_ray([0.3, 5.0, 0.3], [0.0, -1.0, 0.0], 10.0, Some(b)).unwrap().unwrap();
+        assert!(hit.collider == ground && (hit.point[1] - 0.3).abs() < 1e-3, "the pit's floor before any tick: {hit:?}");
+        run(&mut p, 180);
+        assert!((p.pose(b).unwrap().0[1] - 0.3).abs() < 5e-3 && p.sleeping(b), "{:?}", p.pose(b));
+        // The ground filled again under a corner of the pit: cells that are solid stay as they are.
+        assert_eq!(p.edit_voxels(ground, &[], &block([-4, 3, -4], [-2, 6, -2])).unwrap(), 40 * 40 * 6 - 8 * 8 * 3 + 2 * 2 * 3);
+        assert_eq!(p.edit_voxels(ground, &[], &block([-4, 3, -4], [-2, 6, -2])).unwrap(), 40 * 40 * 6 - 8 * 8 * 3 + 2 * 2 * 3);
+        // The block loses its upper half: half the mass, the centre of mass lower; it stays where it is.
+        let m = p.mass(b).unwrap();
+        assert_eq!(p.edit_voxels(c, &block([0, 2, 0], [4, 4, 4]), &[]).unwrap(), 32);
+        assert!((p.mass(b).unwrap() - m / 2.0).abs() < 1e-3 * m, "{:?} of {m}", p.mass(b));
+        run(&mut p, 120);
+        assert!((p.pose(b).unwrap().0[1] - 0.3).abs() < 5e-3, "{:?}", p.pose(b));
+        // Bad edits: not a voxel collider, an unknown one, a cell out of bounds. Nothing changes.
+        let ball = body(&mut p, [3.0, 3.0, 3.0], Shape::Sphere(0.2));
+        let _ = ball;
+        let plain = p.add_collider(None, &ColliderDesc { position: [9.0, 0.0, 9.0], ..ColliderDesc::new(Shape::Box([0.5; 3])) }).unwrap();
+        assert!(p.edit_voxels(plain, &[[0, 0, 0]], &[]).is_err() && p.edit_voxels(9999, &[], &[]).is_err());
+        assert!(p.edit_voxels(c, &[[0, 0, 0]], &[[1 << 21, 0, 0]]).is_err() && p.edit_voxels(c, &[[i32::MIN, 0, 0]], &[]).is_err());
+        assert_eq!(p.voxels(c), Some(32));
+        // Carved to nothing: the collider is gone, the body is the caller's to remove.
+        assert_eq!(p.edit_voxels(c, &block([0, 0, 0], [4, 2, 4]), &[]).unwrap(), 0);
+        assert!(!p.has_collider(c) && p.voxels(c).is_none());
+        assert!(p.remove_body(b).is_empty());
+        run(&mut p, 30);
+        assert!(p.take_faults().is_empty());
+    }
+
+    /// A ray at a voxel shape meets what testing every solid cell's box finds, for random rays at a turned shape; and
+    /// a ray that lies on a plane of the lattice and runs along it meets the cells (parry's own walk misses them all).
+    #[test]
+    fn rays_at_voxel_shapes() {
+        use rapier3d::parry::query::RayCast;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 16_777_216.0
+        };
+        let cells: Vec<[i32; 3]> = block([-6, -3, -5], [7, 4, 6]).into_iter().filter(|_| rnd() < 0.3).collect();
+        let voxels = rapier3d::parry::shape::Voxels::new(Vector::splat(0.25), &cells.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
+        let at = pose([0.3, -0.2, 0.1], [0.2, -0.4, 0.1, 0.9]).unwrap();
+        let (mut hits, mut misses) = (0, 0);
+        for _ in 0..4000 {
+            let o = Vector::new(rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0);
+            // (Towards the shape, about the origin, or anywhere.)
+            let to = Vector::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * if rnd() < 0.7 { 3.0 } else { 30.0 };
+            let d = (to - o).normalize();
+            let ray = Ray::new(o, d);
+            let max = 1.0 + rnd() * 8.0;
+            let brute = cells
+                .iter()
+                .filter_map(|c| {
+                    let centre = at.transform_point(Vector::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) * 0.25);
+                    Cuboid::new(Vector::splat(0.125)).cast_ray(&Pose::from_parts(centre, at.rotation), &ray, max, true)
+                })
+                .fold(f32::INFINITY, f32::min);
+            match voxel_ray(&voxels, &at, &ray, max) {
+                Some((t, n)) => {
+                    assert!((t - brute).abs() < 1e-4, "{t} for {brute}: from {o:?} along {d:?}");
+                    assert!((n.length() - 1.0).abs() < 1e-4 && (t == 0.0 || n.dot(d) < 1e-4), "{n:?}");
+                    hits += 1;
+                }
+                None => {
+                    assert!(brute == f32::INFINITY, "missed a cell at {brute}: from {o:?} along {d:?}");
+                    misses += 1;
+                }
+            }
+        }
+        assert!(hits > 800 && misses > 800, "{hits} hits, {misses} misses");
+        // On the lattice's planes, along them: a slab of cells of 0.1 m from above at every corner of its cells.
+        let slab = rapier3d::parry::shape::Voxels::new(Vector::splat(0.1), &block([-20, 0, -20], [20, 3, 20]).iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
+        let still = Pose::identity();
+        let mut parry_missed = 0;
+        for x in -19..19 {
+            for z in -19..19 {
+                let ray = Ray::new(Vector::new(x as f32 * 0.1, 5.0, z as f32 * 0.1), Vector::new(0.0, -1.0, 0.0));
+                let (t, n) = voxel_ray(&slab, &still, &ray, 10.0).unwrap_or_else(|| panic!("a ray down at ({x}, {z}) x 0.1 m misses the slab"));
+                assert!((t - 4.7).abs() < 1e-4 && n.y == 1.0, "{t} {n:?}");
+                parry_missed += slab.cast_ray(&still, &ray, 10.0, true).is_none() as u32;
+            }
+        }
+        // (Why the walk is here. If parry mends its own, this count falls to 0 and the walk can go.)
+        assert!(parry_missed > 0, "parry's ray meets them all now");
+        // Along the top face, in it: nothing above the cells is met; one cell lower the first cell is.
+        assert!(voxel_ray(&slab, &still, &Ray::new(Vector::new(-5.0, 0.3, 0.05), Vector::new(1.0, 0.0, 0.0)), 20.0).is_none());
+        let (t, n) = voxel_ray(&slab, &still, &Ray::new(Vector::new(-5.0, 0.2, 0.05), Vector::new(1.0, 0.0, 0.0)), 20.0).unwrap();
+        assert!((t - 3.0).abs() < 1e-5 && n.x == -1.0);
+        // From inside a cell: at once, against the ray.
+        let (t, n) = voxel_ray(&slab, &still, &Ray::new(Vector::new(0.05, 0.15, 0.05), Vector::new(0.0, 1.0, 0.0)), 20.0).unwrap();
+        assert!(t == 0.0 && n.y == -1.0);
+    }
+
+    /// Colliders that share one voxel shape: its memory is counted once; an edit of one gives that one cells of its
+    /// own and leaves the others as they were.
+    #[test]
+    fn voxel_shapes_are_shared_until_edited() {
+        let mut p = Physics::default();
+        let shape = SharedVoxels::new(0.1, block([0, 0, 0], [8, 2, 8])).unwrap();
+        let at = |x: f32| ColliderDesc { position: [x, 0.0, 0.0], ..ColliderDesc::new(Shape::SharedVoxels(shape.clone())) };
+        let (a, b, c) = (p.add_collider(None, &at(0.0)).unwrap(), p.add_collider(None, &at(2.0)).unwrap(), p.add_collider(None, &at(4.0)).unwrap());
+        let one = p.voxel_bytes();
+        assert!(one > 0 && (p.voxels(a), p.voxels(b), p.voxels(c)) == (Some(128), Some(128), Some(128)));
+        // A hole through the second: only it has the hole (a ray down at the same place of each).
+        assert_eq!(p.edit_voxels(b, &block([3, 0, 3], [5, 2, 5]), &[]).unwrap(), 120);
+        assert_eq!((p.voxels(a), p.voxels(b), p.voxels(c)), (Some(128), Some(120), Some(128)));
+        assert!(p.voxel_bytes() > one, "the edited one has cells of its own");
+        let down = |p: &Physics, x: f32| p.cast_ray([x + 0.35, 5.0, 0.35], [0.0, -1.0, 0.0], 10.0, None).unwrap().map(|h| h.collider);
+        assert_eq!((down(&p, 0.0), down(&p, 2.0), down(&p, 4.0)), (Some(a), None, Some(c)));
+        // What a shape refuses, it refuses here.
+        assert!(SharedVoxels::new(0.1, vec![]).is_err() && SharedVoxels::new(f32::NAN, vec![[0, 0, 0]]).is_err());
+        // A body dropped on the third rests on it.
+        let ball = body(&mut p, [4.4, 1.0, 0.4], Shape::Box([0.1; 3]));
+        run(&mut p, 120);
+        assert!((p.pose(ball).unwrap().0[1] - 0.3).abs() < 5e-3, "{:?}", p.pose(ball));
+    }
+
+    /// What a voxel shape refuses.
+    #[test]
+    fn voxel_shapes_are_checked() {
+        let mut p = Physics::default();
+        let bad = |p: &mut Physics, size: f32, cells: Vec<[i32; 3]>| p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size, cells })).is_err();
+        assert!(bad(&mut p, 0.1, vec![]) && bad(&mut p, 0.0, vec![[0, 0, 0]]) && bad(&mut p, f32::NAN, vec![[0, 0, 0]]) && bad(&mut p, 1e3, vec![[0, 0, 0]]));
+        assert!(bad(&mut p, 0.1, vec![[0, 1 << 20, 0]]) && bad(&mut p, 0.1, vec![[i32::MIN, 0, 0]]) && bad(&mut p, 100.0, vec![[1001, 0, 0]]));
+        // The same cell twice is one cell.
+        let c = p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: vec![[0, 0, 0], [0, 0, 0], [1, 0, 0]] })).unwrap();
+        assert_eq!(p.voxels(c), Some(2));
+        // A sensor of cells, and cells at the far end of what a shape may reach.
+        p.add_collider(None, &ColliderDesc { sensor: true, ..ColliderDesc::new(Shape::Voxels { size: 0.01, cells: vec![[(1 << 20) - 1, 0, -(1 << 20)]] }) }).unwrap();
+        run(&mut p, 5);
+    }
+
     /// Bad input adds nothing; removing a body takes its colliders and joints with it.
     #[test]
     fn bad_input_and_removal() {
@@ -1376,3 +1863,4 @@ mod tests {
         assert_eq!(a, crate::check::EXPECTED, "the script's end changed: if meant, record {a:#x}");
     }
 }
+

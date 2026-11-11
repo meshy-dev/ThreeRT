@@ -101,13 +101,19 @@ pub fn voxel_level(d: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen(js_name = voxelExplode)]
 pub fn voxel_explode(x: f64, y: f64, z: f64, r: f64) -> Result<String, JsValue> {
-    engine(|e| api::voxel_explode(&mut e.voxels, &mut e.world, x, y, z, r)).map_err(thrown)
+    engine(|e| api::voxel_explode(&mut e.voxels, &mut e.world, &mut e.physics, x, y, z, r)).map_err(thrown)
 }
 
 #[wasm_bindgen(js_name = voxelEdit)]
 pub fn voxel_edit(d: &str) -> Result<String, JsValue> {
     let d = desc("voxelEdit", d)?;
-    engine(|e| api::voxel_edit(&mut e.voxels, &mut e.world, &d)).map_err(thrown)
+    engine(|e| api::voxel_edit(&mut e.voxels, &mut e.world, &mut e.physics, &d)).map_err(thrown)
+}
+
+/// The voxel bodies as JSON (`api::voxel_bodies`).
+#[wasm_bindgen(js_name = voxelBodies)]
+pub fn voxel_bodies() -> String {
+    engine(|e| api::voxel_bodies(&e.voxels, &e.physics))
 }
 
 #[wasm_bindgen(js_name = voxelHash)]
@@ -357,7 +363,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, 
     // level the scene asked for is loaded now.
     let mut core = engine(|e| {
         e.world.take_changes();
-        if e.voxels.realize(&mut e.world, Path::new(""))?.is_some() {
+        if e.voxels.realize(&mut e.world, &mut e.physics, Path::new(""))?.is_some() {
             e.world.take_changes();
         }
         LiveCore::new(g, &e.world, Path::new(""), Path::new(""), width, height)
@@ -474,9 +480,7 @@ pub fn frame_end(dt: f32) -> Result<String, JsValue> {
         let now = web_time_now;
         let p0 = now();
         engine(|e| {
-            if let Some(p) = e.physics.as_mut() {
-                p.advance(&mut e.world, dt as f64);
-            }
+            api::physics_advance(&mut e.physics, &mut e.voxels, &mut e.world, dt as f64);
         });
         let p1 = now();
         let rebuilt = commit_view(v)?;
@@ -571,9 +575,7 @@ pub fn commit(seq: f64) -> Result<bool, JsValue> {
 #[wasm_bindgen]
 pub fn tick(dt: f32) -> String {
     engine(|e| {
-        if let Some(p) = e.physics.as_mut() {
-            p.advance(&mut e.world, dt as f64);
-        }
+        api::physics_advance(&mut e.physics, &mut e.voxels, &mut e.world, dt as f64);
         e.world.take_changes();
         json!(e.physics.as_mut().map(|p| { let s = p.take_stats(); json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) })).to_string()
     })

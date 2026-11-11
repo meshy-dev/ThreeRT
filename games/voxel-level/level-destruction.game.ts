@@ -14,6 +14,11 @@
 //              cut loose, falls and rests on its stump (explosions that split)
 //   fell       a saw cut (a box 1 m thick, 30 x 30 m) through everything from 0.5 m above the road ahead: trees, lamp
 //              posts, cars and the buildings there lose their footing and fall 1 m (the largest loose parts)
+//   shatter    `fell`, then from two seconds on a cut 0.2 m thick every tenth of a second through what fell, 30 a
+//              metre apart across the road and 30 along it: the bodies are cut into more and more bodies (ROADMAP
+//              § 6 step 8: how many bodies a frame holds, and the cap on them)
+//   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner (past 500:
+//              the level's cap is reached and held)
 // With `debris`
 // (level-destruction-debris.game.ts; ROADMAP § 6 step 2e), the voxels too few to make a piece are thrown out as
 // instances of one unit cube (an `InstancedMesh`, coloured per instance from the palette), fall, bounce on the ground
@@ -29,11 +34,11 @@
 //   node tools/voxel-level/generate.ts --granularity object && node tools/bundle-game.ts games/voxel-level/level-destruction.game.ts
 import { BoxGeometry, Color, DirectionalLight, GpuParticles, InstancedMesh, MaterialFunction, Mesh, MeshStandardMaterial, ParticleProgram, SimulatedSmoke, PerspectiveCamera, PlaneGeometry, ProceduralGeometry, ProceduralMesh, Scene, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
-import { VOXEL_BRICKS, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
+import { VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
 import { nativeObjects, nativePalette } from "./native.ts";
 import { EDGE, PALETTE, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
 
-type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple";
+type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense";
 interface State { scenario: Scenario | null; started: number }
 
 /** Spots for explosions: alternately on the ground ahead of the camera and on the walls of the buildings nearest it
@@ -206,14 +211,17 @@ class Dust {
 }
 
 /** `debris`: the removed voxels thrown out as instances (`Debris`; logged per explosion), or "dust": as GPU particles.
- *  `smoke`: the cells of the simulated smoke's grid. Falling objects are logged per frame as `batch {...}`. */
-export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false) {
+ *  `smoke`: the cells of the simulated smoke's grid. `physics` (ROADMAP § 6 step 8; on by default): the level
+ *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
+ *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
+ *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (300 unless given). */
+export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number) {
   const keys = cameraPath(seed);
   const at = spots(seed);
   // The ground points of the eight trees nearest ahead of the camera (`topple`).
   const [camX, , camZ] = keys[0].pos;
   const trunks = levelPlan(seed).props.filter((p) => p.kind === "tree").map((p) => toScene(p.x, p.y, p.z)).filter((p) => p[2] > camZ + 4).sort((a, b) => Math.hypot(a[0] - camX, a[2] - camZ) - Math.hypot(b[0] - camX, b[2] - camZ)).slice(0, 8);
-  let next = 0, fired = 0, frames = 0, last = -1;
+  let next = 0, fired = 0, frames = 0, last = -1, hadBodies = false;
   const flying = debris === true ? new Debris(seed) : null;
   const dust = debris === "dust" ? new Dust() : null;
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
@@ -257,17 +265,22 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       const fn = new ProceduralMesh(new ProceduralGeometry(VOXEL_BRICKS, [0, 0, 0, 0.1, 0.1, 0.1], new Array(12).fill(0)), ground);
       fn.visible = false;
       scene.add(fn);
-      voxelLevel({ route, palette: nativePalette(false), function: VOXEL_BRICKS.name, objects: nativeObjects(seed), debris: !!debris, ...(dust ? { occupancy: 0.2 } : {}) });
+      voxelLevel({ route, palette: nativePalette(false), function: VOXEL_BRICKS.name, objects: nativeObjects(seed), debris: !!debris, physics, ...(maxBodies === undefined ? {} : { maxBodies }), ...(dust ? { occupancy: 0.2 } : {}) });
       if (flying) scene.add(flying.mesh);
       if (dust) scene.add(dust.node);
       if (cloud) scene.add(cloud);
-      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}`, width: 1280, height: 720, preset: "cinematic" as const } };
+      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}${physics ? "" : "-lattice"}`, width: 1280, height: 720, preset: "cinematic" as const } };
     },
     frame(f) {
       frames++;
       flying?.step(f.dt);
       const b = voxelFrame(f.dt) as VoxelFrame; // (the level is loaded by the first frame)
       if (b.batches > 0 || (b.settled ?? 0) > 0) console.log(`batch ${JSON.stringify(b)}`);
+      if (physics && frames % 30 === 0) {
+        const bodies = voxelBodies();
+        if (bodies.length > 0 || hadBodies) console.log(`bodies ${JSON.stringify({ frame: frames, n: bodies.length, asleep: bodies.filter((x) => x.asleep).length, voxels: bodies.reduce((n, x) => n + x.voxels, 0), largest: bodies.reduce((n, x) => Math.max(n, x.voxels), 0) })}`);
+        hadBodies = bodies.length > 0;
+      }
       const s = f.state.scenario;
       if (!s) return;
       const t = (frames - f.state.started) / 60; // frames since the scenario began, at 60 per second of frame script
@@ -305,6 +318,24 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           const e = voxelCarve({ box: [x - 15, y + 0.5, z - 6, x + 15, y + 1.5, z + 24] });
           console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
         }
+      } else if (s === "shatter" || s === "shatter-dense") {
+        const [x, y, z] = at[2 * 62];
+        if (t >= 1 && last < 0) {
+          last = 0;
+          const e = voxelCarve({ box: [x - 15, y + 0.5, z - 6, x + 15, y + 1.5, z + 24] });
+          console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
+        }
+        // (From 0.3 m above the road up: the cuts go through what stands and what fell, not into the ground.)
+        // Cuts 0.2 m thick, `gap` m apart, `rate` a second: across the road's 30 m, then along them.
+        const [gap, rate] = s === "shatter" ? [1, 10] : [0.5, 20];
+        const n = 30 / gap, k = Math.floor((t - 3) * rate) + 1;
+        if (t >= 3 && k <= 2 * n && k !== last) {
+          last = k;
+          const along = k <= n;
+          const p = (along ? x - 15 : z - 6) + (along ? k : k - n) * gap - gap / 2;
+          const e = voxelCarve({ box: along ? [p - 0.1, y + 0.3, z - 6, p + 0.1, y + 40, z + 24] : [x - 15, y + 0.3, p - 0.1, x + 15, y + 40, p + 0.1] });
+          console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
+        }
       } else if (s === "crater") {
         // Ground spot 62: 9 m ahead on the road.
         if (t >= 1 && last !== 0) {
@@ -331,9 +362,15 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       show: (tx) => { tx.state.scenario = "show"; tx.state.started = frames; last = -1; },
       crater: (tx) => { tx.state.scenario = "crater"; tx.state.started = frames; last = -1; },
       fell: (tx) => { tx.state.scenario = "fell"; tx.state.started = frames; last = -1; },
+      shatter: (tx) => { tx.state.scenario = "shatter"; tx.state.started = frames; last = -1; },
+      "shatter-dense": (tx) => { tx.state.scenario = "shatter-dense"; tx.state.started = frames; last = -1; },
       topple: (tx) => { tx.state.scenario = "topple"; tx.state.started = frames; last = -1; },
       // The level's hash, logged (`hash <16 hex digits>`): the same events at the same frames give the same one.
-      hash: () => { console.log(`hash ${voxelHash()} frame ${frames}`); },
+      // With physics, the physics world's hash too (the bodies' poses and velocities, bit for bit).
+      hash: () => {
+        const world = physics ? (JSON.parse((globalThis as { __engine?: { physics?: (op: string, a: object) => string } }).__engine?.physics?.("hash", {}) ?? "{}") as { hash?: string }).hash : undefined;
+        console.log(`hash ${voxelHash()}${world ? ` physics ${world}` : ""} frame ${frames}`);
+      },
     },
   });
 }

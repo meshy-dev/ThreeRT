@@ -4048,9 +4048,180 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - Bodies at rest on one another have no GPU number (no game makes a pile yet): step 8's first measurement.
      - Under software traversal a rigid group's pose still rebuilds the scene every frame (`zero-day-animated`:
        2.6 s a frame), as before step 7b.
-8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
-   - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
-   - Then the decision: keep Rapier or write our own.
+8. **[engine] Voxel bodies.** The level collides, and what an edit leaves hanging on nothing is a rigid body (it
+   replaces step 6's fall through the lattice). Native first: the acceptance is under hardware traversal; software
+   traversal has to work (bodies are units, no rebuild) and gets one set of figures; a browser is not part of this
+   step. Design: docs/VOXEL.md "Voxel bodies"; docs/RUNTIME.md "Physics" (the voxel shape, the engine's own bodies).
+   - Scope:
+     - **The collision shape**, on step 7's `Shape`: parry's `Voxels`, for the level's objects (fixed) and for the
+       loose parts (moving), chosen against a compound of boxes, a triangle mesh and a convex hull by measurement.
+     - **The level collides by default**: every object a fixed collider of its voxels, edited by the cells an edit
+       cleared; rays and shape casts of the physics world meet it. `physics: false` on the level is step 6 as it
+       was; `collide: false` on an object leaves it out. Ordinary meshes still declare `physics`.
+     - **Loose parts are rigid bodies**: mass from their voxels and each palette entry's density; they tumble, land
+       on the level and on one another, and sleep; they move as instances (no vertex is written again).
+     - **Debris**: parts under 8 voxels stay the game's particles; at most 300 voxel bodies (`maxBodies`). At the
+       cap a new part takes the place of the body that matters least (asleep before awake, then the fewest voxels,
+       then the oldest; never one the same edit carved or made: a body being cut keeps its larger part), if that
+       body is no larger than the part; else the part is debris. What goes is debris.
+     - **A body stays a body** when it has settled (asleep it costs no tick; turned, it does not fit the lattice,
+       and writing it back would lose voxels). The cap bounds them.
+     - **Edits reach bodies**: a carve cuts a body where it is, as it is turned; what is cut off is a body of its own.
+     - **Determinism and robustness** as in step 7: wasm32 builds in CI; a class of voxel worlds in `check::cases`
+       and the adapter's own script, native against wasm32; a fuzz of calls on voxel shapes.
+   - Acceptance (hardware traversal): a 4 m explosion's frame ≤ 50 ms and 60 fps after it; a building cut loose
+     falls, lands and sleeps within 16.7 ms a frame; about a hundred bodies with room to spare, and the number at
+     which 60 fps is lost; the CPU split (physics step, placing, meshes, colliders) recorded; scenes without voxel
+     bodies unchanged (the catalog's bytes, `renderer/shaders`, step 7's physics tests and hello world).
+   - **Status: done (branch `voxel-bodies`, 2026-11-11), measured natively under hardware traversal on this Mac
+     (M5 Pro; the benchmark level at 1280 x 720 at 0.5; tables in docs/VOXEL.md "Voxel bodies").**
+     - Acceptance, as measured:
+       - **A 4 m explosion's frame: 18.4 ms of CPU** (walls and ground), **21.9 ms** for a 4 m crater of 140,785
+         voxels (target 50 ms); the frames after: CPU p50 5.2 ms, GPU 5.2 ms.
+       - **A building cut loose** (the cut of 30 x 30 m: 20 parts, the largest 32,680 voxels): while they fall and
+         land a frame's CPU is p50 5.3–5.5 ms, p95 8.1 ms, none over 16.7 ms; the physics step 0.28 ms, at worst
+         0.52 (step 6: 26–28 ms a frame for as long as it fell); 17 of 20 asleep after 9.5 s.
+       - **About a hundred bodies: yes, with room to spare.** Natively the world is stepped by Rapier's parallel
+         solver on 4 threads (decided 2026-11-11 on these figures). The number of bodies moving at once at which
+         60 fps is lost (large ones: slabs and columns of buildings in one heap): **about 450–500 on 4 threads,
+         about a hundred on one** (`THREERT_PHYSICS_THREADS=1`: at 100–149 moving the step is 10–14 ms and a
+         frame's CPU 14–18 ms; from 150 every frame is over). What takes the frame is Rapier's step; placing the
+         parts is under 0.2 ms, the GPU's frame does not change. The bodies are the same in every frame either way.
+       - **The cap is 300 bodies, measured**: a scenario that makes more than 500 holds the count at the cap, and
+         with every one of 300 in the air a frame's CPU is 10.7–10.9 ms at the median, 12.8–13.2 at p95, and no
+         frame of 1,094 is over 16.7 ms on account of the physics (two runs; one stray frame each with a step under
+         1 ms). At 400 the frame holds in two runs of four and goes over in the others on 2 and 3 frames of 1,094
+         (17.0–19.3 ms, with 320–400 moving); at 512 a frame is 16.3 ms at the median with all moving, 5 of 22 such
+         frames over. With the parallel solver off the cap to set is 128 (about at the frame: 7 frames of 1,095
+         over, the worst 22.0 ms).
+       - The CPU split of an edit (the 4 m crater: carve 2.4, colliders 6.5, meshes 7.5, commit 3.9 ms; the cut:
+         carve 21.6, colliders 15.3, meshes 5.3, parts and bodies 27.8, commit 37.7, the first physics step 5.6).
+       - Scenes without voxel bodies: the catalog's 25 bundles are byte-identical to main's under software
+         traversal; `renderer/shaders` has no diff; `test-render` 173 of 173 (the 170 of main and three new
+         `voxel/cut-body*`, a fourth since); step 7's physics tests and hello world give the numbers they gave.
+         The perf smoke was not measured (it refused: the GPU was 20 % busy with other applications).
+       - Software traversal (works, not optimised): bodies are units added and moved in place, no rebuild, guard
+         count 0; the 4 m explosion's frame 18.6 ms, the cut's 194 ms (the parts' trees are built on the CPU),
+         after it a frame's CPU p50 8.1 ms, none over 16.7 ms.
+       - Determinism: 300 voxel worlds and the adapter's script end in the same bits natively and in wasm32 (the
+         physics job in CI); step 7's worlds end in the bits they did; the level run twice through explosions, the
+         cut and a crater gives the same level and physics hashes.
+     - Done: `Shape::Voxels`, `Physics::edit_voxels` and the world's own ray at voxel shapes (physics-core); the
+       bridge's engine bodies and colliders (ids from 2^30 up: scene code names them and cannot make or remove
+       them); `voxel_core::Edit::cleared` and `Level::take`; in renderer/src/voxel.rs the level's colliders, the
+       bodies, their sync, the carve of bodies, the cap; `voxelBodies()` and `voxelImpulse` in `packages/voxel`;
+       physics hits on the engine's colliders carry their ids. The time the engine spends inside a voxel call is
+       not counted against the frame script's 50 ms (a cut through a hundred bodies takes that long, and the
+       script was ended after it).
+     - **From scene code** (`voxel/cut-body-push`, a live test): a ray of `Raycaster.intersectPhysics` meets the
+       level (`hit.object` is `engineColliders`, whose `physics` is null; no `body`) and a voxel body (`body`), and
+       `voxelImpulse(hit.body, ...)` throws it. Writing that test found two faults the Rust tests had stepped
+       past: the scene package asked the engine's world only once a scene object with `physics` existed (a voxel
+       level makes none: `voxelLevel` now binds the queries), and an id read out of an answer came back from the
+       script engine as a double and was refused (the bridge reads a whole number as the id it is).
+     - Three faults of Rapier 0.36 / parry 0.31 with voxel shapes, each with a test and a way round in physics-core
+       (none patches the crates): the solver panics on a ball against voxels (parry's function for that pair keeps
+       no workspace; the pair now goes through its general voxel function); parry's ray misses voxels along a
+       lattice plane (the world walks the cells itself); a shape edited where it sits keeps stale contacts (the
+       collider is taken out and put back).
+     - **A fourth, in the parallel step: it can hang for good** (found by the review's fuzz on this PR's head,
+       2026-11-12: one run of fifty; a world of six bodies stepped back to back hangs after 30,000 to 500,000
+       steps). Rapier hands the broad phase's tree optimisation to `rayon::spawn` and later waits for it with a
+       channel's blocking `recv`. Stepped on a pool's worker, the job is on that worker's own deque and the wait
+       is outside rayon, so only another worker can run it, and rayon does not promise one comes: waking for a
+       job in a worker's deque is best effort (no store-to-load barrier between the push and the pusher's read
+       of the sleep counters; shown by adding one fence to a scratch rayon-core: 15 million steps without a hang
+       against a hang in five runs of five). When every other worker is just falling asleep they all miss it.
+       Rapier's own `configure_thread_pool` has the same hole. **Way round, in `renderer/src/physics.rs`
+       `in_pool`, nothing patched**: the thread that waits for the step injects an empty job into the pool every
+       0.5 ms until the step returns; an injected job always wakes a worker, and a woken worker looks through
+       every deque. A hung step costs 0.5 ms once. Why nothing met it before: the determinism check steps from a
+       thread outside the pool (the job is then injected, the path that always wakes), and the level's frames are
+       milliseconds apart (the workers are long asleep and are woken outright); it takes steps microseconds
+       apart. **Checks, on the CPU**: `renderer/examples/physics_fuzz.rs` (the fuzz, and the six-body world
+       stepped back to back, with a watchdog: a step that does not return in 30 s is a failure): 500 fuzz runs in a row and 20 of its
+       many-bodies variant with every check held, and 26 million back-to-back steps, none hung; with
+       the kick off (`THREERT_PHYSICS_KICK=off`) the stress hangs in three runs of three. CI's renderer job runs it
+       on the physics' threads as the renderer steps: the recorded hashes at 2 and 4 threads (the determinism
+       check steps from outside any pool, which is not the renderer's path), 10 fuzz runs and a million steps.
+     - **What the same review found besides, fixed here** (`out/review-24/review.md`):
+       - The time budget of a script: each voxel call moved the deadline by a millisecond at least, so a frame
+         script looping on cheap calls (or on ones that throw) never ended. The engine's time is now lent as
+         measured and at most 250 ms an entry (the 30 m cut, the largest single edit measured, is 115 ms); a voxel
+         call made after the deadline throws at once (the script engine checks its deadline only every so many
+         operations, and a loop of calls of some milliseconds makes few). Edits and frames asked for before the
+         level is loaded are at most 4,096 (they are outside the script engine's memory limit).
+       - A hole in the level's collider where a crater crosses a terrain tile's border: a neighbour that lost cells
+         of its own had its shell made whole only around those, not over the crater the other tile bared. Each
+         object is now made whole over its own box and every carved neighbour's (checked against brute force, with
+         the review's rays).
+       - At the cap, a cut retired the remainder of the body it was cutting and kept the chip (no body was
+         asleep, so the oldest was the one being cut): every id gone after a cut through 400 bodies. Now nothing the
+         edit carved or made is retired while it runs; the body that goes is the one that matters least (asleep,
+         then fewest voxels, then oldest), and only for a part at least as large; else the part is debris.
+       - A carve took bodies with another shape than the level: the radius now clamped to 128 voxels and to 0
+         below as the level's, a box whole for every class it reaches (it was shrunk by the class's share).
+       - Smaller: the physics' threads not made is a sequential step, said once (it was a panic every step); an
+         unknown `THREERT_PHYSICS_THREADS` is said; a level collider the physics took out on an error is
+         forgotten; no `powi` in a body's density; CI's physics job runs on changes to `api.rs` and `world.rs`.
+   - Open:
+     - **The parallel solver's independence of the thread count is checked as far as this, and no further**:
+       on this machine at 1, 2, 4, 8 and 15 threads (the determinism check's script and 1,500 random worlds of five
+       kinds, each small; heaps of up to 1,000 voxel pieces; 20,000 voxel worlds without a panic: these on the
+       process's pool, stepped from outside it), on the physics' own threads as the renderer steps (the script and
+       the 1,500 worlds again, and the voxel adapter's script, at 1, 2, 4 and 8 threads; the benchmark level's
+       hashes through explosions, the cut and a crater, equal to the sequential build's), and in CI on Linux at 2 and 4 threads on every change to the physics (native parallel
+       = native sequential = wasm32 = recorded; 7–11 s of the physics job with a warm cache). Not checked: other
+       machines and CPU families beyond CI's, worlds with joints and thousands of bodies at once, long runs of
+       large heaps. wasm32 stays sequential (no threads here), and the bits agree. Step 9's checkpoints are what
+       would find a difference in the field.
+     - **The cap of 300 is this machine's** (an M5 Pro's four threads): a slower machine holds fewer at 60 fps, and
+       nothing adapts it. A level can set `maxBodies`. Asleep, bodies cost nothing, and a game's bodies seldom all
+       move at once.
+     - **A large cut's own frame is over 50 ms**: 117 ms for the cut of 30 x 30 m (the scene's commit of the new
+       parts' meshes 38 ms, the parts' meshes and bodies 28, the carve 22, the colliders 15); a cut through a heap
+       of a hundred bodies 19–21 ms (p95 32–36). Explosions are within the target, which is what the acceptance
+       names (as in step 6). Not split over frames; not in this step.
+     - **A voxel part that glows rebuilds the scene once when it comes loose** (a driven mesh that emits is not
+       placed as an instance: the build flattens it; seen in `voxel/cut-body-live`, whose posts glow). The
+       daylight level has none; a level with lamps at night does.
+     - **The level's colliders cost 5.4 s of load and 303 MiB** on the benchmark level (the first frame comes
+       after 10.7 s with them, 5.5 s without). **An offline still pays the 5.4 s too** (16.5–19.6 s for a still of
+       the level against 11.1–12.2 s before), though nothing in it collides: not changed in this step. natively this is a fixed cost of
+       every level of that size. They are a shell of the cells within 4 of the open (every solid cell was 26 s and
+       1.3 GiB), and objects of one file share one shape until one is edited (before that: 6.9 s and 455 MiB).
+       What is left is the terrain's 1,600 tiles, a shape each. Decided against (2026-11-11): a shell of 2 cells
+       (a body would get through it at 12 m/s), and building them after the first frame (a level whose first
+       seconds have no collision behaves by its load time).
+     - The script surface is `voxelBodies()`, `voxelImpulse` and the ids physics hits report; the rest is step 10's
+       (voxel bodies as objects with `.physics`, paint and added voxels on bodies, mass by cell).
+     - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
+       jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
+     - **A large loose part's collider holds every cell** (the level's are shells): a solid block of 200³ cut
+       loose is an edit of 2.8 s and 619 MB, and past 2²⁴ cells the part is refused and becomes debris (a large
+       building cut loose whole would vanish, not fall). Measured by the review; a shell for bodies (they are hit
+       from every side, so 4 cells all round), or a split into pieces, is for when a level has such parts.
+     - Scene code can put colliders of its own on the engine's voxel bodies (a design question: step 10's voxel
+       bodies as objects); scene code's and the engine's bodies and colliders share one count of the physics
+       world's limits (a level with `maxBodies: 20000` leaves scripts none); every part cut off a body leaves an
+       empty slot in the level's object list for good.
+     - Tree crowns cost more than buildings: five crowns of 10,616–18,894 voxels moving step in 1.6–2.2 ms (leaves
+       make many contacts), a building part of 32,680 in under 0.5 ms. They sleep 5–10 s after the cut.
+     - Software traversal is not optimised (the cut's frame 194 ms). A browser: a small voxel scene with bodies in
+       Chrome is not run in this step.
+     - The faults above that are parry's and Rapier's own are to be reported upstream (the step's hang: a draft
+       with a reproduction of 60 lines on Rapier alone, not sent). **The kick is a way round, not a cure**: it
+       rests on two things rayon does today (an injected job wakes a sleeping worker; a worker looks through
+       every deque before it sleeps). To be dropped when Rapier joins that pass without blocking a worker; the
+       stress with `THREERT_PHYSICS_KICK=off` says when.
+   - Then the decision: keep Rapier or write our own. What this step measured for it: Rapier does what the step
+     needs on both ends (the same bits natively and in wasm32, and on several threads; voxel against voxel
+     resting, stacking and sleeping on a level of 61.6 M collider cells; edits of a shape by its cells in 0.1 ms),
+     with the four faults above found and worked round without patching it (the fourth, the hang of the parallel
+     step, by a review's fuzz after this step's own checks had passed). Its cost is the step: about 0.1 ms a large body
+     that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver, now the native
+     default, is worth a factor of 3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
+     to bring the determinism, the sleeping and the voxel-voxel contacts with it.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
    - Acceptance: a room replayed from its log gives bit-identical world data.
@@ -4058,6 +4229,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
      period the hash of the world data and of the physics world (`Physics::hash`) is logged, and a node replaying
      compares. The ends are not assumed to agree bit for bit: a difference is found at the first checkpoint after it
      and placed between two checkpoints.
+   - **The voxel world now depends on the physics' determinism** (step 8): where a loose part comes to rest, and so
+     which voxels a later edit carves from it, is the physics world's doing. A replay needs the physics' bits to
+     agree wherever the voxels' must; the checkpoints above cover both hashes, and step 8's checks hold native
+     against wasm32 for voxel shapes.
    - **World handlers' changes are commands.** What `on` handlers do to the scene (step 7) is not in the game state;
      it all leaves the script through the scene binding's sync, and that is where it is logged and replayed from. No
      other way out of a world handler may be added.
@@ -4099,6 +4274,11 @@ benchmark level. The order follows the dependencies; a step that meets a further
        command's fixed-point shape (step 6).
 10. **[engine] The game API and effects.**
     - `packages/voxel`: voxel edits, bodies, joints, lights, scene queries and effects.
+    - **Voxel bodies as objects** (left by step 8, decided 2026-11-11): a loose part is today a body id
+      (`voxelBodies()`, a physics hit's `body`, `voxelImpulse`), drawn by objects scene code did not make. How it
+      appears to a game in three's style (an object with `.physics`: `applyImpulse`, `getLinearVelocity`, contact
+      events, joints between voxel objects) is designed here. With it: paint and added voxels reaching bodies, and
+      a body's mass spread by its cells' own densities (it is their mean today).
     - Fire and smoke on the existing volume and particle paths.
     - Vehicles and ropes on step 7's joints.
     - Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.

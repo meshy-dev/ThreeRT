@@ -21,6 +21,13 @@ pub const MAX_HULL_POINTS: usize = 4096;
 pub const MAX_TICKS: u32 = 5;
 /// The most hits one ray reports.
 pub const MAX_HITS: usize = 256;
+/// Ids from here up are the engine's own bodies and colliders (the voxel world's: ROADMAP § 6 step 8). Scene code
+/// cannot make or remove one, and can name one wherever a call takes a body or a collider (an impulse, a velocity, a
+/// joint's end, a query's `skip`); hits and contacts report them like any other.
+pub const ENGINE_IDS: u32 = 1 << 30;
+/// The most bodies and colliders the engine itself makes (a level's objects are a collider each).
+pub const MAX_ENGINE_BODIES: usize = 20_000;
+pub const MAX_ENGINE_COLLIDERS: usize = 40_000;
 /// Floats a slot of `poses()` holds: position xyz, rotation xyzw.
 pub const POSE: usize = 7;
 
@@ -103,8 +110,14 @@ fn num(a: &Value, key: &str, default: f32) -> Result<f32, String> {
     }
 }
 
+/// A whole number from 0 to `u32::MAX`, however the caller's JSON wrote it. (A script engine has one kind of number:
+/// an id it read out of an answer, a hit's `body`, comes back as `1073741837.0`.)
+fn whole(v: &Value) -> Option<u32> {
+    v.as_u64().or_else(|| v.as_f64().filter(|x| *x >= 0.0 && *x <= u32::MAX as f64 && x.fract() == 0.0).map(|x| x as u64)).filter(|&x| x <= u32::MAX as u64).map(|x| x as u32)
+}
+
 fn id(a: &Value, key: &str) -> Result<u32, String> {
-    a[key].as_u64().filter(|&x| x <= u32::MAX as u64).map(|x| x as u32).ok_or_else(|| format!("physics: {key} must be an id"))
+    whole(&a[key]).ok_or_else(|| format!("physics: {key} must be an id"))
 }
 
 fn opt_id(a: &Value, key: &str) -> Result<Option<u32>, String> {
@@ -184,7 +197,7 @@ impl Bridge {
                 let vertices = floats("vertices")?;
                 let idx = s["indices"].as_array().filter(|a| a.len() % 3 == 0 && a.len() / 3 <= limits::MAX_MESH_TRIANGLES).ok_or_else(|| format!("physics: a trimesh needs indices, three a triangle, at most {} triangles", limits::MAX_MESH_TRIANGLES))?;
                 // (An index past u32 is refused, not cut: 4294967296 is not vertex 0.)
-                let index = |x: &Value| x.as_u64().filter(|&i| i <= u32::MAX as u64).map(|i| i as u32);
+                let index = whole;
                 let indices = idx.chunks(3).map(|t| Some([index(&t[0])?, index(&t[1])?, index(&t[2])?])).collect::<Option<Vec<_>>>().ok_or("physics: trimesh indices must be whole numbers below 2^32")?;
                 Shape::Trimesh { vertices, indices }
             }
@@ -207,6 +220,9 @@ impl Bridge {
                     return Err(format!("physics: more than {MAX_BODIES} bodies"));
                 }
                 let bid = id(a, "id")?;
+                if bid >= ENGINE_IDS {
+                    return Err(format!("physics: ids from {ENGINE_IDS} up are the engine's"));
+                }
                 if self.bodies.contains_key(&bid) {
                     return Err(format!("physics: body {bid} exists"));
                 }
@@ -271,6 +287,9 @@ impl Bridge {
                     return Err(format!("physics: more than {MAX_COLLIDERS} colliders"));
                 }
                 let cid = id(a, "id")?;
+                if cid >= ENGINE_IDS {
+                    return Err(format!("physics: ids from {ENGINE_IDS} up are the engine's"));
+                }
                 if self.colliders.contains_key(&cid) {
                     return Err(format!("physics: collider {cid} exists"));
                 }
@@ -330,6 +349,9 @@ impl Bridge {
             "remove" => {
                 // (All three read before any is removed: a call that is refused changes nothing.)
                 let (body, collider, joint) = (opt_id(a, "body")?, opt_id(a, "collider")?, opt_id(a, "joint")?);
+                if body.is_some_and(|b| b >= ENGINE_IDS) || collider.is_some_and(|c| c >= ENGINE_IDS) {
+                    return Err("physics: the engine's bodies and colliders are not scene code's to remove (a voxel object's go with its voxels)".into());
+                }
                 if let Some(b) = body.and_then(|b| self.bodies.get(&b).copied()) {
                     self.forget_body(b);
                 }
@@ -451,6 +473,91 @@ impl Bridge {
             "faults" => Value::Array(std::mem::take(&mut self.faults).into_iter().map(|(b, o, left, why)| json!({ "body": b, "object": o, "kind": if left { "leftWorld" } else { "nonFinite" }, "reason": why })).collect()),
             other => return Err(format!("physics: unknown call \"{other}\"")),
         })
+    }
+
+    /// A body of the engine's own (id from `ENGINE_IDS` up): it drives no scene object through the bridge (the engine
+    /// places what it stands for: `engine_pose`).
+    pub fn engine_body(&mut self, id: u32, d: &BodyDesc) -> Result<(), String> {
+        if id < ENGINE_IDS || self.bodies.contains_key(&id) {
+            return Err(format!("physics: engine body {id} exists or is below {ENGINE_IDS}"));
+        }
+        if self.bodies.range(ENGINE_IDS..).count() >= MAX_ENGINE_BODIES {
+            return Err(format!("physics: more than {MAX_ENGINE_BODIES} engine bodies"));
+        }
+        let b = self.core.add_body(d)?;
+        self.bodies.insert(id, b);
+        self.body_ids.insert(b, id);
+        self.faulted.remove(&id);
+        Ok(())
+    }
+
+    /// A collider of the engine's own, on one of its bodies or fixed in the world.
+    pub fn engine_collider(&mut self, id: u32, body: Option<u32>, d: &ColliderDesc) -> Result<(), String> {
+        if id < ENGINE_IDS || self.colliders.contains_key(&id) {
+            return Err(format!("physics: engine collider {id} exists or is below {ENGINE_IDS}"));
+        }
+        if self.colliders.range(ENGINE_IDS..).count() >= MAX_ENGINE_COLLIDERS {
+            return Err(format!("physics: more than {MAX_ENGINE_COLLIDERS} engine colliders"));
+        }
+        let owner = match body {
+            Some(b) => Some(*self.bodies.get(&b).ok_or_else(|| format!("physics: unknown body {b}"))?),
+            None => None,
+        };
+        let c = self.core.add_collider(owner, d)?;
+        self.colliders.insert(id, c);
+        self.collider_ids.insert(c, (id, body));
+        Ok(())
+    }
+
+    /// An engine voxel collider's cells changed (`Physics::edit_voxels`). Returns the cells it has; with none left
+    /// it is gone, its id with it.
+    pub fn engine_edit_voxels(&mut self, id: u32, clear: &[[i32; 3]], fill: &[[i32; 3]]) -> Result<usize, String> {
+        let c = *self.colliders.get(&id).filter(|_| id >= ENGINE_IDS).ok_or_else(|| format!("physics: unknown engine collider {id}"))?;
+        let left = self.core.edit_voxels(c, clear, fill);
+        if !self.core.has_collider(c) {
+            self.colliders.remove(&id);
+            self.collider_ids.remove(&c);
+        }
+        left
+    }
+
+    /// An engine body with its colliders and joints, or an engine collider, gone. (Unknown ids: nothing.)
+    pub fn engine_remove(&mut self, body: Option<u32>, collider: Option<u32>) {
+        if let Some(b) = body.filter(|&b| b >= ENGINE_IDS).and_then(|b| self.bodies.get(&b).copied()) {
+            self.forget_body(b);
+        }
+        if let Some(c) = collider.filter(|&c| c >= ENGINE_IDS).and_then(|c| self.colliders.remove(&c)) {
+            self.core.remove_collider(c);
+            self.collider_ids.remove(&c);
+        }
+    }
+
+    /// Where a body is (any body, by its caller's id): position, rotation, and whether it sleeps. None: no such body
+    /// (never made, removed, or taken out by the world after a tick: `faults`).
+    pub fn engine_pose(&self, id: u32) -> Option<([f32; 3], [f32; 4], bool)> {
+        let b = *self.bodies.get(&id)?;
+        self.core.pose(b).map(|(p, q)| (p, q, self.core.sleeping(b)))
+    }
+
+    /// A body's velocities set (the engine's: a part that comes loose keeps moving as what it broke from did).
+    pub fn engine_velocity(&mut self, id: u32, linvel: [f32; 3], angvel: [f32; 3]) -> Result<(), String> {
+        let b = *self.bodies.get(&id).ok_or_else(|| format!("physics: unknown body {id}"))?;
+        self.core.set_velocity(b, Some(linvel), Some(angvel))
+    }
+
+    /// A body's linear and angular velocity.
+    pub fn engine_velocity_of(&self, id: u32) -> Option<([f32; 3], [f32; 3])> {
+        self.core.velocity(*self.bodies.get(&id)?)
+    }
+
+    /// The memory of the world's voxel shapes, bytes (`Physics::voxel_bytes`).
+    pub fn voxel_bytes(&self) -> usize {
+        self.core.voxel_bytes()
+    }
+
+    /// A voxel collider's solid cells, counted (None: none, or no voxel shape).
+    pub fn engine_voxels(&self, id: u32) -> Option<usize> {
+        self.core.voxels(*self.colliders.get(&id)?)
     }
 
     /// The world's body of the caller's id in `a[key]`.
@@ -765,10 +872,15 @@ mod tests {
         let before = s.placed;
         assert_eq!(run(&mut b, &mut s, 30), 0);
         assert_eq!(s.placed, before);
-        // An impulse wakes it; it moves again.
-        b.call(&mut s, "impulse", &json!({ "body": 2, "impulse": [0, 300, 0] })).unwrap();
+        // An impulse wakes it; it moves again. (The id as a script engine hands back one it read from an answer: a
+        // whole number written as a double. One that is not whole, or negative, or past 2^32, is no id.)
+        b.call(&mut s, "impulse", &json!({ "body": 2.0, "impulse": [0, 300, 0] })).unwrap();
         assert!(run(&mut b, &mut s, 10) >= 10);
         assert!(s.at[&2].0[1] > 0.5);
+        for bad in [json!(2.5), json!(-2.0), json!(4294967296.0), json!("2"), json!(f64::MAX)] {
+            let e = b.call(&mut s, "impulse", &json!({ "body": bad, "impulse": [0, 300, 0] })).unwrap_err();
+            assert!(e.contains("must be an id"), "{bad}: {e}");
+        }
     }
 
     /// Scene code moves a body's object: a dynamic body is there at once with its velocity; a kinematic one goes there

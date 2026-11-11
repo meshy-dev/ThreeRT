@@ -338,6 +338,186 @@ along the camera path, 2 rounds with an A/A; memory from an offline frame.
   colours are for palettes of many colours in one material: a `.vox` model's up to 255 colours of one material are one
   mesh instead of up to 255, and the browser's three.js draws one mesh per class.
 
+### Voxel bodies (ROADMAP § 6 step 8; 2026-11-11)
+
+The level collides and what comes loose is a rigid body. Code: `renderer/physics-core` (`Shape::Voxels`,
+`Physics::edit_voxels`), `renderer/voxel-core` (`Edit::cleared`, `Level::take`), `renderer/src/voxel.rs` (the
+level's colliders, the bodies). First what the CPU costs on its own (this Mac, release builds), then the level on
+the GPU ("Measured on the GPU" below).
+
+**The shape** is parry's `Voxels` (8³ chunks, a byte a cell, each cell knowing its neighbours), for the fixed
+level and for the moving parts. Measured against the others on Rapier (`physics-core/examples/voxel_shapes.rs`: a
+ground of 427 k cells of 0.1 m; pieces of 6³ cells with holes, about 200 solid):
+
+| the fixed ground | build | memory | an edit of 2,080 cells |
+| --- | --- | --- | --- |
+| voxels | 26 ms | 1.3 MiB | 0.10 ms, in place |
+| a compound of boxes (cells merged greedily) | 2.9 ms | 0.3 MiB | 3.7 ms: the object built again |
+| a triangle mesh of the faces | 107 ms | 53.7 MiB | 105 ms: built again |
+
+| 100 pieces dropped in a heap: moving / fixed | a tick while they fall: mean, worst | asleep after 15 s |
+| --- | --- | --- |
+| voxels / voxels | 1.38, 4.7 ms | 100 |
+| boxes / voxels | 1.66, 5.9 ms | 98 |
+| hull / voxels | 0.44, 2.4 ms | 29 |
+| voxels / triangle mesh | – | 0: all fell through the ground |
+| boxes / boxes | 0.46, 1.5 ms | 94 |
+
+Voxels against voxels: 400 pieces 7.1 ms a tick while they fall (at worst 19), 1,000 pieces 22.6 ms (52); asleep,
+0. The same bits natively and in wasm32.
+
+**On several threads.** Natively the world is stepped by Rapier's parallel solver with `enhanced-determinism`
+(physics-core's `parallel`; the renderer's native build has it on, in a pool of the physics' own: 4 threads, or the
+machine's performance cores when fewer; `THREERT_PHYSICS_THREADS` sets another count, 1 is sequential). wasm32 is
+sequential. The same heaps, a tick while they fall, mean and worst, ms:
+
+| pieces | sequential | 2 threads | 4 | 8 | 15 |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 0.10, 0.99 | 0.08, 0.42 | 0.08, 0.41 | 0.09, 0.48 | 0.08, 0.59 |
+| 100 | 1.24, 3.84 | 0.74, 2.27 | 0.49, 1.71 | 0.47, 2.08 | 0.51, 2.04 |
+| 400 | 6.69, 17.75 | 3.72, 9.26 | 2.25, 6.12 | 1.68, 5.32 | 1.52, 6.58 |
+| 1,000 | 20.48, 50.81 | – | 6.27, 15.44 | 4.29, 12.76 | 3.66, 13.67 |
+
+Each row ends in the same bits at every thread count and sequentially (a hash of every piece's pose and velocity
+after 900 ticks). **That the result does not depend on the thread count is what we checked ourselves, and this is
+how far:**
+
+- On this machine (M5 Pro, 15 cores), at 1, 2, 4, 8 and 15 threads: the determinism check's script and its 1,500
+  random worlds (hulls, bodies of several colliders, joints with limits and motors, CCD on a triangle mesh with
+  kinematic bodies and queries, voxel lumps on voxel ground with edits: each a few to a few dozen bodies, 90
+  ticks); heaps of 10, 100, 400 and 1,000 voxel pieces on voxel ground, 900 ticks; 20,000 random voxel worlds
+  without a panic.
+- In CI (Linux, x86-64), on every change to the physics: the script and the 1,500 worlds at 2 and 4 threads
+  against the sequential native build, which is held to wasm32 and to the recorded hashes
+  (`tools/physics-determinism.ts`: native parallel = native sequential = wasm32 = recorded).
+- The renderer's own build, stepped as it steps (on the physics' own threads): the script, the 1,500 worlds and
+  the voxel adapter's script at 1, 2, 4 and 8 threads; the benchmark level run twice through explosions, the 30 m
+  cut and a crater gives the level and physics hashes the sequential build gave; the same bodies moving in every
+  frame of four destruction scenarios, sequential against 4 threads.
+- **Not checked**: other machines and other CPU families at thread counts beyond these (Rapier promises it; it also
+  promised the cross-platform bits that needed a patch to glamx); worlds with joints and thousands of bodies at once
+  (the worlds with joints here are small; the large ones have no joints); long runs (minutes) of large heaps.
+
+(Rapier's contact recycling stays on: with it off a heap of 400 pieces does not come to rest, 79 asleep after
+15 s.)
+
+**The parallel step can hang, and what the renderer does about it.** Rapier 0.36.1 hands the broad phase's tree
+optimisation to `rayon::spawn` and waits for it with a blocking `recv`. Stepped on a pool's worker (which is how
+the renderer steps, and how Rapier's own `configure_thread_pool` does) the job sits on the stepping worker's own
+deque, and if every other worker happens to be falling asleep at that instant none takes it: the step never
+returns. It needs steps microseconds apart (ticks back to back: a catch-up, an offline settle, a fuzz); a world of
+six bodies stepped back to back hangs after 30,000 to 500,000 steps, the review's fuzz in one run of fifty. The
+renderer's wait for a step therefore injects an empty job into the pool every 0.5 ms until the step is back
+(`renderer/src/physics.rs` `in_pool`): a worker wakes for it and takes the stranded job on its way. Neither crate
+is patched. `renderer/examples/physics_fuzz.rs` is the check (CPU only, with a watchdog): 500 fuzz runs in a row, 20 of the
+many-bodies variant and 26 million back-to-back steps without a hang; with the kick off the back-to-back world
+hangs in three runs of three.
+
+**The level's colliders.** Every object gets a fixed collider at load; an edit takes out the cells the object lost
+(`Edit::cleared`: by the cells, not by the object's size). A collider holds the object's cells within 4 of a cell
+that is not solid, a shell; an edit brings in the cells it bared, the neighbouring terrain tiles' too. On the
+benchmark level (4,172 objects; 515 M solid cells, 480 M of them the terrain's 1,600 tiles down to the bedrock):
+
+| colliders of | cells | build | memory |
+| --- | --- | --- | --- |
+| every solid cell | 515.3 M | 26.0 s | 1,279 MiB |
+| the shell | 61.6 M | 6.9 s (finding the cells 2.3) | 455 MiB |
+| the shell, objects of one file sharing a shape until one is edited | 61.6 M | **5.4 s** (finding the cells 2.1) | **303 MiB** |
+
+A collider holds its object's own cells and stands by the object's placement, so the 2,572 objects that are no
+terrain, which come from 630 files, have 630 shapes between them (`physics_core::SharedVoxels`); an edit gives the
+edited object cells of its own. What is left is the terrain: 1,600 tiles, whose shells depend on their neighbours,
+a shape each. Natively this is a fixed cost of a level of this size (ROADMAP § 6 step 8, "Open").
+
+**An edit on the level, on the CPU** (`voxel.rs` `voxel_level_physics`; at the foot of the largest building part):
+
+| edit | voxels | all | carve | colliders | meshes | parts and bodies |
+| --- | --- | --- | --- | --- | --- | --- |
+| explosion, 0.5 m | 296 | 5.1 ms | 0.13 | 0.89 | 4.00 | – |
+| 1 m | 2,857 | 6.3 ms | 0.27 | 1.33 | 4.72 | – |
+| 2 m | 19,919 | 9.0 ms | 0.64 | 2.54 | 5.76 | – |
+| 4 m | 144,344 | 19.8 ms | 2.96 | 8.50 | 8.27 | – |
+| the cut of 30 x 30 m, 1 m thick | 577,519 | 124 ms | 25.2 | 43.1 | 42.4 | 12.5: six bodies of 112,889 voxels, the largest 95,694 |
+
+After the cut the physics steps in 0.17 ms a frame (p95 0.44; a frame's physics at worst 2.7 ms) while the parts
+fall and land, all six sleep within five seconds, and then it is 0. In step 6 the same cut cost 26–28 ms a frame for as long as the building fell (its
+vertices written again every frame); now a part moves by its transform.
+
+**A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /
+2,400 / 7,800 kg/m³ unless the entry names one), drawn by driven objects. A carve reaches it through its pose; what
+is cut off is a body of its own. At most 300 at once (`maxBodies`; the number is measured, below). At the cap a
+new part takes the place of the body that matters least: asleep before awake, then the fewest voxels, then the
+oldest, and never one the same edit carved or made (a body being cut keeps its larger part and its id; its chips do
+not push out the bodies the same cut is going through). It does so only if that body has no more voxels than the
+part; else the part itself is debris. A settled body stays a body.
+
+**Measured on the GPU** (this Mac, M5 Pro; hardware traversal unless said; the benchmark level at 1280 x 720 at
+0.5, in lockstep at 1 / 60 s; `games/voxel-level/level-destruction.game.ts`'s scenarios; a frame's GPU time is
+5.2–5.7 ms throughout, its trace 1.8 ms).
+
+| | the edit's frame, CPU | frames after it, CPU p50 / p95 | physics step | bodies |
+| --- | --- | --- | --- | --- |
+| a still level | – | 5.3 ms | 0.01 ms | 0 |
+| explosions of 1, 2, 4 m (`singles`) | 10.5, 10.4, **18.4 ms** | 5.2 ms | – | 0 |
+| a 4 m crater in open ground (140,785 voxels) | **21.9 ms** | 5.2 ms | – | 0 |
+| the cut of 30 x 30 m (`fell`: 46,469 voxels, 20 parts) | 116.7 ms | **5.3–5.5 / 8.1 ms, none over 16.7** | p50 0.28, at worst 0.52 ms | 20 (the largest 32,680 voxels); 17 asleep after 9.5 s |
+| eight trees cut at the trunk (`topple`) | 6.9–14.9 ms | 5.5–7.2 / 8.7 ms | 2.25 ms while five crowns move | 5 (10,616–18,894 voxels); four asleep 5–6 s after the last cut, the fifth after 10 s (the CPU's run of the same cuts) |
+| 7 explosions a second for 10 s (`sustained`) | p50 9.2, p95 13.4 ms | – | at worst 1.35 ms | 2 |
+| an explosion a frame for 60 s (`endurance`) | – | 9–11 / 18 ms in the first 5 s, 5.2–5.5 after | p50 at most 4.4 ms | 9 from the fifth second to the end |
+
+The cut's 116.7 ms: the level's carve 21.6, its colliders 15.3, its meshes 5.3, the parts' meshes and bodies 27.8,
+the scene's commit of the new meshes 37.7, the physics' first step 5.6. In step 6 the same fall cost 26–28 ms a
+frame for as long as it lasted. The level's load is 10.7 s to the first frame with the colliders and 5.5 s without
+(`physics: false`).
+
+**How many bodies a frame holds, and the cap.** `shatter-dense`: the cut of `fell`, then 120 cuts 0.2 m thick half a
+metre apart, twenty a second, through what fell: slabs, then columns of buildings, tens to thousands of voxels
+each, in one heap, more than 500 of them. **The default configuration** (the parallel solver on 4 threads) with
+the default cap of 300: the count reaches 300 and stays there to the end of the run. Frames without an edit, by the
+bodies that moved in them (physics step and the frame's CPU time, p50 / p95; two runs, the same bodies in every
+frame, the second's figures in brackets):
+
+| bodies moving | frames | physics step | frame CPU | frames over 16.7 ms |
+| --- | --- | --- | --- | --- |
+| 0–49 | 661 | 0.36 / 0.77 ms | 5.7 / 7.8 ms | 0 |
+| 50–99 | 66 | 1.97 / 3.20 | 7.4 / 9.6 | 0 |
+| 100–149 | 78 | 3.30 / 4.64 | 8.1 / 10.2 | 1 (a step of 0.8 ms) |
+| 150–199 | 63 | 1.15 / 4.75 | 6.9 / 9.8 | 0 |
+| 200–249 | 123 | 1.85 / 5.12 | 8.0 / 9.9 | 0 |
+| 250–299 (every body of the cap in the air or landing) | 103 | 5.92 / 7.71 (6.18 / 8.23) | 10.7 / 12.8 (10.9 / 13.2) | 0 (0) |
+
+**No frame of 1,094 is over 16.7 ms on account of the physics** in either run (each has one stray, 17.9 and 17.2
+ms, with a step under 1 ms). That is why the cap is 300. With a cap of 400 the count holds too, and with every body
+in the air a frame is 13.1–13.2 ms at the median and 14.9–16.0 at p95, but in two runs of four a few frames go over
+(2 and 3 of 1,094, 17.0–19.3 ms, with 320–400 moving); with 512, 16.3 ms at the median and 5 of 22 such frames over.
+
+The same scenario with the cap at 512, sequential (`THREERT_PHYSICS_THREADS=1`) against the default's 4 threads:
+
+| bodies moving | frames | step, sequential | frame CPU, sequential | over 16.7 ms | step, 4 threads | frame CPU, 4 threads | over 16.7 ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 50–99 | 51 | 5.02 / 7.89 ms | 9.2 / 12.1 ms | 1 | 2.10 / 2.96 ms | 7.5 / 9.0 ms | 1 |
+| 100–149 | 41 | 10.15 / 14.03 | 14.2 / 17.7 | 9 | 3.45 / 4.55 | 8.4 / 9.3 | 0 |
+| 200–249 | 8 | 17.46 / 18.57 | 21.7 / 22.2 | 8 | 5.65 / 5.75 | 9.5 / 11.5 | 0 |
+| 300–349 | 6 | 21.01 / 21.08 | 24.9 / 25.3 | 6 | 6.07 / 6.51 | 10.1 / 10.3 | 0 |
+| 450–499 | 46 | 35.38 / 39.61 | 39.4 / 43.6 | 46 | 10.41 / 11.99 | 14.7 / 17.1 | 5 |
+| 500–549 | 22 | 41.24 / 42.94 | 45.2 / 47.3 | 22 | 12.37 / 13.01 | 16.4 / 18.0 | 6 |
+
+**The number of bodies moving at once at which 60 fps is lost: on one thread about a hundred** (from 150 every
+frame is over); **on 4 threads about 450–500.** What takes the frame is Rapier's step (placing the parts is at most
+0.17 ms, the scene's commit about 2 ms, the GPU's frame does not change). The bodies and the bodies that moved are
+the same in every frame, sequential and parallel (and at 8 threads, which bring the step no gain on the frame).
+With few bodies the pool costs nothing that shows: `fell` (20 bodies) steps in 0.18–0.35 ms a frame either way,
+hello world in 0.03 ms. **With the parallel solver off the cap to set is 128** (`maxBodies: 128`): sequentially,
+with all 128 moving, a frame is 12.1 ms at the median and 7 frames of 1,095 are over 16.7 ms (the worst 22.0): about
+at the frame. A cut through the heap is itself a frame of 19–21 ms (p50; p95 32–36 ms) on 4 threads and 26–35 ms
+(p95 44–59 ms) on one: it carves, splits and meshes again every body it meets, and the frame's step is in it.
+
+**Under software traversal** (`THREERT_HWRT=0`: bodies are units; not optimised): no rebuild, the parts added and
+moved in place (records 10,459 to 10,503 for the 20 bodies of `fell`), the loop guard's count 0; the same bodies
+asleep at the same frames as under hardware traversal. Explosions of 1, 2, 4 m: 8.4, 8.6, 18.6 ms; the cut's frame
+194 ms (the parts' trees are built on the CPU: the commit is 117 ms of it); after it a frame's CPU p50 8.1, p95
+9.1 ms, none over 16.7 ms; a frame's GPU 7.5–8.1 ms (trace 4.2–4.6).
+
 ## Two published designs for destructible voxel worlds
 
 - **Dense grids and a world occupancy volume** (the raster-era design):

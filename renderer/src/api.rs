@@ -59,14 +59,39 @@ pub fn voxel_level(v: &mut VoxelWorld, d: &Value) -> Result<()> {
 }
 
 /// An explosion: what it did, as JSON.
-pub fn voxel_explode(v: &mut VoxelWorld, w: &mut World, x: f64, y: f64, z: f64, r: f64) -> Result<String> {
-    Ok(v.explode(w, Vec3::new(x as f32, y as f32, z as f32), r as f32)?.to_string())
+pub fn voxel_explode(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld>, x: f64, y: f64, z: f64, r: f64) -> Result<String> {
+    Ok(v.explode(w, p, Vec3::new(x as f32, y as f32, z as f32), r as f32)?.to_string())
 }
 
 /// An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`).
-pub fn voxel_edit(v: &mut VoxelWorld, w: &mut World, d: &Value) -> Result<String> {
+pub fn voxel_edit(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld>, d: &Value) -> Result<String> {
     let op = crate::voxel::EditOp::parse(d)?;
-    Ok(v.edit(w, &op)?.to_string())
+    Ok(v.edit(w, p, &op)?.to_string())
+}
+
+/// The voxel bodies (loose parts the physics world moves): each one's body id for `physics` calls, its voxels,
+/// whether it sleeps, where it is. "[]" without any.
+pub fn voxel_bodies(v: &VoxelWorld, p: &Option<PhysicsWorld>) -> String {
+    p.as_ref().map_or("[]".into(), |p| v.body_list(p).to_string())
+}
+
+/// A frame of the physics world (`dt` seconds: the whole ticks that fit), and the voxel bodies' objects placed
+/// where the bodies are. False without a world.
+pub fn physics_advance(p: &mut Option<PhysicsWorld>, v: &mut VoxelWorld, w: &mut World, dt: f64) -> bool {
+    let Some(p) = p.as_mut() else { return false };
+    p.advance(w, dt);
+    let t = web_time::Instant::now();
+    v.sync_bodies(w, p);
+    p.add_sync_ms(t.elapsed().as_secs_f64() * 1e3);
+    true
+}
+
+/// The physics world `ticks` ticks on in all (an offline render at a scene time), the voxel bodies' objects with it.
+pub fn physics_settle(p: &mut Option<PhysicsWorld>, v: &mut VoxelWorld, w: &mut World, ticks: u32) {
+    if let Some(p) = p.as_mut() {
+        p.settle(w, ticks);
+        v.sync_bodies(w, p);
+    }
 }
 
 /// The level's hash (16 hex digits; "" before a level): the same commands give the same hash.

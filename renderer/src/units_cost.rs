@@ -225,7 +225,7 @@ fn units_cost() {
     let host = crate::script::ScriptHost::new(&std::fs::read_to_string(&bundle).unwrap()).unwrap();
     host.setup("r", None).unwrap();
     // (A voxel level the scene code asked for: loaded before the first scene build, as the session does.)
-    if host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &assets).unwrap().is_some() {
+    if host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &mut host.physics.borrow_mut(), &assets).unwrap().is_some() {
         let _ = host.world.borrow_mut().take_changes();
     }
     let world = host.world.borrow();
@@ -323,7 +323,7 @@ fn units_pile() {
     let ns: Vec<usize> = std::env::var("UNITS_PILE_N").unwrap_or("0,250,1000,4000,16000".into()).split(',').map(|v| v.parse().unwrap()).collect();
     let host = crate::script::ScriptHost::new(&std::fs::read_to_string(&bundle).unwrap()).unwrap();
     host.setup("r", None).unwrap();
-    if host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &assets).unwrap().is_some() {
+    if host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &mut host.physics.borrow_mut(), &assets).unwrap().is_some() {
         let _ = host.world.borrow_mut().take_changes();
     }
     let world = host.world.borrow();

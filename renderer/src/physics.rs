@@ -15,7 +15,7 @@ use serde_json::Value;
 use web_time::Instant;
 
 /// A frame's physics, for the frame log: the ticks stepped and their time, the time to place the driven objects, the
-/// bodies and how many of them moved.
+/// bodies and how many of them moved; and the times the step's wait kicked the physics' threads (`in_pool`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
     pub ticks: u32,
@@ -23,6 +23,7 @@ pub struct Stats {
     pub sync_ms: f64,
     pub bodies: usize,
     pub moved: usize,
+    pub kicks: u32,
 }
 
 impl Scene for World {
@@ -77,6 +78,15 @@ impl PhysicsWorld {
         r
     }
 
+    /// The bridge itself, for the engine's own bodies and colliders (the voxel world's: voxel.rs).
+    pub fn bridge(&mut self) -> &mut Bridge {
+        &mut self.bridge
+    }
+
+    pub fn bridge_ref(&self) -> &Bridge {
+        &self.bridge
+    }
+
     /// The scene removed these objects: their bodies go (`Bridge::objects_removed`).
     pub fn objects_removed(&mut self, objects: &[u32]) {
         self.bridge.objects_removed(objects);
@@ -94,9 +104,19 @@ impl PhysicsWorld {
     /// `ticks` ticks, then the moved bodies' objects placed.
     fn step(&mut self, w: &mut World, ticks: u32) {
         let t0 = Instant::now();
-        for _ in 0..ticks {
-            self.bridge.tick();
+        let bridge = &mut self.bridge;
+        #[allow(unused_mut)]
+        let mut tick = move || {
+            for _ in 0..ticks {
+                bridge.tick();
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.stats.kicks += in_pool(tick);
         }
+        #[cfg(target_arch = "wasm32")]
+        tick();
         let t1 = Instant::now();
         let moved = self.bridge.sync(w);
         self.stats.ticks += ticks;
@@ -122,6 +142,12 @@ impl PhysicsWorld {
         }
     }
 
+    /// Time the engine spent placing what its own bodies stand for (the voxel bodies' objects: voxel.rs
+    /// `sync_bodies`), counted with the frame's sync.
+    pub fn add_sync_ms(&mut self, ms: f64) {
+        self.stats.sync_ms += ms;
+    }
+
     /// The frame's figures, and a fresh count for the next.
     pub fn take_stats(&mut self) -> Stats {
         std::mem::take(&mut self.stats)
@@ -131,6 +157,133 @@ impl PhysicsWorld {
     pub fn hash(&self) -> u64 {
         self.bridge.hash()
     }
+}
+
+/// The threads the physics world is stepped on natively (Rapier's parallel solver: physics-core's `parallel`): a pool
+/// of the physics' own, not the process's, which has every core for the renderer's own work. **4 threads, or the
+/// machine's performance cores when it has fewer**; `THREERT_PHYSICS_THREADS` sets another count (1 to 16), and 1 (or
+/// 0, or "off") is sequential: the solver on one thread, which costs what the sequential build does. Measured
+/// (docs/VOXEL.md "Voxel bodies"): 4 threads take a third of the sequential step's time, 8 gain nothing on the frame,
+/// and with little moving the pool costs 0.03 ms. The bits do not depend on the count (the recorded hashes at 1 to
+/// 15 threads on this machine: ROADMAP § 6 step 8 says what was checked and what was not). wasm32 has no threads
+/// here: there the world is stepped where it is called.
+/// None when the threads could not be made: the world is then stepped on the calling thread (sequential, the same
+/// bits), said once.
+#[cfg(not(target_arch = "wasm32"))]
+fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let env = std::env::var("THREERT_PHYSICS_THREADS").ok();
+        let threads = threads_from(env.as_deref(), performance_cores()).unwrap_or_else(|default| {
+            eprintln!("physics: THREERT_PHYSICS_THREADS={:?} is no thread count (1 to 16; 1, 0, off: sequential): {default} threads", env.as_deref().unwrap_or(""));
+            default
+        });
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|k| format!("physics-{k}"))
+            .build()
+            .map_err(|e| eprintln!("physics: the physics' {threads} threads could not be made ({e}): stepped on the frame's thread"))
+            .ok()
+    })
+    .as_ref()
+}
+
+/// How long a step is waited for before the physics' threads are kicked, and again after each kick.
+#[cfg(not(target_arch = "wasm32"))]
+const KICK: std::time::Duration = std::time::Duration::from_micros(500);
+
+/// Runs `f` (a frame's ticks) on one of the physics' threads and waits for it; returns the kicks it took.
+///
+/// **Why not `pool().install(f)`**, which is what this was: Rapier 0.36.1's step hangs there, about once in 10^5
+/// steps of a small world stepped back to back (a fuzz of 1,500 edits and calls: one run in fifty). Its step hands the
+/// broad phase's tree optimisation to `rayon::spawn` and later waits for it with a channel's `recv`
+/// (`physics_pipeline/solve.rs`, `mod.rs` `join_deferred_bvh_optimize`). Inside a pool the spawn goes onto the
+/// stepping worker's own deque, and the `recv` blocks that worker outside rayon, so only another worker can run the
+/// job: one that steals it. rayon does not promise that another worker comes: waking for a job in a worker's deque is
+/// best effort (the push's index store and the pusher's read of the sleep counters have no store-to-load barrier
+/// between them; crossbeam-deque stores the index relaxed), because in rayon's own waits the pusher runs the job
+/// itself in the end. When all the other workers happen to be falling asleep at that instant they all miss it, and
+/// the step never returns. Rapier's own `configure_thread_pool` steps the same way and has the same hole.
+///
+/// So the caller, which only waits anyway, **kicks**: while the step has not returned, every `KICK` it injects an
+/// empty job into the pool. An injected job always wakes a sleeping worker (that path is the one `install` itself
+/// rests on), and a worker that wakes looks through every deque before it sleeps again: it takes the stranded job.
+/// A step that hung costs `KICK` once; a long step gets a few empty jobs, which change nothing (the bits do not
+/// depend on which thread runs what). With one thread Rapier runs that pass inline and there is nothing to strand.
+/// `THREERT_PHYSICS_KICK=off` waits without kicking, to reproduce the hang (the fuzz, `examples/physics_fuzz.rs`,
+/// finds it in a few dozen runs).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn in_pool(f: impl FnOnce() + Send) -> u32 {
+    use std::sync::{Condvar, Mutex, PoisonError};
+    // (`THREERT_PHYSICS_KICK`: "off" or 0, or the period in microseconds.)
+    static PERIOD: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    let period = *PERIOD.get_or_init(|| match std::env::var("THREERT_PHYSICS_KICK").ok().as_deref() {
+        Some("off") | Some("0") => None,
+        Some(v) => Some(v.parse().ok().filter(|us| (1..=1_000_000).contains(us)).map_or(KICK, std::time::Duration::from_micros)),
+        None => Some(KICK),
+    });
+    let Some(pool) = pool() else {
+        f();
+        return 0;
+    };
+    let Some(period) = period.filter(|_| pool.current_num_threads() > 1) else {
+        pool.install(f);
+        return 0;
+    };
+    // Set when `f` has returned, or unwound: the wait ends either way, and the scope then carries the panic on.
+    struct Done<'a>(&'a (Mutex<bool>, Condvar));
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            *self.0 .0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            self.0 .1.notify_one();
+        }
+    }
+    let done = (Mutex::new(false), Condvar::new());
+    let mut kicks = 0;
+    pool.in_place_scope(|s| {
+        s.spawn(|_| {
+            let _done = Done(&done);
+            f();
+        });
+        let mut finished = done.0.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*finished {
+            let (guard, wait) = done.1.wait_timeout(finished, period).unwrap_or_else(PoisonError::into_inner);
+            finished = guard;
+            if !*finished && wait.timed_out() {
+                kicks += 1;
+                pool.spawn(|| {});
+            }
+        }
+    });
+    kicks
+}
+
+/// The pool's size: what `THREERT_PHYSICS_THREADS` says (1 to 16; 0, "off", "false", "no", any case: 1, sequential),
+/// else 4 or the performance cores when fewer. Err(that default) for a value that is none of these: the caller says so.
+#[cfg(not(target_arch = "wasm32"))]
+fn threads_from(env: Option<&str>, cores: usize) -> Result<usize, usize> {
+    let default = cores.clamp(1, 4);
+    match env.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None => Ok(default),
+        Some("off" | "false" | "no" | "0") => Ok(1),
+        Some(v) => v.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).ok_or(default),
+    }
+}
+
+/// The machine's performance cores: on Apple silicon the first performance level's physical cores (the efficiency
+/// cores are left to the rest of the process); elsewhere the cores the process may use.
+#[cfg(not(target_arch = "wasm32"))]
+fn performance_cores() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        let (mut n, mut size) = (0i32, std::mem::size_of::<i32>());
+        // SAFETY: the name is a C string, and the value is read into an i32 whose size is passed with it.
+        let read = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&mut n as *mut i32).cast(), &mut size, std::ptr::null_mut(), 0) };
+        if read == 0 && n > 0 {
+            return n as usize;
+        }
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 #[cfg(test)]
@@ -180,6 +333,20 @@ mod tests {
         assert_eq!(p.take_stats().bodies, 0);
     }
 
+    /// The physics' threads: 4, the performance cores when fewer, what the environment says when it says a count;
+    /// 1 (0, "off") is sequential.
+    #[test]
+    fn the_physics_threads() {
+        assert_eq!([threads_from(None, 5), threads_from(None, 12), threads_from(None, 2), threads_from(None, 0)], [Ok(4), Ok(4), Ok(2), Ok(1)]);
+        assert_eq!([threads_from(Some("8"), 5), threads_from(Some("1"), 5), threads_from(Some("0"), 5), threads_from(Some("off"), 5), threads_from(Some(" 2 "), 5)], [Ok(8), Ok(1), Ok(1), Ok(1), Ok(2)]);
+        assert_eq!([threads_from(Some("OFF"), 5), threads_from(Some("False"), 5), threads_from(Some("no"), 5)], [Ok(1), Ok(1), Ok(1)]);
+        // Not understood: the default, and the caller says so.
+        assert_eq!([threads_from(Some("64"), 5), threads_from(Some("many"), 2), threads_from(Some(""), 5), threads_from(Some("-1"), 5)], [Err(4), Err(2), Err(4), Err(4)]);
+        assert!(performance_cores() >= 1);
+        let asked = threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores());
+        assert_eq!(pool().unwrap().current_num_threads(), asked.unwrap_or_else(|d| d));
+    }
+
     /// The renderer's build of the physics steps to the recorded bits, as physics-core's own build and its wasm32
     /// build do (tools/physics-determinism.ts): features that the renderer's other dependencies turn on in the shared
     /// crates (num-traits' and glam's `std`) do not bring the platform's math functions into it.
@@ -188,6 +355,22 @@ mod tests {
         use physics_core::check;
         assert_eq!(format!("{:016x}", check::script(600)), format!("{:016x}", check::EXPECTED));
         assert_eq!(format!("{:016x}", check::cases()), format!("{:016x}", check::EXPECTED_CASES));
+        // And stepped as the renderer steps its world: on one of the physics' threads, with their count. (Called
+        // from here the checks above run their parallel parts on the process's pool, whatever its size.)
+        let (mut script, mut cases) = (0, 0);
+        in_pool(|| (script, cases) = (check::script(600), check::cases()));
+        assert_eq!(format!("{script:016x}"), format!("{:016x}", check::EXPECTED), "on the physics' threads");
+        assert_eq!(format!("{cases:016x}"), format!("{:016x}", check::EXPECTED_CASES), "on the physics' threads");
+    }
+
+    /// A step's wait ends when the step unwinds, and the panic comes through; the pool steps again after it.
+    #[test]
+    fn a_step_that_panics_is_not_waited_for() {
+        let r = std::panic::catch_unwind(|| in_pool(|| panic!("in the step")));
+        assert!(r.is_err());
+        let mut ran = false;
+        in_pool(|| ran = true);
+        assert!(ran);
     }
 
     /// Two events with no tick between them: the body the first one's script added is in the engine once that script

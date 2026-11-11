@@ -66,11 +66,64 @@ const SETUP_MS: u64 = 120_000;
 const EVENT_MS: u64 = 1_000;
 const FRAME_MS: u64 = 50;
 
+/// The most engine time one entry into the script (a frame, an event, setup) is lent, µs: past it the time the engine
+/// spends in voxel calls counts against the script's budget again. 250 ms: the largest single edit measured on the
+/// benchmark level, the 30 x 30 m cut, takes 115 ms of engine time, so two of those fit; a frame that spends more in
+/// the engine than that is a hitch of a quarter of a second whatever the script does, and a script that keeps asking
+/// is then ended at its budget like one that spins.
+const LEND_US: u64 = 250_000;
+
+/// The script's clock for one entry: its deadline in µs since the host's epoch (0: none), checked by the interrupt
+/// handler, and the engine time lent to it so far.
+struct Budget {
+    epoch: Instant,
+    deadline: AtomicU64,
+    lent: AtomicU64,
+}
+
+impl Budget {
+    /// Past the deadline (with what was lent): the script's time is up.
+    fn up(&self) -> bool {
+        let d = self.deadline.load(Ordering::Relaxed);
+        d != 0 && self.epoch.elapsed().as_micros() as u64 > d
+    }
+}
+
+/// The engine's time inside a voxel call is not the script's: when the call returns (or throws), the deadline moves
+/// by the time it took, as it was, up to `LEND_US` in all for the entry. (A cut through a hundred voxel bodies takes
+/// 50 ms and more; without this the script that asked for it would be ended at its next statement, the rest of its
+/// frame lost.) A script that spins, or loops on cheap calls, is ended as before.
+///
+/// A voxel call made when the time is already up throws "interrupted" at once: the script engine looks at its
+/// deadline only every so many of its own operations, and a loop whose every turn is a call of some milliseconds
+/// makes few of those (it ran for seconds past its budget before).
+struct Lent<'a>(&'a Budget, Instant);
+
+impl<'a> Lent<'a> {
+    fn new(ctx: &Ctx<'_>, budget: &'a Budget) -> rquickjs::Result<Self> {
+        if budget.up() {
+            return Err(fail(ctx, anyhow!("interrupted (the script's time is up)")));
+        }
+        Ok(Lent(budget, Instant::now()))
+    }
+}
+
+impl Drop for Lent<'_> {
+    fn drop(&mut self) {
+        let took = self.1.elapsed().as_micros() as u64;
+        let give = took.min(LEND_US.saturating_sub(self.0.lent.load(Ordering::Relaxed)));
+        // (0: no deadline is set, and none is made.)
+        if give > 0 && self.0.deadline.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| (d != 0).then_some(d + give)).is_ok() {
+            self.0.lent.fetch_add(give, Ordering::Relaxed);
+        }
+    }
+}
+
 pub struct ScriptHost {
     _rt: Runtime,
     ctx: Context,
-    /// Abort deadline in ms since `epoch` (0 = none), checked by the interrupt handler.
-    deadline: Arc<AtomicU64>,
+    /// The deadline of the entry running now and the engine time lent to it (`Budget`).
+    budget: Arc<Budget>,
     epoch: Instant,
     /// `describe()`: handlers, keys, whether the game has a frame script.
     pub info: serde_json::Value,
@@ -138,7 +191,7 @@ fn thrown(ctx: &Ctx, e: crate::api::Error) -> rquickjs::Error {
 
 /// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts: each call's arguments out of QuickJS,
 /// then what the call does (api.rs: the same code a browser's exports run, renderer/web).
-fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>) -> rquickjs::Result<()> {
+fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>, budget: &Arc<Budget>) -> rquickjs::Result<()> {
     use crate::api;
     let e = Object::new(ctx.clone())?;
     // Physics (renderer/src/physics.rs): one call, `physics(op, args)`, answering in JSON. The world is made by the
@@ -156,18 +209,22 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     // knows the asset root; an explosion returns what it did as JSON.
     let v = voxels.clone();
     e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::voxel_level(&mut v.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
-    let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, w, p, d) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
+    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
     // An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`), and the level's
     // hash (16 hex digits; "" before a level): the same commands give the same hash.
-    let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, w, p, dl) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
+    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &dl)?; api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    // The voxel bodies (ROADMAP § 6 step 8), as JSON: [{ body, collider, voxels, asleep, position, rotation }]. `body`
+    // is the physics world's id: `physics("impulse", { body, ... })` and the other calls take it.
+    let (v, p) = (voxels.clone(), physics.clone());
+    e.set("voxelBodies", Function::new(ctx.clone(), move || -> String { api::voxel_bodies(&v.borrow(), &p.borrow()) })?)?;
     let v = voxels.clone();
     e.set("voxelHash", Function::new(ctx.clone(), move || -> String { api::voxel_hash(&v.borrow()) })?)?;
     let v = voxels.clone();
     e.set("voxelDebris", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, v.borrow_mut().take_debris()) })?)?;
-    let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> { api::voxel_frame(&mut v.borrow_mut(), &mut w.borrow_mut(), dt).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, w, d) = (voxels.clone(), world.clone(), budget.clone());
+    e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_frame(&mut v.borrow_mut(), &mut w.borrow_mut(), dt).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     // (…, groups?, colors?): the optional arguments as the rest (rquickjs takes seven parameters at most).
     e.set("geometry", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, p: TypedArray<f32>, n: TypedArray<f32>, uv: TypedArray<f32>, idx: TypedArray<u32>, rest: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
@@ -285,23 +342,20 @@ impl ScriptHost {
         let rt = Runtime::new()?;
         rt.set_memory_limit(1 << 30);
         rt.set_max_stack_size(4 << 20);
-        let deadline = Arc::new(AtomicU64::new(0));
         let epoch = Instant::now();
-        let d = deadline.clone();
-        rt.set_interrupt_handler(Some(Box::new(move || {
-            let limit = d.load(Ordering::Relaxed);
-            limit != 0 && epoch.elapsed().as_millis() as u64 > limit
-        })));
+        let budget = Arc::new(Budget { epoch, deadline: AtomicU64::new(0), lent: AtomicU64::new(0) });
+        let b = budget.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || b.up())));
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { _rt: rt, ctx, deadline, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default() };
-        let (w, v, ph) = (h.world.clone(), h.voxels.clone(), h.physics.clone());
+        let mut h = ScriptHost { _rt: rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default() };
+        let (w, v, ph, d2) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone());
         let info: String = h.call(SETUP_MS, |ctx| {
             let g = ctx.globals();
             g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") }))?)?;
             g.set("__host_now", Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1000.0)?)?;
-            install_engine(ctx, &w, &v, &ph)?;
+            install_engine(ctx, &w, &v, &ph, &d2)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
             host(ctx)?.get::<_, Function>("describe")?.call(())
@@ -312,9 +366,10 @@ impl ScriptHost {
 
     /// Runs `f` in the engine under a time budget; JS exceptions become errors with their message and stack.
     fn call<T>(&self, budget_ms: u64, f: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<T>) -> Result<T> {
-        self.deadline.store(self.epoch.elapsed().as_millis() as u64 + budget_ms, Ordering::Relaxed);
+        self.budget.lent.store(0, Ordering::Relaxed);
+        self.budget.deadline.store(self.epoch.elapsed().as_micros() as u64 + budget_ms * 1000, Ordering::Relaxed);
         let r = self.ctx.with(|ctx| f(&ctx).catch(&ctx).map_err(|e| anyhow!("{e}")));
-        self.deadline.store(0, Ordering::Relaxed);
+        self.budget.deadline.store(0, Ordering::Relaxed);
         r
     }
 
@@ -392,20 +447,12 @@ impl ScriptHost {
     /// A frame of the physics world, if scene code made one: its ticks, and the objects its bodies drive placed
     /// (renderer/src/physics.rs). True if there is a world (the caller commits what moved).
     pub fn advance_physics(&self, dt: f32) -> bool {
-        match self.physics.borrow_mut().as_mut() {
-            Some(p) => {
-                p.advance(&mut self.world.borrow_mut(), dt as f64);
-                true
-            }
-            None => false,
-        }
+        crate::api::physics_advance(&mut self.physics.borrow_mut(), &mut self.voxels.borrow_mut(), &mut self.world.borrow_mut(), dt as f64)
     }
 
     /// The physics world `ticks` ticks on (an offline render at a scene time).
     pub fn settle_physics(&self, ticks: u32) {
-        if let Some(p) = self.physics.borrow_mut().as_mut() {
-            p.settle(&mut self.world.borrow_mut(), ticks);
-        }
+        crate::api::physics_settle(&mut self.physics.borrow_mut(), &mut self.voxels.borrow_mut(), &mut self.world.borrow_mut(), ticks);
     }
 
     /// Runs the frame script for one rendered frame.
@@ -505,7 +552,7 @@ impl GameSession {
     /// that follows includes it, so its changes are dropped here (as the setup's are, `load`).
     fn realize_voxels(&self, assets: &std::path::Path) -> Result<()> {
         let mut w = self.host.world.borrow_mut();
-        if let Some(r) = self.host.voxels.borrow_mut().realize(&mut w, assets)? {
+        if let Some(r) = self.host.voxels.borrow_mut().realize(&mut w, &mut self.host.physics.borrow_mut(), assets)? {
             eprintln!("voxels: {r}");
             w.take_changes();
         }
@@ -780,6 +827,63 @@ mod tests {
                 assert!((z - 0.3).abs() < 1e-4, "three ticks at 6 m/s: {z}");
             }
         }
+    }
+
+    /// The engine's time in a voxel edit is not the script's: a frame's worth of script that spends 150 ms in edits
+    /// (three times its budget) goes on to its end, and one that spins after its edits is still ended.
+    #[test]
+    fn the_engines_time_in_a_voxel_call_is_not_the_scripts() {
+        let h = ScriptHost::new(GAME).unwrap();
+        *h.voxels.borrow_mut() = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 16, 64], Some((0, 0)), true)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        let edits = "let t = __host_now(), n = 0; while (__host_now() - t < 150) { __engine.voxelEdit({ op: 'carve', box: [0.5, 0.5, 0.5, 5.5, 1.5, 5.5] }); __engine.voxelEdit({ op: 'add', box: [0.5, 0.5, 0.5, 5.5, 1.5, 5.5], material: 1 }); n++; }";
+        let n: i32 = h.call(FRAME_MS, |ctx| ctx.eval(format!("{edits} let s = 0; for (let i = 0; i < 100000; i++) s += i; n"))).unwrap();
+        assert!(n >= 1);
+        let t = Instant::now();
+        let err = h.call(FRAME_MS, |ctx| ctx.eval::<(), _>(format!("{{ {edits} }} spin()"))).unwrap_err();
+        assert!(format!("{err}").contains("interrupted"), "{err}");
+        assert!(t.elapsed().as_millis() < 2000, "{} ms", t.elapsed().as_millis());
+    }
+
+    /// The engine's time is lent as it was, not rounded up, and at most `LEND_US` an entry (the review of #24: each
+    /// call moved the deadline by a millisecond at least, so a frame script looping on cheap voxel calls, or on ones
+    /// that throw, ran for ever). Each loop is ended within its budget, and real edits past what may be lent are too.
+    #[test]
+    fn a_script_looping_on_voxel_calls_is_ended() {
+        let h = ScriptHost::new(GAME).unwrap();
+        // Without a level: voxelFrame does nothing, voxelEdit and voxelExplode throw.
+        for body in ["__engine.voxelFrame(0)", "try { __engine.voxelEdit({}) } catch (e) {}", "try { __engine.voxelExplode(0, 0, 0, 1) } catch (e) {}"] {
+            let t = Instant::now();
+            let err = h.call(FRAME_MS, |ctx| ctx.eval::<(), _>(format!("for (;;) {{ {body}; }}"))).unwrap_err();
+            assert!(format!("{err}").contains("interrupted"), "{body}: {err}");
+            assert!(t.elapsed().as_millis() < 200, "{body}: ended after {} ms", t.elapsed().as_millis());
+        }
+        // With a level, edits that each take real time, for ever: lent up to 250 ms, then the budget's 50.
+        *h.voxels.borrow_mut() = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 16, 64], Some((0, 0)), true)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        let t = Instant::now();
+        let err = h.call(FRAME_MS, |ctx| ctx.eval::<(), _>("for (;;) { __engine.voxelEdit({ op: 'carve', box: [0.5, 0.5, 0.5, 5.5, 1.5, 5.5] }); __engine.voxelEdit({ op: 'add', box: [0.5, 0.5, 0.5, 5.5, 1.5, 5.5], material: 1 }); }")).unwrap_err();
+        assert!(format!("{err}").contains("interrupted"), "{err}");
+        let ms = t.elapsed().as_millis();
+        assert!((250..800).contains(&ms), "ended after {ms} ms (50 of script and at most 250 lent)");
+    }
+
+    /// An id scene code read out of an answer goes back into a call: a ray's hit on a voxel body, its `body` into an
+    /// impulse. (Parsed out of the answer the id is a double in the script engine, and comes back as `1073741837.0`:
+    /// the bridge reads a whole number as the id it is.)
+    #[test]
+    fn an_id_a_script_read_from_a_hit_goes_into_a_call() {
+        let h = ScriptHost::new(GAME).unwrap();
+        // A slab and a bar standing on it, cut loose: 336 voxels of 1,000 kg/m³.
+        let mut v = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        v.edit(&mut h.world.borrow_mut(), &mut h.physics.borrow_mut(), &crate::voxel::EditOp::parse(&serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] })).unwrap()).unwrap();
+        assert_eq!(v.bodies(), 1);
+        *h.voxels.borrow_mut() = v;
+        let up: f64 = h.call(100, |ctx| ctx.eval(r#"
+            const hit = JSON.parse(__engine.physics("ray", { origin: [3.05, 1.55, 10], direction: [0, 0, -1], max: 20 }));
+            if (hit.body !== JSON.parse(__engine.voxelBodies())[0].body) throw new Error("the hit is not the body: " + JSON.stringify(hit));
+            __engine.physics("impulse", { body: hit.body, impulse: [0, 500, 0] });
+            JSON.parse(__engine.physics("state", { body: hit.body })).linvel[1]
+        "#)).unwrap();
+        assert!((up - 500.0 / 336.0).abs() < 0.05, "{up} m/s");
     }
 
     #[test]

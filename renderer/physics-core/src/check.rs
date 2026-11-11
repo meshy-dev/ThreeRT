@@ -75,7 +75,7 @@ pub fn pile(n: u32, ticks: u32) -> u64 {
 /// Random worlds for the determinism check, by kind: each is `case(kind, seed)`. The script above has one convex hull
 /// and no body of several colliders, and those are where the platforms' math first showed (the principal axes of an
 /// inertia tensor that is not diagonal: an eigen decomposition with an acos and two cos).
-pub const KINDS: [(&str, u32); 4] = [
+pub const KINDS: [(&str, u32); 5] = [
     ("convex hulls", 400),
     ("bodies of several colliders", 400),
     ("joints with limits and motors", 200),
@@ -83,10 +83,14 @@ pub const KINDS: [(&str, u32); 4] = [
     // it is checked against): continuous collision detection, a static triangle mesh, a kinematic body, fixed and ball
     // joints, and the answers of rays, overlaps and sweeps (asked with and without a tick since the last change).
     ("ccd on a trimesh with a kinematic body, fixed and ball joints and queries", 200),
+    // Step 8's shape: lumps of voxels that tumble onto a ground of voxels and onto each other, a box and a ball among
+    // them; the ground carved under them and a lump carved as it lies (`Physics::edit_voxels`: mass, centre of mass
+    // and inertia made again from the cells that are left, another eigen decomposition); a ray's answer on voxels.
+    ("voxel lumps on voxel ground, carved", 300),
 ];
 
 /// The hash of all the cases (`cases()`) with `enhanced-determinism`, natively and in wasm32 alike.
-pub const EXPECTED_CASES: u64 = 0x6fd1_eba4_551b_8d39;
+pub const EXPECTED_CASES: u64 = 0xcf74_cd21_1f5c_152f;
 
 /// A generator of integers only: a float made from one is exact arithmetic, the same bits on every platform.
 struct Rng(u64);
@@ -126,6 +130,9 @@ pub fn case(kind: u32, seed: u32) -> u64 {
     let hull = |r: &mut Rng| Shape::ConvexHull((0..8).map(|_| r.v3(0.5)).collect());
     // (Kind 3's kinematic body: where it is driven, and how it is turned.)
     let mut pusher: Option<(BodyId, [f32; 3], [f32; 4])> = None;
+    // (Kind 4's ground, and its lumps: body, collider, cells a side.)
+    let mut voxel_ground: Option<ColliderId> = None;
+    let mut voxel_lumps: Vec<(BodyId, ColliderId, i32)> = vec![];
     match kind {
         // Two tumbling hulls of 8 random points that meet over the ground.
         0 => {
@@ -158,6 +165,39 @@ pub fn case(kind: u32, seed: u32) -> u64 {
             while p.add_collider(Some(b), &ColliderDesc::new(hull(&mut r))).is_err() {}
             p.add_joint(post, b, &JointDesc::Prismatic { anchor1: r.v3(0.3), anchor2: r.v3(0.3), axis: r.v3(1.0), limits: Some(Limits { min: r.range(-1.5, -0.1), max: r.range(0.1, 1.5) }), motor: None }).unwrap();
             p.add_joint(a, b, &JointDesc::Rope { anchor1: r.v3(0.3), anchor2: r.v3(0.3), length: r.range(1.0, 2.5) }).unwrap();
+        }
+        // Voxels: a ground of cells with relief, three lumps of cells with holes, a box and a ball.
+        4 => {
+            let mut ground = vec![];
+            for x in -20i32..20 {
+                for z in -20i32..20 {
+                    for y in 0..2 + (r.next() % 3) as i32 {
+                        ground.push([x, y, z]);
+                    }
+                }
+            }
+            voxel_ground = Some(p.add_collider(None, &ColliderDesc { friction: r.range(0.2, 0.9), ..ColliderDesc::new(Shape::Voxels { size: 0.1, cells: ground }) }).unwrap());
+            for k in 0..3 {
+                let n = 3 + (r.next() % 3) as i32;
+                let mut cells = vec![];
+                for x in 0..n {
+                    for y in 0..n {
+                        for z in 0..n {
+                            if x == n / 2 || y == n / 2 || r.next() % 3 != 0 {
+                                cells.push([x - n / 2, y - n / 2, z - n / 2]);
+                            }
+                        }
+                    }
+                }
+                let at = [0.4 * r.unit(), 1.2 + 0.8 * k as f32, 0.4 * r.unit()];
+                let b = body(&mut p, &mut r, at);
+                let c = p.add_collider(Some(b), &ColliderDesc { density: r.range(500.0, 3000.0), ..ColliderDesc::new(Shape::Voxels { size: 0.1, cells }) }).unwrap();
+                voxel_lumps.push((b, c, n));
+            }
+            let b = body(&mut p, &mut r, [0.3, 3.8, -0.2]);
+            p.add_collider(Some(b), &ColliderDesc::new(Shape::Box([r.range(0.05, 0.3), r.range(0.05, 0.3), r.range(0.05, 0.3)]))).unwrap();
+            let b = body(&mut p, &mut r, [-0.3, 4.4, 0.2]);
+            p.add_collider(Some(b), &ColliderDesc::new(Shape::Sphere(r.range(0.05, 0.3)))).unwrap();
         }
         // Fast small bodies with CCD onto a static triangle mesh with relief, a kinematic box driven through them,
         // two boxes held by a fixed joint and a capsule on a ball joint.
@@ -192,8 +232,42 @@ pub fn case(kind: u32, seed: u32) -> u64 {
             p.set_kinematic_target(b, [-3.0 + v[0] * s, 0.8, v[2] * s], q).unwrap();
         }
         p.step();
+        if let Some(g) = voxel_ground.filter(|_| t == 45 || t == 60) {
+            if t == 45 {
+                // A pit under where they fell: what rests there falls on.
+                let (cx, cz, w) = ((r.next() % 9) as i32 - 4, (r.next() % 9) as i32 - 4, 2 + (r.next() % 4) as i32);
+                let gone: Vec<[i32; 3]> = (cx - w..=cx + w).flat_map(|x| (cz - w..=cz + w).flat_map(move |z| (0..4).map(move |y| [x, y, z]))).collect();
+                fold(p.edit_voxels(g, &gone, &[[cx, 0, cz]]).unwrap() as u64);
+            } else {
+                // A lump loses a slab of its cells, another gains a row; one cut down to nothing goes.
+                let (b, c, n) = voxel_lumps[(r.next() % 3) as usize];
+                let cut = (r.next() % (n as u64 + 1)) as i32 - n / 2;
+                let gone: Vec<[i32; 3]> = (-n..=n).flat_map(|x| (-n..=n).flat_map(move |z| (cut..=n).map(move |y| [x, y, z]))).collect();
+                let left = p.edit_voxels(c, &gone, &[]).unwrap();
+                fold(left as u64);
+                if left == 0 {
+                    p.remove_body(b);
+                }
+                let (_, c, n) = voxel_lumps[(r.next() % 3) as usize];
+                if p.has_collider(c) {
+                    fold(p.edit_voxels(c, &[], &(0..n + 2).map(|x| [x, n, 0]).collect::<Vec<_>>()).unwrap() as u64);
+                }
+            }
+        }
         if t % 10 == 9 {
             fold(p.hash());
+            if kind == 4 {
+                let at = [r.unit() * 1.5, 6.0, r.unit() * 1.5];
+                match p.cast_ray(at, [r.unit() * 0.2, -1.0, r.unit() * 0.2], 20.0, None).unwrap() {
+                    Some(x) => {
+                        fold(x.collider as u64);
+                        for f in [x.distance].into_iter().chain(x.point).chain(x.normal) {
+                            fold(crate::world::hash_bits(f) as u64);
+                        }
+                    }
+                    None => fold(u64::MAX),
+                }
+            }
             if kind == 3 {
                 // Queries, their answers folded in bit for bit: a ray and a ball swept down at a place, what a box
                 // overlaps; then the same once more after a body is moved by a call (no tick since: `Physics::fresh`).
@@ -270,6 +344,17 @@ mod tests {
         assert_eq!((s.to_bits(), c.to_bits()), (ls.to_bits(), lc.to_bits()));
     }
 
+    /// A soak of the voxel worlds (`case` 4) past the seeds the determinism check runs: none panics. (With parry's own
+    /// contacts between a voxel shape and a ball, 4 of the first 300 did: world.rs `VoxelsWithBalls`.)
+    ///   cargo test --release --lib voxel_worlds_never_panic -- --ignored
+    #[test]
+    #[ignore = "a soak: 20,000 worlds, minutes"]
+    fn voxel_worlds_never_panic() {
+        for seed in 0..20_000 {
+            super::case(4, seed);
+        }
+    }
+
     /// A triangle mesh is built without the flags that make parry compute pseudo normals, which takes the angles of
     /// every triangle with the platform's `acos` (parry vector_ext.rs `angle`; upstream's list, ROADMAP § 6 step 9).
     #[test]
@@ -281,3 +366,4 @@ mod tests {
         assert!(!mesh.flags().intersects(TriMeshFlags::ORIENTED | TriMeshFlags::FIX_INTERNAL_EDGES));
     }
 }
+

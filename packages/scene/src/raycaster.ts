@@ -9,7 +9,7 @@
 // what a shape overlaps or meets when moved. Both see the world as the engine has it, with or without a tick since
 // the last change; what the running script changed in the scene reaches the engine when it returns (docs/RUNTIME.md,
 // World handlers).
-import { InstancedMesh, Mesh, type Object3D, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
+import { InstancedMesh, Mesh, Object3D, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
 import { Box3, Matrix4, Quaternion, Ray, Vector2, Vector3 } from "./math.ts";
 import type { BufferGeometry } from "./geometry.ts";
 
@@ -24,7 +24,27 @@ export interface Intersection {
   instanceId?: number;
   /** The surface's normal at the point, in the world (hits of the physics world). */
   normal?: Vector3;
+  /** A hit on one of the engine's own colliders (`object` is `engineColliders`): the physics world's id of the
+   *  collider. */
+  collider?: number;
+  /** On such a hit, the physics world's id of the body the collider is on: there on a voxel body (a part that came
+   *  loose), absent on the voxel level itself, which is fixed and on no body. */
+  body?: number;
 }
+
+/** The physics world's ids from here up are the engine's own bodies and colliders: a voxel level's objects (fixed
+ *  colliders) and the parts that came loose from it (bodies). No scene object stands for them. */
+export const ENGINE_IDS = 2 ** 30;
+
+/**
+ * The `object` of a physics hit on one of the engine's own colliders (a voxel level: `@threert/voxel`). It is in no
+ * scene and has no `physics` (`hit.object.physics` is null): what was met is in the hit's `collider` and `body`.
+ * - The voxel level: `body` is absent. The level is fixed; `hit.object.physics?.type === "fixed"`, the test for a
+ *   fixed scene object, does not say so here: test `hit.object === engineColliders && hit.body === undefined`.
+ * - A voxel body (a part that came loose): `body` is its id, the one `voxelBodies()` lists and `voxelImpulse` takes.
+ */
+export const engineColliders = new Object3D();
+engineColliders.name = "engine colliders";
 
 /** What a query of the physics world leaves out: an object (the one that asks: its own body). */
 export interface PhysicsQueryOptions {
@@ -32,6 +52,7 @@ export interface PhysicsQueryOptions {
 }
 
 interface PhysicsHit {
+  collider?: number;
   body: number | null;
   distance: number;
   point: [number, number, number];
@@ -39,8 +60,10 @@ interface PhysicsHit {
 }
 
 function physicsIntersection(h: PhysicsHit): Intersection | null {
+  const hit = { distance: h.distance, point: new Vector3(...h.point), face: null, faceIndex: null, normal: new Vector3(...h.normal) };
+  if (h.collider !== undefined && h.collider >= ENGINE_IDS) return { ...hit, object: engineColliders, collider: h.collider, ...(h.body === null ? {} : { body: h.body }) };
   const object = h.body === null ? undefined : physicsBodies.get(h.body);
-  return object ? { distance: h.distance, point: new Vector3(...h.point), object, face: null, faceIndex: null, normal: new Vector3(...h.normal) } : null;
+  return object ? { ...hit, object } : null;
 }
 
 function skipOf(o: PhysicsQueryOptions): { skip?: number } {
@@ -200,10 +223,11 @@ export class Shapecaster {
 
   /** The objects whose colliders the shape overlaps (each once). */
   overlap(options: PhysicsQueryOptions = {}): Object3D[] {
-    const hits = physicsQuery("overlap", { ...this.at(), ...skipOf(options) }) as { body: number | null }[] | null;
+    const hits = physicsQuery("overlap", { ...this.at(), ...skipOf(options) }) as { collider?: number; body: number | null }[] | null;
     const out = new Set<Object3D>();
     for (const h of hits ?? []) {
-      const o = h.body === null ? undefined : physicsBodies.get(h.body);
+      // (The engine's own colliders, a voxel level's: `engineColliders`, once.)
+      const o = h.collider !== undefined && h.collider >= ENGINE_IDS ? engineColliders : h.body === null ? undefined : physicsBodies.get(h.body);
       if (o) out.add(o);
     }
     return [...out];

@@ -489,6 +489,21 @@ impl Rng {
 /// panics, the pose table stays finite, and the world's hash can always be taken.
 #[test]
 fn random_calls_never_panic() {
+    fuzz(false);
+}
+
+/// The same in a world that has the engine's voxel shapes (ROADMAP § 6 step 8): a ground of cells and lumps of cells
+/// on bodies of the engine's ids, which the random calls name too (impulses, velocities, poses, joints to them, a
+/// `remove` that is refused), while the engine carves and fills their cells and takes them out, with ordinary and
+/// with absurd cells.
+#[test]
+fn random_calls_on_voxel_shapes_never_panic() {
+    fuzz(true);
+}
+
+fn fuzz(voxels: bool) {
+    use crate::bridge::ENGINE_IDS;
+    use crate::world::{BodyDesc, ColliderDesc, Shape};
     for level in 0..=4u32 {
         for seed in 1..=300u64 {
             let mut r = Rng((seed + level as u64 * 1_000_000).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
@@ -496,8 +511,34 @@ fn random_calls_never_panic() {
             if r.chance(0.8) {
                 ok(&mut b, &mut s, "collider", json!({ "id": 999, "position": [0, -0.5, 0], "shape": { "type": "box", "halfExtents": [50, 0.5, 50] }, "events": true }));
             }
+            if voxels {
+                let cells = |r: &mut Rng, n: i32, y: i32| -> Vec<[i32; 3]> { (-n..n).flat_map(|x| (-n..n).flat_map(move |z| (0..y).map(move |h| [x, h, z]))).filter(|_| r.chance(0.8)).collect() };
+                b.engine_collider(ENGINE_IDS, None, &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: cells(&mut r, 12, 2) })).unwrap();
+                for k in 1..=3u32 {
+                    b.engine_body(ENGINE_IDS + k, &BodyDesc { position: [r.unit() as f32, 0.5 + k as f32 * 0.6, r.unit() as f32], ..Default::default() }).unwrap();
+                    b.engine_collider(ENGINE_IDS + 10 + k, Some(ENGINE_IDS + k), &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: cells(&mut r, 2, 3) })).unwrap();
+                }
+            }
             for _ in 0..100 {
-                let id = 1 + r.below(10);
+                let mut id = 1 + r.below(10);
+                if voxels && r.chance(0.35) {
+                    id = (ENGINE_IDS + r.below(5) as u32) as u64;
+                }
+                if voxels && r.chance(0.1) {
+                    // The engine's own: cells carved and filled (at the higher levels anywhere, any number), a body or
+                    // a collider taken out. Refused or done, never a panic.
+                    let cell = |r: &mut Rng| -> [i32; 3] { [0, 1, 2].map(|_| if level >= 3 && r.chance(0.2) { [i32::MIN, i32::MAX, 1 << 20, -(1 << 20) - 1, 123_456_789][r.below(5) as usize] } else { r.below(9) as i32 - 4 }) };
+                    let clear: Vec<[i32; 3]> = (0..r.below(40)).map(|_| cell(&mut r)).collect();
+                    let fill: Vec<[i32; 3]> = (0..r.below(40)).map(|_| cell(&mut r)).collect();
+                    let c = ENGINE_IDS + [0, 11, 12, 13, 77][r.below(5) as usize];
+                    let _ = b.engine_edit_voxels(c, &clear, &fill);
+                    if r.chance(0.1) {
+                        b.engine_remove(Some(ENGINE_IDS + 1 + r.below(3) as u32), None);
+                    }
+                    if r.chance(0.05) {
+                        b.engine_remove(None, Some(c));
+                    }
+                }
                 let (op, a): (&str, Value) = match r.below(26) {
                     0..=4 => {
                         let kind = ["dynamic", "dynamic", "dynamic", "fixed", "kinematic"][r.below(5) as usize];

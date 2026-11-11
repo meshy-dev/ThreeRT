@@ -4,6 +4,8 @@
 // A saw cut (`voxelCarve`, a box) takes the lower post's layers y 0.8 .. 1.0. Its upper part and the whole second post
 // then hang on nothing: one loose part of two objects' voxels, which falls 0.2 m onto the stump (60 ticks in setup).
 // Seen from the side, black sky: the cut has closed, so the band y 0.8 .. 1.0 reads 5 nits (not fallen: 0).
+// The level's physics is off here (`physics: false`): this is the fall through the lattice, cell by cell, which a
+// level without physics still has. With it on, the loose part is a rigid body: voxel-cut-body.ts.
 import { defineGame } from "@threert/gameplay";
 import { voxelCarve, voxelFrame, voxelLevel } from "@threert/voxel";
 import { camera, result, sceneWithSky, type Region, type TestMeta } from "./lib.ts";
@@ -19,9 +21,10 @@ export const test: TestMeta = {
   note: "posts at x = z = 0, the cut at y 0.8 .. 1.0; camera at z = 8, y = 2",
 };
 
-export function level(): void {
+export function level(physics = false): void {
   voxelLevel({
     route: "mesh",
+    physics,
     palette: [
       { name: "none", color: [0, 0, 0], roughness: 1, metalness: 0 },
       { name: "black", color: [0, 0, 0], roughness: 1, metalness: 0 },
