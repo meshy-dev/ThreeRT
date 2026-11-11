@@ -119,6 +119,7 @@ interface NativeEngine {
   voxelDebris?: () => Float32Array;
   voxelHash?: () => string;
   voxelBodies?: () => string;
+  physics?: (op: string, args: object) => string;
 }
 const engine = () => (globalThis as { __engine?: NativeEngine }).__engine;
 
@@ -182,6 +183,17 @@ export function voxelBodies(): VoxelBody[] {
   const e = engine();
   if (!e?.voxelBodies) throw new Error("voxelBodies: needs the renderer's native voxels");
   return JSON.parse(e.voxelBodies()) as VoxelBody[];
+}
+
+/**
+ * An impulse (N s) on a voxel body: at its centre of mass, or at a point of the world (which turns it too). `body` is
+ * the id `voxelBodies()` lists and a physics hit reports (`Raycaster.intersectPhysics`: `hit.body`). Throws if there
+ * is no such body (it may have been carved away, or retired for the cap, since the id was read).
+ */
+export function voxelImpulse(body: number, impulse: readonly [number, number, number], point?: readonly [number, number, number]): void {
+  const e = engine();
+  if (!e?.physics) throw new Error("voxelImpulse: needs the renderer's physics");
+  e.physics("impulse", { body, impulse: [...impulse], ...(point ? { point: [...point] } : {}) });
 }
 
 /** A hash of the level's voxels and objects (16 hex digits; "" before it is loaded): the same commands in the same

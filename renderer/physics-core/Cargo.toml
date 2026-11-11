@@ -12,6 +12,10 @@ default = ["enhanced-determinism"]
 # in wasm32. On by default: without it the two differ (docs/ROADMAP.md § 6 step 7, with what it costs; build with
 # --no-default-features to compare).
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
+# Rapier's parallel solver and narrow phase (rayon): for native builds only (wasm32 has no threads here), off by
+# default. An experiment of ROADMAP § 6 step 8 (out/web-probe/step8/parallel.md, docs/VOXEL.md): whether the world
+# steps to the same bits with it, at any thread count, and what it gains on voxel bodies.
+parallel = ["rapier3d/parallel"]
 # For the determinism check only (tools/physics-determinism.ts): puts `std` into the crate graph the way a larger
 # program's other dependencies do (the renderer's turn on `num-traits/std`), which is what brought the platform's math
 # functions into Rapier's crates (third_party/glamx/PATCH.md). The bits must be the same with it.

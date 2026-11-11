@@ -1911,6 +1911,48 @@ mod tests {
         assert_eq!(format!("{:016x}", VoxelWorld::check_script()), format!("{:016x}", EXPECTED_SCRIPT));
     }
 
+    /// tests/render/voxel-cut-body.ts on the CPU: the cut is asked for in setup, before the level is loaded, so it is
+    /// made at the load, where the part it frees becomes a body; an offline render then settles the physics to its
+    /// scene time (2 s), and the part stands on the stump. And what scene code gets back from a ray is enough to act
+    /// on the body: the hit's `body` is the id the physics calls take (an impulse through it moves the part).
+    #[test]
+    fn a_cut_made_in_setup_frees_a_body_at_the_load_and_a_rays_hit_names_it() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::default();
+        let d: LevelDesc = serde_json::from_value(serde_json::json!({
+            "route": "mesh",
+            "palette": [{ "name": "none", "color": [0, 0, 0], "roughness": 1, "metalness": 0 }, { "name": "black", "color": [0, 0, 0], "roughness": 1, "metalness": 0 },
+                        { "name": "glow", "color": [1, 1, 1], "roughness": 1, "metalness": 0, "emissive": 5 }],
+            "objects": [{ "name": "slab", "uri": "tests/render/data/voxel-slab.tpg", "position": [0, 0, 0], "anchor": true },
+                        { "name": "post", "uri": "tests/render/data/voxel-post.tpg", "position": [0.0, 0.4, 0.0] },
+                        { "name": "post-above", "uri": "tests/render/data/voxel-post.tpg", "position": [0.0, 2.0, 0.0], "turn": 1 }],
+        }))
+        .unwrap();
+        v.request(d).unwrap();
+        assert_eq!(v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [-0.5, 0.8, -0.5, 0.5, 1.0, 0.5] }))).unwrap()["queued"], true);
+        let r = v.realize(&mut w, &mut ph, &assets()).unwrap().unwrap();
+        assert_eq!((r["explosions"].as_u64(), v.bodies()), (Some(1), 1), "{r}");
+        // (The two posts are one file: one shape between their colliders until the cut gave the lower one its own.)
+        assert_eq!(r["colliders"].as_u64(), Some(3));
+        crate::api::physics_settle(&mut ph, &mut v, &mut w, 120);
+        let part = *v.bodies.keys().next().unwrap();
+        let at = w.objects[&v.objects[part].as_ref().unwrap().parts[0].1].position;
+        assert!((at - Vec3::new(-0.2, 0.8, -0.2)).length() < 5e-3, "{at}");
+        // A ray from the side at the part: its hit's body, straight into an impulse.
+        let p = ph.as_mut().unwrap();
+        let hit = p.call(&mut w, "ray", &serde_json::json!({ "origin": [0.05, 2.05, 5.0], "direction": [0, 0, -1], "max": 10 })).unwrap();
+        let body = hit["body"].as_u64().expect("the ray meets the part");
+        assert_eq!(Some(body), v.body_list(p)[0]["body"].as_u64());
+        p.call(&mut w, "impulse", &serde_json::json!({ "body": body, "impulse": [0, 2000, 0] })).unwrap();
+        let up = p.call(&mut w, "state", &serde_json::json!({ "body": body })).unwrap()["linvel"][1].as_f64().unwrap();
+        assert!((up - 2000.0 / (416.0 * 0.9)).abs() < 0.05, "416 voxels of a soft entry (900 kg/m³) take 2,000 N s as {up} m/s");
+        for _ in 0..12 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        assert!(w.objects[&v.objects[part].as_ref().unwrap().parts[0].1].position.y > 1.2, "the part went up with it");
+    }
+
     /// The cap on bodies: past it the oldest sleeping body goes, its voxels debris; and a body the physics world took
     /// out goes with its objects.
     #[test]

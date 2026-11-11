@@ -77,3 +77,23 @@ test("bulk writes: brick() and fillBrick()", () => {
   assert.equal(g.get(8, 0, -8), 0);
   assert.equal(g.layout().stats.voxels, 1);
 });
+
+test("voxel bodies: the list is the engine's, an impulse goes to the physics world by the body's id", async () => {
+  const { voxelBodies, voxelImpulse } = await import("../src/native.ts");
+  const calls: [string, object][] = [];
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = {
+    voxelBodies: () => JSON.stringify([{ body: 2 ** 30 + 7, collider: 2 ** 30 + 8, voxels: 416, asleep: true, position: [0, 0.8, 0], rotation: [0, 0, 0, 1] }]),
+    physics: (op: string, args: object) => { calls.push([op, args]); return "null"; },
+  };
+  try {
+    const [b] = voxelBodies();
+    assert.deepEqual([b.body, b.voxels, b.asleep], [2 ** 30 + 7, 416, true]);
+    voxelImpulse(b.body, [0, 50, 0]);
+    voxelImpulse(b.body, [1, 0, 0], [0, 1, 0]);
+    assert.deepEqual(calls, [["impulse", { body: 2 ** 30 + 7, impulse: [0, 50, 0] }], ["impulse", { body: 2 ** 30 + 7, impulse: [1, 0, 0], point: [0, 1, 0] }]]);
+  } finally {
+    g.__engine = before;
+  }
+});

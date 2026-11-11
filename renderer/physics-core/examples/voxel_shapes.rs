@@ -8,7 +8,10 @@
 //! pieces of debris dropped onto it in a heap: the tick's time while they fall and when they rest, how many come to
 //! rest and sleep, whether any went through the ground.
 //!
-//!   cargo run --release --example voxel_shapes [pieces = 100] [ground cells a side = 256]
+//!   cargo run --release --example voxel_shapes [pieces = 100] [ground cells a side = 256] [only: e.g. voxels/voxels]
+//!
+//! With `only`, that pair alone, and no table of the fixed ground. Each row ends with a hash of every piece's pose and
+//! velocity, bit for bit: `--features parallel` (Rapier's parallel solver) and `RAYON_NUM_THREADS` must not change it.
 use rapier3d::prelude::*;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -152,6 +155,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let pieces: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100);
     let n: i32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(256);
+    let only = args.get(3).cloned();
     let g = ground(n);
     println!("ground: {n} x {n} cells of {SIZE} m, {} solid; {} pieces of 6³ cells (about {} solid each)", g.len(), pieces, piece(&mut Rng(1), 6).len());
     // The fixed ground: memory, build, an edit.
@@ -159,7 +163,7 @@ fn main() {
         let c = [n / 2, 6, n / 2];
         g.iter().filter(|p| (0..3).map(|a| (p[a] - c[a]).pow(2)).sum::<i32>() <= 100).count()
     });
-    for kind in ["voxels", "boxes", "trimesh"] {
+    for kind in ["voxels", "boxes", "trimesh"].into_iter().filter(|_| only.is_none()) {
         let before = HELD.load(Ordering::Relaxed);
         let t = Instant::now();
         let mut s = shape(kind, &g);
@@ -192,7 +196,7 @@ fn main() {
     }
     // Debris onto the ground.
     println!("\nmoving / fixed      tick ms: falling (mean, worst)   resting (mean)   asleep at 15 s   through the ground   fastest at the end, m/s");
-    for (moving, fixed) in [("voxels", "voxels"), ("boxes", "voxels"), ("hull", "voxels"), ("voxels", "trimesh"), ("boxes", "trimesh"), ("boxes", "boxes"), ("voxels", "boxes")] {
+    for (moving, fixed) in [("voxels", "voxels"), ("boxes", "voxels"), ("hull", "voxels"), ("voxels", "trimesh"), ("boxes", "trimesh"), ("boxes", "boxes"), ("voxels", "boxes")].into_iter().filter(|(m, f)| only.as_ref().is_none_or(|o| *o == format!("{m}/{f}"))) {
         let mut w = PhysicsWorld::new();
         w.integration_parameters.dt = 1.0 / 60.0;
         w.insert_collider(ColliderBuilder::new(shape(fixed, &g)), None);
@@ -221,6 +225,15 @@ fn main() {
         let asleep = bodies.iter().filter(|&&b| w.bodies[b].is_sleeping()).count();
         let through = bodies.iter().filter(|&&b| w.bodies[b].translation().y < 0.2).count();
         let fastest = bodies.iter().map(|&b| w.bodies[b].linvel().length()).fold(0.0f32, f32::max);
-        println!("  {:<17} {fall:>14.2} {worst:>8.2} {rest:>18.3} {asleep:>12} of {pieces} {through:>16} {fastest:>22.3}", format!("{moving} / {fixed}"));
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &b in &bodies {
+            let b = &w.bodies[b];
+            for x in b.translation().to_array().into_iter().chain(b.rotation().to_array()).chain(b.linvel().to_array()).chain(b.angvel().to_array()) {
+                for byte in x.to_bits().to_le_bytes() {
+                    hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        println!("  {:<17} {fall:>14.2} {worst:>8.2} {rest:>18.3} {asleep:>12} of {pieces} {through:>16} {fastest:>22.3}   {hash:016x}", format!("{moving} / {fixed}"));
     }
 }
