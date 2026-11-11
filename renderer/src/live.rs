@@ -441,7 +441,8 @@ const SKY_THREADS: usize = 3;
 /// trails the sun by one bake (~10–40 ms at `sky::DYNAMIC_SKY`). Lockstep runs wait for it, so they repeat.
 struct DynamicSky {
     atm: Arc<crate::sky::Atmosphere>,
-    ask: mpsc::Sender<(glam::Vec3, glam::Vec3)>,
+    /// (sun direction, sun illuminance above the atmosphere, cloud cover)
+    ask: mpsc::Sender<(glam::Vec3, glam::Vec3, f32)>,
     done: mpsc::Receiver<(gpu::EnvMap, Vec<f32>, f32)>,
     /// The brightest sky texel from which the environment is light-sampled (`Prepared::env_nee_floor`).
     env_nee_floor: f32,
@@ -454,7 +455,7 @@ impl DynamicSky {
         };
         let atm = Arc::new(crate::sky::Atmosphere::earth(*rayleigh_scale, *mie_scale, *mie_anisotropy, glam::Vec3::from(*ground_albedo)));
         let glow = crate::sky::glow_of(glow, horizon_glow);
-        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3)>();
+        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3, f32)>();
         let (tx, done) = mpsc::channel();
         let a = atm.clone();
         std::thread::Builder::new()
@@ -465,8 +466,8 @@ impl DynamicSky {
                     Some(p) => p.install(|| crate::sky::SkyTables::new(&a)),
                     None => crate::sky::SkyTables::new(&a),
                 };
-                let bake = |sun: (glam::Vec3, glam::Vec3)| {
-                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow);
+                let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
+                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
                     let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
@@ -1107,6 +1108,8 @@ pub struct LiveCore {
     pub gpu_blas_ms: f32,
     /// CPU time the last `render` spent waiting for the oldest frame in flight (ms; frame log `wait`): GPU-bound frames.
     pub cpu_wait_ms: f32,
+    /// The cloud cover the sky and the sun light were made with (`move_sun`).
+    sky_cover: f32,
 }
 
 /// GPU time per frame from timestamp queries (start of the first trace pass .. end of the post pass), read back a few
@@ -1116,12 +1119,36 @@ struct FrameTimer {
     resolve: wgpu::Buffer,
     /// Per slot: readback buffer and its state (0 free, 1 mapping, 2 mapped).
     reads: Vec<(wgpu::Buffer, Arc<AtomicU32>)>,
-    /// Per slot: the frame it timed.
+    /// Per slot: the frame it timed, and that frame's samples per pixel (its traces; only the first is timestamped).
     frames: [u32; TIMER_SLOTS],
+    spps: [u32; TIMER_SLOTS],
     slot: usize,
 }
 
 const TIMER_SLOTS: usize = 4;
+
+/// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
+const TIMER_GAP_MS: f32 = 2.0;
+
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, raster, particle pass pairs; zero: not run): from
+/// its first pass (particles, raster or trace) to the end of its post pass. The post pass follows the trace's command
+/// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
+/// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
+/// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
+/// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
+/// its passes, the further traces at the first one's length.
+fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
+    let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
+    if t[3] <= start {
+        return None;
+    }
+    let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
+    let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
+    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
+        return Some(ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2])));
+    }
+    Some(ms(t[3] - start))
+}
 
 impl FrameTimer {
     fn new(d: &wgpu::Device) -> FrameTimer {
@@ -1133,6 +1160,7 @@ impl FrameTimer {
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
             frames: [0; TIMER_SLOTS],
+            spps: [1; TIMER_SLOTS],
             slot: 0,
         }
     }
@@ -1146,11 +1174,9 @@ impl FrameTimer {
                 let t: [u64; 8] = bytemuck::pod_read_unaligned(&buf.slice(..).get_mapped_range().unwrap()[..64]);
                 buf.unmap();
                 state.store(0, Ordering::Release);
-                // The frame starts at its first pass: particles, raster or trace (zero: not run).
-                let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min().unwrap_or(0);
                 let frame = self.frames[k];
-                if t[3] > start && latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0) {
-                    latest = Some(((t[3] - start) as f32 * period_ns * 1e-6, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
+                if let Some(ms) = frame_gpu_ms(&t, self.spps[k], period_ns).filter(|_| latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0)) {
+                    latest = Some((ms, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
                 }
             }
         }
@@ -1459,8 +1485,9 @@ impl LiveCore {
         let restir = std::env::var("THREERT_RESTIR").is_ok_and(|v| v == "1");
         let resv = gpu::reservoirs(&g.device, if restir { w as u64 * h as u64 } else { 1 });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &cache.as_ref().map_or_else(|| gpu::CacheBuffers::new(&g.device, 1), |c| gpu::CacheBuffers { keys: c.bufs.keys.clone(), acc: c.bufs.acc.clone(), val: c.bufs.val.clone() }), &resv, &targets.refl, &targets.motion, &targets.direct);
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0 };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0 };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
+        core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
         Ok(core)
     }
@@ -1745,7 +1772,9 @@ impl LiveCore {
             self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
             self.lit_changed = self.frame.max(1);
         }
-        if changes.sun {
+        // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
+        if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
+            self.sky_cover = self.sc.tables.cloud_cover;
             self.move_sun(world);
         }
         if changes.exposure {
@@ -1764,7 +1793,8 @@ impl LiveCore {
             self.sc.sky = DynamicSky::new(world, size, alt, floor);
         }
         let Some(sky) = self.sc.sky.as_ref() else { return };
-        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux);
+        let cover = self.sc.tables.cloud_cover;
+        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux, cover);
         let e = &mut self.sc.tables;
         if let (Some(idx), Some(o)) = (e.light_index.get(&id), world.objects.get(&id)) {
             if let crate::world::Kind::Light(l) = &o.kind {
@@ -1777,7 +1807,7 @@ impl LiveCore {
                 }
             }
         }
-        let _ = sky.ask.send((dir, lux));
+        let _ = sky.ask.send((dir, lux, cover));
         if self.fixed_dt.is_some() {
             if let Ok(b) = sky.done.recv() {
                 self.put_sky(b);
@@ -2363,7 +2393,7 @@ impl LiveCore {
             let mut pose: Option<&crate::desc::Animation> = None;
             for (id, _) in &pg.members {
                 let Some(o) = world.objects.get(id) else { return Ok(false) };
-                let crate::world::Kind::Model { uri, nodes, animation: Some(a) } = &o.kind else { return Ok(false) };
+                let crate::world::Kind::Model { uri, nodes, animation: Some(a), .. } = &o.kind else { return Ok(false) };
                 if !world.shown(*id) || *uri != pg.uri || *nodes != pg.nodes || pose.is_some_and(|p| p != a) {
                     return Ok(false);
                 }
@@ -2873,11 +2903,14 @@ impl LiveCore {
                     (record, gpu, blas, entry)
                 }
                 Kind::Mesh { materials, .. } if materials.len() > 1 => return Err("a mesh with several materials".into()),
-                Kind::Model { uri, nodes, animation } => {
+                Kind::Model { uri, nodes, animation, functions } => {
                     // A static model already in the scene: another instance of its mesh (one not in it brings materials
                     // and textures, which load with a rebuild).
                     if animation.is_some() {
                         return Err("an animated model".into());
+                    }
+                    if !functions.is_empty() {
+                        return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
                     if features & gpu::F_INST == 0 || m.determinant() <= 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("a model the build would flatten (mirrored, instancing off, or the scene's first instance)".into());
@@ -3414,6 +3447,7 @@ impl LiveCore {
                 }
                 if let Some(k) = slot {
                     t.frames[k] = self.frame;
+                    t.spps[k] = spp.max(1);
                 }
                 slot
             }
@@ -4257,6 +4291,31 @@ pub fn parse_scale(v: Option<&str>, default: Option<f32>) -> Result<Option<f32>>
         None => Ok(default),
         Some("auto") => Ok(None),
         Some(v) => v.parse::<f32>().map(|s| Some(s.clamp(0.25, 1.0))).map_err(|_| anyhow!("--scale must be a number or auto")),
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn a_post_pass_from_another_frame_counts_by_its_own_length() {
+        // Two frames of the crowd scene (ns, period 1): frame 453 as read, and frame 454, whose slot read frame 458's
+        // post pair (74.5 ms after its trace began).
+        let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0];
+        let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0];
+        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1, 1.0).unwrap();
+        assert_eq!(ms(t453), (t453[3] - t453[0]) as f32 * 1e-6);
+        assert!((ms(t454) - (7.849166 + 5.660166)).abs() < 1e-3, "{}", ms(t454));
+        // The first pass is the frame's start; nothing timed, no measurement.
+        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1, 1.0), None);
+        let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000];
+        assert_eq!(frame_gpu_ms(&particles_first, 1, 1.0), Some(13.0));
+        // 3 samples: two more traces (untimed) between the first and the post pass, a 16.2 ms gap: the span. The post
+        // pair of frame 458 under 3 samples: still out of place (trace 7.85 ms, gap 66.7 ms), counted as the passes.
+        let three = [1_000_000, 9_000_000, 25_200_000, 31_000_000, 0, 0, 0, 0];
+        assert_eq!(frame_gpu_ms(&three, 3, 1.0), Some(30.0));
+        assert!((frame_gpu_ms(&t454, 3, 1.0).unwrap() - (3.0 * 7.849166 + 5.660166)).abs() < 1e-3);
     }
 }
 

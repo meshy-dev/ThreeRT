@@ -43,6 +43,8 @@ pub struct Tables {
     pub(crate) emissive: HashSet<u32>,
     pub wetness: f32,
     pub rain: f32,
+    /// Cloud cover (0..1): a change re-bakes the sky and dims the sun (live.rs `move_sun`).
+    pub cloud_cover: f32,
     pub fog: Option<desc::Fog>,
     /// three.js `scene.background` (`Params::background`).
     pub background: Option<[f32; 3]>,
@@ -82,6 +84,7 @@ impl Tables {
             light_tree,
             wetness: sc.wetness,
             rain: sc.rain,
+            cloud_cover: sc.cloud_cover,
             fog: sc.fog.clone(),
             background: sc.background.map(|b| b.to_array()),
             emit_in_place: false,
@@ -167,6 +170,7 @@ impl Tables {
         if c.environment {
             self.wetness = w.environment.wetness.clamp(0.0, 1.0);
             self.rain = w.environment.rain.clamp(0.0, 1.0);
+            self.cloud_cover = w.environment.cloud_cover.clamp(0.0, 1.0);
             self.fog = w.environment.fog.clone();
             self.background = w.environment.background;
             self.aerial = scene::aerial_params(&w.environment.sky);

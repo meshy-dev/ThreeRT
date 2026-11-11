@@ -1006,3 +1006,118 @@ export class SurfaceMaterial extends LibraryMaterial<SurfaceParameters> {
     );
   }
 }
+
+// ------------------------------------------------------------------------------------------------ wet layer
+
+// (Its own copies of SurfaceMaterial's noise and ripples, under other names: helpers are deduplicated by their whole
+// text, and the Metal compiler failed on the translucent pass with SURFACE_HELPERS' window code in it.)
+const WET_HELPERS = `
+fn std_wl_hash(x: i32, y: i32, z: i32) -> f32 {
+    let v = bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u;
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return f32(((w >> 22u) ^ w) >> 8u) * (1.0 / 16777216.0);
+}
+fn std_wl_vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * (3.0 - 2.0 * f);
+    let x = i32(i.x);
+    let y = i32(i.y);
+    return mix(mix(std_wl_hash(x, y, 0), std_wl_hash(x + 1, y, 0), u.x), mix(std_wl_hash(x, y + 1, 0), std_wl_hash(x + 1, y + 1, 0), u.x), u.y);
+}
+fn std_wl_fbm(p: vec2<f32>) -> f32 {
+    var a = 0.5;
+    var q = p;
+    var s = 0.0;
+    for (var o = 0; o < 4; o++) {
+        s += a * std_wl_vnoise(q);
+        q = mat2x2<f32>(1.6, 1.2, -1.2, 1.6) * q + vec2<f32>(17.1, 9.3);
+        a *= 0.5;
+    }
+    return s / 0.9375;
+}
+fn std_wl_ripples(x: vec2<f32>, t: f32) -> vec2<f32> {
+    let q = x / 0.35;
+    let c = floor(q);
+    var g = vec2<f32>(0.0);
+    let o = vec2<i32>(select(-1, 0, q.x - c.x >= 0.5), select(-1, 0, q.y - c.y >= 0.5));
+    for (var j = 0; j <= 1; j++) {
+        for (var i = 0; i <= 1; i++) {
+            let ci = vec2<i32>(i32(c.x) + o.x + i, i32(c.y) + o.y + j);
+            let ph = t * 0.9 + std_wl_hash(ci.x, ci.y, 13);
+            let age = fract(ph);
+            let cyc = i32(floor(ph));
+            if (std_wl_hash(ci.x * 31 + cyc, ci.y, 17) > 0.45) { continue; }
+            let dv = q - (vec2<f32>(ci) + vec2<f32>(std_wl_hash(ci.x + cyc, ci.y, 7), std_wl_hash(ci.x, ci.y + cyc, 11)));
+            let dist = length(dv);
+            let xr = (dist - age * 0.6) * 22.0;
+            if (abs(xr) < 6.2831853 && dist > 1e-4) {
+                let amp = (1.0 - age) * (1.0 - age) * (1.0 - abs(xr) / 6.2831853);
+                g += dv / dist * (cos(xr) * amp);
+            }
+        }
+    }
+    return g;
+}
+`;
+
+const WET_LAYER = new MaterialFunction("std_wet_layer", {
+  params: { Wet: 1, PuddleAmount: 1, PuddleScale: 6 },
+  helpers: WET_HELPERS,
+  code: `
+    let p = i.wp;
+    let ng = i.ng;
+    var col = base.base;
+    var rough = base.roughness;
+    var metal = base.metallic;
+    var spec = base.specular;
+    var n = base.normal;
+    // SurfaceMaterial's wetness (Lagarde), on the material's own shading.
+    let wet = clamp($Wet * i.wetness, 0.0, 1.0);
+    if (wet > 0.0) {
+        var pud = 0.0;
+        if ($PuddleAmount > 0.0 && ng.y > 0.6 && i.near) {
+            let hgt = std_wl_fbm(p.xz / $PuddleScale) + 0.35 * (dot(col, vec3<f32>(0.2126, 0.7152, 0.0722)) - 0.1);
+            let level = 0.32 + 0.22 * $PuddleAmount * i.wetness;
+            pud = 1.0 - smoothstep(level - 0.03, level + 0.03, hgt);
+        }
+        let damp = max(wet, pud);
+        col *= mix(1.0, 0.5, damp * (1.0 - metal));
+        rough = mix(rough, min(rough, 0.14), wet);
+        n = normalize(mix(n, ng, 0.5 * wet));
+        rough = mix(rough, 0.02, pud);
+        col = mix(col, col * 0.6, pud);
+        metal = mix(metal, 0.0, pud);
+        spec = mix(spec, 0.5, pud);
+        n = normalize(mix(n, ng, pud));
+        if (i.rain > 0.0 && ng.y > 0.6 && i.depth == 0u) {
+            let g = std_wl_ripples(p.xz, i.time) * i.rain * (0.015 + 0.1 * pud);
+            n = normalize(n - vec3<f32>(g.x, 0.0, g.y));
+        }
+    }
+    o.base = col;
+    o.roughness = rough;
+    o.metallic = metal;
+    o.specular = spec;
+    o.normal = n;`,
+});
+
+export interface WetLayerParameters {
+  /** Scales `scene.wetness` (1). */
+  wet?: number;
+  /** How much floods at full wetness (1; 0 = no puddles). */
+  puddles?: number;
+  /** Metres across a puddle field's noise (6). */
+  puddleScale?: number;
+}
+
+/**
+ * The rain on any material: `SurfaceMaterial`'s wetness as a layer on another material's own shading (its maps
+ * sampled). With `scene.wetness` the surface darkens and glosses; on up-facing ground puddles fill (mirror-flat), and
+ * `scene.rain` rings ripple in them. For a glTF file's materials: `new GLTFModel(uri, { functions: { ground:
+ * wetLayer() } })`.
+ */
+export function wetLayer(p: WetLayerParameters = {}): ShaderBinding {
+  return WET_LAYER.with({ Wet: p.wet ?? 1, PuddleAmount: p.puddles ?? 1, PuddleScale: p.puddleScale ?? 6 });
+}

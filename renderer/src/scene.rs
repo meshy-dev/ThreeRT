@@ -445,6 +445,8 @@ pub struct Scene {
     /// Global wetness and rain intensity (0..1).
     pub wetness: f32,
     pub rain: f32,
+    /// Cloud cover (0..1) of an atmosphere sky.
+    pub cloud_cover: f32,
     pub preset: desc::Preset,
     pub stats: HashMap<&'static str, f64>,
     /// Triangle ranges per object (name, first, end), in `tris` order: picking and selection outlines.
@@ -813,18 +815,25 @@ pub fn build_material(id: u32, m: &desc::Material, textures: &HashMap<u32, world
         mt: [-1; 8],
     };
     if let Some(sh) = &m.shader {
-        let f = *shaders.get(sh.id.as_str()).ok_or_else(|| anyhow!("material {id}: unknown material function {}", sh.id))?;
-        gm.tex1[3] = f + 1;
-        for (k, v) in sh.params.iter().take(32).enumerate() {
-            gm.mp[k / 4][k % 4] = *v;
-        }
-        for (k, t) in sh.textures.iter().take(8).enumerate() {
-            if let Some(tid) = t {
-                gm.mt[k] = tex(*tid, false)?;
-            }
-        }
+        apply_shader(&mut gm, sh, shaders, tex).with_context(|| format!("material {id}"))?;
     }
     Ok(gm)
+}
+
+/// A material function's binding on a GPU material: the function, its 32 parameters and its textures (`tex(texture,
+/// sRGB requested)`).
+pub fn apply_shader(gm: &mut GpuMaterial, sh: &desc::ShaderRef, shaders: &HashMap<String, i32>, tex: &mut dyn FnMut(u32, bool) -> Result<i32>) -> Result<()> {
+    let f = *shaders.get(sh.id.as_str()).ok_or_else(|| anyhow!("unknown material function {}", sh.id))?;
+    gm.tex1[3] = f + 1;
+    for (k, v) in sh.params.iter().take(32).enumerate() {
+        gm.mp[k / 4][k % 4] = *v;
+    }
+    for (k, t) in sh.textures.iter().take(8).enumerate() {
+        if let Some(tid) = t {
+            gm.mt[k] = tex(*tid, false)?;
+        }
+    }
+    Ok(())
 }
 
 /// Analytic light of a light object with world matrix `m` (rect lights with a visible card are emitter geometry
@@ -1032,7 +1041,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     if instancing && std::env::var("THREERT_POSE_SHARE").map_or(true, |v| v != "0") {
         let mut count: HashMap<PoseKey, usize> = HashMap::new();
         for id in &order {
-            let Kind::Model { uri, nodes, animation: Some(a) } = &w.objects[id].kind else { continue };
+            let Kind::Model { uri, nodes, animation: Some(a), functions } = &w.objects[id].kind else { continue };
             if !w.shown(*id) || worlds[id].determinant() <= 0.0 {
                 continue;
             }
@@ -1041,7 +1050,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             if !glb.animated() || (nodes.is_none() && glb.rigid()) {
                 continue;
             }
-            let key: PoseKey = (uri.clone(), nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop);
+            // (Copies with material functions share a pose only with the same functions: their own materials.)
+            let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+            let key: PoseKey = (file, nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop);
             *count.entry(key.clone()).or_default() += 1;
             pose_key_of.insert(*id, key);
         }
@@ -1225,10 +1236,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     retained.dynamic.insert(*id, DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
                 }
             }
-            Kind::Model { uri, nodes, animation } if shown => {
+            Kind::Model { uri, nodes, animation, functions } if shown => {
                 let glb = model_gltf(uri, assets)?;
                 let (doc, _, images) = &glb.gltf;
-                let key = uri.clone();
+                // (A model with material functions has its own copies of the file's materials.)
+                let key = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+                // (Its meshes too: placements share a mesh only with the same functions.)
+                let mesh_key = (key.clone(), nodes.clone());
                 // (material index, instancing class: 0 opaque, 1 cutout, 2 flattened per placement: glass (shadow rays
                 // pass), emissive (emitter sampling), material function)
                 let mut resolve = |gm: Option<gltf::Material>| -> Result<(u32, u32)> {
@@ -1236,7 +1250,20 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let i = match asset_materials.get(&(key.clone(), idx)) {
                         Some(i) => *i,
                         None => {
-                            let gpu = gltf_material(gm, images, &key, &mut texcache, &model_images)?;
+                            let name = gm.as_ref().and_then(|g| g.name()).unwrap_or_default().to_string();
+                            let mut gpu = gltf_material(gm, images, uri, &mut texcache, &model_images)?;
+                            // The first function whose prefix the material's name starts with, on the glTF shading.
+                            if let Some(f) = functions.iter().find(|f| name.starts_with(f.prefix.as_str())) {
+                                let mut tex = |tid: u32, srgb_default: bool| -> Result<i32> {
+                                    let t = w.textures.get(&tid).ok_or_else(|| anyhow!("unknown texture {tid}"))?;
+                                    let (tkey, img) = match decoded.get(&tid) {
+                                        Some(d) => d.clone(),
+                                        None => texture_image(t, assets)?,
+                                    };
+                                    texcache.add((tkey, t.srgb && srgb_default), t.wrap, || Ok(img))
+                                };
+                                apply_shader(&mut gpu, &f.shader, &retained.shaders, &mut tex).with_context(|| format!("{uri}: material {name}"))?;
+                            }
                             let i = materials.len() as u32;
                             materials.push(gpu);
                             asset_materials.insert((key.clone(), idx), i);
@@ -1407,7 +1434,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                 }
                 if instancing && !posed && m.determinant() > 0.0 {
-                    let key = (uri.clone(), nodes.clone());
+                    let key = mesh_key.clone();
                     let mesh = match mesh_of.get(&key) {
                         Some(k) => *k,
                         None => {
@@ -1785,6 +1812,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         fog: env.fog.clone(),
         wetness: env.wetness.clamp(0.0, 1.0),
         rain: env.rain.clamp(0.0, 1.0),
+        cloud_cover: env.cloud_cover.clamp(0.0, 1.0),
         preset,
         stats,
         tri_nodes,
@@ -1929,7 +1957,7 @@ pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Resu
             }
             Some(tris.iter().zip(attrs).map(|(t, a)| (t.map(Vec3::from), a)).collect())
         }
-        Kind::Model { uri, nodes, animation } => {
+        Kind::Model { uri, nodes, animation, .. } => {
             let tris = model_gltf(uri, assets)?.triangles(m, nodes.as_deref(), animation.as_ref())?;
             if tris.len() != d.mats.len() {
                 return Ok(None);

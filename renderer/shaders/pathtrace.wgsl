@@ -926,6 +926,9 @@ fn from_ue_vec(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y); }
 
 // @material-functions-begin
 fn material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn alpha_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn emissive_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
 // @material-functions-end
 
 fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
@@ -979,7 +982,7 @@ fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
         let i = mat_in_at(ti, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
         var b = mat_base(m);
         b.opacity = alpha;
-        alpha = material_function(m.tex1.w - 1, i, m, b).opacity;
+        alpha = alpha_material_function(m.tex1.w - 1, i, m, b).opacity;
     }
     return alpha >= m.uv2.w;
 }
@@ -1640,7 +1643,7 @@ fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
@@ -1760,7 +1763,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>) -> ES {
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        r.le = material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        r.le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     r.l = l;
     r.dist = dist;
