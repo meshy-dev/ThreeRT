@@ -348,6 +348,58 @@ fn voxel_cells(size: f32, cells: &[[i32; 3]]) -> Result<(), String> {
     }
 }
 
+/// Contacts between a voxel shape and a ball, found as between a voxel shape and any other shape. Parry has a
+/// function of its own for the pair (contact_manifolds_voxels_ball.rs), the only one of its voxel functions that
+/// keeps no workspace; and a pair without a workspace is to Rapier 0.36 a pair of one manifold whose place in its
+/// list never changes, so the solver keeps a reference to it from one step to the next. A ball on voxels has a
+/// manifold a cell it touches: when one went, the solver came to "stale ContactRef manifold ordinal" and panicked
+/// (a ball rolling on a voxel ground: `voxel_worlds_never_panic`, `random_calls_on_voxel_shapes_never_panic`). The
+/// general function keeps a workspace, which is what tells Rapier to look the pair's manifolds up afresh. Every
+/// other pair is parry's own dispatch, so a world without voxel shapes is stepped bit for bit as it was.
+struct VoxelsWithBalls;
+
+mod dispatch {
+    use super::VoxelsWithBalls;
+    use rapier3d::parry::math::{Pose, Real, Vector};
+    use rapier3d::parry::query::details::{contact_manifolds_voxels_shape_shapes, NonlinearRigidMotion, NormalConstraints, ShapeCastOptions};
+    use rapier3d::parry::query::{ClosestPoints, Contact, ContactManifold, ContactManifoldsWorkspace, DefaultQueryDispatcher, PersistentQueryDispatcher, QueryDispatcher, ShapeCastHit, ShapeDistance, ShapeIntersection, Unsupported};
+    use rapier3d::parry::shape::Shape;
+
+    impl QueryDispatcher for VoxelsWithBalls {
+        fn intersection_test(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape) -> Result<ShapeIntersection, Unsupported> {
+            Err(Unsupported)
+        }
+        fn distance(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape) -> Result<ShapeDistance, Unsupported> {
+            Err(Unsupported)
+        }
+        fn contact(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Real) -> Result<Option<Contact>, Unsupported> {
+            Err(Unsupported)
+        }
+        fn closest_points(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Real) -> Result<ClosestPoints, Unsupported> {
+            Err(Unsupported)
+        }
+        fn cast_shapes(&self, _: &Pose, _: Vector, _: &dyn Shape, _: &dyn Shape, _: ShapeCastOptions) -> Result<Option<ShapeCastHit>, Unsupported> {
+            Err(Unsupported)
+        }
+        fn cast_shapes_nonlinear(&self, _: &NonlinearRigidMotion, _: &dyn Shape, _: &NonlinearRigidMotion, _: &dyn Shape, _: Real, _: Real, _: bool) -> Result<Option<ShapeCastHit>, Unsupported> {
+            Err(Unsupported)
+        }
+    }
+
+    impl<M: Default + Clone + Send + Sync, C: Default + Copy + Send + Sync> PersistentQueryDispatcher<M, C> for VoxelsWithBalls {
+        fn contact_manifolds(&self, pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape, prediction: Real, manifolds: &mut Vec<ContactManifold<M, C>>, workspace: &mut Option<ContactManifoldsWorkspace>) -> Result<(), Unsupported> {
+            if (g1.as_voxels().is_some() && g2.as_ball().is_some()) || (g1.as_ball().is_some() && g2.as_voxels().is_some()) {
+                contact_manifolds_voxels_shape_shapes(&DefaultQueryDispatcher, pos12, g1, g2, prediction, manifolds, workspace);
+                return Ok(());
+            }
+            Err(Unsupported)
+        }
+        fn contact_manifold_convex_convex(&self, _: &Pose, _: &dyn Shape, _: &dyn Shape, _: Option<&dyn NormalConstraints>, _: Option<&dyn NormalConstraints>, _: Real, _: &mut ContactManifold<M, C>) -> Result<(), Unsupported> {
+            Err(Unsupported)
+        }
+    }
+}
+
 /// A ray against a voxel shape placed at `at`, the cells walked one by one (Amanatides and Woo): the distance to the
 /// first solid cell within `max` and the normal of the face it is entered by (a ray that starts in a solid cell: 0,
 /// and against the ray). Parry's own (ray_voxels.rs) tests each cell's box with the ray and takes the next cell by
@@ -477,6 +529,10 @@ impl Default for Physics {
 impl Physics {
     pub fn new(gravity: [f32; 3]) -> Physics {
         let mut world = PhysicsWorld::new();
+        {
+            use rapier3d::parry::query::{DefaultQueryDispatcher, QueryDispatcher};
+            world.narrow_phase = NarrowPhase::with_query_dispatcher(VoxelsWithBalls.chain(DefaultQueryDispatcher));
+        }
         world.gravity = v(gravity);
         world.integration_parameters.dt = TICK;
         Physics {
@@ -593,14 +649,6 @@ impl Physics {
             return Err(format!("physics: the world's colliders would hold more than {MAX_SHAPE_DATA} points and triangles"));
         }
         let shape = d.shape.shared()?;
-        if matches!(d.shape, Shape::Voxels { .. }) {
-            // A world with a voxel shape looks at every pair's contacts every tick. Rapier 0.36 keeps the contacts of
-            // a pair that has hardly moved (`contact_recycling`), and with pairs of many manifolds (a voxel shape's)
-            // its solver then came to a manifold the pair no longer had and panicked ("stale ContactRef manifold
-            // ordinal"): 4 of 300 random voxel worlds with it, none of 20,000 without (`check::case` 4,
-            // `voxel_worlds_never_panic`). A world without voxel shapes is stepped as it was.
-            self.world.integration_parameters.contact_recycling = false;
-        }
         let mut c = ColliderBuilder::new(shape).position(pose(d.position, d.rotation)?).density(d.density).friction(d.friction).restitution(d.restitution).sensor(d.sensor);
         if let Some(m) = d.mass {
             c = c.mass(m);
@@ -742,11 +790,10 @@ impl Physics {
     /// removes a body left without colliders). Err: no such collider, not a voxel shape, a cell out of bounds;
     /// nothing is changed then.
     ///
-    /// The collider is taken out of Rapier and put back with its cells changed, under the same id. Changing the
-    /// shape where it sits (`Collider::shape_mut`) is not safe in Rapier 0.36: its pairs keep contacts found on the
-    /// old cells (a pair that has not moved is not looked at again), and the solver's graph keeps entries of
-    /// manifolds the pair no longer has: 4 of 300 random voxel worlds (`check::case` 4) panicked in a later tick
-    /// ("stale ContactRef manifold ordinal"). Put back, it meets everything anew.
+    /// The collider is taken out of Rapier and put back with its cells changed, under the same id. Changed where it
+    /// sits (`Collider::shape_mut`), its pairs would keep the contacts found on the old cells for as long as they
+    /// do not move (Rapier's contact recycling: a pair that has hardly moved is not looked at again), and what
+    /// rested on a cell that is gone would rest on nothing. Put back, it meets everything anew.
     pub fn edit_voxels(&mut self, id: ColliderId, clear: &[[i32; 3]], fill: &[[i32; 3]]) -> Result<usize, String> {
         let &(h, data) = self.colliders.get(&id).ok_or("physics: unknown collider")?;
         let size = match self.world.colliders[h].shape().as_voxels() {
@@ -1710,19 +1757,16 @@ mod tests {
         assert!(t == 0.0 && n.y == -1.0);
     }
 
-    /// What a voxel shape refuses; and a world steps as it did until it has one (Rapier's contact recycling is on
-    /// without voxel shapes, off with: `add_collider`).
+    /// What a voxel shape refuses.
     #[test]
     fn voxel_shapes_are_checked() {
         let mut p = Physics::default();
         let bad = |p: &mut Physics, size: f32, cells: Vec<[i32; 3]>| p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size, cells })).is_err();
         assert!(bad(&mut p, 0.1, vec![]) && bad(&mut p, 0.0, vec![[0, 0, 0]]) && bad(&mut p, f32::NAN, vec![[0, 0, 0]]) && bad(&mut p, 1e3, vec![[0, 0, 0]]));
         assert!(bad(&mut p, 0.1, vec![[0, 1 << 20, 0]]) && bad(&mut p, 0.1, vec![[i32::MIN, 0, 0]]) && bad(&mut p, 100.0, vec![[1001, 0, 0]]));
-        assert!(p.world.integration_parameters.contact_recycling, "no voxel shape yet");
         // The same cell twice is one cell.
         let c = p.add_collider(None, &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: vec![[0, 0, 0], [0, 0, 0], [1, 0, 0]] })).unwrap();
         assert_eq!(p.voxels(c), Some(2));
-        assert!(!p.world.integration_parameters.contact_recycling);
         // A sensor of cells, and cells at the far end of what a shape may reach.
         p.add_collider(None, &ColliderDesc { sensor: true, ..ColliderDesc::new(Shape::Voxels { size: 0.01, cells: vec![[(1 << 20) - 1, 0, -(1 << 20)]] }) }).unwrap();
         run(&mut p, 5);

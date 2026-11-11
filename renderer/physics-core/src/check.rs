@@ -90,7 +90,7 @@ pub const KINDS: [(&str, u32); 5] = [
 ];
 
 /// The hash of all the cases (`cases()`) with `enhanced-determinism`, natively and in wasm32 alike.
-pub const EXPECTED_CASES: u64 = 0xa82b_86d3_6693_a65e;
+pub const EXPECTED_CASES: u64 = 0xcf74_cd21_1f5c_152f;
 
 /// A generator of integers only: a float made from one is exact arithmetic, the same bits on every platform.
 struct Rng(u64);
@@ -344,8 +344,8 @@ mod tests {
         assert_eq!((s.to_bits(), c.to_bits()), (ls.to_bits(), lc.to_bits()));
     }
 
-    /// A soak of the voxel worlds (`case` 4) past the seeds the determinism check runs: none panics. (With Rapier's
-    /// contact recycling left on, 4 of the first 300 did: world.rs `add_collider`.)
+    /// A soak of the voxel worlds (`case` 4) past the seeds the determinism check runs: none panics. (With parry's own
+    /// contacts between a voxel shape and a ball, 4 of the first 300 did: world.rs `VoxelsWithBalls`.)
     ///   cargo test --release --lib voxel_worlds_never_panic -- --ignored
     #[test]
     #[ignore = "a soak: 20,000 worlds, minutes"]
