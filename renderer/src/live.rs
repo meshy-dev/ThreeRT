@@ -444,6 +444,10 @@ impl Targets {
                             [(buf.offset / stride) as u32, (buf.size / stride) as u32]
                         })
                         .collect();
+                    // (And the struct's unused last pair: `merged::OFFSETS_BYTES`.)
+                    let mut lo = lo;
+                    lo.push([0, 0]);
+                    debug_assert_eq!(lo.len() * 8, crate::merged::OFFSETS_BYTES);
                     offsets = wgpu::util::DeviceExt::create_buffer_init(d, &wgpu::util::BufferInitDescriptor { label: Some("live offsets"), contents: bytemuck::cast_slice(&lo), usage: wgpu::BufferUsages::UNIFORM });
                     entries.extend(slabs.iter().zip(&SLABS).map(|(s, m)| e(m.binding, s)));
                     entries.push(e(SLABS[SLAB_K].binding, live));

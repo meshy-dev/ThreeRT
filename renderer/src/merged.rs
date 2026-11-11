@@ -175,6 +175,8 @@ pub const LIVE_BUFS: [LiveBuf; 25] = [
     LiveBuf { name: "xhist_out", binding: 30, slab: SLAB_V4, decl: "@group(0) @binding(30) var<storage, read_write> xhist_out: array<vec4<f32>>;" },
 ];
 pub const OFFSETS_BINDING: u32 = 31;
+/// `MergedOffsets`' size: a pair for each of `LIVE_BUFS`, and one unused that makes it a multiple of 16 bytes.
+pub const OFFSETS_BYTES: usize = (LIVE_BUFS.len() + 1) * 8;
 
 /// The live passes' storage bindings that stay as they are: (binding, read only).
 pub const LIVE_KEPT: [(u32, bool); 3] = [(1, true), (10, false), (13, false)];
@@ -396,13 +398,15 @@ pub fn kernel(src: &str, caps: &Caps) -> String {
 /// offsets `LO`.
 pub fn live(src: &str) -> String {
     let mut names: Vec<&str> = SLABS.iter().map(|s| s.name).collect();
-    names.extend(["LO", "MergedOffsets"]);
+    names.extend(["LO", "MergedOffsets", "merged_pad"]);
     fresh(src, &names);
     let mut s = src.to_string();
     for b in LIVE_BUFS.iter() {
         take(&mut s, b.decl, "");
     }
-    let fields: Vec<String> = LIVE_BUFS.iter().map(|b| format!("    {}: vec2<u32>,", b.name)).collect();
+    // (A last pair unused: the struct is 208 bytes, a multiple of 16. WebGPU does not ask for that, but wgpu's
+    // downlevel targets do of a uniform binding's size, and it costs nothing; `OFFSETS_BYTES`.)
+    let fields: Vec<String> = LIVE_BUFS.iter().map(|b| format!("    {}: vec2<u32>,", b.name)).chain(["    merged_pad: vec2<u32>,".to_string()]).collect();
     let mut head = format!("// The merged layout (renderer/src/merged.rs): each buffer's (first element, length) in its slab.\nstruct MergedOffsets {{\n{}\n}};\n@group(0) @binding({OFFSETS_BINDING}) var<uniform> LO: MergedOffsets;\n", fields.join("\n"));
     for sl in &SLABS {
         head += &format!("@group(0) @binding({}) var<storage, {}> {}: array<{}>;\n", sl.binding, if sl.read_only { "read" } else { "read_write" }, sl.name, sl.ty);
@@ -570,7 +574,8 @@ mod tests {
         assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "{used:?}");
         assert_eq!(used.len(), passes, "every pass is still there");
         // The offsets' struct: a pair of u32 each, in order (what `live::Targets` writes).
-        assert_eq!(layout(&m, "MergedOffsets"), ((0..25).map(|k| k * 8).collect(), 200));
+        assert_eq!(layout(&m, "MergedOffsets"), ((0..26).map(|k| k * 8).collect(), OFFSETS_BYTES as u64));
+        assert_eq!(OFFSETS_BYTES % 16, 0);
         assert_eq!(LIVE_BUFS.len(), 25);
     }
 

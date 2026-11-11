@@ -38,7 +38,7 @@ if (scene === "hello") execFileSync("node", [join(repoRoot, "tools/bundle-game.t
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const q = (xs: number[], p: number) => { const s = [...xs].sort((a, c) => a - c); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : NaN; };
 const r2 = (v: number) => Math.round(v * 100) / 100;
-type Frame = { interval: number; gpu: number; trace: number; scale: number; guard: number | null };
+type Frame = { t: number; interval: number; gpu: number; trace: number; scale: number; guard: number | null };
 const log = join(repoRoot, "out/bench/layout-frames.jsonl");
 mkdirSync(dirname(log), { recursive: true });
 
@@ -64,7 +64,11 @@ for (const name of order) {
   }
   await sleep(seconds * 1000);
   await live.quit();
-  const F = readFileSync(log, "utf8").split("\n").slice(0, -1).filter(Boolean).map((l) => JSON.parse(l) as Frame).slice(mark);
+  // The window by the frames' own clock (`t`, ms since the view opened): the last `seconds` of the run. (Not by the
+  // log's line count at a moment: the renderer writes its log through a buffer, a dozen frames behind.)
+  const all = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Frame);
+  const end = all.at(-1)?.t ?? 0;
+  const F = all.filter((f) => f.t > end - seconds * 1000);
   const trips = F.at(-1)?.guard ?? null;
   const row = { variant: name, frames: F.length, gpu: [r2(q(F.map((f) => f.gpu), 0.5)), r2(q(F.map((f) => f.gpu), 0.95))], trace: [r2(q(F.map((f) => f.trace), 0.5)), r2(q(F.map((f) => f.trace), 0.95))], interval: [r2(q(F.map((f) => f.interval), 0.5)), r2(q(F.map((f) => f.interval), 0.95))], first_frame_s: r2(first / 1000), guard_trips: trips, other_gpu_before_pct: busy === null ? null : r2(busy) };
   rows.push(row);
