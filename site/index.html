@@ -81,6 +81,7 @@
   .tricks .no s { text-decoration-thickness: 2px; text-decoration-color: var(--ember); }
   .tricks .yes { margin-top: 26px; font: 640 clamp(56px, 8vw, 116px)/1 var(--font-sans); letter-spacing: -.055em; }
   .tricks svg.orbit { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
+  @media (prefers-reduced-motion: reduce) { .tricks svg.orbit .pulse { display: none; } }
 
   /* ---- Everywhere: one scene, a rail to two renderers, every screen ---- */
   .root { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--ink-2); font: 500 13px var(--font-mono); color: var(--bone); position: relative; z-index: 1; }
@@ -278,7 +279,7 @@
     <defs><linearGradient id="ry" x1="10" y1="56" x2="54" y2="20" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FF6A13"/><stop offset=".5" stop-color="#FFB454"/><stop offset="1" stop-color="#FFEBC4"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
     <path d="M32 8.967 L58 54 L6 54 Z" fill="none" stroke="#ECE8E1" stroke-width="2" stroke-linejoin="round" opacity=".9"/>
     <path d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="url(#ry)" stroke-width="1.8" stroke-linejoin="round" opacity=".35"/>
-    <path d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="#FFEBC4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" stroke-dasharray="9 91" filter="url(#gl)"><animate attributeName="stroke-dashoffset" from="100" to="0" dur="2.4s" repeatCount="indefinite"/></path>
+    <path class="pulse" d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="#FFEBC4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" stroke-dasharray="9 91" filter="url(#gl)"><animate attributeName="stroke-dashoffset" from="100" to="0" dur="2.4s" repeatCount="indefinite"/></path>
   </svg>
   <div class="wrap">
     <div class="no rv"><s>Shadow maps.</s> <s>Light probes.</s> <s>Lightmaps.</s><br><s>Screen-space GI.</s> <s>Baking.</s></div>
@@ -366,6 +367,7 @@
   // that ends in a release (a tap or a drag) keeps the reader's position for the slide; a touch the browser turns
   // into a scroll ends in pointercancel instead, and the sweep goes on.
   cmpEl.addEventListener("pointerdown", () => { dragging = true; });
+  cmpEl.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") touched = true; }); // keyboard slider
   addEventListener("pointerup", () => { if (dragging) touched = true; dragging = false; });
   addEventListener("pointercancel", () => (dragging = false));
   new IntersectionObserver(([e]) => (visible = e.isIntersecting), { threshold: 0.35 }).observe($("#reel"));

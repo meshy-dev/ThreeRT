@@ -46,7 +46,7 @@ export function compare(el) {
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") { setX(x + (e.key === "ArrowLeft" ? -4 : 4)); e.preventDefault(); }
   });
   // A gentle first sweep so the reader sees it is interactive.
-  if (d.intro !== undefined) {
+  if (d.intro !== undefined && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
     const io = new IntersectionObserver(([en]) => {
       if (!en.isIntersecting) return;
       io.disconnect();
@@ -71,12 +71,15 @@ export function sequence(el) {
   el.innerHTML = `<canvas></canvas><div class="bar"></div>${label("a", d.la, d.sa)}${label("b", d.lb, d.sb)}<div class="loading">loading 120 frames…</div>
     <div class="ctl"><button class="pp" aria-label="Play / pause"></button><div class="track"><b></b></div><span class="t">0.0 s</span></div>`;
   const cv = $("canvas", el), cx = cv.getContext("2d"), bar = $(".bar", el), pp = $(".pp", el), fill = $(".track b", el), tl = $(".t", el);
-  let x = 50, k = 0, dir = 1, playing = true, last = 0, ready = false, frames = null;
+  // Autoplay unless the reader asked for reduced motion (the play button still works).
+  let x = 50, k = 0, dir = 1, playing = !matchMedia("(prefers-reduced-motion: reduce)").matches, last = 0, ready = false, frames = null, visible = false, raf = 0;
   const icon = () => (pp.innerHTML = playing ? `<svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="1.5" width="3" height="9" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" fill="currentColor"/></svg>` : `<svg width="12" height="12" viewBox="0 0 12 12"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor"/></svg>`);
   icon();
   const draw = () => {
     if (!ready) return;
-    const w = (cv.width = el.clientWidth * devicePixelRatio), h = (cv.height = el.clientHeight * devicePixelRatio);
+    // Resize the backing store only when the box changed (assigning width / height clears it).
+    const w = Math.round(el.clientWidth * devicePixelRatio), h = Math.round(el.clientHeight * devicePixelRatio);
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     const [three, rt] = [frames.three[k], frames.rt[k]];
     cx.drawImage(three, 0, 0, w, h);
     const cut = (x / 100) * w;
@@ -103,15 +106,20 @@ export function sequence(el) {
       k = clamp(k, 0, n - 1);
       draw();
     }
-    requestAnimationFrame(loop);
+    raf = visible ? requestAnimationFrame(loop) : 0; // stops off-screen
   };
-  const io = new IntersectionObserver(([en]) => { if (en.isIntersecting && !frames) { load(); requestAnimationFrame(loop); } }, { rootMargin: "400px" });
+  const io = new IntersectionObserver(([en]) => {
+    visible = en.isIntersecting;
+    if (visible && !frames) load();
+    if (visible && !raf) raf = requestAnimationFrame(loop);
+  }, { rootMargin: "400px" });
   io.observe(el);
   let drag = false;
   const at = (e) => { x = clamp(((e.clientX - el.getBoundingClientRect().left) / el.clientWidth) * 100, 0, 100); draw(); };
   el.addEventListener("pointerdown", (e) => { if (e.target.closest(".ctl")) return; drag = true; el.setPointerCapture(e.pointerId); at(e); });
   el.addEventListener("pointermove", (e) => drag && at(e));
   el.addEventListener("pointerup", () => (drag = false));
+  el.addEventListener("pointercancel", () => (drag = false)); // a touch the browser took as a scroll
   pp.addEventListener("click", () => { playing = !playing; icon(); });
   $(".track", el).addEventListener("click", (e) => {
     const r = e.currentTarget.getBoundingClientRect();
