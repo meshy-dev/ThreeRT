@@ -296,6 +296,80 @@ impl Layout {
     }
 }
 
+/// A unit as the top tree sees it: where its mesh's model bounds are in the world. Hidden: it keeps its place (an
+/// instanced object's instance that is not drawn now) and is in no top tree.
+#[derive(Clone, Copy, Debug)]
+pub struct Unit {
+    pub world: Mat4,
+    pub lo: Vec3A,
+    pub hi: Vec3A,
+    pub hidden: bool,
+}
+
+/// Software traversal's units of a scene (what the TLAS and the mesh BLASes are to hardware traversal): where the
+/// trees are, each instanced mesh's tree, and the unit at each kernel record.
+#[derive(Clone, Debug)]
+pub struct Units {
+    pub layout: Layout,
+    /// By instanced mesh (the scene's `meshes` index): its tree's root and node count. None: no tree (a mesh that
+    /// deforms or has no triangle, or one an edit freed).
+    pub trees: Vec<Option<(u32, u32)>>,
+    /// By kernel record: the unit there, if the record is one's.
+    pub slots: Vec<Option<Unit>>,
+    /// The units in the top tree as last built (`top`): the kernel's `P.motion.z`.
+    pub count: u32,
+}
+
+impl Units {
+    /// Mesh `k`'s tree's root.
+    pub fn root(&self, k: u32) -> Option<u32> {
+        self.trees.get(k as usize).copied().flatten().map(|t| t.0)
+    }
+
+    /// The unit at `record` (None: none there now). Records past the slots there are make them.
+    pub fn set(&mut self, record: usize, unit: Option<Unit>) {
+        if record >= self.slots.len() {
+            if unit.is_none() {
+                return;
+            }
+            self.slots.resize(record + 1, None);
+        }
+        self.slots[record] = unit;
+    }
+
+    /// A place for mesh `k`'s tree (the tree it had, if any, given back first): its root, or None when the mesh
+    /// range has no run that long. The caller writes the tree's nodes there.
+    pub fn add_tree(&mut self, k: u32, tree: &MeshTree) -> Option<u32> {
+        self.drop_tree(k);
+        let root = self.layout.place(tree.nodes.len())?;
+        if self.trees.len() <= k as usize {
+            self.trees.resize(k as usize + 1, None);
+        }
+        self.trees[k as usize] = Some((root, tree.nodes.len() as u32));
+        Some(root)
+    }
+
+    /// Mesh `k`'s tree given back: its root and length (the caller fills them with `FILL`), if it had one.
+    pub fn drop_tree(&mut self, k: u32) -> Option<(u32, u32)> {
+        let t = self.trees.get_mut(k as usize)?.take()?;
+        self.layout.release(t.0, t.1 as usize);
+        Some(t)
+    }
+
+    /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
+    /// unit: no nodes (the kernel does not walk a top tree then). Err: more units than the range holds, or a unit
+    /// whose box is not finite; nothing is changed then.
+    pub fn top(&mut self) -> Result<Vec<GpuNode>, String> {
+        let boxes: Vec<UnitBox> = self.slots.iter().enumerate().filter_map(|(r, u)| u.as_ref().filter(|u| !u.hidden).map(|u| UnitBox::new(r as u32, u.world, u.lo, u.hi))).collect();
+        if boxes.len() > self.layout.max_units() {
+            return Err(format!("{} units: more than the top tree's range holds ({})", boxes.len(), self.layout.max_units()));
+        }
+        let nodes = if boxes.is_empty() { vec![] } else { top_tree(&boxes)? };
+        self.count = boxes.len() as u32;
+        Ok(nodes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

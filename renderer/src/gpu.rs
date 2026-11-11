@@ -134,12 +134,13 @@ impl EditRoom {
         std::env::var("THREERT_EDIT_RESERVE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
     }
 
-    /// Whether the scene gets room (`for_scene`): editable geometry under hardware RT.
+    /// Whether the scene gets room (`for_scene`): editable geometry under hardware RT, or under software traversal
+    /// with units (`hwrt` true for them too: `lib.rs prepare`).
     pub fn editable(scene: &Scene, hwrt: bool) -> bool {
         hwrt && Self::reserve() > 0.0 && (!scene.procs.is_empty() || !scene.retained.own_instance.is_empty())
     }
 
-    fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool) -> EditRoom {
+    pub(crate) fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool) -> EditRoom {
         let k = Self::reserve();
         let (procs, meshes) = (!scene.procs.is_empty(), !scene.retained.own_instance.is_empty());
         if !Self::editable(scene, hwrt) {
@@ -210,6 +211,9 @@ pub struct Uploaded {
     pub prev_verts: wgpu::Buffer,
     pub dynamic_first: usize,
     pub accel: Option<Accel>,
+    /// Software traversal's units (units.rs), when the scene has any: what `accel` is to hardware traversal. Their
+    /// trees are in the node buffer (`bg_parts.nodes`).
+    pub units: Option<crate::units::Units>,
     /// The particle pass, when the scene has particle systems (hardware RT).
     pub particles: Option<ParticleGpu>,
     pub gpu_particles: Option<GpuParticlesGpu>,
@@ -541,6 +545,93 @@ pub struct Accel {
     pub proc_base: usize,
 }
 
+/// What is above the triangles for an edit in place: hardware traversal's TLAS and BLASes, or software traversal's
+/// units (units.rs). An instance's slot is its TLAS index; its kernel record is the slot less `inst_base` (0 for
+/// units: a unit's slot is its record).
+pub enum Top<'a> {
+    Hw(&'a mut Accel),
+    Sw(&'a mut crate::units::Units),
+}
+
+impl<'a> Top<'a> {
+    /// The scene's, or None under software traversal without units (edits rebuild then).
+    pub fn of(accel: &'a mut Option<Accel>, units: &'a mut Option<crate::units::Units>) -> Option<Top<'a>> {
+        match (accel.as_mut(), units.as_mut()) {
+            (Some(a), _) => Some(Top::Hw(a)),
+            (None, Some(u)) => Some(Top::Sw(u)),
+            _ => None,
+        }
+    }
+
+    pub fn inst_base(&self) -> usize {
+        match self {
+            Top::Hw(a) => a.inst_base,
+            Top::Sw(_) => 0,
+        }
+    }
+
+    /// The slot of the first procedural object (`proc_first`: its record).
+    pub fn proc_base(&self, proc_first: usize) -> usize {
+        match self {
+            Top::Hw(a) => a.proc_base,
+            Top::Sw(_) => proc_first,
+        }
+    }
+
+    pub fn sw(&self) -> bool {
+        matches!(self, Top::Sw(_))
+    }
+
+    /// No instance at `slot`.
+    pub fn clear(&mut self, slot: usize) {
+        match self {
+            Top::Hw(a) => a.tlas[slot] = None,
+            Top::Sw(u) => u.set(slot, None),
+        }
+    }
+
+    /// An instance of instanced mesh `k` (model bounds `lo..hi`) at `slot`, placed by `world`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place(&mut self, slot: usize, k: u32, (lo, hi): (glam::Vec3A, glam::Vec3A), world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
+        match self {
+            Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), custom, instance_mask(cast_shadow, hidden))),
+            Top::Sw(u) => u.set(slot, u.root(k).map(|_| crate::units::Unit { world, lo, hi, hidden })),
+        }
+    }
+
+    /// The instance at `slot`, if there is one, placed by `world` now; with `shown`, its mask too (hidden or not,
+    /// casting shadows or not).
+    pub fn moved(&mut self, slot: usize, world: glam::Mat4, shown: Option<(bool, bool)>) {
+        match self {
+            Top::Hw(a) => {
+                if let Some(t) = a.tlas[slot].as_mut() {
+                    t.transform = tlas_rows(world);
+                    if let Some((cast_shadow, hidden)) = shown {
+                        t.mask = instance_mask(cast_shadow, hidden);
+                    }
+                }
+            }
+            Top::Sw(u) => {
+                if let Some(t) = u.slots.get_mut(slot).and_then(|t| t.as_mut()) {
+                    t.world = world;
+                    if let Some((_, hidden)) = shown {
+                        t.hidden = hidden;
+                    }
+                }
+            }
+        }
+    }
+
+    /// An instance's kernel record as this traversal reads it: a unit's carries its mesh's tree's root and whether it
+    /// casts shadows (hardware traversal has them in the TLAS).
+    pub fn record(&self, r: crate::scene::GpuInstance, k: u32, cast_shadow: bool) -> crate::scene::GpuInstance {
+        match self {
+            Top::Hw(_) => r,
+            Top::Sw(u) => crate::units::unit_record(r, u.root(k).unwrap_or(0), cast_shadow),
+        }
+    }
+}
+
 /// A TLAS instance transform: the world matrix's first three rows.
 /// TLAS mask of an instance: 1 casts shadows, 2 does not, 0 a hidden instance of an instanced object (no ray sees it).
 pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
@@ -618,6 +709,14 @@ pub fn kernel_source(src: &str, features: u32) -> String {
             "    s.emissive = emission(m, uv, lod) * obj_power(a);\n",
             "    s.emissive = emission(m, uv, lod) * obj_power(a);\n    // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.\n    if (m.tex1.z == MAT_UNLIT) {\n        s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);\n        base = vec3<f32>(0.0);\n        spec = 0.0;\n        metal = 0.0;\n    }\n",
         );
+    }
+    if features & F_UNITS != 0 {
+        // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before).
+        patch(
+            "    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+            "    hit = trace_units(o, d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+        );
+        patch("\n// @trace-end\n", &format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl")));
     }
     if features & F_BACKGROUND != 0 {
         patch("    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n};\n", "    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n    background: vec4<f32>, // three.js scene.background (radiance), 1\n};\n");
@@ -962,7 +1061,10 @@ pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions (F_SOURCE). (Bit
 /// 24 is F_AERIAL's.)
 pub const F_GRID: u32 = 1 << 25;
-pub const F_SOURCE: u32 = F_TINT | F_UNLIT | F_BACKGROUND | F_VCOLOR | F_GRID;
+pub const F_SOURCE: u32 = F_TINT | F_UNLIT | F_BACKGROUND | F_VCOLOR | F_GRID | F_UNITS;
+/// Software traversal's units (units.rs; shaders/trace_units.wgsl): the second level's walk, spliced into the
+/// software traversal after the still scene's (F_SOURCE). Never with hardware traversal.
+pub const F_UNITS: u32 = 1 << 26;
 /// The sky's aerial perspective (SkyAtmosphere `aerialPerspective`; pathtrace.wgsl `aerial_tr`) on every path segment
 /// that ends on a surface: compiled out where no scene has it. (Bit 23 is left to INSTANCE_BIT below.)
 pub const F_AERIAL: u32 = 1 << 24;
@@ -997,7 +1099,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
-    media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 }
+    media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (materials, fog), and the instanced meshes' (`instance_features`).
@@ -1463,7 +1565,9 @@ impl Gpu {
             b
         };
         let records: Vec<crate::scene::GpuInstance> = scene.gpu_instances.iter().chain(&scene.proc_records).copied().collect();
-        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt);
+        // (Software traversal's units have room as hardware traversal's instances do: `prepare` sized their trees'
+        // by the same figures.)
+        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt || scene.units.is_some());
         let st = wgpu::BufferUsages::STORAGE;
         // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live.rs `edit_geometry`.)
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
@@ -1483,7 +1587,8 @@ impl Gpu {
         // The vertex colours' bytes on the GPU (the edit room's included).
         timings.push(("vcolor_mb".into(), if scene.gpu_vcolors.is_empty() { 0.0 } else { (scene.gpu_vcolors.len() * 4 + room.tris * 12) as f64 / (1 << 20) as f64 }));
         let b_attrs = buf_room("attrs", bytemuck::cast_slice(&scene.attrs), room.tris * std::mem::size_of::<crate::scene::GpuTriAttr>(), edit);
-        let b_nodes = buf("nodes", nodes, st);
+        // (With units, edits write trees into it: units.rs.)
+        let b_nodes = buf("nodes", nodes, if scene.units.is_some() { st | wgpu::BufferUsages::COPY_DST } else { st });
         // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
         // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
         timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
@@ -1920,7 +2025,7 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
-        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2521,6 +2626,22 @@ impl Gpu {
         }
     }
 
+    /// Software traversal's top tree again, over the units as they are now, written to its range of the node buffer
+    /// (what `rebuild_tlas` is to hardware traversal). Err: no tree can be made (more units than its range holds, a
+    /// unit that is nowhere); nothing was written, and the caller rebuilds the scene.
+    pub fn retop(&self, units: &mut crate::units::Units, nodes: &wgpu::Buffer) -> std::result::Result<(), String> {
+        let top = units.top()?;
+        if !top.is_empty() {
+            self.queue.write_buffer(nodes, units.layout.top_first as u64 * 32, bytemuck::cast_slice(&top));
+        }
+        Ok(())
+    }
+
+    /// A mesh tree's nodes into the node buffer at its root (`Units::add_tree` placed it).
+    pub fn write_tree(&self, nodes: &wgpu::Buffer, root: u32, tree: &crate::units::MeshTree) {
+        self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&tree.nodes));
+    }
+
     pub fn rebuild_tlas(&self, accel: &Accel, e: &mut wgpu::CommandEncoder) {
         e.build_acceleration_structures(std::iter::empty::<&wgpu::BlasBuildEntry>(), [&accel.tlas]);
     }
@@ -2827,6 +2948,27 @@ mod tests {
             }
             println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
         }
+    }
+
+    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS): the source without the
+    /// feature is the file; with it, the still scene's walk hands its hit to `trace_units`, whose text is there once,
+    /// inside the software traversal (the part hardware traversal's source replaces, which therefore cannot have it).
+    #[test]
+    fn units_are_spliced_into_software_traversal_only() {
+        let base = kernel_base(false);
+        assert!(!base.contains("trace_units"));
+        let u = kernel_source(&base, F_UNITS);
+        assert_eq!(u.matches("fn trace_units(").count(), 1);
+        assert_eq!(u.matches("hit = trace_units(o, d, hit, mode);").count(), 1);
+        let (begin, end, at) = (u.find("// @trace-begin").unwrap(), u.find("// @trace-end").unwrap(), u.find("fn trace_units(").unwrap());
+        assert!(begin < at && at < end);
+        // Taking the units out again gives the file back: nothing else was touched.
+        let call = "    hit = trace_units(o, d, hit, mode);\n";
+        let body = format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl"));
+        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1), base);
+        // Hardware traversal's source has neither anchor.
+        let hw = kernel_base(true);
+        assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));
     }
 
     #[test]

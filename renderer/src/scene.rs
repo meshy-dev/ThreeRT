@@ -498,6 +498,9 @@ pub struct Scene {
     /// environment's CDF in the `env_cdf` binding (`Params::procs`), the records the model instances' in `instances`.
     pub proc_layout: Option<ProcLayout>,
     pub proc_records: Vec<GpuInstance>,
+    /// Software traversal's units (`prepare`: the instances it keeps as instances; units.rs), None under hardware
+    /// traversal and for a scene without any.
+    pub units: Option<crate::units::Units>,
     /// Translucent particles' triangles (`transparent` material): in the kernel's triangle tables after everything
     /// else (`trans_first`, set by `prepare`), in no traversal group: only the translucency pass sees them.
     pub trans_tris: Vec<[Vec3A; 3]>,
@@ -1837,6 +1840,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         geometry_fns,
         proc_layout: None,
         proc_records: vec![],
+        units: None,
         trans_tris,
         trans_attrs,
         trans_first: 0,

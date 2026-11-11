@@ -353,9 +353,17 @@ pub fn fog_params(fog: Option<&desc::Fog>) -> [[f32; 4]; 4] {
 
 pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
     let t = Instant::now();
-    // Software traversal has no instancing: the instances become ordinary world-space triangles.
+    // Software traversal: the instances stay instances, units of a second level (units.rs; docs/RUNTIME.md "Software
+    // traversal with units"), each mesh with a tree of its own over its model-space triangles, which are put in the
+    // tree's order here, before anything counts them. Without units (THREERT_UNITS=0, the A/B; or a mesh no tree
+    // can be made of) the instances become ordinary world-space triangles, as they all did before.
+    let mut trees = None;
     if !g.hwrt && !sc.instances.is_empty() {
-        flatten_instances(sc);
+        trees = unit_trees(sc);
+        match &trees {
+            Some(_) => flatten_deforming(sc),
+            None => flatten_instances(sc),
+        }
     }
     // Software traversal walks each procedural object's boxes through a tree of its own, and the tree over no box is
     // not one the kernel can walk (bvh.rs `EMPTY`): an object without boxes has nothing to meet, and is left out.
@@ -391,12 +399,45 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     for (k, (t, a)) in sc.pool_tris.iter().zip(&sc.pool_attrs).enumerate() {
         let [a0, b, c] = *t;
         let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
-        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 })]);
+        // (A unit's triangles are in its tree's order, cutouts among the rest: each carries its own flag, as the still
+        // scene's do. Hardware traversal has them apart, in a geometry of their own.)
+        let cutout = trees.is_some() && sc.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.uv2[3] > 0.0);
+        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 } | if cutout { scene::TRI_MASKED } else { 0 })]);
         tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
     sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.opaque) }).collect();
+    // The units: the mesh trees after the still tree's nodes, room for the trees and units edits add (the edit room's
+    // triangles and records, gpu.rs `EditRoom`), the top tree; each unit's record gets its tree's root.
+    let mut nodes = bvh.nodes;
+    sc.units = None;
+    if let Some(trees) = trees {
+        let room = gpu::EditRoom::for_scene(sc, tri_verts.len() / 3, sc.instances.len() + sc.procs.len(), true);
+        let used: usize = trees.iter().flatten().map(|t| t.nodes.len()).sum();
+        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0 };
+        let still = nodes.len();
+        nodes.resize(still + u.layout.nodes(), units::FILL);
+        for (k, t) in trees.iter().enumerate() {
+            if let Some(t) = t {
+                let root = u.add_tree(k as u32, t).expect("the mesh range holds the build's trees") as usize;
+                nodes[root..root + t.nodes.len()].copy_from_slice(&t.nodes);
+            }
+        }
+        for (r, i) in sc.instances.iter().enumerate() {
+            let m = sc.meshes[i.mesh as usize];
+            if let Some(root) = u.root(i.mesh) {
+                sc.gpu_instances[r] = units::unit_record(sc.gpu_instances[r], root, i.cast_shadow);
+                u.slots[r] = Some(units::Unit { world: i.world, lo: m.lo, hi: m.hi, hidden: i.hidden });
+            }
+        }
+        // (A scene whose units the top tree cannot hold, or with one that is nowhere: none is drawn, and it says so.)
+        match u.top() {
+            Ok(top) => nodes[u.layout.top_first as usize..u.layout.top_first as usize + top.len()].copy_from_slice(&top),
+            Err(e) => eprintln!("units: no top tree ({e}): the scene's instances are not drawn"),
+        }
+        sc.units = Some(u);
+    }
     // Procedural geometry: its records after the model instances', its boxes / materials / data in `proc_data`.
     let layout = scene::proc_layout(&sc.procs, !g.hwrt);
     sc.proc_records = sc.procs.iter().zip(&layout.headers).map(|(p, &h)| p.gpu(h)).collect();
@@ -615,7 +656,8 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
         vol2: fog[3],
         raster: [0.0; 4],
         cache: [0.0; 4],
-        motion: [0.0; 4],
+        // (y, z: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl.)
+        motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count), 0.0]),
         prev_pos: [0.0; 4],
         prev_fwd: [0.0; 4],
         prev_right: [0.0; 4],
@@ -637,10 +679,75 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes: bvh.nodes, emitters, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.
+/// Software traversal's units (units.rs): a tree for each instanced mesh that keeps its shape, its triangles (and
+/// what goes with them: attributes, vertex colours) put in the tree's order. None: no units (THREERT_UNITS=0, or a
+/// mesh no tree can be made of: a vertex that is not a number); the caller flattens every instance then.
+fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
+    if std::env::var("THREERT_UNITS").is_ok_and(|v| v == "0") {
+        return None;
+    }
+    let mut trees = Vec::with_capacity(sc.meshes.len());
+    for m in &sc.meshes {
+        if m.deforms || m.count == 0 {
+            trees.push(None);
+            continue;
+        }
+        match units::mesh_tree(&sc.pool_tris[m.first as usize..(m.first + m.count) as usize]) {
+            Ok(t) => trees.push(Some(t)),
+            Err(e) => {
+                eprintln!("units: {e}: the scene's instances are flattened");
+                return None;
+            }
+        }
+    }
+    if !sc.pool_vcolors.is_empty() {
+        sc.pool_vcolors.resize(sc.pool_tris.len(), scene::WHITE);
+    }
+    for (m, t) in sc.meshes.iter().zip(&trees) {
+        let Some(t) = t else { continue };
+        let r = m.first as usize..(m.first + m.count) as usize;
+        let tris: Vec<_> = t.order.iter().map(|&i| sc.pool_tris[r.start + i as usize]).collect();
+        sc.pool_tris[r.clone()].copy_from_slice(&tris);
+        let attrs: Vec<_> = t.order.iter().map(|&i| sc.pool_attrs[r.start + i as usize]).collect();
+        sc.pool_attrs[r.clone()].copy_from_slice(&attrs);
+        if !sc.pool_vcolors.is_empty() {
+            let colors: Vec<_> = t.order.iter().map(|&i| sc.pool_vcolors[r.start + i as usize]).collect();
+            sc.pool_vcolors[r].copy_from_slice(&colors);
+        }
+    }
+    Some(trees)
+}
+
+/// With units: the instances of meshes that deform (a pose a crowd shares) are still written out as world-space
+/// triangles, as every instance was. They keep their place among the instances (edits name instances by index) and
+/// are no unit.
+fn flatten_deforming(sc: &mut scene::Scene) {
+    for k in 0..sc.instances.len() {
+        let inst = sc.instances[k].clone();
+        let m = sc.meshes[inst.mesh as usize];
+        if inst.hidden || !m.deforms {
+            continue;
+        }
+        let first = sc.tris.len() as u32;
+        for k in m.first..m.first + m.count {
+            if let Some(&c) = sc.pool_vcolors.get(k as usize) {
+                scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
+            }
+            sc.tris.push(inst.tri(&sc.pool_tris[k as usize]));
+            sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
+            sc.attrs.push(scene::instance_attr(&sc.pool_attrs[k as usize], inst.world, inst.object));
+        }
+        sc.tri_nodes.push((inst.name.clone(), first, sc.tris.len() as u32));
+        if let Some(i) = inst.sub {
+            sc.tri_instances.push((first, sc.tris.len() as u32, i));
+        }
+    }
+}
+
 fn flatten_instances(sc: &mut scene::Scene) {
     for inst in std::mem::take(&mut sc.instances) {
         if inst.hidden {
