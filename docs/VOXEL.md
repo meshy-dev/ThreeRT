@@ -537,11 +537,18 @@ it too (the level itself stays `engineColliders`).
   removes its joints in the engine.
 - **When it stops being one**: cut, the part that keeps the body keeps the object; retired for the cap, carved away
   or fallen out of the world, it is `gone` (`goneReason`: "cap", "carved", "fell") with a "gone" event at the frame's
-  events, and its calls do nothing.
+  events, and its calls do nothing. A level edit looks at the bodies again at once; a call on a body the engine took
+  out before the objects noticed finds it gone then and does nothing either (it does not throw).
+- **Contacts, kept straight** (the bridge): a pair's start is reported once, even when an edit takes the collider out
+  and puts it back; a collider that goes (a body carved away, retired, removed) ends its pairs.
 - **Refused**: scene code's own colliders on a voxel body (the engine edits and splits it by its cells, and weighs it
   by them); join a body of your own with a `FixedJoint`.
 - **Paint, added voxels, mass**: paint from the world reaches bodies (their surface cells, as the level's paint);
-  `addVoxels` fills the body's empty cells in the shape, at most 65,536 at once and 64 times that looked at; a body's
+  `addVoxels` fills the body's empty cells in the shape, at most 65,536 at once and 64 times that looked at, and only
+  if the body stays within 2^21 cells (`MAX_BODY_CELLS`) spanning at most 1,024 cells a side and 2^25 in all
+  (`MAX_BODY_SIDE`, `MAX_BODY_BOX`: its mesh is made over that box, at most 47 MB a redraw; one add 120 m out took
+  2.4 GB before); the collider is edited first, and if anything is refused nothing changes. A part spanning more is
+  debris, not a body; a body is never kept without its collider. A material outside the palette is refused. A body's
   mass, centre of mass and inertia are the sum of its cells, each a cube of its palette entry's density (the collider
   carries none). Step 8's `voxelImpulse` is kept, deprecated.
 

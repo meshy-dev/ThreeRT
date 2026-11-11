@@ -797,6 +797,7 @@ impl VoxelWorld {
             if let Some(o) = self.objects.get_mut(k as usize).and_then(|o| o.take()) {
                 for p in o.parts {
                     w.remove(p.1);
+                    w.drop_geometry(p.2);
                 }
                 if let Some((tx, tz)) = o.tile {
                     self.tiles.remove(&(tx, tz));
@@ -1703,6 +1704,7 @@ impl VoxelWorld {
             if let Some(o) = self.objects.get_mut(id as usize).and_then(|o| o.take()) {
                 for p in o.parts {
                     w.remove(p.1);
+                    w.drop_geometry(p.2);
                 }
             }
         }

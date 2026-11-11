@@ -4294,8 +4294,22 @@ benchmark level. The order follows the dependencies; a step that meets a further
       - Found on the way and fixed: an add on a body could scan an unbounded box (at most 65,536 voxels added, 64
         times that looked at), and both it and voxel-core's shape check counted cells in an i64 that wraps (a box of
         1e30 m was 2^69 cells, counted as 0: a level `add` that large would never return).
+      - The independent review of #25 found, fixed here with tests: an add far from a body made its mesh over the
+        whole box (2.4 GB at 120 m; out of memory at 2e8 m): a body now stays within 2^21 cells spanning at most
+        1,024 a side and 2^25 in all, checked before anything changes; an add the physics refused left the mesh and
+        the collider apart (the collider is edited first now); a body could grow past the physics' limit and keep
+        being drawn without a collider (never now: it is debris); a getter in a descriptor that called the engine
+        panicked it ("already mutably borrowed", on main too: ten entries read their arguments after borrowing; all
+        read first now); a held object threw between the engine retiring its body and the next look (it finds it
+        gone and does nothing); every redraw left a geometry behind for good (the level's own edits too, on main:
+        +200 geometries in 400 edits; now +1); contacts started twice through an edit and never ended for a body
+        that went; the engine's gone list grew with nobody taking it; a material outside the palette was taken; ids
+        could meet in use ones after a wrap; `scene.add` of a voxel body threw only at the next sync (it refuses
+        at once).
       - Open: a level `add` still accepts up to 2^27 cells (the fuzz keeps its adds tame for that, step 8's Open);
-        a voxel body's pose is read from the engine at every read of `position` (one call; no per-frame cache).
+        a voxel body's pose is read from the engine at every read of `position` (one call; no per-frame cache);
+        `World::drop_geometry` looks through every object for a user (a few hundred microseconds an edit on the
+        benchmark level's 10,000 objects; a count per geometry would make it nothing).
     - (b) Fire and smoke on the existing volume and particle paths. Whether fire spreads along burning voxels is the
       user's to decide; not started.
     - (c) Vehicles and ropes on step 7's joints.

@@ -876,6 +876,40 @@ mod tests {
         assert!((250..800).contains(&ms), "ended after {ms} ms (50 of script and at most 250 lent)");
     }
 
+    /// The engine's half of a voxel body gone under a held object (the review of #25): a level edit carves it away;
+    /// every engine call on its id then throws a script error (which `VoxelBody` takes as its cue to find it gone),
+    /// none panics, and the gone list names it with its reason.
+    #[test]
+    fn calls_on_a_voxel_body_the_level_carved_away_throw_cleanly() {
+        let h = ScriptHost::new(GAME).unwrap();
+        *h.voxels.borrow_mut() = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        h.voxels.borrow_mut().edit(&mut h.world.borrow_mut(), &mut h.physics.borrow_mut(), &crate::voxel::EditOp::parse(&serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] })).unwrap()).unwrap();
+        let out: String = h
+            .call(1000, |ctx| {
+                ctx.eval(
+                    r#"
+                const id = JSON.parse(__engine.voxelBodies())[0].body;
+                __engine.voxelEdit({ op: "carve", box: [2.0, 0.6, 2.0, 4.0, 4.0, 4.0] });
+                const tries = {
+                    state: () => __engine.physics("state", { body: id }),
+                    impulse: () => __engine.physics("impulse", { body: id, impulse: [0, 1, 0] }),
+                    contacts: () => __engine.voxelContacts(id, true),
+                    edit: () => __engine.voxelBodyEdit(id, { op: "paint", material: 1, sphere: [3, 1, 3, 1] }),
+                };
+                const r = [__engine.voxelBodies()];
+                for (const [k, f] of Object.entries(tries)) { try { f(); r.push(k + " ok"); } catch (e) { r.push(k + " threw"); } }
+                r.push(__engine.voxelGone());
+                r.push(String(id));
+                JSON.stringify(r)
+            "#,
+                )
+            })
+            .unwrap();
+        let r: Vec<String> = serde_json::from_str(&out).unwrap();
+        let id = &r[6];
+        assert_eq!(r[..6], ["[]".to_string(), "state threw".into(), "impulse threw".into(), "contacts threw".into(), "edit threw".into(), format!("[[{id},\"carved\"]]")]);
+    }
+
     /// A descriptor whose getter calls the engine again (the review of #25: the engine was borrowed while the
     /// descriptor was read, and the second call panicked, "already mutably borrowed"): each entry that takes one reads
     /// it first. None panics; each answers or throws a script error.
