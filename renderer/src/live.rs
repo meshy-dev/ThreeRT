@@ -2675,6 +2675,14 @@ impl LiveCore {
     /// BLASes the live meshes need (estimated from the build's bytes per triangle), MB.
     pub fn room_stats(&self) -> serde_json::Value {
         let (e, up) = (&self.sc.edit, &self.sc.up);
+        // Software traversal's (it does not grow): the same counts, and of the node buffer the mesh trees' range (in
+        // use, held) and the units the top tree has against the most its range holds.
+        if let Some(u) = up.units.as_ref() {
+            return serde_json::json!({
+                "tris": [e.tris.used(), e.tris.cap], "records": [e.records.used(), e.records.cap], "objects": [e.objects.used(), e.objects.cap],
+                "holes": e.tris.free.len(), "grows": e.grows, "nodes": [u.layout.mesh_cap as usize - u.layout.free_nodes(), u.layout.mesh_cap], "units": [u.count, u.layout.max_units()],
+            });
+        }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
         let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.instances, &up.objects, &up.cdf, &up.emitters, &a.verts].iter().map(|b| b.size()).sum::<u64>();
         let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
@@ -2685,7 +2693,13 @@ impl LiveCore {
         })
     }
 
-    /// Moving emitters moved (`repose`, `repose_rigid`): the light tree's moving subtree refit around their triangles
+    /// Software traversal's top tree so far (the frame log's `top`): how many times it was built, kept with leaves
+    /// taken out and put in, and kept with its boxes brought up to date, and the ms all of that took. Null without
+    /// units.
+    pub fn top_stats(&self) -> serde_json::Value {
+        self.sc.up.units.as_ref().map_or(serde_json::Value::Null, |u| serde_json::json!([u.kept.builds, u.kept.changes, u.kept.refits, (u.kept.ms * 1e3).round() / 1e3]))
+    }
+
     /// now (the CPU copy of the dynamic tail), its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
     fn refit_moving_tree(&mut self) {
         let first = self.sc.dynamic.0;
@@ -4414,7 +4428,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
             use std::io::Write;
             let line = serde_json::json!({
                 "t": start.elapsed().as_secs_f64() * 1e3, "interval": last_frame.elapsed().as_secs_f64() * 1e3, "start": t_frame.duration_since(prev_start).as_secs_f64() * 1e3,
-                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_count(),
+                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "top": core.top_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_count(),
             });
             writeln!(l, "{line}")?;
         }

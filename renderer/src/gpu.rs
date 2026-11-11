@@ -729,9 +729,12 @@ pub fn kernel_source(src: &str, features: u32) -> String {
     }
     if features & F_UNITS != 0 {
         // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before).
+        // And it has no stack of its own here: the name is then the module's, which the units' file declares, set to
+        // zero once an invocation and not once a ray (shaders/trace_units.wgsl says what that is worth).
+        patch(STILL_STACK, STILL_STACK_GONE);
         patch(
             "    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
-            "    hit = trace_units(o, d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+            "    hit = trace_units(o, d, inv_d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
         );
         patch("\n// @trace-end\n", &format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl")));
     }
@@ -748,6 +751,11 @@ pub fn kernel_source(src: &str, features: u32) -> String {
 pub fn loop_guard() -> Option<u32> {
     loop_guard_of(false)
 }
+
+/// pathtrace.wgsl's `trace` declares its stack (software traversal); in a kernel with units it does not
+/// (`kernel_source`).
+const STILL_STACK: &str = "\n    var stack: array<u32, 48>;\n    var sp = 0u;\n    var node = 0u;\n";
+const STILL_STACK_GONE: &str = "\n    var sp = 0u;\n    var node = 0u;\n";
 
 /// The loop guard's limit for a kernel with units or without (`F_UNITS`). A kernel with units has the guard natively
 /// too, at the browser's limit, unless THREERT_LOOP_GUARD=0: its second level is the traversal that has run least,
@@ -3042,13 +3050,17 @@ mod tests {
         assert!(!base.contains("trace_units"));
         let u = kernel_source(&base, F_UNITS);
         assert_eq!(u.matches("fn trace_units(").count(), 1);
-        assert_eq!(u.matches("hit = trace_units(o, d, hit, mode);").count(), 1);
+        assert_eq!(u.matches("hit = trace_units(o, d, inv_d, hit, mode);").count(), 1);
         let (begin, end, at) = (u.find("// @trace-begin").unwrap(), u.find("// @trace-end").unwrap(), u.find("fn trace_units(").unwrap());
         assert!(begin < at && at < end);
+        // One stack an invocation, the module's: the still walk declares none (the procedural objects' walk keeps
+        // its own), and the name it uses is the one the units' file declares.
+        assert_eq!((base.matches(STILL_STACK).count(), u.matches(STILL_STACK).count()), (1, 0));
+        assert_eq!((u.matches("var<private> stack: array<u32, 64>;").count(), u.matches("var stack: array<u32").count(), base.matches("var stack: array<u32").count()), (1, 1, 2));
         // Taking the units out again gives the file back: nothing else was touched.
-        let call = "    hit = trace_units(o, d, hit, mode);\n";
+        let call = "    hit = trace_units(o, d, inv_d, hit, mode);\n";
         let body = format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl"));
-        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1), base);
+        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1).replacen(STILL_STACK_GONE, STILL_STACK, 1), base);
         // Hardware traversal's source has neither anchor.
         let hw = kernel_base(true);
         assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));

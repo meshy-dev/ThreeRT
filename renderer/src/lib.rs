@@ -22,6 +22,8 @@ pub mod skin;
 pub mod sky;
 pub mod tables;
 pub mod units;
+#[cfg(test)]
+mod units_cost;
 pub mod texpack;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod view;
@@ -463,7 +465,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     if let Some(trees) = trees {
         let room = gpu::EditRoom::for_scene(sc, tri_verts.len() / 3, sc.instances.len() + sc.procs.len(), false, true);
         let used: usize = trees.iter().flatten().map(|t| t.nodes.len()).sum();
-        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0, records: sc.instances.len() + sc.procs.len() + room.records };
+        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0, records: sc.instances.len() + sc.procs.len() + room.records, kept: Default::default() };
         let still = nodes.len();
         nodes.resize(still + u.layout.nodes(), units::FILL);
         for (k, t) in trees.iter().enumerate() {
@@ -1172,7 +1174,7 @@ mod units_tests {
         let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
         let walk = |k: &(Vec<bvh::GpuNode>, Vec<[f32; 4]>, Vec<scene::GpuInstance>, u32, u32), o: Vec3A, d: Vec3A, mode: u32| {
             let instances = if k.2.is_empty() { vec![scene::GpuInstance::default()] } else { k.2.clone() };
-            let kernel = Kernel { nodes: &k.0, tri_verts: &k.1, instances: &instances, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default() };
+            let kernel = Kernel { nodes: &k.0, tri_verts: &k.1, instances: &instances, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
             kernel.trace(o, d, INF, mode).unwrap_or_else(|e| panic!("ray {o} {d}, mode {mode}: the kernel {e}"))
         };
         let mut s = 12345u64;
