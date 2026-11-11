@@ -11,12 +11,17 @@
 // (units.rs `unit_record`): the ray keeps its direction and only its origin moves, which is what the rows would have
 // made of it.
 //
-// `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. One stack for all
-// three walks, `trace`'s (in a kernel with units it has 64 entries, not 48: gpu.rs `kernel_source`): the still walk
-// has left it empty, a unit's walk pushes above what the top walk has pending and is done when it is back down to it.
-// 64 entries: 19 for the top tree, 45 for a mesh's (units.rs `STACK`). A stack of this function's own would be 64
-// more words set to zero for every ray, whatever the ray then meets. Every index read here was checked on the CPU
-// when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
+// `trace` walks the still scene first and calls this with its hit: the ray is already cut to it.
+//
+// The stack is the module's, one for an invocation of the kernel, and in a kernel with units the still walk uses it
+// too (gpu.rs `kernel_source` takes its own away). An array a function declares is set to zero each time the
+// function is entered, whatever the ray then meets, and a ray's walk is entered many times a pixel: the unit walk's
+// own 64 words cost hello 0.3 ms a frame and the city 0.75, and the still walk's 48 cost every scene as much again,
+// flattened ones too. This one is set to zero once. A walk reads only what it has pushed: what an earlier ray left
+// is never read. The still walk has left it empty; a unit's walk pushes above what the top walk has pending and is
+// done when it is back down to it. 64 entries: 19 for the top tree, 45 for a mesh's (units.rs `STACK`); the still
+// walk uses 48 of them, as before. Every index read here was checked on the CPU when it was written (units.rs
+// `check_mesh`, `check_top`), the depths with them.
 //
 // One loop walks both levels: a GPU runs a group of rays through a loop together, and a ray that has left an inner
 // loop waits for the others of its group to leave it; with the unit's walk as a loop inside the top walk's, every
@@ -28,7 +33,9 @@
 //
 // The root's box is tested before the walk: a ray that meets no unit reads one node, and a scene of one unit is a
 // root that is a leaf, whose record only the rays that meet its box read.
-fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32, stack: ptr<function, array<u32, 64>>) -> Hit {
+var<private> stack: array<u32, 64>;
+
+fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
     if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
     let top = bitcast<u32>(P.motion.z);
@@ -62,7 +69,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: 
                 }
                 node = near;
                 if (tr != INF && sp < 64u) {
-                    (*stack)[sp] = far;
+                    stack[sp] = far;
                     sp++;
                 }
                 continue;
@@ -107,7 +114,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: 
         }
         if (sp == 0u) { break; }
         sp--;
-        node = (*stack)[sp];
+        node = stack[sp];
     }
     return hit;
 }

@@ -14,9 +14,9 @@
 //! up to date (`refit_top`) while units only move a little, and units that come, or travel, get a tree of their own
 //! beside the others' (`Kept`: the settled and the loose), which is what is built when they move.
 //!
-//! Depths: one stack of `STACK` entries for a ray, the still walk's own (which a kernel with units declares that
-//! long, and hands to the unit walk when it is done and the stack is empty); both levels of the unit walk share it
-//! (a push past it is dropped: geometry missed, never a hang). A walk's stack is never deeper than its tree, so the
+//! Depths: one stack of `STACK` entries, the kernel module's (trace_units.wgsl says why not a walk's own): the still
+//! walk uses it, leaves it empty, and both levels of the unit walk share it (a push past it is dropped: geometry
+//! missed, never a hang). A walk's stack is never deeper than its tree, so the
 //! top tree is held to `TOP_DEPTH` (its builder takes no split the levels left could not finish, and stops a level
 //! short of it: the top tree may be a root over two built trees) and a mesh tree to
 //! `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit. Binned SAH
@@ -27,10 +27,10 @@ use crate::bvh::{self, GpuNode};
 use crate::scene::GpuInstance;
 use glam::{Mat4, Vec3A};
 
-/// A ray's stack in a kernel with units (pathtrace.wgsl `trace`'s, lengthened by `gpu::kernel_source`; the unit walk
-/// of trace_units.wgsl is handed it): entries shared by the unit walk's two levels.
+/// The stack of a kernel with units (trace_units.wgsl `stack`, the module's): entries shared by the unit walk's two
+/// levels, and used by the still walk before them.
 pub const STACK: usize = 64;
-/// The still walk's stack in a kernel without units, and how much of it the still walk uses in any kernel.
+/// The still walk's stack in a kernel without units, and how much of the module's the still walk uses in one with.
 pub const STILL_STACK: usize = 48;
 /// The deepest top tree (levels below the root): a built tree is no deeper than 18, whatever its units' boxes
 /// (`build_sah`), and the top tree is one, or a root over two (`Kept`).
@@ -1029,8 +1029,8 @@ pub(crate) mod cpu {
         pub(crate) fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
             let mut hit = Hit { t: tmax_in, tri: 0xffff_ffff, inst: NO_INST };
             let inv_d = Self::inv(d);
-            // (The stack is the units' size, as `kernel_source` makes it in a kernel with units; the still walk's
-            // own bound stays.)
+            // (The stack is the module's in a kernel with units, 64 long, the still walk's own bound kept; in one
+            // without, the walk's own 48.)
             let (mut stack, mut sp, mut node) = ([0u32; STACK], 0usize, 0u32);
             loop {
                 self.step()?;
@@ -1192,7 +1192,8 @@ mod tests {
             units,
             "trace_units.wgsl",
             &[
-                "fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32, stack: ptr<function, array<u32, 64>>) -> Hit {",
+                "var<private> stack: array<u32, 64>;",
+                "fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {",
                 "if (bitcast<u32>(P.motion.w) == 0u) { return hit; }",
                 "let top = bitcast<u32>(P.motion.z);",
                 "let whole = nodes[top];",
@@ -1216,7 +1217,7 @@ mod tests {
                 "if (tr < tl) {",
                 "node = near;",
                 "if (tr != INF && sp < 64u) {",
-                "(*stack)[sp] = far;",
+                "stack[sp] = far;",
                 "continue;",
                 "} else if (rec == NO_INST) {",
                 "let u = instances[n.left_or_first];",
@@ -1246,7 +1247,7 @@ mod tests {
                 "rinv = inv_d;",
                 "off = top;",
                 "if (sp == 0u) { break; }",
-                "node = (*stack)[sp];",
+                "node = stack[sp];",
                 "return hit;",
             ],
         );
