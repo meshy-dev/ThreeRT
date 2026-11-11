@@ -232,9 +232,10 @@ pub struct ParticleGpu {
     fresh: std::cell::Cell<bool>,
     /// Some systems are opaque (in the scene's dynamic BLASes, rebuilt every frame).
     opaque: bool,
-    /// Per system: its particle count, whether the translucency pass draws it, and its state when hidden in place
-    /// (`set_particles_hidden`): `Shown`, `Collapse` (this frame's pass collapses its quads), `Collapsed` (zero its
-    /// count next frame), `Idle`.
+    /// Per system: its particle count, whether the translucency pass draws it, and its state when hidden or shown in
+    /// place (`set_particles_hidden`): `Shown`; `Collapse` (this frame's pass collapses its quads), `Collapsed` (zero
+    /// its count next frame), `Idle`; `Showing` (this frame's pass is its first: no motion vectors), `ShowRan` (clear
+    /// that next frame).
     counts: Vec<u32>,
     translucent: Vec<bool>,
     hidden: std::cell::RefCell<Vec<Hidden>>,
@@ -247,6 +248,8 @@ enum Hidden {
     Collapse,
     Collapsed,
     Idle,
+    Showing,
+    ShowRan,
 }
 
 /// Volume training points per frame at most (translucent.wgsl `volume_train`).
@@ -1869,8 +1872,13 @@ impl Gpu {
                 match *h {
                     Hidden::Collapse => *h = Hidden::Collapsed,
                     Hidden::Collapsed => {
-                        self.write_particle_count(p, k, 0, false);
+                        self.write_particle_count(p, k, 0, 0.0);
                         *h = Hidden::Idle;
+                    }
+                    Hidden::Showing => *h = Hidden::ShowRan,
+                    Hidden::ShowRan => {
+                        self.write_particle_count(p, k, p.counts[k], 0.0);
+                        *h = Hidden::Shown;
                     }
                     _ => {}
                 }
@@ -2073,11 +2081,11 @@ impl Gpu {
         }
     }
 
-    /// System `k`'s particle count and collapse flag in the table (a.y, c.w).
-    fn write_particle_count(&self, p: &ParticleGpu, k: usize, count: u32, collapse: bool) {
+    /// System `k`'s particle count and flag in the table (a.y; c.w: 1 collapse, 2 first run, particles.wgsl).
+    fn write_particle_count(&self, p: &ParticleGpu, k: usize, count: u32, flag: f32) {
         let at = (k * std::mem::size_of::<ParticleSystemGpu>()) as u64;
         self.queue.write_buffer(&p.table, at + 4, bytemuck::bytes_of(&count));
-        self.queue.write_buffer(&p.table, at + 44, bytemuck::bytes_of(&if collapse { 1.0f32 } else { 0.0 }));
+        self.queue.write_buffer(&p.table, at + 44, bytemuck::bytes_of(&flag));
     }
 
     /// A particle node shown or hidden by its own `visible`, in place: hidden, its systems' next pass collapses their
@@ -2089,13 +2097,14 @@ impl Gpu {
         let mut found = false;
         for (k, _) in p.nodes.iter().enumerate().filter(|(_, n)| **n == node) {
             found = true;
-            let shown = hidden[k] == Hidden::Shown;
+            let shown = matches!(hidden[k], Hidden::Shown | Hidden::Showing | Hidden::ShowRan);
             if hide && shown {
-                self.write_particle_count(p, k, p.counts[k], true);
+                self.write_particle_count(p, k, p.counts[k], 1.0);
                 hidden[k] = Hidden::Collapse;
             } else if !hide && !shown {
-                self.write_particle_count(p, k, p.counts[k], false);
-                hidden[k] = Hidden::Shown;
+                // (Its first run since: no last frame for its motion vectors.)
+                self.write_particle_count(p, k, p.counts[k], 2.0);
+                hidden[k] = Hidden::Showing;
             }
         }
         found
