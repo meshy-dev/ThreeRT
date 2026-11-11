@@ -9,11 +9,14 @@
 //! The node buffer: the still scene's tree (as before), then the mesh trees' range (trees side by side, room after
 //! them), then the top tree's range. A mesh tree is relocatable: child indices count from its root, a leaf's
 //! triangles from its mesh's first triangle. The top tree's child indices count from its root, and each of its leaves
-//! is one unit: `left_or_first` the unit's record, `count` 1. It is rebuilt whole whenever a unit changes.
+//! is one unit: `left_or_first` the unit's record, `count` 1. It is built by the surface-area heuristic (`build_sah`)
+//! and written whole whenever a unit changes: built again when a unit comes or goes, kept with its boxes brought up
+//! to date (`refit_top`) while units only move and it stays within `REFIT_SLACK` of what it cost when built.
 //!
 //! Depths: both levels share the unit walk's stack of `STACK` entries (a push past it is dropped: geometry missed,
-//! never a hang). A walk's stack is never deeper than its tree, so the top tree is held to `TOP_DEPTH` and a mesh tree
-//! to `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit. Binned
+//! never a hang). A walk's stack is never deeper than its tree, so the top tree is held to `TOP_DEPTH` (its builder
+//! takes no split the levels left could not finish) and a mesh tree to `MESH_DEPTH` (a tree deeper than that is built
+//! again by median splits, which halve), and the two fit. Binned
 //! SAH is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced
 //! one's 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk has 48 entries for its one tree.
 
@@ -25,7 +28,7 @@ use glam::{Mat4, Vec3A};
 pub const STACK: usize = 64;
 /// The still walk's stack (pathtrace.wgsl `trace`), as it was before there were units.
 pub const STILL_STACK: usize = 48;
-/// The deepest top tree (levels below the root): 2^18 units by median splits.
+/// The deepest top tree (levels below the root): 2^18 units at most, whatever their boxes (`build_sah`).
 pub const TOP_DEPTH: usize = 18;
 /// The deepest mesh tree (46): what the stack has left. SAH trees deeper than this are rebuilt by median splits.
 pub const MESH_DEPTH: usize = STACK - TOP_DEPTH;
@@ -158,6 +161,111 @@ fn build_median(boxes: &[(Vec3A, Vec3A)], max_leaf: usize) -> (Vec<GpuNode>, Vec
     (nodes, order)
 }
 
+/// The bins of a top tree's split along an axis.
+const TOP_BINS: usize = 32;
+
+fn area(lo: Vec3A, hi: Vec3A) -> f32 {
+    let e = (hi - lo).max(Vec3A::ZERO);
+    2.0 * (e.x * e.y + e.y * e.z + e.z * e.x)
+}
+
+/// A tree over boxes (min, max) by the surface-area heuristic, one box a leaf, no deeper than `max_depth` whatever
+/// the boxes are (there are at most 2^`max_depth` of them). Each split is the cheapest of the binned ones along the
+/// three axes of the boxes' centres (cost: each side's area times its count, the chance a ray through the node meets
+/// the side times what is in it), among those that leave both sides no more boxes than the levels below can still
+/// halve down to one; where there is none (every centre in one place; a split the depth forbids), the median along
+/// the widest axis, which halves. So a node at depth d holds at most 2^(`max_depth` - d) boxes, and a leaf is no
+/// deeper than `max_depth`. Returns the nodes (a leaf's `left_or_first`: its position in the order) and the order.
+///
+/// Why not the median everywhere (what the top tree was at first): units are not of one size. A median split by
+/// centres puts a wall and the lamp beside it in whichever halves their centres fall in, and both halves' boxes then
+/// span the wall: a ray reads far more of the tree than it enters units (the voxel level: 82 top nodes read a ray
+/// for 2.2 units entered; `units_cost.rs`).
+fn build_sah(boxes: &[(Vec3A, Vec3A)], max_depth: usize) -> (Vec<GpuNode>, Vec<u32>) {
+    let mut order: Vec<u32> = (0..boxes.len() as u32).collect();
+    let mut nodes = vec![FILL];
+    if boxes.is_empty() {
+        return (nodes, order);
+    }
+    debug_assert!(max_depth >= usize::BITS as usize || boxes.len() <= 1 << max_depth);
+    let centres: Vec<Vec3A> = boxes.iter().map(|b| (b.0 + b.1) * 0.5).collect();
+    let mut stack = vec![(0usize, 0usize, boxes.len(), 0usize)];
+    while let Some((ni, start, end, depth)) = stack.pop() {
+        let (mut lo, mut hi) = (Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY));
+        let (mut clo, mut chi) = (lo, hi);
+        for &k in &order[start..end] {
+            lo = lo.min(boxes[k as usize].0);
+            hi = hi.max(boxes[k as usize].1);
+            clo = clo.min(centres[k as usize]);
+            chi = chi.max(centres[k as usize]);
+        }
+        let count = end - start;
+        if count == 1 {
+            nodes[ni] = GpuNode { bmin: lo.into(), left_or_first: start as u32, bmax: hi.into(), count: 1 };
+            continue;
+        }
+        // The most boxes a side may hold: what the levels under a child still halve down to one.
+        let room = 1usize.checked_shl((max_depth - depth - 1) as u32).unwrap_or(usize::MAX);
+        let ext = chi - clo;
+        let bin = |k: u32, axis: usize| (((centres[k as usize][axis] - clo[axis]) * (TOP_BINS as f32 / ext[axis])) as usize).min(TOP_BINS - 1);
+        let mut best = (f32::INFINITY, 0usize, 0usize);
+        for axis in 0..3 {
+            if !(ext[axis] > 0.0) {
+                continue;
+            }
+            let mut bins = [(Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY), 0usize); TOP_BINS];
+            for &k in &order[start..end] {
+                let b = &mut bins[bin(k, axis)];
+                *b = (b.0.min(boxes[k as usize].0), b.1.max(boxes[k as usize].1), b.2 + 1);
+            }
+            // The right sides' areas from the last bin back, then the left sides' forward.
+            let mut right = [0.0f32; TOP_BINS];
+            let mut acc = (Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY));
+            for i in (1..TOP_BINS).rev() {
+                acc = (acc.0.min(bins[i].0), acc.1.max(bins[i].1));
+                right[i] = area(acc.0, acc.1);
+            }
+            let mut acc = (Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY));
+            let mut nl = 0;
+            for i in 1..TOP_BINS {
+                acc = (acc.0.min(bins[i - 1].0), acc.1.max(bins[i - 1].1));
+                nl += bins[i - 1].2;
+                let nr = count - nl;
+                if nl == 0 || nr == 0 || nl > room || nr > room {
+                    continue;
+                }
+                let cost = area(acc.0, acc.1) * nl as f32 + right[i] * nr as f32;
+                if cost < best.0 {
+                    best = (cost, axis, i);
+                }
+            }
+        }
+        let mid = if best.0.is_finite() {
+            let (_, axis, split) = best;
+            let slice = &mut order[start..end];
+            let mut i = 0;
+            for j in 0..slice.len() {
+                if bin(slice[j], axis) < split {
+                    slice.swap(i, j);
+                    i += 1;
+                }
+            }
+            i
+        } else {
+            let axis = if ext.x >= ext.y && ext.x >= ext.z { 0 } else if ext.y >= ext.z { 1 } else { 2 };
+            order[start..end].select_nth_unstable_by(count / 2, |&a, &b| centres[a as usize][axis].total_cmp(&centres[b as usize][axis]).then(a.cmp(&b)));
+            count / 2
+        };
+        let left = nodes.len();
+        nodes.push(FILL);
+        nodes.push(FILL);
+        nodes[ni] = GpuNode { bmin: lo.into(), left_or_first: left as u32, bmax: hi.into(), count: 0 };
+        stack.push((left + 1, start + mid, end, depth + 1));
+        stack.push((left, start, start + mid, depth + 1));
+    }
+    (nodes, order)
+}
+
 fn tri_boxes(tris: &[[Vec3A; 3]]) -> Vec<(Vec3A, Vec3A)> {
     tris.iter().map(|t| (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]))).collect()
 }
@@ -204,8 +312,8 @@ impl UnitBox {
     }
 }
 
-/// The top tree over `units` (at least one): median splits down to one unit a leaf, each leaf's `left_or_first` its
-/// unit's record. Checked against the units it was given.
+/// The top tree over `units` (at least one): by the surface-area heuristic (`build_sah`) down to one unit a leaf, no
+/// deeper than `TOP_DEPTH`; each leaf's `left_or_first` its unit's record. Checked against the units it was given.
 pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
     if units.is_empty() {
         return Err("a top tree needs a unit".into());
@@ -217,7 +325,7 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
         return Err("a unit's box is not finite".into());
     }
     let boxes: Vec<(Vec3A, Vec3A)> = units.iter().map(|u| (u.lo, u.hi)).collect();
-    let (mut nodes, order) = build_median(&boxes, 1);
+    let (mut nodes, order) = build_sah(&boxes, TOP_DEPTH);
     for n in nodes.iter_mut().filter(|n| n.count > 0) {
         n.left_or_first = units[order[n.left_or_first as usize] as usize].record;
     }
@@ -226,12 +334,71 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
     Ok(nodes)
 }
 
-/// A unit's record: the instance's (`scene::Instance::gpu`), with its mesh tree's root and whether it casts shadows in
-/// the two words the normal rows leave unused (trace_units.wgsl reads them as bits).
+/// A unit's record: the instance's (`scene::Instance::gpu`), with, in the three words the normal rows leave unused
+/// (trace_units.wgsl reads them as bits): its mesh tree's root; whether it casts shadows; whether it is placed by a
+/// translation alone (or not moved at all). The last is read off the record's own normal rows, which are then the
+/// identity's: the walk moves the ray's origin and leaves the rest of the ray as it is, which is what multiplying by
+/// these rows comes to, to the bit (the sign of a zero aside, which no comparison in the walk sees).
 pub fn unit_record(mut r: GpuInstance, root: u32, cast_shadow: bool) -> GpuInstance {
     r.n[0][3] = f32::from_bits(root);
     r.n[1][3] = f32::from_bits(cast_shadow as u32);
+    r.n[2][3] = f32::from_bits(translation_alone(&r) as u32);
     r
+}
+
+/// Whether a record's normal rows are the identity's.
+pub fn translation_alone(r: &GpuInstance) -> bool {
+    (0..3).all(|k| (0..3).all(|c| r.n[k][c] == if k == c { 1.0 } else { 0.0 }))
+}
+
+/// How much more than at its build a top tree may cost (`top_cost`) and still be kept with its boxes brought up to
+/// date (`refit_top`); past it the tree is built again. (V5 of out/web-probe/gpu-runs-c.md is to say whether 1.3 is
+/// the number: the top tree is about half of what a ray reads on a level of 10,000 units, so 30 % of it is about
+/// 15 % of a ray.)
+pub const REFIT_SLACK: f64 = 1.3;
+
+/// What a top tree costs a ray, by surface area: the sum of its interior nodes' box areas (a line through space meets
+/// a box in proportion to its area; at each interior node it meets, the walk reads two nodes). Not divided by the
+/// root's: a unit that flies off makes the root large, and the tree no better.
+pub fn top_cost(nodes: &[GpuNode]) -> f64 {
+    nodes.iter().filter(|n| n.count == 0).map(|n| area(Vec3A::from(n.bmin), Vec3A::from(n.bmax)) as f64).sum()
+}
+
+/// A top tree as it stands (`nodes`: one `top_tree` built, or this made of it) with its boxes again from `units`: a
+/// leaf's is its unit's, an interior node's what holds its two children's. The tree's shape is not touched: units
+/// that moved a little are where the tree has them, and a tree that is not rebuilt costs a pass over its nodes
+/// instead of a build (0.2 ms against 3.7 ms for 10,000 units). None: the units are not the tree's leaves, one for
+/// one (a unit added, removed, hidden or shown: build it again), or `nodes` is no tree. The caller checks the result
+/// as it checks a built tree, and compares its cost.
+pub fn refit_top(nodes: &[GpuNode], units: &[UnitBox]) -> Option<Vec<GpuNode>> {
+    if units.is_empty() || nodes.len() != 2 * units.len() - 1 {
+        return None;
+    }
+    let most = units.iter().map(|u| u.record).max()? as usize;
+    let mut at = vec![u32::MAX; most + 1];
+    for (k, u) in units.iter().enumerate() {
+        if std::mem::replace(&mut at[u.record as usize], k as u32) != u32::MAX {
+            return None;
+        }
+    }
+    let mut out = nodes.to_vec();
+    // Children are after their parents (`check_tree`): from the last node back, both are done before their parent.
+    for i in (0..out.len()).rev() {
+        let n = out[i];
+        if n.count > 0 {
+            let k = std::mem::replace(at.get_mut(n.left_or_first as usize)?, u32::MAX);
+            let u = units.get(k as usize)?;
+            out[i] = GpuNode { bmin: u.lo.into(), bmax: u.hi.into(), ..n };
+        } else {
+            let l = n.left_or_first as usize;
+            if l <= i || l + 1 >= out.len() {
+                return None;
+            }
+            let (a, b) = (out[l], out[l + 1]);
+            out[i] = GpuNode { bmin: Vec3A::from(a.bmin).min(b.bmin.into()).into(), bmax: Vec3A::from(a.bmax).max(b.bmax.into()).into(), ..n };
+        }
+    }
+    Some(out)
 }
 
 /// Where the units' trees are in the node buffer, and which of the mesh trees' range is free. Nodes are counted, not
@@ -339,6 +506,18 @@ pub struct Units {
     pub count: u32,
     /// The records the kernel's instance table holds (the scene's and its room's): no unit is past them.
     pub records: usize,
+    /// The top tree as `top` last made it, and how it came to be.
+    pub kept: Kept,
+}
+
+/// The top tree `Units::top` last returned: its nodes, what it cost when it was built (`top_cost`), and how many
+/// times `top` built a tree and how many times it kept one (`refit_top`).
+#[derive(Clone, Debug, Default)]
+pub struct Kept {
+    pub nodes: Vec<GpuNode>,
+    pub built_cost: f64,
+    pub builds: u64,
+    pub refits: u64,
 }
 
 impl Units {
@@ -394,7 +573,9 @@ impl Units {
     }
 
     /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
-    /// unit: no nodes (the kernel does not walk a top tree then). Err: more units than the range holds, a unit whose
+    /// unit: no nodes (the kernel does not walk a top tree then). The tree it made last is kept, its boxes brought up
+    /// to date, while its leaves are these units and it costs a ray no more than `REFIT_SLACK` times what it did
+    /// when it was built (units that move every frame: bodies); else it is built again. Err: more units than the range holds, a unit whose
     /// box is not finite, one past the kernel's records, or one whose record names a tree that is not its mesh's now
     /// (freed, or placed elsewhere since the record was written: the kernel would walk whatever is there); nothing
     /// is changed then.
@@ -413,9 +594,37 @@ impl Units {
         if boxes.len() > self.layout.max_units() {
             return Err(format!("{} units: more than the top tree's range holds ({})", boxes.len(), self.layout.max_units()));
         }
-        let nodes = if boxes.is_empty() { vec![] } else { top_tree(&boxes)? };
+        let nodes = if boxes.is_empty() {
+            vec![]
+        } else if let Some(kept) = self.refit(&boxes) {
+            self.kept.refits += 1;
+            kept
+        } else {
+            let built = top_tree(&boxes)?;
+            self.kept.built_cost = top_cost(&built);
+            self.kept.builds += 1;
+            built
+        };
         self.count = boxes.len() as u32;
+        self.kept.nodes = nodes.clone();
         Ok(nodes)
+    }
+
+    /// The kept tree over `boxes`, if it is still theirs and still good: checked as a built one is.
+    fn refit(&self, boxes: &[UnitBox]) -> Option<Vec<GpuNode>> {
+        if boxes.iter().any(|u| !(u.lo.is_finite() && u.hi.is_finite())) {
+            return None;
+        }
+        let nodes = refit_top(&self.kept.nodes, boxes)?;
+        if top_cost(&nodes) > self.kept.built_cost * REFIT_SLACK {
+            return None;
+        }
+        let mut is = vec![false; self.slots.len()];
+        for u in boxes {
+            is[u.record as usize] = true;
+        }
+        check_top(&nodes, |r| is.get(r as usize).copied().unwrap_or(false)).ok()?;
+        Some(nodes)
     }
 }
 
@@ -451,22 +660,53 @@ pub(crate) mod cpu {
         pub(crate) budget: u64,
         /// The deepest the shared stack got.
         pub(crate) deepest: std::cell::Cell<usize>,
+        /// What the walks read, counted (units_cost.rs).
+        pub(crate) reads: std::cell::Cell<Reads>,
+    }
+
+    /// A walk's reads by kind: nodes of the still tree, of the top tree and of mesh trees, vertices (three a triangle
+    /// test) and unit records; `still_steps`: the loop iterations of the still scene's walk (the rest of `steps` are
+    /// the unit walk's). `in_units`: the still walk is over.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub(crate) struct Reads {
+        pub(crate) still_nodes: u64,
+        pub(crate) top_nodes: u64,
+        pub(crate) mesh_nodes: u64,
+        pub(crate) still_verts: u64,
+        pub(crate) mesh_verts: u64,
+        pub(crate) records: u64,
+        pub(crate) still_steps: u64,
+        pub(crate) in_units: bool,
     }
 
     pub(crate) type Walk<T> = Result<T, String>;
 
     impl Kernel<'_> {
+        fn count(&self, f: impl Fn(&mut Reads)) {
+            let mut r = self.reads.get();
+            f(&mut r);
+            self.reads.set(r);
+        }
+        /// The still walk is over. (The top tree's nodes are the buffer's last: a node at `top` or after is the top
+        /// tree's, one before it a mesh tree's.)
+        fn still_done(&self) {
+            self.count(|r| r.in_units = true);
+        }
         pub(crate) fn node(&self, i: u32) -> Walk<GpuNode> {
+            self.count(|r| *(if !r.in_units { &mut r.still_nodes } else if i >= self.top { &mut r.top_nodes } else { &mut r.mesh_nodes }) += 1);
             self.nodes.get(i as usize).copied().ok_or(format!("reads node {i} of {}", self.nodes.len()))
         }
         pub(crate) fn vert(&self, i: u32) -> Walk<Vec3A> {
+            self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 1);
             self.tri_verts.get(i as usize).map(|v| Vec3A::new(v[0], v[1], v[2])).ok_or(format!("reads vertex {i} of {}", self.tri_verts.len()))
         }
         pub(crate) fn record(&self, i: u32) -> Walk<GpuInstance> {
+            self.count(|r| r.records += 1);
             self.instances.get(i as usize).copied().ok_or(format!("reads record {i} of {}", self.instances.len()))
         }
         pub(crate) fn step(&self) -> Walk<()> {
             self.steps.set(self.steps.get() + 1);
+            self.count(|r| r.still_steps += !r.in_units as u64);
             if self.steps.get() > self.budget {
                 return Err("does not stop".into());
             }
@@ -582,6 +822,7 @@ pub(crate) mod cpu {
                     sp += 1;
                 }
             }
+            self.still_done();
             self.trace_units(o, d, hit, mode)
         }
 
@@ -597,13 +838,26 @@ pub(crate) mod cpu {
             loop {
                 self.step()?;
                 let n = self.node(node)?;
+                if Self::ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF {
+                    if sp == 0 {
+                        break;
+                    }
+                    sp -= 1;
+                    node = stack[sp];
+                    continue;
+                }
                 if n.count > 0 {
                     let rec = n.left_or_first;
                     let r = self.record(rec)?;
                     if mode != TRACE_SHADOW || r.n[1][3].to_bits() != 0 {
-                        let lo = Self::proc_point(&r, o);
-                        let ld = Self::proc_dir(&r, d);
-                        let linv = Self::inv(ld);
+                        let mut lo = o - Vec3A::new(r.m[0][3], r.m[1][3], r.m[2][3]);
+                        let mut ld = d;
+                        let mut linv = inv_d;
+                        if r.n[2][3].to_bits() == 0 {
+                            lo = Self::proc_dir(&r, lo);
+                            ld = Self::proc_dir(&r, d);
+                            linv = Self::inv(ld);
+                        }
                         let root = r.n[0][3].to_bits();
                         let first = r.info[0];
                         let base = sp;
@@ -720,13 +974,20 @@ mod tests {
                 "var stack: array<u32, 64>;",
                 "var node = top;",
                 "let n = nodes[node];",
+                "if (ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF) {",
+                "if (sp == 0u) { break; }",
+                "node = stack[sp];",
                 "if (n.count > 0u) {",
                 "let rec = n.left_or_first;",
                 "let r = instances[rec];",
                 "if (mode != TRACE_SHADOW || bitcast<u32>(r.n1.w) != 0u) {",
-                "let lo = proc_point(r, o);",
-                "let ld = proc_dir(r, d);",
-                "let linv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));",
+                "var lo = o - vec3<f32>(r.m0.w, r.m1.w, r.m2.w);",
+                "var ld = d;",
+                "var linv = inv_d;",
+                "if (bitcast<u32>(r.n2.w) == 0u) {",
+                "lo = proc_dir(r, lo);",
+                "ld = proc_dir(r, d);",
+                "linv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));",
                 "let root = bitcast<u32>(r.n0.w);",
                 "let first = r.info.x;",
                 "let base = sp;",
@@ -841,6 +1102,10 @@ mod tests {
         units: Vec<Option<(usize, Mat4, bool)>>,
         top: u32,
         count: u32,
+        /// The top tree as last written, what it cost when built, and how often it was kept (as `Units::top`).
+        kept: Vec<GpuNode>,
+        built_cost: f64,
+        refits: usize,
     }
 
     fn put_tris(out: &mut Vec<[f32; 4]>, tris: &[[Vec3A; 3]]) {
@@ -863,7 +1128,7 @@ mod tests {
             let layout = Layout::new(b.nodes.len(), mesh_room, units);
             let mut nodes = b.nodes;
             nodes.resize(nodes.len() + layout.nodes(), FILL);
-            Scene { nodes, tri_verts, instances: vec![GpuInstance::default()], top: layout.top_first, layout, still_tris: still.len(), meshes: vec![], units: vec![], count: 0 }
+            Scene { nodes, tri_verts, instances: vec![GpuInstance::default()], top: layout.top_first, layout, still_tris: still.len(), meshes: vec![], units: vec![], count: 0, kept: vec![], built_cost: 0.0, refits: 0 }
         }
 
         /// A new mesh: its tree placed and written, its triangles appended in the tree's order.
@@ -904,7 +1169,8 @@ mod tests {
             k
         }
 
-        /// The top tree again, over the units there are now, into its range.
+        /// The top tree again, over the units there are now, into its range: kept and refitted, or built, by
+        /// `Units::top`'s rule.
         fn retop(&mut self) -> Result<(), String> {
             let boxes: Vec<UnitBox> = self.units.iter().enumerate().filter_map(|(k, u)| u.map(|(m, w, _)| (k, m, w))).map(|(k, m, w)| { let (.., lo, hi) = self.meshes[m].unwrap(); UnitBox::new(k as u32, w, lo, hi) }).collect();
             self.count = boxes.len() as u32;
@@ -914,15 +1180,27 @@ mod tests {
             if boxes.len() > self.layout.max_units() {
                 return Err("no room for the top tree".into());
             }
-            let t = top_tree(&boxes)?;
+            let t = match refit_top(&self.kept, &boxes).filter(|t| top_cost(t) <= self.built_cost * REFIT_SLACK) {
+                Some(t) => {
+                    check_top(&t, |r| self.units.get(r as usize).is_some_and(|u| u.is_some()))?;
+                    self.refits += 1;
+                    t
+                }
+                None => {
+                    let t = top_tree(&boxes)?;
+                    self.built_cost = top_cost(&t);
+                    t
+                }
+            };
             let at = self.layout.top_first as usize;
             self.nodes[at..at + t.len()].copy_from_slice(&t);
+            self.kept = t;
             Ok(())
         }
 
         fn kernel(&self) -> Kernel<'_> {
             let budget = 64 * (self.nodes.len() as u64 + self.tri_verts.len() as u64) + 1024;
-            Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default() }
+            Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
         }
 
         /// Every triangle a ray could meet, tested one by one with the kernel's own triangle test (the still scene's in
@@ -987,18 +1265,26 @@ mod tests {
         }
     }
 
+    /// A placement: a third of them a translation alone (the walk's short way), a few none at all.
     fn pose(rng: &mut Rng) -> Mat4 {
+        let kind = rng.f();
+        if kind < 0.05 {
+            return Mat4::IDENTITY;
+        }
+        if kind < 0.35 {
+            return Mat4::from_translation(Vec3::from(rng.v(30.0)));
+        }
         let s = Vec3::new(0.3 + 2.0 * rng.f(), 0.3 + 2.0 * rng.f(), 0.3 + 2.0 * rng.f());
         let q = Quat::from_euler(glam::EulerRot::XYZ, rng.f() * 6.0, rng.f() * 6.0, rng.f() * 6.0);
         Mat4::from_scale_rotation_translation(s, q, Vec3::from(rng.v(30.0)))
     }
 
-    /// Random scenes under random edits: meshes added and removed, units added, moved and removed, the top tree built
-    /// again after each, as an edit does. After every edit the kernel's two walks, on the CPU with every read checked,
+    /// Random scenes under random edits: meshes added and removed, units added, moved (far, or a little: the top tree
+    /// is then kept and refitted) and removed, the top tree made again after each, as an edit does. After every edit the kernel's two walks, on the CPU with every read checked,
     /// agree with brute force. Scenes with and without a still part; units that overlap; a scene emptied of units.
     #[test]
     fn the_walks_agree_with_brute_force_under_random_edits() {
-        let (mut edits, mut unit_hits, mut rays) = (0, 0, 0);
+        let (mut edits, mut unit_hits, mut rays, mut refits, mut short) = (0, 0, 0, 0, 0);
         for seed in 0..12u64 {
             let mut rng = Rng(seed * 7919 + 1);
             let n = 50 + rng.below(400);
@@ -1033,8 +1319,13 @@ mod tests {
                     }
                     5 | 6 | 7 if !live_units.is_empty() => {
                         let k = live_units[rng.below(live_units.len())];
-                        let (m, _, cast) = sc.units[k].unwrap();
-                        let world = pose(&mut rng);
+                        let (m, was, cast) = sc.units[k].unwrap();
+                        // Somewhere else, or (half of them) a step from where it was, turned a little or not.
+                        let world = match rng.below(4) {
+                            0 => Mat4::from_translation(Vec3::from(rng.v(0.5))) * was,
+                            1 => was * Mat4::from_rotation_y(rng.f() * 0.2),
+                            _ => pose(&mut rng),
+                        };
                         sc.units[k] = Some((m, world, cast));
                         sc.instances[k] = sc.record(m, world, cast);
                         what = "a unit moved";
@@ -1068,8 +1359,11 @@ mod tests {
             // The mesh range's free runs add up to what the removed trees gave back.
             let used: usize = sc.meshes.iter().flatten().map(|m| m.3).sum();
             assert_eq!(sc.layout.free_nodes() + used, sc.layout.mesh_cap as usize);
+            refits += sc.refits;
+            short += sc.units.iter().enumerate().filter(|(k, u)| u.is_some() && sc.instances[*k].n[2][3].to_bits() == 1).count();
         }
         assert!(edits > 300 && unit_hits * 8 > rays, "{edits} edits, {unit_hits} of {rays} closest hits on units");
+        assert!(refits > 40 && short > 20, "{refits} top trees kept, {short} units placed by a translation alone at the end");
     }
 
     /// The trees the builders make are the trees the checks accept, at their depth bounds: a top tree of a thousand
@@ -1080,7 +1374,54 @@ mod tests {
         let units: Vec<UnitBox> = (0..1000).map(|k| UnitBox::new(k, Mat4::from_translation(Vec3::from(rng.v(100.0))), Vec3A::splat(-0.25), Vec3A::splat(0.25))).collect();
         let top = top_tree(&units).unwrap();
         assert_eq!(top.len(), 1999);
-        assert_eq!(check_top(&top, |r| r < 1000).unwrap(), 10, "1000 units: ceil(log2)");
+        let depth = check_top(&top, |r| r < 1000).unwrap();
+        assert!((10..=TOP_DEPTH).contains(&depth), "1000 units: {depth}");
+        // By surface area, not by count: cheaper for a ray than the tree of median splits over the same units, of one
+        // size or not (every tenth here a wall among lamps). (13 % and 15 % here; the voxel level's 10,459 units: 24 %,
+        // units_cost.rs.)
+        let boxes: Vec<(Vec3A, Vec3A)> = units.iter().map(|u| (u.lo, u.hi)).collect();
+        let (sah, median) = (top_cost(&top), top_cost(&build_median(&boxes, 1).0));
+        assert!(sah < 0.95 * median, "{sah} against {median}");
+        let mixed: Vec<(Vec3A, Vec3A)> = boxes.iter().enumerate().map(|(k, b)| if k % 10 == 0 { (b.0 - Vec3A::new(12.0, 6.0, 0.0), b.1 + Vec3A::new(12.0, 6.0, 0.0)) } else { *b }).collect();
+        let (sah, median) = (top_cost(&build_sah(&mixed, TOP_DEPTH).0), top_cost(&build_median(&mixed, 1).0));
+        assert!(sah < 0.9 * median, "{sah} against {median}");
+        // The depth holds whatever the boxes are: as many as the depth allows (every split must halve), one more level
+        // than that, plenty; boxes all in one place, in a row each further than all before it together (the cheapest
+        // split by area peels one off, a chain), in two clumps of unequal size, anywhere.
+        for round in 0..400 {
+            let n = 1 + rng.below(300);
+            let least = (n as f32).log2().ceil() as usize;
+            let max_depth = least + [0, 0, 1, 2, 40][round % 5];
+            let boxes: Vec<(Vec3A, Vec3A)> = (0..n)
+                .map(|k| {
+                    let c = match round % 4 {
+                        0 => Vec3A::ZERO,
+                        1 => Vec3A::new(1.5f32.powi(k as i32 % 60) * (1 + k / 60) as f32, 0.0, 0.0),
+                        2 => rng.v(1.0) + if k % 7 == 0 { Vec3A::splat(500.0) } else { Vec3A::ZERO },
+                        _ => rng.v(50.0),
+                    };
+                    let h = Vec3A::splat(0.1 + rng.f() * if k % 9 == 0 { 20.0 } else { 1.0 });
+                    (c - h, c + h)
+                })
+                .collect();
+            let (nodes, order) = build_sah(&boxes, max_depth);
+            assert_eq!(nodes.len(), 2 * n - 1);
+            let depth = check_tree(&nodes, max_depth, |_, count| if count == 1 { Ok(()) } else { Err("a leaf of several".into()) }).unwrap_or_else(|e| panic!("round {round}, {n} boxes, depth {max_depth}: {e}"));
+            assert!(depth >= least);
+            let mut seen = order.clone();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..n as u32).collect::<Vec<_>>());
+            // Every leaf's box is its box, every interior node's holds its children's.
+            for (i, node) in nodes.iter().enumerate() {
+                if node.count > 0 {
+                    let b = boxes[order[node.left_or_first as usize] as usize];
+                    assert_eq!((Vec3A::from(node.bmin), Vec3A::from(node.bmax)), b);
+                } else {
+                    let (a, b) = (nodes[node.left_or_first as usize], nodes[node.left_or_first as usize + 1]);
+                    assert_eq!((Vec3A::from(node.bmin), Vec3A::from(node.bmax)), (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into())), "node {i}");
+                }
+            }
+        }
         assert!(top_tree(&[]).is_err());
         let one = top_tree(&units[..1]).unwrap();
         assert_eq!((one.len(), one[0].count, one[0].left_or_first), (1, 1, 0));
@@ -1181,7 +1522,7 @@ mod tests {
         let (small, large) = (mesh_tree(&rng.tris(40, 2.0, 0.3)).unwrap(), mesh_tree(&rng.tris(400, 2.0, 0.3)).unwrap());
         let (ns, nl) = (small.nodes.len(), large.nodes.len());
         assert!(nl > ns);
-        let mut u = Units { layout: Layout::new(10, ns + nl, 4), trees: vec![], slots: vec![], count: 0, records: 4 };
+        let mut u = Units { layout: Layout::new(10, ns + nl, 4), trees: vec![], slots: vec![], count: 0, records: 4, kept: Default::default() };
         // A mesh without a tree is no unit's.
         assert!(u.unit(0, Mat4::IDENTITY, false).is_none());
         assert_eq!(u.add_tree(0, &small), Some(10));
@@ -1252,7 +1593,7 @@ mod tests {
         let tri = |y: f32| [[Vec3A::new(0.0, y, 0.0), Vec3A::new(1.0, y, 0.0), Vec3A::new(0.0, y + 1.0, 0.0)]];
         let (first, fallen) = (mesh_tree(&tri(2.0)).unwrap(), mesh_tree(&tri(-3.0)).unwrap());
         assert_eq!((first.lo.y, first.hi.y, fallen.lo.y, fallen.hi.y), (2.0, 3.0, -3.0, -2.0));
-        let mut u = Units { layout: Layout::new(1, 8, 2), trees: vec![], slots: vec![], count: 0, records: 2 };
+        let mut u = Units { layout: Layout::new(1, 8, 2), trees: vec![], slots: vec![], count: 0, records: 2, kept: Default::default() };
         u.add_tree(0, &first).unwrap();
         u.set(0, u.unit(0, Mat4::IDENTITY, false));
         let top = u.top().unwrap();
@@ -1266,5 +1607,87 @@ mod tests {
         u.moved(0, Mat4::from_translation(glam::Vec3::Y * 10.0), None);
         let top = u.top().unwrap();
         assert!(top[0].bmin[1] <= 12.0 && top[0].bmin[1] > 11.0 && top[0].bmax[1] >= 13.0, "{:?}", top[0]);
+    }
+
+    /// Units that only move keep their top tree, its boxes theirs again (each leaf's its unit's box, each node's what
+    /// holds its children's), while it costs a ray no more than `REFIT_SLACK` of what it did when built; a unit that
+    /// goes far, comes, goes, is hidden or shown has it built again. A kept tree is one a build could have made: the
+    /// same checks pass, and a build over the same units costs no more.
+    #[test]
+    fn a_top_tree_is_kept_while_units_only_move() {
+        let mut rng = Rng(21);
+        let mesh = mesh_tree(&rng.tris(30, 1.0, 0.3)).unwrap();
+        let n = 200;
+        let mut u = Units { layout: Layout::new(1, mesh.nodes.len(), n + 1), trees: vec![], slots: vec![], count: 0, records: n + 1, kept: Default::default() };
+        u.add_tree(0, &mesh).unwrap();
+        let mut at: Vec<Vec3> = (0..n).map(|_| Vec3::from(rng.v(40.0))).collect();
+        for (k, p) in at.iter().enumerate() {
+            u.set(k, u.unit(0, Mat4::from_translation(*p), false));
+        }
+        let holds = |u: &Units, top: &[GpuNode]| {
+            check_top(top, |r| u.slots.get(r as usize).is_some_and(|s| s.is_some_and(|s| !s.hidden))).unwrap();
+            for node in top {
+                if node.count > 0 {
+                    let unit = u.slots[node.left_or_first as usize].unwrap();
+                    let b = UnitBox::new(node.left_or_first, unit.world, mesh.lo, mesh.hi);
+                    assert_eq!((Vec3A::from(node.bmin), Vec3A::from(node.bmax)), (b.lo, b.hi));
+                } else {
+                    let (a, b) = (top[node.left_or_first as usize], top[node.left_or_first as usize + 1]);
+                    assert_eq!((Vec3A::from(node.bmin), Vec3A::from(node.bmax)), (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into())));
+                }
+            }
+        };
+        let first = u.top().unwrap();
+        holds(&u, &first);
+        assert_eq!((u.kept.builds, u.kept.refits), (1, 0));
+        // Nothing moved: the same tree, to the byte.
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&u.top().unwrap()), bytemuck::cast_slice::<_, u8>(&first));
+        assert_eq!((u.kept.builds, u.kept.refits), (1, 1));
+        // Every unit a step a frame, as bodies go: kept at first, and built again each time the steps have added up to
+        // a tree that costs too much, which is not every frame.
+        for _ in 0..60 {
+            for (k, p) in at.iter_mut().enumerate() {
+                *p += Vec3::from(rng.v(4.0));
+                u.moved(k, Mat4::from_translation(*p), None);
+            }
+            let top = u.top().unwrap();
+            holds(&u, &top);
+            assert!(top_cost(&top) <= u.kept.built_cost * REFIT_SLACK);
+        }
+        let (builds, refits) = (u.kept.builds, u.kept.refits);
+        assert!(builds + refits == 62 && builds >= 2 && refits > 2 * builds, "{builds} built, {refits} kept");
+        // One unit far off: the kept tree would hold it in a box across the scene.
+        u.moved(7, Mat4::from_translation(Vec3::splat(4000.0)), None);
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!(u.kept.builds, builds + 1, "built again");
+        // A unit hidden, shown, gone, another come: each a build (the leaves are other units).
+        u.moved(3, Mat4::IDENTITY, Some(true));
+        assert_eq!((u.top().unwrap().len(), u.kept.builds), (2 * (n - 1) - 1, builds + 2));
+        u.moved(3, Mat4::IDENTITY, Some(false));
+        assert_eq!((u.top().unwrap().len(), u.kept.builds), (2 * n - 1, builds + 3));
+        u.set(5, None);
+        u.set(n, u.unit(0, Mat4::IDENTITY, false));
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!((top.len(), u.kept.builds), (2 * n - 1, builds + 4), "as many units, not the same ones");
+        // What `refit_top` refuses outright: fewer or more units than leaves, a record twice, no tree.
+        let boxes: Vec<UnitBox> = (0..3).map(|k| UnitBox::new(k, Mat4::from_translation(Vec3::X * k as f32 * 3.0), Vec3A::ZERO, Vec3A::ONE)).collect();
+        let three = top_tree(&boxes).unwrap();
+        assert!(refit_top(&three, &boxes).is_some());
+        assert!(refit_top(&three, &boxes[..2]).is_none());
+        assert!(refit_top(&[], &boxes).is_none() && refit_top(&three, &[]).is_none());
+        let twice: Vec<UnitBox> = [0, 1, 1].iter().map(|&k| UnitBox::new(k, Mat4::IDENTITY, Vec3A::ZERO, Vec3A::ONE)).collect();
+        assert!(refit_top(&three, &twice).is_none());
+        let other: Vec<UnitBox> = [0, 1, 5].iter().map(|&k| UnitBox::new(k, Mat4::IDENTITY, Vec3A::ZERO, Vec3A::ONE)).collect();
+        assert!(refit_top(&three, &other).is_none());
+        // The record's word for a placement by a translation alone.
+        let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false }.gpu(0, 0), 9, true);
+        assert_eq!(rec(Mat4::IDENTITY).n[2][3].to_bits(), 1);
+        assert_eq!(rec(Mat4::from_translation(Vec3::new(3.0, -2.0, 0.5))).n[2][3].to_bits(), 1);
+        assert_eq!(rec(Mat4::from_rotation_y(0.3)).n[2][3].to_bits(), 0);
+        assert_eq!(rec(Mat4::from_scale(Vec3::splat(2.0))).n[2][3].to_bits(), 0);
+        assert_eq!(rec(Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))).n[2][3].to_bits(), 0, "a mirror");
+        assert_eq!((rec(Mat4::IDENTITY).n[0][3].to_bits(), rec(Mat4::IDENTITY).n[1][3].to_bits()), (9, 1));
     }
 }

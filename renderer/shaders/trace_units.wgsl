@@ -7,12 +7,18 @@
 // (child indices count from that root, a leaf's triangles from the mesh's first). `n1.w`: the unit casts shadows.
 // The top tree, over the units' world boxes, starts at node `P.motion.z` (bits; child indices count from it); each of
 // its leaves is one unit, `left_or_first` its record. `P.motion.w` (bits): how many units there are. (`P.motion.y`
-// is `render --signals`'.)
+// is `render --signals`'.) `n2.w` (bits): the unit is placed by a translation alone, its normal rows the identity's
+// (units.rs `unit_record`): the ray keeps its direction and only its origin moves, which is what the rows would have
+// made of it.
 //
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. Both levels share one
 // stack, this function's own: a unit's walk pushes above what the top walk has pending and stops when it is back down
 // to it. 64 entries: 18 for the top tree, 46 for a mesh's (units.rs `STACK`). Every index read here was checked on the
 // CPU when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
+//
+// The top walk tests each node's own box when it comes to it, against the ray as it is cut by then: the root's (a ray
+// that meets no unit reads one node; a scene of one unit is a root that is a leaf, and only the rays that meet its
+// box read its record), and a node that waited on the stack while a nearer hit was found.
 fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
     if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
@@ -23,15 +29,27 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var node = top;
     loop {
         let n = nodes[node];
+        if (ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF) {
+            if (sp == 0u) { break; }
+            sp--;
+            node = stack[sp];
+            continue;
+        }
         if (n.count > 0u) {
             // A top leaf: one unit.
             let rec = n.left_or_first;
             let r = instances[rec];
             if (mode != TRACE_SHADOW || bitcast<u32>(r.n1.w) != 0u) {
-                // The ray in the unit's space (its direction not renormalised: t is the world's).
-                let lo = proc_point(r, o);
-                let ld = proc_dir(r, d);
-                let linv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));
+                // The ray in the unit's space (its direction not renormalised: t is the world's): `proc_point`,
+                // `proc_dir`, or the origin moved alone.
+                var lo = o - vec3<f32>(r.m0.w, r.m1.w, r.m2.w);
+                var ld = d;
+                var linv = inv_d;
+                if (bitcast<u32>(r.n2.w) == 0u) {
+                    lo = proc_dir(r, lo);
+                    ld = proc_dir(r, d);
+                    linv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));
+                }
                 let root = bitcast<u32>(r.n0.w);
                 let first = r.info.x;
                 let base = sp;
