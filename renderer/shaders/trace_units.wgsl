@@ -14,7 +14,7 @@
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. One stack for all
 // three walks, `trace`'s (in a kernel with units it has 64 entries, not 48: gpu.rs `kernel_source`): the still walk
 // has left it empty, a unit's walk pushes above what the top walk has pending and stops when it is back down to it.
-// 64 entries: 18 for the top tree, 46 for a mesh's (units.rs `STACK`). A stack of this function's own would be 64
+// 64 entries: 19 for the top tree, 45 for a mesh's (units.rs `STACK`). A stack of this function's own would be 64
 // more words set to zero for every ray, whatever the ray then meets. Every index read here was checked on the CPU
 // when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
 //

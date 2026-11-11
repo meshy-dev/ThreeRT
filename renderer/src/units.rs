@@ -10,13 +10,15 @@
 //! them), then the top tree's range. A mesh tree is relocatable: child indices count from its root, a leaf's
 //! triangles from its mesh's first triangle. The top tree's child indices count from its root, and each of its leaves
 //! is one unit: `left_or_first` the unit's record, `count` 1. It is built by the surface-area heuristic (`build_sah`)
-//! and written whole whenever a unit changes: built again when a unit comes or goes, kept with its boxes brought up
-//! to date (`refit_top`) while units only move and it stays within `REFIT_SLACK` of what it cost when built.
+//! and written whole whenever a unit changes, but seldom built over all the units: it is kept with its boxes brought
+//! up to date (`refit_top`) while units only move a little, and units that come, or travel, get a tree of their own
+//! beside the others' (`Kept`: the settled and the loose), which is what is built when they move.
 //!
 //! Depths: one stack of `STACK` entries for a ray, the still walk's own (which a kernel with units declares that
 //! long, and hands to the unit walk when it is done and the stack is empty); both levels of the unit walk share it
 //! (a push past it is dropped: geometry missed, never a hang). A walk's stack is never deeper than its tree, so the
-//! top tree is held to `TOP_DEPTH` (its builder takes no split the levels left could not finish) and a mesh tree to
+//! top tree is held to `TOP_DEPTH` (its builder takes no split the levels left could not finish, and stops a level
+//! short of it: the top tree may be a root over two built trees) and a mesh tree to
 //! `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit. Binned SAH
 //! is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced one's
 //! 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk uses 48 entries for its one tree, as before.
@@ -30,12 +32,13 @@ use glam::{Mat4, Vec3A};
 pub const STACK: usize = 64;
 /// The still walk's stack in a kernel without units, and how much of it the still walk uses in any kernel.
 pub const STILL_STACK: usize = 48;
-/// The deepest top tree (levels below the root): 2^18 units at most, whatever their boxes (`build_sah`).
-pub const TOP_DEPTH: usize = 18;
-/// The deepest mesh tree (46): what the stack has left. SAH trees deeper than this are rebuilt by median splits.
+/// The deepest top tree (levels below the root): a built tree is no deeper than 18, whatever its units' boxes
+/// (`build_sah`), and the top tree is one, or a root over two (`Kept`).
+pub const TOP_DEPTH: usize = 19;
+/// The deepest mesh tree (45): what the stack has left. SAH trees deeper than this are rebuilt by median splits.
 pub const MESH_DEPTH: usize = STACK - TOP_DEPTH;
-/// The most units a top tree holds.
-pub const MAX_UNITS: usize = 1 << TOP_DEPTH;
+/// The most units a top tree holds: 2^18, what a built tree's depth has room for.
+pub const MAX_UNITS: usize = 1 << (TOP_DEPTH - 1);
 /// A leaf's most triangles (bvh.rs builds leaves of up to 16).
 pub const MAX_LEAF: u32 = 16;
 
@@ -292,6 +295,7 @@ pub fn mesh_tree(tris: &[[Vec3A; 3]]) -> Result<MeshTree, String> {
 }
 
 /// A unit for the top tree: its record, and its mesh's model-space bounds under its world transform.
+#[derive(Clone, Copy, Debug)]
 pub struct UnitBox {
     pub record: u32,
     pub lo: Vec3A,
@@ -314,8 +318,9 @@ impl UnitBox {
     }
 }
 
-/// The top tree over `units` (at least one): by the surface-area heuristic (`build_sah`) down to one unit a leaf, no
-/// deeper than `TOP_DEPTH`; each leaf's `left_or_first` its unit's record. Checked against the units it was given.
+/// The top tree over `units` (at least one): by the surface-area heuristic (`build_sah`) down to one unit a leaf, a
+/// level less deep than `TOP_DEPTH` (so that two can be joined); each leaf's `left_or_first` its unit's record.
+/// Checked against the units it was given.
 pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
     if units.is_empty() {
         return Err("a top tree needs a unit".into());
@@ -327,7 +332,7 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
         return Err("a unit's box is not finite".into());
     }
     let boxes: Vec<(Vec3A, Vec3A)> = units.iter().map(|u| (u.lo, u.hi)).collect();
-    let (mut nodes, order) = build_sah(&boxes, TOP_DEPTH);
+    let (mut nodes, order) = build_sah(&boxes, TOP_DEPTH - 1);
     for n in nodes.iter_mut().filter(|n| n.count > 0) {
         n.left_or_first = units[order[n.left_or_first as usize] as usize].record;
     }
@@ -353,11 +358,23 @@ pub fn translation_alone(r: &GpuInstance) -> bool {
     (0..3).all(|k| (0..3).all(|c| r.n[k][c] == if k == c { 1.0 } else { 0.0 }))
 }
 
-/// How much more than at its build a top tree may cost (`top_cost`) and still be kept with its boxes brought up to
-/// date (`refit_top`); past it the tree is built again. (V5 of out/web-probe/gpu-runs-c.md is to say whether 1.3 is
-/// the number: the top tree is about half of what a ray reads on a level of 10,000 units, so 30 % of it is about
-/// 15 % of a ray.)
+/// How much more than at its build the settled units' tree may cost (`top_cost`) and still be kept with its boxes
+/// brought up to date (`refit_top`); past it a tree is built over all the units. (The top tree is about half of what
+/// a ray reads on a level of 10,000 units, so 30 % of it is about 15 % of a ray.)
 pub const REFIT_SLACK: f64 = 1.3;
+
+/// How far a unit may go from where it was placed in the top tree before it is no longer kept there: this many times
+/// the longest side of the box it was placed with (`Kept::astray`).
+pub const ASTRAY: f32 = 1.0;
+
+/// A scene of no more units than this has its top tree built whenever a unit comes, goes or goes astray: a build is
+/// then microseconds.
+pub const SMALL: usize = 64;
+
+/// The loose units that have come to rest are put back with the others (one tree built over all) once they are this
+/// share of the units; at rest: not gone astray through `QUIET` builds of the loose tree in a row.
+pub const FOLD: f64 = 1.0 / 8.0;
+pub const QUIET: u8 = 8;
 
 /// What a top tree costs a ray, by surface area: the sum of its interior nodes' box areas (a line through space meets
 /// a box in proportion to its area; at each interior node it meets, the walk reads two nodes). Not divided by the
@@ -401,6 +418,128 @@ pub fn refit_top(nodes: &[GpuNode], units: &[UnitBox]) -> Option<Vec<GpuNode>> {
         }
     }
     Some(out)
+}
+
+/// A top tree as it stands (`nodes`, as for `refit_top`) without the leaves whose units are not among `units` (a
+/// leaf's sibling takes its parent's place), every box brought up to date. With it, what the tree cost (`top_cost`)
+/// with its boxes up to date before any leaf was taken out, and after. Taking leaves out leaves a tree no deeper and
+/// no worse for the units that stay. None: `nodes` is no tree, a record is there twice, a unit has no leaf, or no
+/// leaf is left. The result is laid out as a build's (children side by side, after their parent); the caller checks
+/// it as it checks a built tree.
+pub fn thin_top(nodes: &[GpuNode], units: &[UnitBox]) -> Option<(Vec<GpuNode>, [f64; 2])> {
+    const NONE: u32 = u32::MAX;
+    let n = nodes.len();
+    if units.is_empty() || n == 0 {
+        return None;
+    }
+    let most = units.iter().map(|u| u.record).max()? as usize;
+    let mut at = vec![NONE; most + 1];
+    for (k, u) in units.iter().enumerate() {
+        if std::mem::replace(&mut at[u.record as usize], k as u32) != NONE {
+            return None;
+        }
+    }
+    // The tree as nodes that name their parent and children. Every node but the root is some node's child once, and
+    // children are after their parents: a tree from node 0, whose every walk below ends.
+    let mut lo: Vec<Vec3A> = nodes.iter().map(|q| q.bmin.into()).collect();
+    let mut hi: Vec<Vec3A> = nodes.iter().map(|q| q.bmax.into()).collect();
+    let mut par = vec![NONE; n];
+    let mut kid = vec![[NONE; 2]; n];
+    let mut alive = vec![true; n];
+    for (i, q) in nodes.iter().enumerate() {
+        if q.count > 0 {
+            continue;
+        }
+        let l = q.left_or_first as usize;
+        if l <= i || l + 1 >= n || par[l] != NONE || par[l + 1] != NONE {
+            return None;
+        }
+        (par[l], par[l + 1], kid[i]) = (i as u32, i as u32, [l as u32, l as u32 + 1]);
+    }
+    if par[1..].contains(&NONE) {
+        return None;
+    }
+    // Interior nodes' boxes from their children's, the last node first (a node taken out leaves its sibling under
+    // its grandparent: still after it), and the sum of their areas.
+    let sweep = |lo: &mut [Vec3A], hi: &mut [Vec3A], kid: &[[u32; 2]], alive: &[bool]| {
+        let mut cost = 0.0;
+        for i in (0..n).rev() {
+            if alive[i] && kid[i][0] != NONE {
+                let (a, b) = (kid[i][0] as usize, kid[i][1] as usize);
+                (lo[i], hi[i]) = (lo[a].min(lo[b]), hi[a].max(hi[b]));
+                cost += area(lo[i], hi[i]) as f64;
+            }
+        }
+        cost
+    };
+    // The leaves that stay get their units' boxes; the others go after the cost with them is taken.
+    let (mut stay, mut gone) = (0, vec![]);
+    for i in 0..n {
+        if nodes[i].count == 0 {
+            continue;
+        }
+        match at.get(nodes[i].left_or_first as usize).copied().filter(|&k| k != NONE) {
+            Some(k) => {
+                (lo[i], hi[i]) = (units[k as usize].lo, units[k as usize].hi);
+                at[nodes[i].left_or_first as usize] = NONE;
+                stay += 1;
+            }
+            None => gone.push(i),
+        }
+    }
+    if stay != units.len() {
+        return None;
+    }
+    let before = sweep(&mut lo, &mut hi, &kid, &alive);
+    let mut root = 0usize;
+    for &x in &gone {
+        // (A leaf that stays is left, so `x` is never the root: it has a parent, and a sibling to take its place.)
+        let p = par[x] as usize;
+        (alive[x], alive[p]) = (false, false);
+        let s = if kid[p][0] as usize == x { kid[p][1] } else { kid[p][0] };
+        let g = par[p];
+        par[s as usize] = g;
+        if g == NONE {
+            root = s as usize;
+        } else {
+            let slot = if kid[g as usize][0] as usize == p { 0 } else { 1 };
+            kid[g as usize][slot] = s;
+        }
+    }
+    let after = if gone.is_empty() { before } else { sweep(&mut lo, &mut hi, &kid, &alive) };
+    let mut out = vec![FILL];
+    let mut stack = vec![(root, 0usize)];
+    while let Some((i, to)) = stack.pop() {
+        if kid[i][0] == NONE {
+            out[to] = GpuNode { bmin: lo[i].into(), left_or_first: nodes[i].left_or_first, bmax: hi[i].into(), count: 1 };
+            continue;
+        }
+        let left = out.len();
+        out.push(FILL);
+        out.push(FILL);
+        out[to] = GpuNode { bmin: lo[i].into(), left_or_first: left as u32, bmax: hi[i].into(), count: 0 };
+        stack.push((kid[i][1] as usize, left + 1));
+        stack.push((kid[i][0] as usize, left));
+    }
+    (out.len() == 2 * units.len() - 1).then_some((out, [before, after]))
+}
+
+/// One top tree of two: a root over `a`'s and `b`'s, then `a`'s other nodes, then `b`'s. A level deeper than the
+/// deeper of the two.
+pub fn join_tops(a: &[GpuNode], b: &[GpuNode]) -> Vec<GpuNode> {
+    let hold = |x: &GpuNode, y: &GpuNode| (Vec3A::from(x.bmin).min(y.bmin.into()), Vec3A::from(x.bmax).max(y.bmax.into()));
+    let (lo, hi) = hold(&a[0], &b[0]);
+    let mut out = Vec::with_capacity(a.len() + b.len() + 1);
+    out.push(GpuNode { bmin: lo.into(), left_or_first: 1, bmax: hi.into(), count: 0 });
+    // Where a tree's nodes after its root go: `a`'s from 3, `b`'s after them. A child index counts from the top
+    // tree's root, and moves by as much as the node it names.
+    let moved = |q: &GpuNode, by: u32| if q.count > 0 { *q } else { GpuNode { left_or_first: q.left_or_first + by, ..*q } };
+    let (by_a, by_b) = (2, a.len() as u32 + 1);
+    out.push(moved(&a[0], by_a));
+    out.push(moved(&b[0], by_b));
+    out.extend(a[1..].iter().map(|q| moved(q, by_a)));
+    out.extend(b[1..].iter().map(|q| moved(q, by_b)));
+    out
 }
 
 /// Where the units' trees are in the node buffer, and which of the mesh trees' range is free. Nodes are counted, not
@@ -512,14 +651,41 @@ pub struct Units {
     pub kept: Kept,
 }
 
-/// The top tree `Units::top` last returned: its nodes, what it cost when it was built (`top_cost`), and how many
-/// times `top` built a tree and how many times it kept one (`refit_top`).
+/// The top tree `Units::top` last returned, and how it came to be. The units are in two sets. The settled, which are
+/// where they were when a tree was last built over all the units (or have moved less than `ASTRAY` from there):
+/// their tree is that build's, kept, its boxes brought up to date, leaves taken out as units go. And the loose: units
+/// that have come since, or gone astray (pieces an explosion throws, bodies that travel): a tree of their own, built
+/// again whenever one of them comes, goes or goes astray, which costs by their number and not by the scene's. With
+/// loose units the top tree is a root over the two (`join_tops`); without, the settled tree alone.
+///
+/// Why not one tree with the new units put into it a leaf at a time: tried (greedy descent by least added area, the
+/// depth held, equals balanced), and after a few thousand pieces had flown, the tree cost rays through the piles
+/// several times a built tree's (`units_cost.rs` `units_pile`: 16,000 pieces, 204 k bytes a pixel against 22 k),
+/// while by the area of its nodes it looked 10 % worse. Two trees that are each built are each good, and a ray that
+/// passes both walks both: what it costs is measured there too.
 #[derive(Clone, Debug, Default)]
 pub struct Kept {
+    /// The top tree as written.
     pub nodes: Vec<GpuNode>,
+    /// With loose units: the settled units' tree by itself (`nodes` holds it from node 1). Without: empty, and
+    /// `nodes` is it.
+    settled: Vec<GpuNode>,
+    /// By record: 0 not in the tree, 1 settled, 2 loose.
+    part: Vec<u8>,
+    loose: usize,
+    /// By record: the box the unit had when it was placed (the build over all, or the loose tree's last build).
+    placed: Vec<(Vec3A, Vec3A)>,
+    /// By record, for a loose unit: how many builds of the loose tree in a row it has not gone astray since.
+    calm: Vec<u8>,
+    /// What the settled tree cost when it was built (`top_cost`), less the share of the leaves taken out since.
     pub built_cost: f64,
+    /// How many times a tree was built over all the units; how many times the loose units' tree was built (the
+    /// settled one kept); how many times the tree was kept as it was, its boxes brought up to date; the ms all of
+    /// them took (the frame log's `top`).
     pub builds: u64,
+    pub changes: u64,
     pub refits: u64,
+    pub ms: f64,
 }
 
 impl Units {
@@ -575,13 +741,14 @@ impl Units {
     }
 
     /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
-    /// unit: no nodes (the kernel does not walk a top tree then). The tree it made last is kept, its boxes brought up
-    /// to date, while its leaves are these units and it costs a ray no more than `REFIT_SLACK` times what it did
-    /// when it was built (units that move every frame: bodies); else it is built again. Err: more units than the
+    /// unit: no nodes (the kernel does not walk a top tree then). The tree it made last is kept as far as it is
+    /// still good (`Kept::top`): whole, its boxes brought up to date, while units only move a little; its settled
+    /// part, with a tree built over the units that have come or travelled; else it is built again. Err: more units than the
     /// range holds, a unit whose box is not finite, one past the kernel's records, or one whose record names a tree
     /// that is not its mesh's now (freed, or placed elsewhere since the record was written: the kernel would walk
     /// whatever is there); nothing is changed then.
     pub fn top(&mut self) -> Result<Vec<GpuNode>, String> {
+        let t = web_time::Instant::now();
         let mut boxes: Vec<UnitBox> = vec![];
         for (r, u) in self.slots.iter().enumerate() {
             let Some(u) = u.as_ref().filter(|u| !u.hidden) else { continue };
@@ -596,36 +763,125 @@ impl Units {
         if boxes.len() > self.layout.max_units() {
             return Err(format!("{} units: more than the top tree's range holds ({})", boxes.len(), self.layout.max_units()));
         }
-        let nodes = if boxes.is_empty() {
-            vec![]
-        } else if let Some(kept) = self.refit(&boxes) {
-            self.kept.refits += 1;
-            kept
-        } else {
-            let built = top_tree(&boxes)?;
-            self.kept.built_cost = top_cost(&built);
-            self.kept.builds += 1;
-            built
-        };
+        let slots = self.slots.len();
+        let nodes = if boxes.is_empty() { vec![] } else { self.kept.top(&boxes, slots)? };
         self.count = boxes.len() as u32;
         self.kept.nodes = nodes.clone();
+        self.kept.ms += t.elapsed().as_secs_f64() * 1e3;
         Ok(nodes)
     }
+}
 
-    /// The kept tree over `boxes`, if it is still theirs and still good: checked as a built one is.
-    fn refit(&self, boxes: &[UnitBox]) -> Option<Vec<GpuNode>> {
-        if boxes.iter().any(|u| !(u.lo.is_finite() && u.hi.is_finite())) {
+impl Kept {
+    /// The top tree over `boxes` (at least one; their records below `records`), by the least work that leaves it
+    /// good: kept, its boxes brought up to date (no unit has come, gone or gone astray); the settled tree kept and
+    /// the loose units' built; or one tree built over all (the first; a small scene's; a settled tree that costs
+    /// more than `REFIT_SLACK` times what it may; loose units at rest that are many: `FOLD`). Whichever it is was
+    /// checked (`check_top`) before anything here was changed for it.
+    pub fn top(&mut self, boxes: &[UnitBox], records: usize) -> Result<Vec<GpuNode>, String> {
+        if let Some(nodes) = self.keep(boxes, records) {
+            return Ok(nodes);
+        }
+        let built = top_tree(boxes)?;
+        self.built_cost = top_cost(&built);
+        (self.settled, self.loose) = (vec![], 0);
+        self.part.clear();
+        self.place(boxes, 1);
+        self.builds += 1;
+        Ok(built)
+    }
+
+    fn place(&mut self, units: &[UnitBox], part: u8) {
+        for u in units {
+            let r = u.record as usize;
+            if self.part.len() <= r {
+                self.part.resize(r + 1, 0);
+                self.placed.resize(r + 1, (Vec3A::ZERO, Vec3A::ZERO));
+                self.calm.resize(r + 1, 0);
+            }
+            (self.part[r], self.placed[r]) = (part, (u.lo, u.hi));
+        }
+    }
+
+    /// Whether a unit has gone from where the tree has it: its box is no longer within the box it was placed with,
+    /// widened by that box's longest side (`ASTRAY`). A body that turns where it is, or has moved less than its own
+    /// size, has not; one that flies has, every few frames. Left where it is in the tree, its leaf is among its old
+    /// neighbours, and its box, brought up to date, stretches every node above it to where it is now: a tree that
+    /// costs little more by the area of its nodes (what `REFIT_SLACK` sees) and many times more to the rays that
+    /// pass the place (a thousand pieces thrown from one point, kept as they were built: 3.6 times the bytes a pixel).
+    fn astray(&self, u: &UnitBox) -> bool {
+        let (lo, hi) = self.placed[u.record as usize];
+        let by = Vec3A::splat((hi - lo).max_element() * ASTRAY);
+        u.lo.cmplt(lo - by).any() || u.hi.cmpgt(hi + by).any()
+    }
+
+    /// The kept tree made `boxes`', or None: build one over all (nothing is changed then).
+    fn keep(&mut self, boxes: &[UnitBox], records: usize) -> Option<Vec<GpuNode>> {
+        if self.nodes.is_empty() || !boxes.iter().all(|u| u.lo.is_finite() && u.hi.is_finite() && (u.record as usize) < records) {
             return None;
         }
-        let nodes = refit_top(&self.kept.nodes, boxes)?;
-        if top_cost(&nodes) > self.kept.built_cost * REFIT_SLACK {
-            return None;
-        }
-        let mut is = vec![false; self.slots.len()];
+        let mut is = vec![false; records];
         for u in boxes {
             is[u.record as usize] = true;
         }
-        check_top(&nodes, |r| is.get(r as usize).copied().unwrap_or(false)).ok()?;
+        let checked = |t: Vec<GpuNode>| check_top(&t, |r| is.get(r as usize).copied().unwrap_or(false)).is_ok().then_some(t);
+        // Each unit's part now: settled if it was and has not gone astray, else loose. (`stirred`: the loose tree is
+        // no longer its units': one came, or went astray. `resting`: loose units that have long kept still.)
+        let (mut settled, mut loose): (Vec<UnitBox>, Vec<UnitBox>) = (vec![], vec![]);
+        let (mut stirred, mut resting) = (false, 0);
+        let mut strayed = vec![];
+        for u in boxes {
+            match self.part.get(u.record as usize).copied().unwrap_or(0) {
+                1 if !self.astray(u) => settled.push(*u),
+                2 => {
+                    let astray = self.astray(u);
+                    stirred |= astray;
+                    resting += (!astray && self.calm[u.record as usize] >= QUIET) as usize;
+                    strayed.push(astray);
+                    loose.push(*u);
+                }
+                _ => {
+                    stirred = true;
+                    strayed.push(true);
+                    loose.push(*u);
+                }
+            }
+        }
+        let was_settled = if self.loose > 0 { self.settled.len() } else { self.nodes.len() }.div_ceil(2);
+        if !stirred && settled.len() == was_settled && loose.len() == self.loose {
+            // The tree as it is. (With loose units the settled tree's cost is its own nodes': node 1, and those from
+            // 3 to where the loose tree's begin. The settled tree kept by itself gets its boxes when it is next used.)
+            let nodes = checked(refit_top(&self.nodes, boxes)?)?;
+            let cost = if self.loose > 0 { top_cost(&nodes[1..2]) + top_cost(&nodes[3..self.settled.len() + 2]) } else { top_cost(&nodes) };
+            if cost > self.built_cost * REFIT_SLACK {
+                return None;
+            }
+            self.refits += 1;
+            return Some(nodes);
+        }
+        if boxes.len() <= SMALL || settled.is_empty() || resting as f64 > boxes.len() as f64 * FOLD {
+            return None;
+        }
+        // The settled tree without the leaves that went, as good as it was; the loose units' tree, built.
+        let (kept, [before, after]) = thin_top(if self.loose > 0 { &self.settled } else { &self.nodes }, &settled)?;
+        if before > self.built_cost * REFIT_SLACK {
+            return None;
+        }
+        let nodes = checked(if loose.is_empty() { kept.clone() } else { join_tops(&kept, &top_tree(&loose).ok()?) })?;
+        for part in self.part.iter_mut() {
+            *part = 0;
+        }
+        for u in &settled {
+            self.part[u.record as usize] = 1;
+        }
+        self.place(&loose, 2);
+        for (u, astray) in loose.iter().zip(strayed) {
+            let calm = &mut self.calm[u.record as usize];
+            *calm = if astray { 0 } else { calm.saturating_add(1) };
+        }
+        self.built_cost *= if before > 0.0 { after / before } else { 1.0 };
+        (self.settled, self.loose) = (if loose.is_empty() { vec![] } else { kept }, loose.len());
+        self.changes += 1;
         Some(nodes)
     }
 }
@@ -1105,10 +1361,8 @@ mod tests {
         units: Vec<Option<(usize, Mat4, bool)>>,
         top: u32,
         count: u32,
-        /// The top tree as last written, what it cost when built, and how often it was kept (as `Units::top`).
-        kept: Vec<GpuNode>,
-        built_cost: f64,
-        refits: usize,
+        /// The top tree as last written, and how it came to be (`Units::top`'s rule: `Kept::top`).
+        kept: Kept,
     }
 
     fn put_tris(out: &mut Vec<[f32; 4]>, tris: &[[Vec3A; 3]]) {
@@ -1131,7 +1385,7 @@ mod tests {
             let layout = Layout::new(b.nodes.len(), mesh_room, units);
             let mut nodes = b.nodes;
             nodes.resize(nodes.len() + layout.nodes(), FILL);
-            Scene { nodes, tri_verts, instances: vec![GpuInstance::default()], top: layout.top_first, layout, still_tris: still.len(), meshes: vec![], units: vec![], count: 0, kept: vec![], built_cost: 0.0, refits: 0 }
+            Scene { nodes, tri_verts, instances: vec![GpuInstance::default()], top: layout.top_first, layout, still_tris: still.len(), meshes: vec![], units: vec![], count: 0, kept: Kept::default() }
         }
 
         /// A new mesh: its tree placed and written, its triangles appended in the tree's order.
@@ -1172,7 +1426,7 @@ mod tests {
             k
         }
 
-        /// The top tree again, over the units there are now, into its range: kept and refitted, or built, by
+        /// The top tree again, over the units there are now, into its range: kept, changed or built, by
         /// `Units::top`'s rule.
         fn retop(&mut self) -> Result<(), String> {
             let boxes: Vec<UnitBox> = self.units.iter().enumerate().filter_map(|(k, u)| u.map(|(m, w, _)| (k, m, w))).map(|(k, m, w)| { let (.., lo, hi) = self.meshes[m].unwrap(); UnitBox::new(k as u32, w, lo, hi) }).collect();
@@ -1183,21 +1437,11 @@ mod tests {
             if boxes.len() > self.layout.max_units() {
                 return Err("no room for the top tree".into());
             }
-            let t = match refit_top(&self.kept, &boxes).filter(|t| top_cost(t) <= self.built_cost * REFIT_SLACK) {
-                Some(t) => {
-                    check_top(&t, |r| self.units.get(r as usize).is_some_and(|u| u.is_some()))?;
-                    self.refits += 1;
-                    t
-                }
-                None => {
-                    let t = top_tree(&boxes)?;
-                    self.built_cost = top_cost(&t);
-                    t
-                }
-            };
+            let t = self.kept.top(&boxes, self.units.len())?;
+            check_top(&t, |r| self.units.get(r as usize).is_some_and(|u| u.is_some()))?;
             let at = self.layout.top_first as usize;
             self.nodes[at..at + t.len()].copy_from_slice(&t);
-            self.kept = t;
+            self.kept.nodes = t;
             Ok(())
         }
 
@@ -1287,13 +1531,22 @@ mod tests {
     /// agree with brute force. Scenes with and without a still part; units that overlap; a scene emptied of units.
     #[test]
     fn the_walks_agree_with_brute_force_under_random_edits() {
-        let (mut edits, mut unit_hits, mut rays, mut refits, mut short) = (0, 0, 0, 0, 0);
+        let (mut edits, mut unit_hits, mut rays, mut refits, mut changes, mut builds, mut short) = (0, 0, 0, 0, 0, 0, 0);
         for seed in 0..12u64 {
             let mut rng = Rng(seed * 7919 + 1);
             let n = 50 + rng.below(400);
             let still = if seed % 3 == 0 { vec![] } else { rng.tris(n, 40.0, 3.0) };
-            let mut sc = Scene::new(&still, 6000, 64);
+            // (Every other scene starts with more units than a small scene's: there the top tree is kept in parts.)
+            let mut sc = Scene::new(&still, 6000, if seed % 2 == 0 { 64 } else { 400 });
             sc.check(&mut rng, 40, "no unit yet");
+            if seed % 2 == 1 {
+                let m = sc.add_mesh(&rng.tris(12, 3.0, 1.0)).unwrap();
+                for _ in 0..150 {
+                    sc.add_unit(m, pose(&mut rng), true);
+                }
+                sc.retop().unwrap();
+                sc.check(&mut rng, 40, "a scene of many units");
+            }
             for step in 0..60 {
                 let live_meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&k| sc.meshes[k].is_some()).collect();
                 let live_units: Vec<usize> = (0..sc.units.len()).filter(|&k| sc.units[k].is_some()).collect();
@@ -1362,11 +1615,13 @@ mod tests {
             // The mesh range's free runs add up to what the removed trees gave back.
             let used: usize = sc.meshes.iter().flatten().map(|m| m.3).sum();
             assert_eq!(sc.layout.free_nodes() + used, sc.layout.mesh_cap as usize);
-            refits += sc.refits;
+            refits += sc.kept.refits;
+            changes += sc.kept.changes;
+            builds += sc.kept.builds;
             short += sc.units.iter().enumerate().filter(|(k, u)| u.is_some() && sc.instances[*k].n[2][3].to_bits() == 1).count();
         }
         assert!(edits > 300 && unit_hits * 8 > rays, "{edits} edits, {unit_hits} of {rays} closest hits on units");
-        assert!(refits > 40 && short > 20, "{refits} top trees kept, {short} units placed by a translation alone at the end");
+        assert!(refits > 40 && changes > 100 && builds > 100 && short > 20, "{refits} top trees kept, {changes} with the loose units' built, {builds} built over all; {short} units placed by a translation alone at the end");
     }
 
     /// The trees the builders make are the trees the checks accept, at their depth bounds: a top tree of a thousand
@@ -1621,7 +1876,7 @@ mod tests {
         let mut rng = Rng(21);
         let mesh = mesh_tree(&rng.tris(30, 1.0, 0.3)).unwrap();
         let n = 200;
-        let mut u = Units { layout: Layout::new(1, mesh.nodes.len(), n + 1), trees: vec![], slots: vec![], count: 0, records: n + 1, kept: Default::default() };
+        let mut u = Units { layout: Layout::new(1, mesh.nodes.len(), n + 200), trees: vec![], slots: vec![], count: 0, records: n + 200, kept: Default::default() };
         u.add_tree(0, &mesh).unwrap();
         let mut at: Vec<Vec3> = (0..n).map(|_| Vec3::from(rng.v(40.0))).collect();
         for (k, p) in at.iter().enumerate() {
@@ -1646,44 +1901,127 @@ mod tests {
         // Nothing moved: the same tree, to the byte.
         assert_eq!(bytemuck::cast_slice::<_, u8>(&u.top().unwrap()), bytemuck::cast_slice::<_, u8>(&first));
         assert_eq!((u.kept.builds, u.kept.refits), (1, 1));
-        // Every unit a step a frame, as bodies go: kept at first, and built again each time the steps have added up to
-        // a tree that costs too much, which is not every frame.
+        // Every unit a little a frame (bodies that settle): the tree is kept.
         for _ in 0..60 {
             for (k, p) in at.iter_mut().enumerate() {
-                *p += Vec3::from(rng.v(4.0));
+                *p += Vec3::from(rng.v(0.02));
                 u.moved(k, Mat4::from_translation(*p), None);
             }
             let top = u.top().unwrap();
             holds(&u, &top);
-            assert!(top_cost(&top) <= u.kept.built_cost * REFIT_SLACK);
         }
-        let (builds, refits) = (u.kept.builds, u.kept.refits);
-        assert!(builds + refits == 62 && builds >= 2 && refits > 2 * builds, "{builds} built, {refits} kept");
-        // One unit far off: the kept tree would hold it in a box across the scene.
-        u.moved(7, Mat4::from_translation(Vec3::splat(4000.0)), None);
+        assert_eq!((u.kept.builds, u.kept.changes, u.kept.refits), (1, 0, 61));
+        // Units close together, each grown to nearly twice its size where it is: none has gone astray, and the tree
+        // costs too much: built.
+        let mut d = Units { layout: Layout::new(1, mesh.nodes.len(), 100), trees: vec![], slots: vec![], count: 0, records: 100, kept: Default::default() };
+        d.add_tree(0, &mesh).unwrap();
+        let close: Vec<Vec3> = (0..100).map(|_| Vec3::from(rng.v(2.0))).collect();
+        for (k, p) in close.iter().enumerate() {
+            d.set(k, d.unit(0, Mat4::from_translation(*p), false));
+        }
+        d.top().unwrap();
+        for (k, p) in close.iter().enumerate() {
+            d.moved(k, Mat4::from_translation(*p) * Mat4::from_scale(Vec3::splat(1.9)), None);
+        }
+        d.top().unwrap();
+        assert_eq!((d.kept.builds, d.kept.changes, d.kept.refits), (2, 0, 0));
+        for (k, p) in at.iter().enumerate() {
+            u.moved(k, Mat4::from_translation(*p) * Mat4::from_scale(Vec3::splat(1.5)), None);
+        }
         let top = u.top().unwrap();
         holds(&u, &top);
-        assert_eq!(u.kept.builds, builds + 1, "built again");
-        // A unit hidden, shown, gone, another come: each a build (the leaves are other units).
-        u.moved(3, Mat4::IDENTITY, Some(true));
-        assert_eq!((u.top().unwrap().len(), u.kept.builds), (2 * (n - 1) - 1, builds + 2));
-        u.moved(3, Mat4::IDENTITY, Some(false));
-        assert_eq!((u.top().unwrap().len(), u.kept.builds), (2 * n - 1, builds + 3));
-        u.set(5, None);
+        assert_eq!((u.kept.builds, u.kept.changes, u.kept.refits), (1, 0, 62));
+        // Ten of them fly, a step of their own size a frame: they are the loose ones, their tree is built each
+        // frame, the others' is kept; and the whole is near what a tree built over all would cost.
+        let boxes_of = |u: &Units| u.slots.iter().enumerate().filter_map(|(r, s)| s.filter(|s| !s.hidden).map(|s| UnitBox::new(r as u32, s.world, mesh.lo, mesh.hi))).collect::<Vec<UnitBox>>();
+        let mut worst: f64 = 0.0;
+        for _ in 0..40 {
+            for (k, p) in at.iter_mut().enumerate().take(10) {
+                *p += Vec3::from(rng.v(6.0));
+                u.moved(k, Mat4::from_translation(*p) * Mat4::from_scale(Vec3::splat(1.5)), None);
+            }
+            let top = u.top().unwrap();
+            holds(&u, &top);
+            worst = worst.max(top_cost(&top) / top_cost(&top_tree(&boxes_of(&u)).unwrap()));
+        }
+        assert_eq!((u.kept.builds, u.kept.loose, u.kept.settled.len()), (1, 10, 2 * (n - 10) - 1));
+        assert!(u.kept.changes >= 30 && worst < 1.25, "{} times the loose tree; at worst {worst:.2} of a built tree's cost", u.kept.changes);
+        // One of the settled far off: loose too. A unit hidden, shown (loose now), gone, another come.
+        u.moved(77, Mat4::from_translation(Vec3::splat(4000.0)), None);
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!((u.kept.builds, u.kept.loose), (1, 11));
+        u.moved(33, Mat4::IDENTITY, Some(true));
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!((top.len(), u.kept.builds, u.kept.loose), (2 * (n - 1) - 1, 1, 11));
+        u.moved(33, Mat4::IDENTITY, Some(false));
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!((top.len(), u.kept.builds, u.kept.loose), (2 * n - 1, 1, 12));
+        u.set(55, None);
         u.set(n, u.unit(0, Mat4::IDENTITY, false));
         let top = u.top().unwrap();
         holds(&u, &top);
-        assert_eq!((top.len(), u.kept.builds), (2 * n - 1, builds + 4), "as many units, not the same ones");
-        // What `refit_top` refuses outright: fewer or more units than leaves, a record twice, no tree.
-        let boxes: Vec<UnitBox> = (0..3).map(|k| UnitBox::new(k, Mat4::from_translation(Vec3::X * k as f32 * 3.0), Vec3A::ZERO, Vec3A::ONE)).collect();
-        let three = top_tree(&boxes).unwrap();
-        assert!(refit_top(&three, &boxes).is_some());
-        assert!(refit_top(&three, &boxes[..2]).is_none());
-        assert!(refit_top(&[], &boxes).is_none() && refit_top(&three, &[]).is_none());
-        let twice: Vec<UnitBox> = [0, 1, 1].iter().map(|&k| UnitBox::new(k, Mat4::IDENTITY, Vec3A::ZERO, Vec3A::ONE)).collect();
-        assert!(refit_top(&three, &twice).is_none());
-        let other: Vec<UnitBox> = [0, 1, 5].iter().map(|&k| UnitBox::new(k, Mat4::IDENTITY, Vec3A::ZERO, Vec3A::ONE)).collect();
-        assert!(refit_top(&three, &other).is_none());
+        assert_eq!((top.len(), u.kept.builds, u.kept.loose), (2 * n - 1, 1, 13), "as many units, not the same ones");
+        // The loose ones gone: the settled tree alone again.
+        for k in (0..10).chain([33, 77, n]) {
+            u.set(k, None);
+        }
+        let top = u.top().unwrap();
+        holds(&u, &top);
+        assert_eq!((top.len(), u.kept.builds, u.kept.loose, u.kept.settled.len()), (2 * (n - 13) - 1, 1, 0, 0));
+        // Pieces thrown, thirty at a time, that fly a while and come to rest; once those at rest are an eighth of the
+        // units, one tree is built over all, and they are settled.
+        let (builds, mut next, mut folded) = (u.kept.builds, n + 1, 0);
+        let mut flying: Vec<(usize, Vec3, u32)> = vec![];
+        for frame in 0..200 {
+            if frame % 20 == 0 && frame < 120 {
+                let from = Vec3::from(rng.v(30.0));
+                for _ in 0..30 {
+                    flying.push((next, from, 0));
+                    u.set(next, u.unit(0, Mat4::from_translation(from), false));
+                    next += 1;
+                }
+            }
+            for f in flying.iter_mut().filter(|f| f.2 < 12) {
+                f.1 += Vec3::from(rng.v(3.0));
+                f.2 += 1;
+                u.moved(f.0, Mat4::from_translation(f.1), None);
+            }
+            let was = u.kept.builds;
+            let top = u.top().unwrap();
+            holds(&u, &top);
+            assert_eq!(top.len(), 2 * boxes_of(&u).len() - 1);
+            folded += (u.kept.builds > was) as usize;
+            assert!(top_cost(&top) <= 1.25 * top_cost(&top_tree(&boxes_of(&u)).unwrap()), "frame {frame}");
+        }
+        assert!((1..=4).contains(&folded) && u.kept.builds == builds + folded as u64, "{folded} built over all in 200 frames");
+        assert!(u.kept.loose <= 60, "{} loose at the end", u.kept.loose);
+        // `thin_top` by itself: leaves taken out down to one; what it refuses. `join_tops`: a tree.
+        let boxes = |records: &[u32]| records.iter().map(|&k| UnitBox::new(k, Mat4::from_translation(Vec3::X * k as f32 * 3.0), Vec3A::ZERO, Vec3A::ONE)).collect::<Vec<UnitBox>>();
+        let eight = top_tree(&boxes(&[0, 1, 2, 3, 4, 5, 6, 7])).unwrap();
+        let (five, [before, after]) = thin_top(&eight, &boxes(&[0, 2, 3, 6, 7])).unwrap();
+        assert_eq!((five.len(), check_top(&five, |r| [0, 2, 3, 6, 7].contains(&r)).is_ok()), (9, true));
+        assert!(before == top_cost(&eight) && after == top_cost(&five) && after < before);
+        let (one, [_, after]) = thin_top(&five, &boxes(&[6])).unwrap();
+        assert_eq!((one.len(), one[0].left_or_first, one[0].count, after), (1, 6, 1, 0.0));
+        assert!(thin_top(&eight, &boxes(&[0, 9])).is_none(), "a unit without a leaf");
+        assert!(thin_top(&eight, &boxes(&[1, 1])).is_none(), "a record twice");
+        assert!(thin_top(&[], &boxes(&[1])).is_none() && thin_top(&eight, &[]).is_none());
+        let mut broken = eight.clone();
+        broken[0].left_or_first = 0;
+        assert!(thin_top(&broken, &boxes(&[0, 1])).is_none());
+        let mut shared = eight.clone();
+        let inner: Vec<usize> = (1..shared.len()).filter(|&i| shared[i].count == 0).collect();
+        shared[inner[1]].left_or_first = shared[inner[0]].left_or_first.max(inner[1] as u32 + 1);
+        assert!(thin_top(&shared, &boxes(&[0, 1])).is_none(), "two nodes with the same children");
+        let joined = join_tops(&five, &top_tree(&boxes(&[10, 11, 12])).unwrap());
+        assert_eq!((joined.len(), check_top(&joined, |r| [0, 2, 3, 6, 7, 10, 11, 12].contains(&r)).unwrap()), (15, 1 + check_top(&five, |_| true).unwrap()));
+        let joined = join_tops(&one, &one);
+        assert_eq!((joined.len(), joined[0].left_or_first, joined[1].count, joined[2].count), (3, 1, 1, 1));
+        // A built tree is a level short of the bound: two of them joined are at it.
+        assert!(check_tree(&build_sah(&(0..1 << 12).map(|k| (Vec3A::splat(k as f32), Vec3A::splat(k as f32 + 1.0))).collect::<Vec<_>>(), 12).0, 64, |_, _| Ok(())).unwrap() <= 12);
         // The record's word for a placement by a translation alone.
         let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false }.gpu(0, 0), 9, true);
         assert_eq!(rec(Mat4::IDENTITY).n[2][3].to_bits(), 1);
