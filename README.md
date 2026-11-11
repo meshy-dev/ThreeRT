@@ -29,6 +29,7 @@ Mirror: [`doodlewind/ThreeRT`](https://github.com/doodlewind/ThreeRT).
 | `playground/` | ThreeRT Playground: a macOS native editor around the live viewport |
 | `compare/` | Hello-world scenes side by side in three.js and ThreeRT |
 | `docs/` | Roadmap, workflow and merge gate, parity, material functions, voxel engine |
+| `site/` | The landing page: static, `bun site/serve.ts` (see [`site/README.md`](site/README.md)) |
 
 ## Getting started
 

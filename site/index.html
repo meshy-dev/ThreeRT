@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreeRT — Every light, traced. At 60 fps.</title>
+<meta name="description" content="ThreeRT path-traces all lighting in real time behind a three.js-style API: Amazon Lumberyard Bistro and Beeple's Zero-Day at 60 fps, and three.js everywhere else.">
+<link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/threert.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
+<style>
+  /* ---- Hero: the comparison is the page ---- */
+  .hero { position: relative; height: min(100vh, 1000px); min-height: 640px; overflow: hidden; background: #000; }
+  .hero .cmp { position: absolute; inset: 0; aspect-ratio: auto; border-radius: 0; }
+  .hero .cmp .lab { top: auto; bottom: 32px; }
+  .hero .cmp .lab.a { left: 32px; } .hero .cmp .lab.b { right: 32px; }
+  .hero .cmp::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(90deg, rgba(6,7,9,.86) 0%, rgba(6,7,9,.55) 34%, rgba(6,7,9,0) 62%), linear-gradient(180deg, rgba(6,7,9,.7) 0%, rgba(6,7,9,0) 16%), linear-gradient(0deg, rgba(6,7,9,.6) 0%, rgba(6,7,9,0) 16%); }
+  .hero .cmp .knob { top: 74%; }
+  .hero .copy { position: absolute; z-index: 7; left: 0; right: 0; top: 132px; pointer-events: none; }
+  .hero .copy .wrap { display: grid; gap: 24px; }
+  .hero .copy a { pointer-events: auto; }
+  .hero h1 .l2 { display: block; }
+  .hero .cta { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
+
+  section { padding: 128px 0; }
+  .sec-head { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: end; margin-bottom: 48px; }
+  .sec-head .lede { justify-self: end; }
+
+  /* ---- RT ---- */
+  .rtx .big { display: flex; align-items: flex-end; justify-content: space-between; gap: 40px; }
+  .rtx .big h2 { font: 680 clamp(110px, 15vw, 220px)/0.8 var(--font-sans); letter-spacing: -0.07em; }
+  .rtx .big p { color: var(--bone-2); font-size: 17px; max-width: 32ch; padding-bottom: 10px; }
+  .rtx ol { list-style: none; margin: 64px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+  .rtx li { padding: 28px 32px 0 0; border-top: 1px solid var(--line-2); }
+  .rtx li + li { padding-left: 32px; border-left: 1px solid var(--line); }
+  .rtx li h3 { font: 600 clamp(30px, 3vw, 42px)/1 var(--font-sans); letter-spacing: -.045em; color: var(--bone); }
+  .rtx li h3 b { font-weight: 700; background: var(--ray); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .rtx li p { margin-top: 14px; color: var(--bone-2); font-size: 15.5px; max-width: 40ch; }
+
+  /* ---- Hello world: an auto-advancing reel (code + output), story-style progress on top ---- */
+  .reel { border: 1px solid var(--line-2); border-radius: 18px; overflow: hidden; background: #08090c; box-shadow: 0 40px 120px rgba(0, 0, 0, .6); display: grid; grid-template-columns: 0.86fr 1.14fr; }
+  .reel .story { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr) auto; gap: 16px; align-items: end; padding: 16px 18px 14px; border-bottom: 1px solid var(--line); }
+  .reel .story .st { appearance: none; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; display: grid; gap: 9px; color: var(--mute); }
+  .reel .story .st b { font: 600 14px var(--font-sans); letter-spacing: -.01em; color: var(--bone-2); transition: color .3s; }
+  .reel .story .st span { font: 500 11.5px var(--font-mono); margin-left: 8px; color: var(--mute); }
+  .reel .story .st i { display: block; height: 2px; border-radius: 2px; background: rgba(236, 232, 225, .14); overflow: hidden; }
+  .reel .story .st i::after { content: ""; display: block; height: 100%; width: var(--p, 0%); background: var(--ray); }
+  .reel .story .st[aria-current="true"] b { color: var(--bone); }
+  .reel .story .pp { appearance: none; border: 1px solid var(--line-2); background: none; color: var(--bone-2); width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; cursor: pointer; }
+  .reel .left { border-right: 1px solid var(--line); position: relative; min-width: 0; min-height: 320px; overflow: hidden; }
+  /* Long lines fade out before the edge and the bottom fades too: nothing is cut hard against the image. */
+  .reel .code { position: absolute; inset: 0 24px 0 0; border: 0; border-radius: 0; background: transparent; font-size: 11px; line-height: 1.7; padding: 18px 0 18px 20px; overflow: hidden;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 96px), transparent), linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 72px), transparent);
+    -webkit-mask-composite: source-in; mask-image: linear-gradient(to right, #000 calc(100% - 96px), transparent), linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 72px), transparent); mask-composite: intersect; }
+  .reel .out { position: relative; display: grid; align-content: center; background: #000; }
+  .reel .out .cmp { border-radius: 0; transition: opacity .35s var(--ease); }
+  .reel .out .cmp.fade, .reel .code.fade { opacity: 0; }
+  .reel .code { transition: opacity .35s var(--ease); }
+
+  /* ---- Comparison ---- */
+  .scene-tabs { display: flex; gap: 28px; margin-bottom: 18px; }
+  .scene-tabs button { appearance: none; border: 0; background: none; padding: 0 0 10px; cursor: pointer; font: 600 22px var(--font-sans); letter-spacing: -.02em; color: var(--mute); border-bottom: 2px solid transparent; }
+  .scene-tabs button[aria-pressed="true"] { color: var(--bone); border-bottom-color: var(--tungsten); }
+  #main .lab.a { display: none; }
+  .pick { position: absolute; z-index: 6; top: 14px; left: 14px; display: flex; gap: 2px; padding: 4px; border-radius: 10px; background: rgba(8, 9, 11, 0.7); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  .pick button { appearance: none; border: 0; background: none; color: #bdb8af; font: 500 12.5px/1 var(--font-sans); padding: 8px 11px; border-radius: 7px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 7px; }
+  .pick button::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #8b919b; opacity: .5; }
+  .pick button[aria-pressed="true"] { background: rgba(236, 232, 225, .14); color: #ece8e1; }
+  .pick button[aria-pressed="true"]::before { opacity: 1; }
+  .pick button[data-v="ref"]::before { background: #ece8e1; }
+
+  .motion { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .motion .cap { margin-top: 12px; }
+
+  .details { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 18px; }
+  .details h3 { margin: 18px 0 8px; }
+  .details p { color: var(--bone-2); font-size: 15px; max-width: 54ch; }
+
+  .tricks { text-align: center; padding: 160px 0; position: relative; overflow: hidden; }
+  .tricks .no { font: 600 clamp(28px, 4vw, 56px)/1.14 var(--font-sans); letter-spacing: -.04em; color: #3a3e47; }
+  .tricks .no s { text-decoration-thickness: 2px; text-decoration-color: var(--ember); }
+  .tricks .yes { margin-top: 26px; font: 640 clamp(56px, 8vw, 116px)/1 var(--font-sans); letter-spacing: -.055em; }
+  .tricks svg.orbit { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
+  @media (prefers-reduced-motion: reduce) { .tricks svg.orbit .pulse { display: none; } }
+
+  /* ---- Everywhere: one scene, a rail to two renderers, every screen ---- */
+  .root { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--ink-2); font: 500 13px var(--font-mono); color: var(--bone); position: relative; z-index: 1; }
+  .root img { width: 18px; height: 18px; }
+  .rail { margin-left: 26px; padding-left: 44px; border-left: 1.5px solid rgba(236, 232, 225, .22); padding-top: 22px; }
+  .branch { position: relative; }
+  .branch + .branch { margin-top: 18px; }
+  .branch::before { content: ""; position: absolute; left: -45.5px; top: 50%; width: 44px; height: 1.5px; background: rgba(236, 232, 225, .3); }
+  .branch.rt-b::before { background: var(--tungsten); box-shadow: 0 0 10px rgba(255, 180, 84, .6); }
+  .branch:last-child::after { content: ""; position: absolute; left: -48px; top: calc(50% + 1.5px); bottom: -4px; width: 8px; background: var(--ink-0); }
+  .tier { border: 1px solid var(--line); border-radius: 22px; padding: 24px 24px 22px 30px; background: var(--ink-1); display: grid; grid-template-columns: 280px 1fr; gap: 24px; align-items: center; overflow: hidden; }
+  .tier.rt-tier { border-color: color-mix(in srgb, var(--tungsten) 45%, transparent); background: radial-gradient(70% 90% at 70% 0%, rgba(255, 140, 50, 0.13), transparent 70%), var(--ink-1); }
+  .tier h3 { font: 600 28px var(--font-sans); letter-spacing: -.035em; }
+  .tier .req { display: block; margin-top: 8px; font: 500 12px var(--font-mono); color: var(--mute); }
+  .tier .sub { margin-top: 14px; color: var(--bone-2); font-size: 15px; }
+  .tier ul { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 9px; }
+  .tier li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; color: var(--bone-2); font-size: 14.5px; }
+  .tier li::before { content: ""; width: 7px; height: 7px; margin-top: 8px; border-radius: 50%; background: var(--c-three); }
+  .rt-tier li::before { background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .shelf3d { position: relative; height: 300px; min-width: 0; }
+  .shelf3d canvas { display: block; width: 100%; height: calc(100% - 46px); }
+  .shelf3d.fallback img { display: block; width: 100%; height: 100%; object-fit: contain; }
+  .dev3d-cap { position: absolute; bottom: 0; transform: translateX(-50%); margin: 0; font: 500 11.5px/1.45 var(--font-mono); color: var(--mute); text-align: center; white-space: nowrap; pointer-events: none; }
+  .dev3d-cap b { display: block; font: 600 13px var(--font-sans); color: var(--bone-2); letter-spacing: -.01em; }
+  .payoff { margin-top: 64px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: end; padding-top: 40px; border-top: 1px solid var(--line); }
+  .payoff h3 { font: 620 clamp(30px, 3.4vw, 48px)/1.05 var(--font-sans); letter-spacing: -.045em; }
+  .payoff p { color: var(--bone-2); font-size: 16px; }
+
+  .tricks .cta { display: flex; justify-content: center; gap: 12px; margin-top: 44px; }
+  .note { font: 400 12px/1.6 var(--font-mono); color: var(--mute); }
+
+  @media (max-width: 1100px) {
+    .sec-head, .motion, .details, .tier, .payoff, .rtx ol { grid-template-columns: 1fr; } .rtx li + li { padding-left: 0; border-left: 0; } .rtx .big { flex-direction: column; align-items: flex-start; }
+    .sec-head .lede { justify-self: start; }
+    .reel { grid-template-columns: 1fr; } .reel .left { border-right: 0; border-bottom: 1px solid var(--line); min-height: 300px; } .reel .story { grid-template-columns: 1fr 1fr 1fr auto; }
+    .shelf { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav overlay">
+  <div class="wrap">
+    <a class="logo" href="#"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="#hello">Hello world</a><a href="#compare">vs three.js</a><a href="#motion">Motion</a><a href="#everywhere">Everywhere</a></div>
+    <a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT" style="height:38px;font-size:14px">GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="cmp" id="hero" data-a="media/bistro/tuned.webp" data-b="media/bistro/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="44" data-intro></div>
+  <div class="copy">
+    <div class="wrap">
+      <h1 class="h-display">Every light, traced.<span class="l2 ray-text">At 60 fps.</span></h1>
+      <p class="lede" style="max-width:52ch">The first three.js-style engine to fully path-trace industry-standard scenes in real time.<sup>1</sup></p>
+      <div class="cta"><a class="btn primary" href="#hello">See it in a hello world</a><a class="btn ghost" href="#everywhere">Runs everywhere</a></div>
+    </div>
+  </div>
+</header>
+
+<section id="rt">
+  <div class="wrap rtx">
+    <div class="big rv"><h2>Three<span class="ray-text">RT</span></h2><p>Three, for the API you already know. RT, for the three things it adds.</p></div>
+    <ol class="rv">
+      <li><h3><b>R</b>ay <b>T</b>racing</h3><p>Every light is traced: shadows, bounce light, reflections and glowing surfaces that light the room. No shadow maps, no light probes, no baking.</p></li>
+      <li><h3><b>R</b>eal <b>T</b>ime</h3><p>60 fps in production scenes, with the camera moving. Not a still that converges once you stop.</p></li>
+      <li><h3><b>R</b>un<b>t</b>ime</h3><p>A game runtime, not only a renderer. Scene code and game logic run inside the engine, and the same scene runs as three.js in any browser.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="hello" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">Hello world<br><span class="mute">looks right.</span></h2>
+      <p class="lede">Write a scene at tutorial size and leave every setting at its default. ThreeRT gives it sky light, soft shadows, bounce light and real reflections. Left: the same scene in three.js, as written.</p>
+    </div>
+    <div class="reel rv" id="reel">
+      <div class="story" id="story">
+        <button class="st" data-i="0"><b>Material balls<span>material-grid.ts</span></b><i></i></button>
+        <button class="st" data-i="1"><b>Sunlit room<span>sun-room.ts</span></b><i></i></button>
+        <button class="st" data-i="2"><b>glTF model<span>glb-asset.ts</span></b><i></i></button>
+        <button class="pp" id="reelPP" aria-label="Pause"></button>
+      </div>
+      <div class="left"><pre class="code" id="helloCode"></pre></div>
+      <div class="out"><div class="cmp" id="helloCmp" data-x="92"></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="compare" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">Against three.js<br><span class="mute">at full power.</span></h2>
+      <p class="lede">The same scene file, run by both engines. three.js gets everything it has: shadow maps, image-based lighting and, on WebGPU, its own SSGI, SSR and TRAA. ThreeRT gets the scene.</p>
+    </div>
+    <div class="scene-tabs rv" id="sceneTabs"><button data-v="bistro">Bistro night</button><button data-v="zero-day">Zero-Day</button></div>
+    <div class="rv" style="position:relative">
+      <div class="cmp" id="main" data-x="50"></div>
+      <div class="pick" id="leftPick" aria-label="Left side"><button data-v="tuned">three.js · WebGL</button><button data-v="strongest">three.js · WebGPU + SSGI</button><button data-v="ref">Path-traced reference</button></div>
+    </div>
+  </div>
+</section>
+
+<section id="motion" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">Not a still.<br><span class="mute">A camera move.</span></h2>
+      <p class="lede">Each scene’s own camera path, both engines in lockstep. ThreeRT holds 60 fps the whole way.</p>
+    </div>
+    <div class="motion rv">
+      <div>
+        <div class="seqp" data-scene="media/bistro" data-la="three.js · 54 fps" data-lb="ThreeRT · 60 fps"></div>
+        <div class="cap"><b>Bistro night</b></div>
+      </div>
+      <div>
+        <div class="seqp" data-scene="media/zero-day" data-la="three.js · 12 fps" data-lb="ThreeRT · 60 fps"></div>
+        <div class="cap"><b>Zero-Day</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="traced" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">What a ray finds<br><span class="mute">that a raster can’t.</span></h2>
+      <p class="lede">Close-ups of the same frames. Left: three.js at its strongest. Right: ThreeRT.</p>
+    </div>
+    <div class="details">
+      <div class="rv">
+        <div class="cmp zoom" style="--z:2;--o:78% 24%" data-a="media/bistro/strongest.webp" data-b="media/bistro/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="50"></div>
+        <h3 class="h-3">Every emitter is a light</h3>
+        <p>Bistro’s string lights, shop signs and lamps light the square themselves, in their own colours.</p>
+      </div>
+      <div class="rv">
+        <div class="cmp zoom" style="--z:1.9;--o:36% 42%" data-a="media/bistro/strongest.webp" data-b="media/bistro/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="50"></div>
+        <h3 class="h-3">Light that bounces</h3>
+        <p>The shop window and the wall lamp spill warm light across the facade and the pavement.</p>
+      </div>
+      <div class="rv">
+        <div class="cmp zoom" style="--z:1.8;--o:46% 94%" data-a="media/zero-day/strongest.webp" data-b="media/zero-day/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="50"></div>
+        <h3 class="h-3">Reflections of the whole world</h3>
+        <p>Zero-Day’s floor mirrors the machines and their lights, including the parts the camera never sees.</p>
+      </div>
+      <div class="rv">
+        <div class="cmp zoom" style="--z:1.9;--o:48% 30%" data-a="media/zero-day/strongest.webp" data-b="media/zero-day/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="50"></div>
+        <h3 class="h-3">Ten thousand small lights</h3>
+        <p>Each of Zero-Day’s small emitters adds its own light, highlight and shadow.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="everywhere" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv" style="grid-template-columns:1fr;gap:24px">
+      <h2 class="h-1">Traced where it can be.<br><span class="mute">three.js everywhere else.</span></h2>
+      <p class="lede" style="justify-self:start">One scene, one game. On hardware with ray tracing, the native client traces every light. On every other screen, the same scene opens in the browser as three.js.</p>
+    </div>
+    <div class="rv">
+      <div class="root"><img src="brand/mark-small.svg" alt="">game.ts · one scene, one codebase</div>
+      <div class="rail">
+        <div class="branch rt-b">
+          <div class="tier rt-tier">
+            <div>
+              <h3>Native client</h3><span class="req">hardware ray tracing</span>
+              <p class="sub">Every light path traced, at 60 fps.</p>
+              <ul><li>Dynamic resolution holds the frame rate</li><li>Installs like any game client</li></ul>
+            </div>
+            <div class="shelf3d" id="shelfNative"></div>
+          </div>
+        </div>
+        <div class="branch">
+          <div class="tier">
+            <div>
+              <h3>WebView</h3><span class="req">any browser, any device</span>
+              <p class="sub">The same scene as three.js rasterization, in any browser or in-app WebView.</p>
+              <ul><li>A link instead of a download</li><li>Plain three.js, with its whole ecosystem</li></ul>
+            </div>
+            <div class="shelf3d" id="shelfWeb"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="payoff rv" style="margin-top:72px">
+      <h3>AAA games, <span class="ray-text">one link away.</span></h3>
+      <p>The web version isn’t a port. It is the same game, running as three.js.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tricks">
+  <svg class="orbit rv" viewBox="0 0 64 64" aria-hidden="true">
+    <defs><linearGradient id="ry" x1="10" y1="56" x2="54" y2="20" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FF6A13"/><stop offset=".5" stop-color="#FFB454"/><stop offset="1" stop-color="#FFEBC4"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="1.4"/></filter></defs>
+    <path d="M32 8.967 L58 54 L6 54 Z" fill="none" stroke="#ECE8E1" stroke-width="2" stroke-linejoin="round" opacity=".9"/>
+    <path d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="url(#ry)" stroke-width="1.8" stroke-linejoin="round" opacity=".35"/>
+    <path class="pulse" d="M23.333 54 L40.667 23.978 L23.333 23.978 L40.667 54 L49.333 38.989 L14.667 38.989 Z" fill="none" stroke="#FFEBC4" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" stroke-dasharray="9 91" filter="url(#gl)"><animate attributeName="stroke-dashoffset" from="100" to="0" dur="2.4s" repeatCount="indefinite"/></path>
+  </svg>
+  <div class="wrap">
+    <div class="no rv"><s>Shadow maps.</s> <s>Light probes.</s> <s>Lightmaps.</s><br><s>Screen-space GI.</s> <s>Baking.</s></div>
+    <div class="yes rv">Just <span class="ray-text">light</span>.</div>
+    <div class="cta rv"><a class="btn primary" href="#hello">Start with hello world</a><a class="btn ghost" href="https://github.com/taichi-dev/ThreeRT/tree/main/docs">Read the docs</a></div>
+  </div>
+</section>
+
+<footer class="foot">
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="#"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <p style="margin-top:14px">Real-time path tracing behind a three.js-style API.</p>
+    </div>
+    <div class="note">
+      <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine.</p>
+      <p style="margin-top:12px">Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+    </div>
+  </div>
+</footer>
+
+<script type="module">
+  import { $, $$, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
+
+  // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
+  reveal();
+  const guard = (name, f) => { try { const r = f(); if (r?.catch) r.catch((e) => console.error(`${name}:`, e)); } catch (e) { console.error(`${name}:`, e); } };
+
+  guard("comparisons", () => {
+    compare($("#hero"));
+    for (const el of $$(".details .cmp")) compare(el);
+    for (const el of $$(".seqp")) sequence(el);
+  });
+
+  // Against three.js: scene tabs above, the left side picked on the left side.
+  guard("against three.js", () => {
+    const main = compare($("#main"));
+    const st = { scene: "bistro", left: "tuned" };
+    const names = { tuned: "three.js · WebGL", strongest: "three.js · WebGPU + SSGI", ref: "Path-traced reference" };
+    const render = () => main.set({ a: `media/${st.scene}/${st.left}.webp`, b: `media/${st.scene}/live.webp`, la: names[st.left], lb: "ThreeRT" });
+    seg($("#sceneTabs"), (v) => { st.scene = v; render(); }).pick("bistro");
+    seg($("#leftPick"), (v) => { st.left = v; render(); }).pick("tuned");
+    $("#leftPick").addEventListener("pointerdown", (e) => e.stopPropagation());
+  });
+
+  // Everywhere: real-proportion 3D devices, each showing a real render (ThreeRT natively, three.js in the WebView).
+  // three.js loads on demand; if it can't, the rows show their stills.
+  const NATIVE = [
+    { kind: "monitor", img: "media/bistro/live.webp", name: "Desktop", req: "RTX 20 · RX 6000 and later", width: 3.3 },
+    { kind: "macbook", img: "media/zero-day/live.webp", name: "Mac", req: "M3 and later", width: 2.8 },
+    { kind: "deck", img: "media/bistro/live.webp", name: "Steam Deck", req: "all models", width: 3.3 },
+    { kind: "iphone", img: "media/zero-day/live.webp", name: "iPhone", req: "15 Pro and later", width: 2.3 },
+  ];
+  const WEB = [
+    { kind: "laptop", img: "media/bistro/tuned.webp", browser: true, name: "Any laptop", req: "WebGL · WebGPU", width: 3.0 },
+    { kind: "tablet", img: "media/zero-day/tuned.webp", name: "Any tablet", req: "browser or WebView", width: 2.4 },
+    { kind: "phone", img: "media/bistro/tuned.webp", name: "Any phone", req: "browser or WebView", width: 2.2 },
+  ];
+  const still = (el, src, list) => { el.classList.add("fallback"); el.innerHTML = `<img src="${src}" alt="${list.map((d) => d.name).join(", ")}">`; };
+  guard("devices", () => import("./js/devices.js").then(
+    ({ deviceShelf }) => {
+      deviceShelf($("#shelfNative"), NATIVE, { warm: true, fallback: "media/devices/native.webp" });
+      deviceShelf($("#shelfWeb"), WEB, { fallback: "media/devices/web.webp" });
+    },
+    (e) => { console.error("devices:", e); still($("#shelfNative"), "media/devices/native.webp", NATIVE); still($("#shelfWeb"), "media/devices/web.webp", WEB); },
+  ));
+
+  // Hello world: an auto-advancing reel. Each slide shows the scene's code and sweeps from three.js to ThreeRT.
+  guard("hello world", async () => {
+    const SLIDES = ["material-grid", "sun-room", "glb-asset"], DUR = 7000;
+    const helloCmp = compare($("#helloCmp"));
+    const code = {};
+    // A source that fails to load leaves its slide without code, not the reel without slides.
+    await Promise.all(SLIDES.map(async (id) => {
+      try { const r = await fetch(`media/code/${id}.threert.ts`); code[id] = r.ok ? highlight((await r.text()).trim()) : ""; } catch { code[id] = ""; }
+    }));
+    for (const id of SLIDES) for (const k of ["three", "rt"]) new Image().src = `media/hello/${id}-${k}.webp`;
+    const sts = $$("#story .st"), pp = $("#reelPP"), codeEl = $("#helloCode"), cmpEl = $("#helloCmp");
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let cur = -1, elapsed = 0, last = performance.now(), playing = !reduce, hover = false, visible = false, dragging = false, touched = false, swap = 0;
+    const icon = () => { pp.innerHTML = playing ? '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>' : '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 1v8l7-4z" fill="currentColor"/></svg>'; pp.setAttribute("aria-label", playing ? "Pause" : "Play"); };
+    const show = (i) => {
+      cur = (i + SLIDES.length) % SLIDES.length; elapsed = 0; touched = false;
+      const id = SLIDES[cur];
+      cmpEl.classList.add("fade"); codeEl.classList.add("fade");
+      clearTimeout(swap); // a newer slide supersedes a swap still waiting on the fade
+      swap = setTimeout(() => {
+        helloCmp.set({ a: `media/hello/${id}-three.webp`, b: `media/hello/${id}-rt.webp`, la: "three.js", lb: "ThreeRT", x: reduce ? 45 : 92 });
+        codeEl.innerHTML = code[id]; codeEl.scrollTop = 0;
+        cmpEl.classList.remove("fade"); codeEl.classList.remove("fade");
+      }, 280);
+      sts.forEach((b, k) => b.setAttribute("aria-current", String(k === cur)));
+    };
+    // Divider keyframes over a slide: hold on three.js, sweep to reveal ThreeRT, settle in the middle.
+    const ease = (t) => t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    const sweep = (p) => p < 0.1 ? 92 : p < 0.5 ? 92 - 82 * ease((p - 0.1) / 0.4) : p < 0.8 ? 10 + 36 * ease((p - 0.5) / 0.3) : 46;
+    const tick = (now) => {
+      const dt = now - last; last = now;
+      if (playing && !hover && !dragging && visible && cur >= 0) {
+        elapsed += dt;
+        const p = Math.min(1, elapsed / DUR);
+        if (!touched) helloCmp.setX(sweep(p)); // once the reader moves the divider, the slide keeps their position
+        const max = codeEl.scrollHeight - codeEl.clientHeight;
+        if (max > 0) codeEl.scrollTop = max * Math.min(1, Math.max(0, (p - 0.15) / 0.75));
+        if (elapsed >= DUR) show(cur + 1);
+      }
+      sts.forEach((b, k) => b.style.setProperty("--p", `${k < cur ? 100 : k === cur ? Math.min(100, (elapsed / DUR) * 100) : 0}%`));
+      requestAnimationFrame(tick);
+    };
+    sts.forEach((b) => b.addEventListener("click", () => show(+b.dataset.i)));
+    pp.addEventListener("click", () => { playing = !playing; icon(); });
+    $("#reel").addEventListener("pointerenter", () => (hover = true));
+    $("#reel").addEventListener("pointerleave", () => (hover = false));
+    // The divider captures the pointer while dragging, so a drag can leave the reel: pause until it ends. Only a press
+    // that ends in a release (a tap or a drag) keeps the reader's position for the slide; a touch the browser turns
+    // into a scroll ends in pointercancel instead, and the sweep goes on.
+    cmpEl.addEventListener("pointerdown", () => { dragging = true; });
+    cmpEl.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") touched = true; }); // keyboard slider
+    addEventListener("pointerup", () => { if (dragging) touched = true; dragging = false; });
+    addEventListener("pointercancel", () => (dragging = false));
+    new IntersectionObserver(([e]) => (visible = e.isIntersecting), { threshold: 0.35 }).observe($("#reel"));
+    icon(); show(0); requestAnimationFrame(tick);
+  });
+</script>
+</body>
+</html>
