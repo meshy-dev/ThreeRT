@@ -149,7 +149,7 @@ struct VoxelObject {
 
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
-pub const EXPECTED_SCRIPT: u64 = 0x0a53_c865_f7e3_d7ef;
+pub const EXPECTED_SCRIPT: u64 = 0xd26e_5461_62ad_7eec;
 
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
@@ -465,12 +465,12 @@ impl VoxelWorld {
         self.floor = self.level.as_ref().map_or(f32::MIN, |l| l.objects.iter().flatten().map(|o| o.lo[1]).min().map_or(f32::MIN, |y| y as f32 * size - 100.0));
         if self.physics {
             let p = ph.get_or_insert_with(Default::default);
-            let mut full = HashMap::new();
+            let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
             for k in 0..self.objects.len() {
                 if d.objects.get(k).is_some_and(|o| o.collide == Some(false)) {
                     continue;
                 }
-                if let Some(n) = self.collide(p, k, &mut full) {
+                if let Some(n) = self.collide(p, k, &mut full, &mut shapes) {
                     colliders += 1;
                     collider_cells += n;
                 }
@@ -498,20 +498,37 @@ impl VoxelWorld {
         })))
     }
 
-    /// Level object `k`'s fixed collider: its cells where they stand in the world's lattice. Returns the cells, or
-    /// None if it got none (no voxel; a cell past what a shape may reach: said once).
-    fn collide(&mut self, p: &mut PhysicsWorld, k: usize, full: &mut HashMap<(usize, (i32, i32, i32)), bool>) -> Option<usize> {
+    /// Level object `k`'s fixed collider: the shell of its cells (`shell`), in its grid's own cells, placed as the
+    /// object is (`collider_pose`). Objects of one file have one grid between them and so one shape (`shapes`: by
+    /// grid, the shape and its cells): they share it until an edit gives one of them cells of its own
+    /// (`Physics::edit_voxels`). A terrain tile's shell depends on its neighbours: its own shape. Returns the
+    /// collider's cells, or None if it got none (no voxel; a cell past what a shape may reach: said once).
+    fn collide(&mut self, p: &mut PhysicsWorld, k: usize, full: &mut HashMap<(usize, (i32, i32, i32)), bool>, shapes: &mut HashMap<usize, (physics_core::SharedVoxels, usize)>) -> Option<usize> {
         let o = self.level.as_ref()?.objects.get(k)?.as_ref()?;
-        let t = Instant::now();
-        let cells: Vec<[i32; 3]> = self.shell(k, None, full).into_iter().map(|g| o.place.to_world(g)).collect();
-        self.shell_ms += t.elapsed().as_secs_f64() * 1e3;
-        if cells.is_empty() {
-            return None;
-        }
-        let (id, n) = (self.id(), cells.len());
-        let d = ColliderDesc { friction: FRICTION, ..ColliderDesc::new(physics_core::Shape::Voxels { size: self.size, cells }) };
-        match p.bridge().engine_collider(id, None, &d) {
-            Ok(()) => {
+        let (grid, place) = (Rc::as_ptr(&o.grid) as usize, o.place);
+        let alone = self.objects.get(k)?.as_ref()?.tile.is_some();
+        let made = match shapes.get(&grid).filter(|_| !alone) {
+            Some(s) => Ok(s.clone()),
+            None => {
+                let t = Instant::now();
+                let cells = self.shell(k, None, full);
+                self.shell_ms += t.elapsed().as_secs_f64() * 1e3;
+                if cells.is_empty() {
+                    return None;
+                }
+                let n = cells.len();
+                physics_core::SharedVoxels::new(self.size, cells).map(|s| {
+                    if !alone {
+                        shapes.insert(grid, (s.clone(), n));
+                    }
+                    (s, n)
+                })
+            }
+        };
+        let id = self.id();
+        let (position, rotation) = collider_pose(&place, self.size);
+        match made.and_then(|(shape, n)| p.bridge().engine_collider(id, None, &ColliderDesc { position, rotation, friction: FRICTION, ..ColliderDesc::new(physics_core::Shape::SharedVoxels(shape)) }).map(|()| n)) {
+            Ok(n) => {
                 if self.colliders.len() <= k {
                     self.colliders.resize(k + 1, None);
                 }
@@ -659,13 +676,13 @@ impl VoxelWorld {
             let mut full = HashMap::new();
             for (k, cells, (lo, hi)) in work {
                 let Some(c) = self.colliders.get(k).copied().flatten() else { continue };
+                // (In the object's own cells, as its collider has them. An object that is gone: its collider goes below.)
+                let Some(o) = self.level.as_ref().and_then(|l| l.objects.get(k)?.as_ref()) else { continue };
                 let t = Instant::now();
-                let fill: Vec<[i32; 3]> = match self.level.as_ref().and_then(|l| l.objects.get(k)?.as_ref()) {
-                    Some(o) => self.shell(k, Some(o.place.box_to_grid(lo, hi)), &mut full).into_iter().map(|g| o.place.to_world(g)).collect(),
-                    None => vec![],
-                };
+                let fill = self.shell(k, Some(o.place.box_to_grid(lo, hi)), &mut full);
                 self.shell_ms += t.elapsed().as_secs_f64() * 1e3;
-                match p.bridge().engine_edit_voxels(c, cells, &fill) {
+                let cells: Vec<[i32; 3]> = cells.iter().map(|&w| o.place.to_grid(w)).collect();
+                match p.bridge().engine_edit_voxels(c, &cells, &fill) {
                     Ok(0) => self.colliders[k] = None,
                     Ok(_) => {}
                     Err(err) => eprintln!("voxels: a collider was not edited ({err})"),
@@ -762,7 +779,7 @@ impl VoxelWorld {
             piece_world_ms += tw.elapsed().as_secs_f64() * 1e3;
             // (Added voxels that hold: a collider of their own.)
             if let (false, true, Some(p)) = (falling, self.physics, ph.as_mut()) {
-                self.collide(p, k, &mut HashMap::new());
+                self.collide(p, k, &mut HashMap::new(), &mut HashMap::new());
             }
         }
         let pieces_ms = t2.elapsed().as_secs_f64() * 1e3;
@@ -943,9 +960,9 @@ impl VoxelWorld {
         }
         v.colliders = vec![None; blocks.len()];
         let p = ph.get_or_insert_with(Default::default);
-        let mut full = HashMap::new();
+        let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
         for k in 0..blocks.len() {
-            v.collide(p, k, &mut full);
+            v.collide(p, k, &mut full, &mut shapes);
         }
         v
     }
@@ -1542,6 +1559,20 @@ impl VoxelWorld {
     }
 }
 
+/// Where a level object's collider stands, its cells being the object's own: the rotation of its quarter turns about
+/// y and the translation that puts the cube of its cell g on the cube of world cell `place.to_world(g)` (a turned
+/// cube's lowest corner is not the turned corner: `voxel_core::Placement`).
+fn collider_pose(place: &Placement, size: f32) -> ([f32; 3], [f32; 4]) {
+    const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let (rotation, corner) = match place.turn & 3 {
+        0 => ([0.0, 0.0, 0.0, 1.0], [0, 0, 0]),
+        1 => ([0.0, S, 0.0, S], [0, 0, -1]),
+        2 => ([0.0, 1.0, 0.0, 0.0], [-1, 0, -1]),
+        _ => ([0.0, S, 0.0, -S], [-1, 0, 0]),
+    };
+    ([0, 1, 2].map(|a| (place.t[a] - corner[a]) as f32 * size), rotation)
+}
+
 /// A grid's solid cells in six-connected parts, each part's cells in the grid's order (so the parts and their order
 /// are the same on every machine).
 fn components(grid: &VoxelGrid) -> Vec<Vec<[i32; 3]>> {
@@ -1856,6 +1887,21 @@ mod tests {
         // A ray along the trench's floor from inside the second tile meets the first tile's bared side.
         let hit = ph.as_mut().unwrap().call(&mut w, "ray", &serde_json::json!({ "origin": [6.75, 1.25, 3.05], "direction": [-1, 0, 0], "max": 5 })).unwrap();
         assert!((hit["point"][0].as_f64().unwrap() - 6.4).abs() < 1e-4 && hit["collider"].as_u64() == v.colliders[0].map(|c| c as u64), "{hit}");
+    }
+
+    /// A collider's pose puts every cell of the object where the level has it, whatever its turn.
+    #[test]
+    fn a_colliders_pose_is_the_objects_placement() {
+        for turn in 0..4 {
+            let place = Placement::new([7, -3, 12], turn, [2, 0, -5]);
+            let (at, rot) = collider_pose(&place, 0.1);
+            let m = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at));
+            for g in [[0, 0, 0], [1, 0, 0], [0, 0, 1], [5, 9, -4], [-3, 2, 6]] {
+                let w = place.to_world(g);
+                let centre = m.transform_point3((Vec3::new(g[0] as f32, g[1] as f32, g[2] as f32) + 0.5) * 0.1);
+                assert!((centre - (Vec3::new(w[0] as f32, w[1] as f32, w[2] as f32) + 0.5) * 0.1).length() < 1e-5, "turn {turn}, cell {g:?}: {centre} for world cell {w:?}");
+            }
+        }
     }
 
     /// The voxel bodies' script ends in the recorded bits (tools/physics-determinism.ts: in wasm32 too), and in it a

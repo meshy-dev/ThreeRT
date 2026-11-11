@@ -117,7 +117,22 @@ pub enum Shape {
     /// (`Physics::edit_voxels`). On a moving body its mass is its cells' volume at the collider's density, its centre
     /// of mass and inertia those of the cells.
     Voxels { size: f32, cells: Vec<[i32; 3]> },
+    /// A voxel shape made once (`SharedVoxels::new`) and given to several colliders: they share its cells until one
+    /// of them is edited, which then gets cells of its own (`Physics::edit_voxels`). Objects of one voxel file placed
+    /// many times: one shape's memory and build for all of them.
+    SharedVoxels(SharedVoxels),
     Custom(Box<dyn CustomShape>),
+}
+
+/// A voxel shape that colliders can share (`Shape::SharedVoxels`). Cloning it is another reference to the same cells.
+#[derive(Clone)]
+pub struct SharedVoxels(SharedShape);
+
+impl SharedVoxels {
+    /// As `Shape::Voxels { size, cells }`, with its checks.
+    pub fn new(size: f32, cells: Vec<[i32; 3]>) -> Result<SharedVoxels, String> {
+        Shape::Voxels { size, cells }.shared().map(SharedVoxels)
+    }
 }
 
 /// A collider: its shape, its pose relative to its body (or in the world without one), and its material.
@@ -333,6 +348,7 @@ impl Shape {
                 let cells: Vec<IVector> = cells.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect();
                 Ok(SharedShape::voxels(Vector::splat(*size), &cells))
             }
+            Shape::SharedVoxels(s) => Ok(s.0.clone()),
             Shape::Custom(c) => Ok(c.shared()),
         }
     }
@@ -661,7 +677,7 @@ impl Physics {
         self.colliders.insert(id, (h, data));
         self.shape_data += data;
         self.fresh.insert(id);
-        if matches!(d.shape, Shape::Voxels { .. }) {
+        if matches!(d.shape, Shape::Voxels { .. } | Shape::SharedVoxels(_)) {
             self.voxel_colliders.insert(id);
         }
         Ok(id)
@@ -853,8 +869,17 @@ impl Physics {
     }
 
     /// The memory the world's voxel shapes hold, bytes (parry's own count of each: cells, chunk tables, their tree).
+    /// A shape several colliders share is counted once.
     pub fn voxel_bytes(&self) -> usize {
-        self.voxel_colliders.iter().filter_map(|id| self.world.colliders.get(self.colliders.get(id)?.0)?.shape().as_voxels().map(|v| v.total_memory_size())).sum()
+        let mut seen = std::collections::BTreeSet::new();
+        self.voxel_colliders
+            .iter()
+            .filter_map(|id| {
+                let shape = self.world.colliders.get(self.colliders.get(id)?.0)?.shared_shape();
+                let first = seen.insert(std::sync::Arc::as_ptr(&shape.0) as *const () as usize);
+                shape.as_voxels().filter(|_| first).map(|v| v.total_memory_size())
+            })
+            .sum()
     }
 
     /// A voxel collider's solid cells, counted; None if it is none.
@@ -1755,6 +1780,30 @@ mod tests {
         // From inside a cell: at once, against the ray.
         let (t, n) = voxel_ray(&slab, &still, &Ray::new(Vector::new(0.05, 0.15, 0.05), Vector::new(0.0, 1.0, 0.0)), 20.0).unwrap();
         assert!(t == 0.0 && n.y == -1.0);
+    }
+
+    /// Colliders that share one voxel shape: its memory is counted once; an edit of one gives that one cells of its
+    /// own and leaves the others as they were.
+    #[test]
+    fn voxel_shapes_are_shared_until_edited() {
+        let mut p = Physics::default();
+        let shape = SharedVoxels::new(0.1, block([0, 0, 0], [8, 2, 8])).unwrap();
+        let at = |x: f32| ColliderDesc { position: [x, 0.0, 0.0], ..ColliderDesc::new(Shape::SharedVoxels(shape.clone())) };
+        let (a, b, c) = (p.add_collider(None, &at(0.0)).unwrap(), p.add_collider(None, &at(2.0)).unwrap(), p.add_collider(None, &at(4.0)).unwrap());
+        let one = p.voxel_bytes();
+        assert!(one > 0 && (p.voxels(a), p.voxels(b), p.voxels(c)) == (Some(128), Some(128), Some(128)));
+        // A hole through the second: only it has the hole (a ray down at the same place of each).
+        assert_eq!(p.edit_voxels(b, &block([3, 0, 3], [5, 2, 5]), &[]).unwrap(), 120);
+        assert_eq!((p.voxels(a), p.voxels(b), p.voxels(c)), (Some(128), Some(120), Some(128)));
+        assert!(p.voxel_bytes() > one, "the edited one has cells of its own");
+        let down = |p: &Physics, x: f32| p.cast_ray([x + 0.35, 5.0, 0.35], [0.0, -1.0, 0.0], 10.0, None).unwrap().map(|h| h.collider);
+        assert_eq!((down(&p, 0.0), down(&p, 2.0), down(&p, 4.0)), (Some(a), None, Some(c)));
+        // What a shape refuses, it refuses here.
+        assert!(SharedVoxels::new(0.1, vec![]).is_err() && SharedVoxels::new(f32::NAN, vec![[0, 0, 0]]).is_err());
+        // A body dropped on the third rests on it.
+        let ball = body(&mut p, [4.4, 1.0, 0.4], Shape::Box([0.1; 3]));
+        run(&mut p, 120);
+        assert!((p.pose(ball).unwrap().0[1] - 0.3).abs() < 5e-3, "{:?}", p.pose(ball));
     }
 
     /// What a voxel shape refuses.
