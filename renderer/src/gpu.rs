@@ -140,13 +140,20 @@ impl EditRoom {
         hwrt && Self::reserve() > 0.0 && (!scene.procs.is_empty() || !scene.retained.own_instance.is_empty())
     }
 
-    pub(crate) fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool) -> EditRoom {
+    /// `units`: software traversal with units, whose room does not grow (hardware traversal's does, from nothing): a
+    /// scene of theirs without editable geometry still gets records and object entries, for instances of the meshes
+    /// it has (a mesh it has not rebuilds the scene: no triangles).
+    pub(crate) fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool, units: bool) -> EditRoom {
         let k = Self::reserve();
         let (procs, meshes) = (!scene.procs.is_empty(), !scene.retained.own_instance.is_empty());
-        if !Self::editable(scene, hwrt) {
-            return EditRoom::default();
-        }
         let part = |n: usize, min: usize| ((n as f64 * 0.25 * k) as usize).max((min as f64 * k) as usize);
+        if !Self::editable(scene, hwrt || units) {
+            return if units && k > 0.0 {
+                EditRoom { records: part(records, 1024), objects: part(scene.objects.len() / scene.object_stride(), 1024), ..EditRoom::default() }
+            } else {
+                EditRoom::default()
+            };
+        }
         let blob_words = scene.proc_layout.as_ref().map_or(0, |l| l.head.len() + l.blob_words);
         EditRoom {
             tris: if meshes { part(tris, 1 << 16) } else { 0 },
@@ -1577,7 +1584,7 @@ impl Gpu {
         let records: Vec<crate::scene::GpuInstance> = scene.gpu_instances.iter().chain(&scene.proc_records).copied().collect();
         // (Software traversal's units have room as hardware traversal's instances do: `prepare` sized their trees'
         // by the same figures.)
-        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt || scene.units.is_some());
+        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt, scene.units.is_some());
         let st = wgpu::BufferUsages::STORAGE;
         // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live.rs `edit_geometry`.)
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;

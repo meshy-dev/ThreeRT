@@ -2171,7 +2171,9 @@ impl LiveCore {
         let nodes: &[[f32; 4]] = e.light_tree.as_ref().map_or(&[], |t| &t.nodes);
         let need = ((em.len() + nodes.len()) * 16) as u64;
         if need > up.emitters.size() {
-            up.emitters = g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitters"), size: need + need / 2, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            // (The usage it was made with: the merged layout copies the tables each frame, `Gpu::sync_tables`.)
+            let usage = up.emitters.usage();
+            up.emitters = g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitters"), size: need + need / 2, usage, mapped_at_creation: false });
             g.rebind_scene(up);
         }
         if !em.is_empty() {
@@ -3174,7 +3176,7 @@ impl LiveCore {
                                             edit.rebind = true;
                                             edit.tris.take(t.len()).ok_or("edit room: triangles")?
                                         }
-                                        None => return Err("edit room: triangles (particles, or the device's limits)".into()),
+                                        None => return Err(if matches!(top, gpu::Top::Sw(_)) { "edit room: triangles (software traversal's does not grow)" } else { "edit room: triangles (particles, or the device's limits)" }.into()),
                                     };
                                     let mut im = scene::own_inst_mesh(&t, (first - edit.pool_first) as u32, class);
                                     im.emits = emits;
@@ -3293,7 +3295,7 @@ impl LiveCore {
                                 edit.rebind = true;
                                 edit.records.take(cap).ok_or("edit room: records")?
                             }
-                            None => return Err("edit room: records (particles, or the device's limits)".into()),
+                            None => return Err(if matches!(top, gpu::Top::Sw(_)) { "edit room: records (software traversal's does not grow)" } else { "edit room: records (particles, or the device's limits)" }.into()),
                         };
                         let o0 = match edit.objects.take(cap) {
                             Some(k) => k,
@@ -3361,7 +3363,7 @@ impl LiveCore {
                             edit.rebind = true;
                             edit.records.take(1).ok_or("edit room: records")?
                         }
-                        None => return Err("edit room: records (particles, or the device's limits)".into()),
+                        None => return Err(if matches!(top, gpu::Top::Sw(_)) { "edit room: records (software traversal's does not grow)" } else { "edit room: records (particles, or the device's limits)" }.into()),
                     };
                     let v = (inst_base + r, r);
                     edit.placed.insert(id, v);
