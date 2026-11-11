@@ -3898,11 +3898,12 @@ benchmark level. The order follows the dependencies; a step that meets a further
        them with naga; `THREERT_MERGED=1` runs it natively.
      - **A GPU job that did not end took the machine's display down** (2026-11-11 01:42, WindowServer's watchdog)
        while the atomic tests ran under software traversal: at `geometry/instanced-procedural` in the layout as
-       written, then at `environment/background` in the merged one. Neither scene has a triangle. Cause, by reading
-       (no GPU run since): the tree over no triangle was one node with `count: 0`, an interior node to the kernel,
+       written, then at `environment/background` in the merged one. Neither scene has a triangle. The likely cause,
+       by reading: the tree over no triangle was one node with `count: 0`, an interior node to the kernel,
        whose children were itself and the bytes after its 32-byte buffer; zeros end the walk, an earlier scene's
        bytes need not. Fixed in `bvh.rs` (a leaf of the empty vertex buffer's zero triangle), with a test that walks
-       the kernel's loop on the CPU. And a **loop guard** (`merged::guard`): every loop of the kernel bounded and
+       the kernel's loop on the CPU. **Not confirmed as what hung**: the same sequence on a build without the fix,
+       with the guard, passed (both scenes alone, with the fix and the guard, give their tests' answers). And a **loop guard** (`merged::guard`): every loop of the kernel bounded and
        what it stops counted and read back; always on in a browser, `THREERT_LOOP_GUARD` natively.
      - `tools/web-engine.ts` (CI): the module in Node with the page's `__engine` and the native bundle runs the
        physics hello world's script to the native test's numbers.
@@ -3914,9 +3915,13 @@ benchmark level. The order follows the dependencies; a step that meets a further
        1.13 s, 1.08 s of it the sky's bake on one thread; a kernel the browser has not compiled takes 1.4 s before
        the first frame, 26 ms after that. Engine calls cost 40 ns (a scalar) to about a microsecond (a descriptor),
        10,000 poses 0.3 ms. The module is 7.3 MiB (1.5 MiB with brotli).
-     - Open: the two-level tree (in-place edits under software traversal: the rebuild above); the sky's bake off
-       the page's thread or smaller; the kernel's compile at load instead of at the first frame; a scene larger
-       than hello world in a browser, and the merged layout's cost on one natively; other browsers.
+     - Open, first: **a frame in which a body moves costs the page 16.7 ms, 16.4–16.6 of it the rebuild** (9.0
+       natively under software traversal, nothing under hardware traversal): in-place edits under software
+       traversal, the two-level tree, the next step. Then: the browser's image is not bit-identical to the native
+       one (the guard changes the kernel's last bits; natively it is off and the catalog is byte-identical to main);
+       1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame; a
+       scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
+       2026-11-11 is not confirmed; other browsers.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

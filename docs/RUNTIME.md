@@ -362,8 +362,9 @@ tree (ROADMAP § 6).
     (20 and 28 as written), the structs' arrays where the Rust side puts them.
   - `THREERT_MERGED=1` runs it natively (software traversal, the device held to 8).
 - **The loop guard** (`merged::guard`). The kernel's traversals follow indices they read from buffers and end only on
-  sound data. On 2026-11-11 two dispatches that did not end took this machine's display down (WindowServer's
-  watchdog; software traversal under the atomic tests, at two scenes without a triangle). A page's shader runs on the
+  sound data. On 2026-11-11 two dispatches that did not return took this machine's display down (WindowServer's
+  watchdog; software traversal under the atomic tests, at two scenes without a triangle; the cause below is likely,
+  not confirmed). A page's shader runs on the
   player's GPU beside everything else, so **a browser's kernel always has the guard**: every loop body counts the
   invocation's iterations and leaves past a limit (65,536; a page can set it). No formula changes, but the image is
   not bit-identical to the kernel's without the guard: the compiler arranges the arithmetic of the functions it is in
@@ -375,7 +376,10 @@ tree (ROADMAP § 6).
 - **A tree over nothing** (`bvh.rs`). A node with `count: 0` is an interior node to the kernel, and the one-node tree
   of a scene without triangles had itself and the bytes after its buffer for children. It is now a leaf of triangle
   0, which an empty vertex buffer's zeros make a triangle without area; a procedural object without boxes is left out
-  under software traversal. A test walks the kernel's loop on the CPU with every read checked.
+  under software traversal. A test walks the kernel's loop on the CPU with every read checked. That read is certain;
+  **that it is what kept the two dispatches from returning is not confirmed**: the sequence that hung, run again on
+  a build without the fix and with the guard, passed (the bytes after the buffer ended the walk that time; a hang
+  needs them to be a box the ray meets and a count or child indices that do not end).
 - **What a browser does not have.** Hardware ray queries, so software traversal: no particles of either kind, no
   translucency pass, and no in-place edits (every added object and every frame a body moves rebuilds the scene; the
   two-level tree is the step after this one). The denoiser (OIDN, offline only), the offline render, snapshots and
@@ -388,6 +392,18 @@ Checked without a GPU:
 - The generator's and the guard's tests (naga), the tree walk, the web crate's wasm32 build (CI).
 
 ### Measured in a browser (2026-11-11)
+
+Three things first:
+- **A frame in which a rigid body moves costs the page 16.7 ms, 16.4–16.6 of it rebuilding the scene** (p50; natively
+  under software traversal 9.0 ms, under hardware traversal nothing). The CPU side alone fills a 60 fps frame. It is
+  what the next step, in-place edits under software traversal, is for.
+- **The browser's image is not bit-identical to the native one.** A browser's kernel has the loop guard, and the
+  kernel with the guard differs from the kernel without it in the last bits (rounding: 354 of 43,200 numbers of a
+  one-sample hello world, by at most 2 × 10⁻⁷ of their value). Natively the guard is off by default, so native
+  renders are what they were (the catalog is byte-identical to main). The game's numbers (the physics, the clicks)
+  are the native run's exactly.
+- **The first frame waits about 1.4 s for a kernel the browser has not compiled, and opening the view takes 1.1 s, of
+  which the sky's bake on the page's one thread is 1.09 s.**
 
 Apple M5 Pro, Chrome 157.0.8103.40 driven by Playwright (`node tools/web-hello.ts`; a Chrome of its own profile),
 its WebGPU adapter `apple` / `metal-3`, not a fallback adapter (the machine's GPU). The adapter allows 10 storage
