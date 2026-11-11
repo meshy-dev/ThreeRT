@@ -11,6 +11,7 @@
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
 // all of it off (no collider; loose parts fall straight down until they rest, as before); `collide: false` on an
 // object leaves that object without a collider.
+import { usePhysicsEngine } from "@threert/scene";
 
 export type Hardness = "soft" | "medium" | "hard" | "indestructible";
 
@@ -120,14 +121,18 @@ interface NativeEngine {
   voxelHash?: () => string;
   voxelBodies?: () => string;
   physics?: (op: string, args: object) => string;
+  physicsPoses?: () => Float32Array;
 }
 const engine = () => (globalThis as { __engine?: NativeEngine }).__engine;
 
-/** Loads `level` natively (once the renderer knows its asset root, before the first frame). */
+/** Loads `level` natively (once the renderer knows its asset root, before the first frame). A level that collides
+ *  (`physics` not false) is in the physics world whether or not any scene object has `physics`: the scene's queries
+ *  (`Raycaster.intersectPhysics`, `Shapecaster`) ask that world from here on. */
 export function voxelLevel(level: NativeLevel): void {
   const e = engine();
   if (!e?.voxelLevel) throw new Error("voxelLevel: needs the renderer's native voxels");
   e.voxelLevel(level);
+  if (level.physics !== false && e.physics) usePhysicsEngine(e as Parameters<typeof usePhysicsEngine>[0]);
 }
 
 function edit(d: object): VoxelEdit | { queued: true } {
@@ -187,8 +192,9 @@ export function voxelBodies(): VoxelBody[] {
 
 /**
  * An impulse (N s) on a voxel body: at its centre of mass, or at a point of the world (which turns it too). `body` is
- * the id `voxelBodies()` lists and a physics hit reports (`Raycaster.intersectPhysics`: `hit.body`). Throws if there
- * is no such body (it may have been carved away, or retired for the cap, since the id was read).
+ * the id `voxelBodies()` lists and a physics hit reports (`Raycaster.intersectPhysics`: `hit.body`; a hit on the
+ * level itself has `hit.object === engineColliders`, a null `hit.object.physics` and no `body`: the level is fixed).
+ * Throws if there is no such body (it may have been carved away, or retired for the cap, since the id was read).
  */
 export function voxelImpulse(body: number, impulse: readonly [number, number, number], point?: readonly [number, number, number]): void {
   const e = engine();

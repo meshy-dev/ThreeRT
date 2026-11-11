@@ -110,8 +110,14 @@ fn num(a: &Value, key: &str, default: f32) -> Result<f32, String> {
     }
 }
 
+/// A whole number from 0 to `u32::MAX`, however the caller's JSON wrote it. (A script engine has one kind of number:
+/// an id it read out of an answer, a hit's `body`, comes back as `1073741837.0`.)
+fn whole(v: &Value) -> Option<u32> {
+    v.as_u64().or_else(|| v.as_f64().filter(|x| *x >= 0.0 && *x <= u32::MAX as f64 && x.fract() == 0.0).map(|x| x as u64)).filter(|&x| x <= u32::MAX as u64).map(|x| x as u32)
+}
+
 fn id(a: &Value, key: &str) -> Result<u32, String> {
-    a[key].as_u64().filter(|&x| x <= u32::MAX as u64).map(|x| x as u32).ok_or_else(|| format!("physics: {key} must be an id"))
+    whole(&a[key]).ok_or_else(|| format!("physics: {key} must be an id"))
 }
 
 fn opt_id(a: &Value, key: &str) -> Result<Option<u32>, String> {
@@ -191,7 +197,7 @@ impl Bridge {
                 let vertices = floats("vertices")?;
                 let idx = s["indices"].as_array().filter(|a| a.len() % 3 == 0 && a.len() / 3 <= limits::MAX_MESH_TRIANGLES).ok_or_else(|| format!("physics: a trimesh needs indices, three a triangle, at most {} triangles", limits::MAX_MESH_TRIANGLES))?;
                 // (An index past u32 is refused, not cut: 4294967296 is not vertex 0.)
-                let index = |x: &Value| x.as_u64().filter(|&i| i <= u32::MAX as u64).map(|i| i as u32);
+                let index = whole;
                 let indices = idx.chunks(3).map(|t| Some([index(&t[0])?, index(&t[1])?, index(&t[2])?])).collect::<Option<Vec<_>>>().ok_or("physics: trimesh indices must be whole numbers below 2^32")?;
                 Shape::Trimesh { vertices, indices }
             }
@@ -866,10 +872,15 @@ mod tests {
         let before = s.placed;
         assert_eq!(run(&mut b, &mut s, 30), 0);
         assert_eq!(s.placed, before);
-        // An impulse wakes it; it moves again.
-        b.call(&mut s, "impulse", &json!({ "body": 2, "impulse": [0, 300, 0] })).unwrap();
+        // An impulse wakes it; it moves again. (The id as a script engine hands back one it read from an answer: a
+        // whole number written as a double. One that is not whole, or negative, or past 2^32, is no id.)
+        b.call(&mut s, "impulse", &json!({ "body": 2.0, "impulse": [0, 300, 0] })).unwrap();
         assert!(run(&mut b, &mut s, 10) >= 10);
         assert!(s.at[&2].0[1] > 0.5);
+        for bad in [json!(2.5), json!(-2.0), json!(4294967296.0), json!("2"), json!(f64::MAX)] {
+            let e = b.call(&mut s, "impulse", &json!({ "body": bad, "impulse": [0, 300, 0] })).unwrap_err();
+            assert!(e.contains("must be an id"), "{bad}: {e}");
+        }
     }
 
     /// Scene code moves a body's object: a dynamic body is there at once with its velocity; a kinematic one goes there

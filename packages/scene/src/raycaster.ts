@@ -24,9 +24,11 @@ export interface Intersection {
   instanceId?: number;
   /** The surface's normal at the point, in the world (hits of the physics world). */
   normal?: Vector3;
-  /** A hit on one of the engine's own colliders (`engineColliders`): the physics world's ids of the collider and,
-   *  when it is on a body (a voxel body), of the body. */
+  /** A hit on one of the engine's own colliders (`object` is `engineColliders`): the physics world's id of the
+   *  collider. */
   collider?: number;
+  /** On such a hit, the physics world's id of the body the collider is on: there on a voxel body (a part that came
+   *  loose), absent on the voxel level itself, which is fixed and on no body. */
   body?: number;
 }
 
@@ -36,8 +38,10 @@ export const ENGINE_IDS = 2 ** 30;
 
 /**
  * The `object` of a physics hit on one of the engine's own colliders (a voxel level: `@threert/voxel`). It is in no
- * scene; the hit's `collider` and `body` say what was met. A voxel body's id is what `voxelBodies()` lists and
- * `voxelImpulse` takes.
+ * scene and has no `physics` (`hit.object.physics` is null): what was met is in the hit's `collider` and `body`.
+ * - The voxel level: `body` is absent. The level is fixed; `hit.object.physics?.type === "fixed"`, the test for a
+ *   fixed scene object, does not say so here: test `hit.object === engineColliders && hit.body === undefined`.
+ * - A voxel body (a part that came loose): `body` is its id, the one `voxelBodies()` lists and `voxelImpulse` takes.
  */
 export const engineColliders = new Object3D();
 engineColliders.name = "engine colliders";

@@ -812,6 +812,26 @@ mod tests {
         assert!(t.elapsed().as_millis() < 2000, "{} ms", t.elapsed().as_millis());
     }
 
+    /// An id scene code read out of an answer goes back into a call: a ray's hit on a voxel body, its `body` into an
+    /// impulse. (Parsed out of the answer the id is a double in the script engine, and comes back as `1073741837.0`:
+    /// the bridge reads a whole number as the id it is.)
+    #[test]
+    fn an_id_a_script_read_from_a_hit_goes_into_a_call() {
+        let h = ScriptHost::new(GAME).unwrap();
+        // A slab and a bar standing on it, cut loose: 336 voxels of 1,000 kg/m³.
+        let mut v = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        v.edit(&mut h.world.borrow_mut(), &mut h.physics.borrow_mut(), &crate::voxel::EditOp::parse(&serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] })).unwrap()).unwrap();
+        assert_eq!(v.bodies(), 1);
+        *h.voxels.borrow_mut() = v;
+        let up: f64 = h.call(100, |ctx| ctx.eval(r#"
+            const hit = JSON.parse(__engine.physics("ray", { origin: [3.05, 1.55, 10], direction: [0, 0, -1], max: 20 }));
+            if (hit.body !== JSON.parse(__engine.voxelBodies())[0].body) throw new Error("the hit is not the body: " + JSON.stringify(hit));
+            __engine.physics("impulse", { body: hit.body, impulse: [0, 500, 0] });
+            JSON.parse(__engine.physics("state", { body: hit.body })).linvel[1]
+        "#)).unwrap();
+        assert!((up - 500.0 / 336.0).abs() < 0.05, "{up} m/s");
+    }
+
     #[test]
     fn budgets_and_errors() {
         let h = ScriptHost::new(GAME).unwrap();

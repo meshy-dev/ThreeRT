@@ -97,3 +97,36 @@ test("voxel bodies: the list is the engine's, an impulse goes to the physics wor
     g.__engine = before;
   }
 });
+
+test("a voxel level that collides is what the scene's physics queries ask, with no scene object that has physics: a ray's hit on a voxel body goes into voxelImpulse", async () => {
+  const { voxelLevel, voxelImpulse } = await import("../src/native.ts");
+  const { engineColliders, Raycaster, Vector3 } = await import("@threert/scene");
+  const calls: [string, object][] = [];
+  const [level, part] = [2 ** 30 + 1, 2 ** 30 + 7];
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = {
+    voxelLevel: () => {},
+    physics: (op: string, args: { direction?: number[] }) => {
+      calls.push([op, args]);
+      if (op !== "ray") return "null";
+      // Down: the level (a fixed collider, on no body). Along z: a voxel body, then the level behind it.
+      const down = { collider: level, body: null, distance: 4.6, point: [1, 0.4, 1], normal: [0, 1, 0] };
+      return JSON.stringify(args.direction![1] < 0 ? [down] : [{ collider: part + 1, body: part, distance: 4.8, point: [0.05, 2.05, 0.2], normal: [0, 0, 1] }, { ...down, distance: 9 }]);
+    },
+  };
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const [ground] = new Raycaster(new Vector3(1, 5, 1), new Vector3(0, -1, 0)).intersectPhysics();
+    // The level: `engineColliders` for its object (no scene object: `physics` is null), a collider, no body.
+    assert.equal(ground.object, engineColliders);
+    assert.equal(ground.object.physics, null);
+    assert.deepEqual([ground.collider, ground.body, ground.distance], [level, undefined, 4.6]);
+    const hits = new Raycaster(new Vector3(0.05, 2.05, 5), new Vector3(0, 0, -1)).intersectPhysics();
+    assert.deepEqual(hits.map((h) => [h.object === engineColliders, h.collider, h.body]), [[true, part + 1, part], [true, level, undefined]]);
+    voxelImpulse(hits[0].body!, [1500, 300, 0]);
+    assert.deepEqual(calls.at(-1), ["impulse", { body: part, impulse: [1500, 300, 0] }]);
+  } finally {
+    g.__engine = before;
+  }
+});

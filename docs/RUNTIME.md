@@ -219,8 +219,13 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   one (`body`, `collider` and `remove` refuse those ids), and can name one in every other call; `voxelBodies()`
   (`packages/voxel`) lists the bodies with their ids, and `voxelImpulse(body, impulse, point?)` pushes one. A hit of
   `Raycaster.intersectPhysics` or of a `Shapecaster` on one of them has `engineColliders` for its `object` (they
-  are no scene object's) and carries `collider` and, on a body, `body`: the id those calls take. (A voxel body as
-  an object with `.physics` is ROADMAP § 6 step 10's.) A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  are no scene object's) and carries `collider` and, on a body, `body`: the id those calls take. **On the voxel
+  level `hit.object.physics` is null and there is no `body`; on a voxel body there is a `body`.** So hello world's
+  test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
+  `hit.object === engineColliders && hit.body === undefined`. A level that collides is in the physics world, and
+  the queries ask it, whether or not any scene object has `physics` (`tests/render/voxel-cut-body-push.ts`: a
+  ray's hit on a body, its `body` into `voxelImpulse`, the part thrown). (A voxel body as an object with `.physics`
+  is ROADMAP § 6 step 10's.) A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
   cells, each within 2^20 cells and 100 km of the shape's origin.
   - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
     (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it
