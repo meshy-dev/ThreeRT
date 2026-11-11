@@ -6,11 +6,11 @@
   </defs>
   <rect width="512" height="512" rx="114" fill="url(#bg)"/>
   <rect x="1.5" y="1.5" width="509" height="509" rx="112.5" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="3"/>
-  <!-- The mark, placed by where its light sits, not by its box. The triangle is tilted, so the box of the 64-unit
-       drawing is centred while the triangle is not: at translate(96 96) its centroid, and the luminance-weighted
-       centre of the lit drawing, sat 22 px up and to the left of the plate's centre. Here that centre is the plate's
-       (256, 256) to within a pixel, and the three corners are the same distance from it. -->
-  <g transform="translate(117.9 117.4) scale(5)">
+  <!-- The mark, placed by eye. The triangle is tilted, so neither of the two computed places looks centred: with the
+       64-unit drawing's box on the plate's centre (translate(96 96)) the mark sits up and to the left, and with the
+       luminance-weighted centre of the lit drawing there (translate(117.9 117.4)) it reads low and to the right.
+       This is the place chosen by looking: 11 px left and 8 px up of the second, half way between the two. -->
+  <g transform="translate(106.9 109.4) scale(5)">
     <path d="M11.59 32 L32 12.36 L38.81 39.86 Z" fill="none" stroke="#FFAD4E" stroke-width="6" stroke-linejoin="round" opacity=".5" filter="url(#glow)"/>
     <path d="M18.39 59.5 L4.78 4.5 L59.22 20.21 Z" fill="none" stroke="#ECE8E1" stroke-width="3" stroke-linejoin="round"/>
     <path d="M11.59 32 L32 12.36 L38.81 39.86 Z" fill="url(#ray)" fill-opacity=".16" stroke="url(#ray)" stroke-width="3" stroke-linejoin="round"/>
