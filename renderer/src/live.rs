@@ -961,7 +961,8 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
     sc.height = h;
     // Emitters its edits add get a light-tree subtree of their own (ROADMAP § 6 step 4; THREERT_LT_DYNAMIC=0: by power
     // share, the A/B).
-    sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt) && std::env::var("THREERT_LT_DYNAMIC").map_or(true, |v| v != "0");
+    // (Software traversal with units edits in place as hardware traversal does: `units_wanted`.)
+    sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt || crate::units_wanted(g.hwrt, &sc)) && std::env::var("THREERT_LT_DYNAMIC").map_or(true, |v| v != "0");
     let mut timings = vec![("build_ms".to_string(), t0.elapsed().as_secs_f64() * 1000.0)];
     let mut prep = prepare(g, &mut sc, &mut timings);
     let mut tables = tables::Tables::new(&sc, std::mem::take(&mut prep.emitter_tris), prep.light_tree.take());
@@ -1964,10 +1965,11 @@ impl LiveCore {
         self.sc.exposure_settings.ae2 = [e, 0.0, 0.0, 0.0];
     }
 
-    /// Moves movable instances (hardware RT): their kernel records (the old transform kept as the previous frame's, for
-    /// motion vectors), their object entries' pivots and their TLAS transforms; with `build_tlas` it rebuilds the TLAS
-    /// (otherwise the dynamic rebuild that follows does). No triangles change. False without hardware RT (the caller
-    /// rebuilds: software traversal flattens instances).
+    /// Moves movable instances: their kernel records (the old transform kept as the previous frame's, for motion
+    /// vectors), their object entries' pivots and their TLAS transforms (hardware traversal; with `build_tlas` it
+    /// rebuilds the TLAS, otherwise the dynamic rebuild that follows does) or their units and the top tree over them
+    /// (software traversal, units.rs). No triangles change. False when it cannot (software traversal without units,
+    /// or an instance that is no unit; a top tree that cannot be made): the caller rebuilds.
     fn move_instances(&mut self, world: &World, placed: &[(u32, u32)], build_tlas: bool) -> bool {
         // (Hardware traversal's TLAS instances, or software traversal's units; neither: the caller rebuilds.)
         let Some(mut top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return false };
@@ -1986,6 +1988,11 @@ impl LiveCore {
                 Some(Picked::Mesh(inst)) => inst,
                 _ => &mut self.sc.instances[i as usize],
             };
+            // (Software traversal: an instance of a mesh that deforms is no unit; its triangles are among the still
+            // scene's, in the world, and a rebuild moves them.)
+            if !top.has_mesh(inst.mesh) {
+                return false;
+            }
             let old = self.sc.gpu_instances[i as usize];
             inst.world = w;
             let mut r = top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, inst.cast_shadow);
@@ -2321,6 +2328,9 @@ impl LiveCore {
                     (p.gpu(old.info[0]), p.entry(n.power, t.custom(i, n.custom), t.color(i)))
                 } else {
                     let inst = &mut sc.instances[first + i];
+                    if !top.has_mesh(inst.mesh) {
+                        return Err("an instanced mesh that is no unit (software traversal)".into());
+                    }
                     (inst.world, inst.hidden) = (wm, hidden);
                     let (lo, hi) = sc.meshes[inst.mesh as usize].placed_bounds(wm);
                     (top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, n.cast_shadow), scene::object_row(wm.transform_point3(glam::Vec3::ZERO), n.power, hi - lo, t.custom(i, n.custom), t.color(i)))
@@ -2829,7 +2839,12 @@ impl LiveCore {
         let features = up.kernel.features;
         let grow = Grow { g: &self.g, ok: up.particles.is_none() && up.gpu_particles.is_none() };
         // (Hardware traversal's TLAS and BLASes, or software traversal's units: `gpu::Top`.)
-        let Some(mut top) = gpu::Top::of(&mut up.accel, &mut up.units) else { return Err("software traversal".into()) };
+        let Some(mut top) = gpu::Top::of(&mut up.accel, &mut up.units) else {
+            // Software traversal without units. With units on, that is a scene without an instance yet: the first
+            // one brings the unit walk into the kernel (F_UNITS), as hardware traversal's first brings F_INST.
+            let first = crate::units_on() && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { own_blas: true, .. } | Kind::Instanced { procedural: false, .. })));
+            return Err(if first { "the scene's first instanced mesh (kernel feature)" } else { "software traversal" }.into());
+        };
         // The objects to place again: those added, and those whose geometry was replaced.
         let mut todo: std::collections::BTreeSet<u32> = ch.added.clone();
         if !ch.geometries.is_empty() {
@@ -3141,6 +3156,9 @@ impl LiveCore {
                                     // (Its tree again: the records of the objects that draw it, all placed again by
                                     // this edit, take the root it has now.)
                                     if let (gpu::Top::Sw(units), Some(tree)) = (&mut top, &tree) {
+                                        if let Some(old) = units.drop_tree(k) {
+                                            g.fill_tree(&up.bg_parts.nodes, old);
+                                        }
                                         let root = units.add_tree(k, tree).ok_or("edit room: tree nodes")?;
                                         g.write_tree(&up.bg_parts.nodes, root, tree);
                                     }
@@ -3175,6 +3193,9 @@ impl LiveCore {
                                         gpu::Top::Sw(units) => {
                                             let k = dead.unwrap_or(meshes.len() as u32);
                                             let tree = tree.as_ref().expect("software traversal made the tree");
+                                            if let Some(old) = units.drop_tree(k) {
+                                                g.fill_tree(&up.bg_parts.nodes, old);
+                                            }
                                             let Some(root) = units.add_tree(k, tree) else {
                                                 edit.dead_meshes.extend(dead);
                                                 edit.tris.give(first, t.len());
@@ -3388,7 +3409,9 @@ impl LiveCore {
             // are now (one that cannot be made: the scene is rebuilt).
             gpu::Top::Sw(units) => {
                 for &k in &edit.dead_meshes {
-                    units.drop_tree(k);
+                    if let Some(old) = units.drop_tree(k) {
+                        g.fill_tree(&up.bg_parts.nodes, old);
+                    }
                 }
                 g.retop(units, &up.bg_parts.nodes)?;
             }
@@ -3692,7 +3715,7 @@ impl LiveCore {
             let mut p = self.sc.base;
             // Software traversal's units as edits left them: the top tree's root and how many it holds (trace_units.wgsl).
             if let Some(u) = &self.sc.up.units {
-                (p.motion[1], p.motion[2]) = (f32::from_bits(u.layout.top_first), f32::from_bits(u.count));
+                (p.motion[2], p.motion[3]) = (f32::from_bits(u.layout.top_first), f32::from_bits(u.count));
             }
             if self.raster.is_some() && !self.sc.instanced {
                 p.raster = [1.0, jitter.0, jitter.1, 0.0];

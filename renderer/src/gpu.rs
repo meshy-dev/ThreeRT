@@ -595,7 +595,7 @@ impl<'a> Top<'a> {
     pub fn place(&mut self, slot: usize, k: u32, (lo, hi): (glam::Vec3A, glam::Vec3A), world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
         match self {
             Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), custom, instance_mask(cast_shadow, hidden))),
-            Top::Sw(u) => u.set(slot, u.root(k).map(|_| crate::units::Unit { world, lo, hi, hidden })),
+            Top::Sw(u) => u.set(slot, u.unit(k, world, (lo, hi), hidden)),
         }
     }
 
@@ -628,14 +628,7 @@ impl<'a> Top<'a> {
                     }
                 }
             }
-            Top::Sw(u) => {
-                if let Some(t) = u.slots.get_mut(slot).and_then(|t| t.as_mut()) {
-                    t.world = world;
-                    if let Some((_, hidden)) = shown {
-                        t.hidden = hidden;
-                    }
-                }
-            }
+            Top::Sw(u) => u.moved(slot, world, shown.map(|(_, hidden)| hidden)),
         }
     }
 
@@ -2657,6 +2650,13 @@ impl Gpu {
     /// A mesh tree's nodes into the node buffer at its root (`Units::add_tree` placed it).
     pub fn write_tree(&self, nodes: &wgpu::Buffer, root: u32, tree: &crate::units::MeshTree) {
         self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&tree.nodes));
+    }
+
+    /// A freed mesh tree's nodes (`Units::drop_tree`: its root and length) are room again: leaves that end a walk
+    /// (`units::FILL`), as the room was laid out. (No unit names them: `Units::top` holds that. This is so that the
+    /// room never holds a part of an old tree beside a part of a new one.)
+    pub fn fill_tree(&self, nodes: &wgpu::Buffer, (root, len): (u32, u32)) {
+        self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&vec![crate::units::FILL; len as usize]));
     }
 
     pub fn rebuild_tlas(&self, accel: &Accel, e: &mut wgpu::CommandEncoder) {

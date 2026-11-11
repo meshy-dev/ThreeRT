@@ -5,16 +5,17 @@
 // A unit is a model instance (`instances`, as hardware traversal's): its mesh's triangles in model space in
 // `tri_verts`, from the record's first triangle; its mesh's tree in `nodes`, from the root in the record's `n0.w`
 // (child indices count from that root, a leaf's triangles from the mesh's first). `n1.w`: the unit casts shadows.
-// The top tree, over the units' world boxes, starts at node `P.motion.y` (bits; child indices count from it); each of
-// its leaves is one unit, `left_or_first` its record. `P.motion.z` (bits): how many units there are.
+// The top tree, over the units' world boxes, starts at node `P.motion.z` (bits; child indices count from it); each of
+// its leaves is one unit, `left_or_first` its record. `P.motion.w` (bits): how many units there are. (`P.motion.y`
+// is `render --signals`'.)
 //
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. Both levels share one
 // stack: a unit's walk pushes above what the top walk has pending and stops when it is back down to it. Every index
 // read here was checked on the CPU when it was written (units.rs `check_mesh`, `check_top`).
 fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
-    if (bitcast<u32>(P.motion.z) == 0u) { return hit; }
-    let top = bitcast<u32>(P.motion.y);
+    if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
+    let top = bitcast<u32>(P.motion.z);
     let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
     var stack: array<u32, 48>;
     var sp = 0u;

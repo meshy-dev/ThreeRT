@@ -296,14 +296,18 @@ impl Layout {
     }
 }
 
-/// A unit as the top tree sees it: where its mesh's model bounds are in the world. Hidden: it keeps its place (an
-/// instanced object's instance that is not drawn now) and is in no top tree.
+/// A unit as the top tree sees it: where its mesh's model bounds are in the world, and the tree its record names
+/// (its mesh, and the root the record was last written with: `Units::top` refuses a unit whose record names a tree
+/// that is no longer there). Hidden: it keeps its place (an instanced object's instance that is not drawn now) and
+/// is in no top tree.
 #[derive(Clone, Copy, Debug)]
 pub struct Unit {
     pub world: Mat4,
     pub lo: Vec3A,
     pub hi: Vec3A,
     pub hidden: bool,
+    pub mesh: u32,
+    pub root: u32,
 }
 
 /// Software traversal's units of a scene (what the TLAS and the mesh BLASes are to hardware traversal): where the
@@ -316,14 +320,32 @@ pub struct Units {
     pub trees: Vec<Option<(u32, u32)>>,
     /// By kernel record: the unit there, if the record is one's.
     pub slots: Vec<Option<Unit>>,
-    /// The units in the top tree as last built (`top`): the kernel's `P.motion.z`.
+    /// The units in the top tree as last built (`top`): the kernel's `P.motion.w`.
     pub count: u32,
+    /// The records the kernel's instance table holds (the scene's and its room's): no unit is past them.
+    pub records: usize,
 }
 
 impl Units {
     /// Mesh `k`'s tree's root.
     pub fn root(&self, k: u32) -> Option<u32> {
         self.trees.get(k as usize).copied().flatten().map(|t| t.0)
+    }
+
+    /// A unit of mesh `k` (model bounds `lo..hi`) placed by `world`, whose record names the tree mesh `k` has now.
+    /// None: the mesh has no tree (it is no unit's).
+    pub fn unit(&self, k: u32, world: Mat4, (lo, hi): (Vec3A, Vec3A), hidden: bool) -> Option<Unit> {
+        self.root(k).map(|root| Unit { world, lo, hi, hidden, mesh: k, root })
+    }
+
+    /// The unit at `record` moved to `world` (with `hidden`: shown or not), its record written again: it names its
+    /// mesh's tree as it is now.
+    pub fn moved(&mut self, record: usize, world: Mat4, hidden: Option<bool>) {
+        let Some(mut u) = self.slots.get(record).copied().flatten() else { return };
+        u.world = world;
+        u.hidden = hidden.unwrap_or(u.hidden);
+        u.root = self.root(u.mesh).unwrap_or(u.root);
+        self.slots[record] = Some(u);
     }
 
     /// The unit at `record` (None: none there now). Records past the slots there are make them.
@@ -357,9 +379,20 @@ impl Units {
     }
 
     /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
-    /// unit: no nodes (the kernel does not walk a top tree then). Err: more units than the range holds, or a unit
-    /// whose box is not finite; nothing is changed then.
+    /// unit: no nodes (the kernel does not walk a top tree then). Err: more units than the range holds, a unit whose
+    /// box is not finite, one past the kernel's records, or one whose record names a tree that is not its mesh's now
+    /// (freed, or placed elsewhere since the record was written: the kernel would walk whatever is there); nothing
+    /// is changed then.
     pub fn top(&mut self) -> Result<Vec<GpuNode>, String> {
+        for (r, u) in self.slots.iter().enumerate() {
+            let Some(u) = u.as_ref().filter(|u| !u.hidden) else { continue };
+            if r >= self.records {
+                return Err(format!("the unit at record {r} is past the kernel's {} records", self.records));
+            }
+            if self.root(u.mesh) != Some(u.root) {
+                return Err(format!("the unit at record {r} names a tree at node {} that is not mesh {}'s now", u.root, u.mesh));
+            }
+        }
         let boxes: Vec<UnitBox> = self.slots.iter().enumerate().filter_map(|(r, u)| u.as_ref().filter(|u| !u.hidden).map(|u| UnitBox::new(r as u32, u.world, u.lo, u.hi))).collect();
         if boxes.len() > self.layout.max_units() {
             return Err(format!("{} units: more than the top tree's range holds ({})", boxes.len(), self.layout.max_units()));
@@ -395,7 +428,7 @@ pub(crate) mod cpu {
         pub(crate) nodes: &'a [GpuNode],
         pub(crate) tri_verts: &'a [[f32; 4]],
         pub(crate) instances: &'a [GpuInstance],
-        /// `P.motion.y`, `P.motion.z`.
+        /// `P.motion.z`, `P.motion.w`.
         pub(crate) top: u32,
         pub(crate) units: u32,
         pub(crate) steps: std::cell::Cell<u64>,
@@ -666,8 +699,8 @@ mod tests {
             "trace_units.wgsl",
             &[
                 "fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {",
-                "if (bitcast<u32>(P.motion.z) == 0u) { return hit; }",
-                "let top = bitcast<u32>(P.motion.y);",
+                "if (bitcast<u32>(P.motion.w) == 0u) { return hit; }",
+                "let top = bitcast<u32>(P.motion.z);",
                 "var stack: array<u32, 48>;",
                 "var node = top;",
                 "let n = nodes[node];",
@@ -1119,5 +1152,77 @@ mod tests {
         // No unit at all: a top range of one node, no mesh range.
         let none = Layout::new(7, 0, 0);
         assert_eq!((none.nodes(), none.max_units()), (1, 1));
+    }
+
+    /// `Units` (what live.rs's edits keep): a unit names the tree its mesh has when its record is written; a top tree
+    /// is refused, and nothing changed, while a shown unit names a tree that was freed or placed again elsewhere, or
+    /// sits past the kernel's records; writing the record again (`moved`), hiding it or clearing it mends that.
+    #[test]
+    fn the_units_refuse_a_record_that_names_a_tree_that_is_gone() {
+        let mut rng = Rng(11);
+        let (small, large) = (mesh_tree(&rng.tris(40, 2.0, 0.3)).unwrap(), mesh_tree(&rng.tris(400, 2.0, 0.3)).unwrap());
+        let (ns, nl) = (small.nodes.len(), large.nodes.len());
+        assert!(nl > ns);
+        let bounds = (Vec3A::splat(-1.5), Vec3A::splat(1.5));
+        let mut u = Units { layout: Layout::new(10, ns + nl, 4), trees: vec![], slots: vec![], count: 0, records: 4 };
+        // A mesh without a tree is no unit's.
+        assert!(u.unit(0, Mat4::IDENTITY, bounds, false).is_none());
+        assert_eq!(u.add_tree(0, &small), Some(10));
+        assert_eq!(u.add_tree(1, &large), Some(10 + ns as u32));
+        assert_eq!(u.layout.free_nodes(), 0);
+        let (a, b) = (u.unit(0, Mat4::IDENTITY, bounds, false).unwrap(), u.unit(1, Mat4::from_translation(glam::Vec3::X * 5.0), bounds, false).unwrap());
+        assert_eq!((a.root, b.root), (10, 10 + ns as u32));
+        u.set(0, Some(a));
+        u.set(2, Some(b));
+        // (Clearing a record past the slots makes none.)
+        u.set(9, None);
+        assert_eq!(u.slots.len(), 3);
+        let top = u.top().unwrap();
+        assert_eq!((top.len(), u.count), (3, 2));
+        check_top(&top, |r| u.slots.get(r as usize).is_some_and(|s| s.is_some())).unwrap();
+
+        // Mesh 0's tree is freed: its unit's record still names node 10.
+        assert_eq!(u.drop_tree(0), Some((10, ns as u32)));
+        assert_eq!(u.drop_tree(0), None);
+        let e = u.top().unwrap_err();
+        assert!(e.contains("record 0") && e.contains("mesh 0"), "{e}");
+        assert_eq!(u.count, 2, "a refused top tree changes nothing");
+        // Hidden, it is in no top tree and nothing reads its record's root.
+        u.moved(0, Mat4::IDENTITY, Some(true));
+        assert_eq!((u.top().unwrap().len(), u.count), (1, 1));
+        u.moved(0, Mat4::IDENTITY, Some(false));
+        assert!(u.top().is_err());
+
+        // Mesh 1's tree is made again: its own nodes are given back first, one run with mesh 0's, and the new tree
+        // starts where that run does. Its unit's record names the old root until it is written again.
+        u.set(0, None);
+        assert_eq!(u.add_tree(1, &large), Some(10));
+        assert_eq!(u.layout.free_nodes(), ns);
+        assert!(u.top().is_err());
+        assert_eq!(u.add_tree(1, &small), Some(10));
+        let e = u.top().unwrap_err();
+        assert!(e.contains("record 2") && e.contains("mesh 1"), "{e}");
+        u.moved(2, Mat4::from_translation(glam::Vec3::Y), None);
+        assert_eq!(u.slots[2].unwrap().root, 10);
+        assert_eq!((u.top().unwrap().len(), u.count), (1, 1));
+        assert_eq!(u.layout.free_nodes(), nl);
+
+        // A unit past the kernel's records is refused; hidden or cleared, it is not there.
+        u.set(4, u.unit(1, Mat4::IDENTITY, bounds, false));
+        let e = u.top().unwrap_err();
+        assert!(e.contains("record 4") && e.contains("4 records"), "{e}");
+        u.set(4, None);
+        // More units than the top tree's range holds.
+        u.records = 16;
+        for r in 3..8 {
+            u.set(r, u.unit(1, Mat4::from_translation(glam::Vec3::Z * r as f32), bounds, false));
+        }
+        assert!(u.top().unwrap_err().contains("more than the top tree's range holds"));
+        assert_eq!(u.count, 1);
+        // No unit shown: no nodes, a count of 0 (the kernel walks no top tree).
+        for r in 0..8 {
+            u.set(r, None);
+        }
+        assert_eq!((u.top().unwrap().len(), u.count), (0, 0));
     }
 }

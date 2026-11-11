@@ -352,8 +352,18 @@ pub fn fog_params(fog: Option<&desc::Fog>) -> [[f32; 4]; 4] {
 }
 
 pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
-    // (THREERT_UNITS=0: software traversal with every instance flattened, as before units: the A/B.)
-    prepare_as(g.hwrt, !std::env::var("THREERT_UNITS").is_ok_and(|v| v == "0"), sc, timings)
+    prepare_as(g.hwrt, units_on(), sc, timings)
+}
+
+/// THREERT_UNITS=0: software traversal with every instance flattened, as before units (the A/B).
+pub(crate) fn units_on() -> bool {
+    !std::env::var("THREERT_UNITS").is_ok_and(|v| v == "0")
+}
+
+/// Whether `prepare` will keep the scene's instances as units (software traversal, and it has instances), asked
+/// before it runs (live.rs `load_scene`: the light tree's part for emitters edits add).
+pub fn units_wanted(hwrt: bool, sc: &scene::Scene) -> bool {
+    !hwrt && units_on() && !sc.instances.is_empty()
 }
 
 /// `prepare` for a traversal: hardware ray queries, or software traversal with units (units.rs) or without.
@@ -421,7 +431,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     if let Some(trees) = trees {
         let room = gpu::EditRoom::for_scene(sc, tri_verts.len() / 3, sc.instances.len() + sc.procs.len(), true);
         let used: usize = trees.iter().flatten().map(|t| t.nodes.len()).sum();
-        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0 };
+        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0, records: sc.instances.len() + sc.procs.len() + room.records };
         let still = nodes.len();
         nodes.resize(still + u.layout.nodes(), units::FILL);
         for (k, t) in trees.iter().enumerate() {
@@ -432,9 +442,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         }
         for (r, i) in sc.instances.iter().enumerate() {
             let m = sc.meshes[i.mesh as usize];
-            if let Some(root) = u.root(i.mesh) {
-                sc.gpu_instances[r] = units::unit_record(sc.gpu_instances[r], root, i.cast_shadow);
-                u.slots[r] = Some(units::Unit { world: i.world, lo: m.lo, hi: m.hi, hidden: i.hidden });
+            if let Some(unit) = u.unit(i.mesh, i.world, (m.lo, m.hi), i.hidden) {
+                sc.gpu_instances[r] = units::unit_record(sc.gpu_instances[r], unit.root, i.cast_shadow);
+                u.slots[r] = Some(unit);
             }
         }
         // (A scene whose units the top tree cannot hold, or with one that is nowhere: none is drawn, and it says so.)
@@ -662,8 +672,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         vol2: fog[3],
         raster: [0.0; 4],
         cache: [0.0; 4],
-        // (y, z: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl.)
-        motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count), 0.0]),
+        // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
+        // `render --signals`'.)
+        motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, 0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count)]),
         prev_pos: [0.0; 4],
         prev_fwd: [0.0; 4],
         prev_right: [0.0; 4],
@@ -1071,12 +1082,12 @@ mod units_tests {
         // one is hidden: eight units in the top tree.
         assert_eq!((su.instances.len(), u.count), (9, 8), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
         assert!(gpu::instance_features(&su) & gpu::F_UNITS != 0 && gpu::instance_features(&sf) & gpu::F_UNITS == 0);
-        assert_eq!((pu.params.motion[1].to_bits(), pu.params.motion[2].to_bits()), (u.layout.top_first, 8));
+        assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits()), (u.layout.top_first, 8));
         // The flattened scene holds every instance's triangles; the scene with units holds each mesh's once.
         assert!(pf.tri_verts.len() > pu.tri_verts.len());
         assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
         let kernel = |p: &Prepared, sc: &scene::Scene| {
-            let (top, units) = (p.params.motion[1].to_bits(), p.params.motion[2].to_bits());
+            let (top, units) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
             (p.nodes.clone(), p.tri_verts.clone(), sc.gpu_instances.clone(), top, units)
         };
         let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
