@@ -10,14 +10,15 @@
 // is `render --signals`'.)
 //
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. Both levels share one
-// stack: a unit's walk pushes above what the top walk has pending and stops when it is back down to it. Every index
-// read here was checked on the CPU when it was written (units.rs `check_mesh`, `check_top`).
+// stack, this function's own: a unit's walk pushes above what the top walk has pending and stops when it is back down
+// to it. 64 entries: 18 for the top tree, 46 for a mesh's (units.rs `STACK`). Every index read here was checked on the
+// CPU when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
 fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
     if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
     let top = bitcast<u32>(P.motion.z);
     let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
-    var stack: array<u32, 48>;
+    var stack: array<u32, 64>;
     var sp = 0u;
     var node = top;
     loop {
@@ -73,7 +74,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
                         let tmp = ul; ul = ur; ur = tmp;
                     }
                     m = mnear;
-                    if (ur != INF && sp < 48u) {
+                    if (ur != INF && sp < 64u) {
                         stack[sp] = mfar;
                         sp++;
                     }
@@ -104,7 +105,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
             let tmp = tl; tl = tr; tr = tmp;
         }
         node = near;
-        if (tr != INF && sp < 48u) {
+        if (tr != INF && sp < 64u) {
             stack[sp] = far;
             sp++;
         }

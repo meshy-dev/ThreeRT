@@ -11,19 +11,23 @@
 //! triangles from its mesh's first triangle. The top tree's child indices count from its root, and each of its leaves
 //! is one unit: `left_or_first` the unit's record, `count` 1. It is rebuilt whole whenever a unit changes.
 //!
-//! Depths: both levels share the kernel's stack of `STACK` entries (a push past it is dropped: geometry missed, never
-//! a hang). A walk's stack is never deeper than its tree, so the top tree is held to `TOP_DEPTH` and a mesh tree to
-//! `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit.
+//! Depths: both levels share the unit walk's stack of `STACK` entries (a push past it is dropped: geometry missed,
+//! never a hang). A walk's stack is never deeper than its tree, so the top tree is held to `TOP_DEPTH` and a mesh tree
+//! to `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit. Binned
+//! SAH is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced
+//! one's 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk has 48 entries for its one tree.
 
 use crate::bvh::{self, GpuNode};
 use crate::scene::GpuInstance;
 use glam::{Mat4, Vec3A};
 
-/// The kernel's traversal stack (pathtrace.wgsl `trace`, trace_units.wgsl): entries shared by both levels.
-pub const STACK: usize = 48;
+/// The unit walk's stack (trace_units.wgsl; its own, not the still walk's): entries shared by both levels.
+pub const STACK: usize = 64;
+/// The still walk's stack (pathtrace.wgsl `trace`), as it was before there were units.
+pub const STILL_STACK: usize = 48;
 /// The deepest top tree (levels below the root): 2^18 units by median splits.
 pub const TOP_DEPTH: usize = 18;
-/// The deepest mesh tree: 2^30 leaves by median splits; SAH trees deeper than this are rebuilt that way.
+/// The deepest mesh tree (46): what the stack has left. SAH trees deeper than this are rebuilt by median splits.
 pub const MESH_DEPTH: usize = STACK - TOP_DEPTH;
 /// The most units a top tree holds.
 pub const MAX_UNITS: usize = 1 << TOP_DEPTH;
@@ -515,7 +519,7 @@ pub(crate) mod cpu {
         pub(crate) fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
             let mut hit = Hit { t: tmax_in, tri: 0xffff_ffff, inst: NO_INST };
             let inv_d = Self::inv(d);
-            let (mut stack, mut sp, mut node) = ([0u32; STACK], 0usize, 0u32);
+            let (mut stack, mut sp, mut node) = ([0u32; STILL_STACK], 0usize, 0u32);
             loop {
                 self.step()?;
                 let n = self.node(node)?;
@@ -561,7 +565,7 @@ pub(crate) mod cpu {
                     std::mem::swap(&mut tl, &mut tr);
                 }
                 node = near;
-                if tr != INF && sp < STACK {
+                if tr != INF && sp < STILL_STACK {
                     stack[sp] = far;
                     sp += 1;
                 }
@@ -701,7 +705,7 @@ mod tests {
                 "fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {",
                 "if (bitcast<u32>(P.motion.w) == 0u) { return hit; }",
                 "let top = bitcast<u32>(P.motion.z);",
-                "var stack: array<u32, 48>;",
+                "var stack: array<u32, 64>;",
                 "var node = top;",
                 "let n = nodes[node];",
                 "if (n.count > 0u) {",
@@ -733,7 +737,7 @@ mod tests {
                 "if (sp == base) { break; }",
                 "if (ur < ul) {",
                 "m = mnear;",
-                "if (ur != INF && sp < 48u) {",
+                "if (ur != INF && sp < 64u) {",
                 "stack[sp] = mfar;",
                 "if (sp == 0u) { break; }",
                 "node = stack[sp];",
@@ -745,7 +749,7 @@ mod tests {
                 "if (sp == 0u) { break; }",
                 "if (tr < tl) {",
                 "node = near;",
-                "if (tr != INF && sp < 48u) {",
+                "if (tr != INF && sp < 64u) {",
                 "stack[sp] = far;",
                 "return hit;",
             ],
@@ -773,15 +777,17 @@ mod tests {
                 "let t = dot(e2, qv) * inv;",
                 "if (t <= 0.0 || t >= tmax) { return vec3<f32>(INF, 0.0, 0.0); }",
                 "fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {",
+                "var stack: array<u32, 48>;",
                 "if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }",
                 "let r = intersect_tri(o, d, ti, hit.t);",
                 "hit = Hit(r.x, ti, r.y, r.z, NO_INST);",
                 "if (mode != TRACE_CLOSEST) { return hit; }",
+                "if (tr != INF && sp < 48u) {",
                 "if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }",
             ],
         );
         // What the stack and the record's words are here is what they are there.
-        assert_eq!(STACK, 48);
+        assert_eq!((STACK, STILL_STACK), (64, 48));
         assert!(TOP_DEPTH + MESH_DEPTH <= STACK);
     }
 

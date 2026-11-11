@@ -549,12 +549,16 @@ that is not its mesh's tree now (freed, or placed again elsewhere), or a unit si
 not yet used, and a tree given back, hold leaves that end (`units::FILL`), not zeros (zeros are an interior node
 whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
 
-**The stack.** Both levels share one stack of 48 entries (the still walk's own, as before); a walk's stack is never
-deeper than its tree, and a unit's walk pushes above what the top walk has pending. The top tree is built by median
-splits, each halving: 18 levels hold 2^18 units, the most a top tree is given. That leaves 30 for a mesh tree: a
-binned-SAH tree deeper than that (a degenerate mesh) is built again by median splits, whose depth is
-log2(triangles / 4). A push past the stack is dropped (geometry missed, never a hang), and the builders' bounds mean
-it is not reached; `the_builders_keep_their_depths` holds them to it.
+**The stack.** Both levels share one stack of 64 entries, the unit walk's own (the still walk keeps its 48, in
+`pathtrace.wgsl`, untouched); a walk's stack is never deeper than its tree, and a unit's walk pushes above what the
+top walk has pending. The top tree is built by median splits, each halving: 18 levels hold 2^18 units, the most a
+top tree is given (a scene with more instances is flattened, as before). That leaves 46 for a mesh tree. Binned SAH
+is not balanced: measured on the CPU, its trees over the catalog's models are 17 deep for 37 k triangles, 20 for
+502 k, 22 for a 31 k-triangle building of Kabukichō, and 42 for the 5.86 M triangles of `zero-day` (a balanced tree
+there is 21), which as part of a flattened scene fitted the still walk's 48. A mesh tree deeper than 46 is built
+again by median splits, whose depth is log2(triangles / 4): a worse tree to walk, never a wrong one. A push past the
+stack is dropped (geometry missed, never a hang), and the builders' bounds mean it is not reached;
+`the_builders_keep_their_depths` holds them to it.
 
 **Checked on the CPU** (`units.rs`, `lib.rs` `units_tests`; no GPU):
 - the kernel's two walks transcribed line for line (a test compares the transcription's source lines with the
