@@ -15,7 +15,7 @@ use serde_json::Value;
 use web_time::Instant;
 
 /// A frame's physics, for the frame log: the ticks stepped and their time, the time to place the driven objects, the
-/// bodies and how many of them moved.
+/// bodies and how many of them moved; and the times the step's wait kicked the physics' threads (`in_pool`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
     pub ticks: u32,
@@ -23,6 +23,7 @@ pub struct Stats {
     pub sync_ms: f64,
     pub bodies: usize,
     pub moved: usize,
+    pub kicks: u32,
 }
 
 impl Scene for World {
@@ -111,7 +112,9 @@ impl PhysicsWorld {
             }
         };
         #[cfg(not(target_arch = "wasm32"))]
-        pool().install(tick);
+        {
+            self.stats.kicks += in_pool(tick);
+        }
         #[cfg(target_arch = "wasm32")]
         tick();
         let t1 = Instant::now();
@@ -171,6 +174,67 @@ fn pool() -> &'static rayon::ThreadPool {
         let threads = threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores());
         rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|k| format!("physics-{k}")).build().expect("the physics' threads")
     })
+}
+
+/// How long a step is waited for before the physics' threads are kicked, and again after each kick.
+#[cfg(not(target_arch = "wasm32"))]
+const KICK: std::time::Duration = std::time::Duration::from_micros(500);
+
+/// Runs `f` (a frame's ticks) on one of the physics' threads and waits for it; returns the kicks it took.
+///
+/// **Why not `pool().install(f)`**, which is what this was: Rapier 0.36.1's step hangs there, about once in 10^5
+/// steps of a small world stepped back to back (a fuzz of 1,500 edits and calls: one run in fifty). Its step hands the
+/// broad phase's tree optimisation to `rayon::spawn` and later waits for it with a channel's `recv`
+/// (`physics_pipeline/solve.rs`, `mod.rs` `join_deferred_bvh_optimize`). Inside a pool the spawn goes onto the
+/// stepping worker's own deque, and the `recv` blocks that worker outside rayon, so only another worker can run the
+/// job: one that steals it. rayon does not promise that another worker comes: waking for a job in a worker's deque is
+/// best effort (the push's index store and the pusher's read of the sleep counters have no store-to-load barrier
+/// between them; crossbeam-deque stores the index relaxed), because in rayon's own waits the pusher runs the job
+/// itself in the end. When all the other workers happen to be falling asleep at that instant they all miss it, and
+/// the step never returns. Rapier's own `configure_thread_pool` steps the same way and has the same hole.
+///
+/// So the caller, which only waits anyway, **kicks**: while the step has not returned, every `KICK` it injects an
+/// empty job into the pool. An injected job always wakes a sleeping worker (that path is the one `install` itself
+/// rests on), and a worker that wakes looks through every deque before it sleeps again: it takes the stranded job.
+/// A step that hung costs `KICK` once; a long step gets a few empty jobs, which change nothing (the bits do not
+/// depend on which thread runs what). With one thread Rapier runs that pass inline and there is nothing to strand.
+/// `THREERT_PHYSICS_KICK=off` waits without kicking, to reproduce the hang (the fuzz, `examples/physics_fuzz.rs`,
+/// finds it in a few dozen runs).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn in_pool(f: impl FnOnce() + Send) -> u32 {
+    use std::sync::{Condvar, Mutex, PoisonError};
+    static KICKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let pool = pool();
+    if pool.current_num_threads() < 2 || !*KICKS.get_or_init(|| std::env::var("THREERT_PHYSICS_KICK").map_or(true, |v| v != "off" && v != "0")) {
+        pool.install(f);
+        return 0;
+    }
+    // Set when `f` has returned, or unwound: the wait ends either way, and the scope then carries the panic on.
+    struct Done<'a>(&'a (Mutex<bool>, Condvar));
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            *self.0 .0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            self.0 .1.notify_one();
+        }
+    }
+    let done = (Mutex::new(false), Condvar::new());
+    let mut kicks = 0;
+    pool.in_place_scope(|s| {
+        s.spawn(|_| {
+            let _done = Done(&done);
+            f();
+        });
+        let mut finished = done.0.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*finished {
+            let (guard, wait) = done.1.wait_timeout(finished, KICK).unwrap_or_else(PoisonError::into_inner);
+            finished = guard;
+            if !*finished && wait.timed_out() {
+                kicks += 1;
+                pool.spawn(|| {});
+            }
+        }
+    });
+    kicks
 }
 
 /// The pool's size: what `THREERT_PHYSICS_THREADS` says (1 to 16; 0 and "off": 1, sequential; anything else is not
@@ -266,6 +330,22 @@ mod tests {
         use physics_core::check;
         assert_eq!(format!("{:016x}", check::script(600)), format!("{:016x}", check::EXPECTED));
         assert_eq!(format!("{:016x}", check::cases()), format!("{:016x}", check::EXPECTED_CASES));
+        // And stepped as the renderer steps its world: on one of the physics' threads, with their count. (Called
+        // from here the checks above run their parallel parts on the process's pool, whatever its size.)
+        let (mut script, mut cases) = (0, 0);
+        in_pool(|| (script, cases) = (check::script(600), check::cases()));
+        assert_eq!(format!("{script:016x}"), format!("{:016x}", check::EXPECTED), "on the physics' threads");
+        assert_eq!(format!("{cases:016x}"), format!("{:016x}", check::EXPECTED_CASES), "on the physics' threads");
+    }
+
+    /// A step's wait ends when the step unwinds, and the panic comes through; the pool steps again after it.
+    #[test]
+    fn a_step_that_panics_is_not_waited_for() {
+        let r = std::panic::catch_unwind(|| in_pool(|| panic!("in the step")));
+        assert!(r.is_err());
+        let mut ran = false;
+        in_pool(|| ran = true);
+        assert!(ran);
     }
 
     /// Two events with no tick between them: the body the first one's script added is in the engine once that script

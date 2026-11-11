@@ -242,6 +242,12 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
     450–500 bodies moving in a frame, and a level's cap of 400 voxel bodies (`maxBodies`) by measurement. wasm32
     is sequential. How far "the bits do not depend on the thread count" was checked, and what was not: docs/VOXEL.md
     "Voxel bodies", ROADMAP § 6 step 8 "Open".
+  - **A step is waited for with a kick** (`physics.rs` `in_pool`): Rapier's parallel step, made on a pool's worker,
+    can strand a job on that worker's deque and wait for it for good (about once in 10^5 steps when steps are
+    microseconds apart). While the step is out, the waiting thread injects an empty job into the pool every 0.5 ms,
+    which wakes a worker that then takes the stranded one. The frame log's `physics.kicks` counts them (long steps
+    get a few; they change nothing). `THREERT_PHYSICS_KICK=off` waits without, to reproduce the hang;
+    `cargo run --release --example physics_fuzz` is the CPU check, with a watchdog.
   - Ids in a call (`body`, `collider`, `skip`, ...) are whole numbers however they are written: scene code hands
     back an id it read from an answer as a double.
 

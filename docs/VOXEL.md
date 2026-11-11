@@ -390,15 +390,28 @@ how far:**
 - In CI (Linux, x86-64), on every change to the physics: the script and the 1,500 worlds at 2 and 4 threads
   against the sequential native build, which is held to wasm32 and to the recorded hashes
   (`tools/physics-determinism.ts`: native parallel = native sequential = wasm32 = recorded).
-- The renderer's own build: its recorded-bits tests at 1, 4 and 8 threads; the benchmark level run twice through
-  explosions, the 30 m cut and a crater gives the level and physics hashes the sequential build gave; the same
-  bodies moving in every frame of four destruction scenarios, sequential against 4 threads.
+- The renderer's own build, stepped as it steps (on the physics' own threads): the script, the 1,500 worlds and
+  the voxel adapter's script at 1, 2, 4 and 8 threads; the benchmark level run twice through explosions, the 30 m
+  cut and a crater gives the level and physics hashes the sequential build gave; the same bodies moving in every
+  frame of four destruction scenarios, sequential against 4 threads.
 - **Not checked**: other machines and other CPU families at thread counts beyond these (Rapier promises it; it also
   promised the cross-platform bits that needed a patch to glamx); worlds with joints and thousands of bodies at once
   (the worlds with joints here are small; the large ones have no joints); long runs (minutes) of large heaps.
 
 (Rapier's contact recycling stays on: with it off a heap of 400 pieces does not come to rest, 79 asleep after
 15 s.)
+
+**The parallel step can hang, and what the renderer does about it.** Rapier 0.36.1 hands the broad phase's tree
+optimisation to `rayon::spawn` and waits for it with a blocking `recv`. Stepped on a pool's worker (which is how
+the renderer steps, and how Rapier's own `configure_thread_pool` does) the job sits on the stepping worker's own
+deque, and if every other worker happens to be falling asleep at that instant none takes it: the step never
+returns. It needs steps microseconds apart (ticks back to back: a catch-up, an offline settle, a fuzz); a world of
+six bodies stepped back to back hangs after 30,000 to 500,000 steps, the review's fuzz in one run of fifty. The
+renderer's wait for a step therefore injects an empty job into the pool every 0.5 ms until the step is back
+(`renderer/src/physics.rs` `in_pool`): a worker wakes for it and takes the stranded job on its way. Neither crate
+is patched. `renderer/examples/physics_fuzz.rs` is the check (CPU only, with a watchdog): 500 fuzz runs in a row, 20 of the
+many-bodies variant and 26 million back-to-back steps without a hang; with the kick off the back-to-back world
+hangs in three runs of three.
 
 **The level's colliders.** Every object gets a fixed collider at load; an edit takes out the cells the object lost
 (`Edit::cleared`: by the cells, not by the object's size). A collider holds the object's cells within 4 of a cell

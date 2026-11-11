@@ -93,6 +93,11 @@ jobs:
         with:
           workspaces: renderer
       - run: cd renderer && cargo build --release --locked
+      # The voxel bodies and the physics on the CPU, through the engine's own path (ROADMAP § 6 step 8): 10 runs of a
+      # fuzz of edits and calls with its checks, then a small world stepped back to back a million times, which is
+      # where the physics' step hung on its own threads (src/physics.rs `in_pool`). A step that does not return in
+      # 30 s fails the job (the example's watchdog), it is not waited for.
+      - run: cd renderer && cargo run --release --locked --example physics_fuzz -- --runs 10 --stress 1000000
 
   voxel:
     name: "voxel: wasm32, tests, determinism"

@@ -4120,12 +4120,32 @@ benchmark level. The order follows the dependencies; a step that meets a further
        no workspace; the pair now goes through its general voxel function); parry's ray misses voxels along a
        lattice plane (the world walks the cells itself); a shape edited where it sits keeps stale contacts (the
        collider is taken out and put back).
+     - **A fourth, in the parallel step: it can hang for good** (found by the review's fuzz on this PR's head,
+       2026-11-12: one run of fifty; a world of six bodies stepped back to back hangs after 30,000 to 500,000
+       steps). Rapier hands the broad phase's tree optimisation to `rayon::spawn` and later waits for it with a
+       channel's blocking `recv`. Stepped on a pool's worker, the job is on that worker's own deque and the wait
+       is outside rayon, so only another worker can run it, and rayon does not promise one comes: waking for a
+       job in a worker's deque is best effort (no store-to-load barrier between the push and the pusher's read
+       of the sleep counters; shown by adding one fence to a scratch rayon-core: 15 million steps without a hang
+       against a hang in five runs of five). When every other worker is just falling asleep they all miss it.
+       Rapier's own `configure_thread_pool` has the same hole. **Way round, in `renderer/src/physics.rs`
+       `in_pool`, nothing patched**: the thread that waits for the step injects an empty job into the pool every
+       0.5 ms until the step returns; an injected job always wakes a worker, and a woken worker looks through
+       every deque. A hung step costs 0.5 ms once. Why nothing met it before: the determinism check steps from a
+       thread outside the pool (the job is then injected, the path that always wakes), and the level's frames are
+       milliseconds apart (the workers are long asleep and are woken outright); it takes steps microseconds
+       apart. **Checks, on the CPU**: `renderer/examples/physics_fuzz.rs` (the fuzz, and the six-body world
+       stepped back to back, with a watchdog: a step that does not return in 30 s is a failure): 500 fuzz runs in a row and 20 of its
+       many-bodies variant with every check held, and 26 million back-to-back steps, none hung; with
+       the kick off (`THREERT_PHYSICS_KICK=off`) the stress hangs in three runs of three. CI's renderer job runs
+       10 fuzz runs and a million steps (CITIME).
    - Open:
      - **The parallel solver's independence of the thread count is checked as far as this, and no further**:
        on this machine at 1, 2, 4, 8 and 15 threads (the determinism check's script and 1,500 random worlds of five
-       kinds, each small; heaps of up to 1,000 voxel pieces; 20,000 voxel worlds without a panic; the renderer's
-       recorded-bits tests; the benchmark level's hashes through explosions, the cut and a crater, equal to the
-       sequential build's), and in CI on Linux at 2 and 4 threads on every change to the physics (native parallel
+       kinds, each small; heaps of up to 1,000 voxel pieces; 20,000 voxel worlds without a panic: these on the
+       process's pool, stepped from outside it), on the physics' own threads as the renderer steps (the script and
+       the 1,500 worlds again, and the voxel adapter's script, at 1, 2, 4 and 8 threads; the benchmark level's
+       hashes through explosions, the cut and a crater, equal to the sequential build's), and in CI on Linux at 2 and 4 threads on every change to the physics (native parallel
        = native sequential = wasm32 = recorded; 7–11 s of the physics job with a warm cache). Not checked: other
        machines and CPU families beyond CI's, worlds with joints and thousands of bodies at once, long runs of
        large heaps. wasm32 stays sequential (no threads here), and the bits agree. Step 9's checkpoints are what
@@ -4156,11 +4176,16 @@ benchmark level. The order follows the dependencies; a step that meets a further
        make many contacts), a building part of 32,680 in under 0.5 ms. They sleep 5–10 s after the cut.
      - Software traversal is not optimised (the cut's frame 194 ms). A browser: a small voxel scene with bodies in
        Chrome is not run in this step.
-     - The two faults above that are parry's and Rapier's own are to be reported upstream.
+     - The faults above that are parry's and Rapier's own are to be reported upstream (the step's hang: a draft
+       with a reproduction of 60 lines on Rapier alone, not sent). **The kick is a way round, not a cure**: it
+       rests on two things rayon does today (an injected job wakes a sleeping worker; a worker looks through
+       every deque before it sleeps). To be dropped when Rapier joins that pass without blocking a worker; the
+       stress with `THREERT_PHYSICS_KICK=off` says when.
    - Then the decision: keep Rapier or write our own. What this step measured for it: Rapier does what the step
      needs on both ends (the same bits natively and in wasm32, and on several threads; voxel against voxel
      resting, stacking and sleeping on a level of 61.6 M collider cells; edits of a shape by its cells in 0.1 ms),
-     with the three faults above found and worked round in a day. Its cost is the step: about 0.1 ms a large body
+     with the four faults above found and worked round without patching it (the fourth, the hang of the parallel
+     step, by a review's fuzz after this step's own checks had passed). Its cost is the step: about 0.1 ms a large body
      that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver, now the native
      default, is worth a factor of 3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
      to bring the determinism, the sleeping and the voxel-voxel contacts with it.
