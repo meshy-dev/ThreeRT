@@ -637,9 +637,14 @@ pub fn loop_guard() -> Option<u32> {
     }
 }
 
-/// A kernel source as it is compiled: with the loop guard if there is one.
-fn guarded(src: &str) -> String {
-    loop_guard().map_or_else(|| src.to_string(), |n| crate::merged::guard(src, n))
+/// A kernel source as it is compiled: with the loop guard if there is one, its count in `MergedLive` (the merged
+/// layout) or in a buffer of its own (group 1, `merged::GUARD_BINDING`).
+fn guarded(src: &str, merged: bool) -> String {
+    match loop_guard() {
+        None => src.to_string(),
+        Some(n) if merged => crate::merged::guard(src, n, "ML.loop_guard_trips"),
+        Some(n) => crate::merged::guard(&format!("{src}\n{}", crate::merged::guard_decl()), n, crate::merged::GUARD_TRIPS.name),
+    }
 }
 
 pub fn tlas_rows(w: glam::Mat4) -> [f32; 12] {
@@ -716,6 +721,9 @@ pub struct KernelBufs {
     pub refl: Buf,
     pub motion: Buf,
     pub direct: Buf,
+    /// The loop guard's count (merged.rs `guard`: its first word, the invocations a loop of which was stopped): with
+    /// the guard, and always in the merged layout (the last array of `MergedLive`).
+    pub guard: Option<Buf>,
     /// The merged layout: the one buffer, and its arrays' lengths.
     pub merged: Option<(wgpu::Buffer, [u32; 7])>,
 }
@@ -725,14 +733,15 @@ impl KernelBufs {
     pub fn new(d: &wgpu::Device, merged: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
         if !merged {
             let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
-            return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), merged: None };
+            let guard = loop_guard().map(|_| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
+            return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
         }
-        let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct];
+        let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
         let caps: [u32; 7] = std::array::from_fn(|k| crate::merged::live_cap(k, bytes[k]));
-        let (at, size) = crate::merged::offsets(&crate::merged::KERNEL_LIVE, &caps);
+        let (at, size) = crate::merged::live_layout(&caps);
         let buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("merged live"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let b = |k: usize| Buf { buffer: buffer.clone(), offset: at[k], size: bytes[k] };
-        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, resv: b(3), refl: b(4), motion: b(5), direct: b(6), merged: Some((buffer, caps)) }
+        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, resv: b(3), refl: b(4), motion: b(5), direct: b(6), guard: Some(b(7)), merged: Some((buffer, caps)) }
     }
 }
 
@@ -745,7 +754,11 @@ pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &w
     let tex = wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) };
     match &b.merged {
         Some((buffer, _)) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::KERNEL_LIVE_BINDING, resource: buffer.as_entire_binding() }] }),
-        None => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(4, &b.resv), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)] }),
+        None => {
+            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(4, &b.resv), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
+            entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
+            d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &entries })
+        }
     }
 }
 
@@ -1104,7 +1117,7 @@ impl Gpu {
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
             device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src).into()) },
+                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false).into()) },
                 wgpu::ShaderRuntimeChecks::unchecked(),
             )
         });
@@ -1180,9 +1193,12 @@ impl Gpu {
             storage(6, false),
             storage(7, false),
         ];
-        // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`).
+        // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
+        // As written, a kernel with the guard has the count in a buffer of its own.
         if merged {
             vis_entries.truncate(2);
+        } else if loop_guard().is_some() {
+            vis_entries.push(storage(crate::merged::GUARD_BINDING, false));
         }
         let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
         let one = device.create_texture(&wgpu::TextureDescriptor {
@@ -1277,7 +1293,7 @@ impl Gpu {
                 let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
                 unsafe {
                     self.device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src).into()) },
+                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged).into()) },
                         wgpu::ShaderRuntimeChecks::unchecked(),
                     )
                 }
@@ -2449,6 +2465,21 @@ impl Gpu {
         up.tables = tables;
     }
 
+    /// The loop guard's count as the GPU has it now (None: no guard): the invocations it stopped since the buffers
+    /// were made. Waits for the GPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn guard_trips(&self, bufs: &KernelBufs) -> Result<Option<u32>> {
+        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard().is_some()) else { return Ok(None) };
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = self.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(&g.buffer, g.offset, &read, 0, 4);
+        self.queue.submit([e.finish()]);
+        read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        let n = u32::from_le_bytes(read.slice(..).get_mapped_range()?[..4].try_into().expect("four bytes"));
+        Ok(Some(n))
+    }
+
     /// The buffer of the merged layout's `MergedTables` for these seven tables (merged.rs `TABLES`' order), and its
     /// arrays' lengths.
     fn tables_buffer(&self, tables: [&wgpu::Buffer; 7]) -> (wgpu::Buffer, [u32; 7]) {
@@ -2632,6 +2663,7 @@ impl Gpu {
         }
         let (b_accum, b_params, bg) = (&up.accum, &up.params, &up.bg);
         let accum_size = b_accum.size();
+        let stopped_before = self.guard_trips(&self.no_vis_bufs)?;
 
 
         let t1 = Instant::now();
@@ -2661,6 +2693,12 @@ impl Gpu {
             self.device.poll(wgpu::PollType::wait_indefinitely())?;
         }
         timings.push(("trace_ms".into(), t1.elapsed().as_secs_f64() * 1000.0));
+        // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
+        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs)?) {
+            if now != before {
+                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
+            }
+        }
         let t_tl = Instant::now();
         let overlay = self.render_translucent(&up, base, spp)?;
         if up.translucent.is_some() {

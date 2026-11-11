@@ -394,6 +394,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, 
         "format": format!("{format:?}"),
         "timestamps": timestamps,
         "merged": core.g.merged,
+        "loop_guard": gpu::loop_guard(),
         "limits": { "maxStorageBuffersPerShaderStage": limits.max_storage_buffers_per_shader_stage, "maxBufferSize": limits.max_buffer_size, "maxStorageBufferBindingSize": limits.max_storage_buffer_binding_size },
         "triangles": core.triangles,
         "ms": { "gpu": t_gpu - t0, "view": js_sys::Date::now() - t_gpu },
@@ -447,7 +448,8 @@ pub fn frame_begin(dt: f32) -> Result<bool, JsValue> {
 /// what the script and the bodies changed committed, the frame rendered and shown. Returns the frame's numbers as
 /// JSON (ms): the physics (ticks, step, sync, bodies, moved), the commit and whether it rebuilt the scene, the
 /// rebuild, recording the frame, the GPU's time for the last frame that was timed and its trace pass, the traced
-/// resolution's scale.
+/// resolution's scale; and `guard_trips`, the kernel's invocations the loop guard has stopped since the view opened
+/// (renderer/src/merged.rs `guard`; read back a frame or two late): anything but 0 means frames with wrong pixels.
 #[wasm_bindgen(js_name = frameEnd)]
 pub fn frame_end(dt: f32) -> Result<String, JsValue> {
     view(|v| {
@@ -496,6 +498,7 @@ pub fn frame_end(dt: f32) -> Result<String, JsValue> {
             "scale": v.core.render_scale,
             "frame": v.core.frame,
             "fallback": v.core.fallback,
+            "guard_trips": v.core.guard_trips,
         })
         .to_string())
     })

@@ -54,6 +54,8 @@ export interface FrameRow {
   trace_ms: number;
   scale: number;
   frame: number;
+  /** The kernel's invocations the loop guard has stopped since the view opened (0: every frame is sound). */
+  guard_trips: number | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -193,6 +195,8 @@ async function main() {
     click,
     event: (type: string, payload: unknown = {}) => event(type, JSON.stringify(payload)),
     physicsHash: () => wasm.physicsHash(),
+    /** The loop guard's count as last read back (null: the kernel has no guard). */
+    guardTrips: () => frames.at(-1)?.guard_trips ?? null,
   };
   Object.assign(window, { threert: session });
 
@@ -204,7 +208,7 @@ async function main() {
     if (since < 1000 / fps - 2) return;
     last = now;
     const row = frame(Math.min(since / 1000, 0.1), since);
-    if (row.frame % 30 === 0) status(`${(info.adapter as { name: string }).name} · ${(1000 / since).toFixed(0)} fps · GPU ${row.gpu_ms.toFixed(1)} ms · scale ${row.scale.toFixed(2)}`);
+    if (row.frame % 30 === 0) status(`${(info.adapter as { name: string }).name} · ${(1000 / since).toFixed(0)} fps · GPU ${row.gpu_ms.toFixed(1)} ms · scale ${row.scale.toFixed(2)}${row.guard_trips ? ` · LOOP GUARD: ${row.guard_trips} invocations stopped, the image is wrong` : ""}`);
   };
   requestAnimationFrame((now) => {
     last = now;

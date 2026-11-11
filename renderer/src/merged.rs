@@ -63,6 +63,26 @@ pub const KERNEL_LIVE: [Member; 7] = [
     Member { name: "direct_out", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;" },
 ];
 pub const KERNEL_LIVE_BINDING: u32 = 1;
+/// `MergedLive`'s last array, after `KERNEL_LIVE`'s: the loop guard's count (`guard`; its first word: the invocations
+/// a loop of which was stopped). Always there in the merged layout, written only by a kernel with the guard.
+pub const GUARD_TRIPS: Member = Member { name: "loop_guard_trips", ty: "atomic<u32>", stride: 4, align: 4, decl: "" };
+/// The same count in the layout as written, when the kernel has the guard (group 1, binding `GUARD_BINDING`).
+pub const GUARD_BINDING: u32 = 8;
+pub const GUARD_WORDS: u32 = 4;
+
+/// Where `MergedLive`'s arrays are for these lengths (bytes): `KERNEL_LIVE`'s seven, then the loop guard's count; and
+/// the struct's size.
+pub fn live_layout(caps: &[u32; 7]) -> (Vec<u64>, u64) {
+    let members: Vec<&Member> = KERNEL_LIVE.iter().chain([&GUARD_TRIPS]).collect();
+    let caps: Vec<u32> = caps.iter().copied().chain([GUARD_WORDS]).collect();
+    let (mut at, mut out) = (0u64, vec![]);
+    for (m, &c) in members.iter().zip(&caps) {
+        at = at.next_multiple_of(m.align);
+        out.push(at);
+        at += m.stride * c as u64;
+    }
+    (out, at.next_multiple_of(16))
+}
 
 /// The lengths of the merged structs' arrays: what a kernel's source is written for (`gpu::Kernel::caps`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -340,7 +360,7 @@ fn fresh(src: &str, names: &[&str]) {
     }
 }
 
-fn merged_struct(name: &str, members: &[Member], caps: &[u32]) -> String {
+fn merged_struct(name: &str, members: &[&Member], caps: &[u32]) -> String {
     let fields: Vec<String> = members.iter().zip(caps).map(|(m, c)| format!("    {}: array<{}, {c}>,", m.name, m.ty)).collect();
     format!("struct {name} {{\n{}\n}};\n", fields.join("\n"))
 }
@@ -349,11 +369,11 @@ fn merged_struct(name: &str, members: &[Member], caps: &[u32]) -> String {
 /// layout for arrays of `caps`' lengths: group 0 binds tri_verts, attrs, nodes, `MT`, env_cdf, accum and prev_verts,
 /// group 1 `ML`.
 pub fn kernel(src: &str, caps: &Caps) -> String {
-    fresh(src, &["MT", "ML", "MergedTables", "MergedLive"]);
+    fresh(src, &["MT", "ML", "MergedTables", "MergedLive", GUARD_TRIPS.name]);
     let mut s = src.to_string();
     for (k, m) in TABLES.iter().enumerate() {
         let with = if k == 0 {
-            format!("{}@group(0) @binding({TABLES_BINDING}) var<storage, read> MT: MergedTables;", merged_struct("MergedTables", &TABLES, &caps.tables))
+            format!("{}@group(0) @binding({TABLES_BINDING}) var<storage, read> MT: MergedTables;", merged_struct("MergedTables", &TABLES.iter().collect::<Vec<_>>(), &caps.tables))
         } else {
             String::new()
         };
@@ -361,7 +381,7 @@ pub fn kernel(src: &str, caps: &Caps) -> String {
     }
     for (k, m) in KERNEL_LIVE.iter().enumerate() {
         let with = if k == 0 {
-            format!("{}@group(1) @binding({KERNEL_LIVE_BINDING}) var<storage, read_write> ML: MergedLive;", merged_struct("MergedLive", &KERNEL_LIVE, &caps.live))
+            format!("{}@group(1) @binding({KERNEL_LIVE_BINDING}) var<storage, read_write> ML: MergedLive;", merged_struct("MergedLive", &KERNEL_LIVE.iter().chain([&GUARD_TRIPS]).collect::<Vec<_>>(), &caps.live.iter().copied().chain([GUARD_WORDS]).collect::<Vec<_>>()))
         } else {
             String::new()
         };
@@ -401,7 +421,12 @@ pub fn live(src: &str) -> String {
 /// docs/RUNTIME.md "The engine in a browser"). With the bound a dispatch always ends: wrong pixels instead of no
 /// frame. The arithmetic is untouched, so a render no loop of which reaches the limit is the same render, bit for bit.
 /// `THREERT_LOOP_GUARD=<limit>` natively (`gpu::loop_guard`); a browser's kernel always has it.
-pub fn guard(src: &str, limit: u32) -> String {
+///
+/// A stopped loop is counted, not hidden: the invocation that reaches the limit adds one to the first word of `trips`
+/// (an `array<atomic<u32>, 4>` the source can name: `ML.loop_guard_trips` in the merged layout, the buffer `guard_decl`
+/// declares in the layout as written), which the renderer reads back (`live::LiveCore::guard_trips`, an offline
+/// render's error). A frame with a count above zero is a frame with wrong pixels, and says so.
+pub fn guard(src: &str, limit: u32, trips: &str) -> String {
     fresh(src, &["loop_guard", "LOOP_GUARD_N"]);
     let b = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len() + 4096);
@@ -464,8 +489,14 @@ pub fn guard(src: &str, limit: u32) -> String {
         }
     }
     let mut s = String::from_utf8(out).expect("the source's own bytes");
-    s += &format!("\n// The loop guard (renderer/src/merged.rs `guard`): an invocation's loop iterations, all its loops together.\nvar<private> LOOP_GUARD_N: u32 = 0u;\nfn loop_guard() -> bool {{\n    LOOP_GUARD_N += 1u;\n    return LOOP_GUARD_N > {limit}u;\n}}\n");
+    s += &format!("\n// The loop guard (renderer/src/merged.rs `guard`): an invocation's loop iterations, all its loops together; the\n// invocations stopped at the limit are counted.\nvar<private> LOOP_GUARD_N: u32 = 0u;\nfn loop_guard() -> bool {{\n    LOOP_GUARD_N += 1u;\n    if (LOOP_GUARD_N == {limit}u + 1u) {{ atomicAdd(&{trips}[0], 1u); }}\n    return LOOP_GUARD_N > {limit}u;\n}}\n");
     s
+}
+
+/// The loop guard's count as a buffer of its own, for a kernel in the layout as written (the merged layout has it in
+/// `MergedLive`): the declaration `guard`'s `trips` names.
+pub fn guard_decl() -> String {
+    format!("@group(1) @binding({GUARD_BINDING}) var<storage, read_write> {}: array<atomic<u32>, {GUARD_WORDS}>;\n", GUARD_TRIPS.name)
 }
 
 #[cfg(test)]
@@ -521,7 +552,7 @@ mod tests {
             assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "features {features:#x}: {used:?}");
             assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(8), "the trace reads all eight");
             assert_eq!(layout(&m, "MergedTables"), offsets(&TABLES, &caps.tables));
-            assert_eq!(layout(&m, "MergedLive"), offsets(&KERNEL_LIVE, &caps.live));
+            assert_eq!(layout(&m, "MergedLive"), live_layout(&caps.live));
         }
     }
 
@@ -571,16 +602,20 @@ mod tests {
             let words = |w: &str| code.match_indices(w).filter(|(k, _)| !code[..*k].ends_with(|c: char| c.is_alphanumeric() || c == '_')).count();
             words("loop {") + words("for (") + words("while (")
         };
-        for src in [KERNEL.to_string(), kernel(&crate::gpu::kernel_source(KERNEL, crate::gpu::F_SOURCE), &caps()), LIVE.to_string(), live(LIVE)] {
-            let g = guard(&src, 1 << 16);
-            assert!(loops(&src) > 0);
+        // The kernel as written (its count a buffer of its own) and merged (its count in `MergedLive`).
+        let merged = kernel(&crate::gpu::kernel_source(KERNEL, crate::gpu::F_SOURCE), &caps());
+        for (src, trips) in [(format!("{KERNEL}{}", guard_decl()), "loop_guard_trips"), (merged, "ML.loop_guard_trips")] {
+            let g = guard(&src, 1 << 16, trips);
+            assert!(loops(&src) > 40, "the kernel's loops");
             assert_eq!(g.matches("if (loop_guard()) { break; }").count(), loops(&src));
-            parse(&g);
+            let (m, info) = parse(&g);
+            let (used, declared) = storage_buffers(&m, &info);
+            // (As written: one buffer more, where the device has room. Merged: still eight.)
+            assert!(declared == 21 || declared as u32 == STORAGE_BUFFERS, "{declared}: {used:?}");
         }
-        assert_eq!(
-            guard("fn f() {\n    for (var i = 0u; i < n(2u); i++) { x(); }\n    loop { // {\n        break;\n    }\n    while (a) { }\n}\n", 9),
-            "fn f() {\n    for (var i = 0u; i < n(2u); i++) { if (loop_guard()) { break; } x(); }\n    loop { if (loop_guard()) { break; } // {\n        break;\n    }\n    while (a) { if (loop_guard()) { break; } }\n}\n\n// The loop guard (renderer/src/merged.rs `guard`): an invocation's loop iterations, all its loops together.\nvar<private> LOOP_GUARD_N: u32 = 0u;\nfn loop_guard() -> bool {\n    LOOP_GUARD_N += 1u;\n    return LOOP_GUARD_N > 9u;\n}\n"
-        );
+        let g = guard("fn f() {\n    for (var i = 0u; i < n(2u); i++) { x(); }\n    loop { // {\n        break;\n    }\n    while (a) { }\n}\n", 9, "T");
+        assert!(g.starts_with("fn f() {\n    for (var i = 0u; i < n(2u); i++) { if (loop_guard()) { break; } x(); }\n    loop { if (loop_guard()) { break; } // {\n        break;\n    }\n    while (a) { if (loop_guard()) { break; } }\n}\n"), "{g}");
+        assert!(g.ends_with("fn loop_guard() -> bool {\n    LOOP_GUARD_N += 1u;\n    if (LOOP_GUARD_N == 9u + 1u) { atomicAdd(&T[0], 1u); }\n    return LOOP_GUARD_N > 9u;\n}\n"), "{g}");
     }
 
     #[test]

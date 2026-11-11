@@ -1196,6 +1196,12 @@ pub struct LiveCore {
     pub cpu_wait_ms: f32,
     /// The cloud cover the sky and the sun light were made with (`move_sun`).
     sky_cover: f32,
+    /// The loop guard (merged.rs `guard`), if the kernel has it: the invocations it has stopped at its limit since the
+    /// view was made, as last read back (a frame or two behind, without waiting). Above zero: frames with wrong
+    /// pixels, a traversal that did not end on the scene's data. None without the guard.
+    pub guard_trips: Option<u32>,
+    /// Its readback: the buffer and its state (0 free, 1 mapping, 2 mapped), as the frame timer's.
+    guard_read: Option<(wgpu::Buffer, Arc<AtomicU32>)>,
 }
 
 /// GPU time per frame from timestamp queries (start of the first trace pass .. end of the post pass), read back a few
@@ -1572,7 +1578,9 @@ impl LiveCore {
         let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline(&targets.kernel) });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &targets.kernel);
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0 };
+        let guard_read = (gpu::loop_guard().is_some() && targets.kernel.guard.is_some())
+            .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -3523,6 +3531,20 @@ impl LiveCore {
             let _ = g.device.poll(wgpu::PollType::Wait { submission_index: Some(oldest), timeout: None });
         }
         let waited = t_wait.elapsed().as_secs_f32() * 1000.0;
+        // The loop guard's count, read back since an earlier frame.
+        let mut guard_free = false;
+        if let Some((read, state)) = &self.guard_read {
+            if state.load(Ordering::Acquire) == 2 {
+                let n = u32::from_le_bytes(read.slice(..).get_mapped_range().unwrap()[..4].try_into().expect("four bytes"));
+                read.unmap();
+                state.store(0, Ordering::Release);
+                if self.guard_trips != Some(n) {
+                    eprintln!("live: the loop guard has stopped {n} of the kernel's invocations: frames with wrong pixels (a traversal that does not end on this scene's data)");
+                }
+                self.guard_trips = Some(n);
+            }
+            guard_free = state.load(Ordering::Acquire) == 0;
+        }
         // GPU time drives adaptive resolution / samples per frame: timestamps when available (no stall), else twice a
         // second a frame timed in isolation (idle GPU -> submit -> wait).
         let period = g.queue.get_timestamp_period();
@@ -3828,10 +3850,18 @@ impl LiveCore {
                 e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, 16, 16);
             }
         }
+        if let (Some((read, _)), Some(count), true) = (&self.guard_read, &self.targets.kernel.guard, guard_free) {
+            e.copy_buffer_to_buffer(&count.buffer, count.offset, read, 0, 4);
+        }
         extra(&mut e, &self.targets.out);
         let done = g.queue.submit([e.finish()]);
         self.inflight.push_back(done);
         self.cpu_wait_ms = waited;
+        if let (Some((read, state)), true) = (&self.guard_read, guard_free) {
+            let state = state.clone();
+            state.store(1, Ordering::Release);
+            read.slice(..).map_async(wgpu::MapMode::Read, move |r| state.store(if r.is_ok() { 2 } else { 0 }, Ordering::Release));
+        }
         if let (Some(t), Some(slot)) = (&self.timer, timed) {
             let state = t.reads[slot].1.clone();
             state.store(1, Ordering::Release);
@@ -4254,7 +4284,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
             use std::io::Write;
             let line = serde_json::json!({
                 "t": start.elapsed().as_secs_f64() * 1e3, "interval": last_frame.elapsed().as_secs_f64() * 1e3, "start": t_frame.duration_since(prev_start).as_secs_f64() * 1e3,
-                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len,
+                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_trips,
             });
             writeln!(l, "{line}")?;
         }
