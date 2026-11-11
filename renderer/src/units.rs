@@ -39,11 +39,13 @@ pub const MAX_LEAF: u32 = 16;
 pub const FILL: GpuNode = bvh::EMPTY;
 
 /// A mesh's tree: its nodes (relocatable), the order it puts the mesh's triangles in (`order[i]`: the triangle now at
-/// position i), its depth.
+/// position i), its depth, the bounds of the triangles it was built over (model space).
 pub struct MeshTree {
     pub nodes: Vec<GpuNode>,
     pub order: Vec<u32>,
     pub depth: usize,
+    pub lo: Vec3A,
+    pub hi: Vec3A,
 }
 
 fn finite(n: &GpuNode) -> bool {
@@ -175,7 +177,8 @@ pub fn mesh_tree(tris: &[[Vec3A; 3]]) -> Result<MeshTree, String> {
         Err(_) => build_median(&tri_boxes(tris), 4),
     };
     let depth = check_mesh(&nodes, tris.len())?;
-    Ok(MeshTree { nodes, order, depth })
+    let (lo, hi) = tris.iter().flatten().fold((Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY)), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    Ok(MeshTree { nodes, order, depth, lo, hi })
 }
 
 /// A unit for the top tree: its record, and its mesh's model-space bounds under its world transform.
@@ -300,18 +303,26 @@ impl Layout {
     }
 }
 
-/// A unit as the top tree sees it: where its mesh's model bounds are in the world, and the tree its record names
-/// (its mesh, and the root the record was last written with: `Units::top` refuses a unit whose record names a tree
-/// that is no longer there). Hidden: it keeps its place (an instanced object's instance that is not drawn now) and
-/// is in no top tree.
+/// A unit as the top tree sees it: where it places its mesh, and the tree its record names (its mesh, and the root
+/// the record was last written with: `Units::top` refuses a unit whose record names a tree that is no longer there).
+/// Its box in the top tree is its tree's bounds under `world`, taken when the top tree is built: a mesh written
+/// again where it was (a geometry that moves every frame) has a new tree, and its units the new bounds with it.
+/// Hidden: it keeps its place (an instanced object's instance that is not drawn now) and is in no top tree.
 #[derive(Clone, Copy, Debug)]
 pub struct Unit {
     pub world: Mat4,
-    pub lo: Vec3A,
-    pub hi: Vec3A,
     pub hidden: bool,
     pub mesh: u32,
     pub root: u32,
+}
+
+/// A mesh's tree in the node buffer: its root, its node count, the bounds of its triangles (model space).
+#[derive(Clone, Copy, Debug)]
+pub struct Tree {
+    pub root: u32,
+    pub len: u32,
+    pub lo: Vec3A,
+    pub hi: Vec3A,
 }
 
 /// Software traversal's units of a scene (what the TLAS and the mesh BLASes are to hardware traversal): where the
@@ -319,9 +330,9 @@ pub struct Unit {
 #[derive(Clone, Debug)]
 pub struct Units {
     pub layout: Layout,
-    /// By instanced mesh (the scene's `meshes` index): its tree's root and node count. None: no tree (a mesh that
-    /// deforms or has no triangle, or one an edit freed).
-    pub trees: Vec<Option<(u32, u32)>>,
+    /// By instanced mesh (the scene's `meshes` index): its tree. None: no tree (a mesh that deforms or has no
+    /// triangle, or one an edit freed).
+    pub trees: Vec<Option<Tree>>,
     /// By kernel record: the unit there, if the record is one's.
     pub slots: Vec<Option<Unit>>,
     /// The units in the top tree as last built (`top`): the kernel's `P.motion.w`.
@@ -333,13 +344,13 @@ pub struct Units {
 impl Units {
     /// Mesh `k`'s tree's root.
     pub fn root(&self, k: u32) -> Option<u32> {
-        self.trees.get(k as usize).copied().flatten().map(|t| t.0)
+        self.trees.get(k as usize).copied().flatten().map(|t| t.root)
     }
 
-    /// A unit of mesh `k` (model bounds `lo..hi`) placed by `world`, whose record names the tree mesh `k` has now.
-    /// None: the mesh has no tree (it is no unit's).
-    pub fn unit(&self, k: u32, world: Mat4, (lo, hi): (Vec3A, Vec3A), hidden: bool) -> Option<Unit> {
-        self.root(k).map(|root| Unit { world, lo, hi, hidden, mesh: k, root })
+    /// A unit of mesh `k` placed by `world`, whose record names the tree mesh `k` has now. None: the mesh has no
+    /// tree (it is no unit's).
+    pub fn unit(&self, k: u32, world: Mat4, hidden: bool) -> Option<Unit> {
+        self.root(k).map(|root| Unit { world, hidden, mesh: k, root })
     }
 
     /// The unit at `record` moved to `world` (with `hidden`: shown or not), its record written again: it names its
@@ -371,15 +382,15 @@ impl Units {
         if self.trees.len() <= k as usize {
             self.trees.resize(k as usize + 1, None);
         }
-        self.trees[k as usize] = Some((root, tree.nodes.len() as u32));
+        self.trees[k as usize] = Some(Tree { root, len: tree.nodes.len() as u32, lo: tree.lo, hi: tree.hi });
         Some(root)
     }
 
     /// Mesh `k`'s tree given back: its root and length (the caller fills them with `FILL`), if it had one.
     pub fn drop_tree(&mut self, k: u32) -> Option<(u32, u32)> {
         let t = self.trees.get_mut(k as usize)?.take()?;
-        self.layout.release(t.0, t.1 as usize);
-        Some(t)
+        self.layout.release(t.root, t.len as usize);
+        Some((t.root, t.len))
     }
 
     /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
@@ -388,16 +399,17 @@ impl Units {
     /// (freed, or placed elsewhere since the record was written: the kernel would walk whatever is there); nothing
     /// is changed then.
     pub fn top(&mut self) -> Result<Vec<GpuNode>, String> {
+        let mut boxes: Vec<UnitBox> = vec![];
         for (r, u) in self.slots.iter().enumerate() {
             let Some(u) = u.as_ref().filter(|u| !u.hidden) else { continue };
             if r >= self.records {
                 return Err(format!("the unit at record {r} is past the kernel's {} records", self.records));
             }
-            if self.root(u.mesh) != Some(u.root) {
-                return Err(format!("the unit at record {r} names a tree at node {} that is not mesh {}'s now", u.root, u.mesh));
+            match self.trees.get(u.mesh as usize).copied().flatten() {
+                Some(t) if t.root == u.root => boxes.push(UnitBox::new(r as u32, u.world, t.lo, t.hi)),
+                _ => return Err(format!("the unit at record {r} names a tree at node {} that is not mesh {}'s now", u.root, u.mesh)),
             }
         }
-        let boxes: Vec<UnitBox> = self.slots.iter().enumerate().filter_map(|(r, u)| u.as_ref().filter(|u| !u.hidden).map(|u| UnitBox::new(r as u32, u.world, u.lo, u.hi))).collect();
         if boxes.len() > self.layout.max_units() {
             return Err(format!("{} units: more than the top tree's range holds ({})", boxes.len(), self.layout.max_units()));
         }
@@ -1169,14 +1181,13 @@ mod tests {
         let (small, large) = (mesh_tree(&rng.tris(40, 2.0, 0.3)).unwrap(), mesh_tree(&rng.tris(400, 2.0, 0.3)).unwrap());
         let (ns, nl) = (small.nodes.len(), large.nodes.len());
         assert!(nl > ns);
-        let bounds = (Vec3A::splat(-1.5), Vec3A::splat(1.5));
         let mut u = Units { layout: Layout::new(10, ns + nl, 4), trees: vec![], slots: vec![], count: 0, records: 4 };
         // A mesh without a tree is no unit's.
-        assert!(u.unit(0, Mat4::IDENTITY, bounds, false).is_none());
+        assert!(u.unit(0, Mat4::IDENTITY, false).is_none());
         assert_eq!(u.add_tree(0, &small), Some(10));
         assert_eq!(u.add_tree(1, &large), Some(10 + ns as u32));
         assert_eq!(u.layout.free_nodes(), 0);
-        let (a, b) = (u.unit(0, Mat4::IDENTITY, bounds, false).unwrap(), u.unit(1, Mat4::from_translation(glam::Vec3::X * 5.0), bounds, false).unwrap());
+        let (a, b) = (u.unit(0, Mat4::IDENTITY, false).unwrap(), u.unit(1, Mat4::from_translation(glam::Vec3::X * 5.0), false).unwrap());
         assert_eq!((a.root, b.root), (10, 10 + ns as u32));
         u.set(0, Some(a));
         u.set(2, Some(b));
@@ -1214,14 +1225,14 @@ mod tests {
         assert_eq!(u.layout.free_nodes(), nl);
 
         // A unit past the kernel's records is refused; hidden or cleared, it is not there.
-        u.set(4, u.unit(1, Mat4::IDENTITY, bounds, false));
+        u.set(4, u.unit(1, Mat4::IDENTITY, false));
         let e = u.top().unwrap_err();
         assert!(e.contains("record 4") && e.contains("4 records"), "{e}");
         u.set(4, None);
         // More units than the top tree's range holds.
         u.records = 16;
         for r in 3..8 {
-            u.set(r, u.unit(1, Mat4::from_translation(glam::Vec3::Z * r as f32), bounds, false));
+            u.set(r, u.unit(1, Mat4::from_translation(glam::Vec3::Z * r as f32), false));
         }
         assert!(u.top().unwrap_err().contains("more than the top tree's range holds"));
         assert_eq!(u.count, 1);
@@ -1230,5 +1241,30 @@ mod tests {
             u.set(r, None);
         }
         assert_eq!((u.top().unwrap().len(), u.count), (0, 0));
+    }
+
+    /// A mesh written again where it was (a geometry that moves every frame: live.rs writes a mesh of the same
+    /// triangle count over the one it replaces) has a new tree, and its unit's box in the top tree is the new tree's:
+    /// the walk must reach triangles that left the old bounds. (Seen on the GPU, voxel/cut-falls-live: a part that
+    /// fell 0.2 m was cut off at the box it had before.)
+    #[test]
+    fn a_unit_of_a_mesh_written_again_has_its_new_bounds() {
+        let tri = |y: f32| [[Vec3A::new(0.0, y, 0.0), Vec3A::new(1.0, y, 0.0), Vec3A::new(0.0, y + 1.0, 0.0)]];
+        let (first, fallen) = (mesh_tree(&tri(2.0)).unwrap(), mesh_tree(&tri(-3.0)).unwrap());
+        assert_eq!((first.lo.y, first.hi.y, fallen.lo.y, fallen.hi.y), (2.0, 3.0, -3.0, -2.0));
+        let mut u = Units { layout: Layout::new(1, 8, 2), trees: vec![], slots: vec![], count: 0, records: 2 };
+        u.add_tree(0, &first).unwrap();
+        u.set(0, u.unit(0, Mat4::IDENTITY, false));
+        let top = u.top().unwrap();
+        assert!(top[0].bmin[1] <= 2.0 && top[0].bmax[1] >= 3.0, "{:?}", top[0]);
+        // The same mesh, other triangles; its unit placed again, as the edit places it, and then only moved.
+        u.add_tree(0, &fallen).unwrap();
+        u.set(0, u.unit(0, Mat4::IDENTITY, false));
+        let top = u.top().unwrap();
+        assert!(top[0].bmin[1] <= -3.0 && top[0].bmax[1] >= -2.0 && top[0].bmax[1] < 0.0, "{:?}", top[0]);
+        u.add_tree(0, &first).unwrap();
+        u.moved(0, Mat4::from_translation(glam::Vec3::Y * 10.0), None);
+        let top = u.top().unwrap();
+        assert!(top[0].bmin[1] <= 12.0 && top[0].bmin[1] > 11.0 && top[0].bmax[1] >= 13.0, "{:?}", top[0]);
     }
 }

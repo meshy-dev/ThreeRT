@@ -455,8 +455,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             }
         }
         for (r, i) in sc.instances.iter().enumerate() {
-            let m = sc.meshes[i.mesh as usize];
-            if let Some(unit) = u.unit(i.mesh, i.world, (m.lo, m.hi), i.hidden) {
+            if let Some(unit) = u.unit(i.mesh, i.world, i.hidden) {
                 sc.gpu_instances[r] = units::unit_record(sc.gpu_instances[r], unit.root, i.cast_shadow);
                 u.slots[r] = Some(unit);
             }

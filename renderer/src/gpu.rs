@@ -597,12 +597,12 @@ impl<'a> Top<'a> {
         }
     }
 
-    /// An instance of instanced mesh `k` (model bounds `lo..hi`) at `slot`, placed by `world`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn place(&mut self, slot: usize, k: u32, (lo, hi): (glam::Vec3A, glam::Vec3A), world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
+    /// An instance of instanced mesh `k` at `slot`, placed by `world`. (Its bounds are the mesh's BLAS's, or its
+    /// tree's: units.rs `Unit`.)
+    pub fn place(&mut self, slot: usize, k: u32, world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
         match self {
             Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), custom, instance_mask(cast_shadow, hidden))),
-            Top::Sw(u) => u.set(slot, u.unit(k, world, (lo, hi), hidden)),
+            Top::Sw(u) => u.set(slot, u.unit(k, world, hidden)),
         }
     }
 

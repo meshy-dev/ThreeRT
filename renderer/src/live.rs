@@ -3322,7 +3322,7 @@ impl LiveCore {
                             let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.opaque), mesh, o.cast_shadow);
                             w_records.put(((r0 + i) * size) as u64, bytemuck::bytes_of(&rec));
                             gpu_instances[r0 + i] = rec;
-                            top.place(inst_base + r0 + i, mesh, (im.lo, im.hi), wm, gpu::INSTANCE_BIT | (r0 + i) as u32, o.cast_shadow, hidden);
+                            top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | (r0 + i) as u32, o.cast_shadow, hidden);
                             let (lo, hi) = im.placed_bounds(wm);
                             let entry = scene::object_row(wm.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, t.custom(i, o.custom), t.color(i));
                             w_objects.put(((o0 + i) * st * 16) as u64, bytemuck::cast_slice(&entry[..st]));
@@ -3378,7 +3378,7 @@ impl LiveCore {
             let custom = if matches!(o.kind, Kind::Procedural { .. }) { record as u32 } else { gpu::INSTANCE_BIT | record as u32 };
             match blas {
                 Placed::Proc(blas) => top.place_blas(slot, &blas, placement, custom, mask(o.cast_shadow)),
-                Placed::Mesh(k) => top.place(slot, k, (meshes[k as usize].lo, meshes[k as usize].hi), placement, custom, o.cast_shadow, false),
+                Placed::Mesh(k) => top.place(slot, k, placement, custom, o.cast_shadow, false),
             }
             let st = tables.stride;
             w_objects.put((object * st * 16) as u64, bytemuck::cast_slice(&entry[..st]));
