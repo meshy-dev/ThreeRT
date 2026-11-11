@@ -455,8 +455,43 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          result, a few frames later.
        - The fly-past's frame interval p95 went from 29.7 / 28.5 to 17.20 / 17.17 ms, and its commits over 5 ms from
          91 to 0.
-     - Next for step 1a: the acceptance runs (the fly-past and a Shinjuku drive, 5 poses × 4 times, in place against a
-       fresh load, a clip).
+     - Acceptance (2026-11-11, branch `tokyo-1a-acceptance`; `node tools/tokyo/accept-1a.ts`, clips by
+       `node tools/tokyo/clip.ts tower|drive`), on main + ThreeRT#6 (light sampling set up for the lights switched off at
+       load, found by these runs):
+       - The Shiba fly-past (15:30 → 17:45 in 10.5 s, 540–760 km/h) and a Shinjuku drive (Yasukuni-dōri eastbound from
+         `roads.json` at 60 km/h, 16:00 → 18:00 over 67 s), real time at the dynamic resolution:
+
+         | run | frames | scale | frame start p95 / p99 | interval p95 / max | over 50 ms | rebuilds | GPU p50 / p95 |
+         |---|---|---|---|---|---|---|---|
+         | fly-past | 648 in 10.5 s | 0.70 | 16.67 / 23.73 | 17.5 / 27.1 | 0 | 0 | 14.24 / 16.55 |
+         | drive | 4,086 in 67.1 s | 0.625 | 16.67 / 16.95 | 16.83 / 20.0 | 0 | 0 | 14.40 / 16.25 |
+
+         Both pass. Before #6 neither did: frame start p95 19.92 and 17.21 ms at the 0.5 floor.
+       - Live (the 0.5 floor, 64 frames after a reset) against our offline render (4096 spp, no denoiser, clamps off): ΔE
+         / SSIM / luminance (the truth's own noise, its 1024 spp render against it, ΔE / SSIM; SSIM with both halved, at
+         the resolution live renders):
+
+         | pose | 15:30 | sunset (16:40) | civil dusk (17:07) | night (19:30) |
+         |---|---|---|---|---|
+         | Kabukichō's gate | 0.50 / 0.983 / 0.976 (0.19 / 0.996; 0.990) | 0.60 / 0.984 / 1.004 (0.23 / 0.998; 0.992) | 0.62 / 0.966 / 0.989 (0.29 / 0.980; 0.979) | 1.73 / 0.877 / 0.994 (1.20 / 0.884; 0.936) |
+         | west exit | 0.98 / 0.942 / 0.945 (0.29 / 0.975; 0.968) | 0.91 / 0.965 / 1.011 (0.27 / 0.997; 0.980) | 0.75 / 0.954 / 0.989 (0.26 / 0.982; 0.970) | 2.01 / **0.869** / 0.993 (1.14 / 0.900; 0.916) |
+         | skyscraper canyon | 1.09 / 0.960 / 0.961 (0.28 / 0.987; 0.982) | 0.88 / 0.965 / 1.011 (0.26 / 0.996; 0.985) | 0.60 / 0.958 / 0.973 (0.22 / 0.978; 0.975) | 1.88 / **0.835** / 0.994 (1.19 / 0.878; 0.905) |
+         | aerial east | 1.56 / 0.933 / 0.993 (0.29 / 0.991; 0.976) | 1.83 / 0.916 / 0.963 (0.25 / 0.998; 0.964) | 1.75 / 0.931 / 0.898 (0.13 / 0.998; 0.981) | 2.89 / **0.896** / 1.037 (0.28 / 0.993; 0.962) |
+         | aerial west | 2.26 / 0.938 / 0.985 (0.34 / 0.993; 0.976) | 2.07 / **0.880** / 0.975 (0.29 / 0.998; 0.939) | 1.17 / 0.930 / 0.879 (0.12 / 0.997; 0.977) | 2.52 / **0.884** / 1.030 (0.30 / 0.989; 0.951) |
+
+         - ΔE ≤ 3 at all 20. SSIM ≥ 0.9, or within 0.02 of the truth's own, at 15 (bold: the misses).
+         - The night's numbers are step 1's static night rooms' (gate 1.70 / 0.878, west exit 2.02 / 0.868, canyon
+           1.87 / 0.836, aerials 2.95 / 0.894 and 2.57 / 0.882): the time-of-day room at 19:30 renders as they do. Their
+           misses are step 1's, left to step 3.
+         - Sunset's west aerial misses on the far city's detail at the 0.5 floor: halved, 0.939.
+         - At civil dusk the aerials read 10–12 % dark (0.898, 0.879): the far lamps and windows the live view does not
+           sample (`LT_FAR`, 120 m) and finds only by BSDF rays. Step 3.
+       - In place against a fresh load (Shinjuku's east aerial; the clock run in lockstep to the time, held 200 frames,
+         reset, 128 frames): ΔE 0.03 at 15:30, 0.08 at sunset, 0.01 at civil dusk, 0 at night (bit for bit). All pass.
+         Before #6: 0.29 / 0.49 / 0.15 / 0.34.
+       - Clips, posted in the session (animated WebP: the real-time run's frames, the lockstep snapshots of each):
+         - the fly-past, 637 frames in 10.5 s at scale 0.70;
+         - the drive, 4,078 frames in 67.1 s at scale 0.625.
   1b. **Weather on Tokyo.** States, and transitions between them, all in place (no rebuild):
      - rain: wet streets and puddles reflecting the city, and the rain curtain (Bistro's), measured on Tokyo;
      - fog and mist: height fog over the city, thickening and clearing;
