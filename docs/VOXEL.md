@@ -431,9 +431,17 @@ Where it runs (the user, 2026-11-10):
 - How (the user, 2026-11-10; docs/RUNTIME.md "The runtime's shape"): the Rust engine compiled to wasm, with the
   gameplay TypeScript in the browser's own JS engine calling its exports (layout C). Natively the script engine stays
   QuickJS, and nothing depends on a JIT. Scripts are three.js-style; Rust owns the scene, the physics and the voxels;
-  commands, poses, events and queries are the four channels between them. Not run in a real browser yet.
+  commands, poses, events and queries are the four channels between them. In a real browser so far: the physics
+  hello world (Chrome, 2026-11-11; docs/RUNTIME.md "The engine in a browser"). The voxel level has not run in one.
 - So voxel editing, meshing and physics (Rapier) build for wasm (`wasm32-unknown-unknown`: no wgpu, no file system,
-  threads optional), and the browser has no ray queries (WebGPU). How the browser renders is the user's decision.
+  threads optional), and the browser has no ray queries (WebGPU): it renders with the engine's own kernel under
+  software traversal. There a chunk's mesh and a piece of debris are units (a tree of their own under a top tree;
+  docs/RUNTIME.md "Software traversal with units", ROADMAP § 6 step 7b), so that an edit rewrites the chunks it
+  touched and not the scene (in a session and in a browser; an offline render under software traversal flattens
+  them, as before, and is byte for byte the reference render it was). Measured natively under software traversal
+  (2026-11-11), live: the level's triangle data 310.9 MiB (flattened: 2,098), an explosion 2.5–4.5 ms in place
+  (6.9–7.9 s), and a still frame's trace 7.85 ms where the flattened level's is 4.58 (the chunks' boxes overlap; the
+  top tree is not tuned yet).
 - The triangle route's output renders in `web/` as it is: standard meshes or glTF with palette materials, each voxel's
   colour as vertex colours, nothing that needs WGSL. Procedural boxes (a geometry function in WGSL) are native only.
 

@@ -234,8 +234,11 @@ try {
       check(boxes.every((b) => b.asleep && b.speed === 0), "every box is at rest, asleep");
     }
     check(state.trips === 0, `the loop guard stopped nothing in ${state.frames} frames (${state.trips})`);
-    // Software traversal: every added box and every frame a body moves rebuilds the scene (hardware: once, then in place).
-    console.log(`web hello: ${state.frames} frames, ${state.rebuilt} of them rebuilt the scene (software traversal: each box added, each frame a body moved: ${state.moved})`);
+    // Software traversal with units (docs/RUNTIME.md): the first box rebuilds the scene (a model's first instance: the
+    // kernel gets the unit walk), at its click's commit; every later box and every frame a body moves is in place.
+    // (Flattened, as before units: each box added and each of those frames rebuilt it.)
+    const commits = (state.clicks as ({ rebuilt: boolean } | null)[]).map((c) => (c ? (c.rebuilt ? "rebuild" : "in place") : "none"));
+    check(state.rebuilt === 0 && commits[0] === "rebuild" && commits.slice(1).every((c) => c === "in place"), `no frame rebuilt the scene (${state.rebuilt} of ${state.frames}; a body moved in ${state.moved}); the clicks' commits: ${commits.join(", ")}`);
     // The native test's numbers, if given: the same ticks, so the same boxes to the report's four decimals.
     const native = opt("--native");
     if (native && existsSync(native)) {
@@ -262,7 +265,8 @@ try {
     await page.close();
     const F = data.frames;
     // The first frames (pipelines compiled on first use, caches filling) apart; then still frames, frames in which a
-    // body moved (each rebuilds the scene), frames a click's box rebuilt.
+    // body moved (in place: the units' top tree), frames that rebuilt the scene (none with units: the first box's
+    // rebuild is its click's commit).
     const rows = (name: string, f: FrameRow[]) => ({
       name,
       frames: f.length,

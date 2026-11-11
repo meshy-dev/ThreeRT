@@ -21,6 +21,7 @@ pub mod script;
 pub mod skin;
 pub mod sky;
 pub mod tables;
+pub mod units;
 pub mod texpack;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod view;
@@ -350,19 +351,62 @@ pub fn fog_params(fog: Option<&desc::Fog>) -> [[f32; 4]; 4] {
     ]
 }
 
+/// `prepare` for an offline render: under software traversal every instance flattened unless THREERT_UNITS=1.
 pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
+    prepare_as(g.hwrt, units_on(false), sc, timings)
+}
+
+/// `prepare` for a live session: under software traversal the instances are units unless THREERT_UNITS=0.
+pub fn prepare_live(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
+    prepare_as(g.hwrt, units_on(true), sc, timings)
+}
+
+/// Whether software traversal keeps a scene's instances as units (units.rs). A live session and a browser do: units
+/// are what they edit in place, and what a browser's memory and load time need. An offline render does not: it
+/// edits nothing, it is the reference the catalog's bytes are compared by, and its kernel and bytes stay what they
+/// were before units. THREERT_UNITS=1 has an offline render use them (the A/B against a live frame's units);
+/// THREERT_UNITS=0 flattens everywhere (the A/B against units).
+pub(crate) fn units_on(live: bool) -> bool {
+    units_said(std::env::var("THREERT_UNITS").ok().as_deref(), live)
+}
+
+fn units_said(var: Option<&str>, live: bool) -> bool {
+    match var {
+        Some("0") => false,
+        Some("1") => true,
+        _ => live || cfg!(target_arch = "wasm32"),
+    }
+}
+
+/// Whether `prepare_live` will keep the scene's instances as units (software traversal, and it has instances), asked
+/// before it runs (live.rs `load_scene`: the light tree's part for emitters edits add).
+pub fn units_wanted(hwrt: bool, sc: &scene::Scene) -> bool {
+    !hwrt && units_on(true) && !sc.instances.is_empty() && sc.instances.len() <= units::MAX_UNITS
+}
+
+/// `prepare` for a traversal: hardware ray queries, or software traversal with units (units.rs) or without.
+pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
     let t = Instant::now();
-    // Software traversal has no instancing: the instances become ordinary world-space triangles.
-    if !g.hwrt && !sc.instances.is_empty() {
-        flatten_instances(sc);
+    // Software traversal: the instances stay instances, units of a second level (units.rs; docs/RUNTIME.md "Software
+    // traversal with units"), each mesh with a tree of its own over its model-space triangles, which are put in the
+    // tree's order here, before anything counts them. Without units (THREERT_UNITS=0, the A/B; a mesh no tree can
+    // be made of; more instances than a top tree holds) the instances become ordinary world-space triangles, as
+    // they all did before.
+    let mut trees = None;
+    if !hwrt && !sc.instances.is_empty() {
+        trees = if units && sc.instances.len() <= units::MAX_UNITS { unit_trees(sc) } else { None };
+        match &trees {
+            Some(_) => flatten_deforming(sc),
+            None => flatten_instances(sc),
+        }
     }
     // Software traversal walks each procedural object's boxes through a tree of its own, and the tree over no box is
     // not one the kernel can walk (bvh.rs `EMPTY`): an object without boxes has nothing to meet, and is left out.
-    if !g.hwrt {
+    if !hwrt {
         sc.procs.retain(|p| !p.blob.boxes.is_empty());
     }
     // Hardware RT only needs triangles grouped by shadow casting; software traversal needs our BVH.
-    let bvh = if g.hwrt {
+    let bvh = if hwrt {
         let mut order: Vec<u32> = (0..sc.tris.len() as u32).collect();
         order.sort_by_key(|&i| group_of(sc.tri_flags[i as usize]));
         bvh::Bvh { nodes: vec![bvh::GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 0 }], order }
@@ -390,19 +434,64 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     for (k, (t, a)) in sc.pool_tris.iter().zip(&sc.pool_attrs).enumerate() {
         let [a0, b, c] = *t;
         let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
-        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 })]);
+        // (A unit's triangles are in its tree's order, cutouts among the rest: each carries its own flag, as the still
+        // scene's do. Hardware traversal has them apart, in a geometry of their own.)
+        let cutout = trees.is_some() && sc.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.uv2[3] > 0.0);
+        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 } | if cutout { scene::TRI_MASKED } else { 0 })]);
         tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
     sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.opaque) }).collect();
+    // A scene whose triangles are all units': the still tree is then the leaf of one triangle, triangle 0 (bvh.rs
+    // `EMPTY`), which no ray meets while triangle 0 is the zeros of an empty buffer. Here triangle 0 is the pool's
+    // first, a mesh's in its model space, and the still walk would meet it standing in the world. The leaf gets a
+    // triangle of its own after the pool, without area.
+    let no_still = trees.is_some() && pool_first == 0;
+    let nothing = tri_verts.len() / 3;
+    if no_still {
+        tri_verts.extend([[0.0; 4]; 3]);
+        attrs.push(bytemuck::Zeroable::zeroed());
+    }
+    // The units: the mesh trees after the still tree's nodes, room for the trees and units edits add (the edit room's
+    // triangles and records, gpu.rs `EditRoom`), the top tree; each unit's record gets its tree's root.
+    let mut nodes = bvh.nodes;
+    if no_still {
+        nodes[0].left_or_first = nothing as u32;
+    }
+    sc.units = None;
+    if let Some(trees) = trees {
+        let room = gpu::EditRoom::for_scene(sc, tri_verts.len() / 3, sc.instances.len() + sc.procs.len(), false, true);
+        let used: usize = trees.iter().flatten().map(|t| t.nodes.len()).sum();
+        let mut u = units::Units { layout: units::Layout::new(nodes.len(), used + room.tris, sc.instances.len() + room.records), trees: vec![None; trees.len()], slots: vec![None; sc.instances.len()], count: 0, records: sc.instances.len() + sc.procs.len() + room.records };
+        let still = nodes.len();
+        nodes.resize(still + u.layout.nodes(), units::FILL);
+        for (k, t) in trees.iter().enumerate() {
+            if let Some(t) = t {
+                let root = u.add_tree(k as u32, t).expect("the mesh range holds the build's trees") as usize;
+                nodes[root..root + t.nodes.len()].copy_from_slice(&t.nodes);
+            }
+        }
+        for (r, i) in sc.instances.iter().enumerate() {
+            if let Some(unit) = u.unit(i.mesh, i.world, i.hidden) {
+                sc.gpu_instances[r] = units::unit_record(sc.gpu_instances[r], unit.root, i.cast_shadow);
+                u.slots[r] = Some(unit);
+            }
+        }
+        // (A scene whose units the top tree cannot hold, or with one that is nowhere: none is drawn, and it says so.)
+        match u.top() {
+            Ok(top) => nodes[u.layout.top_first as usize..u.layout.top_first as usize + top.len()].copy_from_slice(&top),
+            Err(e) => eprintln!("units: no top tree ({e}): the scene's instances are not drawn"),
+        }
+        sc.units = Some(u);
+    }
     // Procedural geometry: its records after the model instances', its boxes / materials / data in `proc_data`.
-    let layout = scene::proc_layout(&sc.procs, !g.hwrt);
+    let layout = scene::proc_layout(&sc.procs, !hwrt);
     sc.proc_records = sc.procs.iter().zip(&layout.headers).map(|(p, &h)| p.gpu(h)).collect();
     sc.proc_layout = (!sc.procs.is_empty()).then_some(layout);
     // Translucent particles (hardware RT): after the pool, in no group (only the translucency pass traces them).
     sc.trans_first = (tri_verts.len() / 3) as u32;
-    if g.hwrt {
+    if hwrt {
         for (t, a) in sc.trans_tris.iter().zip(&sc.trans_attrs) {
             let [a0, b, c] = *t;
             let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
@@ -426,7 +515,7 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
         v
     };
     // Posed models: where each of their triangles landed (they are re-skinned in place, hardware RT only).
-    if g.hwrt && (!sc.retained.dynamic.is_empty() || !sc.retained.rigid.is_empty() || !sc.particles.is_empty() || !sc.gpu_particles.is_empty()) {
+    if hwrt && (!sc.retained.dynamic.is_empty() || !sc.retained.rigid.is_empty() || !sc.particles.is_empty() || !sc.gpu_particles.is_empty()) {
         let first_dynamic: usize = groups[..4].iter().sum();
         let finals: std::collections::HashMap<u32, u32> = bvh.order[first_dynamic..].iter().enumerate().map(|(k, &i)| (i, (first_dynamic + k) as u32)).collect();
         for d in sc.retained.dynamic.values_mut().chain(sc.retained.rigid.values_mut().map(|r| &mut r.rest)) {
@@ -614,7 +703,9 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
         vol2: fog[3],
         raster: [0.0; 4],
         cache: [0.0; 4],
-        motion: [0.0; 4],
+        // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
+        // `render --signals`'.)
+        motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, 0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count)]),
         prev_pos: [0.0; 4],
         prev_fwd: [0.0; 4],
         prev_right: [0.0; 4],
@@ -636,10 +727,72 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes: bvh.nodes, emitters, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.
+/// Software traversal's units (units.rs): a tree for each instanced mesh that keeps its shape, its triangles (and
+/// what goes with them: attributes, vertex colours) put in the tree's order. None: no units (a mesh no tree can be
+/// made of: a vertex that is not a number); the caller flattens every instance then.
+fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
+    let mut trees = Vec::with_capacity(sc.meshes.len());
+    for m in &sc.meshes {
+        if m.deforms || m.count == 0 {
+            trees.push(None);
+            continue;
+        }
+        match units::mesh_tree(&sc.pool_tris[m.first as usize..(m.first + m.count) as usize]) {
+            Ok(t) => trees.push(Some(t)),
+            Err(e) => {
+                eprintln!("units: {e}: the scene's instances are flattened");
+                return None;
+            }
+        }
+    }
+    if !sc.pool_vcolors.is_empty() {
+        sc.pool_vcolors.resize(sc.pool_tris.len(), scene::WHITE);
+    }
+    for (m, t) in sc.meshes.iter().zip(&trees) {
+        let Some(t) = t else { continue };
+        let r = m.first as usize..(m.first + m.count) as usize;
+        let tris: Vec<_> = t.order.iter().map(|&i| sc.pool_tris[r.start + i as usize]).collect();
+        sc.pool_tris[r.clone()].copy_from_slice(&tris);
+        let attrs: Vec<_> = t.order.iter().map(|&i| sc.pool_attrs[r.start + i as usize]).collect();
+        sc.pool_attrs[r.clone()].copy_from_slice(&attrs);
+        if !sc.pool_vcolors.is_empty() {
+            let colors: Vec<_> = t.order.iter().map(|&i| sc.pool_vcolors[r.start + i as usize]).collect();
+            sc.pool_vcolors[r].copy_from_slice(&colors);
+        }
+    }
+    Some(trees)
+}
+
+/// With units: the instances of meshes that deform (a pose a crowd shares) are still written out as world-space
+/// triangles, as every instance was. They keep their place among the instances (edits name instances by index) and
+/// are no unit.
+fn flatten_deforming(sc: &mut scene::Scene) {
+    for k in 0..sc.instances.len() {
+        let inst = sc.instances[k].clone();
+        let m = sc.meshes[inst.mesh as usize];
+        if inst.hidden || !m.deforms {
+            continue;
+        }
+        let first = sc.tris.len() as u32;
+        for k in m.first..m.first + m.count {
+            if let Some(&c) = sc.pool_vcolors.get(k as usize) {
+                scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
+            }
+            sc.tris.push(inst.tri(&sc.pool_tris[k as usize]));
+            sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
+            sc.attrs.push(scene::instance_attr(&sc.pool_attrs[k as usize], inst.world, inst.object));
+        }
+        sc.tri_nodes.push((inst.name.clone(), first, sc.tris.len() as u32));
+        if let Some(i) = inst.sub {
+            sc.tri_instances.push((first, sc.tris.len() as u32, i));
+        }
+    }
+}
+
 fn flatten_instances(sc: &mut scene::Scene) {
     for inst in std::mem::take(&mut sc.instances) {
         if inst.hidden {
@@ -881,5 +1034,172 @@ mod light_lod_tests {
             r.iter().sum::<f32>() / r.len() as f32
         };
         assert!(mean(&table) < 0.5 * mean(&unsorted), "groups are compact: {} vs {}", mean(&table), mean(&unsorted));
+    }
+}
+
+#[cfg(test)]
+mod units_tests {
+    use super::*;
+    use crate::units::cpu::{Kernel, INF, TRACE_CLOSEST, TRACE_SHADOW};
+    use crate::world::{Geometry, Kind, World};
+    use glam::{Mat4, Quat};
+
+    /// A world with a flattened ground, meshes of their own (`own_blas`: units under software traversal) turned and
+    /// scaled, one that casts no shadow, one hidden, and an instanced mesh of five instances of which four are drawn.
+    fn world(ground: bool) -> World {
+        let mut w = World::default();
+        w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
+        let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+        // A closed shape of 80 triangles (a strip of quads around an axis), for a tree with interior nodes.
+        let ring = {
+            let (mut p, mut n, mut idx) = (vec![], vec![], vec![]);
+            for k in 0..=40u32 {
+                let a = k as f32 / 40.0 * std::f32::consts::TAU;
+                for y in [-0.5f32, 0.5] {
+                    p.extend([a.cos() * (0.6 + 0.2 * y), y, a.sin() * 0.6]);
+                    n.extend([a.cos(), 0.0, a.sin()]);
+                }
+            }
+            for k in 0..40u32 {
+                idx.extend([2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2]);
+            }
+            Geometry { uvs: vec![0.0; p.len() / 3 * 2], positions: p, normals: n, indices: idx, groups: vec![], colors: vec![] }
+        };
+        w.set_geometry(2, quad(6.0)).unwrap();
+        w.set_geometry(3, quad(0.5)).unwrap();
+        w.set_geometry(5, ring).unwrap();
+        let mesh = |geometry, own_blas| Kind::Mesh { geometry, material: 1, own_blas, materials: vec![] };
+        if ground {
+            w.set_object(10, "ground".into(), None, mesh(2, false), true, false).unwrap();
+            w.set_transform(10, Vec3::new(0.0, -1.0, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+        }
+        let place = |w: &mut World, id: u32, geometry: u32, at: [f32; 3], turn: f32, scale: [f32; 3], shadow: bool| {
+            w.set_object(id, format!("o{id}"), None, mesh(geometry, true), shadow, false).unwrap();
+            w.set_transform(id, Vec3::from(at), Quat::from_euler(glam::EulerRot::XYZ, turn, turn * 0.7, 0.3), Vec3::from(scale)).unwrap();
+        };
+        place(&mut w, 11, 5, [0.0, 0.0, 0.0], 0.4, [1.0, 1.0, 1.0], true);
+        place(&mut w, 12, 5, [2.0, 0.5, -1.0], 1.9, [0.5, 2.0, 0.7], true);
+        place(&mut w, 13, 3, [-2.0, 0.2, 0.5], 0.9, [3.0, 1.0, 1.0], false);
+        place(&mut w, 14, 5, [0.3, 0.1, 0.2], 2.5, [1.2, 0.4, 1.2], true);
+        place(&mut w, 15, 3, [0.0, 3.0, 0.0], 0.0, [1.0, 1.0, 1.0], true);
+        w.set_visible(15, false).unwrap();
+        w.set_object(20, "many".into(), None, Kind::Instanced { geometry: 5, procedural: false, materials: vec![1], capacity: 5 }, true, false).unwrap();
+        let m: Vec<f32> = (0..5).flat_map(|k| Mat4::from_scale_rotation_translation(Vec3::splat(0.6), Quat::from_rotation_y(k as f32), Vec3::new(-4.0 + 2.0 * k as f32, 1.5, -3.0)).to_cols_array()).collect();
+        w.set_instances(20, 4, Some(m), None, None).unwrap();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(4, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_transform(4, Vec3::new(0.0, 1.0, 9.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
+        w
+    }
+
+    /// `prepare` under software traversal with units lays out what the kernel walks (the still tree, the meshes'
+    /// trees and their triangles in tree order, the records with their roots, the top tree, the parameters): the
+    /// kernel's walk over it, on the CPU with every read checked, meets what it meets in the same scene with every
+    /// instance flattened into world-space triangles (the software traversal there was), ray for ray: the same
+    /// distance (to the rounding of testing a triangle in its own space instead of the world's), and shadow rays
+    /// blocked alike (a unit that casts none lets them through). No GPU.
+    #[test]
+    fn a_scene_with_units_is_the_flattened_scene_to_every_ray() {
+        agree(&world(true), (3000, 400, 2000));
+    }
+
+    /// The same with no still triangle at all: the still tree is then the leaf of one triangle (bvh.rs `EMPTY`), and
+    /// that triangle must be one no ray meets, not the first of the units' (a mesh's, in its model space). First seen
+    /// on a GPU: `geometry/instanced`, two planes, darker towards a triangle standing at the origin.
+    #[test]
+    fn a_scene_of_units_alone_is_the_flattened_scene_to_every_ray() {
+        agree(&world(false), (1000, 1000, 400));
+    }
+
+    /// Units are a live session's and a browser's: an offline render flattens a scene's instances as it did before
+    /// units, unless told (THREERT_UNITS=1), and its kernel is then the one without the unit walk. THREERT_UNITS=0
+    /// flattens everywhere.
+    #[test]
+    fn an_offline_render_has_no_units_unless_told() {
+        let browser = cfg!(target_arch = "wasm32");
+        assert_eq!((units_said(None, false), units_said(None, true)), (browser, true));
+        assert_eq!((units_said(Some("1"), false), units_said(Some("1"), true)), (true, true));
+        assert_eq!((units_said(Some("0"), false), units_said(Some("0"), true)), (false, false));
+        assert_eq!(units_said(Some(""), false), browser);
+        if std::env::var("THREERT_UNITS").is_ok() {
+            return;
+        }
+        // What `prepare` hands an offline render of a scene with instances, and `prepare_live` a live session.
+        let build = |live: bool| {
+            let mut sc = scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(false, units_on(live), &mut sc, &mut vec![]);
+            (sc, p)
+        };
+        let (off, po) = build(false);
+        let (flat, pf) = {
+            let mut sc = scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(false, false, &mut sc, &mut vec![]);
+            (sc, p)
+        };
+        assert!(off.units.is_none() && off.instances.is_empty(), "offline: flattened");
+        assert_eq!(gpu::instance_features(&off) & gpu::F_UNITS, 0, "offline: the kernel without the unit walk");
+        assert_eq!(gpu::instance_features(&off), gpu::instance_features(&flat));
+        assert!(bytemuck::cast_slice::<_, u8>(&po.tri_verts) == bytemuck::cast_slice::<_, u8>(&pf.tri_verts) && bytemuck::cast_slice::<_, u8>(&po.nodes) == bytemuck::cast_slice::<_, u8>(&pf.nodes), "offline: the flattened scene's bytes");
+        let (live, _) = build(true);
+        assert!(live.units.is_some() && gpu::instance_features(&live) & gpu::F_UNITS != 0, "live: units");
+        assert!(units_wanted(false, &scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap()) && !units_wanted(true, &off));
+    }
+
+    fn agree(w: &World, least: (usize, usize, usize)) {
+        let build = |units: bool| {
+            let mut sc = scene::build(&w, std::path::Path::new("."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(false, units, &mut sc, &mut vec![]);
+            (sc, p)
+        };
+        let (su, pu) = build(true);
+        let (sf, pf) = build(false);
+        assert_eq!(su.tris.is_empty(), w.objects.get(&10).is_none(), "still triangles: the ground's only");
+        let u = su.units.as_ref().expect("the scene has units");
+        assert!(sf.units.is_none() && sf.instances.is_empty(), "flattened: no instance is left");
+        // Nine instances: four own meshes shown, one hidden (no instance at all), five of the instanced mesh of which
+        // one is hidden: eight units in the top tree.
+        assert_eq!((su.instances.len(), u.count), (9, 8), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
+        assert!(gpu::instance_features(&su) & gpu::F_UNITS != 0 && gpu::instance_features(&sf) & gpu::F_UNITS == 0);
+        assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits()), (u.layout.top_first, 8));
+        // The flattened scene holds every instance's triangles; the scene with units holds each mesh's once.
+        assert!(pf.tri_verts.len() > pu.tri_verts.len());
+        assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
+        let kernel = |p: &Prepared, sc: &scene::Scene| {
+            let (top, units) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
+            (p.nodes.clone(), p.tri_verts.clone(), sc.gpu_instances.clone(), top, units)
+        };
+        let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
+        let walk = |k: &(Vec<bvh::GpuNode>, Vec<[f32; 4]>, Vec<scene::GpuInstance>, u32, u32), o: Vec3A, d: Vec3A, mode: u32| {
+            let instances = if k.2.is_empty() { vec![scene::GpuInstance::default()] } else { k.2.clone() };
+            let kernel = Kernel { nodes: &k.0, tri_verts: &k.1, instances: &instances, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default() };
+            kernel.trace(o, d, INF, mode).unwrap_or_else(|e| panic!("ray {o} {d}, mode {mode}: the kernel {e}"))
+        };
+        let mut s = 12345u64;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 40) as f32) / (1u64 << 24) as f32
+        };
+        let (mut hits, mut on_units, mut shadowed) = (0, 0, 0);
+        for k in 0..9000 {
+            // From around the camera into the scene, through the space around the origin (where a mesh's model-space
+            // triangles would stand if anything took them for the world's), and from above straight down.
+            let (o, d) = if k % 3 == 0 {
+                (Vec3A::new(8.0 * rnd() - 4.0, 4.0 * rnd(), 9.0), Vec3A::new(3.0 * rnd() - 1.5, 3.0 * rnd() - 2.0, -4.0).normalize())
+            } else if k % 3 == 1 {
+                (Vec3A::new(2.0 * rnd() - 1.0, 2.0 * rnd() - 1.0, 4.0), Vec3A::new(0.1 * rnd() - 0.05, 0.1 * rnd() - 0.05, -1.0).normalize())
+            } else {
+                (Vec3A::new(12.0 * rnd() - 6.0, 6.0, 8.0 * rnd() - 5.0), Vec3A::new(0.2 * rnd() - 0.1, -1.0, 0.2 * rnd() - 0.1).normalize())
+            };
+            let (a, b) = (walk(&ku, o, d, TRACE_CLOSEST), walk(&kf, o, d, TRACE_CLOSEST));
+            assert!((a.t - b.t).abs() <= 2e-4 * (1.0 + b.t.min(1e4)) || (a.t == INF) == (b.t == INF) && a.t == INF, "ray {o} {d}: with units {a:?}, flattened {b:?}");
+            assert_eq!(a.t == INF, b.t == INF, "ray {o} {d}: with units {a:?}, flattened {b:?}");
+            hits += (a.t < INF) as usize;
+            on_units += (a.inst != units::cpu::NO_INST) as usize;
+            let (sa, sb) = (walk(&ku, o, d, TRACE_SHADOW), walk(&kf, o, d, TRACE_SHADOW));
+            assert_eq!(sa.t == INF, sb.t == INF, "shadow ray {o} {d}: with units {sa:?}, flattened {sb:?}");
+            shadowed += (sa.t < INF) as usize;
+        }
+        assert!(hits > least.0 && on_units > least.1 && shadowed > least.2, "{hits} hits, {on_units} on units, {shadowed} shadow rays blocked");
     }
 }

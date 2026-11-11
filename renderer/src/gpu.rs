@@ -134,18 +134,26 @@ impl EditRoom {
         std::env::var("THREERT_EDIT_RESERVE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
     }
 
-    /// Whether the scene gets room (`for_scene`): editable geometry under hardware RT.
+    /// Whether the scene gets room (`for_scene`): editable geometry under hardware RT, or under software traversal
+    /// with units (`hwrt` true for them too: `lib.rs prepare`).
     pub fn editable(scene: &Scene, hwrt: bool) -> bool {
         hwrt && Self::reserve() > 0.0 && (!scene.procs.is_empty() || !scene.retained.own_instance.is_empty())
     }
 
-    fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool) -> EditRoom {
+    /// `units`: software traversal with units, whose room does not grow (hardware traversal's does, from nothing): a
+    /// scene of theirs without editable geometry still gets records and object entries, for instances of the meshes
+    /// it has (a mesh it has not rebuilds the scene: no triangles).
+    pub(crate) fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool, units: bool) -> EditRoom {
         let k = Self::reserve();
         let (procs, meshes) = (!scene.procs.is_empty(), !scene.retained.own_instance.is_empty());
-        if !Self::editable(scene, hwrt) {
-            return EditRoom::default();
-        }
         let part = |n: usize, min: usize| ((n as f64 * 0.25 * k) as usize).max((min as f64 * k) as usize);
+        if !Self::editable(scene, hwrt || units) {
+            return if units && k > 0.0 {
+                EditRoom { records: part(records, 1024), objects: part(scene.objects.len() / scene.object_stride(), 1024), ..EditRoom::default() }
+            } else {
+                EditRoom::default()
+            };
+        }
         let blob_words = scene.proc_layout.as_ref().map_or(0, |l| l.head.len() + l.blob_words);
         EditRoom {
             tris: if meshes { part(tris, 1 << 16) } else { 0 },
@@ -210,6 +218,9 @@ pub struct Uploaded {
     pub prev_verts: wgpu::Buffer,
     pub dynamic_first: usize,
     pub accel: Option<Accel>,
+    /// Software traversal's units (units.rs), when the scene has any: what `accel` is to hardware traversal. Their
+    /// trees are in the node buffer (`bg_parts.nodes`).
+    pub units: Option<crate::units::Units>,
     /// The particle pass, when the scene has particle systems (hardware RT).
     pub particles: Option<ParticleGpu>,
     pub gpu_particles: Option<GpuParticlesGpu>,
@@ -541,6 +552,103 @@ pub struct Accel {
     pub proc_base: usize,
 }
 
+/// What is above the triangles for an edit in place: hardware traversal's TLAS and BLASes, or software traversal's
+/// units (units.rs). An instance's slot is its TLAS index; its kernel record is the slot less `inst_base` (0 for
+/// units: a unit's slot is its record).
+pub enum Top<'a> {
+    Hw(&'a mut Accel),
+    Sw(&'a mut crate::units::Units),
+}
+
+impl<'a> Top<'a> {
+    /// The scene's, or None under software traversal without units (edits rebuild then).
+    pub fn of(accel: &'a mut Option<Accel>, units: &'a mut Option<crate::units::Units>) -> Option<Top<'a>> {
+        match (accel.as_mut(), units.as_mut()) {
+            (Some(a), _) => Some(Top::Hw(a)),
+            (None, Some(u)) => Some(Top::Sw(u)),
+            _ => None,
+        }
+    }
+
+    pub fn inst_base(&self) -> usize {
+        match self {
+            Top::Hw(a) => a.inst_base,
+            Top::Sw(_) => 0,
+        }
+    }
+
+    /// The slot of the first procedural object (`proc_first`: its record).
+    pub fn proc_base(&self, proc_first: usize) -> usize {
+        match self {
+            Top::Hw(a) => a.proc_base,
+            Top::Sw(_) => proc_first,
+        }
+    }
+
+    pub fn sw(&self) -> bool {
+        matches!(self, Top::Sw(_))
+    }
+
+    /// No instance at `slot`.
+    pub fn clear(&mut self, slot: usize) {
+        match self {
+            Top::Hw(a) => a.tlas[slot] = None,
+            Top::Sw(u) => u.set(slot, None),
+        }
+    }
+
+    /// An instance of instanced mesh `k` at `slot`, placed by `world`. (Its bounds are the mesh's BLAS's, or its
+    /// tree's: units.rs `Unit`.)
+    pub fn place(&mut self, slot: usize, k: u32, world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
+        match self {
+            Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), custom, instance_mask(cast_shadow, hidden))),
+            Top::Sw(u) => u.set(slot, u.unit(k, world, hidden)),
+        }
+    }
+
+    /// A procedural object's instance at `slot` (its AABB BLAS). Hardware traversal only: software traversal finds
+    /// procedural objects by their records (`trace_procs`), and its edits of them rebuild the scene.
+    pub fn place_blas(&mut self, slot: usize, blas: &wgpu::Blas, world: glam::Mat4, custom: u32, mask: u8) {
+        if let Top::Hw(a) = self {
+            a.tlas[slot] = Some(wgpu::TlasInstance::new(blas, tlas_rows(world), custom, mask));
+        }
+    }
+
+    /// Whether instanced mesh `k` can be placed: always under hardware traversal (its BLAS); under software traversal
+    /// if it has a tree (a mesh that deforms has none: its instances are flattened).
+    pub fn has_mesh(&self, k: u32) -> bool {
+        match self {
+            Top::Hw(_) => true,
+            Top::Sw(u) => u.root(k).is_some(),
+        }
+    }
+
+    /// The instance at `slot`, if there is one, placed by `world` now; with `shown`, its mask too (hidden or not,
+    /// casting shadows or not).
+    pub fn moved(&mut self, slot: usize, world: glam::Mat4, shown: Option<(bool, bool)>) {
+        match self {
+            Top::Hw(a) => {
+                if let Some(t) = a.tlas[slot].as_mut() {
+                    t.transform = tlas_rows(world);
+                    if let Some((cast_shadow, hidden)) = shown {
+                        t.mask = instance_mask(cast_shadow, hidden);
+                    }
+                }
+            }
+            Top::Sw(u) => u.moved(slot, world, shown.map(|(_, hidden)| hidden)),
+        }
+    }
+
+    /// An instance's kernel record as this traversal reads it: a unit's carries its mesh's tree's root and whether it
+    /// casts shadows (hardware traversal has them in the TLAS).
+    pub fn record(&self, r: crate::scene::GpuInstance, k: u32, cast_shadow: bool) -> crate::scene::GpuInstance {
+        match self {
+            Top::Hw(_) => r,
+            Top::Sw(u) => crate::units::unit_record(r, u.root(k).unwrap_or(0), cast_shadow),
+        }
+    }
+}
+
 /// A TLAS instance transform: the world matrix's first three rows.
 /// TLAS mask of an instance: 1 casts shadows, 2 does not, 0 a hidden instance of an instanced object (no ray sees it).
 pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
@@ -619,6 +727,14 @@ pub fn kernel_source(src: &str, features: u32) -> String {
             "    s.emissive = emission(m, uv, lod) * obj_power(a);\n    // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.\n    if (m.tex1.z == MAT_UNLIT) {\n        s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);\n        base = vec3<f32>(0.0);\n        spec = 0.0;\n        metal = 0.0;\n    }\n",
         );
     }
+    if features & F_UNITS != 0 {
+        // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before).
+        patch(
+            "    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+            "    hit = trace_units(o, d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+        );
+        patch("\n// @trace-end\n", &format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl")));
+    }
     if features & F_BACKGROUND != 0 {
         patch("    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n};\n", "    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n    background: vec4<f32>, // three.js scene.background (radiance), 1\n};\n");
         patch("fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {\n", "fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {\n    // three.js scene.background: what camera rays (and paths bent straight through glass) see where nothing is.\n    if (pdf <= 0.0) { return P.background.rgb; }\n");
@@ -626,18 +742,30 @@ pub fn kernel_source(src: &str, features: u32) -> String {
     s
 }
 
-/// The loop guard's limit, if the kernel is to have one (merged.rs `guard`: every loop of it bounded, so a dispatch
-/// ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where the kernel is otherwise as
-/// written; always in a browser, where a dispatch that does not end is the player's whole GPU.
+/// The loop guard's limit for every kernel, if one is set (merged.rs `guard`: every loop of a kernel bounded, so a
+/// dispatch ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where a kernel is
+/// otherwise as written; always in a browser, where a dispatch that does not end is the player's whole GPU.
 pub fn loop_guard() -> Option<u32> {
-    match LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => {}
-        n => return Some(n),
-    }
-    match std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok()) {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => cfg!(target_arch = "wasm32").then_some(1 << 16),
+    loop_guard_of(false)
+}
+
+/// The loop guard's limit for a kernel with units or without (`F_UNITS`). A kernel with units has the guard natively
+/// too, at the browser's limit, unless THREERT_LOOP_GUARD=0: its second level is the traversal that has run least,
+/// and what it walks is rewritten by edits while it runs. A kernel without units is as `loop_guard` says: natively,
+/// with nothing set, the source as written.
+pub fn loop_guard_of(units: bool) -> Option<u32> {
+    let page = LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed);
+    let var = std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok());
+    guard_limit(page, var, units, cfg!(target_arch = "wasm32"))
+}
+
+/// `loop_guard_of`, of what was set: by a page (0: nothing), by the environment (Some(0): off), and where.
+fn guard_limit(page: u32, var: Option<u32>, units: bool, browser: bool) -> Option<u32> {
+    match (page, var) {
+        (n, _) if n > 0 => Some(n),
+        (_, Some(0)) => None,
+        (_, Some(n)) => Some(n),
+        (_, None) => (units || browser).then_some(1 << 16),
     }
 }
 
@@ -650,6 +778,13 @@ pub fn set_loop_guard(limit: u32) {
     if limit > 0 {
         LOOP_GUARD.store(limit, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Whether a device's layout as written has the guard's count (group 1, `merged::GUARD_BINDING`; `KernelBufs::guard`):
+/// when a kernel of it may have the guard. Under software traversal that is unless THREERT_LOOP_GUARD=0, a scene's
+/// first unit bringing the guard with it; under hardware traversal, when a limit is set.
+fn guard_room(hwrt: bool) -> bool {
+    loop_guard_of(!hwrt).is_some()
 }
 
 /// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
@@ -665,10 +800,11 @@ pub fn kernel_base(hwrt: bool) -> String {
     }
 }
 
-/// A kernel source as it is compiled: with the loop guard if there is one, its count in `MergedLive` (the merged
-/// layout) or in a buffer of its own (group 1, `merged::GUARD_BINDING`).
-fn guarded(src: &str, merged: bool) -> String {
-    match loop_guard() {
+/// A kernel source as it is compiled: with the loop guard if it has one (`loop_guard_of`: `units`, whether the source
+/// has the unit walk), its count in `MergedLive` (the merged layout) or in a buffer of its own (group 1,
+/// `merged::GUARD_BINDING`).
+fn guarded(src: &str, merged: bool, units: bool) -> String {
+    match loop_guard_of(units) {
         None => src.to_string(),
         Some(n) if merged => crate::merged::guard(src, n, "ML.loop_guard_trips"),
         Some(n) => crate::merged::guard(&format!("{src}\n{}", crate::merged::guard_decl()), n, crate::merged::GUARD_TRIPS.name),
@@ -758,10 +894,11 @@ pub struct KernelBufs {
 
 impl KernelBufs {
     /// For a cache of `entries`, reservoirs for `pixels` and the live passes' three of these bytes.
-    pub fn new(d: &wgpu::Device, merged: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
+    /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
         if !merged {
             let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
-            let guard = loop_guard().map(|_| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
+            let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
             return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
         }
         let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
@@ -962,7 +1099,10 @@ pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions (F_SOURCE). (Bit
 /// 24 is F_AERIAL's.)
 pub const F_GRID: u32 = 1 << 25;
-pub const F_SOURCE: u32 = F_TINT | F_UNLIT | F_BACKGROUND | F_VCOLOR | F_GRID;
+pub const F_SOURCE: u32 = F_TINT | F_UNLIT | F_BACKGROUND | F_VCOLOR | F_GRID | F_UNITS;
+/// Software traversal's units (units.rs; shaders/trace_units.wgsl): the second level's walk, spliced into the
+/// software traversal after the still scene's (F_SOURCE). Never with hardware traversal.
+pub const F_UNITS: u32 = 1 << 26;
 /// The sky's aerial perspective (SkyAtmosphere `aerialPerspective`; pathtrace.wgsl `aerial_tr`) on every path segment
 /// that ends on a surface: compiled out where no scene has it. (Bit 23 is left to INSTANCE_BIT below.)
 pub const F_AERIAL: u32 = 1 << 24;
@@ -997,7 +1137,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
-    media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 }
+    media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (materials, fog), and the instanced meshes' (`instance_features`).
@@ -1138,7 +1278,7 @@ impl Gpu {
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
             device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false).into()) },
+                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false, false).into()) },
                 wgpu::ShaderRuntimeChecks::unchecked(),
             )
         });
@@ -1215,10 +1355,11 @@ impl Gpu {
             storage(7, false),
         ];
         // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
-        // As written, a kernel with the guard has the count in a buffer of its own.
+        // As written, a kernel with the guard has the count in a buffer of its own: the binding is there whenever a
+        // kernel of this device may have the guard (`guard_room`; a kernel without it does not name the binding).
         if merged {
             vis_entries.truncate(2);
-        } else if loop_guard().is_some() {
+        } else if guard_room(hwrt) {
             vis_entries.push(storage(crate::merged::GUARD_BINDING, false));
         }
         let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
@@ -1246,7 +1387,7 @@ impl Gpu {
                 storage(6, true),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, 1, 1, 64, 64, 64);
+        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 1, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
@@ -1268,6 +1409,11 @@ impl Gpu {
             (None, None)
         };
         Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+    }
+
+    /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
+    pub fn guard_room(&self) -> bool {
+        guard_room(self.hwrt)
     }
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
@@ -1314,7 +1460,7 @@ impl Gpu {
                 let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
                 unsafe {
                     self.device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged).into()) },
+                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged, patches & F_UNITS != 0).into()) },
                         wgpu::ShaderRuntimeChecks::unchecked(),
                     )
                 }
@@ -1463,7 +1609,9 @@ impl Gpu {
             b
         };
         let records: Vec<crate::scene::GpuInstance> = scene.gpu_instances.iter().chain(&scene.proc_records).copied().collect();
-        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt);
+        // (Software traversal's units have room as hardware traversal's instances do: `prepare` sized their trees'
+        // by the same figures.)
+        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt, scene.units.is_some());
         let st = wgpu::BufferUsages::STORAGE;
         // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live.rs `edit_geometry`.)
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
@@ -1483,7 +1631,8 @@ impl Gpu {
         // The vertex colours' bytes on the GPU (the edit room's included).
         timings.push(("vcolor_mb".into(), if scene.gpu_vcolors.is_empty() { 0.0 } else { (scene.gpu_vcolors.len() * 4 + room.tris * 12) as f64 / (1 << 20) as f64 }));
         let b_attrs = buf_room("attrs", bytemuck::cast_slice(&scene.attrs), room.tris * std::mem::size_of::<crate::scene::GpuTriAttr>(), edit);
-        let b_nodes = buf("nodes", nodes, st);
+        // (With units, edits write trees into it: units.rs.)
+        let b_nodes = buf("nodes", nodes, if scene.units.is_some() { st | wgpu::BufferUsages::COPY_DST } else { st });
         // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
         // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
         timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
@@ -1920,7 +2069,7 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
-        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2486,11 +2635,11 @@ impl Gpu {
         up.tables = tables;
     }
 
-    /// The loop guard's count as the GPU has it now (None: no guard): the invocations it stopped since the buffers
-    /// were made. Waits for the GPU.
+    /// The loop guard's count as the GPU has it now (None: `kernel` has no guard): the invocations it stopped since
+    /// the buffers were made. Waits for the GPU.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn guard_trips(&self, bufs: &KernelBufs) -> Result<Option<u32>> {
-        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard().is_some()) else { return Ok(None) };
+    pub fn guard_trips(&self, bufs: &KernelBufs, kernel: &Kernel) -> Result<Option<u32>> {
+        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard_of(kernel.features & F_UNITS != 0).is_some()) else { return Ok(None) };
         let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut e = self.device.create_command_encoder(&Default::default());
         e.copy_buffer_to_buffer(&g.buffer, g.offset, &read, 0, 4);
@@ -2519,6 +2668,29 @@ impl Gpu {
             let room = crate::merged::TABLES[k].stride * caps.tables[k] as u64;
             e.copy_buffer_to_buffer(src, 0, t, at[k], src.size().min(room));
         }
+    }
+
+    /// Software traversal's top tree again, over the units as they are now, written to its range of the node buffer
+    /// (what `rebuild_tlas` is to hardware traversal). Err: no tree can be made (more units than its range holds, a
+    /// unit that is nowhere); nothing was written, and the caller rebuilds the scene.
+    pub fn retop(&self, units: &mut crate::units::Units, nodes: &wgpu::Buffer) -> std::result::Result<(), String> {
+        let top = units.top()?;
+        if !top.is_empty() {
+            self.queue.write_buffer(nodes, units.layout.top_first as u64 * 32, bytemuck::cast_slice(&top));
+        }
+        Ok(())
+    }
+
+    /// A mesh tree's nodes into the node buffer at its root (`Units::add_tree` placed it).
+    pub fn write_tree(&self, nodes: &wgpu::Buffer, root: u32, tree: &crate::units::MeshTree) {
+        self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&tree.nodes));
+    }
+
+    /// A freed mesh tree's nodes (`Units::drop_tree`: its root and length) are room again: leaves that end a walk
+    /// (`units::FILL`), as the room was laid out. (No unit names them: `Units::top` holds that. This is so that the
+    /// room never holds a part of an old tree beside a part of a new one.)
+    pub fn fill_tree(&self, nodes: &wgpu::Buffer, (root, len): (u32, u32)) {
+        self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&vec![crate::units::FILL; len as usize]));
     }
 
     pub fn rebuild_tlas(&self, accel: &Accel, e: &mut wgpu::CommandEncoder) {
@@ -2684,7 +2856,7 @@ impl Gpu {
         }
         let (b_accum, b_params, bg) = (&up.accum, &up.params, &up.bg);
         let accum_size = b_accum.size();
-        let stopped_before = self.guard_trips(&self.no_vis_bufs)?;
+        let stopped_before = self.guard_trips(&self.no_vis_bufs, &up.kernel)?;
 
 
         let t1 = Instant::now();
@@ -2715,9 +2887,9 @@ impl Gpu {
         }
         timings.push(("trace_ms".into(), t1.elapsed().as_secs_f64() * 1000.0));
         // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
-        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs)?) {
+        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs, &up.kernel)?) {
             if now != before {
-                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
+                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard_of(up.kernel.features & F_UNITS != 0).unwrap_or(0)));
             }
         }
         let t_tl = Instant::now();
@@ -2814,19 +2986,72 @@ mod tests {
         println!("source live {}", sha(&crate::live::live_source(false)));
         for hwrt in [false, true] {
             let base = kernel_base(hwrt);
-            assert_eq!(guarded(&base, false), base);
-            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false)));
+            assert_eq!(guarded(&base, false, false), base);
+            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false, false)));
             // Every combination of the features that patch the source (`kernel_source`), each as compiled.
             let bits = [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID];
             let mut all = Sha256::new();
             for m in 0..32u32 {
                 let f = bits.iter().enumerate().filter(|(k, _)| m >> k & 1 == 1).fold(0, |a, (_, b)| a | b);
                 let src = kernel_source(&base, f);
-                assert_eq!(guarded(&src, false), src);
-                all.update(guarded(&src, false).as_bytes());
+                assert_eq!(guarded(&src, false, false), src);
+                all.update(guarded(&src, false, false).as_bytes());
             }
             println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
         }
+    }
+
+    /// A kernel with units has the loop guard natively with nothing set, at the browser's limit; THREERT_LOOP_GUARD=0
+    /// takes it out, a limit set is the limit, a page's limit comes first. A kernel without units has it only where
+    /// one is set, or in a browser.
+    #[test]
+    fn a_kernel_with_units_has_the_loop_guard() {
+        assert_eq!(guard_limit(0, None, true, false), Some(65536));
+        assert_eq!(guard_limit(0, None, false, false), None);
+        assert_eq!(guard_limit(0, Some(0), true, false), None);
+        assert_eq!(guard_limit(0, Some(0), true, true), None);
+        assert_eq!(guard_limit(0, Some(16), true, false), Some(16));
+        assert_eq!(guard_limit(0, Some(16), false, false), Some(16));
+        assert_eq!(guard_limit(0, None, false, true), Some(65536));
+        assert_eq!(guard_limit(8192, Some(0), false, false), Some(8192));
+        if std::env::var("THREERT_LOOP_GUARD").is_ok() {
+            return;
+        }
+        // As compiled: the source with units has every loop bounded and the count's buffer; hardware traversal, which
+        // never has units, has room for the count only when a limit is set.
+        let src = kernel_source(&kernel_base(false), F_UNITS);
+        let g = guarded(&src, false, true);
+        assert!(g.contains("return LOOP_GUARD_N > 65536u;") && g.contains(&crate::merged::guard_decl()), "the guard and its count");
+        // (That it bounds every loop: merged.rs `the_guard_bounds_every_loop`. The unit walk's are among them.)
+        let stops = |s: &str| s.matches("if (loop_guard()) { break; }").count();
+        let flat = crate::merged::guard(&format!("{}\n{}", kernel_base(false), crate::merged::guard_decl()), 65536, crate::merged::GUARD_TRIPS.name);
+        assert!(stops(&g) > stops(&flat) && stops(&flat) > 40);
+        assert_eq!(guarded(&src, false, false), src, "units told to have no guard: the source as written");
+        // What a native session with units compiles with nothing set, to naga (wgpu's front end).
+        let m = naga::front::wgsl::parse_str(&g).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
+        assert!(guard_room(false) && !guard_room(true));
+    }
+
+    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS): the source without the
+    /// feature is the file; with it, the still scene's walk hands its hit to `trace_units`, whose text is there once,
+    /// inside the software traversal (the part hardware traversal's source replaces, which therefore cannot have it).
+    #[test]
+    fn units_are_spliced_into_software_traversal_only() {
+        let base = kernel_base(false);
+        assert!(!base.contains("trace_units"));
+        let u = kernel_source(&base, F_UNITS);
+        assert_eq!(u.matches("fn trace_units(").count(), 1);
+        assert_eq!(u.matches("hit = trace_units(o, d, hit, mode);").count(), 1);
+        let (begin, end, at) = (u.find("// @trace-begin").unwrap(), u.find("// @trace-end").unwrap(), u.find("fn trace_units(").unwrap());
+        assert!(begin < at && at < end);
+        // Taking the units out again gives the file back: nothing else was touched.
+        let call = "    hit = trace_units(o, d, hit, mode);\n";
+        let body = format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl"));
+        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1), base);
+        // Hardware traversal's source has neither anchor.
+        let hw = kernel_base(true);
+        assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 // floor: GPU ms a frame and its trace pass (timestamp queries), the frame interval, and the guard's count (0, or the
 // numbers mean nothing). A still view, so nothing rebuilds. The GPU lock is held.
 //
-//   node tools/bench-layout.ts [hello | kabukicho] [--seconds 8] [--json out.json]
+//   node tools/bench-layout.ts [hello | kabukicho] [--seconds 8] [--variants a,b] [--json out.json]
 //
 // Every variant but the first runs the kernel in a form this machine may not have run before. After 2026-11-11 (a
 // dispatch that did not end took the display down): the first frame of each variant is waited for with a timeout,
@@ -28,7 +28,9 @@ const variants: Record<string, Record<string, string>> = {
   "merged+guard": { THREERT_MERGED: "1", THREERT_LOOP_GUARD: GUARD },
 };
 // Guarded variants first: a kernel that would not end is found by its count, not by the display.
-const order = ["written+guard", "merged+guard", "written", "merged", "merged", "written", "merged+guard", "written+guard"];
+// (`--variants written+guard,merged+guard`: only those, in the same order.)
+const only = opt("--variants", "").split(",").filter(Boolean);
+const order = ["written+guard", "merged+guard", "written", "merged", "merged", "written", "merged+guard", "written+guard"].filter((v) => !only.length || only.includes(v));
 
 const holder = acquireGpuLock("bench-layout");
 if (holder) { console.log(`not measured: GPU lock held by ${holder.tool} (pid ${holder.pid})`); process.exit(2); }

@@ -35,7 +35,13 @@ const proc = spawn(rendererBin, ["serve"], { stdio: ["pipe", "pipe", "pipe"] });
 const lines = createInterface({ input: proc.stdout! })[Symbol.asyncIterator]();
 await lines.next(); // ready
 let stderr = "";
-proc.stderr!.on("data", (d) => (stderr = (stderr + d).slice(-4000)));
+// (The loop guard, THREERT_LOOP_GUARD: an offline render it stopped is an error; a live test's frames it stopped are
+// only said here. Wrong pixels either way: the run fails.)
+let guardStops = "";
+proc.stderr!.on("data", (d) => {
+  stderr = (stderr + d).slice(-4000);
+  guardStops = /live: the loop guard has stopped[^\n]*/.exec(String(d))?.[0] ?? guardStops;
+});
 
 /** Mean radiance (RGB) of a region of a raw f32 RGB image. */
 function region(px: Float32Array, w: number, h: number, [u0, v0, u1, v1]: Region): [number, number, number] {
@@ -127,4 +133,5 @@ console.log(`\n${passed} pass, ${failed} fail, ${results.length - passed - faile
 summary("test-render A: pass rate", passed / Math.max(results.length, 1), { lowerIsBetter: false, digits: 3 });
 summary("test-render A: wall time", total / 1000, { unit: " s", digits: 1 });
 if (stderr && failed) console.error(stderr.split("\n").filter((l) => /error|panic/i.test(l)).slice(-5).join("\n"));
-process.exitCode = failed ? 1 : 0;
+if (guardStops) console.log(`test-render: ${guardStops}`);
+process.exitCode = failed || guardStops ? 1 : 0;

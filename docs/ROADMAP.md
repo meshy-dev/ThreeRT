@@ -3904,7 +3904,8 @@ benchmark level. The order follows the dependencies; a step that meets a further
        bytes need not. Fixed in `bvh.rs` (a leaf of the empty vertex buffer's zero triangle), with a test that walks
        the kernel's loop on the CPU. **Not confirmed as what hung**: the same sequence on a build without the fix,
        with the guard, passed (both scenes alone, with the fix and the guard, give their tests' answers). And a **loop guard** (`merged::guard`): every loop of the kernel bounded and
-       what it stops counted and read back; always on in a browser, `THREERT_LOOP_GUARD` natively.
+       what it stops counted and read back; always on in a browser, `THREERT_LOOP_GUARD` natively (since step 7b
+       a native kernel with units has it with nothing set).
      - `tools/web-engine.ts` (CI): the module in Node with the page's `__engine` and the native bundle runs the
        physics hello world's script to the native test's numbers.
      - **In Chrome 157 on the machine's GPU** (`tools/web-hello.ts`, Playwright; docs/RUNTIME.md "Measured in a
@@ -3915,13 +3916,105 @@ benchmark level. The order follows the dependencies; a step that meets a further
        1.13 s, 1.08 s of it the sky's bake on one thread; a kernel the browser has not compiled takes 1.4 s before
        the first frame, 26 ms after that. Engine calls cost 40 ns (a scalar) to about a microsecond (a descriptor),
        10,000 poses 0.3 ms. The module is 7.3 MiB (1.5 MiB with brotli).
-     - Open, first: **a frame in which a body moves costs the page 16.7 ms, 16.4–16.6 of it the rebuild** (9.0
-       natively under software traversal, nothing under hardware traversal): in-place edits under software
-       traversal, the two-level tree, the next step. Then: the browser's image is not bit-identical to the native
-       one (the guard changes the kernel's last bits; natively it is off and the catalog is byte-identical to main);
-       1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame; a
-       scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
+     - Open, first: **a frame in which a body moves costs the page 16.7 ms, 16.4–16.6 of it the rebuild** (9.0 natively
+       under software traversal, nothing under hardware traversal): in-place edits under software traversal, the
+       two-level tree, the next step (step 7b: 0.84 ms now, no rebuild). Then: the browser's image is not bit-identical
+       to the native one (the guard changes the kernel's last bits; natively it is off and the catalog is byte-identical
+       to main); 1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame;
+       a scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
        2026-11-11 is not confirmed; other browsers.
+7b. **[ThreeRT] In-place edits under software traversal (a two-level tree).** Decided by the user on 2026-11-11, before
+   step 8: a browser has no ray queries, and under software traversal every added object and every frame in which
+   a body moves rebuilds the scene (hello world in Chrome: 16.5 ms of the page's 16.7 a frame; the voxel level: 7 s an
+   explosion; its triangle data 2.1 GiB because instances are written out). Design: docs/RUNTIME.md "Software
+   traversal with units".
+   - The still scene stays one flat tree; what can move or be added (an instance of a mesh: a body's box, a voxel
+     chunk) is a unit with a tree of its own in model space, found through a top tree walked after the still one. A
+     scene without units gets the kernel it has today, byte for byte.
+   - Acceptance: the two walks transcribed to the CPU and run against brute force over random scenes and random
+     add / move / remove sequences (no read outside a range, always an end, the same closest hit), before any GPU
+     run; scenes without units unchanged (the sources handed to wgpu, the catalog's bytes); hello world's two checks
+     that fail under software traversal pass, and in Chrome a frame in which a body moves no longer rebuilds; the
+     voxel level under software traversal: triangle data, load, an explosion, a still frame; overlap measured on a
+     pile of debris.
+   - Every GPU run of the new walk has the loop guard, natively too (what hung on 2026-11-11 is not confirmed, so
+     another path that does not end may exist); whether software traversal has it by default natively is decided
+     with its measured cost.
+   - **Decided 2026-11-11, after the first GPU runs** (docs/RUNTIME.md "Software traversal with units"):
+     - **Units are a live session's and a browser's. An offline render under software traversal flattens every
+       instance by default**, its kernel and bytes main's; `THREERT_UNITS=1` gives it units, `THREERT_UNITS=0`
+       flattens a session. Why: the offline render under software traversal is the reference render and what the
+       catalog's byte gate compares, with no variable set; memory, load and edits in place are what a session and a
+       browser need; no catalog scene with models but Kabukichō has been rendered with units.
+     - **A native kernel with units has the loop guard with nothing set** (65,536; `THREERT_LOOP_GUARD=0` takes it
+       out). A native kernel without units has none by default, as before: no existing byte changes. What a stop
+       does is unchanged (an offline render fails, a session logs it, `test-render` fails the run). Whether all of
+       native software traversal has it by default is not part of this step.
+   - **Status: runs natively and in Chrome on the machine's GPU** (branch `sw-two-level`, 2026-11-11; every run with
+     the loop guard, which stopped nothing). The figures and their tables: docs/RUNTIME.md "Software traversal with
+     units", "Measured".
+     - Done: `renderer/src/units.rs` (mesh trees, the top tree, where they go in the node buffer, the checks made
+       where a tree is written), `shaders/trace_units.wgsl` (spliced into software traversal by a source feature,
+       `F_UNITS`; `pathtrace.wgsl` not edited), `prepare_live` keeping a session's instances as units (`prepare`,
+       an offline render's, flattens unless `THREERT_UNITS=1`), and the edits in place through `gpu::Top` (the TLAS
+       or the units), so `move_instances`, `update_instanced` and `edit_geometry` are one path under both
+       traversals. `THREERT_UNITS=0` flattens, as before. The guard's default for a kernel with units
+       (`gpu::loop_guard_of`).
+     - The acceptance:
+       - The CPU tests pass (the walks transcribed from the shaders and compared with their lines; random scenes
+         under random edits against brute force; a prepared scene with units against the same scene flattened;
+         broken and stale trees refused), before the first GPU run.
+       - Scenes without units: the sources handed to wgpu are main's (`the_default_sources_are_untouched`, hardware
+         traversal's among them); **offline with nothing said about units the catalog's 23 bundles are
+         byte-identical to main under software traversal** (both builds with the guard at 65,536, as every GPU run
+         here); under hardware traversal 18 are, and the other five (Bistro's three, Zero Day's two) differ from
+         main as two runs of main differ from each other ("Known issues": hardware traversal's ties).
+       - Hello world: `tools/physics-hello.ts` passes under software traversal with nothing else set (units and
+         the guard by default; it stopped nothing), the two checks that failed among them. In Chrome a frame in which a body moves costs the page **0.84 ms (was 16.7)** and none rebuilds the
+         scene (295 did); a click that adds a box commits in 0.6–0.8 ms (18–24) after the first.
+       - The voxel level under software traversal: triangle data **310.9 MiB (2,098)**, first frame after 5.2 s
+         (11.6), an explosion **2.5–4.5 ms in place (6.9–7.9 s)**; a still frame's trace **7.85 ms (4.58): 71 %
+         longer**.
+       - Kabukichō (352 units): triangle data 55 MiB (634), first frame 1.55 s (3.3); the trace 13.9 ms (12.0):
+         **16 % longer**, and with it the view misses 60 Hz on this machine (17.2 ms a frame).
+       - The guard on Kabukichō, main's kernel: +1.23 ms of trace (11 %); the merged layout +0.13 ms.
+       - The atomic tests under software traversal, as written and merged: 147 of 170 pass; the 23 that fail fail
+         on main's build too, with the same values: 13 `particles/*`, the 5 `gpu-particles/*`, `translucent/depth`,
+         `translucent/order`, `volume/lighting`, `volume/lighting-offline` (all particles, which software traversal
+         does not draw) and `surface/windows` (not explained). The names: docs/RUNTIME.md; "Known issues".
+     - Two faults the GPU runs found, fixed, each with a CPU test since: a scene of units alone drew a mesh's first
+       triangle at the origin (the still tree's leaf named triangle 0); a mesh written again in place kept its
+       units' old boxes (`voxel/cut-falls-live`: a falling part cut off).
+     - **Not run**, one by one (none was among the GPU runs agreed for this step; each is asked for before it is
+       made):
+       - a kernel with units without the loop guard (every run of one had it);
+       - a catalog scene with units, offline (`THREERT_UNITS=1`) or live, but Kabukichō;
+       - explosions on the voxel level until the edit room is full (V4): how many fit before a rebuild;
+       - a pile of debris (V5): overlap where it is worst;
+       - anything but hello world in a browser.
+     - Open:
+       - **First, what the next item is for: a still frame costs more with units** (software traversal, live,
+         1280 × 720 traced at half, the guard on in both columns):
+
+         | scene | the trace, units / flat | frame GPU, units / flat | 60 Hz |
+         | --- | --- | --- | --- |
+         | hello world (natively) | 1.40–1.42 / 1.01–1.04 ms, **+37 %** | Chrome: 6.59 / 6.60 ms | held by both |
+         | the voxel level | 7.85 / 4.58 ms, **+71 %** | 11.2 / 7.9 ms | held by both |
+         | Kabukichō | 13.88 / 12.01 ms, **+16 %** | 17.18 / 15.35 ms | **missed with units** (a frame every 17.2–17.5 ms; flat 16.65) |
+
+         Against main's session on Kabukichō under software traversal (flat, no guard: 14.11 ms of GPU a frame) the
+         default now is 3.1 ms more, 1.2 of it the guard. Nothing was tuned: the top tree is built by median splits,
+         every unit's ray is transformed, and every ray enters the top tree. An SAH top tree and a path for units
+         whose transform is the identity are the first things to try; until then a session that only stands still
+         is cheaper flattened (`THREERT_UNITS=0`), at its memory and load time.
+       - The edit room and the tree ranges do not grow under software traversal: an edit that finds them full
+         rebuilds the scene (seen: 1,100 instances added to a room of 1,024 records). How many explosions that is
+         on the level is not measured.
+       - Procedural edits, posed models and rigid groups' poses still rebuild under software traversal; a scene
+         with more than 2^18 instances is flattened, as before.
+       - Whether all of native software traversal has the loop guard by default (not this step's; it costs 11 % of
+         Kabukichō's trace, and what hung on 2026-11-11 is still not confirmed).
+       - The 23 atomic tests that fail under software traversal on main ("Known issues"): the other line's.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.
@@ -3979,6 +4072,24 @@ benchmark level. The order follows the dependencies; a step that meets a further
 
 ## Known issues
 
+- Under software traversal 23 of the 170 atomic tests fail (found 2026-11-11 in § 6 step 7b, the first whole run of
+  the suite under software traversal; main `a707e1c`'s build and the step's, as written and in the merged layout,
+  the same ids and values; not fixed: the rendering line's). Hardware traversal passes all 170.
+  - 20 are particles, which software traversal does not draw (they stay collapsed at the pivot,
+    docs/MATERIAL_FUNCTIONS.md): 13 `particles/*`, the 5 `gpu-particles/*`, `translucent/depth`, `translucent/order`.
+  - `volume/lighting` and `volume/lighting-offline` read 6 for 1. Basis: both measure one translucent particle in a
+    closed cube with one 6-nit wall behind it (their features are `particles`, `translucency`); without the particle
+    the region is the wall. The same missing particles, in a family whose name does not say so.
+  - `surface/windows` reads 0.3934 for 0.4234 (−7 %, tolerance 3 %); `surface/windows-mirror` beside it passes.
+    Basis: the scene is one plane with the library's facade windows and no instance, so nothing of step 7b is in
+    its kernel (the source is main's byte for byte), and main's build reads the same 0.3934 in both layouts. The
+    cause was not looked for.
+- Offline renders of `bistro`, `bistro-slice`, `bistro-district`, `zero-day` and `zero-day-animated` are not the same
+  bytes twice under hardware traversal (measured 2026-11-11 in § 6 step 7b's merge gate; the last entry here has
+  Bistro's ties between coincident surfaces at 2–4 %). Main `a707e1c` against itself, 320 × 180, 4 spp: 1,782 /
+  1,095 / 125 / 7,988 / 10,426 of 57,600 pixels differ; the catalog's other 18 bundles repeat exactly, and software
+  traversal repeats all 23. So hardware traversal's byte identity on these five says nothing; software traversal's
+  is the gate.
 - Emissive quads under masked decals of the same shape went black with hardware ray tracing (found 2026-11-08 by the
   unbiasedness check, `tools/unbiased-check.ts`; fixed the same day, branch `coplanar-flatten`).
   - Zero Day against the software BVH (16384 spp, 320 × 180, raw HDR): one 4 × 4 region 0.966, another 0.978, at every
