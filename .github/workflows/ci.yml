@@ -125,10 +125,17 @@ jobs:
         with:
           node-version: 24
       - run: rustup target add wasm32-unknown-unknown
+      # Cargo takes a path dependency's sources as changed when they are newer than its build, which a checkout always
+      # makes them: third_party/glamx, the patched crate under Rapier's (a path dependency), was rebuilt in each of the
+      # four builds of physics-core below, and Rapier's crates on top of it with it. Its sources get one fixed old
+      # time instead, and the cache's key holds their hash: it is only restored from a run with the same third_party, so
+      # the build of glamx it keeps is of these sources (a change to them starts from no cache).
+      - run: find renderer/third_party -exec touch -d 2000-01-01T00:00:00Z {} +
       # physics-core's own target directory, and the renderer's (the determinism check builds the renderer's crate graph
-      # for wasm32 there).
+      # for wasm32 there; rust-cache leaves out of that one the crates under renderer/, glamx among them).
       - uses: Swatinem/rust-cache@v2
         with:
+          key: third-party-${{ hashFiles('renderer/third_party/**') }}
           workspaces: |
             renderer/physics-core
             renderer
