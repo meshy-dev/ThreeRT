@@ -425,9 +425,22 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         attrs.push(*a);
     }
     sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.opaque) }).collect();
+    // A scene whose triangles are all units': the still tree is then the leaf of one triangle, triangle 0 (bvh.rs
+    // `EMPTY`), which no ray meets while triangle 0 is the zeros of an empty buffer. Here triangle 0 is the pool's
+    // first, a mesh's in its model space, and the still walk would meet it standing in the world. The leaf gets a
+    // triangle of its own after the pool, without area.
+    let no_still = trees.is_some() && pool_first == 0;
+    let nothing = tri_verts.len() / 3;
+    if no_still {
+        tri_verts.extend([[0.0; 4]; 3]);
+        attrs.push(bytemuck::Zeroable::zeroed());
+    }
     // The units: the mesh trees after the still tree's nodes, room for the trees and units edits add (the edit room's
     // triangles and records, gpu.rs `EditRoom`), the top tree; each unit's record gets its tree's root.
     let mut nodes = bvh.nodes;
+    if no_still {
+        nodes[0].left_or_first = nothing as u32;
+    }
     sc.units = None;
     if let Some(trees) = trees {
         let room = gpu::EditRoom::for_scene(sc, tri_verts.len() / 3, sc.instances.len() + sc.procs.len(), true);
@@ -1016,7 +1029,7 @@ mod units_tests {
 
     /// A world with a flattened ground, meshes of their own (`own_blas`: units under software traversal) turned and
     /// scaled, one that casts no shadow, one hidden, and an instanced mesh of five instances of which four are drawn.
-    fn world() -> World {
+    fn world(ground: bool) -> World {
         let mut w = World::default();
         w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
         let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
@@ -1039,8 +1052,10 @@ mod units_tests {
         w.set_geometry(3, quad(0.5)).unwrap();
         w.set_geometry(5, ring).unwrap();
         let mesh = |geometry, own_blas| Kind::Mesh { geometry, material: 1, own_blas, materials: vec![] };
-        w.set_object(10, "ground".into(), None, mesh(2, false), true, false).unwrap();
-        w.set_transform(10, Vec3::new(0.0, -1.0, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+        if ground {
+            w.set_object(10, "ground".into(), None, mesh(2, false), true, false).unwrap();
+            w.set_transform(10, Vec3::new(0.0, -1.0, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+        }
         let place = |w: &mut World, id: u32, geometry: u32, at: [f32; 3], turn: f32, scale: [f32; 3], shadow: bool| {
             w.set_object(id, format!("o{id}"), None, mesh(geometry, true), shadow, false).unwrap();
             w.set_transform(id, Vec3::from(at), Quat::from_euler(glam::EulerRot::XYZ, turn, turn * 0.7, 0.3), Vec3::from(scale)).unwrap();
@@ -1069,7 +1084,18 @@ mod units_tests {
     /// blocked alike (a unit that casts none lets them through). No GPU.
     #[test]
     fn a_scene_with_units_is_the_flattened_scene_to_every_ray() {
-        let w = world();
+        agree(&world(true), (3000, 400, 2000));
+    }
+
+    /// The same with no still triangle at all: the still tree is then the leaf of one triangle (bvh.rs `EMPTY`), and
+    /// that triangle must be one no ray meets, not the first of the units' (a mesh's, in its model space). First seen
+    /// on a GPU: `geometry/instanced`, two planes, darker towards a triangle standing at the origin.
+    #[test]
+    fn a_scene_of_units_alone_is_the_flattened_scene_to_every_ray() {
+        agree(&world(false), (1000, 1000, 400));
+    }
+
+    fn agree(w: &World, least: (usize, usize, usize)) {
         let build = |units: bool| {
             let mut sc = scene::build(&w, std::path::Path::new("."), &default_presets_dir(), None).unwrap();
             let p = prepare_as(false, units, &mut sc, &mut vec![]);
@@ -1077,6 +1103,7 @@ mod units_tests {
         };
         let (su, pu) = build(true);
         let (sf, pf) = build(false);
+        assert_eq!(su.tris.is_empty(), w.objects.get(&10).is_none(), "still triangles: the ground's only");
         let u = su.units.as_ref().expect("the scene has units");
         assert!(sf.units.is_none() && sf.instances.is_empty(), "flattened: no instance is left");
         // Nine instances: four own meshes shown, one hidden (no instance at all), five of the instanced mesh of which
@@ -1103,10 +1130,13 @@ mod units_tests {
             ((s >> 40) as f32) / (1u64 << 24) as f32
         };
         let (mut hits, mut on_units, mut shadowed) = (0, 0, 0);
-        for k in 0..6000 {
-            // From around the camera into the scene, and from above straight down (shadow rays' way).
-            let (o, d) = if k % 2 == 0 {
+        for k in 0..9000 {
+            // From around the camera into the scene, through the space around the origin (where a mesh's model-space
+            // triangles would stand if anything took them for the world's), and from above straight down.
+            let (o, d) = if k % 3 == 0 {
                 (Vec3A::new(8.0 * rnd() - 4.0, 4.0 * rnd(), 9.0), Vec3A::new(3.0 * rnd() - 1.5, 3.0 * rnd() - 2.0, -4.0).normalize())
+            } else if k % 3 == 1 {
+                (Vec3A::new(2.0 * rnd() - 1.0, 2.0 * rnd() - 1.0, 4.0), Vec3A::new(0.1 * rnd() - 0.05, 0.1 * rnd() - 0.05, -1.0).normalize())
             } else {
                 (Vec3A::new(12.0 * rnd() - 6.0, 6.0, 8.0 * rnd() - 5.0), Vec3A::new(0.2 * rnd() - 0.1, -1.0, 0.2 * rnd() - 0.1).normalize())
             };
@@ -1119,6 +1149,6 @@ mod units_tests {
             assert_eq!(sa.t == INF, sb.t == INF, "shadow ray {o} {d}: with units {sa:?}, flattened {sb:?}");
             shadowed += (sa.t < INF) as usize;
         }
-        assert!(hits > 3000 && on_units > 400 && shadowed > 2000, "{hits} hits, {on_units} on units, {shadowed} shadow rays blocked");
+        assert!(hits > least.0 && on_units > least.1 && shadowed > least.2, "{hits} hits, {on_units} on units, {shadowed} shadow rays blocked");
     }
 }
