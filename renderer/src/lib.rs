@@ -351,19 +351,37 @@ pub fn fog_params(fog: Option<&desc::Fog>) -> [[f32; 4]; 4] {
     ]
 }
 
+/// `prepare` for an offline render: under software traversal every instance flattened unless THREERT_UNITS=1.
 pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
-    prepare_as(g.hwrt, units_on(), sc, timings)
+    prepare_as(g.hwrt, units_on(false), sc, timings)
 }
 
-/// THREERT_UNITS=0: software traversal with every instance flattened, as before units (the A/B).
-pub(crate) fn units_on() -> bool {
-    !std::env::var("THREERT_UNITS").is_ok_and(|v| v == "0")
+/// `prepare` for a live session: under software traversal the instances are units unless THREERT_UNITS=0.
+pub fn prepare_live(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
+    prepare_as(g.hwrt, units_on(true), sc, timings)
 }
 
-/// Whether `prepare` will keep the scene's instances as units (software traversal, and it has instances), asked
+/// Whether software traversal keeps a scene's instances as units (units.rs). A live session and a browser do: units
+/// are what they edit in place, and what a browser's memory and load time need. An offline render does not: it
+/// edits nothing, it is the reference the catalog's bytes are compared by, and its kernel and bytes stay what they
+/// were before units. THREERT_UNITS=1 has an offline render use them (the A/B against a live frame's units);
+/// THREERT_UNITS=0 flattens everywhere (the A/B against units).
+pub(crate) fn units_on(live: bool) -> bool {
+    units_said(std::env::var("THREERT_UNITS").ok().as_deref(), live)
+}
+
+fn units_said(var: Option<&str>, live: bool) -> bool {
+    match var {
+        Some("0") => false,
+        Some("1") => true,
+        _ => live || cfg!(target_arch = "wasm32"),
+    }
+}
+
+/// Whether `prepare_live` will keep the scene's instances as units (software traversal, and it has instances), asked
 /// before it runs (live.rs `load_scene`: the light tree's part for emitters edits add).
 pub fn units_wanted(hwrt: bool, sc: &scene::Scene) -> bool {
-    !hwrt && units_on() && !sc.instances.is_empty() && sc.instances.len() <= units::MAX_UNITS
+    !hwrt && units_on(true) && !sc.instances.is_empty() && sc.instances.len() <= units::MAX_UNITS
 }
 
 /// `prepare` for a traversal: hardware ray queries, or software traversal with units (units.rs) or without.
@@ -1092,6 +1110,40 @@ mod units_tests {
     #[test]
     fn a_scene_of_units_alone_is_the_flattened_scene_to_every_ray() {
         agree(&world(false), (1000, 1000, 400));
+    }
+
+    /// Units are a live session's and a browser's: an offline render flattens a scene's instances as it did before
+    /// units, unless told (THREERT_UNITS=1), and its kernel is then the one without the unit walk. THREERT_UNITS=0
+    /// flattens everywhere.
+    #[test]
+    fn an_offline_render_has_no_units_unless_told() {
+        let browser = cfg!(target_arch = "wasm32");
+        assert_eq!((units_said(None, false), units_said(None, true)), (browser, true));
+        assert_eq!((units_said(Some("1"), false), units_said(Some("1"), true)), (true, true));
+        assert_eq!((units_said(Some("0"), false), units_said(Some("0"), true)), (false, false));
+        assert_eq!(units_said(Some(""), false), browser);
+        if std::env::var("THREERT_UNITS").is_ok() {
+            return;
+        }
+        // What `prepare` hands an offline render of a scene with instances, and `prepare_live` a live session.
+        let build = |live: bool| {
+            let mut sc = scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(false, units_on(live), &mut sc, &mut vec![]);
+            (sc, p)
+        };
+        let (off, po) = build(false);
+        let (flat, pf) = {
+            let mut sc = scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(false, false, &mut sc, &mut vec![]);
+            (sc, p)
+        };
+        assert!(off.units.is_none() && off.instances.is_empty(), "offline: flattened");
+        assert_eq!(gpu::instance_features(&off) & gpu::F_UNITS, 0, "offline: the kernel without the unit walk");
+        assert_eq!(gpu::instance_features(&off), gpu::instance_features(&flat));
+        assert!(bytemuck::cast_slice::<_, u8>(&po.tri_verts) == bytemuck::cast_slice::<_, u8>(&pf.tri_verts) && bytemuck::cast_slice::<_, u8>(&po.nodes) == bytemuck::cast_slice::<_, u8>(&pf.nodes), "offline: the flattened scene's bytes");
+        let (live, _) = build(true);
+        assert!(live.units.is_some() && gpu::instance_features(&live) & gpu::F_UNITS != 0, "live: units");
+        assert!(units_wanted(false, &scene::build(&world(true), std::path::Path::new("."), &default_presets_dir(), None).unwrap()) && !units_wanted(true, &off));
     }
 
     fn agree(w: &World, least: (usize, usize, usize)) {

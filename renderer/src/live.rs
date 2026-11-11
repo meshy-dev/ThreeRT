@@ -23,7 +23,7 @@
 
 use crate::gpu::Buf;
 use crate::world::World;
-use crate::{gpu, post, prepare, scene, tables};
+use crate::{gpu, post, scene, tables};
 // (The headless runner below, native only, is what uses all of it.)
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use anyhow::{anyhow, Result};
@@ -381,7 +381,7 @@ impl Targets {
             ae_state: b(),
             lumq: b(),
             lumb: b(),
-            kernel: gpu::KernelBufs::new(d, g.merged, cache, resv, n * 32, n * 16, n * 16),
+            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, resv, n * 32, n * 16, n * 16),
             slabs,
             lut_view: lut_tex.create_view(&Default::default()),
             lut_tex,
@@ -964,7 +964,7 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
     // (Software traversal with units edits in place as hardware traversal does: `units_wanted`.)
     sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt || crate::units_wanted(g.hwrt, &sc)) && std::env::var("THREERT_LT_DYNAMIC").map_or(true, |v| v != "0");
     let mut timings = vec![("build_ms".to_string(), t0.elapsed().as_secs_f64() * 1000.0)];
-    let mut prep = prepare(g, &mut sc, &mut timings);
+    let mut prep = crate::prepare_live(g, &mut sc, &mut timings);
     let mut tables = tables::Tables::new(&sc, std::mem::take(&mut prep.emitter_tris), prep.light_tree.take());
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");
@@ -1597,7 +1597,9 @@ impl LiveCore {
         let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline(&targets.kernel) });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &targets.kernel);
-        let guard_read = (gpu::loop_guard().is_some() && targets.kernel.guard.is_some())
+        // (Read whenever a kernel of this session may have the guard: under software traversal a scene's first unit
+        // brings it, `gpu::loop_guard_of`.)
+        let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
         let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
@@ -2844,7 +2846,7 @@ impl LiveCore {
         let Some(mut top) = gpu::Top::of(&mut up.accel, &mut up.units) else {
             // Software traversal without units. With units on, that is a scene without an instance yet: the first
             // one brings the unit walk into the kernel (F_UNITS), as hardware traversal's first brings F_INST.
-            let first = crate::units_on() && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { own_blas: true, .. } | Kind::Instanced { procedural: false, .. })));
+            let first = crate::units_on(true) && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { own_blas: true, .. } | Kind::Instanced { procedural: false, .. })));
             return Err(if first { "the scene's first instanced mesh (kernel feature)" } else { "software traversal" }.into());
         };
         // The objects to place again: those added, and those whose geometry was replaced.

@@ -742,18 +742,30 @@ pub fn kernel_source(src: &str, features: u32) -> String {
     s
 }
 
-/// The loop guard's limit, if the kernel is to have one (merged.rs `guard`: every loop of it bounded, so a dispatch
-/// ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where the kernel is otherwise as
-/// written; always in a browser, where a dispatch that does not end is the player's whole GPU.
+/// The loop guard's limit for every kernel, if one is set (merged.rs `guard`: every loop of a kernel bounded, so a
+/// dispatch ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where a kernel is
+/// otherwise as written; always in a browser, where a dispatch that does not end is the player's whole GPU.
 pub fn loop_guard() -> Option<u32> {
-    match LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => {}
-        n => return Some(n),
-    }
-    match std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok()) {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => cfg!(target_arch = "wasm32").then_some(1 << 16),
+    loop_guard_of(false)
+}
+
+/// The loop guard's limit for a kernel with units or without (`F_UNITS`). A kernel with units has the guard natively
+/// too, at the browser's limit, unless THREERT_LOOP_GUARD=0: its second level is the traversal that has run least,
+/// and what it walks is rewritten by edits while it runs. A kernel without units is as `loop_guard` says: natively,
+/// with nothing set, the source as written.
+pub fn loop_guard_of(units: bool) -> Option<u32> {
+    let page = LOOP_GUARD.load(std::sync::atomic::Ordering::Relaxed);
+    let var = std::env::var("THREERT_LOOP_GUARD").ok().and_then(|v| v.parse::<u32>().ok());
+    guard_limit(page, var, units, cfg!(target_arch = "wasm32"))
+}
+
+/// `loop_guard_of`, of what was set: by a page (0: nothing), by the environment (Some(0): off), and where.
+fn guard_limit(page: u32, var: Option<u32>, units: bool, browser: bool) -> Option<u32> {
+    match (page, var) {
+        (n, _) if n > 0 => Some(n),
+        (_, Some(0)) => None,
+        (_, Some(n)) => Some(n),
+        (_, None) => (units || browser).then_some(1 << 16),
     }
 }
 
@@ -766,6 +778,13 @@ pub fn set_loop_guard(limit: u32) {
     if limit > 0 {
         LOOP_GUARD.store(limit, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Whether a device's layout as written has the guard's count (group 1, `merged::GUARD_BINDING`; `KernelBufs::guard`):
+/// when a kernel of it may have the guard. Under software traversal that is unless THREERT_LOOP_GUARD=0, a scene's
+/// first unit bringing the guard with it; under hardware traversal, when a limit is set.
+fn guard_room(hwrt: bool) -> bool {
+    loop_guard_of(!hwrt).is_some()
 }
 
 /// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
@@ -781,10 +800,11 @@ pub fn kernel_base(hwrt: bool) -> String {
     }
 }
 
-/// A kernel source as it is compiled: with the loop guard if there is one, its count in `MergedLive` (the merged
-/// layout) or in a buffer of its own (group 1, `merged::GUARD_BINDING`).
-fn guarded(src: &str, merged: bool) -> String {
-    match loop_guard() {
+/// A kernel source as it is compiled: with the loop guard if it has one (`loop_guard_of`: `units`, whether the source
+/// has the unit walk), its count in `MergedLive` (the merged layout) or in a buffer of its own (group 1,
+/// `merged::GUARD_BINDING`).
+fn guarded(src: &str, merged: bool, units: bool) -> String {
+    match loop_guard_of(units) {
         None => src.to_string(),
         Some(n) if merged => crate::merged::guard(src, n, "ML.loop_guard_trips"),
         Some(n) => crate::merged::guard(&format!("{src}\n{}", crate::merged::guard_decl()), n, crate::merged::GUARD_TRIPS.name),
@@ -874,10 +894,11 @@ pub struct KernelBufs {
 
 impl KernelBufs {
     /// For a cache of `entries`, reservoirs for `pixels` and the live passes' three of these bytes.
-    pub fn new(d: &wgpu::Device, merged: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
+    /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
         if !merged {
             let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
-            let guard = loop_guard().map(|_| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
+            let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
             return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
         }
         let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
@@ -1257,7 +1278,7 @@ impl Gpu {
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
             device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false).into()) },
+                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false, false).into()) },
                 wgpu::ShaderRuntimeChecks::unchecked(),
             )
         });
@@ -1334,10 +1355,11 @@ impl Gpu {
             storage(7, false),
         ];
         // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
-        // As written, a kernel with the guard has the count in a buffer of its own.
+        // As written, a kernel with the guard has the count in a buffer of its own: the binding is there whenever a
+        // kernel of this device may have the guard (`guard_room`; a kernel without it does not name the binding).
         if merged {
             vis_entries.truncate(2);
-        } else if loop_guard().is_some() {
+        } else if guard_room(hwrt) {
             vis_entries.push(storage(crate::merged::GUARD_BINDING, false));
         }
         let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
@@ -1365,7 +1387,7 @@ impl Gpu {
                 storage(6, true),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, 1, 1, 64, 64, 64);
+        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 1, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
@@ -1387,6 +1409,11 @@ impl Gpu {
             (None, None)
         };
         Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+    }
+
+    /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
+    pub fn guard_room(&self) -> bool {
+        guard_room(self.hwrt)
     }
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
@@ -1433,7 +1460,7 @@ impl Gpu {
                 let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
                 unsafe {
                     self.device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged).into()) },
+                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged, patches & F_UNITS != 0).into()) },
                         wgpu::ShaderRuntimeChecks::unchecked(),
                     )
                 }
@@ -2608,11 +2635,11 @@ impl Gpu {
         up.tables = tables;
     }
 
-    /// The loop guard's count as the GPU has it now (None: no guard): the invocations it stopped since the buffers
-    /// were made. Waits for the GPU.
+    /// The loop guard's count as the GPU has it now (None: `kernel` has no guard): the invocations it stopped since
+    /// the buffers were made. Waits for the GPU.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn guard_trips(&self, bufs: &KernelBufs) -> Result<Option<u32>> {
-        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard().is_some()) else { return Ok(None) };
+    pub fn guard_trips(&self, bufs: &KernelBufs, kernel: &Kernel) -> Result<Option<u32>> {
+        let Some(g) = bufs.guard.as_ref().filter(|_| loop_guard_of(kernel.features & F_UNITS != 0).is_some()) else { return Ok(None) };
         let read = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut e = self.device.create_command_encoder(&Default::default());
         e.copy_buffer_to_buffer(&g.buffer, g.offset, &read, 0, 4);
@@ -2829,7 +2856,7 @@ impl Gpu {
         }
         let (b_accum, b_params, bg) = (&up.accum, &up.params, &up.bg);
         let accum_size = b_accum.size();
-        let stopped_before = self.guard_trips(&self.no_vis_bufs)?;
+        let stopped_before = self.guard_trips(&self.no_vis_bufs, &up.kernel)?;
 
 
         let t1 = Instant::now();
@@ -2860,9 +2887,9 @@ impl Gpu {
         }
         timings.push(("trace_ms".into(), t1.elapsed().as_secs_f64() * 1000.0));
         // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
-        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs)?) {
+        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs, &up.kernel)?) {
             if now != before {
-                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard().unwrap_or(0)));
+                return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard_of(up.kernel.features & F_UNITS != 0).unwrap_or(0)));
             }
         }
         let t_tl = Instant::now();
@@ -2959,19 +2986,51 @@ mod tests {
         println!("source live {}", sha(&crate::live::live_source(false)));
         for hwrt in [false, true] {
             let base = kernel_base(hwrt);
-            assert_eq!(guarded(&base, false), base);
-            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false)));
+            assert_eq!(guarded(&base, false, false), base);
+            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false, false)));
             // Every combination of the features that patch the source (`kernel_source`), each as compiled.
             let bits = [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID];
             let mut all = Sha256::new();
             for m in 0..32u32 {
                 let f = bits.iter().enumerate().filter(|(k, _)| m >> k & 1 == 1).fold(0, |a, (_, b)| a | b);
                 let src = kernel_source(&base, f);
-                assert_eq!(guarded(&src, false), src);
-                all.update(guarded(&src, false).as_bytes());
+                assert_eq!(guarded(&src, false, false), src);
+                all.update(guarded(&src, false, false).as_bytes());
             }
             println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
         }
+    }
+
+    /// A kernel with units has the loop guard natively with nothing set, at the browser's limit; THREERT_LOOP_GUARD=0
+    /// takes it out, a limit set is the limit, a page's limit comes first. A kernel without units has it only where
+    /// one is set, or in a browser.
+    #[test]
+    fn a_kernel_with_units_has_the_loop_guard() {
+        assert_eq!(guard_limit(0, None, true, false), Some(65536));
+        assert_eq!(guard_limit(0, None, false, false), None);
+        assert_eq!(guard_limit(0, Some(0), true, false), None);
+        assert_eq!(guard_limit(0, Some(0), true, true), None);
+        assert_eq!(guard_limit(0, Some(16), true, false), Some(16));
+        assert_eq!(guard_limit(0, Some(16), false, false), Some(16));
+        assert_eq!(guard_limit(0, None, false, true), Some(65536));
+        assert_eq!(guard_limit(8192, Some(0), false, false), Some(8192));
+        if std::env::var("THREERT_LOOP_GUARD").is_ok() {
+            return;
+        }
+        // As compiled: the source with units has every loop bounded and the count's buffer; hardware traversal, which
+        // never has units, has room for the count only when a limit is set.
+        let src = kernel_source(&kernel_base(false), F_UNITS);
+        let g = guarded(&src, false, true);
+        assert!(g.contains("return LOOP_GUARD_N > 65536u;") && g.contains(&crate::merged::guard_decl()), "the guard and its count");
+        // (That it bounds every loop: merged.rs `the_guard_bounds_every_loop`. The unit walk's are among them.)
+        let stops = |s: &str| s.matches("if (loop_guard()) { break; }").count();
+        let flat = crate::merged::guard(&format!("{}\n{}", kernel_base(false), crate::merged::guard_decl()), 65536, crate::merged::GUARD_TRIPS.name);
+        assert!(stops(&g) > stops(&flat) && stops(&flat) > 40);
+        assert_eq!(guarded(&src, false, false), src, "units told to have no guard: the source as written");
+        // What a native session with units compiles with nothing set, to naga (wgpu's front end).
+        let m = naga::front::wgsl::parse_str(&g).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
+        assert!(guard_room(false) && !guard_room(true));
     }
 
     /// Software traversal's units are in a kernel only when the scene has them (F_UNITS): the source without the
