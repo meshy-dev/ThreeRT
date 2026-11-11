@@ -652,6 +652,19 @@ pub fn set_loop_guard(limit: u32) {
     }
 }
 
+/// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
+/// software one's place and the translucency pass after it.
+pub fn kernel_base(hwrt: bool) -> String {
+    let base = include_str!("../shaders/pathtrace.wgsl");
+    if hwrt {
+        let (head, rest) = base.split_once("// @trace-begin").unwrap();
+        let (_, tail) = rest.split_once("// @trace-end").unwrap();
+        format!("enable wgpu_ray_query;\n{head}{}{tail}{}", include_str!("../shaders/trace_hw.wgsl"), include_str!("../shaders/translucent.wgsl"))
+    } else {
+        base.to_string()
+    }
+}
+
 /// A kernel source as it is compiled: with the loop guard if there is one, its count in `MergedLive` (the merged
 /// layout) or in a buffer of its own (group 1, `merged::GUARD_BINDING`).
 fn guarded(src: &str, merged: bool) -> String {
@@ -1121,14 +1134,7 @@ impl Gpu {
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
         }).await?;
-        let base = include_str!("../shaders/pathtrace.wgsl");
-        let src = if hwrt {
-            let (head, rest) = base.split_once("// @trace-begin").unwrap();
-            let (_, tail) = rest.split_once("// @trace-end").unwrap();
-            format!("enable wgpu_ray_query;\n{head}{}{tail}{}", include_str!("../shaders/trace_hw.wgsl"), include_str!("../shaders/translucent.wgsl"))
-        } else {
-            base.to_string()
-        };
+        let src = kernel_base(hwrt);
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
             device.create_shader_module_trusted(
@@ -2792,6 +2798,37 @@ mod tests {
 
     /// The source-patching features (`kernel_source`) find their anchors in pathtrace.wgsl, once each, alone and all
     /// together; no feature leaves the source as it is.
+    /// The native default (no merged layout, no loop guard): what is handed to wgpu is the source as it was before
+    /// either existed. `guarded` gives a kernel back untouched; the live passes are their file. Prints the sources'
+    /// SHA-256 (`--nocapture`), which docs/WORKFLOW.md's gate compares with main's (PR #13).
+    #[test]
+    fn the_default_sources_are_untouched() {
+        use sha2::{Digest, Sha256};
+        if std::env::var("THREERT_LOOP_GUARD").is_ok() {
+            return;
+        }
+        assert_eq!(loop_guard(), None);
+        let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let live = include_str!("../shaders/live.wgsl");
+        assert_eq!(crate::live::live_source(false), live);
+        println!("source live {}", sha(&crate::live::live_source(false)));
+        for hwrt in [false, true] {
+            let base = kernel_base(hwrt);
+            assert_eq!(guarded(&base, false), base);
+            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false)));
+            // Every combination of the features that patch the source (`kernel_source`), each as compiled.
+            let bits = [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID];
+            let mut all = Sha256::new();
+            for m in 0..32u32 {
+                let f = bits.iter().enumerate().filter(|(k, _)| m >> k & 1 == 1).fold(0, |a, (_, b)| a | b);
+                let src = kernel_source(&base, f);
+                assert_eq!(guarded(&src, false), src);
+                all.update(guarded(&src, false).as_bytes());
+            }
+            println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
+        }
+    }
+
     #[test]
     fn kernel_source_finds_its_anchors() {
         let base = include_str!("../shaders/pathtrace.wgsl");

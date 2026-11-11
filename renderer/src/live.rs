@@ -195,6 +195,16 @@ fn tonemap_lut(p: &crate::desc::PostPreset) -> Vec<u16> {
     out
 }
 
+/// The live passes' source: live.wgsl as it is, or in the merged layout its buffers merged into slabs (merged.rs).
+pub(crate) fn live_source(merged: bool) -> std::borrow::Cow<'static, str> {
+    let src = include_str!("../shaders/live.wgsl");
+    if merged {
+        crate::merged::live(src).into()
+    } else {
+        src.into()
+    }
+}
+
 struct Passes {
     layout: wgpu::BindGroupLayout,
     pipes: Vec<(&'static str, wgpu::ComputePipeline)>,
@@ -203,9 +213,7 @@ struct Passes {
 impl Passes {
     fn new(g: &gpu::Gpu) -> Passes {
         let d = &g.device;
-        // (The merged layout: the same source, its buffers merged into slabs; merged.rs.)
-        let src = include_str!("../shaders/live.wgsl");
-        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("live"), source: wgpu::ShaderSource::Wgsl(if g.merged { crate::merged::live(src).into() } else { src.into() }) });
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("live"), source: wgpu::ShaderSource::Wgsl(live_source(g.merged).into()) });
         let buf = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
