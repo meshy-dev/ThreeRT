@@ -4015,6 +4015,39 @@ benchmark level. The order follows the dependencies; a step that meets a further
        - Whether all of native software traversal has the loop guard by default (not this step's; it costs 11 % of
          Kabukichō's trace, and what hung on 2026-11-11 is still not confirmed).
        - The 23 atomic tests that fail under software traversal on main ("Known issues"): the other line's.
+7c. **[ThreeRT] What a still frame costs with units.** Before step 8 (which adds units): step 7b's units made the
+   trace 37 % / 71 % / 16 % longer on hello world, the voxel level and Kabukichō, and Kabukichō missed 60 Hz under
+   software traversal, a browser's only path. Design and every figure: docs/RUNTIME.md "Software traversal with
+   units" ("The stack", "How the top tree is made", "Measured: the still frame").
+   - **Status: done on this machine** (branch `units-still-cost`, 2026-11-11; every GPU run with the loop guard, which
+     stopped nothing). The trace, units as in 7b → now / flat, live, 1280 × 720 traced at half: hello world
+     1.42 → **0.73** / 0.99 ms; the voxel level 7.83 → **4.17** / 4.54; Kabukichō 13.98 → **11.8** / 12.2, its frame
+     15.2 ms of GPU: **60 Hz again**. No picture changed for it: the atomic tests with units pass, the catalog's
+     models with units are their flattened pictures (ΔE 0.01–0.03 on the small ones), and the offline catalog with
+     nothing set is main's bytes (24 of 24).
+   - What it was, in the order of what it gave: arrays set to zero for every ray (a walk's own stack: now one for an
+     invocation, the kernel module's); a unit's walk as a loop inside the top walk's, where a ray waited for its
+     group (now one loop); a top tree by median splits (now by surface area, and kept: the settled units' tree
+     with its boxes brought up to date, a small tree built for the units that come or travel).
+   - Measured with it, as step 7b left open: the catalog's scenes with models live with units; explosions until the
+     room is full (0.5–0.6 s for the rebuild, right after it); debris as units (8,192 in flight: +2–4 % of trace,
+     2.3 ms of CPU a frame), and from it and a CPU count of piles: **step 8 has room for a few thousand debris
+     bodies; the CPU's instance update bounds it before the trace does.**
+   - Open:
+     - **A flattened scene still sets its walk's 48 words to zero for every ray**: with units hello world's trace is
+       0.73 ms and flattened 0.99, the voxel level 4.17 and 4.54. A kernel without units is `pathtrace.wgsl` as it
+       is (its `trace` declares the stack; the file is shared and was not edited here). The same change there (the
+       stack a private variable of the module; `trace_procs` has one too) should give every scene without
+       units under software traversal what it gave these (0.36 / 1.1 / 1.5 ms on the three scenes), in a browser
+       too. Not measured on a kernel without units; it changes that kernel's source, so the default sources'
+       hashes and possibly the catalog's software-traversal bytes: its own step.
+     - `zero-day` (+13 %) and `bistro` (+4 %) with units: one unit of millions of triangles whose transform is not a
+       translation. Such a scene loses nothing flattened (it has one copy of the triangles either way); units for
+       it only when it is edited.
+     - The loop guard's 1.2 ms on Kabukichō (11 %): two other forms of the count gave nothing; not explained.
+     - Bodies at rest on one another have no GPU number (no game makes a pile yet): step 8's first measurement.
+     - Under software traversal a rigid group's pose still rebuilds the scene every frame (`zero-day-animated`:
+       2.6 s a frame), as before step 7b.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

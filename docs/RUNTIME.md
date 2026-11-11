@@ -496,36 +496,34 @@ trace is the frame (Kabukichō), and the atomic tests under software traversal a
 
 ## Software traversal with units (in-place edits without ray queries)
 
-ROADMAP § 6 step 7b. **Status: runs natively and in Chrome on this machine's GPU** (2026-11-11; every run with the
-loop guard, which stopped nothing). Edits and memory are what the step was for; a still frame pays for them.
+ROADMAP § 6 steps 7b and 7c. **Status: runs natively and in Chrome on this machine's GPU** (2026-11-11; every run
+with the loop guard, which stopped nothing). Step 7b brought the edits and the memory; a still frame then paid for
+them (the trace 37 % / 71 % / 16 % longer on the three scenes below), and step 7c took that cost out.
 
 **Where units are used.** In a live session and in a browser (the wasm build), by default. **An offline render
-(`threert-render render`) under software traversal flattens every instance, as before this step: its kernel and its
+(`threert-render render`) under software traversal flattens every instance, as before step 7b: its kernel and its
 bytes are main's with nothing set.** `THREERT_UNITS=1` gives an offline render units; `THREERT_UNITS=0` flattens a
 live session too (the A/B). Why the line is there (decided 2026-11-11):
 - an offline render under software traversal is the reference render, and what the catalog's byte gate compares; the
   gate runs with no variable set, and stays a comparison with main's bytes;
 - what units give (the triangle data of each mesh held once, a faster load, edits in place) is what a session that
-  edits and a browser need; an offline render builds its scene once and edits nothing;
-- no catalog scene with models but Kabukichō has been rendered with units on the GPU.
+  edits and a browser need; an offline render builds its scene once and edits nothing.
 
 **What a still frame costs** (software traversal, live, 1280 × 720 traced at half, this machine, guard on in both
-columns; the tables and the rest are under "Measured" at the end of this section):
+columns; "Measured: the still frame" at the end of this section has every step between the two):
 
-| scene | the trace, units / flat | frame GPU, units / flat | 60 Hz (16.7 ms) |
+| scene | the trace: units as in step 7b → **now** / flat | frame GPU: 7b → **now** / flat | 60 Hz (16.7 ms) |
 | --- | --- | --- | --- |
-| hello world (natively) | 1.40–1.42 / 1.01–1.04 ms: **+37 %** | in Chrome 6.59 / 6.60 ms (its trace 2.55 / 2.08) | held by both |
-| the voxel level (10,459 units) | 7.85 / 4.58 ms: **+71 %** | 11.2 / 7.9 ms | held by both |
-| Kabukichō (352 units) | 13.88 / 12.01 ms: **+16 %** | 17.18 / 15.35 ms | **missed with units** (a frame every 17.2–17.5 ms; flat 16.65) |
+| hello world (natively) | 1.42 → **0.73** / 0.99 ms | 4.60 → **3.92** / 4.33 ms | held |
+| the voxel level (10,459 units) | 7.83 → **4.17** / 4.54 ms | 11.16 → **7.52** / 7.87 ms | held |
+| Kabukichō (352 units) | 13.98 → **11.8** / 12.2 ms | 17.4 → **15.2** / 15.6–15.9 ms | **held again** (a frame every 16.64 ms; step 7b: 17.3) |
 
-Against what main's live session ran on Kabukichō under software traversal with nothing set (flat, no guard: 14.11 ms
-of GPU a frame, 10.78 of trace), the session's default now (units, the guard) is 3.1 ms a frame more, 1.2 of it the
-guard as measured on the flat kernel. Nothing of the unit walk was tuned; that is the next thing to do (ROADMAP § 6
-step 7b, "Open").
+With units the trace is now a little below the flattened scene's on these three, and on the catalog's small models;
+on the two largest single models it is 4 % (`bistro`) and 13 % (`zero-day`) above. Most of what was taken out was
+not traversal: it was arrays set to zero for every ray ("The stack", below).
 
-**Not run** (each needs a GPU run outside the ones agreed for this step): a kernel with units without the guard; a
-catalog scene with units, offline or live, but Kabukichō; explosions on the voxel level until the edit room is full;
-a pile of debris, where units' boxes overlap most.
+**Not run**: a kernel with units without the guard; a pile of bodies at rest on one another on the GPU (no game
+makes one yet; counted on the CPU, below); anything but hello world in a browser.
 
 **What there was.** Software traversal (a browser's only one) walked one flat tree over every triangle in world
 space. Instances were written out into it (`flatten_instances`), so adding or moving anything rebuilt the scene, and a
@@ -541,20 +539,38 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   traversal builds its BLASes from; under software traversal the mesh's triangles are put in its tree's order, a
   cutout triangle carrying its flag). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
   (child indices count from its root, leaf triangles from its mesh's first).
-- **A unit** is the instance's kernel record (160 B), as under hardware traversal, with two of its unused words
-  filled: its mesh tree's root, and whether it casts shadows.
+- **A unit** is the instance's kernel record (160 B), as under hardware traversal, with three of its unused words
+  filled: its mesh tree's root; whether it casts shadows; whether it is placed by a translation alone (the ray then
+  keeps its direction and only its origin moves: 8,308 of the voxel level's 10,459 units).
 - **The top tree** is over the units' world boxes, one unit a leaf. A unit's box is its mesh's tree's bounds under the
-  unit's transform, read when the top tree is built (so a mesh written again where it was moves its units' boxes with
-  it). It is rebuilt whole on the CPU whenever a unit is added, moved or removed (as the TLAS is under hardware
-  traversal) and written into its own range of the node buffer. Its root and the number of units reach the kernel in two
-  words of the frame's parameters (`Params.motion.z`, `.w`, as bits; no binding, no buffer more).
+  unit's transform, read when the top tree is made (so a mesh written again where it was moves its units' boxes with
+  it). It is written whole into its own range of the node buffer whenever a unit is added, moved or removed (as the
+  TLAS is built under hardware traversal). Its root and the number of units reach the kernel in two words of the
+  frame's parameters (`Params.motion.z`, `.w`, as bits; no binding, no buffer more).
+- **How the top tree is made** (`units::Kept`). By the surface-area heuristic (binned, one unit a leaf, its depth held
+  to 18 whatever the boxes are): median splits by centres, what step 7b had, put a wall and the lamp beside it in
+  halves that both span the wall, and a ray read 82 top nodes to enter 2 units on the voxel level (62 now). Such a
+  build is 3.8 ms for 10,000 units, so it is seldom made over all of them. The units are two sets: the **settled**,
+  which are where a build over all last had them (or less than their own size from there), whose tree is that
+  build's, kept, its boxes brought up to date (0.45 ms for 10,000) and leaves taken out as units go; and the
+  **loose**, which have come since or travelled (pieces thrown, bodies in flight), whose own small tree is built
+  whenever one of them comes, goes or travels on. The top tree is a root over the two (one level more: 19). One
+  tree is built over all when the settled tree's nodes have grown past 1.3 times their area at the build, when the
+  loose at rest are an eighth of the units, or when the scene is small (64 units: a build is microseconds). Tried
+  and left out: putting a new unit into the one tree leaf by leaf; after a few thousand pieces had flown, rays
+  through the piles read several times what a built tree costs them.
 - **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
-  unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. The hit it returns
-  is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
-- **`pathtrace.wgsl` is not edited.** The unit walk is `shaders/trace_units.wgsl`, spliced in by `kernel_source`
-  for scenes that have units under software traversal (`F_UNITS`, a source feature, as vertex colours are). A scene
-  without units is handed the source it was handed before, byte for byte; hardware traversal's source never
-  contains it.
+  unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. **The top tree and
+  the units' trees are walked by one loop**, each turn a node of whichever tree the ray is in: a GPU runs a group of
+  rays through a loop together, and with a unit's walk as a loop inside the top walk's, a ray that had left a unit
+  waited at every unit for the slowest of its group (1.5 ms of the voxel level's 6.8). The top tree's root's box is
+  tested first: a ray that meets no unit reads one node, and a scene of one unit has no tree to walk. The hit it
+  returns is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
+- **`pathtrace.wgsl` is not edited.** The unit walk is `shaders/trace_units.wgsl`, put into the source by
+  `kernel_source` for scenes that have units under software traversal (`F_UNITS`, a source feature, as vertex
+  colours are): the file's text, a call at the end of the still walk, and the still walk's stack declaration taken
+  out ("The stack"). A scene without units is handed the source it was handed before, byte for byte; hardware
+  traversal's source never contains it.
 - Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
   of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
   goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
@@ -590,19 +606,25 @@ that is not its mesh's tree now (freed, or placed again elsewhere), or a unit si
 not yet used, and a tree given back, hold leaves that end (`units::FILL`), not zeros (zeros are an interior node
 whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
 
-**The stack.** Both levels share one stack of 64 entries, the unit walk's own (the still walk keeps its 48, in
-`pathtrace.wgsl`, untouched); a walk's stack is never deeper than its tree, and a unit's walk pushes above what the
-top walk has pending. The top tree is built by median splits, each halving: 18 levels hold 2^18 units, the most a
-top tree is given (a scene with more instances is flattened, as before). That leaves 46 for a mesh tree. Binned SAH
-is not balanced: measured on the CPU, its trees over the catalog's models are 17 deep for 37 k triangles, 20 for
-502 k, 22 for a 31 k-triangle building of Kabukichō, and 42 for the 5.86 M triangles of `zero-day` (a balanced tree
-there is 21), which as part of a flattened scene fitted the still walk's 48. A mesh tree deeper than 46 is built
-again by median splits, whose depth is log2(triangles / 4): a worse tree to walk, never a wrong one. A push past the
-stack is dropped (geometry missed, never a hang), and the builders' bounds mean it is not reached;
-`the_builders_keep_their_depths` holds them to it.
+**The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module,
+which the still walk uses too (`kernel_source` takes its own declaration out of the source for such a kernel; the
+file is not edited). Why not a walk's own: an array a function declares is set to zero each time the function is
+entered, whatever the ray then meets, and a ray's walk is entered many times a pixel. The unit walk's own 64 words
+cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55; the still walk's own 48 cost them 0.36,
+1.1 and 1.5 more, **and cost every flattened scene the same** (a kernel without units is the file as it is, so it
+still pays: "Open" in ROADMAP § 6 step 7c). A walk reads only what it pushed, so what an earlier ray left is never
+read. The still walk uses 48 entries, as before, and leaves the stack empty; a unit's walk pushes above what the
+top walk has pending. The top tree is at most 19 deep (a built tree 18, which holds 2^18 units, the most a scene is
+given units for; a root over two of them). That leaves 45 for a mesh tree. Binned SAH is not balanced: measured on
+the CPU, its trees over the catalog's models are 17 deep for 37 k triangles, 20 for 502 k, 22 for a 31 k-triangle
+building of Kabukichō, and 42 for the 5.86 M triangles of `zero-day` (a balanced tree there is 21), which as part of
+a flattened scene fitted the still walk's 48. A mesh tree deeper than 45 is built again by median splits, whose
+depth is log2(triangles / 4): a worse tree to walk, never a wrong one. A push past the stack is dropped (geometry
+missed, never a hang), and the builders' bounds mean it is not reached; `the_builders_keep_their_depths` holds them
+to it.
 
 **Checked on the CPU** (`units.rs`, `lib.rs` `units_tests`; no GPU):
-- the kernel's two walks transcribed line for line (a test compares the transcription's source lines with the
+- the kernel's walks transcribed line for line (a test compares the transcription's source lines with the
   shaders'), with every buffer read through an accessor that refuses an index outside its buffer and every loop
   iteration counted;
 - random scenes and random sequences of adding a mesh, adding, moving and removing units, removing a mesh: after each
@@ -613,6 +635,12 @@ stack is dropped (geometry missed, never a hang), and the builders' bounds mean 
   the same shadow rays blocked;
 - broken trees (a child at or before its parent, a cycle, a range outside, a leaf over 16, a record that is no unit)
   refused; a record naming a tree that is gone refused;
+- the top tree's rule: kept while units move a little, the loose units' tree built when units come, go or travel,
+  one tree over all when the settled one costs too much or the loose have come to rest; whichever it is, a tree
+  `check_top` accepts, within a quarter of a built tree's cost through 200 frames of thrown pieces
+  (`a_top_tree_is_kept_while_units_only_move`); the random edits above run through the same rule;
+- what a ray reads, counted (`units_cost.rs`, measurements, not tests: `units_cost` over a bundle's scene with units
+  and flattened; `units_pile`, pieces of debris thrown onto a scene);
 - the sources handed to wgpu for every scene without units: the hashes main has
   (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers;
 - an offline render of a scene with instances: no unit, no `F_UNITS`, and the triangle and node bytes the flattened
@@ -633,7 +661,10 @@ before a scene's first unit), and `tools/test-render.ts` fails a run in which it
 Under software traversal as written the guard's count has its binding and buffer whether or not the scene's kernel
 names it (not at `THREERT_LOOP_GUARD=0`), so a scene's first unit brings the guard without another layout.
 
-### Measured (2026-11-11)
+### Measured (step 7b, 2026-11-11)
+
+(As step 7b left it: the top tree by median splits, a stack of the unit walk's own, two nested loops. What a still
+frame costs now is in "Measured: the still frame" after this.)
 
 Apple M5 Pro; natively `THREERT_HWRT=0` with `THREERT_LOOP_GUARD` 65,536 unless said; "flat" is the same build with
 `THREERT_UNITS=0` (every instance flattened: main's kernel, and main's bytes on the catalog); live views 1280 × 720
@@ -736,6 +767,67 @@ the rule above was built in):
   `bistro-slice`, `bistro-district`, `zero-day`, `zero-day-animated` differ from main in 1,884 / 133 / 80 / 9,507 /
   8,850 of 57,600 pixels, and main from main in 1,782 / 1,095 / 125 / 7,988 / 10,426: ROADMAP "Known issues",
   hardware traversal's ties). Hardware traversal's sources, layouts and buffers are not touched by the rule.
+
+### Measured: the still frame (step 7c, 2026-11-11)
+
+The same machine, settings and tools as above (software traversal, live, 1280 × 720 traced at half, guard 65,536;
+p50; Kabukichō two launches of `tools/bench-layout.ts`). Each row is a build with one more change; "flat" is the
+last build with `THREERT_UNITS=0`. The runs and their order: `out/web-probe/gpu-runs-c.md` (kept beside the
+checkout).
+
+| the trace, ms | hello world | the voxel level | Kabukichō |
+| --- | --- | --- | --- |
+| flat | 0.99 | 4.54 | 12.2 |
+| step 7b | 1.42 | 7.83 | 13.98, 13.93 |
+| the top tree by surface area | 1.43 | 6.90 | 14.25, 14.21 |
+| + every top node's own box tested when the walk comes to it (taken out again) | 1.42 | 7.43 | 14.34, 14.24 |
+| + a unit placed by a translation alone keeps the ray's direction | 1.41 | 7.39 | 13.94, 14.01 |
+| + the unit walk uses the still walk's stack: one array zeroed a ray, not two | 1.13 | 6.84 | 13.24, 13.17 |
+| + one loop for the top tree and the units' trees | 1.09 | 5.30 | 13.31, 13.02 |
+| + the stack is the module's: none zeroed a ray | **0.73** | **4.17** | **11.83, 11.75** |
+
+Tried and left out: the still tree in the same loop as the other two (the voxel level 5.47 for 5.30, Kabukichō 14.7
+for 13.2); two other forms of the loop guard's count (at most 3 % of hello's trace, nothing on Kabukichō: the
+guard's 1.2 ms there is not its form). In Chrome (`tools/web-hello.ts --frames`) hello's trace is 1.81 ms still and
+1.75 with a body moving (step 7b: 2.55 and 2.66).
+
+**The catalog's scenes with models, live with units** (the last frames of 120 in lockstep compared by
+`threert-render compare`):
+
+| scene (units) | the trace, units / flat | the picture against flat's |
+| --- | --- | --- |
+| `khronos-clearcoat` (1) | 1.84 / 2.11 ms | ΔE 0.01, SSIM 1.0000 |
+| `khronos-metal-rough` (1) | 2.27 / 2.68 | ΔE 0.02, SSIM 1.0000 |
+| `khronos-transmission` (1) | 5.28 / 5.37 | ΔE 0.03, SSIM 0.9999 |
+| `instancing` (1,000, all moving) | 3.39 / 7.89; flat rebuilds the scene every frame (276 ms of CPU a frame; units 6.5) | offline at one instant, 64 spp: ΔE 0.37, SSIM 0.995 |
+| `bistro` (1 unit of 2.83 M triangles) | 23.1 / 22.2 | ΔE 0.69, SSIM 0.990 |
+| `zero-day` (1 unit of 5.87 M) | 14.5 / 12.8 | ΔE 1.20, SSIM 0.963: the scene's own spread, see below |
+| `zero-day-animated` (3,991) | every frame rebuilds the scene (2.6 s), with units as flat: a rigid group's pose, as before step 7b | – |
+
+`zero-day`'s picture: two runs of the flat kernel are ΔE 0.11 apart, so units' 1.20 is not noise of one kernel.
+Offline at 1,024 spp the three traversals are as far from one another: units against flat ΔE 0.97, hardware
+traversal against flat 0.87, hardware against units 0.91 (mean luminance within 0.3 %): speckle on the scene's
+fine and coincident geometry (ROADMAP "Known issues"), nothing missing or misplaced.
+
+**The voxel level under edits.** An explosion's commit (0.5–4 m, in place): 2.6–3.9 ms, of it the trees 0.7–1.4
+(step 7b: 2.5–4.5 and 1.8–2.0). An explosion a frame for ten seconds (433 edits) does not fill the default room
+(triangles 2.23 M of 2.36 M, records 10,516 of 13,073). With a fifth of the room it fills four times: each time
+the scene is rebuilt in **0.48–0.64 s** (flattened, every explosion is 7 s), the room is laid out again around the
+scene as it then is, and the edits after it are in place again; the last frame is the never-full run's, identical,
+and against hardware traversal's of the same run ΔE 0.07, SSIM 0.9997.
+
+**Debris as units.** Twenty explosions in a second throw 8,192 voxel cubes, each an instance for 4 s (the `debris`
+game): with all of them in flight the trace is 4.19–4.30 ms against 4.11–4.13 without (**+2–4 %**); the CPU's
+instance updates are 2.2–2.4 ms a frame, about 1.6 of it the top tree (the loose units' tree built each frame; one
+build over all three times in 277 frames). Pieces at rest on one another cost a ray more than pieces in flight;
+counted on the CPU (`units_pile`: lumps of 36 triangles in eight piles on the level): 1,000 pieces +15 % of the bytes
+a pixel reads, 4,000 +43 %, 16,000 +76 %, a ray past a pile entering 2.2 / 2.8 / 4.0 units; the top tree in a frame
+of flight 0.9 / 1.3 / 2.5 ms. **So step 8 has room for a few thousand debris bodies**, and what bounds it first is
+the CPU's update of the instances, not the trace.
+
+**The merge gate**: the catalog offline under software traversal with nothing set, 24 of 24 bundles byte-identical to
+main; `cargo test --release` whole (79 pass); the atomic tests under hardware traversal (170 pass) and the 29 with
+units under software traversal; hello world natively and in Chrome (every check, the guard 0, no frame rebuilt).
 
 ## Correctness
 
