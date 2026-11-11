@@ -13,20 +13,22 @@
 //! and written whole whenever a unit changes: built again when a unit comes or goes, kept with its boxes brought up
 //! to date (`refit_top`) while units only move and it stays within `REFIT_SLACK` of what it cost when built.
 //!
-//! Depths: both levels share the unit walk's stack of `STACK` entries (a push past it is dropped: geometry missed,
-//! never a hang). A walk's stack is never deeper than its tree, so the top tree is held to `TOP_DEPTH` (its builder
-//! takes no split the levels left could not finish) and a mesh tree to `MESH_DEPTH` (a tree deeper than that is built
-//! again by median splits, which halve), and the two fit. Binned
-//! SAH is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced
-//! one's 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk has 48 entries for its one tree.
+//! Depths: one stack of `STACK` entries for a ray, the still walk's own (which a kernel with units declares that
+//! long, and hands to the unit walk when it is done and the stack is empty); both levels of the unit walk share it
+//! (a push past it is dropped: geometry missed, never a hang). A walk's stack is never deeper than its tree, so the
+//! top tree is held to `TOP_DEPTH` (its builder takes no split the levels left could not finish) and a mesh tree to
+//! `MESH_DEPTH` (a tree deeper than that is built again by median splits, which halve), and the two fit. Binned SAH
+//! is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced one's
+//! 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk uses 48 entries for its one tree, as before.
 
 use crate::bvh::{self, GpuNode};
 use crate::scene::GpuInstance;
 use glam::{Mat4, Vec3A};
 
-/// The unit walk's stack (trace_units.wgsl; its own, not the still walk's): entries shared by both levels.
+/// A ray's stack in a kernel with units (pathtrace.wgsl `trace`'s, lengthened by `gpu::kernel_source`; the unit walk
+/// of trace_units.wgsl is handed it): entries shared by the unit walk's two levels.
 pub const STACK: usize = 64;
-/// The still walk's stack (pathtrace.wgsl `trace`), as it was before there were units.
+/// The still walk's stack in a kernel without units, and how much of it the still walk uses in any kernel.
 pub const STILL_STACK: usize = 48;
 /// The deepest top tree (levels below the root): 2^18 units at most, whatever their boxes (`build_sah`).
 pub const TOP_DEPTH: usize = 18;
@@ -575,10 +577,10 @@ impl Units {
     /// The top tree over the units that are shown, for the top range's start, and their count kept (`count`). No
     /// unit: no nodes (the kernel does not walk a top tree then). The tree it made last is kept, its boxes brought up
     /// to date, while its leaves are these units and it costs a ray no more than `REFIT_SLACK` times what it did
-    /// when it was built (units that move every frame: bodies); else it is built again. Err: more units than the range holds, a unit whose
-    /// box is not finite, one past the kernel's records, or one whose record names a tree that is not its mesh's now
-    /// (freed, or placed elsewhere since the record was written: the kernel would walk whatever is there); nothing
-    /// is changed then.
+    /// when it was built (units that move every frame: bodies); else it is built again. Err: more units than the
+    /// range holds, a unit whose box is not finite, one past the kernel's records, or one whose record names a tree
+    /// that is not its mesh's now (freed, or placed elsewhere since the record was written: the kernel would walk
+    /// whatever is there); nothing is changed then.
     pub fn top(&mut self) -> Result<Vec<GpuNode>, String> {
         let mut boxes: Vec<UnitBox> = vec![];
         for (r, u) in self.slots.iter().enumerate() {
@@ -771,7 +773,9 @@ pub(crate) mod cpu {
         pub(crate) fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
             let mut hit = Hit { t: tmax_in, tri: 0xffff_ffff, inst: NO_INST };
             let inv_d = Self::inv(d);
-            let (mut stack, mut sp, mut node) = ([0u32; STILL_STACK], 0usize, 0u32);
+            // (The stack is the units' size, as `kernel_source` makes it in a kernel with units; the still walk's
+            // own bound stays.)
+            let (mut stack, mut sp, mut node) = ([0u32; STACK], 0usize, 0u32);
             loop {
                 self.step()?;
                 let n = self.node(node)?;
@@ -823,18 +827,17 @@ pub(crate) mod cpu {
                 }
             }
             self.still_done();
-            self.trace_units(o, d, hit, mode)
+            self.trace_units(o, d, inv_d, hit, mode, &mut stack)
         }
 
         /// shaders/trace_units.wgsl `trace_units`, statement for statement.
-        pub(crate) fn trace_units(&self, o: Vec3A, d: Vec3A, hit_in: Hit, mode: u32) -> Walk<Hit> {
+        pub(crate) fn trace_units(&self, o: Vec3A, d: Vec3A, inv_d: Vec3A, hit_in: Hit, mode: u32, stack: &mut [u32; STACK]) -> Walk<Hit> {
             let mut hit = hit_in;
             if self.units == 0 {
                 return Ok(hit);
             }
             let top = self.top;
-            let inv_d = Self::inv(d);
-            let (mut stack, mut sp, mut node) = ([0u32; STACK], 0usize, top);
+            let (mut sp, mut node) = (0usize, top);
             loop {
                 self.step()?;
                 let n = self.node(node)?;
@@ -968,15 +971,15 @@ mod tests {
             units,
             "trace_units.wgsl",
             &[
-                "fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {",
+                "fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32, stack: ptr<function, array<u32, 64>>) -> Hit {",
                 "if (bitcast<u32>(P.motion.w) == 0u) { return hit; }",
                 "let top = bitcast<u32>(P.motion.z);",
-                "var stack: array<u32, 64>;",
+                "var sp = 0u;",
                 "var node = top;",
                 "let n = nodes[node];",
                 "if (ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF) {",
                 "if (sp == 0u) { break; }",
-                "node = stack[sp];",
+                "node = (*stack)[sp];",
                 "if (n.count > 0u) {",
                 "let rec = n.left_or_first;",
                 "let r = instances[rec];",
@@ -1001,7 +1004,7 @@ mod tests {
                 "hit = Hit(x.x, ti, x.y, x.z, rec);",
                 "if (mode != TRACE_CLOSEST) { return hit; }",
                 "if (sp == base) { break; }",
-                "m = stack[sp];",
+                "m = (*stack)[sp];",
                 "let ml = root + q.left_or_first;",
                 "let mr = ml + 1u;",
                 "var ul = ray_aabb(lo, linv, ql.bmin, ql.bmax, hit.t);",
@@ -1011,9 +1014,9 @@ mod tests {
                 "if (ur < ul) {",
                 "m = mnear;",
                 "if (ur != INF && sp < 64u) {",
-                "stack[sp] = mfar;",
+                "(*stack)[sp] = mfar;",
                 "if (sp == 0u) { break; }",
-                "node = stack[sp];",
+                "node = (*stack)[sp];",
                 "let l = top + n.left_or_first;",
                 "let r = l + 1u;",
                 "var tl = ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);",
@@ -1023,7 +1026,7 @@ mod tests {
                 "if (tr < tl) {",
                 "node = near;",
                 "if (tr != INF && sp < 64u) {",
-                "stack[sp] = far;",
+                "(*stack)[sp] = far;",
                 "return hit;",
             ],
         );
@@ -1061,7 +1064,7 @@ mod tests {
         );
         // What the stack and the record's words are here is what they are there.
         assert_eq!((STACK, STILL_STACK), (64, 48));
-        assert!(TOP_DEPTH + MESH_DEPTH <= STACK);
+        assert!(TOP_DEPTH + MESH_DEPTH <= STACK && STILL_STACK <= STACK, "one stack holds each walk");
     }
 
     /// A deterministic stream of numbers in [0, 1).

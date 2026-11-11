@@ -11,20 +11,20 @@
 // (units.rs `unit_record`): the ray keeps its direction and only its origin moves, which is what the rows would have
 // made of it.
 //
-// `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. Both levels share one
-// stack, this function's own: a unit's walk pushes above what the top walk has pending and stops when it is back down
-// to it. 64 entries: 18 for the top tree, 46 for a mesh's (units.rs `STACK`). Every index read here was checked on the
-// CPU when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
+// `trace` walks the still scene first and calls this with its hit: the ray is already cut to it. One stack for all
+// three walks, `trace`'s (in a kernel with units it has 64 entries, not 48: gpu.rs `kernel_source`): the still walk
+// has left it empty, a unit's walk pushes above what the top walk has pending and stops when it is back down to it.
+// 64 entries: 18 for the top tree, 46 for a mesh's (units.rs `STACK`). A stack of this function's own would be 64
+// more words set to zero for every ray, whatever the ray then meets. Every index read here was checked on the CPU
+// when it was written (units.rs `check_mesh`, `check_top`), the depths with them.
 //
 // The top walk tests each node's own box when it comes to it, against the ray as it is cut by then: the root's (a ray
 // that meets no unit reads one node; a scene of one unit is a root that is a leaf, and only the rays that meet its
 // box read its record), and a node that waited on the stack while a nearer hit was found.
-fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
+fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32, stack: ptr<function, array<u32, 64>>) -> Hit {
     var hit = hit_in;
     if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
     let top = bitcast<u32>(P.motion.z);
-    let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
-    var stack: array<u32, 64>;
     var sp = 0u;
     var node = top;
     loop {
@@ -32,7 +32,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
         if (ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF) {
             if (sp == 0u) { break; }
             sp--;
-            node = stack[sp];
+            node = (*stack)[sp];
             continue;
         }
         if (n.count > 0u) {
@@ -69,7 +69,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
                         }
                         if (sp == base) { break; }
                         sp--;
-                        m = stack[sp];
+                        m = (*stack)[sp];
                         continue;
                     }
                     let ml = root + q.left_or_first;
@@ -81,7 +81,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
                     if (ul == INF && ur == INF) {
                         if (sp == base) { break; }
                         sp--;
-                        m = stack[sp];
+                        m = (*stack)[sp];
                         continue;
                     }
                     var mnear = ml;
@@ -93,14 +93,14 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
                     }
                     m = mnear;
                     if (ur != INF && sp < 64u) {
-                        stack[sp] = mfar;
+                        (*stack)[sp] = mfar;
                         sp++;
                     }
                 }
             }
             if (sp == 0u) { break; }
             sp--;
-            node = stack[sp];
+            node = (*stack)[sp];
             continue;
         }
         let l = top + n.left_or_first;
@@ -112,7 +112,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
         if (tl == INF && tr == INF) {
             if (sp == 0u) { break; }
             sp--;
-            node = stack[sp];
+            node = (*stack)[sp];
             continue;
         }
         var near = l;
@@ -124,7 +124,7 @@ fn trace_units(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
         }
         node = near;
         if (tr != INF && sp < 64u) {
-            stack[sp] = far;
+            (*stack)[sp] = far;
             sp++;
         }
     }

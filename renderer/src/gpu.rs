@@ -728,10 +728,12 @@ pub fn kernel_source(src: &str, features: u32) -> String {
         );
     }
     if features & F_UNITS != 0 {
-        // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before).
+        // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before),
+        // and its stack with it, which is the units' size here: one array set to zero for a ray, not two.
+        patch("\n    var stack: array<u32, 48>;\n    var sp = 0u;\n    var node = 0u;\n", "\n    var stack: array<u32, 64>;\n    var sp = 0u;\n    var node = 0u;\n");
         patch(
             "    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
-            "    hit = trace_units(o, d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
+            "    hit = trace_units(o, d, inv_d, hit, mode, &stack);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
         );
         patch("\n// @trace-end\n", &format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl")));
     }
@@ -3042,13 +3044,16 @@ mod tests {
         assert!(!base.contains("trace_units"));
         let u = kernel_source(&base, F_UNITS);
         assert_eq!(u.matches("fn trace_units(").count(), 1);
-        assert_eq!(u.matches("hit = trace_units(o, d, hit, mode);").count(), 1);
+        assert_eq!(u.matches("hit = trace_units(o, d, inv_d, hit, mode, &stack);").count(), 1);
         let (begin, end, at) = (u.find("// @trace-begin").unwrap(), u.find("// @trace-end").unwrap(), u.find("fn trace_units(").unwrap());
         assert!(begin < at && at < end);
-        // Taking the units out again gives the file back: nothing else was touched.
-        let call = "    hit = trace_units(o, d, hit, mode);\n";
+        // Taking the units out again gives the file back: nothing else was touched. (The stack the three walks share
+        // is the still walk's, at the units' size; the procedural objects' walk keeps its own.)
+        let call = "    hit = trace_units(o, d, inv_d, hit, mode, &stack);\n";
         let body = format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl"));
-        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1), base);
+        let (stack, still) = ("\n    var stack: array<u32, 64>;\n    var sp = 0u;\n    var node = 0u;\n", "\n    var stack: array<u32, 48>;\n    var sp = 0u;\n    var node = 0u;\n");
+        assert_eq!((u.matches(stack).count(), u.matches("array<u32, 64>").count(), u.matches("array<u32, 48>").count()), (1, 2, 1));
+        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1).replacen(stack, still, 1), base);
         // Hardware traversal's source has neither anchor.
         let hw = kernel_base(true);
         assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));
