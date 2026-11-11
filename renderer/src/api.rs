@@ -127,7 +127,7 @@ pub fn object(w: &mut World, id: u32, j: &Value) -> Result<()> {
             let materials: Vec<u32> = j["materials"].as_array().map_or(vec![], |a| a.iter().filter_map(|v| v.as_u64().map(|x| x as u32)).collect());
             Kind::Mesh { geometry: num("geometry").unwrap_or(0), material: num("material").unwrap_or(0), own_blas: j["dynamicGeometry"].as_bool().unwrap_or(false) || (body && materials.len() <= 1), materials }
         }
-        "model" => Kind::Model { uri: j["uri"].as_str().unwrap_or_default().to_string(), nodes: serde_json::from_value(j["nodes"].clone()).ok(), animation: serde_json::from_value(j["animation"].clone()).ok() },
+        "model" => Kind::Model { uri: j["uri"].as_str().unwrap_or_default().to_string(), nodes: serde_json::from_value(j["nodes"].clone()).ok(), animation: serde_json::from_value(j["animation"].clone()).ok(), functions: serde_json::from_value(j["functions"].clone()).unwrap_or_default() },
         "light" => Kind::Light(serde_json::from_value(j["light"].clone()).map_err(|e| Error::Type(format!("engine.object light: {e}")))?),
         "camera" => Kind::Camera(serde_json::from_value(j["camera"].clone()).map_err(|e| Error::Type(format!("engine.object camera: {e}")))?),
         "volume" => Kind::Volume {

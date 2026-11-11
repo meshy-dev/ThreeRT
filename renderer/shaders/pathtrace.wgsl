@@ -926,6 +926,9 @@ fn from_ue_vec(v: vec3<f32>) -> vec3<f32> { return vec3<f32>(v.x, v.z, v.y); }
 
 // @material-functions-begin
 fn material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn alpha_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
+fn emissive_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }
 // @material-functions-end
 
 fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
@@ -979,7 +982,7 @@ fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
         let i = mat_in_at(ti, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
         var b = mat_base(m);
         b.opacity = alpha;
-        alpha = material_function(m.tex1.w - 1, i, m, b).opacity;
+        alpha = alpha_material_function(m.tex1.w - 1, i, m, b).opacity;
     }
     return alpha >= m.uv2.w;
 }
@@ -1640,7 +1643,7 @@ fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
@@ -1760,7 +1763,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>) -> ES {
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        r.le = material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        r.le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     r.l = l;
     r.dist = dist;
@@ -1788,6 +1791,9 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         let phi = 2.0 * PI * rnd();
         let tb = basis(to_light);
         let l = tb * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        // A light gone black (a moon that has set, the sun at night) costs neither its BSDF nor its shadow ray. (After
+        // the cone's random numbers: every other light sees the same ones as before.)
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
         let f = eval_bsdf_k(s, lb, v, l, li.x.y);
         if (any(f > vec3<f32>(0.0))) {
             let vis = light_vis(li.ext.w >= 0.5, o, l, INF);
@@ -1899,6 +1905,7 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f3
     for (var i = 0u; i < P.counts2.x; i++) {
         let li = lights[i];
         let l = -li.dir.xyz;
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         if (li.ext.w < 0.5 || !occluded(x, l, INF)) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
     }
     // One shadow ray: either the local lights (RIS) or one emissive point, chosen with equal odds when both exist.
@@ -2140,6 +2147,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
         let phi = 2.0 * PI * rnd();
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         let ph = hg_phase(g, dot(l, d));
         let vis = light_vis(li.ext.w >= 0.5, x, l, INF);
         if (any(vis > vec3<f32>(0.0))) {
@@ -2236,6 +2244,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
         let phi = 2.0 * PI * rnd();
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         if (li.ext.w < 0.5 || !occluded(x, l, INF)) { sum += li.color.rgb * ph; }
     }
     let nd = P.counts2.x;

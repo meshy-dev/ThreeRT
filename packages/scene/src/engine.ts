@@ -62,7 +62,7 @@ export interface CameraDesc {
 }
 
 export type SkyDesc =
-  | { type: "atmosphere"; /** the sun light's object */ sun: number | null; groundAlbedo: Vec3; rayleighScale: number; mieScale: number; mieAnisotropy: number; skyLightIntensity: number; /** the sun moves (time of day) */ dynamic?: boolean; /** night-sky glow, nits */ glow?: Vec3; /** aerial perspective: density multiple (0 = off) */ aerial?: number }
+  | { type: "atmosphere"; /** the sun light's object */ sun: number | null; groundAlbedo: Vec3; rayleighScale: number; mieScale: number; mieAnisotropy: number; skyLightIntensity: number; /** the sun moves (time of day) */ dynamic?: boolean; /** night-sky glow, nits */ glow?: Vec3; /** its light dome: nits at the horizon (RGB), the elevation (radians) it falls to 1/e by */ horizonGlow?: [number, number, number, number]; /** aerial perspective: density multiple (0 = off) */ aerial?: number }
   | { type: "color"; color: Vec3; /** nits */ intensity: number; skyLightIntensity: number }
   | { type: "hdri"; texture: number; intensity: number; rotation: number; skyLightIntensity: number }
   | {
@@ -98,6 +98,7 @@ export interface EnvironmentDesc {
   fog?: FogDesc;
   wetness?: number;
   rain?: number;
+  cloudCover?: number;
 }
 
 export interface MaterialDesc {
@@ -156,7 +157,7 @@ type ObjectKindDesc =
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "group" }
   /** `materials`: one per geometry group (three.js's material array; `material` is the first). */
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "mesh"; geometry: number; material: number; materials?: number[]; dynamicGeometry?: boolean }
-  | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "model"; uri: string; nodes?: string[]; animation?: AnimationDesc }
+  | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "model"; uri: string; nodes?: string[]; animation?: AnimationDesc; functions?: { prefix: string; shader: NonNullable<MaterialDesc["shader"]> }[] }
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "light"; light: LightDesc }
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "camera"; camera: CameraDesc }
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "particles"; count: number; emitter: { id: string; params: number[] }; material: number; emitterArea?: number }
@@ -918,7 +919,7 @@ export class SceneBinding {
     if (o instanceof VolumeMesh) return `volume:${o.shape}:${JSON.stringify(this.volumeBinding(o.volume))}:${o.majorant}:${o.anisotropy}:${o.homogeneous}:${o.grid ? this.gridId(o.grid) : ""}`;
     if (o instanceof GpuParticles) return `gpuParticles:${o.capacity}:${JSON.stringify(this.particleProgram(o.program))}:${this.materialId(o.material)}:${o.castShadow}:${o.emitterArea}:${o.rate}:${JSON.stringify(o.collide)}`;
     if (o instanceof Particles) return `particles:${o.count}:${JSON.stringify(this.particleEmitter(o.emitter))}:${this.materialId(o.material)}:${o.castShadow}:${o.emitterArea}`;
-    if (o instanceof GLTFModel) return `model:${o.uri}:${o.nodes?.join(",") ?? ""}:${o.castShadow}`;
+    if (o instanceof GLTFModel) return `model:${o.uri}:${o.nodes?.join(",") ?? ""}:${o.castShadow}:${o.functions ? JSON.stringify(this.modelFunctions(o)) : ""}`;
     if (o instanceof Light) {
       const d = lightDesc(o);
       return `light:${d.type}:${d.castShadow}:${d.type === "rect" ? d.visible !== false : ""}`;
@@ -944,7 +945,7 @@ export class SceneBinding {
     if (o instanceof Particles) return { ...base, kind: "particles", count: o.count, emitter: this.particleEmitter(o.emitter), material: this.materialId(o.material), ...(o.emitterArea > 0 ? { emitterArea: o.emitterArea } : {}) };
     if (o instanceof GLTFModel) {
       const animation = animationDesc(o);
-      return { ...base, kind: "model", uri: o.uri, ...(o.nodes ? { nodes: [...o.nodes] } : {}), ...(animation ? { animation } : {}) };
+      return { ...base, kind: "model", uri: o.uri, ...(o.nodes ? { nodes: [...o.nodes] } : {}), ...(animation ? { animation } : {}), ...(o.functions ? { functions: this.modelFunctions(o) } : {}) };
     }
     if (o instanceof Light) return { ...base, kind: "light", light: lightDesc(o) };
     if (o instanceof PerspectiveCamera) return { ...base, kind: "camera", camera: this.cameraDesc(o) };
@@ -1285,6 +1286,11 @@ export class SceneBinding {
     return { id: f.name, params };
   }
 
+  /** A model's material functions by material name prefix (`GLTFModel.functions`). */
+  private modelFunctions(o: GLTFModel): { prefix: string; shader: NonNullable<MaterialDesc["shader"]> }[] {
+    return Object.entries(o.functions ?? {}).map(([prefix, b]) => ({ prefix, shader: this.shaderBinding(b)! }));
+  }
+
   private shaderBinding(b: ShaderBinding): MaterialDesc["shader"] {
     const l = this.layoutOf(b.fn);
     const params = new Array<number>(32).fill(0);
@@ -1372,6 +1378,7 @@ export class SceneBinding {
     }
     if (scene.wetness > 0) e.wetness = scene.wetness;
     if (scene.rain > 0) e.rain = scene.rain;
+    if (scene.cloudCover > 0) e.cloudCover = Math.min(1, scene.cloudCover);
     return e;
   }
 
@@ -1394,6 +1401,7 @@ export class SceneBinding {
       const a: SkyDesc = { type: "atmosphere", sun: sun ?? null, groundAlbedo: vec3(env.groundAlbedo), rayleighScale: env.rayleighScale, mieScale: env.mieScale, mieAnisotropy: env.mieAnisotropy, skyLightIntensity: env.skyLightIntensity };
       if (env.dynamic) a.dynamic = true;
       if (env.glowIntensity > 0) a.glow = vec3(env.glow).map((c) => c * env.glowIntensity) as Vec3;
+      if (env.horizonGlowIntensity > 0) a.horizonGlow = [...vec3(env.horizonGlow).map((c) => c * env.horizonGlowIntensity), env.horizonGlowHeight] as [number, number, number, number];
       if (env.aerialPerspective > 0) a.aerial = env.aerialPerspective;
       return a;
     }

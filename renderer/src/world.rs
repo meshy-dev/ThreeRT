@@ -125,7 +125,8 @@ pub enum Kind {
     /// `materials`: one per geometry group (three.js's material array; empty: `material` for every triangle).
     Mesh { geometry: u32, material: u32, own_blas: bool, materials: Vec<u32> },
     /// glTF asset (path relative to the asset root), optionally only some of its nodes (by name).
-    Model { uri: String, nodes: Option<Vec<String>>, animation: Option<desc::Animation> },
+    /// `functions`: material functions on its materials, by name prefix (`GLTFModel.functions`).
+    Model { uri: String, nodes: Option<Vec<String>>, animation: Option<desc::Animation>, functions: Vec<desc::ModelFunction> },
     Light(desc::Light),
     Camera(desc::Camera),
     /// `count` particles: each a quad that the particle function `emitter` (with `params`, 8 vec4) places every frame
@@ -271,6 +272,9 @@ impl Default for Settings {
 #[derive(Default, Debug, Clone)]
 pub struct Changes {
     pub structural: bool,
+    /// Particle systems (`Kind::Particles`, not light-sampled) shown or hidden by their own `visible`: in place when
+    /// the build has them (live.rs `commit`, gpu.rs `set_particles_hidden`), else a rebuild.
+    pub particles_shown: HashSet<u32>,
     pub materials: HashSet<u32>,
     /// Objects whose light parameters changed.
     pub lights: HashSet<u32>,
@@ -316,7 +320,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.particles_shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -386,7 +390,7 @@ impl Default for World {
             geometry_fns: BTreeMap::new(),
             proc_geometries: HashMap::new(),
             instanced: HashMap::new(),
-            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, wetness: 0.0, rain: 0.0 },
+            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, wetness: 0.0, rain: 0.0, cloud_cover: 0.0 },
             settings: Settings::default(),
             changes: Changes { structural: true, ..Default::default() },
         }
@@ -747,9 +751,20 @@ impl World {
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         if o.visible != visible {
             o.visible = visible;
-            self.changes.structural = true;
+            if matches!(o.kind, Kind::Particles { emitter_area, .. } if emitter_area <= 0.0) {
+                self.changes.particles_shown.insert(id);
+            } else {
+                self.changes.structural = true;
+            }
         }
         Ok(())
+    }
+
+    /// Whether the build holds particle system `id` though it is hidden: its own `visible` is false, everything above
+    /// it is shown, and it is not light-sampled (a rain curtain the weather turns off): shown again in place.
+    pub fn particles_hidden_built(&self, id: u32) -> bool {
+        let Some(o) = self.objects.get(&id) else { return false };
+        !o.visible && matches!(o.kind, Kind::Particles { emitter_area, .. } if emitter_area <= 0.0) && o.parent.is_none_or(|p| self.shown(p))
     }
 
     pub fn set_power(&mut self, id: u32, power: f32) -> Result<()> {
@@ -1371,7 +1386,7 @@ mod tests {
         w.set_object(1, "a".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         w.set_object(2, "cam".into(), None, Kind::Group, false, false).unwrap();
         for bad in ["../x.glb", "/etc/passwd", "a/../../b", "https://x/y.glb", ""] {
-            assert!(w.set_object(9, "m".into(), None, Kind::Model { uri: bad.into(), nodes: None, animation: None }, true, false).is_err(), "{bad}");
+            assert!(w.set_object(9, "m".into(), None, Kind::Model { uri: bad.into(), nodes: None, animation: None, functions: vec![] }, true, false).is_err(), "{bad}");
         }
         w.settings.camera = Some(2);
         assert!(w.take_changes().structural);

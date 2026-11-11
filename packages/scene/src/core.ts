@@ -878,6 +878,12 @@ export class Scene extends Object3D {
   wetness = 0;
   /** Rain intensity 0..1 (ripples on wet ground). */
   rain = 0;
+  /**
+   * Cloud cover 0..1 of a `SkyAtmosphere` sky, changed in place: the sky goes over to an overcast dome (CIE standard
+   * overcast, lit by what the clear sky and sun would give the ground), the sun's direct light dims to nothing, and a
+   * city's night glow brightens off the cloud base.
+   */
+  cloudCover = 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1771,11 +1777,18 @@ export class GLTFModel extends Object3D {
   uri: string;
   /** Only these glTF nodes (by name, with their transforms in the file); all when null. */
   nodes: string[] | null;
+  /**
+   * Material functions on the file's own materials, by material name prefix (the first that matches): the function
+   * gets the glTF material's shading (`base`, its maps sampled) and changes it, e.g. `WetLayer` on a city's ground.
+   * Set at build: changing them rebuilds the scene.
+   */
+  functions: Record<string, ShaderBinding> | null;
   declare private _animation: AnimationPose | null;
-  constructor(uri: string, opts: { nodes?: string[]; animation?: AnimationPose } = {}) {
+  constructor(uri: string, opts: { nodes?: string[]; animation?: AnimationPose; functions?: Record<string, ShaderBinding> } = {}) {
     super();
     this.uri = uri;
     this.nodes = opts.nodes ?? null;
+    this.functions = opts.functions ?? null;
     this.animation = opts.animation ?? null;
   }
   get animation(): AnimationPose | null {
@@ -2014,18 +2027,28 @@ export class SkyAtmosphere {
   glow: Color = new Color(0x6b7fb3);
   glowIntensity = 0;
   /**
+   * The glow's light dome over a city: colour × `horizonGlowIntensity` nits at the horizon, on top of the glow, falling
+   * off with elevation (to 1/e at `horizonGlowHeight` radians). Off at 0.
+   */
+  horizonGlow: Color = new Color(0xffb46b);
+  horizonGlowIntensity = 0;
+  horizonGlowHeight = 0.06;
+  /**
    * Aerial perspective: the atmosphere's haze over the surfaces behind it, at this multiple of the atmosphere's own
    * density (Rayleigh and Mie, `rayleighScale` / `mieScale`). Distant land fades into the sky at the horizon behind
    * it, by day and by night (the glow). Off at 0 (the default): surfaces are seen through clear air.
    */
   aerialPerspective = 0;
-  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; aerialPerspective?: number } = {}) {
+  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; horizonGlow?: ColorLike; horizonGlowIntensity?: number; horizonGlowHeight?: number; aerialPerspective?: number } = {}) {
     this.sun = opts.sun ?? null;
     if (opts.groundAlbedo !== undefined) this.groundAlbedo = new Color(opts.groundAlbedo);
     if (opts.skyLightIntensity !== undefined) this.skyLightIntensity = opts.skyLightIntensity;
     if (opts.dynamic !== undefined) this.dynamic = opts.dynamic;
     if (opts.glow !== undefined) this.glow = new Color(opts.glow);
     if (opts.glowIntensity !== undefined) this.glowIntensity = opts.glowIntensity;
+    if (opts.horizonGlow !== undefined) this.horizonGlow = new Color(opts.horizonGlow);
+    if (opts.horizonGlowIntensity !== undefined) this.horizonGlowIntensity = opts.horizonGlowIntensity;
+    if (opts.horizonGlowHeight !== undefined) this.horizonGlowHeight = opts.horizonGlowHeight;
     if (opts.aerialPerspective !== undefined) this.aerialPerspective = opts.aerialPerspective;
   }
 }

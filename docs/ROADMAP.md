@@ -337,6 +337,21 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          where the truth's own noise allows (stated per pose);
        - in place against a fresh load of the same state (`tools/bench-sun.ts`, extended to Tokyo): ΔE ≤ 0.1;
        - a clip posted in the session.
+     - Found by the acceptance runs (2026-11-11, branch `light-tree-switchable`): light sampling was set up at load for
+       the lights on at that moment.
+       - A room loaded by day (its lamps and windows off) left them out of the light tree. Switched on at dusk, they were
+         drawn from the flat CDF beyond it, by power share alone, with no importance at the shading point and no
+         distance cut: shadow rays across the city.
+       - The sky's light-sampling floor (1 % of the emitters' mean radiance) also came from the lights on at load. The
+         room kept light-sampling a night sky that a room loaded at night does not.
+       - Both now count a switched-off emitter at full power (`switchable_power`); the tree's node powers are refit to
+         the objects' powers now. The 12 catalog scenes and 6 game rooms with every emitter on at load render
+         byte-identical; Tokyo's 15:30 room does not.
+       - GPU p50 at the 0.5 floor, main → this branch, per second of path (alternated runs):
+         - the Shiba fly-past: 14.6–17.9 → 8.9–12.5 ms by day, 20.0–21.7 → 12.2–12.8 ms from dusk;
+         - the Yasukuni-dōri drive: 15.0–18.4 → 10.7–13.5 ms once the first lamps are on (16:09).
+       - In place against a fresh load (Shinjuku's east aerial, on main + ThreeRT#3 and #4): ΔE 0.49 → 0.08 at sunset,
+         0.15 → 0.01 at civil dusk, 0.34 → 0 at night (bit for bit).
      - Status, part 1 (2026-11-10, branch `aerial-perspective`): the land beyond the area hazed into the sky.
        - `SkyAtmosphere({ aerialPerspective })` in `packages/scene`: the atmosphere's own haze over the surfaces behind it, at
          a multiple of its density. It is off by default (0); the kernel's `F_AERIAL` is compiled out where no scene
@@ -399,10 +414,95 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          emitter CDF and refits the light tree over all 1.4 M emitters. A group therefore switches on every tile in one
          frame; making that update incremental is the next item.
        - Next for step 1a: the commit's cost, moonlight and the night sky.
+     - Status, part 3 (2026-11-10, branch `moonlight`): moonlight and the night sky.
+       - The moon (`games/tokyo/moon.ts`): a second directional light in the time-of-day rooms, where the moon stands
+         over Tokyo at that moment.
+         - Position by Schlyter's method: mean elements and the main perturbations, within a few arcminutes.
+         - Its light by phase: Allen's magnitude against the sun's, through the same air as the sun's (Rayleigh, Mie at
+           10×, ozone; Kasten and Young's air mass).
+         - Checked at November 2026's phases (`tools/tokyo/test/moon.test.ts`, USNO times): new on the 9th, first
+           quarter on the 17th, full on the 24th, 0.25 lx above the air.
+         - The rooms take a date (`-d20261124`); 2026-11-09 is a new moon.
+         - It is black while it is down, until civil dusk, and under starlight's 1 mlx.
+         - The full moon high over Shinjuku at 23:00 changes the city by ΔE 0.05 at EV 5 (0.2 lx against its lit
+           streets), as in photographs: the moonlight is lost in the city's light.
+       - The kernel skips a black directional light (no BSDF, no shadow ray), after the cone's random numbers, so
+         every other light sees the same ones.
+         - The moon while down, and the sun at night, cost nothing. Shiba from 16:18 to 17:36 live, GPU p50 with a
+           black moon: 14.30 / 14.33 ms without the skip, 13.58 / 13.61 with it (serverless-agent-test#130: 13.7).
+         - The 12 catalog scenes render byte-identical.
+       - The night sky: `SkyAtmosphere` `horizonGlow`, a light dome over the glow (nits at the horizon, falling to
+         1/e at `horizonGlowHeight`). `tests/render/sky-night-glow.ts`: 1.349 measured, 1.349 analytic.
+         - Tokyo's (`NIGHT_GLOW` in `games/tokyo`):
+           - 27 mcd/m² at the zenith (16.5 mag/arcsec², Tokyo's clear-night zenith measured from Sumida, 2010–11);
+           - a dome of 0.26 cd/m² more at the horizon, falling to 1/e by 3.5°;
+           - a violet-blue zenith and a warm dome.
+         - Set against photographs of the Shinjuku skyline at night (Wikimedia Commons, 2004 and 2005; not
+           committed):
+           - the sky at 1°, 7° and 15° reads 7.3 : 1.95 : 1, and the dome is shaped on that;
+           - the colours are the 2004 photograph's, white-balanced on its office windows;
+           - at the 2005 photograph's exposure (EV 3) our sky reads 4× brighter than its top of frame, whose blacks
+             are crushed, and darker than the 2004 one (a longer exposure).
+         - The static night rooms now have the same sky as the time-of-day rooms: the atmosphere with the sun 40°
+           down, and the glow. Before, a uniform blue sky lit the city from below the horizon too.
+         - The land beyond the area now fades into the dome by night (the aerial perspective's haze carries its light),
+           not a black band under the sky. At EV 5 the sky stays near black, as in photographs at that exposure.
+           Before and after, at EV 5 and as a long exposure: `docs/img/tokyo-night-sky.jpg`.
+     - The commit's cost (ThreeRT#3, first serverless-agent-test#135): a power edit rebuilt the emitter CDF and refit
+       the light tree in the frame, ~13–15 ms over Tokyo's 1.4 M emitters, ~90 times in the Shiba fly-past (the
+       street lamps and the window groups switching).
+       - Scenes with many emitters now rebuild both on a worker thread (`EmitterWorker`). The edits land with the
+         result, a few frames later.
+       - The fly-past's frame interval p95 went from 29.7 / 28.5 to 17.20 / 17.17 ms, and its commits over 5 ms from
+         91 to 0.
+     - Acceptance (2026-11-11, branch `tokyo-1a-acceptance`; `node tools/tokyo/accept-1a.ts`, clips by
+       `node tools/tokyo/clip.ts tower|drive`), on main + ThreeRT#6 (light sampling set up for the lights switched off at
+       load, found by these runs):
+       - The Shiba fly-past (15:30 → 17:45 in 10.5 s, 540–760 km/h) and a Shinjuku drive (Yasukuni-dōri eastbound from
+         `roads.json` at 60 km/h, 16:00 → 18:00 over 67 s), real time at the dynamic resolution:
+
+         | run | frames | scale | frame start p95 / p99 | interval p95 / max | over 50 ms | rebuilds | GPU p50 / p95 |
+         |---|---|---|---|---|---|---|---|
+         | fly-past | 648 in 10.5 s | 0.70 | 16.67 / 23.73 | 17.5 / 27.1 | 0 | 0 | 14.24 / 16.55 |
+         | drive | 4,086 in 67.1 s | 0.625 | 16.67 / 16.95 | 16.83 / 20.0 | 0 | 0 | 14.40 / 16.25 |
+
+         Both pass. Before #6 neither did: frame start p95 19.92 and 17.21 ms at the 0.5 floor.
+       - Live (the 0.5 floor, 64 frames after a reset) against our offline render (4096 spp, no denoiser, clamps off): ΔE
+         / SSIM / luminance (the truth's own noise, its 1024 spp render against it, ΔE / SSIM; SSIM with both halved, at
+         the resolution live renders):
+
+         | pose | 15:30 | sunset (16:40) | civil dusk (17:07) | night (19:30) |
+         |---|---|---|---|---|
+         | Kabukichō's gate | 0.50 / 0.983 / 0.976 (0.19 / 0.996; 0.990) | 0.60 / 0.984 / 1.004 (0.23 / 0.998; 0.992) | 0.62 / 0.966 / 0.989 (0.29 / 0.980; 0.979) | 1.73 / 0.877 / 0.994 (1.20 / 0.884; 0.936) |
+         | west exit | 0.98 / 0.942 / 0.945 (0.29 / 0.975; 0.968) | 0.91 / 0.965 / 1.011 (0.27 / 0.997; 0.980) | 0.75 / 0.954 / 0.989 (0.26 / 0.982; 0.970) | 2.01 / **0.869** / 0.993 (1.14 / 0.900; 0.916) |
+         | skyscraper canyon | 1.09 / 0.960 / 0.961 (0.28 / 0.987; 0.982) | 0.88 / 0.965 / 1.011 (0.26 / 0.996; 0.985) | 0.60 / 0.958 / 0.973 (0.22 / 0.978; 0.975) | 1.88 / **0.835** / 0.994 (1.19 / 0.878; 0.905) |
+         | aerial east | 1.56 / 0.933 / 0.993 (0.29 / 0.991; 0.976) | 1.83 / 0.916 / 0.963 (0.25 / 0.998; 0.964) | 1.75 / 0.931 / 0.898 (0.13 / 0.998; 0.981) | 2.89 / **0.896** / 1.037 (0.28 / 0.993; 0.962) |
+         | aerial west | 2.26 / 0.938 / 0.985 (0.34 / 0.993; 0.976) | 2.07 / **0.880** / 0.975 (0.29 / 0.998; 0.939) | 1.17 / 0.930 / 0.879 (0.12 / 0.997; 0.977) | 2.52 / **0.884** / 1.030 (0.30 / 0.989; 0.951) |
+
+         - ΔE ≤ 3 at all 20. SSIM ≥ 0.9, or within 0.02 of the truth's own, at 15 (bold: the misses).
+         - The night's numbers are step 1's static night rooms' (gate 1.70 / 0.878, west exit 2.02 / 0.868, canyon
+           1.87 / 0.836, aerials 2.95 / 0.894 and 2.57 / 0.882): the time-of-day room at 19:30 renders as they do. Their
+           misses are step 1's, left to step 3.
+         - Sunset's west aerial misses on the far city's detail at the 0.5 floor: halved, 0.939.
+         - At civil dusk the aerials read 10–12 % dark (0.898, 0.879): the far lamps and windows the live view does not
+           sample (`LT_FAR`, 120 m) and finds only by BSDF rays. Step 3.
+       - In place against a fresh load (Shinjuku's east aerial; the clock run in lockstep to the time, held 200 frames,
+         reset, 128 frames): ΔE 0.03 at 15:30, 0.08 at sunset, 0.01 at civil dusk, 0 at night (bit for bit). All pass.
+         Before #6: 0.29 / 0.49 / 0.15 / 0.34.
+       - Clips, posted in the session (animated WebP: the real-time run's frames, the lockstep snapshots of each):
+         - the fly-past, 637 frames in 10.5 s at scale 0.70;
+         - the drive, 4,078 frames in 67.1 s at scale 0.625.
   1b. **Weather on Tokyo.** States, and transitions between them, all in place (no rebuild):
      - rain: wet streets and puddles reflecting the city, and the rain curtain (Bistro's), measured on Tokyo;
      - fog and mist: height fog over the city, thickening and clearing;
      - overcast: cloud cover that dims and softens the sun and the sky;
+       - Engine side done (2026-11-11, branch `sky-cloud-cover`): `scene.cloudCover` (0..1), changed in place.
+         - The atmosphere's sky goes over to the CIE standard overcast sky, white. Its horizontal illuminance is 0.3 of
+           what the clear sky and sun give the ground (stratus pass 0.1–0.4).
+         - The sun's direct light is × (1 − cover), its mean share of time out of cloud.
+         - A night glow is 3× brighter off the cloud base (Kyba et al. 2011).
+         - The live view re-bakes the dynamic sky and relights the sun on a change, as for a sun move.
+         - Unit test `full_cover_is_the_cie_overcast_sky_lit_by_the_clear_day`.
      - volumetric clouds in the sky, their shadows moving over the city (the sky's bake and the sun's visibility
        through them);
      - transitions in real time: clear → overcast → rain → clearing, with the clock running.
@@ -413,6 +513,16 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        - in place against a fresh load ΔE ≤ 0.1;
        - Tokyo lines in the perf suite: the Shiba fly-past clear and in rain;
        - a clip (a clear afternoon into a storm at dusk) posted in the session.
+     - Status, part 1 (2026-11-11, branch `gltf-material-functions`): the engine side of the rain on the city.
+       - `GLTFModel.functions`: material functions on a glTF file's own materials, by name prefix (the compiled tiles'
+         ground, roads and roofs are glTF materials with the aerial photos as maps). Set at build; the model has its
+         own copies of the file's materials and meshes. Their triangles are flattened per placement, as every
+         material-function triangle is: on Tokyo 15.2 M of 17.8 M.
+       - `wetLayer()`: `SurfaceMaterial`'s wetness (Lagarde; puddles on up-facing ground, rain ripples) as a layer on
+         another material's shading. `surface/wet-layer-gltf`: 0.556 against 0.549 analytic.
+       - The translucency pass compiles only its particles' material functions: with every function of Tokyo's kernel
+         in it, the Metal compiler failed on the `translucent` pipeline once the ground had wetLayer and the rain
+         curtain was in the scene.
   Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7.
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
@@ -671,6 +781,16 @@ What is left is carried over in § 0. The phase's plan and results, as they were
            moving emitters by their share of power: 0.41; no light tree at all: 0.59). Not the root's split between
            the two subtrees: a 25 % floor on either side of it changed nothing. Open (item 4); no light tree also means
            one candidate and no far-node culling, so that comparison is not one change.
+       - The GPU time's outliers (2026-11-11, branch `crowd-timer`): 3–4 % of the crowd's frames read 70–80 ms of GPU
+         while frames came every 16.7 ms.
+         - The live view times a frame from its first pass to its post pass's end. A slot of the timer read, in those
+           frames, the post pair of the frame that used the slot next, 4 frames on: the same timestamps, bit for bit.
+         - A post pass that begins more than 2 ms after the trace ends (it follows within ~0.2 ms) is now counted by its
+           own length. Every other frame reads as before.
+         - w150-v60, 30 s of the path, 3 alternated pairs: frames over 2 × their interval 3.4–4.2 % → 0–0.1 %, GPU max
+           81–82 → 20.4–20.6 ms, p95 15.3–15.4 → 14.95–15.0 ms. Frame interval p50 / p95 16.65 / 16.9 ms, frame start
+           p95 16.67 ms and scale (the 0.5 floor) unchanged. GPU p50 reads 0.13–0.15 ms higher in every pair (Bistro's
+           perf smoke: +0.14), though the change can only lower a reading; not explained.
   2. Then the costs, in measured order. The method is chosen per measurement. Candidates:
      - GPU (compute) skinning;
      - the dynamic BLAS update strategy:

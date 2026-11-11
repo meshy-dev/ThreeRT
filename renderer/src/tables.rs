@@ -15,6 +15,11 @@ pub struct Dirty {
     pub materials: bool,
     pub lights: bool,
     pub objects: bool,
+    /// Emitter weights changed (powers): the emitter CDF and the light tree's powers are rebuilt.
+    pub emitters: bool,
+    /// Power edits held back (`Tables::defer_powers`): the live view's emitter worker rebuilds the CDF and the tree's
+    /// powers for them, and they land together.
+    pub deferred: bool,
     /// Wetness / rain / fog kernel parameters.
     pub environment: bool,
     pub camera: bool,
@@ -22,7 +27,7 @@ pub struct Dirty {
 
 impl Dirty {
     pub fn any(&self) -> bool {
-        self.materials || self.lights || self.objects || self.environment || self.camera
+        self.materials || self.lights || self.objects || self.emitters || self.deferred || self.environment || self.camera
     }
 }
 
@@ -38,6 +43,8 @@ pub struct Tables {
     pub(crate) emissive: HashSet<u32>,
     pub wetness: f32,
     pub rain: f32,
+    /// Cloud cover (0..1): a change re-bakes the sky and dims the sun (live.rs `move_sun`).
+    pub cloud_cover: f32,
     pub fog: Option<desc::Fog>,
     /// three.js `scene.background` (`Params::background`).
     pub background: Option<[f32; 3]>,
@@ -54,6 +61,11 @@ pub struct Tables {
     pub light_index: HashMap<u32, Vec<usize>>,
     /// vec4s an object in `objects` (`scene::object_stride`).
     pub stride: usize,
+    /// Power edits are held back in `deferred` instead of written to `objects` (the live view's emitter worker: a
+    /// scene with many emitters, live.rs `EmitterWorker`).
+    pub defer_powers: bool,
+    /// Held-back power edits: (the object's first row in `objects`, its power, the time of the edit).
+    pub deferred: Vec<(usize, f32, f32)>,
 }
 
 impl Tables {
@@ -72,6 +84,7 @@ impl Tables {
             light_tree,
             wetness: sc.wetness,
             rain: sc.rain,
+            cloud_cover: sc.cloud_cover,
             fog: sc.fog.clone(),
             background: sc.background.map(|b| b.to_array()),
             emit_in_place: false,
@@ -81,6 +94,16 @@ impl Tables {
             camera: None,
             light_index,
             stride: sc.object_stride(),
+            defer_powers: false,
+            deferred: vec![],
+        }
+    }
+
+    /// Writes power edits into `objects` (the power, and the time of the edit, the second row's w).
+    pub fn put_powers(&mut self, powers: &[(usize, f32, f32)]) {
+        for &(row, power, now) in powers {
+            self.objects[row][3] = power;
+            self.objects[row + 1][3] = now;
         }
     }
 
@@ -100,9 +123,16 @@ impl Tables {
         for id in &c.powers {
             let o = w.objects.get(id).ok_or_else(|| anyhow!("unknown object {id}"))?;
             if let Some(&oi) = self.retained.objects.get(id) {
-                self.objects[oi as usize * self.stride][3] = o.power.max(0.0);
-                self.objects[oi as usize * self.stride + 1][3] = now;
-                d.objects = true;
+                let row = oi as usize * self.stride;
+                if self.defer_powers {
+                    self.deferred.retain(|p| p.0 != row);
+                    self.deferred.push((row, o.power.max(0.0), now));
+                    d.deferred = true;
+                } else {
+                    self.put_powers(&[(row, o.power.max(0.0), now)]);
+                    d.objects = true;
+                    d.emitters = true;
+                }
             }
             self.update_light(w, *id, &mut d);
         }
@@ -140,6 +170,7 @@ impl Tables {
         if c.environment {
             self.wetness = w.environment.wetness.clamp(0.0, 1.0);
             self.rain = w.environment.rain.clamp(0.0, 1.0);
+            self.cloud_cover = w.environment.cloud_cover.clamp(0.0, 1.0);
             self.fog = w.environment.fog.clone();
             self.background = w.environment.background;
             self.aerial = scene::aerial_params(&w.environment.sky);

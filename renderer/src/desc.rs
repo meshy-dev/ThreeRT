@@ -13,8 +13,15 @@ pub struct Shader {
     pub helpers: String,
 }
 
+/// A model's material function on its file's materials whose name starts with `prefix` (`GLTFModel.functions`).
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelFunction {
+    pub prefix: String,
+    pub shader: ShaderRef,
+}
+
 /// A material's binding to a material function: 32 parameter floats (8 vec4) and up to 8 textures.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct ShaderRef {
     /// Material function name.
     pub id: String,
@@ -110,6 +117,10 @@ pub struct Environment {
     /// Rain intensity 0..1 (material functions' `i.rain`: ripples on wet surfaces).
     #[serde(default)]
     pub rain: f32,
+    /// Cloud cover 0..1 of an atmosphere sky (`sky::bake_atmosphere_tables`: an overcast dome, the sun dimmed), changed
+    /// in place.
+    #[serde(default, rename = "cloudCover")]
+    pub cloud_cover: f32,
 }
 
 /// Exponential height fog (UE ExponentialHeightFog): extinction `density * exp(-heightFalloff * (y - height))`.
@@ -166,6 +177,9 @@ pub enum Sky {
         dynamic: bool,
         #[serde(default)]
         glow: Option<Vec3>,
+        /// The glow's light dome: radiance (nits, RGB) at the horizon and the elevation (radians) it falls to 1/e by.
+        #[serde(default)]
+        horizon_glow: Option<[f32; 4]>,
         /// Aerial perspective: the atmosphere's haze on the surfaces it lies in front of, at this multiple of its own
         /// density (0 = off; pathtrace.wgsl `aerial_tr`).
         #[serde(default)]

@@ -8,7 +8,7 @@
 //
 // Data: 3D city model, Project PLATEAU (MLIT Japan); elevation and aerial photos, GSI; roads and places,
 // © OpenStreetMap contributors (ODbL). Compiled tiles are a derived database under the ODbL: not to be published.
-import { Color, DirectionalLight, GLTFModel, Mesh, MeshStandardMaterial, PerspectiveCamera, PlaneGeometry, Scene, SkyAtmosphere, SkyColor } from "@threert/scene";
+import { Color, DirectionalLight, GLTFModel, Mesh, MeshStandardMaterial, PerspectiveCamera, PlaneGeometry, Scene, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
 import { WINDOW_NODES, type AreaIndex } from "./area.ts";
 import shinjuku from "./areas/shinjuku.ts";
@@ -42,24 +42,43 @@ export const SUN = { elevation: 36.8, azimuth: 349.5 };
  * a visual range near 70 km (Koschmieder, 3.9 / extinction at 550 nm), and its aerial perspective, so the land beyond
  * the area and the far city fade into the sky at the horizon.
  */
-export function tokyoSky(sun: DirectionalLight, o: { dynamic?: boolean; glow?: number; glowIntensity?: number } = {}): SkyAtmosphere {
-  const sky = new SkyAtmosphere({ sun, aerialPerspective: 1, ...o });
+export function tokyoSky(sun: DirectionalLight, o: ConstructorParameters<typeof SkyAtmosphere>[0] = {}): SkyAtmosphere {
+  const sky = new SkyAtmosphere({ sun, aerialPerspective: 1, ...NIGHT_GLOW, ...o });
   sky.mieScale = 10;
   return sky;
 }
+
+/**
+ * Tokyo's night sky: the city's light scattered back down by the air (light pollution), which the atmosphere alone does
+ * not give once the sun has set. Added above the horizon by day too, where it is lost in the daylight.
+ * - At the zenith 27 mcd/m², 16.5 mag/arcsec²: Tokyo's clear-night zenith, measured from Sumida in the winter of
+ *   2010-11 (a camera; JpGU 2012 G01-P01). Berlin's centre reads 6-11 mcd/m² (Jechow et al. 2017, 2022).
+ * - The light dome: brighter toward the horizon, 0.26 cd/m² more at it, falling to 1/e by 3.5 degrees up. Shaped on
+ *   photographs of the Shinjuku skyline at night (Wikimedia Commons: Shinjuku20040421.jpg, public domain; Shinjuku night
+ *   skyline.jpg, 2005): the sky at 1, 7 and 15 degrees reads 7.3 : 1.95 : 1, just above the lit horizon about 7x the top
+ *   of the frame.
+ * - Colours from the 2004 photograph, white-balanced on its office windows: a violet-blue zenith (the city's light
+ *   scattered by the air, Rayleigh's blue), a warm dome at the horizon (the lights themselves, through the haze).
+ */
+export const NIGHT_GLOW = {
+  glow: new Color().setRGB(1.05, 0.95, 1.39),
+  glowIntensity: 0.027,
+  horizonGlow: new Color().setRGB(1.28, 0.93, 0.86),
+  horizonGlowIntensity: 0.26,
+  horizonGlowHeight: 3.5 * (Math.PI / 180),
+};
+/** The sun at night in the static rooms: well below the horizon (the sky is the glow alone). */
+const NIGHT_SUN = { elevation: -40, azimuth: 0 };
 
 export function sceneFor(room: string) {
   const [areaId = "shinjuku", time = "night"] = room.split("-");
   const area = AREAS[areaId] ?? AREAS.shinjuku;
   const scene = new Scene();
-  if (time === "day") {
-    const sun = new DirectionalLight(0xfff4e8, 100000).setSunAngles(SUN.elevation, SUN.azimuth);
-    scene.add(sun);
-    scene.environment = tokyoSky(sun);
-  } else {
-    // Urban night sky glow, as Bistro's.
-    scene.environment = new SkyColor(new Color().setRGB(0.35, 0.45, 0.8), 0.04);
-  }
+  // the sun by day; by night, set (the night sky is NIGHT_GLOW)
+  const s = time === "day" ? SUN : NIGHT_SUN;
+  const sun = new DirectionalLight(0xfff4e8, 100000).setSunAngles(s.elevation, s.azimuth);
+  scene.add(sun);
+  scene.environment = tokyoSky(sun);
   // The land beyond the area (not compiled): a plain plane below the lowest terrain, out to 100 km.
   const land = new Mesh(new PlaneGeometry(200000, 200000), new MeshStandardMaterial({ color: 0x3b3a36, roughness: 0.95 }));
   land.rotation.x = -Math.PI / 2;

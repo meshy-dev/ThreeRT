@@ -504,6 +504,8 @@ struct LoadedScene {
     /// The atmosphere's sky once its sun has moved in place (`move_sun` starts it), and what it bakes with: the
     /// environment map's size, the viewer's altitude and the environment's light-sampling floor, as the load had them.
     sky: Option<DynamicSky>,
+    /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
+    emit: Option<EmitterWorker>,
     sky_inputs: ((u32, u32), f32, f32),
     /// For materials that start emitting (`add_material_emitters`): their flattened static triangles' runs (`prepare`)
     /// and the flattened triangles' build indices in traversal order (positions in `tris`).
@@ -521,7 +523,8 @@ const SKY_THREADS: usize = 3;
 /// trails the sun by one bake (~10–40 ms at `sky::DYNAMIC_SKY`). Lockstep runs wait for it, so they repeat.
 struct DynamicSky {
     atm: Arc<crate::sky::Atmosphere>,
-    ask: mpsc::Sender<(glam::Vec3, glam::Vec3)>,
+    /// (sun direction, sun illuminance above the atmosphere, cloud cover)
+    ask: mpsc::Sender<(glam::Vec3, glam::Vec3, f32)>,
     done: mpsc::Receiver<(gpu::EnvMap, Vec<f32>, f32)>,
     /// The brightest sky texel from which the environment is light-sampled (`Prepared::env_nee_floor`).
     env_nee_floor: f32,
@@ -529,12 +532,12 @@ struct DynamicSky {
 
 impl DynamicSky {
     fn new(world: &World, (w, h): (u32, u32), altitude: f32, env_nee_floor: f32) -> Option<DynamicSky> {
-        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, sun: Some(_), .. } = &world.environment.sky else {
+        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, horizon_glow, sun: Some(_), .. } = &world.environment.sky else {
             return None;
         };
         let atm = Arc::new(crate::sky::Atmosphere::earth(*rayleigh_scale, *mie_scale, *mie_anisotropy, glam::Vec3::from(*ground_albedo)));
-        let glow = glow.map(glam::Vec3::from).unwrap_or(glam::Vec3::ZERO);
-        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3)>();
+        let glow = crate::sky::glow_of(glow, horizon_glow);
+        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3, f32)>();
         let (tx, done) = mpsc::channel();
         let a = atm.clone();
         std::thread::Builder::new()
@@ -545,8 +548,8 @@ impl DynamicSky {
                     Some(p) => p.install(|| crate::sky::SkyTables::new(&a)),
                     None => crate::sky::SkyTables::new(&a),
                 };
-                let bake = |sun: (glam::Vec3, glam::Vec3)| {
-                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow);
+                let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
+                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
                     let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
@@ -568,6 +571,96 @@ impl DynamicSky {
             })
             .ok()?;
         Some(DynamicSky { atm, ask, done, env_nee_floor })
+    }
+}
+
+/// Scenes with at least this many emitters rebuild their emitter CDF for power edits on a worker (`EmitterWorker`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const ASYNC_EMITTERS: usize = 100_000;
+
+/// Power edits in a scene with many emitters (a city's lamps and windows switching with the clock): the emitter CDF and
+/// the light tree's node powers are rebuilt on a worker thread (~13 ms over 1.4 M emitters, which held up the frame in
+/// `write_emitters`), and the edits land with them, in a later frame (`take_emitters`): the objects' powers, the CDF
+/// and the tree's powers together, so sampling and shading switch at once. The worker writes the CDF and the tree's
+/// nodes into a mapped staging buffer; the frame only copies it on the GPU (a 22 MB `write_buffer` cost it ~5 ms).
+/// Lockstep frames wait for it, so they repeat. Scenes whose emitters change in place (added in place: the tree's slot;
+/// moving emitters, whose nodes the frame refits) keep `write_emitters`; so does any other emitter edit (materials),
+/// which first lands the edits held back. THREERT_EMIT_SYNC=1: never.
+struct EmitterWorker {
+    ask: mpsc::Sender<EmitterJob>,
+    done: mpsc::Receiver<EmitterBuilt>,
+    /// The emitters it was made for: a list that grew (added in place) makes another.
+    count: usize,
+    /// The edits of the job it is on (they land with its result).
+    flight: Option<Vec<(usize, f32, f32)>>,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+struct EmitterJob {
+    materials: Vec<scene::GpuMaterial>,
+    objects: Vec<[f32; 4]>,
+    lod: [f32; 4],
+    cull: crate::EmitterCull,
+}
+
+struct EmitterBuilt {
+    /// The CDF then the tree's nodes, as the emitters buffer holds them (`put_emitters`), and their bytes.
+    staging: wgpu::Buffer,
+    bytes: u64,
+    /// The CDF's entries (its guide table included).
+    entries: usize,
+    total: f32,
+    power: f32,
+    /// The light tree's node powers (`nodes[i][2]`), for the frame's copy of the tree.
+    node_powers: Vec<f32>,
+}
+
+impl EmitterWorker {
+    /// wasm32: none, and power edits rebuild in the frame as before (the browser's WebGPU device and buffers stay on
+    /// the thread that made them).
+    #[cfg(target_arch = "wasm32")]
+    fn new(_e: &tables::Tables, _device: &wgpu::Device) -> Option<EmitterWorker> {
+        None
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new(e: &tables::Tables, device: &wgpu::Device) -> Option<EmitterWorker> {
+        let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0);
+        if e.emitter_tris.len() < ASYNC_EMITTERS || changing || std::env::var("THREERT_EMIT_SYNC").is_ok_and(|v| v == "1") {
+            return None;
+        }
+        let device = device.clone();
+        let (tris, mut tree, stride) = (e.emitter_tris.clone(), e.light_tree.clone(), e.stride);
+        let (ask, asked) = mpsc::channel::<EmitterJob>();
+        let (tx, done) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("emitters".into())
+            .spawn(move || {
+                while let Ok(j) = asked.recv() {
+                    let (em, total, power) = crate::emitter_cdf(&tris, &j.materials, &j.objects, stride, j.lod, j.cull);
+                    let node_powers = tree.as_mut().map_or(vec![], |t| {
+                        let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], &j.materials, &j.objects, stride)).collect();
+                        t.refit(&|k| w[k]);
+                        t.nodes.iter().map(|n| n[2]).collect()
+                    });
+                    let nodes: &[[f32; 4]] = tree.as_ref().map_or(&[], |t| &t.nodes);
+                    let bytes = ((em.len() + nodes.len()) * 16) as u64;
+                    let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitters staging"), size: bytes.max(16), usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: true });
+                    let at = em.len() as u64 * 16;
+                    for (range, data) in [(0..at, bytemuck::cast_slice::<_, u8>(&em)), (at..bytes, bytemuck::cast_slice(nodes))] {
+                        if !data.is_empty() {
+                            let Ok(mut m) = staging.slice(range).get_mapped_range_mut() else { break };
+                            m.copy_from_slice(data);
+                        }
+                    }
+                    staging.unmap();
+                    if tx.send(EmitterBuilt { staging, bytes, entries: em.len(), total, power, node_powers }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(EmitterWorker { ask, done, count: e.emitter_tris.len(), flight: None })
     }
 }
 
@@ -857,6 +950,8 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");
     tables.fixed_mats = std::mem::take(&mut prep.fixed_mats);
+    let emit = EmitterWorker::new(&tables, &g.device);
+    tables.defer_powers = emit.is_some();
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     let mut up = g.upload(&sc, w, h, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
@@ -930,7 +1025,7 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
         inst_at_load: instances.len(),
         added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, sky_inputs, mat_runs, tri_order }, sc.preset.post))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
 }
 
 pub enum Cmd {
@@ -1099,6 +1194,8 @@ pub struct LiveCore {
     pub gpu_blas_ms: f32,
     /// CPU time the last `render` spent waiting for the oldest frame in flight (ms; frame log `wait`): GPU-bound frames.
     pub cpu_wait_ms: f32,
+    /// The cloud cover the sky and the sun light were made with (`move_sun`).
+    sky_cover: f32,
 }
 
 /// GPU time per frame from timestamp queries (start of the first trace pass .. end of the post pass), read back a few
@@ -1108,12 +1205,36 @@ struct FrameTimer {
     resolve: wgpu::Buffer,
     /// Per slot: readback buffer and its state (0 free, 1 mapping, 2 mapped).
     reads: Vec<(wgpu::Buffer, Arc<AtomicU32>)>,
-    /// Per slot: the frame it timed.
+    /// Per slot: the frame it timed, and that frame's samples per pixel (its traces; only the first is timestamped).
     frames: [u32; TIMER_SLOTS],
+    spps: [u32; TIMER_SLOTS],
     slot: usize,
 }
 
 const TIMER_SLOTS: usize = 4;
+
+/// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
+const TIMER_GAP_MS: f32 = 2.0;
+
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, raster, particle pass pairs; zero: not run): from
+/// its first pass (particles, raster or trace) to the end of its post pass. The post pass follows the trace's command
+/// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
+/// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
+/// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
+/// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
+/// its passes, the further traces at the first one's length.
+fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
+    let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
+    if t[3] <= start {
+        return None;
+    }
+    let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
+    let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
+    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
+        return Some(ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2])));
+    }
+    Some(ms(t[3] - start))
+}
 
 impl FrameTimer {
     fn new(d: &wgpu::Device) -> FrameTimer {
@@ -1125,6 +1246,7 @@ impl FrameTimer {
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             reads: (0..n).map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::default())).collect(),
             frames: [0; TIMER_SLOTS],
+            spps: [1; TIMER_SLOTS],
             slot: 0,
         }
     }
@@ -1138,11 +1260,9 @@ impl FrameTimer {
                 let t: [u64; 8] = bytemuck::pod_read_unaligned(&buf.slice(..).get_mapped_range().unwrap()[..64]);
                 buf.unmap();
                 state.store(0, Ordering::Release);
-                // The frame starts at its first pass: particles, raster or trace (zero: not run).
-                let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min().unwrap_or(0);
                 let frame = self.frames[k];
-                if t[3] > start && latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0) {
-                    latest = Some(((t[3] - start) as f32 * period_ns * 1e-6, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
+                if let Some(ms) = frame_gpu_ms(&t, self.spps[k], period_ns).filter(|_| latest.is_none_or(|(_, f, _)| frame.wrapping_sub(f) as i32 > 0)) {
+                    latest = Some((ms, frame, t[1].saturating_sub(t[0]) as f32 * period_ns * 1e-6));
                 }
             }
         }
@@ -1452,8 +1572,9 @@ impl LiveCore {
         let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline(&targets.kernel) });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &targets.kernel);
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0 };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0 };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
+        core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
         Ok(core)
     }
@@ -1492,6 +1613,15 @@ impl LiveCore {
         let mut changes = world.take_changes();
         if !changes.any() {
             return Ok(false);
+        }
+        // Particle systems shown or hidden by their own `visible`: in place when the build has them (a rain curtain
+        // the weather turns off costs nothing while off), else with the rebuild.
+        if !changes.structural {
+            for id in std::mem::take(&mut changes.particles_shown) {
+                if !self.g.set_particles_hidden(&self.sc.up, id, !world.shown(id)) {
+                    changes.structural = true;
+                }
+            }
         }
         // New materials without textures: entries after the scene's, before the edits that place objects drawn with
         // them (and the GPU's table with them, grown if it is full).
@@ -1698,9 +1828,11 @@ impl LiveCore {
         if d.objects {
             q.write_buffer(&up.objects, 0, bytemuck::cast_slice(&e.objects));
         }
-        if d.materials || d.objects {
+        if d.materials || d.emitters {
             self.add_material_emitters();
             self.write_emitters();
+        } else if d.deferred {
+            self.send_powers();
         }
         let (e, b) = (&mut self.sc.tables, &mut self.sc.base);
         if d.environment {
@@ -1727,7 +1859,9 @@ impl LiveCore {
             self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
             self.lit_changed = self.frame.max(1);
         }
-        if changes.sun {
+        // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
+        if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
+            self.sky_cover = self.sc.tables.cloud_cover;
             self.move_sun(world);
         }
         if changes.exposure {
@@ -1746,7 +1880,8 @@ impl LiveCore {
             self.sc.sky = DynamicSky::new(world, size, alt, floor);
         }
         let Some(sky) = self.sc.sky.as_ref() else { return };
-        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux);
+        let cover = self.sc.tables.cloud_cover;
+        let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux, cover);
         let e = &mut self.sc.tables;
         if let (Some(idx), Some(o)) = (e.light_index.get(&id), world.objects.get(&id)) {
             if let crate::world::Kind::Light(l) = &o.kind {
@@ -1759,7 +1894,7 @@ impl LiveCore {
                 }
             }
         }
-        let _ = sky.ask.send((dir, lux));
+        let _ = sky.ask.send((dir, lux, cover));
         if self.fixed_dt.is_some() {
             if let Ok(b) = sky.done.recv() {
                 self.put_sky(b);
@@ -1933,6 +2068,7 @@ impl LiveCore {
     /// they stay at the end, by power share. The buffer grows (and the scene bind group is made again) when entries
     /// were added past it: a scene that adds none keeps its layout.
     fn write_emitters(&mut self) {
+        self.land_powers_now();
         let g = &self.g;
         let LoadedScene { tables: e, base: b, up, pool_tris, tris: flat, tri_order, edit, .. } = &mut self.sc;
         // Emitters added in place, with the tree's slot for them (`ltree::build_slotted`): its subtree grown again over
@@ -1980,6 +2116,19 @@ impl LiveCore {
             let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], mats, objs, st)).collect();
             t.refit(&|k| w[k]);
         }
+        self.put_emitters(&em, total, power);
+        // Emitters added in place since the worker was made: another, over them.
+        if self.sc.emit.as_ref().is_some_and(|w| w.count != self.sc.tables.emitter_tris.len()) {
+            self.sc.emit = EmitterWorker::new(&self.sc.tables, &self.g.device);
+            self.sc.tables.defer_powers = self.sc.emit.is_some();
+        }
+    }
+
+    /// The emitter CDF `em` (its total weight and the emitters' power), then the light tree's nodes, into the emitters
+    /// buffer (grown, and the scene bind group made again, when they no longer fit), and the kernel's parameters.
+    fn put_emitters(&mut self, em: &[[f32; 4]], total: f32, power: f32) {
+        let g = &self.g;
+        let LoadedScene { tables: e, base: b, up, .. } = &mut self.sc;
         let nodes: &[[f32; 4]] = e.light_tree.as_ref().map_or(&[], |t| &t.nodes);
         let need = ((em.len() + nodes.len()) * 16) as u64;
         if need > up.emitters.size() {
@@ -1987,13 +2136,22 @@ impl LiveCore {
             g.rebind_scene(up);
         }
         if !em.is_empty() {
-            g.queue.write_buffer(&up.emitters, 0, bytemuck::cast_slice(&em));
+            g.queue.write_buffer(&up.emitters, 0, bytemuck::cast_slice(em));
         }
+        if let Some(t) = e.light_tree.as_ref() {
+            g.queue.write_buffer(&up.emitters, em.len() as u64 * 16, bytemuck::cast_slice(&t.nodes));
+        }
+        let _ = b;
+        self.emitter_params(em.len(), total, power);
+    }
+
+    /// The kernel's emitter parameters for a CDF of `entries` (its total weight; the emitters' power) and the tree.
+    fn emitter_params(&mut self, entries: usize, total: f32, power: f32) {
+        let LoadedScene { tables: e, base: b, .. } = &mut self.sc;
         b.emit_power[0] = power;
         b.misc[1] = total;
         if let Some(t) = e.light_tree.as_ref() {
-            b.ltree[0] = f32::from_bits(em.len() as u32);
-            g.queue.write_buffer(&up.emitters, em.len() as u64 * 16, bytemuck::cast_slice(&t.nodes));
+            b.ltree[0] = f32::from_bits(entries as u32);
             // The tree's entries (with the slot: the static ones and those added in place), the rest by power share.
             if t.dynamic.is_some() {
                 b.ltree[1] = f32::from_bits(t.order.len() as u32);
@@ -2001,6 +2159,86 @@ impl LiveCore {
             b.ltree[2] = if power > 0.0 { ((power - t.power) / power).max(0.0) } else { 0.0 };
         }
         b.counts[1] = if total > 0.0 { e.emitter_tris.len() as u32 } else { 0 };
+    }
+
+    /// Power edits held back (`Tables::deferred`) to the emitter worker, unless it is on a job (they go with the next,
+    /// when that one lands). Lockstep frames wait for the result.
+    fn send_powers(&mut self) {
+        let Some(w) = self.sc.emit.as_mut() else { return };
+        if w.flight.is_some() || self.sc.tables.deferred.is_empty() {
+            return;
+        }
+        let e = &mut self.sc.tables;
+        let powers = std::mem::take(&mut e.deferred);
+        let mut objects = e.objects.clone();
+        for &(row, power, _) in &powers {
+            objects[row][3] = power;
+        }
+        let b = &self.sc.base;
+        let job = EmitterJob { materials: e.materials.clone(), objects, lod: b.light_lod, cull: crate::EmitterCull::of(b) };
+        if w.ask.send(job).is_err() {
+            // (The worker is gone: write them now.)
+            e.put_powers(&powers);
+            self.sc.emit = None;
+            e.defer_powers = false;
+            self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+            self.write_emitters();
+            return;
+        }
+        w.flight = Some(powers);
+        if self.fixed_dt.is_some() {
+            if let Ok(r) = self.sc.emit.as_ref().unwrap().done.recv() {
+                self.land_emitters(r);
+            }
+        }
+    }
+
+    /// The emitter worker's result, if it has one: its edits land with it, and the edits held back since go out.
+    fn take_emitters(&mut self) {
+        let Some(r) = self.sc.emit.as_ref().and_then(|w| w.done.try_recv().ok()) else { return };
+        self.land_emitters(r);
+        self.send_powers();
+    }
+
+    /// A job's edits and its emitter CDF and tree powers, together: the objects' powers, the CDF, the tree.
+    fn land_emitters(&mut self, r: EmitterBuilt) {
+        let Some(powers) = self.sc.emit.as_mut().and_then(|w| w.flight.take()) else { return };
+        let e = &mut self.sc.tables;
+        e.put_powers(&powers);
+        self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
+        if let Some(t) = e.light_tree.as_mut() {
+            for (n, &p) in t.nodes.iter_mut().zip(&r.node_powers) {
+                n[2] = p;
+            }
+            t.power = t.nodes.first().map_or(0.0, |n| n[2]);
+        }
+        // (Same entries and nodes as the CDF the scene was loaded with: the buffer holds them.)
+        let mut enc = self.g.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitters") });
+        enc.copy_buffer_to_buffer(&r.staging, 0, &self.sc.up.emitters, 0, r.bytes.min(self.sc.up.emitters.size()));
+        self.g.queue.submit([enc.finish()]);
+        self.emitter_params(r.entries, r.total, r.power);
+        self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
+        self.lit_changed = self.frame.max(1);
+    }
+
+    /// Before another emitter edit (`write_emitters`, a light-LOD rebuild): the job in flight waited for and its result
+    /// dropped, its edits and those held back written into the objects (and uploaded), so the rebuild sees them all.
+    fn land_powers_now(&mut self) {
+        let Some(w) = self.sc.emit.as_mut() else { return };
+        let mut powers = vec![];
+        if let Some(f) = w.flight.take() {
+            let _ = w.done.recv();
+            powers = f;
+        }
+        let e = &mut self.sc.tables;
+        powers.append(&mut e.deferred);
+        if !powers.is_empty() {
+            e.put_powers(&powers);
+            self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
+            // The lighting changed (as when a result lands): the history cap and the anti-lag restart.
+            self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
+            self.lit_changed = self.frame.max(1);
+        }
     }
 
     /// Instanced objects whose instances changed (`World::instanced`, the node's transform, power or customData): their
@@ -2242,7 +2480,7 @@ impl LiveCore {
             let mut pose: Option<&crate::desc::Animation> = None;
             for (id, _) in &pg.members {
                 let Some(o) = world.objects.get(id) else { return Ok(false) };
-                let crate::world::Kind::Model { uri, nodes, animation: Some(a) } = &o.kind else { return Ok(false) };
+                let crate::world::Kind::Model { uri, nodes, animation: Some(a), .. } = &o.kind else { return Ok(false) };
                 if !world.shown(*id) || *uri != pg.uri || *nodes != pg.nodes || pose.is_some_and(|p| p != a) {
                     return Ok(false);
                 }
@@ -2752,11 +2990,14 @@ impl LiveCore {
                     (record, gpu, blas, entry)
                 }
                 Kind::Mesh { materials, .. } if materials.len() > 1 => return Err("a mesh with several materials".into()),
-                Kind::Model { uri, nodes, animation } => {
+                Kind::Model { uri, nodes, animation, functions } => {
                     // A static model already in the scene: another instance of its mesh (one not in it brings materials
                     // and textures, which load with a rebuild).
                     if animation.is_some() {
                         return Err("an animated model".into());
+                    }
+                    if !functions.is_empty() {
+                        return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
                     if features & gpu::F_INST == 0 || m.determinant() <= 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("a model the build would flatten (mirrored, instancing off, or the scene's first instance)".into());
@@ -3234,7 +3475,10 @@ impl LiveCore {
         // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
         let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, half.min(std::f32::consts::PI).cos()];
-        let e = &self.sc.tables;
+        // Power edits held back for the emitter worker land first (its job in flight was built for the old reference:
+        // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
+        self.land_powers_now();
+        let (e, b) = (&self.sc.tables, &mut self.sc.base);
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         self.g.queue.write_buffer(&self.sc.up.emitters, 0, bytemuck::cast_slice(&em));
         b.misc[1] = total;
@@ -3244,6 +3488,7 @@ impl LiveCore {
     pub fn render(&mut self, spp: u32, extra: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::Buffer)) {
         // A dynamic sky's bake that finished since the last frame (time of day).
         self.take_sky();
+        self.take_emitters();
         let (w, h) = (self.w, self.h);
         let (iw, ih) = self.internal_size();
         let now = Instant::now();
@@ -3289,6 +3534,7 @@ impl LiveCore {
                 }
                 if let Some(k) = slot {
                     t.frames[k] = self.frame;
+                    t.spps[k] = spp.max(1);
                 }
                 slot
             }
@@ -3493,7 +3739,8 @@ impl LiveCore {
         let bg = &self.sc.bgs[(self.frame % 2) as usize];
         // Translucent particles: drawn over the composed image right after the specular filter composes it (into fb when
         // depth of field / motion blur follow, else fa; live.wgsl spec_filter), then their volume voxels trained.
-        let tl = self.sc.up.translucent.as_ref().map(|t| {
+        // (Nothing to draw while every translucent particle system is hidden in place.)
+        let tl = self.sc.up.translucent.as_ref().filter(|_| g.translucent_particles_live(&self.sc.up)).map(|t| {
             let pipes = g.translucent_pipelines(&self.sc.up.kernel, true);
             let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.fb.buffer } else { &self.targets.fa.buffer };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
@@ -4135,6 +4382,31 @@ pub fn parse_scale(v: Option<&str>, default: Option<f32>) -> Result<Option<f32>>
         None => Ok(default),
         Some("auto") => Ok(None),
         Some(v) => v.parse::<f32>().map(|s| Some(s.clamp(0.25, 1.0))).map_err(|_| anyhow!("--scale must be a number or auto")),
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn a_post_pass_from_another_frame_counts_by_its_own_length() {
+        // Two frames of the crowd scene (ns, period 1): frame 453 as read, and frame 454, whose slot read frame 458's
+        // post pair (74.5 ms after its trace began).
+        let t453 = [35929577531333, 35929585495833, 35929585700583, 35929591610875, 0, 0, 0, 0];
+        let t454 = [35929593765500, 35929601614666, 35929668312875, 35929673973041, 0, 0, 0, 0];
+        let ms = |t: [u64; 8]| frame_gpu_ms(&t, 1, 1.0).unwrap();
+        assert_eq!(ms(t453), (t453[3] - t453[0]) as f32 * 1e-6);
+        assert!((ms(t454) - (7.849166 + 5.660166)).abs() < 1e-3, "{}", ms(t454));
+        // The first pass is the frame's start; nothing timed, no measurement.
+        assert_eq!(frame_gpu_ms(&[0, 0, 0, 0, 0, 0, 0, 0], 1, 1.0), None);
+        let particles_first = [2_000_000, 9_000_000, 9_200_000, 14_000_000, 0, 0, 1_000_000, 1_900_000];
+        assert_eq!(frame_gpu_ms(&particles_first, 1, 1.0), Some(13.0));
+        // 3 samples: two more traces (untimed) between the first and the post pass, a 16.2 ms gap: the span. The post
+        // pair of frame 458 under 3 samples: still out of place (trace 7.85 ms, gap 66.7 ms), counted as the passes.
+        let three = [1_000_000, 9_000_000, 25_200_000, 31_000_000, 0, 0, 0, 0];
+        assert_eq!(frame_gpu_ms(&three, 3, 1.0), Some(30.0));
+        assert!((frame_gpu_ms(&t454, 3, 1.0).unwrap() - (3.0 * 7.849166 + 5.660166)).abs() < 1e-3);
     }
 }
 

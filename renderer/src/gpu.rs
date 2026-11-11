@@ -251,6 +251,24 @@ pub struct ParticleGpu {
     fresh: std::cell::Cell<bool>,
     /// Some systems are opaque (in the scene's dynamic BLASes, rebuilt every frame).
     opaque: bool,
+    /// Per system: its particle count, whether the translucency pass draws it, and its state when hidden or shown in
+    /// place (`set_particles_hidden`): `Shown`; `Collapse` (this frame's pass collapses its quads), `Collapsed` (zero
+    /// its count next frame), `Idle`; `Showing` (this frame's pass is its first: no motion vectors), `ShowRan` (clear
+    /// that next frame).
+    counts: Vec<u32>,
+    translucent: Vec<bool>,
+    hidden: std::cell::RefCell<Vec<Hidden>>,
+}
+
+/// A particle system's state as hidden in place (`ParticleGpu::hidden`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hidden {
+    Shown,
+    Collapse,
+    Collapsed,
+    Idle,
+    Showing,
+    ShowRan,
 }
 
 /// Volume training points per frame at most (translucent.wgsl `volume_train`).
@@ -731,6 +749,19 @@ pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &w
     }
 }
 
+/// Whether a material function's WGSL (`fn mf_<name>(...) -> MatOut { var o = base; ... return o; }`) can change its
+/// result's `field`: it names `o.<field>`, or uses `o` otherwise than as `o.<another field>` (a whole assignment, a
+/// pointer passed on) beyond its declaration and its return.
+fn writes_field(code: &str, field: &str) -> bool {
+    if code.contains(&format!("o.{field}")) {
+        return true;
+    }
+    let body = code.replacen("var o = base;", "", 1).replace("return o;", "");
+    let b = body.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    (0..b.len()).any(|k| b[k] == b'o' && (k == 0 || !ident(b[k - 1])) && b.get(k + 1).is_none_or(|&c| !ident(c) && c != b'.'))
+}
+
 /// What the path-tracing kernel is specialised on: the scene's feature mask and its material functions (WGSL).
 #[derive(Clone)]
 pub struct Kernel {
@@ -766,6 +797,29 @@ impl Kernel {
                 functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
             }
             functions.push_str("        default { return base; }\n    }\n}\n");
+            // The translucency pass's (translucent.wgsl): only the functions of its particles' materials. With every
+            // function in it, the Metal compiler failed on Tokyo's kernel once the city's ground had one (wetLayer).
+            let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+            functions.push_str("fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {\n    switch f {\n");
+            for k in used {
+                if let Some((id, _, _)) = scene.shaders.get(k as usize) {
+                    functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
+                }
+            }
+            functions.push_str("        default { return base; }\n    }\n}\n");
+            // The sites that read one field of the result (alpha tests: `opacity`; emitter sampling: `emissive`): only
+            // the functions that can change it; for the others the result's field is `base`'s. Each site inlines its
+            // dispatch, and a function's code costs the kernel there even where it never runs (wetLayer's puddles:
+            // ~0.8 ms on Tokyo, dry).
+            for (name, field) in [("alpha_material_function", "opacity"), ("emissive_material_function", "emissive")] {
+                functions.push_str(&format!("fn {name}(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    switch f {{\n"));
+                for (k, (id, code, _)) in scene.shaders.iter().enumerate() {
+                    if writes_field(code, field) {
+                        functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
+                    }
+                }
+                functions.push_str("        default { return base; }\n    }\n}\n");
+            }
         }
         let mut volume_functions = String::new();
         if !scene.volume_fns.is_empty() {
@@ -1758,7 +1812,8 @@ impl Gpu {
                         let o = &scene.objects[ps.object as usize * scene.object_stride()];
                         let mut p = [0.0f32; 32];
                         p.copy_from_slice(&ps.params);
-                        ParticleSystemGpu { a: [ps.final_first, ps.count, ps.object, ps.func], b: [ps.seed, dynamic_first as u32, ps.translucent as u32, scene.trans_first], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
+                        ParticleSystemGpu { a: [ps.final_first, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, dynamic_first as u32, ps.translucent as u32, scene.trans_first], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
@@ -1773,7 +1828,10 @@ impl Gpu {
                 });
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
                 let opaque = scene.particles.iter().any(|p| !p.translucent);
-                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque })
+                let counts = scene.particles.iter().map(|p| p.count).collect();
+                let translucent_sys = scene.particles.iter().map(|p| p.translucent).collect();
+                let hidden = std::cell::RefCell::new(scene.particles.iter().map(|p| if p.hidden { Hidden::Idle } else { Hidden::Shown }).collect());
+                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
             }
             _ => None,
         };
@@ -1944,6 +2002,33 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     pub fn run_particles(&self, up: &Uploaded, cam: [f32; 3], fwd: [f32; 3], time: f32, dt: f32, rain: f32, wetness: f32, e: &mut wgpu::CommandEncoder, pass_ts: Option<(&wgpu::QuerySet, u32)>, blas_ts: Option<(&wgpu::QuerySet, u32)>) {
         let (Some(p), Some(accel)) = (&up.particles, &up.accel) else { return };
+        // Systems hidden in place: collapsed by last frame's pass, now idle (count 0); every system idle: no pass, no
+        // BLAS builds (their quads stay collapsed).
+        {
+            let mut hidden = p.hidden.borrow_mut();
+            for (k, h) in hidden.iter_mut().enumerate() {
+                match *h {
+                    Hidden::Collapse => *h = Hidden::Collapsed,
+                    Hidden::Collapsed => {
+                        self.write_particle_count(p, k, 0, 0.0);
+                        *h = Hidden::Idle;
+                    }
+                    Hidden::Showing => *h = Hidden::ShowRan,
+                    Hidden::ShowRan => {
+                        self.write_particle_count(p, k, p.counts[k], 0.0);
+                        *h = Hidden::Shown;
+                    }
+                    _ => {}
+                }
+            }
+            if hidden.iter().all(|h| *h == Hidden::Idle) {
+                // (The stateful GPU particles leave the dynamic BLAS rebuild to this pass when there are stateless ones.)
+                if up.gpu_particles.is_some() {
+                    self.rebuild_dynamic(accel, e);
+                }
+                return;
+            }
+        }
         let first = if p.fresh.replace(false) { 1.0 } else { 0.0 };
         let v = [cam[0], cam[1], cam[2], time, fwd[0], fwd[1], fwd[2], dt, rain, wetness, first, 0.0];
         self.queue.write_buffer(&p.params, 0, bytemuck::cast_slice(&v));
@@ -2125,13 +2210,47 @@ impl Gpu {
         }
     }
 
-    /// A particle node moved: its systems' pivot (`i.pivot`).
+    /// A particle node moved: its systems' pivot (`i.pivot`; c.w, the collapse flag, kept).
     pub fn set_particle_pivot(&self, up: &Uploaded, node: u32, pivot: [f32; 3]) {
         let Some(p) = &up.particles else { return };
         for (k, _) in p.nodes.iter().enumerate().filter(|(_, n)| **n == node) {
             let at = (k * std::mem::size_of::<ParticleSystemGpu>() + 32) as u64;
-            self.queue.write_buffer(&p.table, at, bytemuck::cast_slice(&[pivot[0], pivot[1], pivot[2], 0.0]));
+            self.queue.write_buffer(&p.table, at, bytemuck::cast_slice(&pivot));
         }
+    }
+
+    /// System `k`'s particle count and flag in the table (a.y; c.w: 1 collapse, 2 first run, particles.wgsl).
+    fn write_particle_count(&self, p: &ParticleGpu, k: usize, count: u32, flag: f32) {
+        let at = (k * std::mem::size_of::<ParticleSystemGpu>()) as u64;
+        self.queue.write_buffer(&p.table, at + 4, bytemuck::bytes_of(&count));
+        self.queue.write_buffer(&p.table, at + 44, bytemuck::bytes_of(&flag));
+    }
+
+    /// A particle node shown or hidden by its own `visible`, in place: hidden, its systems' next pass collapses their
+    /// quads and then they run nothing (`run_particles`); shown, they run again. False when no system of the build is
+    /// that node's (the build left it out: a rebuild).
+    pub fn set_particles_hidden(&self, up: &Uploaded, node: u32, hide: bool) -> bool {
+        let Some(p) = &up.particles else { return false };
+        let mut hidden = p.hidden.borrow_mut();
+        let mut found = false;
+        for (k, _) in p.nodes.iter().enumerate().filter(|(_, n)| **n == node) {
+            found = true;
+            let shown = matches!(hidden[k], Hidden::Shown | Hidden::Showing | Hidden::ShowRan);
+            if hide && shown {
+                self.write_particle_count(p, k, p.counts[k], 1.0);
+                hidden[k] = Hidden::Collapse;
+            } else if !hide && !shown {
+                // (Its first run since: no last frame for its motion vectors.)
+                self.write_particle_count(p, k, p.counts[k], 2.0);
+                hidden[k] = Hidden::Showing;
+            }
+        }
+        found
+    }
+
+    /// Whether the translucency pass has anything to draw: a translucent system shown (or collapsing).
+    pub fn translucent_particles_live(&self, up: &Uploaded) -> bool {
+        up.particles.as_ref().is_none_or(|p| p.translucent.iter().zip(p.hidden.borrow().iter()).any(|(t, h)| *t && *h != Hidden::Idle))
     }
 
     /// A particle node's customData changed: its systems' `i.custom`.
@@ -2577,6 +2696,19 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn material_functions_by_the_fields_they_write() {
+        let f = |body: &str| format!("fn mf_x(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n{body}\n    return o;\n}}\n");
+        let wet = f("    o.base = base.base * 0.5;\n    o.roughness = 0.1;\n    o.normal = i.ng;");
+        assert!(!writes_field(&wet, "emissive") && !writes_field(&wet, "opacity"));
+        assert!(writes_field(&f("    o.emissive = vec3<f32>(1.0);"), "emissive"));
+        assert!(writes_field(&f("    o.opacity *= 0.5;"), "opacity"));
+        // A whole assignment or a pointer passed on may change any field.
+        assert!(writes_field(&f("    o = base;"), "emissive"));
+        assert!(writes_field(&f("    helper(&o);"), "opacity"));
+        assert!(!writes_field(&f("    let no = 1.0;\n    o.base = vec3<f32>(no);"), "opacity"));
+    }
+
     use super::*;
 
     /// The kernel features are one bit each, no two the same (`override FEAT` gets them all, the source-patching ones
