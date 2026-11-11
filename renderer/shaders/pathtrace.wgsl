@@ -70,7 +70,7 @@ struct Params {
     fog_color: vec4<f32>, // ambient inscattering radiance, max opacity
     vol: vec4<f32>,       // volumetric scattering albedo (0 = off), HG anisotropy, extinction scale in range, -
     vol2: vec4<f32>,      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    raster: vec4<f32>,    // live primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y, -
+    raster: vec4<f32>,    // live primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y; ray tracing off (1)
     cache: vec4<f32>,     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     motion: vec4<f32>,    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1].x)
     prev_pos: vec4<f32>,  // live: the previous frame's camera (emitter reservoir reprojection), as cam_*
@@ -154,6 +154,11 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
 var<private> rng_state: u32;
 // Path vertex index of the current shading point (cheaper procedural detail / fewer candidates past the first hit).
 var<private> cur_depth: u32;
+// Live "ray tracing off" (P.raster.w, LiveCore::rays): set once the camera's own ray has found its surface. From then
+// on `trace` reports a miss, so nothing is shadowed, a bounce sees the sky and a mirror reflects the sky: what a
+// rasterizer without shadow maps draws, on any GPU, from the same scene and the same shading. The switch is a uniform:
+// no kernel is rebuilt to flip it.
+var<private> rays_off: bool;
 // The path so far is camera ray + mirror-like bounces (puddles, glass): surface detail is still visible.
 var<private> mirror_path: bool;
 
@@ -503,6 +508,7 @@ fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
 // mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface).
 fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+    if (rays_off) { return hit; }
     let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
     var stack: array<u32, 48>;
     var sp = 0u;
@@ -2993,6 +2999,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             hit = trace(o, d, INF, TRACE_CLOSEST);
         }
+        // Ray tracing off: the camera ray above was the last one traced for this pixel.
+        if (depth == 0u) { rays_off = LIVE && P.raster.w > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
             let t0 = select(0.0, P.fog.w, depth == 0u);

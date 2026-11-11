@@ -5,6 +5,8 @@
 @group(0) @binding(13) var acc: acceleration_structure;
 
 fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
+    // Ray tracing off (pathtrace.wgsl `rays_off`): past the camera ray, every ray misses.
+    if (rays_off) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     let mask = select(0xffu, 1u, mode == TRACE_SHADOW);
     if (!has(F_MASKED)) {
         let h = trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST);
