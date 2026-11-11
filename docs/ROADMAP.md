@@ -4060,8 +4060,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
        was; `collide: false` on an object leaves it out. Ordinary meshes still declare `physics`.
      - **Loose parts are rigid bodies**: mass from their voxels and each palette entry's density; they tumble, land
        on the level and on one another, and sleep; they move as instances (no vertex is written again).
-     - **Debris**: parts under 8 voxels stay the game's particles; at most 400 voxel bodies (`maxBodies`), past it
-       the oldest sleeping one goes, its voxels debris.
+     - **Debris**: parts under 8 voxels stay the game's particles; at most 400 voxel bodies (`maxBodies`). At the
+       cap a new part takes the place of the body that matters least (asleep before awake, then the fewest voxels,
+       then the oldest; never one the same edit carved or made: a body being cut keeps its larger part), if that
+       body is no larger than the part; else the part is debris. What goes is debris.
      - **A body stays a body** when it has settled (asleep it costs no tick; turned, it does not fit the lattice,
        and writing it back would lose voxels). The cap bounds them.
      - **Edits reach bodies**: a carve cuts a body where it is, as it is turned; what is cut off is a body of its own.
@@ -4137,8 +4139,29 @@ benchmark level. The order follows the dependencies; a step that meets a further
        apart. **Checks, on the CPU**: `renderer/examples/physics_fuzz.rs` (the fuzz, and the six-body world
        stepped back to back, with a watchdog: a step that does not return in 30 s is a failure): 500 fuzz runs in a row and 20 of its
        many-bodies variant with every check held, and 26 million back-to-back steps, none hung; with
-       the kick off (`THREERT_PHYSICS_KICK=off`) the stress hangs in three runs of three. CI's renderer job runs
-       10 fuzz runs and a million steps (CITIME).
+       the kick off (`THREERT_PHYSICS_KICK=off`) the stress hangs in three runs of three. CI's renderer job runs it
+       on the physics' threads as the renderer steps: the recorded hashes at 2 and 4 threads (the determinism
+       check steps from outside any pool, which is not the renderer's path), 10 fuzz runs and a million steps.
+     - **What the same review found besides, fixed here** (`out/review-24/review.md`):
+       - The time budget of a script: each voxel call moved the deadline by a millisecond at least, so a frame
+         script looping on cheap calls (or on ones that throw) never ended. The engine's time is now lent as
+         measured and at most 250 ms an entry (the 30 m cut, the largest single edit measured, is 115 ms); a voxel
+         call made after the deadline throws at once (the script engine checks its deadline only every so many
+         operations, and a loop of calls of some milliseconds makes few). Edits and frames asked for before the
+         level is loaded are at most 4,096 (they are outside the script engine's memory limit).
+       - A hole in the level's collider where a crater crosses a terrain tile's border: a neighbour that lost cells
+         of its own had its shell made whole only around those, not over the crater the other tile bared. Each
+         object is now made whole over its own box and every carved neighbour's (checked against brute force, with
+         the review's rays).
+       - At the cap, a cut retired the remainder of the body it was cutting and kept the chip (no body was
+         asleep, so the oldest was the one being cut): every id gone after a cut through 400 bodies. Now nothing the
+         edit carved or made is retired while it runs; the body that goes is the one that matters least (asleep,
+         then fewest voxels, then oldest), and only for a part at least as large; else the part is debris.
+       - A carve took bodies with another shape than the level: the radius now clamped to 128 voxels and to 0
+         below as the level's, a box whole for every class it reaches (it was shrunk by the class's share).
+       - Smaller: the physics' threads not made is a sequential step, said once (it was a panic every step); an
+         unknown `THREERT_PHYSICS_THREADS` is said; a level collider the physics took out on an error is
+         forgotten; no `powi` in a body's density; CI's physics job runs on changes to `api.rs` and `world.rs`.
    - Open:
      - **The parallel solver's independence of the thread count is checked as far as this, and no further**:
        on this machine at 1, 2, 4, 8 and 15 threads (the determinism check's script and 1,500 random worlds of five
@@ -4172,6 +4195,14 @@ benchmark level. The order follows the dependencies; a step that meets a further
        (voxel bodies as objects with `.physics`, paint and added voxels on bodies, mass by cell).
      - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
        jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
+     - **A large loose part's collider holds every cell** (the level's are shells): a solid block of 200³ cut
+       loose is an edit of 2.8 s and 619 MB, and past 2²⁴ cells the part is refused and becomes debris (a large
+       building cut loose whole would vanish, not fall). Measured by the review; a shell for bodies (they are hit
+       from every side, so 4 cells all round), or a split into pieces, is for when a level has such parts.
+     - Scene code can put colliders of its own on the engine's voxel bodies (a design question: step 10's voxel
+       bodies as objects); scene code's and the engine's bodies and colliders share one count of the physics
+       world's limits (a level with `maxBodies: 20000` leaves scripts none); every part cut off a body leaves an
+       empty slot in the level's object list for good.
      - Tree crowns cost more than buildings: five crowns of 10,616–18,894 voxels moving step in 1.6–2.2 ms (leaves
        make many contacts), a building part of 32,680 in under 0.5 ms. They sleep 5–10 s after the cut.
      - Software traversal is not optimised (the cut's frame 194 ms). A browser: a small voxel scene with bodies in

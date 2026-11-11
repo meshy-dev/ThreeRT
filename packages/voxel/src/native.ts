@@ -40,8 +40,10 @@ export interface NativeLevel {
   occupancy?: number;
   /** The level's physics (default true): colliders for its objects, rigid bodies for what comes loose. */
   physics?: boolean;
-  /** The most voxel bodies at once (default 400: what holds 60 fps natively with all of them moving at once): past
-   *  it the oldest that sleeps (else the oldest) goes, its voxels debris. */
+  /** The most voxel bodies at once (default 400: what holds 60 fps natively with all of them moving at once). At it,
+   *  a new part takes the place of the body that matters least (asleep before awake, then the fewest voxels, then
+   *  the oldest; never one the same edit carved or made), if that body is no larger; else the new part is debris.
+   *  What goes is debris (`voxelDebris`). */
   maxBodies?: number;
 }
 

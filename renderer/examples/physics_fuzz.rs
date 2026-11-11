@@ -13,9 +13,14 @@
 //!   hangs after 30,000 to 400,000 steps (five runs of five; `THREERT_PHYSICS_KICK=off` brings it back). The fuzz
 //!   found it first, in one run of fifty.
 //!
+//! - **The bits** (`--bits`): the physics' recorded hashes (physics_core::check: the script and the 1,500 random
+//!   worlds) and the voxel adapter's (`VoxelWorld::check_script`), stepped on the physics' own threads as the
+//!   renderer steps (`in_pool`, `THREERT_PHYSICS_THREADS`). tools/physics-determinism.ts holds the parallel build to
+//!   the sequential one stepping from a thread outside any pool; this is the path the renderer takes.
+//!
 //! The same place for `--limit` seconds (30) ends the process with exit 3 and says where.
 //!
-//!   cargo run --release --example physics_fuzz -- [--runs 20] [--from 1] [--iterations 1500] [--many]
+//!   cargo run --release --example physics_fuzz -- [--bits] [--runs 20] [--from 1] [--iterations 1500] [--many]
 //!                                                  [--stress 2000000] [--limit 30]
 //!
 //! `--many`: 480 bars cut loose at once and again, so more loose parts than the cap holds. Exit 0: every run ended and
@@ -223,6 +228,16 @@ fn main() {
             }
         }
     });
+    if args.iter().any(|a| a == "--bits") {
+        use physics_core::check;
+        let t = std::time::Instant::now();
+        let (mut script, mut cases) = (0, 0);
+        threert_render::physics::in_pool(|| (script, cases) = (check::script(600), check::cases()));
+        let voxels = threert_render::voxel::VoxelWorld::check_script();
+        let threads = std::env::var("THREERT_PHYSICS_THREADS").unwrap_or_default();
+        println!("physics bits on the physics' threads (THREERT_PHYSICS_THREADS={threads:?}): script {script:016x} (recorded {:016x}), cases {cases:016x} ({:016x}), voxel bodies {voxels:016x} ({:016x}); {:.1} s", check::EXPECTED, check::EXPECTED_CASES, threert_render::voxel::EXPECTED_SCRIPT, t.elapsed().as_secs_f64());
+        assert_eq!((script, cases, voxels), (check::EXPECTED, check::EXPECTED_CASES, threert_render::voxel::EXPECTED_SCRIPT), "the recorded hashes");
+    }
     let t = std::time::Instant::now();
     let kicks: u32 = (from..from + runs).map(|seed| run(seed, iterations, many)).sum();
     if runs > 0 {

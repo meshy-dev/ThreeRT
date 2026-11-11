@@ -445,8 +445,11 @@ vertices written again every frame); now a part moves by its transform.
 
 **A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /
 2,400 / 7,800 kg/m³ unless the entry names one), drawn by driven objects. A carve reaches it through its pose; what
-is cut off is a body of its own. At most 400 at once (`maxBodies`; the number is measured, below): past it the
-oldest sleeping one goes, its voxels debris. A settled body stays a body.
+is cut off is a body of its own. At most 400 at once (`maxBodies`; the number is measured, below). At the cap a
+new part takes the place of the body that matters least: asleep before awake, then the fewest voxels, then the
+oldest, and never one the same edit carved or made (a body being cut keeps its larger part and its id; its chips do
+not push out the bodies the same cut is going through). It does so only if that body has no more voxels than the
+part; else the part itself is debris. A settled body stays a body.
 
 **Measured on the GPU** (this Mac, M5 Pro; hardware traversal unless said; the benchmark level at 1280 x 720 at
 0.5, in lockstep at 1 / 60 s; `games/voxel-level/level-destruction.game.ts`'s scenarios; a frame's GPU time is

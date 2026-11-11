@@ -167,13 +167,25 @@ impl PhysicsWorld {
 /// and with little moving the pool costs 0.03 ms. The bits do not depend on the count (the recorded hashes at 1 to
 /// 15 threads on this machine: ROADMAP § 6 step 8 says what was checked and what was not). wasm32 has no threads
 /// here: there the world is stepped where it is called.
+/// None when the threads could not be made: the world is then stepped on the calling thread (sequential, the same
+/// bits), said once.
 #[cfg(not(target_arch = "wasm32"))]
-fn pool() -> &'static rayon::ThreadPool {
-    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+fn pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores());
-        rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|k| format!("physics-{k}")).build().expect("the physics' threads")
+        let env = std::env::var("THREERT_PHYSICS_THREADS").ok();
+        let threads = threads_from(env.as_deref(), performance_cores()).unwrap_or_else(|default| {
+            eprintln!("physics: THREERT_PHYSICS_THREADS={:?} is no thread count (1 to 16; 1, 0, off: sequential): {default} threads", env.as_deref().unwrap_or(""));
+            default
+        });
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|k| format!("physics-{k}"))
+            .build()
+            .map_err(|e| eprintln!("physics: the physics' {threads} threads could not be made ({e}): stepped on the frame's thread"))
+            .ok()
     })
+    .as_ref()
 }
 
 /// How long a step is waited for before the physics' threads are kicked, and again after each kick.
@@ -201,14 +213,23 @@ const KICK: std::time::Duration = std::time::Duration::from_micros(500);
 /// `THREERT_PHYSICS_KICK=off` waits without kicking, to reproduce the hang (the fuzz, `examples/physics_fuzz.rs`,
 /// finds it in a few dozen runs).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn in_pool(f: impl FnOnce() + Send) -> u32 {
+pub fn in_pool(f: impl FnOnce() + Send) -> u32 {
     use std::sync::{Condvar, Mutex, PoisonError};
-    static KICKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let pool = pool();
-    if pool.current_num_threads() < 2 || !*KICKS.get_or_init(|| std::env::var("THREERT_PHYSICS_KICK").map_or(true, |v| v != "off" && v != "0")) {
+    // (`THREERT_PHYSICS_KICK`: "off" or 0, or the period in microseconds.)
+    static PERIOD: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    let period = *PERIOD.get_or_init(|| match std::env::var("THREERT_PHYSICS_KICK").ok().as_deref() {
+        Some("off") | Some("0") => None,
+        Some(v) => Some(v.parse().ok().filter(|us| (1..=1_000_000).contains(us)).map_or(KICK, std::time::Duration::from_micros)),
+        None => Some(KICK),
+    });
+    let Some(pool) = pool() else {
+        f();
+        return 0;
+    };
+    let Some(period) = period.filter(|_| pool.current_num_threads() > 1) else {
         pool.install(f);
         return 0;
-    }
+    };
     // Set when `f` has returned, or unwound: the wait ends either way, and the scope then carries the panic on.
     struct Done<'a>(&'a (Mutex<bool>, Condvar));
     impl Drop for Done<'_> {
@@ -226,7 +247,7 @@ pub(crate) fn in_pool(f: impl FnOnce() + Send) -> u32 {
         });
         let mut finished = done.0.lock().unwrap_or_else(PoisonError::into_inner);
         while !*finished {
-            let (guard, wait) = done.1.wait_timeout(finished, KICK).unwrap_or_else(PoisonError::into_inner);
+            let (guard, wait) = done.1.wait_timeout(finished, period).unwrap_or_else(PoisonError::into_inner);
             finished = guard;
             if !*finished && wait.timed_out() {
                 kicks += 1;
@@ -237,14 +258,15 @@ pub(crate) fn in_pool(f: impl FnOnce() + Send) -> u32 {
     kicks
 }
 
-/// The pool's size: what `THREERT_PHYSICS_THREADS` says (1 to 16; 0 and "off": 1, sequential; anything else is not
-/// taken), else 4 or the performance cores when fewer.
+/// The pool's size: what `THREERT_PHYSICS_THREADS` says (1 to 16; 0, "off", "false", "no", any case: 1, sequential),
+/// else 4 or the performance cores when fewer. Err(that default) for a value that is none of these: the caller says so.
 #[cfg(not(target_arch = "wasm32"))]
-fn threads_from(env: Option<&str>, cores: usize) -> usize {
-    match env.map(str::trim) {
-        Some("off") | Some("0") => 1,
-        Some(v) => v.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).unwrap_or_else(|| threads_from(None, cores)),
-        None => cores.clamp(1, 4),
+fn threads_from(env: Option<&str>, cores: usize) -> Result<usize, usize> {
+    let default = cores.clamp(1, 4);
+    match env.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None => Ok(default),
+        Some("off" | "false" | "no" | "0") => Ok(1),
+        Some(v) => v.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).ok_or(default),
     }
 }
 
@@ -315,11 +337,14 @@ mod tests {
     /// 1 (0, "off") is sequential.
     #[test]
     fn the_physics_threads() {
-        assert_eq!([threads_from(None, 5), threads_from(None, 12), threads_from(None, 2), threads_from(None, 0)], [4, 4, 2, 1]);
-        assert_eq!([threads_from(Some("8"), 5), threads_from(Some("1"), 5), threads_from(Some("0"), 5), threads_from(Some("off"), 5), threads_from(Some(" 2 "), 5)], [8, 1, 1, 1, 2]);
-        assert_eq!([threads_from(Some("64"), 5), threads_from(Some("many"), 2), threads_from(Some(""), 5)], [4, 2, 4]);
+        assert_eq!([threads_from(None, 5), threads_from(None, 12), threads_from(None, 2), threads_from(None, 0)], [Ok(4), Ok(4), Ok(2), Ok(1)]);
+        assert_eq!([threads_from(Some("8"), 5), threads_from(Some("1"), 5), threads_from(Some("0"), 5), threads_from(Some("off"), 5), threads_from(Some(" 2 "), 5)], [Ok(8), Ok(1), Ok(1), Ok(1), Ok(2)]);
+        assert_eq!([threads_from(Some("OFF"), 5), threads_from(Some("False"), 5), threads_from(Some("no"), 5)], [Ok(1), Ok(1), Ok(1)]);
+        // Not understood: the default, and the caller says so.
+        assert_eq!([threads_from(Some("64"), 5), threads_from(Some("many"), 2), threads_from(Some(""), 5), threads_from(Some("-1"), 5)], [Err(4), Err(2), Err(4), Err(4)]);
         assert!(performance_cores() >= 1);
-        assert_eq!(pool().current_num_threads(), threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores()));
+        let asked = threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores());
+        assert_eq!(pool().unwrap().current_num_threads(), asked.unwrap_or_else(|d| d));
     }
 
     /// The renderer's build of the physics steps to the recorded bits, as physics-core's own build and its wasm32
