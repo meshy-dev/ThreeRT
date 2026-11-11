@@ -1138,6 +1138,11 @@ pub struct LiveCore {
     pub fallbacks: u32,
     /// Path-tracing bounces for real-time frames (the offline preset uses more).
     pub bounces: u32,
+    /// Ray tracing (true). Off (`set_rays`), the kernel traces the camera ray of each pixel and no other: no shadows,
+    /// no bounce light, reflections of the sky only; analytic lights and emissive surfaces light unoccluded. The
+    /// fallback for GPUs that trace too slowly (no hardware ray queries), and the "what tracing adds" comparison on
+    /// those that do: the same scene, materials, exposure and post either way.
+    rays: bool,
     /// 0 lit, 1 base color, 2 world normal, 3 lit without denoiser, 4 raw sample, 5 history length, 6 diffuse,
     /// 7 specular, 8 deterministic direct light (THREERT_VIEW_MODE at start: e.g. bench-temporal per signal).
     pub view_mode: u32,
@@ -1601,7 +1606,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -3546,6 +3551,18 @@ impl LiveCore {
         self.reset = true;
     }
 
+    /// Ray tracing on or off (see `rays`). The history starts over: the two modes light a pixel differently.
+    pub fn set_rays(&mut self, on: bool) {
+        if self.rays != on {
+            self.rays = on;
+            self.reset = true;
+        }
+    }
+
+    pub fn rays(&self) -> bool {
+        self.rays
+    }
+
     pub fn set_camera(&mut self, mut c: Camera) {
         if c.tan_half_fov <= 0.0 {
             c.tan_half_fov = self.sc.tan_half_fov;
@@ -3744,6 +3761,7 @@ impl LiveCore {
             if self.raster.is_some() && !self.sc.instanced {
                 p.raster = [1.0, jitter.0, jitter.1, 0.0];
             }
+            p.raster[3] = if self.rays { 0.0 } else { 1.0 };
             if self.restir {
                 let pc = self.prev_cam;
                 p.prev_pos = [pc.pos.x, pc.pos.y, pc.pos.z, pc.tan_half_fov];
