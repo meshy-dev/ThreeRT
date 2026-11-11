@@ -42,8 +42,9 @@ impl Shape {
             Shape::Capsule { a, b, r } => Shape::Capsule { a, b, r: r.clamp(0, cap) },
         };
         let (lo, hi) = s.cells();
-        let n: i64 = (0..3).map(|k| (hi[k] as i64 - lo[k] as i64 + 1).max(0)).product();
-        (n <= MAX_CELLS).then_some(s)
+        // (In i128: three sides of up to 2^23 cells are 2^69, which an i64 wraps to 0.)
+        let n: i128 = (0..3).map(|k| (hi[k] as i128 - lo[k] as i128 + 1).max(0)).product();
+        (n <= MAX_CELLS as i128).then_some(s)
     }
 
     /// The world cells that can hold a centre inside (inclusive on both ends), at the full radius.
@@ -138,6 +139,9 @@ mod tests {
     #[test]
     fn edits_are_bounded() {
         assert_eq!(Shape::Sphere { c: [0; 3], r: i32::MAX }.checked(), Some(Shape::Sphere { c: [0; 3], r: MAX_RADIUS * FP }));
+        // The largest box there is (every corner clamped by `to_fp`): 2^69 cells, refused, not wrapped to 0.
+        let (a, b) = (to_fp(-1e30), to_fp(1e30));
+        assert_eq!(Shape::Box { lo: [a; 3], hi: [b; 3] }.checked(), None);
         assert_eq!(Shape::Box { lo: [0; 3], hi: [to_fp(600.0); 3] }.checked(), None);
         assert_eq!(to_fp(f64::NAN), 0);
         assert_eq!(to_fp(1e30), 1 << 30);

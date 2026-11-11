@@ -577,6 +577,11 @@ impl Bridge {
         self.core.voxels(*self.colliders.get(&id)?)
     }
 
+    /// An engine voxel collider's cells, sorted (`Physics::voxel_cells`).
+    pub fn engine_voxel_cells(&self, id: u32) -> Option<Vec<[i32; 3]>> {
+        self.core.voxel_cells(*self.colliders.get(&id)?)
+    }
+
     /// The world's body of the caller's id in `a[key]`.
     fn body(&self, a: &Value, key: &str) -> Result<BodyId, String> {
         let b = id(a, key)?;

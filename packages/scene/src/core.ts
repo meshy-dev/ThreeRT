@@ -157,6 +157,28 @@ export function usePhysicsEngine(e: PhysicsEngine): void {
   physicsEngine = e;
 }
 
+/**
+ * @internal The engine's own bodies as objects (`@threert/voxel` registers its voxel bodies): the object of an engine
+ * body id, the engine body an object stands for (joints take it), and a call once a frame when the binding delivers
+ * the physics events, which says whether any of them listens for contacts.
+ */
+export interface EngineBodies {
+  object(body: number): Object3D | undefined;
+  bodyOf(o: Object3D): number | undefined;
+  frame(): boolean;
+}
+let engineBodies: EngineBodies | null = null;
+
+/** @internal Registers (or with null drops) the engine's bodies as objects. */
+export function setEngineBodies(e: EngineBodies | null): void {
+  engineBodies = e;
+}
+
+/** @internal The registered engine bodies, if any. */
+export function getEngineBodies(): EngineBodies | null {
+  return engineBodies;
+}
+
 /** @internal The engine may have stepped the world: poses are read again. */
 export function physicsStepped(): void {
   physicsEpoch++;

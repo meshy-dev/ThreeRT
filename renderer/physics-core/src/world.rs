@@ -888,6 +888,14 @@ impl Physics {
         self.world.colliders.get(h)?.shape().as_voxels().map(|v| v.voxels().filter(|v| !v.state.is_empty()).count())
     }
 
+    /// A voxel collider's cells, sorted (the checks').
+    pub fn voxel_cells(&self, id: ColliderId) -> Option<Vec<[i32; 3]>> {
+        let &(h, _) = self.colliders.get(&id)?;
+        let mut out: Vec<[i32; 3]> = self.world.colliders.get(h)?.shape().as_voxels()?.voxels().filter(|v| !v.state.is_empty()).map(|v| [v.grid_coords.x, v.grid_coords.y, v.grid_coords.z]).collect();
+        out.sort_unstable();
+        Some(out)
+    }
+
     pub fn has_joint(&self, id: JointId) -> bool {
         self.joints.contains_key(&id)
     }

@@ -41,6 +41,12 @@ const MAX_TICKS: u32 = 8;
 /// few frames of a thousand went over; with the physics on one thread, `THREERT_PHYSICS_THREADS=1`, 128 is about at
 /// the frame).
 pub const MAX_BODIES: usize = 300;
+/// The most voxels one `add` puts on a body (`edit_body`): 65,536, a block of 4 m at 0.1 m. More is refused, nothing
+/// added: a body's collider, mesh and mass are made again from all its cells at every edit and its contacts cost by its
+/// size (the review of #24, item 6: a block of 200³ cut loose is 2.8 s of edit and 619 MB), so a body is not grown
+/// into a building by one call.
+pub const MAX_BODY_ADD: usize = 1 << 16;
+
 /// The most edits and frames scene code can ask for before the level is loaded (in setup), kept until it is: they are
 /// outside the script engine's memory, so they are counted. 4,096: a setup that cuts a level into its starting state
 /// takes a few dozen edits and a second of frames (the tests: one cut and 60 frames); one that asks for thousands is
@@ -981,6 +987,57 @@ impl VoxelWorld {
         out
     }
 
+    /// Every level object's collider against its shell found by brute force (the checks': `examples/physics_fuzz.rs`):
+    /// its cells within `SHELL` six-connected steps of a cell that is not solid, solid being the object's own cells and,
+    /// for a terrain tile on the bricks' lattice, its neighbours' and the bedrock under it (as `brick_at` reads them).
+    /// Err names the first object whose collider differs, and how. Ok: the objects checked.
+    pub fn check_shells(&self, p: &PhysicsWorld) -> std::result::Result<usize, String> {
+        let Some(level) = self.level.as_ref() else { return Ok(0) };
+        let cell = |k: usize, g: [i32; 3]| level.objects.get(k).and_then(|o| o.as_ref()).is_some_and(|o| o.grid.get(g[0], g[1], g[2]) != 0);
+        let mut checked = 0;
+        for (k, c) in self.colliders.iter().enumerate() {
+            let (Some(c), Some(o)) = (*c, level.objects.get(k).and_then(|o| o.as_ref())) else { continue };
+            let tile = self.objects.get(k).and_then(|o| o.as_ref()).filter(|v| v.off.iter().all(|x| x % 8 == 0)).and_then(|v| v.tile.map(|t| (t, v.off)));
+            let solid = |g: [i32; 3]| -> bool {
+                let Some(((tx, tz), off)) = tile else { return cell(k, g) };
+                let t = [g[0] + off[0], g[1] + off[1], g[2] + off[2]];
+                if t[1] < 0 {
+                    return true;
+                }
+                if (0..TILE).contains(&t[0]) && (0..TILE).contains(&t[2]) {
+                    return cell(k, g);
+                }
+                let Some(&n) = self.tiles.get(&(tx + t[0].div_euclid(TILE), tz + t[2].div_euclid(TILE))) else { return false };
+                match self.objects.get(n).and_then(|v| v.as_ref()).filter(|v| v.off.iter().all(|x| x % 8 == 0)) {
+                    Some(v) => cell(n, [t[0].rem_euclid(TILE) - v.off[0], t[1] - v.off[1], t[2].rem_euclid(TILE) - v.off[2]]),
+                    None => false,
+                }
+            };
+            let mut want: Vec<[i32; 3]> = o
+                .grid
+                .voxels()
+                .map(|(g, _)| g)
+                .filter(|g| (-SHELL..=SHELL).any(|dx| (-SHELL + dx.abs()..=SHELL - dx.abs()).any(|dy| { let r = SHELL - dx.abs() - dy.abs(); (-r..=r).any(|dz| !solid([g[0] + dx, g[1] + dy, g[2] + dz])) })))
+                .collect();
+            want.sort_unstable();
+            let have = p.bridge_ref().engine_voxel_cells(c).ok_or_else(|| format!("object {k}: its collider {c} is gone"))?;
+            if have != want {
+                let missing = want.iter().filter(|g| have.binary_search(g).is_err()).count();
+                let extra = have.iter().filter(|g| want.binary_search(g).is_err()).count();
+                let first = want.iter().find(|g| have.binary_search(g).is_err()).or(have.iter().find(|g| want.binary_search(g).is_err()));
+                return Err(format!("object {k}: its collider has {} cells, its shell {}: {missing} missing, {extra} too many (first {first:?})", have.len(), want.len()));
+            }
+            checked += 1;
+        }
+        // An object with cells and no collider: its shell is not empty, so it should have one.
+        for (k, o) in level.objects.iter().enumerate() {
+            if o.as_ref().is_some_and(|o| o.grid.count() > 0) && self.colliders.get(k).copied().flatten().is_none() && self.physics && !self.bodies.contains_key(&k) && self.objects.get(k).is_some_and(|v| v.is_some()) {
+                return Err(format!("object {k} has {} cells and no collider", o.as_ref().unwrap().grid.count()));
+            }
+        }
+        Ok(checked)
+    }
+
     /// A level of solid blocks of palette entry 1 made here, no file (the checks' and the tests'): each block's corner
     /// cell, its size in cells, its terrain tile if it is one, and whether it is an anchor. Voxels of 0.1 m, the mesh
     /// route, the level's physics on.
@@ -1417,7 +1474,7 @@ impl VoxelWorld {
     }
 
     /// Voxels added to body `k`: the empty cells of its grid whose centres are inside the shape (world metres, as the
-    /// level takes it), at most `voxel_core::MAX_CELLS` cells looked at. Collider, mesh and mass again. Returns the voxels.
+    /// level takes it), at most `MAX_BODY_ADD` of them and 64 times that looked at. Collider, mesh and mass again. Returns the voxels.
     fn add_to_body(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, shape: ShapeM, m: u8) -> Result<usize> {
         let size = self.size;
         let shape = level_shape(shape, size);
@@ -1436,9 +1493,11 @@ impl VoxelWorld {
             return Err(anyhow!("voxelEdit: the shape is not finite"));
         }
         let (ga, gz) = (a.floor().as_ivec3(), z.ceil().as_ivec3());
-        let n = (0..3).map(|i| (gz[i] as i64 - ga[i] as i64 + 1).max(0)).product::<i64>();
-        if n > voxel_core::MAX_CELLS {
-            return Err(anyhow!("voxelEdit: the shape is too large (at most {} voxels across its bounds)", voxel_core::MAX_CELLS));
+        // (Its cells are looked at one by one: at most 64 times what may be added, 2^22, a box of 16 m at 0.1 m.)
+        // (In f64: three sides of up to 2^32 cells overflow an i64.)
+        let n = (0..3).map(|i| (gz[i] as f64 - ga[i] as f64 + 1.0).max(0.0)).product::<f64>();
+        if n > ((MAX_BODY_ADD as u64) << 6) as f64 {
+            return Err(anyhow!("voxelBodyEdit: the shape is too large for an add on a body (at most {} cells across its bounds in the body's grid)", MAX_BODY_ADD << 6));
         }
         let mut filled = vec![];
         for x in ga.x..=gz.x {
@@ -1446,6 +1505,9 @@ impl VoxelWorld {
                 for z in ga.z..=gz.z {
                     if b.grid.get(x, y, z) == 0 && shape_contains(shape, pose.transform_point3((Vec3::new(x as f32, y as f32, z as f32) + 0.5) * size), 1.0) {
                         filled.push([x, y, z]);
+                        if filled.len() > MAX_BODY_ADD {
+                            return Err(anyhow!("voxelBodyEdit: at most {MAX_BODY_ADD} voxels can be added to a body at once"));
+                        }
                     }
                 }
             }

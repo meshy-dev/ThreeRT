@@ -78,54 +78,131 @@ test("bulk writes: brick() and fillBrick()", () => {
   assert.equal(g.layout().stats.voxels, 1);
 });
 
-test("voxel bodies: the list is the engine's, an impulse goes to the physics world by the body's id", async () => {
-  const { voxelBodies, voxelImpulse } = await import("../src/native.ts");
-  const calls: [string, object][] = [];
+/** An engine for the voxel bodies' tests: the binding's (a recording engine) and the voxel calls, answering the
+ *  physics' queries from a table and recording every call. */
+async function voxelEngine() {
+  const { RecordingEngine } = await import("@threert/scene");
+  class VoxelEngine extends RecordingEngine {
+    answers: Record<string, unknown> = {};
+    bodies: object[] = [];
+    gone: [number, string][] = [];
+    voxelCalls: [string, ...unknown[]][] = [];
+    override physics(op: string, args: object): string {
+      super.physics(op, args);
+      const a = this.answers[op];
+      return JSON.stringify(typeof a === "function" ? a(args) : a ?? null);
+    }
+    voxelLevel(d: object) { this.voxelCalls.push(["voxelLevel", d]); }
+    voxelBodies() { return JSON.stringify(this.bodies); }
+    voxelGone() { const g = this.gone; this.gone = []; return JSON.stringify(g); }
+    voxelContacts(body: number, on: boolean) { this.voxelCalls.push(["voxelContacts", body, on]); }
+    voxelBodyEdit(body: number, d: object) { this.voxelCalls.push(["voxelBodyEdit", body, d]); return JSON.stringify({ voxels: 3, bodies: 1, gone: false }); }
+    physicsCalls() { return this.calls.filter((c) => c[0] === "physics").map((c) => [c[1], c[2]] as [string, Record<string, unknown>]); }
+  }
+  return new VoxelEngine();
+}
+
+test("a voxel body is an object: the same one for the same body, with the physics methods every body has, its pose, its own edits", async () => {
+  const { voxelLevel, voxelBodies, voxelBody, voxelImpulse, VoxelBody } = await import("../src/native.ts");
+  const { Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
   const g = globalThis as { __engine?: object };
   const before = g.__engine;
-  g.__engine = {
-    voxelBodies: () => JSON.stringify([{ body: 2 ** 30 + 7, collider: 2 ** 30 + 8, voxels: 416, asleep: true, position: [0, 0.8, 0], rotation: [0, 0, 0, 1] }]),
-    physics: (op: string, args: object) => { calls.push([op, args]); return "null"; },
-  };
+  g.__engine = engine;
+  const [id, col] = [2 ** 30 + 7, 2 ** 30 + 8];
   try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    engine.bodies = [{ body: id, collider: col, voxels: 416, asleep: true, position: [0, 0.8, 0], rotation: [0, 0, 0, 1] }];
     const [b] = voxelBodies();
-    assert.deepEqual([b.body, b.voxels, b.asleep], [2 ** 30 + 7, 416, true]);
-    voxelImpulse(b.body, [0, 50, 0]);
-    voxelImpulse(b.body, [1, 0, 0], [0, 1, 0]);
-    assert.deepEqual(calls, [["impulse", { body: 2 ** 30 + 7, impulse: [0, 50, 0] }], ["impulse", { body: 2 ** 30 + 7, impulse: [1, 0, 0], point: [0, 1, 0] }]]);
+    assert.ok(b instanceof VoxelBody);
+    assert.equal(voxelBodies()[0], b, "the same object each time");
+    assert.equal(voxelBody(id), b);
+    assert.deepEqual([b.body, b.collider, b.voxels, b.asleep, b.gone], [id, col, 416, true, false]);
+    // Its pose, read from the engine when read.
+    engine.answers.state = { position: [1, 2, 3], rotation: [0, 0, 0, 1], linvel: [0, -1, 0], angvel: [0, 0, 0], sleeping: false, mass: 416 };
+    assert.deepEqual(b.position.toArray(), [1, 2, 3]);
+    assert.deepEqual(b.getLinearVelocity().toArray(), [0, -1, 0]);
+    assert.deepEqual([b.sleeping, b.physics], [false, { type: "dynamic", mass: 416 }]);
+    assert.throws(() => { b.physics = "fixed"; }, /the engine's/);
+    // The methods every body has, at once (no sync to wait for).
+    engine.calls.length = 0;
+    b.applyImpulse(new Vector3(0, 50, 0)).applyImpulse(new Vector3(1, 0, 0), new Vector3(0, 1, 0)).setLinearVelocity(new Vector3(0, 3, 0)).applyForce(new Vector3(9, 0, 0));
+    assert.deepEqual(engine.physicsCalls(), [
+      ["impulse", { body: id, impulse: [0, 50, 0] }],
+      ["impulse", { body: id, impulse: [1, 0, 0], point: [0, 1, 0] }],
+      ["velocity", { body: id, linvel: [0, 3, 0] }],
+      ["force", { body: id, force: [9, 0, 0] }],
+    ]);
+    // (Step 8's call by id, kept, deprecated.)
+    voxelImpulse(id, [0, 1, 0]);
+    assert.deepEqual(engine.physicsCalls().at(-1), ["impulse", { body: id, impulse: [0, 1, 0] }]);
+    // Its own edits.
+    assert.deepEqual(b.addVoxels({ box: [0, 0, 0, 1, 1, 1] }, 2), { voxels: 3, bodies: 1, gone: false });
+    b.paint({ sphere: [0, 1, 0, 0.5] }, 3);
+    b.carve({ box: [0, 0, 0, 0.2, 0.2, 0.2] });
+    assert.deepEqual(engine.voxelCalls.filter((c) => c[0] === "voxelBodyEdit").map((c) => (c[2] as { op: string }).op), ["add", "paint", "carve"]);
+    // Contact listeners turn its reports on, once.
+    b.addEventListener("contactstart", () => {});
+    b.addEventListener("contactend", () => {});
+    assert.deepEqual(engine.voxelCalls.filter((c) => c[0] === "voxelContacts"), [["voxelContacts", id, true]]);
   } finally {
     g.__engine = before;
   }
 });
 
-test("a voxel level that collides is what the scene's physics queries ask, with no scene object that has physics: a ray's hit on a voxel body goes into voxelImpulse", async () => {
-  const { voxelLevel, voxelImpulse } = await import("../src/native.ts");
-  const { engineColliders, Raycaster, Vector3 } = await import("@threert/scene");
-  const calls: [string, object][] = [];
-  const [level, part] = [2 ** 30 + 1, 2 ** 30 + 7];
+test("a voxel body in the scene's physics: a ray's hit has its object, a joint takes it, its contacts arrive, and it goes with a reason", async () => {
+  const { voxelLevel, voxelBodies, VoxelBody } = await import("../src/native.ts");
+  const { BoxGeometry, engineColliders, FixedJoint, Mesh, PerspectiveCamera, Raycaster, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
   const g = globalThis as { __engine?: object };
   const before = g.__engine;
-  g.__engine = {
-    voxelLevel: () => {},
-    physics: (op: string, args: { direction?: number[] }) => {
-      calls.push([op, args]);
-      if (op !== "ray") return "null";
-      // Down: the level (a fixed collider, on no body). Along z: a voxel body, then the level behind it.
-      const down = { collider: level, body: null, distance: 4.6, point: [1, 0.4, 1], normal: [0, 1, 0] };
-      return JSON.stringify(args.direction![1] < 0 ? [down] : [{ collider: part + 1, body: part, distance: 4.8, point: [0.05, 2.05, 0.2], normal: [0, 0, 1] }, { ...down, distance: 9 }]);
-    },
-  };
+  g.__engine = engine;
+  const [level, part] = [2 ** 30 + 1, 2 ** 30 + 7];
   try {
     voxelLevel({ route: "mesh", palette: [], objects: [] });
+    engine.bodies = [{ body: part, collider: part + 1, voxels: 416, asleep: false, position: [0, 0.8, 0], rotation: [0, 0, 0, 1] }];
+    // Down: the level (a fixed collider, on no body). Along z: the voxel body, then the level behind it.
+    const down = { collider: level, body: null, distance: 4.6, point: [1, 0.4, 1], normal: [0, 1, 0] };
+    engine.answers.ray = (a: { direction: number[] }) => (a.direction[1] < 0 ? [down] : [{ collider: part + 1, body: part, distance: 4.8, point: [0.05, 2.05, 0.2], normal: [0, 0, 1] }, { ...down, distance: 9 }]);
     const [ground] = new Raycaster(new Vector3(1, 5, 1), new Vector3(0, -1, 0)).intersectPhysics();
-    // The level: `engineColliders` for its object (no scene object: `physics` is null), a collider, no body.
-    assert.equal(ground.object, engineColliders);
-    assert.equal(ground.object.physics, null);
-    assert.deepEqual([ground.collider, ground.body, ground.distance], [level, undefined, 4.6]);
+    // The level: `engineColliders` (no scene object: `physics` null), a collider, no body.
+    assert.deepEqual([ground.object === engineColliders, ground.object.physics, ground.collider, ground.body], [true, null, level, undefined]);
     const hits = new Raycaster(new Vector3(0.05, 2.05, 5), new Vector3(0, 0, -1)).intersectPhysics();
-    assert.deepEqual(hits.map((h) => [h.object === engineColliders, h.collider, h.body]), [[true, part + 1, part], [true, level, undefined]]);
-    voxelImpulse(hits[0].body!, [1500, 300, 0]);
-    assert.deepEqual(calls.at(-1), ["impulse", { body: part, impulse: [1500, 300, 0] }]);
+    const v = hits[0].object;
+    assert.ok(v instanceof VoxelBody, "the body's object");
+    assert.deepEqual([v === voxelBodies()[0], hits[0].body, hits[0].collider, hits[1].object === engineColliders], [true, part, part + 1, true]);
+    engine.calls.length = 0;
+    v.applyImpulse(new Vector3(1500, 300, 0));
+    assert.deepEqual(engine.physicsCalls(), [["impulse", { body: part, impulse: [1500, 300, 0] }]]);
+    // A joint between it and a scene object's body: the voxel body's engine id, its anchor unscaled.
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const crate = new Mesh(new BoxGeometry(1, 1, 1));
+    crate.physics = "dynamic";
+    crate.scale.set(2, 2, 2);
+    const j = new FixedJoint(v, crate);
+    j.anchorA.set(0.1, 0.2, 0.3);
+    scene.add(camera, crate, j);
+    binding.sync();
+    const joint = engine.physicsCalls().find((c) => c[0] === "joint")!;
+    const crateBody = engine.physicsCalls().find((c) => c[0] === "body")![1].id;
+    assert.deepEqual([joint[1].a, joint[1].b, joint[1].anchor1], [part, crateBody, [0.1, 0.2, 0.3]]);
+    // Its contacts: the binding asks for them each frame now that it listens, and they arrive with `other`.
+    const met: unknown[] = [];
+    v.addEventListener("contactstart", (e) => met.push(e.other));
+    engine.answers.contacts = [{ a: part + 1, b: level, bodyA: part, bodyB: null, started: true }, { a: 3, b: part + 1, bodyA: crateBody, bodyB: part, started: true }];
+    binding.deliverPhysicsEvents();
+    assert.deepEqual(met, [engineColliders, crate], "with the level (its colliders are on no body: `engineColliders`) and with a scene object");
+    // Retired for the cap: gone, with the reason, at the frame's events; a call does nothing afterwards.
+    engine.gone = [[part, "cap"]];
+    engine.bodies = [];
+    let gone: unknown = null;
+    v.addEventListener("gone", (e) => (gone = e.reason));
+    binding.deliverPhysicsEvents();
+    assert.deepEqual([gone, v.gone, v.goneReason, voxelBodies().length], ["cap", true, "cap", 0]);
+    engine.calls.length = 0;
+    v.applyImpulse(new Vector3(1, 0, 0));
+    assert.deepEqual([engine.physicsCalls(), v.getLinearVelocity().toArray(), v.physics], [[], [0, 0, 0], null]);
   } finally {
     g.__engine = before;
   }

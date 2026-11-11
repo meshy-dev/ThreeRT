@@ -11,11 +11,12 @@ import {
   AmbientLight, compatNote, DirectionalLight, Fog, FogExp2, GLTFModel, HDRIEnvironment, HemisphereLight, InstancedMesh, Light, MeshBasicMaterial, MaterialFunction, Mesh, MeshPhysicalMaterial, type MeshStandardMaterial, Object3D,
   type ParticleBinding, type ParticleFunction, Particles, GpuParticles, type ParticleProgram, type ParticleProgramBinding, type VolumeBinding, type VolumeFunction, VolumeMesh, type DensityGrid, type GridProgram, type GridProgramBinding, ProceduralMesh, ProceduralGeometry,
   DataTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
-  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint,
+  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, getEngineBodies,
   type SceneChanges, type ShaderBinding, type SwayDesc, type PhysicsDesc, type BoundBody,
 } from "./core.ts";
 import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
 import { Matrix4, Quaternion, Vector3 } from "./math.ts";
+import { ENGINE_IDS, engineColliders } from "./raycaster.ts";
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -815,14 +816,22 @@ export class SceneBinding {
     // made anew included) makes it anew.
     const joints = this.jointsDirty ? this.joints : [];
     this.jointsDirty = false;
+    // (An object that stands for one of the engine's bodies, a voxel body, is taken as that body: its anchor is in the
+    // body's own frame, unscaled.)
+    const engine = getEngineBodies();
+    const bodyOf = (o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined => {
+      if (!o) return undefined;
+      const id = engine?.bodyOf(o);
+      return id !== undefined ? { id, scale: [1, 1, 1] } : this.objects.get(o)?.body;
+    };
     for (const [j, bj] of joints) {
-      const a = j.bodyA ? this.objects.get(j.bodyA) : undefined, b = j.bodyB ? this.objects.get(j.bodyB) : undefined;
+      const a = bodyOf(j.bodyA), b = bodyOf(j.bodyB);
       let key = "";
       let desc: Record<string, unknown> | null = null;
-      if (a?.body && b?.body) {
-        const [sa, sb] = [a.body.scale, b.body.scale];
+      if (a && b) {
+        const [sa, sb] = [a.scale, b.scale];
         desc = {
-          ...j.jointDesc(), a: a.body.id, b: b.body.id,
+          ...j.jointDesc(), a: a.id, b: b.id,
           anchor1: [j.anchorA.x * sa[0], j.anchorA.y * sa[1], j.anchorA.z * sa[2]], anchor2: [j.anchorB.x * sb[0], j.anchorB.y * sb[1], j.anchorB.z * sb[2]],
         };
         key = JSON.stringify(desc);
@@ -856,12 +865,16 @@ export class SceneBinding {
    */
   deliverPhysicsEvents(): void {
     if (this.bodies) this.takeFaults();
-    if (!this.contactBodies) return;
-    const list = JSON.parse(this.engine.physics("contacts", {})) as { bodyA: number | null; bodyB: number | null; started: boolean }[] | null;
+    // (The engine's own bodies' events first: voxel bodies gone; and whether any of them listens for contacts.)
+    const engineListens = getEngineBodies()?.frame() ?? false;
+    if (!this.contactBodies && !engineListens) return;
+    const list = JSON.parse(this.engine.physics("contacts", {})) as { a?: number; b?: number; bodyA: number | null; bodyB: number | null; started: boolean }[] | null;
     if (!list?.length) return;
     const contacts: { a: Object3D; b: Object3D; started: boolean }[] = [];
+    // (A collider on no body is the voxel level's, when it is one of the engine's: `engineColliders`.)
+    const of = (body: number | null, collider: number | undefined) => (body !== null ? physicsBodies.get(body) : collider !== undefined && collider >= ENGINE_IDS ? engineColliders : undefined);
     for (const c of list) {
-      const a = c.bodyA === null ? undefined : physicsBodies.get(c.bodyA), b = c.bodyB === null ? undefined : physicsBodies.get(c.bodyB);
+      const a = of(c.bodyA, c.a), b = of(c.bodyB, c.b);
       if (!a || !b) continue;
       contacts.push({ a, b, started: c.started });
       const type = c.started ? "contactstart" : "contactend";
