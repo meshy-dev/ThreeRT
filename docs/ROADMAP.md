@@ -337,6 +337,21 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          where the truth's own noise allows (stated per pose);
        - in place against a fresh load of the same state (`tools/bench-sun.ts`, extended to Tokyo): ΔE ≤ 0.1;
        - a clip posted in the session.
+     - Found by the acceptance runs (2026-11-11, branch `light-tree-switchable`): light sampling was set up at load for
+       the lights on at that moment.
+       - A room loaded by day (its lamps and windows off) left them out of the light tree. Switched on at dusk, they were
+         drawn from the flat CDF beyond it, by power share alone, with no importance at the shading point and no
+         distance cut: shadow rays across the city.
+       - The sky's light-sampling floor (1 % of the emitters' mean radiance) also came from the lights on at load. The
+         room kept light-sampling a night sky that a room loaded at night does not.
+       - Both now count a switched-off emitter at full power (`switchable_power`); the tree's node powers are refit to
+         the objects' powers now. The 12 catalog scenes and 6 game rooms with every emitter on at load render
+         byte-identical; Tokyo's 15:30 room does not.
+       - GPU p50 at the 0.5 floor, main → this branch, per second of path (alternated runs):
+         - the Shiba fly-past: 14.6–17.9 → 8.9–12.5 ms by day, 20.0–21.7 → 12.2–12.8 ms from dusk;
+         - the Yasukuni-dōri drive: 15.0–18.4 → 10.7–13.5 ms once the first lamps are on (16:09).
+       - In place against a fresh load (Shinjuku's east aerial, on main + ThreeRT#3 and #4): ΔE 0.49 → 0.08 at sunset,
+         0.15 → 0.01 at civil dusk, 0.34 → 0 at night (bit for bit).
      - Status, part 1 (2026-11-10, branch `aerial-perspective`): the land beyond the area hazed into the sky.
        - `SkyAtmosphere({ aerialPerspective })` in `packages/scene`: the atmosphere's own haze over the surfaces behind it, at
          a multiple of its density. It is off by default (0); the kernel's `F_AERIAL` is compiled out where no scene
@@ -481,6 +496,13 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
      - rain: wet streets and puddles reflecting the city, and the rain curtain (Bistro's), measured on Tokyo;
      - fog and mist: height fog over the city, thickening and clearing;
      - overcast: cloud cover that dims and softens the sun and the sky;
+       - Engine side done (2026-11-11, branch `sky-cloud-cover`): `scene.cloudCover` (0..1), changed in place.
+         - The atmosphere's sky goes over to the CIE standard overcast sky, white. Its horizontal illuminance is 0.3 of
+           what the clear sky and sun give the ground (stratus pass 0.1–0.4).
+         - The sun's direct light is × (1 − cover), its mean share of time out of cloud.
+         - A night glow is 3× brighter off the cloud base (Kyba et al. 2011).
+         - The live view re-bakes the dynamic sky and relights the sun on a change, as for a sun move.
+         - Unit test `full_cover_is_the_cie_overcast_sky_lit_by_the_clear_day`.
      - volumetric clouds in the sky, their shadows moving over the city (the sky's bake and the sun's visibility
        through them);
      - transitions in real time: clear → overcast → rain → clearing, with the clock running.
@@ -491,6 +513,16 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        - in place against a fresh load ΔE ≤ 0.1;
        - Tokyo lines in the perf suite: the Shiba fly-past clear and in rain;
        - a clip (a clear afternoon into a storm at dusk) posted in the session.
+     - Status, part 1 (2026-11-11, branch `gltf-material-functions`): the engine side of the rain on the city.
+       - `GLTFModel.functions`: material functions on a glTF file's own materials, by name prefix (the compiled tiles'
+         ground, roads and roofs are glTF materials with the aerial photos as maps). Set at build; the model has its
+         own copies of the file's materials and meshes. Their triangles are flattened per placement, as every
+         material-function triangle is: on Tokyo 15.2 M of 17.8 M.
+       - `wetLayer()`: `SurfaceMaterial`'s wetness (Lagarde; puddles on up-facing ground, rain ripples) as a layer on
+         another material's shading. `surface/wet-layer-gltf`: 0.556 against 0.549 analytic.
+       - The translucency pass compiles only its particles' material functions: with every function of Tokyo's kernel
+         in it, the Metal compiler failed on the `translucent` pipeline once the ground had wetLayer and the rain
+         curtain was in the scene.
   Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7.
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
@@ -749,6 +781,16 @@ What is left is carried over in § 0. The phase's plan and results, as they were
            moving emitters by their share of power: 0.41; no light tree at all: 0.59). Not the root's split between
            the two subtrees: a 25 % floor on either side of it changed nothing. Open (item 4); no light tree also means
            one candidate and no far-node culling, so that comparison is not one change.
+       - The GPU time's outliers (2026-11-11, branch `crowd-timer`): 3–4 % of the crowd's frames read 70–80 ms of GPU
+         while frames came every 16.7 ms.
+         - The live view times a frame from its first pass to its post pass's end. A slot of the timer read, in those
+           frames, the post pair of the frame that used the slot next, 4 frames on: the same timestamps, bit for bit.
+         - A post pass that begins more than 2 ms after the trace ends (it follows within ~0.2 ms) is now counted by its
+           own length. Every other frame reads as before.
+         - w150-v60, 30 s of the path, 3 alternated pairs: frames over 2 × their interval 3.4–4.2 % → 0–0.1 %, GPU max
+           81–82 → 20.4–20.6 ms, p95 15.3–15.4 → 14.95–15.0 ms. Frame interval p50 / p95 16.65 / 16.9 ms, frame start
+           p95 16.67 ms and scale (the 0.5 floor) unchanged. GPU p50 reads 0.13–0.15 ms higher in every pair (Bistro's
+           perf smoke: +0.14), though the change can only lower a reading; not explained.
   2. Then the costs, in measured order. The method is chosen per measurement. Candidates:
      - GPU (compute) skinning;
      - the dynamic BLAS update strategy:

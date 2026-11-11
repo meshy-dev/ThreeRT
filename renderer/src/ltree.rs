@@ -21,6 +21,9 @@
 //! step 4) get a subtree of their own in scenes that can edit geometry (`build_slotted`): the root's right child, the
 //! static subtree its left, grown again over them at every such edit (`set_dynamic`; the static subtree and its codes
 //! stay). By power share alone a lamp moved there by an edit read 2.3 times the variance it had in the tree.
+//!
+//! Emitters whose object is switched off at load (a time-of-day room's lamps and windows by day) are in the tree too,
+//! at zero weight until they switch on: `light_tree_of` builds it with them at full power, then refits the powers.
 
 use crate::EmitterTri;
 
