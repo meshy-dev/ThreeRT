@@ -366,8 +366,10 @@ ground of 427 k cells of 0.1 m; pieces of 6³ cells with holes, about 200 solid)
 Voxels against voxels: 400 pieces 7.1 ms a tick while they fall (at worst 19), 1,000 pieces 22.6 ms (52); asleep,
 0. The same bits natively and in wasm32.
 
-**On several threads** (an experiment: `physics-core --features parallel`, Rapier's parallel solver with
-`enhanced-determinism`; native only, off by default). The same heaps, a tick while they fall, mean and worst, ms:
+**On several threads.** Natively the world is stepped by Rapier's parallel solver with `enhanced-determinism`
+(physics-core's `parallel`; the renderer's native build has it on, in a pool of the physics' own: 4 threads, or the
+machine's performance cores when fewer; `THREERT_PHYSICS_THREADS` sets another count, 1 is sequential). wasm32 is
+sequential. The same heaps, a tick while they fall, mean and worst, ms:
 
 | pieces | sequential | 2 threads | 4 | 8 | 15 |
 | --- | --- | --- | --- | --- | --- |
@@ -377,12 +379,26 @@ Voxels against voxels: 400 pieces 7.1 ms a tick while they fall (at worst 19), 1
 | 1,000 | 20.48, 50.81 | – | 6.27, 15.44 | 4.29, 12.76 | 3.66, 13.67 |
 
 Each row ends in the same bits at every thread count and sequentially (a hash of every piece's pose and velocity
-after 900 ticks); so do the determinism check's 1,500 random worlds; 20,000 random voxel worlds step without a
-panic. The sequential native build is what wasm32 agrees with, so a parallel native build agrees with a browser
-too; `tools/physics-determinism.ts` (CI's physics job) holds a parallel build at 2 and 4 threads to the sequential
-one, script and every world. The renderer has it as the feature `physics-parallel`, off by default (ROADMAP § 6
-step 8, "Open"); on the level it is the tables of "How many bodies a frame holds" below. (Rapier's contact recycling stays on: with it off a heap of 400 pieces does not come to rest, 79
-asleep after 15 s.)
+after 900 ticks). **That the result does not depend on the thread count is what we checked ourselves, and this is
+how far:**
+
+- On this machine (M5 Pro, 15 cores), at 1, 2, 4, 8 and 15 threads: the determinism check's script and its 1,500
+  random worlds (hulls, bodies of several colliders, joints with limits and motors, CCD on a triangle mesh with
+  kinematic bodies and queries, voxel lumps on voxel ground with edits: each a few to a few dozen bodies, 90
+  ticks); heaps of 10, 100, 400 and 1,000 voxel pieces on voxel ground, 900 ticks; 20,000 random voxel worlds
+  without a panic.
+- In CI (Linux, x86-64), on every change to the physics: the script and the 1,500 worlds at 2 and 4 threads
+  against the sequential native build, which is held to wasm32 and to the recorded hashes
+  (`tools/physics-determinism.ts`: native parallel = native sequential = wasm32 = recorded).
+- The renderer's own build: its recorded-bits tests at 1, 4 and 8 threads; the benchmark level run twice through
+  explosions, the 30 m cut and a crater gives the level and physics hashes the sequential build gave; the same
+  bodies moving in every frame of four destruction scenarios, sequential against 4 threads.
+- **Not checked**: other machines and other CPU families at thread counts beyond these (Rapier promises it; it also
+  promised the cross-platform bits that needed a patch to glamx); worlds with joints and thousands of bodies at once
+  (the worlds with joints here are small; the large ones have no joints); long runs (minutes) of large heaps.
+
+(Rapier's contact recycling stays on: with it off a heap of 400 pieces does not come to rest, 79 asleep after
+15 s.)
 
 **The level's colliders.** Every object gets a fixed collider at load; an edit takes out the cells the object lost
 (`Edit::cleared`: by the cells, not by the object's size). A collider holds the object's cells within 4 of a cell
@@ -416,8 +432,8 @@ vertices written again every frame); now a part moves by its transform.
 
 **A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /
 2,400 / 7,800 kg/m³ unless the entry names one), drawn by driven objects. A carve reaches it through its pose; what
-is cut off is a body of its own. At most 512 at once (`maxBodies`): past it the oldest sleeping one goes, its voxels
-debris. A settled body stays a body.
+is cut off is a body of its own. At most 400 at once (`maxBodies`; the number is measured, below): past it the
+oldest sleeping one goes, its voxels debris. A settled body stays a body.
 
 **Measured on the GPU** (this Mac, M5 Pro; hardware traversal unless said; the benchmark level at 1280 x 720 at
 0.5, in lockstep at 1 / 60 s; `games/voxel-level/level-destruction.game.ts`'s scenarios; a frame's GPU time is
@@ -438,45 +454,48 @@ the scene's commit of the new meshes 37.7, the physics' first step 5.6. In step 
 frame for as long as it lasted. The level's load is 10.7 s to the first frame with the colliders and 5.5 s without
 (`physics: false`).
 
-**How many bodies a frame holds** (`shatter`: the cut of `fell`, then 60 cuts 0.2 m thick a tenth of a second
-apart through what fell: slabs, then columns of buildings, hundreds to thousands of voxels each, in one heap; 222
-bodies). Frames without an edit, by the bodies that moved in them: the physics step and the frame's CPU time, p50 /
-p95, and the frames over 16.7 ms; sequential (the default build) against Rapier's parallel solver (the renderer's
-`physics-parallel` feature: off by default; a pool of its own of 4 threads):
+**How many bodies a frame holds, and the cap.** `shatter-dense`: the cut of `fell`, then 120 cuts 0.2 m thick half a
+metre apart, twenty a second, through what fell: slabs, then columns of buildings, tens to thousands of voxels
+each, in one heap, more than 500 of them. **The default configuration** (the parallel solver on 4 threads) with
+the default cap of 400: the count reaches 400 and stays there to the end of the run. Frames without an edit, by the
+bodies that moved in them (physics step and the frame's CPU time, p50 / p95):
+
+| bodies moving | frames | physics step | frame CPU | frames over 16.7 ms |
+| --- | --- | --- | --- | --- |
+| 0–49 | 242 | 0.30 / 1.70 ms | 5.5 / 7.5 ms | 0 |
+| 50–99 | 50 | 2.09 / 2.90 | 7.2 / 8.8 | 0 |
+| 100–149 | 41 | 3.42 / 4.31 | 8.3 / 9.4 | 0 |
+| 150–199 | 8 | 4.76 / 5.11 | 9.1 / 10.0 | 0 |
+| 200–249 | 8 | 5.32 / 5.74 | 9.4 / 10.4 | 0 |
+| 250–299 | 4 | 5.89 / 5.96 | 10.2 / 10.2 | 0 |
+| 300–349 (the heap at rest, still awake) | 625 | 0.79 / 2.66 | 6.3 / 8.7 | 0 |
+| 350–399 | 85 | 6.74 / 9.21 | 10.7 / 13.6 | 0 |
+| 400–449 (every body of the cap in the air or landing) | 31 | 8.86 / 9.40 | 13.1 / 14.9 | 0 |
+
+**No frame of 1,094 is over 16.7 ms** (the worst 16.7). That is why the cap is 400. With a cap of 512 the count
+holds at 512 as well, but with all of them in the air a frame is 16.3 ms at the median and 5 of 22 such frames are
+over (16.8–17.4 ms; the worst frame of the run 19.0 ms with 499 moving): just past the frame.
+
+The same scenario with the cap at 512, sequential (`THREERT_PHYSICS_THREADS=1`) against the default's 4 threads:
 
 | bodies moving | frames | step, sequential | frame CPU, sequential | over 16.7 ms | step, 4 threads | frame CPU, 4 threads | over 16.7 ms |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0–24 | 252 | 0.31 / 1.35 ms | 5.5 / 8.0 ms | 1 | 0.32 / 0.95 ms | 5.4 / 7.5 ms | 1 |
-| 25–49 | 144 | 1.80 / 5.12 | 7.5 / 9.6 | 1 | 1.39 / 3.06 | 6.1 / 8.4 | 1 |
-| 50–74 | 29 | 7.08 / 8.03 | 11.0 / 11.8 | 0 | 3.34 / 3.64 | 8.1 / 8.9 | 0 |
-| 75–99 | 144 | 3.35 / 11.27 | 8.5 / 15.3 | 1 | 1.44 / 3.77 | 6.8 / 9.0 | 1 |
-| 100–124 | 12 | 13.17 / 14.16 | 16.9 / 18.1 | 8 | 4.79 / 4.98 | 8.8 / 10.2 | 0 |
-| 125–149 | 122 | 6.59 / 15.08 | 10.9 / 18.7 | 16 | 2.34 / 4.92 | 7.7 / 9.6 | 1 |
-| 150–174 | 97 | 11.77 / 18.46 | 15.6 / 22.1 | 39 | 3.87 / 6.51 | 8.6 / 11.4 | 1 |
-| 175–199 | 62 | 16.91 / 18.82 | 20.6 / 22.6 | 62 | 5.47 / 6.23 | 9.4 / 11.1 | 0 |
-
-And with more of them (`shatter-dense`: the cuts half a metre apart, twenty a second; the cap of 512 is reached and
-held): the rows where the heap is in the air or landing.
-
-| bodies moving | frames | step, sequential | frame CPU, sequential | over 16.7 ms | step, 4 threads | frame CPU, 4 threads | over 16.7 ms |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 100–149 | 41 | 10.15 / 14.03 ms | 14.2 / 17.7 ms | 9 | 3.45 / 4.55 ms | 8.4 / 9.3 ms | 0 |
+| 50–99 | 51 | 5.02 / 7.89 ms | 9.2 / 12.1 ms | 1 | 2.10 / 2.96 ms | 7.5 / 9.0 ms | 1 |
+| 100–149 | 41 | 10.15 / 14.03 | 14.2 / 17.7 | 9 | 3.45 / 4.55 | 8.4 / 9.3 | 0 |
 | 200–249 | 8 | 17.46 / 18.57 | 21.7 / 22.2 | 8 | 5.65 / 5.75 | 9.5 / 11.5 | 0 |
 | 300–349 | 6 | 21.01 / 21.08 | 24.9 / 25.3 | 6 | 6.07 / 6.51 | 10.1 / 10.3 | 0 |
 | 450–499 | 46 | 35.38 / 39.61 | 39.4 / 43.6 | 46 | 10.41 / 11.99 | 14.7 / 17.1 | 5 |
 | 500–549 | 22 | 41.24 / 42.94 | 45.2 / 47.3 | 22 | 12.37 / 13.01 | 16.4 / 18.0 | 6 |
 
-**The number of bodies moving at once at which 60 fps is lost: sequentially about a hundred** (from 150 every frame
-is over; with all 512 of the cap moving a frame is 39–45 ms); **on 4 threads about 450–500** (with all 512 moving a
-frame is 14.7–16.4 ms at the median and a quarter of the frames are over 16.7 ms). What takes the frame is Rapier's
-step (placing the parts is at most 0.16 ms, the scene's commit about 2 ms, the GPU's frame does not change). The
-bodies and the bodies that moved are the same in every one of the 921 frames of each scenario, sequential and
-parallel (and at 8 threads, which bring the step at 175–199 moving to 3.75 ms and the frame no further). With few
-bodies the pool costs nothing that shows: `fell` (20 bodies) steps in 0.18–0.35 ms a frame either way, hello world
-in 0.026 ms. With a cap of 128 bodies (`maxBodies`) the count stops at 128 while the cuts go on and the sequential
-build keeps the frame under a hundred moving (3 frames of 666 over 16.7 ms), loses one in six at 100–124 and one in
-three from 125. A cut through the heap is itself a frame of 26–35 ms sequentially (p50; p95 44–59 ms) and 21 ms on
-4 threads (p95 34–36 ms): it carves, splits and meshes again every body it meets, and the frame's step is in it.
+**The number of bodies moving at once at which 60 fps is lost: on one thread about a hundred** (from 150 every
+frame is over); **on 4 threads about 450–500.** What takes the frame is Rapier's step (placing the parts is at most
+0.17 ms, the scene's commit about 2 ms, the GPU's frame does not change). The bodies and the bodies that moved are
+the same in every frame, sequential and parallel (and at 8 threads, which bring the step no gain on the frame).
+With few bodies the pool costs nothing that shows: `fell` (20 bodies) steps in 0.18–0.35 ms a frame either way,
+hello world in 0.03 ms. **With the parallel solver off the cap to set is 128** (`maxBodies: 128`): sequentially,
+with all 128 moving, a frame is 12.1 ms at the median and 7 frames of 1,095 are over 16.7 ms (the worst 22.0): about
+at the frame. A cut through the heap is itself a frame of 19–21 ms (p50; p95 32–36 ms) on 4 threads and 26–35 ms
+(p95 44–59 ms) on one: it carves, splits and meshes again every body it meets, and the frame's step is in it.
 
 **Under software traversal** (`THREERT_HWRT=0`: bodies are units; not optimised): no rebuild, the parts added and
 moved in place (records 10,459 to 10,503 for the 20 bodies of `fell`), the loop guard's count 0; the same bodies

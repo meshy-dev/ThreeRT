@@ -17,7 +17,8 @@
 //   shatter    `fell`, then from two seconds on a cut 0.2 m thick every tenth of a second through what fell, 30 a
 //              metre apart across the road and 30 along it: the bodies are cut into more and more bodies (ROADMAP
 //              § 6 step 8: how many bodies a frame holds, and the cap on them)
-//   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner
+//   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner (past 500:
+//              the level's cap is reached and held)
 // With `debris`
 // (level-destruction-debris.game.ts; ROADMAP § 6 step 2e), the voxels too few to make a piece are thrown out as
 // instances of one unit cube (an `InstancedMesh`, coloured per instance from the palette), fall, bounce on the ground
@@ -213,7 +214,7 @@ class Dust {
  *  `smoke`: the cells of the simulated smoke's grid. `physics` (ROADMAP § 6 step 8; on by default): the level
  *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
  *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
- *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (512 unless given). */
+ *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (400 unless given). */
 export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number) {
   const keys = cameraPath(seed);
   const at = spots(seed);

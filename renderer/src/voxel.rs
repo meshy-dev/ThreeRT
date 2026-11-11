@@ -36,8 +36,10 @@ const TILE: i32 = 64;
 const TICK_RATE: f64 = 60.0;
 const MAX_TICKS: u32 = 8;
 /// The most voxel bodies a level holds unless it says otherwise (`LevelDesc::max_bodies`): past it the oldest that
-/// sleeps (else the oldest) goes, its voxels debris.
-pub const MAX_BODIES: usize = 512;
+/// sleeps (else the oldest) goes, its voxels debris. 400 is what was measured to hold 60 fps with every one of them
+/// in the air at once, natively on 4 threads (docs/VOXEL.md "Voxel bodies": 512 is just past the frame; with the
+/// physics on one thread, `THREERT_PHYSICS_THREADS=1`, 128 is about at it).
+pub const MAX_BODIES: usize = 400;
 /// A level object's collider holds its cells within this many cells of one that is not solid (six-connected steps):
 /// a shell. The benchmark level has 515 million solid cells, 480 million of them terrain down to the bedrock; a
 /// collider of every one took 26 s to build and 1.3 GiB. Four cells are 0.4 m of voxels of 0.1 m: a body would have

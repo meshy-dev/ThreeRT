@@ -234,10 +234,14 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
     world without voxel shapes: step 7's worlds end in the bits they did.
   - Cost: asleep, nothing. While they move, Rapier's step on one thread: 1.4 ms a tick for a hundred jagged pieces
     of 200 voxels in a heap, under 0.5 ms for one building part of 96 k voxels landing. On the benchmark level
-    (hardware traversal) 60 fps holds to about a hundred large bodies moving at once: the step is then 10–13 ms.
-    Rapier's parallel solver gives the same bits and a third of that on 4 threads (about 450–500 bodies moving in a
-    frame): the renderer's feature `physics-parallel`, native only, off by default (ROADMAP § 6 step 8, "Open").
-    With it the world is stepped in a pool of its own (`THREERT_PHYSICS_THREADS`, 4), not the process's.
+    (hardware traversal) one thread holds 60 fps to about a hundred large bodies moving at once (the step is then
+    10–13 ms).
+  - **Natively the world is stepped by Rapier's parallel solver**, in a pool of the physics' own: 4 threads, or the
+    machine's performance cores when it has fewer; `THREERT_PHYSICS_THREADS` sets another count, and 1 (0, off) is
+    sequential. It gives the sequential build's bits (which are wasm32's) at a third of the step's time: about
+    450–500 bodies moving in a frame, and a level's cap of 400 voxel bodies (`maxBodies`) by measurement. wasm32
+    is sequential. How far "the bits do not depend on the thread count" was checked, and what was not: docs/VOXEL.md
+    "Voxel bodies", ROADMAP § 6 step 8 "Open".
   - Ids in a call (`body`, `collider`, `skip`, ...) are whole numbers however they are written: scene code hands
     back an id it read from an answer as a double.
 

@@ -40,8 +40,8 @@ export interface NativeLevel {
   occupancy?: number;
   /** The level's physics (default true): colliders for its objects, rigid bodies for what comes loose. */
   physics?: boolean;
-  /** The most voxel bodies at once (default 512): past it the oldest that sleeps (else the oldest) goes, its voxels
-   *  debris. */
+  /** The most voxel bodies at once (default 400: what holds 60 fps natively with all of them moving at once): past
+   *  it the oldest that sleeps (else the oldest) goes, its voxels debris. */
   maxBodies?: number;
 }
 

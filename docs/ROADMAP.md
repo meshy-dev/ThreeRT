@@ -4060,7 +4060,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
        was; `collide: false` on an object leaves it out. Ordinary meshes still declare `physics`.
      - **Loose parts are rigid bodies**: mass from their voxels and each palette entry's density; they tumble, land
        on the level and on one another, and sleep; they move as instances (no vertex is written again).
-     - **Debris**: parts under 8 voxels stay the game's particles; at most 512 voxel bodies (`maxBodies`), past it
+     - **Debris**: parts under 8 voxels stay the game's particles; at most 400 voxel bodies (`maxBodies`), past it
        the oldest sleeping one goes, its voxels debris.
      - **A body stays a body** when it has settled (asleep it costs no tick; turned, it does not fit the lattice,
        and writing it back would lose voxels). The cap bounds them.
@@ -4079,13 +4079,17 @@ benchmark level. The order follows the dependencies; a step that meets a further
        - **A building cut loose** (the cut of 30 x 30 m: 20 parts, the largest 32,680 voxels): while they fall and
          land a frame's CPU is p50 5.3–5.5 ms, p95 8.1 ms, none over 16.7 ms; the physics step 0.28 ms, at worst
          0.52 (step 6: 26–28 ms a frame for as long as it fell); 17 of 20 asleep after 9.5 s.
-       - **About a hundred bodies: yes, without room to spare, sequentially.** The number of bodies moving at once
-         at which 60 fps is lost (large ones: slabs and columns of buildings in one heap): **about a hundred on
-         one thread** (at 100–149 moving the physics step is 10–13 ms and a frame's CPU 14–17 ms; from 150 every
-         frame is over; all 512 of the cap moving: 39–45 ms a frame), **about 450–500 on 4 threads** with Rapier's
-         parallel solver (the feature `physics-parallel`, off by default: all 512 moving, 14.7–16.4 ms a frame at
-         the median). What takes the frame is Rapier's step; placing the parts is under 0.2 ms, the GPU's frame
-         does not change. The bodies are the same in every frame either way.
+       - **About a hundred bodies: yes, with room to spare.** Natively the world is stepped by Rapier's parallel
+         solver on 4 threads (decided 2026-11-11 on these figures). The number of bodies moving at once at which
+         60 fps is lost (large ones: slabs and columns of buildings in one heap): **about 450–500 on 4 threads,
+         about a hundred on one** (`THREERT_PHYSICS_THREADS=1`: at 100–149 moving the step is 10–14 ms and a
+         frame's CPU 14–18 ms; from 150 every frame is over). What takes the frame is Rapier's step; placing the
+         parts is under 0.2 ms, the GPU's frame does not change. The bodies are the same in every frame either way.
+       - **The cap is 400 bodies, measured**: a scenario that makes more than 500 holds the count at the cap, and
+         with every one of 400 in the air a frame's CPU is 13.1 ms at the median, 14.9 at p95, no frame of 1,094
+         over 16.7 ms. At 512 the count holds too but a frame is then 16.3 ms at the median and 5 of 22 such frames
+         are over (the worst 19.0 ms). With the parallel solver off the cap to set is 128 (about at the frame: 7
+         frames of 1,095 over, the worst 22.0 ms).
        - The CPU split of an edit (the 4 m crater: carve 2.4, colliders 6.5, meshes 7.5, commit 3.9 ms; the cut:
          carve 21.6, colliders 15.3, meshes 5.3, parts and bodies 27.8, commit 37.7, the first physics step 5.6).
        - Scenes without voxel bodies: the catalog's 25 bundles are byte-identical to main's under software
@@ -4117,29 +4121,28 @@ benchmark level. The order follows the dependencies; a step that meets a further
        lattice plane (the world walks the cells itself); a shape edited where it sits keeps stale contacts (the
        collider is taken out and put back).
    - Open:
-     - **Past about a hundred bodies moving at once the frame is lost, and the default build has one thread for
-       the physics.** Rapier's parallel solver is in as an option, off by default: physics-core's `parallel`, the
-       renderer's `physics-parallel` (native only; the world is stepped in a pool of its own, 4 threads,
-       `THREERT_PHYSICS_THREADS`). It steps to the sequential build's bits in everything run: the 1,500 random
-       worlds and the script at 2 and 4 threads in CI (`tools/physics-determinism.ts`: a third native build in the
-       physics job), heaps of up to 1,000 voxel pieces at 1 to 15 threads, 20,000 voxel worlds without a panic,
-       the renderer's own recorded-bits tests with the feature on, and the level (the same bodies moving in every
-       frame of `fell`, `sustained`, `shatter` and `shatter-dense`). It takes the step with all 512 bodies moving
-       from 41 to 12 ms and costs nothing that shows when few move. **Whether it is the native default is the
-       supervisor's decision; no default is changed.** (wasm32 stays sequential: it has no threads here, and the
-       bits agree.)
-     - **The cap** (`maxBodies`, 512) is above what the sequential build holds at 60 fps when all move: a cap of
-       128 keeps the worst case about at the frame (one frame in six over 16.7 ms at 100–124 moving). On 4 threads
-       512 all moving is about at the frame. Left at 512 until the decision above; asleep, bodies cost nothing,
-       and a game's bodies seldom all move.
+     - **The parallel solver's independence of the thread count is checked as far as this, and no further**:
+       on this machine at 1, 2, 4, 8 and 15 threads (the determinism check's script and 1,500 random worlds of five
+       kinds, each small; heaps of up to 1,000 voxel pieces; 20,000 voxel worlds without a panic; the renderer's
+       recorded-bits tests; the benchmark level's hashes through explosions, the cut and a crater, equal to the
+       sequential build's), and in CI on Linux at 2 and 4 threads on every change to the physics (native parallel
+       = native sequential = wasm32 = recorded; 7–11 s of the physics job with a warm cache). Not checked: other
+       machines and CPU families beyond CI's, worlds with joints and thousands of bodies at once, long runs of
+       large heaps. wasm32 stays sequential (no threads here), and the bits agree. Step 9's checkpoints are what
+       would find a difference in the field.
+     - **The cap of 400 is this machine's** (an M5 Pro's four threads): a slower machine holds fewer at 60 fps, and
+       nothing adapts it. A level can set `maxBodies`. Asleep, bodies cost nothing, and a game's bodies seldom all
+       move at once.
      - **A large cut's own frame is over 50 ms**: 117 ms for the cut of 30 x 30 m (the scene's commit of the new
        parts' meshes 38 ms, the parts' meshes and bodies 28, the carve 22, the colliders 15); a cut through a heap
-       of a hundred bodies 26–29 ms (p95 45). Explosions are within the target. Not split over frames yet.
+       of a hundred bodies 19–21 ms (p95 32–36). Explosions are within the target, which is what the acceptance
+       names (as in step 6). Not split over frames; not in this step.
      - **A voxel part that glows rebuilds the scene once when it comes loose** (a driven mesh that emits is not
        placed as an instance: the build flattens it; seen in `voxel/cut-body-live`, whose posts glow). The
        daylight level has none; a level with lamps at night does.
      - **The level's colliders cost 5.4 s of load and 303 MiB** on the benchmark level (the first frame comes
-       after 10.7 s with them, 5.5 s without; an offline still pays them too): natively this is a fixed cost of
+       after 10.7 s with them, 5.5 s without). **An offline still pays the 5.4 s too** (16.5–19.6 s for a still of
+       the level against 11.1–12.2 s before), though nothing in it collides: not changed in this step. natively this is a fixed cost of
        every level of that size. They are a shell of the cells within 4 of the open (every solid cell was 26 s and
        1.3 GiB), and objects of one file share one shape until one is edited (before that: 6.9 s and 455 MiB).
        What is left is the terrain's 1,600 tiles, a shape each. Decided against (2026-11-11): a shell of 2 cells
@@ -4158,8 +4161,8 @@ benchmark level. The order follows the dependencies; a step that meets a further
      needs on both ends (the same bits natively and in wasm32, and on several threads; voxel against voxel
      resting, stacking and sleeping on a level of 61.6 M collider cells; edits of a shape by its cells in 0.1 ms),
      with the three faults above found and worked round in a day. Its cost is the step: about 0.1 ms a large body
-     that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver is worth a factor of
-     3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
+     that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver, now the native
+     default, is worth a factor of 3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
      to bring the determinism, the sleeping and the voxel-voxel contacts with it.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
