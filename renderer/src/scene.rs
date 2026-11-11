@@ -650,6 +650,8 @@ pub struct ParticleSystem {
     pub seed: u32,
     /// The node's customData (the particle function's `i.custom`).
     pub custom: [f32; 4],
+    /// Hidden by its own `visible` (`World::particles_hidden_built`): in the build, its pass idle until it is shown.
+    pub hidden: bool,
 }
 
 /// A `GpuParticles` node as built: its quads (`first` in build order, `final_first` in the GPU's), its objects (and
@@ -1598,7 +1600,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     procs.push(p);
                 }
             }
-            Kind::Particles { count, emitter, params, material, emitter_area } if shown && *count > 0 => {
+            Kind::Particles { count, emitter, params, material, emitter_area } if (shown || w.particles_hidden_built(*id)) && *count > 0 => {
                 // Quads collapsed at the node until the particle pass places them (each its own object: pivot,
                 // bounds and per-particle data for material functions).
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
@@ -1631,7 +1633,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 for (k, v) in params.iter().take(32).enumerate() {
                     pf[k] = *v;
                 }
-                particles.push(ParticleSystem { translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom });
+                particles.push(ParticleSystem { translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom, hidden: !shown });
                 if !translucent {
                     tri_nodes.push((n.name.clone(), first, tris.len() as u32));
                 }

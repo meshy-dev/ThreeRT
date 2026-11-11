@@ -1527,6 +1527,15 @@ impl LiveCore {
         if !changes.any() {
             return Ok(false);
         }
+        // Particle systems shown or hidden by their own `visible`: in place when the build has them (a rain curtain
+        // the weather turns off costs nothing while off), else with the rebuild.
+        if !changes.structural {
+            for id in std::mem::take(&mut changes.particles_shown) {
+                if !self.g.set_particles_hidden(&self.sc.up, id, !world.shown(id)) {
+                    changes.structural = true;
+                }
+            }
+        }
         // New materials without textures: entries after the scene's, before the edits that place objects drawn with
         // them (and the GPU's table with them, grown if it is full).
         if !changes.new_materials.is_empty() && !changes.structural {
@@ -3639,7 +3648,8 @@ impl LiveCore {
         let bg = &self.sc.bgs[(self.frame % 2) as usize];
         // Translucent particles: drawn over the composed image right after the specular filter composes it (into fb when
         // depth of field / motion blur follow, else fa; live.wgsl spec_filter), then their volume voxels trained.
-        let tl = self.sc.up.translucent.as_ref().map(|t| {
+        // (Nothing to draw while every translucent particle system is hidden in place.)
+        let tl = self.sc.up.translucent.as_ref().filter(|_| g.translucent_particles_live(&self.sc.up)).map(|t| {
             let pipes = g.translucent_pipelines(&self.sc.up.kernel, true);
             let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.fb } else { &self.targets.fa };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
