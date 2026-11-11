@@ -8,6 +8,16 @@ bun site/serve.ts           # http://localhost:4173/
 bun site/tools/build.ts     # a static copy for any file host -> out/site/
 ```
 
+**Live at https://threert.dev** (www.threert.dev redirects there). Deploy after a change:
+
+```bash
+wrangler login              # once, as a member of the Cloudflare account that holds threert.dev
+bun site/tools/deploy.ts    # build out/site, then wrangler deploy (site/wrangler.jsonc)
+```
+
+It is a Cloudflare Worker, `threert-site`: static assets from `out/site` on the custom domains threert.dev and
+www.threert.dev; `site/worker.ts` only redirects www to the apex and hands everything else to the assets.
+
 ## What is on it
 
 1. **Hero:** Bistro night, three.js | ThreeRT under one draggable divider. "Every light, traced. At 60 fps."
@@ -32,7 +42,8 @@ bun site/tools/build.ts     # a static copy for any file host -> out/site/
 | `js/devices.js` | The 3D device rows (three.js), with a still fallback when WebGL is off |
 | `brand/` | The mark ("Orbit": a triangle and the one closed light path that bounces inside it) and its variants |
 | `media/` | The renders, WebP. Generated; never retouched |
-| `serve.ts`, `tools/` | Local server, static build, media and device-still generators |
+| `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators |
+| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker and its config (threert.dev) |
 
 ## Media
 
