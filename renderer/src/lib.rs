@@ -356,6 +356,11 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     if !g.hwrt && !sc.instances.is_empty() {
         flatten_instances(sc);
     }
+    // Software traversal walks each procedural object's boxes through a tree of its own, and the tree over no box is
+    // not one the kernel can walk (bvh.rs `EMPTY`): an object without boxes has nothing to meet, and is left out.
+    if !g.hwrt {
+        sc.procs.retain(|p| !p.blob.boxes.is_empty());
+    }
     // Hardware RT only needs triangles grouped by shadow casting; software traversal needs our BVH.
     let bvh = if g.hwrt {
         let mut order: Vec<u32> = (0..sc.tris.len() as u32).collect();

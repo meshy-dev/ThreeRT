@@ -1407,6 +1407,8 @@ impl Gpu {
         let d = &self.device;
         let t0 = Instant::now();
         // Empty tables still bind one zeroed element (the largest is a material, 368 B).
+        // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
+        // triangle without area; bvh.rs `EMPTY`.)
         let buf = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
             let data: &[u8] = if bytes.is_empty() { &[0u8; 512] } else { bytes };
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
