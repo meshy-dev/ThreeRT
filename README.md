@@ -73,12 +73,15 @@ npm run test:render                       # the render test suite on the GPU
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push and PR:
-- `npm run typecheck`, `npm test`;
-- the renderer's release build;
-- the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
-- the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
-- the engine library's wasm32 build.
+`.github/workflows/ci.yml` runs on every push to main and every PR, as parallel jobs:
+- `ts`: `npm run typecheck`, `npm test`;
+- `renderer`: the renderer's release build;
+- `voxel`: the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
+- `physics`: the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
+- `wasm`: the engine library's wasm32 build.
+
+A PR runs a job only when it changes that job's inputs (the paths in the workflow's `changes` job; a change to the workflows runs them all); a push to main runs them all.
+`threert` sums them up and is the check to read before merging: it fails when a job failed or was cancelled, and passes when each one passed or was skipped by its paths.
 
 The GPU checks (`test:render`, the perf smoke, the benches) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 
