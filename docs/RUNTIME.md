@@ -235,8 +235,11 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   - Cost: asleep, nothing. While they move, Rapier's step on one thread: 1.4 ms a tick for a hundred jagged pieces
     of 200 voxels in a heap, under 0.5 ms for one building part of 96 k voxels landing. On the benchmark level
     (hardware traversal) 60 fps holds to about a hundred large bodies moving at once: the step is then 10–13 ms.
-    Rapier's parallel solver gives the same bits and a third of that on 4 threads; it is not on (ROADMAP § 6 step
-    8, "Open").
+    Rapier's parallel solver gives the same bits and a third of that on 4 threads (about 450–500 bodies moving in a
+    frame): the renderer's feature `physics-parallel`, native only, off by default (ROADMAP § 6 step 8, "Open").
+    With it the world is stepped in a pool of its own (`THREERT_PHYSICS_THREADS`, 4), not the process's.
+  - Ids in a call (`body`, `collider`, `skip`, ...) are whole numbers however they are written: scene code hands
+    back an id it read from an answer as a double.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 

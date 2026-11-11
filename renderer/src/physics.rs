@@ -103,9 +103,17 @@ impl PhysicsWorld {
     /// `ticks` ticks, then the moved bodies' objects placed.
     fn step(&mut self, w: &mut World, ticks: u32) {
         let t0 = Instant::now();
-        for _ in 0..ticks {
-            self.bridge.tick();
-        }
+        let bridge = &mut self.bridge;
+        #[allow(unused_mut)]
+        let mut tick = move || {
+            for _ in 0..ticks {
+                bridge.tick();
+            }
+        };
+        #[cfg(feature = "physics-parallel")]
+        pool().install(tick);
+        #[cfg(not(feature = "physics-parallel"))]
+        tick();
         let t1 = Instant::now();
         let moved = self.bridge.sync(w);
         self.stats.ticks += ticks;
@@ -146,6 +154,19 @@ impl PhysicsWorld {
     pub fn hash(&self) -> u64 {
         self.bridge.hash()
     }
+}
+
+/// The threads Rapier's parallel solver steps the world on (the `physics-parallel` feature): a pool of the physics'
+/// own, of 4 (`THREERT_PHYSICS_THREADS`: 1 to 16), not the process's pool, which has every core for the renderer's
+/// own work. Measured (docs/VOXEL.md "Voxel bodies"): 4 threads take a third of the sequential step's time, 8 gain
+/// little more, and with little moving more threads cost. The bits do not depend on the count.
+#[cfg(feature = "physics-parallel")]
+fn pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::env::var("THREERT_PHYSICS_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(4);
+        rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|k| format!("physics-{k}")).build().expect("the physics' threads")
+    })
 }
 
 #[cfg(test)]

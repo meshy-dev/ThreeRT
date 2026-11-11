@@ -47,6 +47,10 @@ crate-type = ["cdylib"]
 [features]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
 oidn = ["dep:oidn"]
+# Rapier's parallel solver for the physics world (physics-core's `parallel`), stepped in a pool of its own
+# (src/physics.rs: 4 threads, THREERT_PHYSICS_THREADS). Native only; off by default (ROADMAP § 6 step 8: it steps to the
+# sequential build's bits, which are wasm32's; whether it becomes the native default is not decided).
+physics-parallel = ["physics-core/parallel"]
 
 [profile.release]
 opt-level = 3

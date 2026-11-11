@@ -17,6 +17,7 @@
 //   shatter    `fell`, then from two seconds on a cut 0.2 m thick every tenth of a second through what fell, 30 a
 //              metre apart across the road and 30 along it: the bodies are cut into more and more bodies (ROADMAP
 //              § 6 step 8: how many bodies a frame holds, and the cap on them)
+//   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner
 // With `debris`
 // (level-destruction-debris.game.ts; ROADMAP § 6 step 2e), the voxels too few to make a piece are thrown out as
 // instances of one unit cube (an `InstancedMesh`, coloured per instance from the palette), fall, bounce on the ground
@@ -36,7 +37,7 @@ import { VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxel
 import { nativeObjects, nativePalette } from "./native.ts";
 import { EDGE, PALETTE, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
 
-type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter";
+type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense";
 interface State { scenario: Scenario | null; started: number }
 
 /** Spots for explosions: alternately on the ground ahead of the camera and on the walls of the buildings nearest it
@@ -316,7 +317,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           const e = voxelCarve({ box: [x - 15, y + 0.5, z - 6, x + 15, y + 1.5, z + 24] });
           console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
         }
-      } else if (s === "shatter") {
+      } else if (s === "shatter" || s === "shatter-dense") {
         const [x, y, z] = at[2 * 62];
         if (t >= 1 && last < 0) {
           last = 0;
@@ -324,11 +325,13 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
         }
         // (From 0.3 m above the road up: the cuts go through what stands and what fell, not into the ground.)
-        const k = Math.floor((t - 3) * 10) + 1;
-        if (t >= 3 && k <= 60 && k !== last) {
+        // Cuts 0.2 m thick, `gap` m apart, `rate` a second: across the road's 30 m, then along them.
+        const [gap, rate] = s === "shatter" ? [1, 10] : [0.5, 20];
+        const n = 30 / gap, k = Math.floor((t - 3) * rate) + 1;
+        if (t >= 3 && k <= 2 * n && k !== last) {
           last = k;
-          const along = k <= 30;
-          const p = (along ? x - 15 : z - 6) + (along ? k : k - 30) - 0.5;
+          const along = k <= n;
+          const p = (along ? x - 15 : z - 6) + (along ? k : k - n) * gap - gap / 2;
           const e = voxelCarve({ box: along ? [p - 0.1, y + 0.3, z - 6, p + 0.1, y + 40, z + 24] : [x - 15, y + 0.3, p - 0.1, x + 15, y + 40, p + 0.1] });
           console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
         }
@@ -359,6 +362,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       crater: (tx) => { tx.state.scenario = "crater"; tx.state.started = frames; last = -1; },
       fell: (tx) => { tx.state.scenario = "fell"; tx.state.started = frames; last = -1; },
       shatter: (tx) => { tx.state.scenario = "shatter"; tx.state.started = frames; last = -1; },
+      "shatter-dense": (tx) => { tx.state.scenario = "shatter-dense"; tx.state.started = frames; last = -1; },
       topple: (tx) => { tx.state.scenario = "topple"; tx.state.started = frames; last = -1; },
       // The level's hash, logged (`hash <16 hex digits>`): the same events at the same frames give the same one.
       // With physics, the physics world's hash too (the bodies' poses and velocities, bit for bit).

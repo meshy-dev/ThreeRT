@@ -4079,17 +4079,18 @@ benchmark level. The order follows the dependencies; a step that meets a further
        - **A building cut loose** (the cut of 30 x 30 m: 20 parts, the largest 32,680 voxels): while they fall and
          land a frame's CPU is p50 5.3–5.5 ms, p95 8.1 ms, none over 16.7 ms; the physics step 0.28 ms, at worst
          0.52 (step 6: 26–28 ms a frame for as long as it fell); 17 of 20 asleep after 9.5 s.
-       - **About a hundred bodies: yes, without room to spare.** 60 fps holds to about a hundred bodies moving at
-         once (large ones: slabs and columns of buildings in one heap) and is lost past it: at 100–124 moving the
-         physics step is 10–13 ms (p50) and a frame's CPU 14–17 ms; at 175–199, 17 and 21 ms. What takes the frame
-         is Rapier's step on one thread; placing the parts is under 0.1 ms, the GPU's frame does not change. With
-         Rapier's parallel solver on 4 threads (an experiment, below) the step at 175–199 moving is 5.8 ms and a
-         frame's CPU 9.9 ms: 60 fps through all 222 bodies the scenario makes.
+       - **About a hundred bodies: yes, without room to spare, sequentially.** The number of bodies moving at once
+         at which 60 fps is lost (large ones: slabs and columns of buildings in one heap): **about a hundred on
+         one thread** (at 100–149 moving the physics step is 10–13 ms and a frame's CPU 14–17 ms; from 150 every
+         frame is over; all 512 of the cap moving: 39–45 ms a frame), **about 450–500 on 4 threads** with Rapier's
+         parallel solver (the feature `physics-parallel`, off by default: all 512 moving, 14.7–16.4 ms a frame at
+         the median). What takes the frame is Rapier's step; placing the parts is under 0.2 ms, the GPU's frame
+         does not change. The bodies are the same in every frame either way.
        - The CPU split of an edit (the 4 m crater: carve 2.4, colliders 6.5, meshes 7.5, commit 3.9 ms; the cut:
          carve 21.6, colliders 15.3, meshes 5.3, parts and bodies 27.8, commit 37.7, the first physics step 5.6).
        - Scenes without voxel bodies: the catalog's 25 bundles are byte-identical to main's under software
          traversal; `renderer/shaders` has no diff; `test-render` 173 of 173 (the 170 of main and three new
-         `voxel/cut-body*`); step 7's physics tests and hello world give the numbers they gave; `cargo test` 85.
+         `voxel/cut-body*`, a fourth since); step 7's physics tests and hello world give the numbers they gave.
          The perf smoke was not measured (it refused: the GPU was 20 % busy with other applications).
        - Software traversal (works, not optimised): bodies are units added and moved in place, no rebuild, guard
          count 0; the 4 m explosion's frame 18.6 ms, the cut's 194 ms (the parts' trees are built on the CPU),
@@ -4104,6 +4105,12 @@ benchmark level. The order follows the dependencies; a step that meets a further
        physics hits on the engine's colliders carry their ids. The time the engine spends inside a voxel call is
        not counted against the frame script's 50 ms (a cut through a hundred bodies takes that long, and the
        script was ended after it).
+     - **From scene code** (`voxel/cut-body-push`, a live test): a ray of `Raycaster.intersectPhysics` meets the
+       level (`hit.object` is `engineColliders`, whose `physics` is null; no `body`) and a voxel body (`body`), and
+       `voxelImpulse(hit.body, ...)` throws it. Writing that test found two faults the Rust tests had stepped
+       past: the scene package asked the engine's world only once a scene object with `physics` existed (a voxel
+       level makes none: `voxelLevel` now binds the queries), and an id read out of an answer came back from the
+       script engine as a double and was refused (the bridge reads a whole number as the id it is).
      - Three faults of Rapier 0.36 / parry 0.31 with voxel shapes, each with a test and a way round in physics-core
        (none patches the crates): the solver panics on a ball against voxels (parry's function for that pair keeps
        no workspace; the pair now goes through its general voxel function); parry's ray misses voxels along a
@@ -4111,15 +4118,20 @@ benchmark level. The order follows the dependencies; a step that meets a further
        collider is taken out and put back).
    - Open:
      - **Past about a hundred bodies moving at once the frame is lost, and the default build has one thread for
-       the physics.** Rapier's parallel solver (`physics-core`'s `parallel` feature: native only, off by default)
-       steps to the sequential build's bits in everything run (1,500 random worlds, heaps of up to 1,000 voxel
-       pieces at 1 to 15 threads, 20,000 voxel worlds without a panic, and the level: the same bodies moving in
-       every one of 921 frames at 4 and 8 threads) and takes the step at 175–199 bodies moving from 16.9 to 5.8 ms
-       on 4 threads (3.8 on 8). **No default is changed**: turning it on natively (and on how many threads) is the
-       supervisor's decision; if it is, the determinism check in CI gets a parallel native build.
+       the physics.** Rapier's parallel solver is in as an option, off by default: physics-core's `parallel`, the
+       renderer's `physics-parallel` (native only; the world is stepped in a pool of its own, 4 threads,
+       `THREERT_PHYSICS_THREADS`). It steps to the sequential build's bits in everything run: the 1,500 random
+       worlds and the script at 2 and 4 threads in CI (`tools/physics-determinism.ts`: a third native build in the
+       physics job), heaps of up to 1,000 voxel pieces at 1 to 15 threads, 20,000 voxel worlds without a panic,
+       the renderer's own recorded-bits tests with the feature on, and the level (the same bodies moving in every
+       frame of `fell`, `sustained`, `shatter` and `shatter-dense`). It takes the step with all 512 bodies moving
+       from 41 to 12 ms and costs nothing that shows when few move. **Whether it is the native default is the
+       supervisor's decision; no default is changed.** (wasm32 stays sequential: it has no threads here, and the
+       bits agree.)
      - **The cap** (`maxBodies`, 512) is above what the sequential build holds at 60 fps when all move: a cap of
-       128 keeps the worst case about at the frame (one frame in six over 16.7 ms at 100–124 moving). Left at 512
-       until the decision above; asleep, bodies cost nothing, and a game's bodies seldom all move.
+       128 keeps the worst case about at the frame (one frame in six over 16.7 ms at 100–124 moving). On 4 threads
+       512 all moving is about at the frame. Left at 512 until the decision above; asleep, bodies cost nothing,
+       and a game's bodies seldom all move.
      - **A large cut's own frame is over 50 ms**: 117 ms for the cut of 30 x 30 m (the scene's commit of the new
        parts' meshes 38 ms, the parts' meshes and bodies 28, the carve 22, the colliders 15); a cut through a heap
        of a hundred bodies 26–29 ms (p95 45). Explosions are within the target. Not split over frames yet.
@@ -4147,7 +4159,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
      resting, stacking and sleeping on a level of 61.6 M collider cells; edits of a shape by its cells in 0.1 ms),
      with the three faults above found and worked round in a day. Its cost is the step: about 0.1 ms a large body
      that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver is worth a factor of
-     3 on 4 threads at the same bits. What an engine of our own would have to beat is that step, and it would have
+     3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
      to bring the determinism, the sleeping and the voxel-voxel contacts with it.
 9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
