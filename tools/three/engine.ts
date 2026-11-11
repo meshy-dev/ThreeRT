@@ -623,6 +623,9 @@ export class ThreeEngine implements Engine {
     switch (l.type) {
       case "directional": {
         const dl = new THREE.DirectionalLight();
+        // three.js starts these lights one unit up (Object3D.DEFAULT_UP); the pose is the node's, so the light sits at
+        // its origin. (For a spot light the offset moved the cone a metre off its lamp.)
+        dl.position.set(0, 0, 0);
         dl.target.position.set(0, 0, -1);
         dl.add(dl.target);
         dl.shadow.mapSize.set(SHADOW.directional, SHADOW.directional);
@@ -639,6 +642,7 @@ export class ThreeEngine implements Engine {
       }
       case "spot": {
         const sl = new THREE.SpotLight();
+        sl.position.set(0, 0, 0);
         sl.decay = 2;
         sl.target.position.set(0, 0, -1);
         sl.add(sl.target);
