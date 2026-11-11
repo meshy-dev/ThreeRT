@@ -14,9 +14,62 @@ concurrency:
   # A newer push to a PR supersedes its older run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The checks run as parallel jobs; `threert`, the last one, is the one to read: it fails when any of them failed or was
+# cancelled, and passes when every one passed or was skipped by its paths. A PR runs a job only when it changes that
+# job's inputs (the `changes` job); a push to main and a manual run run them all.
 jobs:
-  threert:
+  changes:
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      renderer: ${{ steps.paths.outputs.renderer }}
+      voxel: ${{ steps.paths.outputs.voxel }}
+      physics: ${{ steps.paths.outputs.physics }}
+      wasm: ${{ steps.paths.outputs.wasm }}
+      web: ${{ steps.paths.outputs.web }}
+    steps:
+      # Each job's inputs, as patterns on the paths a PR changes (the old and the new path of a rename). A change to the
+      # workflows, a PR of 3,000 files or more (the most the API lists) and any event other than a PR run every job.
+      - id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          all=false files=
+          if [ "$EVENT" != pull_request ] || [ "$CHANGED" -ge 3000 ]; then
+            all=true
+          else
+            files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
+            printf '%s\n' "$files"
+            if grep -Eq '^\.github/' <<< "$files"; then all=true; fi
+          fi
+          # job <name> <the paths it runs for> [<paths among those it does not>]
+          job() {
+            if [ "$all" = true ] || grep -Ev "${3:-^$}" <<< "$files" | grep -Eq "$2"; then run=true; else run=false; fi
+            echo "$1=$run" | tee -a "$GITHUB_OUTPUT"
+          }
+          # The renderer's release build: the crate, its path dependencies (voxel-core, physics-core, third_party) and
+          # the presets it embeds (src/files.rs); not the browser module's crate (renderer/web), which it does not build.
+          job renderer '^(renderer/|presets/)' '^renderer/web/'
+          # voxel-core and its determinism check.
+          job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
+          # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
+          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file).
+          job physics '^(renderer/(physics-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$)|tools/physics-determinism\.ts$)'
+          # The engine's library for wasm32: the same as the renderer's.
+          job wasm '^(renderer/|presets/)' '^renderer/web/'
+          # The browser module (renderer/web, on the engine's library) and tools/web-engine.ts: the module in Node with
+          # the physics hello world's bundle (games/, packages/, the bundler's and the build's tools, the npm manifests).
+          job web '^(renderer/|presets/|games/|packages/|tools/(web-engine\.ts|bundle-game\.ts|lib/)|package(-lock)?\.json$)'
+
+  ts:
+    name: "ts: typecheck, tests"
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -26,32 +79,126 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  renderer:
+    name: "renderer: release build"
+    needs: changes
+    if: needs.changes.outputs.renderer == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            renderer
-            renderer/voxel-core
-            renderer/physics-core
-            renderer/web
+          workspaces: renderer
       - run: cd renderer && cargo build --release --locked
-      # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
+
+  voxel:
+    name: "voxel: wasm32, tests, determinism"
+    needs: changes
+    if: needs.changes.outputs.voxel == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer/voxel-core
+      # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
       - run: cd renderer/voxel-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
       # Its edits are deterministic: the same script natively and in wasm32 leaves the same voxels (ROADMAP § 6 step 6).
       - run: node tools/voxel-determinism.ts
+
+  physics:
+    name: "physics: wasm32, tests, determinism"
+    needs: changes
+    if: needs.changes.outputs.physics == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: rustup target add wasm32-unknown-unknown
+      # Cargo takes a path dependency's sources as changed when they are newer than its build, which a checkout always
+      # makes them: third_party/glamx, the patched crate under Rapier's (a path dependency), was rebuilt in each of the
+      # four builds of physics-core below, and Rapier's crates on top of it with it. Its sources get one fixed old
+      # time instead, and the cache's key holds their hash: it is only restored from a run with the same third_party, so
+      # the build of glamx it keeps is of these sources (a change to them starts from no cache).
+      - run: find renderer/third_party -exec touch -d 2000-01-01T00:00:00Z {} +
+      # physics-core's own target directory, and the renderer's (the determinism check builds the renderer's crate graph
+      # for wasm32 there; rust-cache leaves out of that one the crates under renderer/, glamx among them).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: third-party-${{ hashFiles('renderer/third_party/**') }}
+          workspaces: |
+            renderer/physics-core
+            renderer
       # The physics core (Rapier) builds for the browser too, passes its tests, and steps to the same bits natively and
       # in wasm32 (ROADMAP § 6 step 7).
       - run: cd renderer/physics-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
       - run: node tools/physics-determinism.ts
+
+  wasm:
+    name: "engine: wasm32 library"
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer
       # The engine's library builds for the browser (wasm32; docs/RUNTIME.md "The engine's library in a browser").
       - run: cd renderer && cargo build --release --locked --lib --target wasm32-unknown-unknown
-      # And the module a page loads: the engine's exports for the browser's JavaScript (renderer/web; docs/RUNTIME.md
+
+  web:
+    name: "web: browser module, hello world in Node"
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer/web
+      # The module a page loads: the engine's exports for the browser's JavaScript (renderer/web; docs/RUNTIME.md
       # "The engine in a browser"). Running it needs a browser with a GPU: tools/web-hello.ts, on a developer's machine.
       - run: cd renderer/web && cargo build --release --locked --target wasm32-unknown-unknown
+      # wasm-bindgen's CLI writes the module's JavaScript; its version is the crate's (renderer/web/Cargo.toml). The
+      # release's prebuilt binary, checksummed by the action (it falls back to cargo-binstall for a version it lacks).
+      - id: bindgen
+        run: echo "version=$(grep -o 'wasm-bindgen = "=[0-9.]*"' renderer/web/Cargo.toml | grep -o '[0-9][0-9.]*')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.bindgen.outputs.version }}
       # The browser's side of it without a browser or a GPU: the module in Node, the page's `__engine` over its exports,
       # the game bundle the native runtime loads, the physics hello world's script and its checks (tools/web-engine.ts).
-      # wasm-bindgen's CLI writes the module's JavaScript; its version is the crate's (renderer/web/Cargo.toml).
-      - run: |
-          V=$(grep -o 'wasm-bindgen = "=[0-9.]*"' renderer/web/Cargo.toml | grep -o '[0-9][0-9.]*')
-          wasm-bindgen --version 2>/dev/null | grep -q "$V" || cargo install wasm-bindgen-cli --version "$V" --locked
       - run: node tools/web-engine.ts
+
+  # The check to read before merging (`gh pr checks <n>`: `threert`).
+  threert:
+    needs: [changes, ts, renderer, voxel, physics, wasm, web]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$RESULTS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<< "$RESULTS" > /dev/null
