@@ -1,26 +1,55 @@
-# ThreeRT landing page
+# ThreeRT site
 
-A static page, no build step. three.js comes from the repo's own devDependency; the images in `media/` are committed.
+Static pages, no build step. three.js and the QR encoder come from the repo's own devDependencies; the images in
+`media/` are committed.
 
 ```bash
-npm install                 # once, at the repo root (three, sharp)
-bun site/serve.ts           # http://localhost:4173/
+npm install                 # once, at the repo root (three, qrcode-generator, sharp)
+bun site/serve.ts           # http://localhost:4173/        [port] [--lan]
 bun site/tools/build.ts     # a static copy for any file host -> out/site/
 ```
+
+`--lan` listens on every interface and prints the LAN address: open that one on the Mac and a phone on the same
+network can scan the QR codes on the pages (they carry `threert://<lan ip>:<port>/play/<id>`).
 
 **Live at https://threert.dev** (www.threert.dev redirects there). Deploy after a change:
 
 ```bash
 wrangler login              # once, as a member of the Cloudflare account that holds threert.dev
-bun site/tools/deploy.ts    # build out/site, then wrangler deploy (site/wrangler.jsonc)
+bun site/tools/deploy.ts    # build out/site (strict, see below), then wrangler deploy (site/wrangler.jsonc)
 ```
 
 It is a Cloudflare Worker, `threert-site`: static assets from `out/site` on the custom domains threert.dev and
-www.threert.dev; `site/worker.ts` only redirects www to the apex and hands everything else to the assets.
+www.threert.dev; `site/worker.ts` redirects www to the apex, serves the clients' disk images from R2 and hands everything else to the assets.
+Workers static assets take **25 MiB a file**, and the client's disk image is about 32 MiB (it carries the `threert`
+command line). So the image is not a static asset: it lives in the R2 bucket `threert-releases` under its file name,
+and `worker.ts` serves it at the URL the Download page links, `/releases/<file>` (ranges, `ETag`, `HEAD`). R2 rather
+than a GitHub release because the client is closed source and has no public repository to carry one. Once:
 
-## What is on it
+```bash
+bunx wrangler@4 r2 bucket create threert-releases
+```
 
-1. **Hero:** Bistro night, three.js | ThreeRT under one draggable divider. "Every light, traced. At 60 fps."
+`deploy.ts` uploads the image `releases/latest.json` names, then deploys. `build.ts` leaves the image out of
+`out/site` (`--with-image` copies it, for a plain file host). Locally, `serve.ts` serves it from `site/releases/`.
+To check the Worker itself without an account: `bunx wrangler@4 r2 object put threert-releases/<file> --file
+site/releases/<file> --local --config site/wrangler.jsonc`, then `bunx wrangler@4 dev --config site/wrangler.jsonc`.
+
+## Pages
+
+Every page has the same nav, top right: **Showcase / Download / Docs / GitHub** (github.com/taichi-dev/ThreeRT), and
+the same footer links. The markup is repeated in each page; change it in all four.
+
+| Page | What is on it |
+|---|---|
+| `index.html` | The landing page (below). Its two buttons, in the hero and at the end: **Download** (to `download/`, named for the visitor's platform by `js/site.js`) and **GitHub**. |
+| `showcase/` | Bistro night and Zero-Day as camera moves (the committed media), then **Open on your device**: a card for each example package in `play/` with an "Open in ThreeRT" link, the same game as three.js, and a QR code for the iPhone app. |
+| `download/` | ThreeRT for macOS (the build `releases/latest.json` names) and ThreeRT for iPhone (a TestFlight or App Store link once `ios.url` is set), then how a client loads a game: `threert dev`, scan, traced and live. |
+| `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format, links to the reference documents in `docs/` on GitHub. |
+
+### The landing page
+
+1. **Hero:** Bistro night, three.js | ThreeRT under one draggable divider. "Path tracing at 60 fps."
 2. **ThreeRT = Three + RT:** Ray Tracing, Real Time, Runtime.
 3. **Hello world looks right:** an auto-advancing reel of three starter scenes, the ThreeRT source next to its output
    (three.js as written | ThreeRT with every setting at its default).
@@ -32,18 +61,63 @@ www.threert.dev; `site/worker.ts` only redirects www to the apex and hands every
    as three.js in any browser or WebView, drawn as live three.js device models at real proportions.
 8. **Just light.**
 
+## The two generated directories
+
+`site/releases/` and `site/play/` are not committed (.gitignore): the first holds a build of the closed-source
+client, the second packages built with it. The client repository's release script writes both, whole. Without them
+the pages still work: Download says that no build is published on this host, Showcase that there are no packages.
+`serve.ts` and `build.ts` warn; `build.ts --require-release` (what `deploy.ts` runs) stops instead, so a deploy never
+puts up a Download button with nothing behind it.
+
+`releases/latest.json`, next to the file it names:
+
+```jsonc
+{
+  "version": "0.1.0", "date": "2026-11-11",
+  "macos": { "file": "ThreeRT-0.1.0-macos-arm64.dmg", "size": 33981234, "sha256": "…", "minOS": "14.0", "arch": "arm64",
+             "url": null,              // null: `releases/<file>` on this host (R2 behind the Worker; site/releases/ locally);
+                                       // or the https URL of the image when it is hosted elsewhere (`release.ts --macos-url`)
+             "signed": "adhoc",        // or "developer-id"
+             "notarized": false },     // unless signed with a Developer ID and notarized, the page explains the first launch
+  "ios": { "url": null,                // the TestFlight / App Store link; null: "TestFlight beta not open yet"
+           "channel": "testflight",    // or "appstore"
+           "minOS": "17.0" }
+}
+```
+
+`play/index.json`, next to a thumbnail and a package directory for each game:
+
+```jsonc
+{
+  "client": "0.1.0",
+  "games": [{ "id": "light-room", "title": "Light Room", "caption": "…", "kind": "game" /* or "scene" */, "thumb": "light-room.jpg" }]
+}
+```
+
+`play/<id>/` is a ThreeRT package (the client repository's docs/CLIENT.md § 1): `threert.json` (format `threert/1`),
+`game.js`, `game.mjs`, the same game as three.js (`index.html`, `web.js`), `presets/`, `assets/`. The pages derive the
+links from where they are served (`js/site.js` `packageLinks`):
+
+| | over https | over http (a dev machine) |
+|---|---|---|
+| Open in ThreeRT | `threerts://<host>/play/<id>` | `threert://<host>:<port>/play/<id>` |
+| three.js in the browser | `https://<host>/play/<id>/` | `http://<host>:<port>/play/<id>/` |
+| QR code | the plain `https://` URL: the phone's camera opens the three.js page, the app's scanner opens the package | the `threert://` link, which the camera hands to the app |
+
 ## Files
 
 | Path | What |
 |---|---|
-| `index.html` | The page (sections, their styles and their script) |
-| `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the comparison and player components |
+| `index.html`, `showcase/`, `download/`, `docs/` | The pages (sections, their styles and their script) |
+| `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the nav and footer, the comparison and player components, the cards, steps and QR tiles of the inner pages |
 | `js/threert.js` | The wipe comparison, the synced camera-move player, the code highlighter |
+| `js/site.js` | What the pages share: the visitor's platform, the release and the packages on this host, their links, QR codes |
 | `js/devices.js` | The 3D device rows (three.js), with a still fallback when WebGL is off |
-| `brand/` | The mark ("Orbit": a triangle and the one closed light path that bounces inside it) and its variants |
+| `brand/` | The mark ("Three bounces": the three.js triangle, tilted as three.js draws it, and the closed light path inside it, which is three.js's own inner triangle) and its variants. `js/mark.js` draws it live in the lockup and on the landing page, and turns the path on hover |
 | `media/` | The renders, WebP. Generated; never retouched |
-| `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators |
-| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker and its config (threert.dev) |
+| `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
+| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, disk images from R2, static assets) and its config (threert.dev) |
+| `releases/`, `play/` | Generated, not committed (above) |
 
 ## Media
 
