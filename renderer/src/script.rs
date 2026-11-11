@@ -61,6 +61,23 @@ globalThis.atob = (s) => {
 };
 "#;
 
+/// Where the game's `console.*` lines go besides stderr (the client's log panel and dev server): `set_log_sink`.
+static LOG_SINK: std::sync::RwLock<Option<fn(&str, &str)>> = std::sync::RwLock::new(None);
+
+/// Also hands every game log line (`level`, `text`) to `sink` (one per process; None removes it).
+pub fn set_log_sink(sink: Option<fn(&str, &str)>) {
+    if let Ok(mut s) = LOG_SINK.write() {
+        *s = sink;
+    }
+}
+
+/// The game code a session runs: a one-script bundle (tools/bundle-game.ts), or a game module on the runtime module
+/// (`ScriptHost::from_modules`, the cloud's layout; the clients' playground code).
+pub enum GameCode<'a> {
+    Bundle(&'a str),
+    Modules { game: &'a str, runtime: &'a str },
+}
+
 /// Time budgets per entry point (ms): building a scene may take a while, events and frames may not.
 const SETUP_MS: u64 = 120_000;
 const EVENT_MS: u64 = 1_000;
@@ -299,7 +316,12 @@ impl ScriptHost {
         let (w, v, ph) = (h.world.clone(), h.voxels.clone(), h.physics.clone());
         let info: String = h.call(SETUP_MS, |ctx| {
             let g = ctx.globals();
-            g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") }))?)?;
+            g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| {
+                eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") });
+                if let Some(sink) = LOG_SINK.read().ok().and_then(|s| *s) {
+                    sink(&level, &msg);
+                }
+            })?)?;
             g.set("__host_now", Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1000.0)?)?;
             install_engine(ctx, &w, &v, &ph)?;
             ctx.eval::<(), _>(PRELUDE)?;
@@ -476,7 +498,16 @@ impl GameClock {
 impl GameSession {
     /// Loads the bundle and builds the scene in the runtime.
     fn load(bundle: &std::path::Path, room: &str) -> Result<GameSession> {
-        let host = ScriptHost::new(&std::fs::read_to_string(bundle).map_err(|e| anyhow!("{}: {e}", bundle.display()))?)?;
+        Self::load_code(GameCode::Bundle(&std::fs::read_to_string(bundle).map_err(|e| anyhow!("{}: {e}", bundle.display()))?), room)
+    }
+
+    /// Loads game code and builds the scene in the runtime, without a live view yet: a client can fetch the files the
+    /// scene reads (`files`) before `start_loaded` / `open_loaded` build the GPU scene from them.
+    pub fn load_code(code: GameCode, room: &str) -> Result<GameSession> {
+        let host = match code {
+            GameCode::Bundle(b) => ScriptHost::new(b)?,
+            GameCode::Modules { game, runtime } => ScriptHost::from_modules(game, runtime)?,
+        };
         let setup_ms = host.setup(room, None)?;
         host.world.borrow_mut().take_changes();
         eprintln!("game: setup {setup_ms:.0} ms in the node runtime, {} objects, handlers {}, frame script {}", host.world.borrow().objects.len(), host.info["handlers"], host.has_frame());
@@ -486,19 +517,32 @@ impl GameSession {
     /// Loads the bundle, builds the scene in the runtime and opens a live view of it. Models and file textures resolve
     /// against `assets`.
     pub fn start(bundle: &std::path::Path, room: &str, assets: &std::path::Path, g: crate::gpu::Gpu, presets: &std::path::Path, w: u32, h: u32) -> Result<(GameSession, crate::live::LiveCore)> {
-        let s = Self::load(bundle, room)?;
-        s.realize_voxels(assets)?;
-        let core = crate::live::LiveCore::new(g, &s.host.world.borrow(), assets, presets, w, h)?;
-        Ok((s, core))
+        Self::load(bundle, room)?.start_loaded(assets, g, presets, w, h)
     }
 
     /// Loads the bundle into an existing live view (history cleared, camera from the scene).
     pub fn open(bundle: &std::path::Path, room: &str, assets: &std::path::Path, core: &mut crate::live::LiveCore) -> Result<GameSession> {
-        let s = Self::load(bundle, room)?;
-        s.realize_voxels(assets)?;
-        core.open(&s.host.world.borrow(), assets)?;
+        Self::load(bundle, room)?.open_loaded(assets, core)
+    }
+
+    /// Files the built scene reads from the asset root (models, file textures, procedural assets).
+    pub fn files(&self) -> Vec<String> {
+        self.host.world.borrow().files()
+    }
+
+    /// Opens the first live view of a loaded session (`load_code`).
+    pub fn start_loaded(self, assets: &std::path::Path, g: crate::gpu::Gpu, presets: &std::path::Path, w: u32, h: u32) -> Result<(GameSession, crate::live::LiveCore)> {
+        self.realize_voxels(assets)?;
+        let core = crate::live::LiveCore::new(g, &self.host.world.borrow(), assets, presets, w, h)?;
+        Ok((self, core))
+    }
+
+    /// Shows a loaded session (`load_code`) in an existing live view (history cleared, camera from the scene).
+    pub fn open_loaded(self, assets: &std::path::Path, core: &mut crate::live::LiveCore) -> Result<GameSession> {
+        self.realize_voxels(assets)?;
+        core.open(&self.host.world.borrow(), assets)?;
         core.seq = 0;
-        Ok(s)
+        Ok(self)
     }
 
     /// Loads the voxel level the scene code asked for (`voxelLevel`) now that the asset root is known. The scene build
