@@ -44,7 +44,8 @@ struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: 
 
 // a: (first triangle in the GPU order, count, first object, function); b: (seed, first dynamic triangle, translucent
 // (1: its triangles are the translucency pass's, `tblas` from the first translucent triangle), first translucent
-// triangle); c: the node's pivot; p: parameters; d: the node's customData.
+// triangle); c: the node's pivot, w > 0: collapse every particle (the system was just hidden: gpu.rs
+// `set_particles_hidden`); p: parameters; d: the node's customData.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>, d: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> PPS: PP;
@@ -132,7 +133,7 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     i.pivot = s.c.xyz;
     i.custom = s.d;
     var o = particle_function(s.a.w, i, s.p);
-    if (!o.visible) {
+    if (!o.visible || s.c.w > 0.5) {
         o.u = vec3<f32>(0.0);
         o.v = vec3<f32>(0.0);
     }

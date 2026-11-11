@@ -232,6 +232,21 @@ pub struct ParticleGpu {
     fresh: std::cell::Cell<bool>,
     /// Some systems are opaque (in the scene's dynamic BLASes, rebuilt every frame).
     opaque: bool,
+    /// Per system: its particle count, whether the translucency pass draws it, and its state when hidden in place
+    /// (`set_particles_hidden`): `Shown`, `Collapse` (this frame's pass collapses its quads), `Collapsed` (zero its
+    /// count next frame), `Idle`.
+    counts: Vec<u32>,
+    translucent: Vec<bool>,
+    hidden: std::cell::RefCell<Vec<Hidden>>,
+}
+
+/// A particle system's state as hidden in place (`ParticleGpu::hidden`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hidden {
+    Shown,
+    Collapse,
+    Collapsed,
+    Idle,
 }
 
 /// Volume training points per frame at most (translucent.wgsl `volume_train`).
@@ -1620,7 +1635,8 @@ impl Gpu {
                         let o = &scene.objects[ps.object as usize * scene.object_stride()];
                         let mut p = [0.0f32; 32];
                         p.copy_from_slice(&ps.params);
-                        ParticleSystemGpu { a: [ps.final_first, ps.count, ps.object, ps.func], b: [ps.seed, dynamic_first as u32, ps.translucent as u32, scene.trans_first], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
+                        ParticleSystemGpu { a: [ps.final_first, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, dynamic_first as u32, ps.translucent as u32, scene.trans_first], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
@@ -1635,7 +1651,10 @@ impl Gpu {
                 });
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
                 let opaque = scene.particles.iter().any(|p| !p.translucent);
-                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque })
+                let counts = scene.particles.iter().map(|p| p.count).collect();
+                let translucent_sys = scene.particles.iter().map(|p| p.translucent).collect();
+                let hidden = std::cell::RefCell::new(scene.particles.iter().map(|p| if p.hidden { Hidden::Idle } else { Hidden::Shown }).collect());
+                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
             }
             _ => None,
         };
@@ -1806,6 +1825,28 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     pub fn run_particles(&self, up: &Uploaded, cam: [f32; 3], fwd: [f32; 3], time: f32, dt: f32, rain: f32, wetness: f32, e: &mut wgpu::CommandEncoder, pass_ts: Option<(&wgpu::QuerySet, u32)>, blas_ts: Option<(&wgpu::QuerySet, u32)>) {
         let (Some(p), Some(accel)) = (&up.particles, &up.accel) else { return };
+        // Systems hidden in place: collapsed by last frame's pass, now idle (count 0); every system idle: no pass, no
+        // BLAS builds (their quads stay collapsed).
+        {
+            let mut hidden = p.hidden.borrow_mut();
+            for (k, h) in hidden.iter_mut().enumerate() {
+                match *h {
+                    Hidden::Collapse => *h = Hidden::Collapsed,
+                    Hidden::Collapsed => {
+                        self.write_particle_count(p, k, 0, false);
+                        *h = Hidden::Idle;
+                    }
+                    _ => {}
+                }
+            }
+            if hidden.iter().all(|h| *h == Hidden::Idle) {
+                // (The stateful GPU particles leave the dynamic BLAS rebuild to this pass when there are stateless ones.)
+                if up.gpu_particles.is_some() {
+                    self.rebuild_dynamic(accel, e);
+                }
+                return;
+            }
+        }
         let first = if p.fresh.replace(false) { 1.0 } else { 0.0 };
         let v = [cam[0], cam[1], cam[2], time, fwd[0], fwd[1], fwd[2], dt, rain, wetness, first, 0.0];
         self.queue.write_buffer(&p.params, 0, bytemuck::cast_slice(&v));
@@ -1987,13 +2028,46 @@ impl Gpu {
         }
     }
 
-    /// A particle node moved: its systems' pivot (`i.pivot`).
+    /// A particle node moved: its systems' pivot (`i.pivot`; c.w, the collapse flag, kept).
     pub fn set_particle_pivot(&self, up: &Uploaded, node: u32, pivot: [f32; 3]) {
         let Some(p) = &up.particles else { return };
         for (k, _) in p.nodes.iter().enumerate().filter(|(_, n)| **n == node) {
             let at = (k * std::mem::size_of::<ParticleSystemGpu>() + 32) as u64;
-            self.queue.write_buffer(&p.table, at, bytemuck::cast_slice(&[pivot[0], pivot[1], pivot[2], 0.0]));
+            self.queue.write_buffer(&p.table, at, bytemuck::cast_slice(&pivot));
         }
+    }
+
+    /// System `k`'s particle count and collapse flag in the table (a.y, c.w).
+    fn write_particle_count(&self, p: &ParticleGpu, k: usize, count: u32, collapse: bool) {
+        let at = (k * std::mem::size_of::<ParticleSystemGpu>()) as u64;
+        self.queue.write_buffer(&p.table, at + 4, bytemuck::bytes_of(&count));
+        self.queue.write_buffer(&p.table, at + 44, bytemuck::bytes_of(&if collapse { 1.0f32 } else { 0.0 }));
+    }
+
+    /// A particle node shown or hidden by its own `visible`, in place: hidden, its systems' next pass collapses their
+    /// quads and then they run nothing (`run_particles`); shown, they run again. False when no system of the build is
+    /// that node's (the build left it out: a rebuild).
+    pub fn set_particles_hidden(&self, up: &Uploaded, node: u32, hide: bool) -> bool {
+        let Some(p) = &up.particles else { return false };
+        let mut hidden = p.hidden.borrow_mut();
+        let mut found = false;
+        for (k, _) in p.nodes.iter().enumerate().filter(|(_, n)| **n == node) {
+            found = true;
+            let shown = hidden[k] == Hidden::Shown;
+            if hide && shown {
+                self.write_particle_count(p, k, p.counts[k], true);
+                hidden[k] = Hidden::Collapse;
+            } else if !hide && !shown {
+                self.write_particle_count(p, k, p.counts[k], false);
+                hidden[k] = Hidden::Shown;
+            }
+        }
+        found
+    }
+
+    /// Whether the translucency pass has anything to draw: a translucent system shown (or collapsing).
+    pub fn translucent_particles_live(&self, up: &Uploaded) -> bool {
+        up.particles.as_ref().is_none_or(|p| p.translucent.iter().zip(p.hidden.borrow().iter()).any(|(t, h)| *t && *h != Hidden::Idle))
     }
 
     /// A particle node's customData changed: its systems' `i.custom`.
