@@ -64,13 +64,15 @@ export function yasukuni(): number[][] {
 export function driver(pts: number[][], speed: number): { cam: (t: number) => Cam; secs: number } {
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][2] - pts[i - 1][2]));
+  // (Past the end, along the last stretch: the look-ahead point stays ahead of the eye, which stops at the end.)
   const at = (s: number) => {
-    s = Math.min(Math.max(s, 0), cum[cum.length - 1]);
+    s = Math.max(s, 0);
     let i = 1;
     while (i < cum.length - 1 && cum[i] < s) i++;
     const u = (s - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]);
     return [0, 1, 2].map((c) => pts[i - 1][c] + (pts[i][c] - pts[i - 1][c]) * u + (c === 1 ? 1.6 : 0));
   };
-  return { cam: (t) => ({ pos: at(t * speed), target: at(t * speed + 30), tan }), secs: cum[cum.length - 1] / speed };
+  const end = cum[cum.length - 1];
+  return { cam: (t) => ({ pos: at(Math.min(t * speed, end)), target: at(Math.min(t * speed, end) + 30), tan }), secs: end / speed };
 }
 

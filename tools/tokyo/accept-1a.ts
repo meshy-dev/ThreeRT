@@ -46,12 +46,12 @@ const result: Record<string, unknown> = {};
 async function realtime(name: string, room: string, cam: (t: number) => Cam, secs: number) {
   const log = join(out, `${name}.jsonl`);
   rmSync(log, { force: true });
+  const launch = performance.now();
   const live = startLive(b, bundle, { scale: "auto", frameLog: log, room });
-  await live.firstFrame;
+  const first = await live.firstFrame;
   live.send({ cmd: "camera", ...cam(0) });
   await sleep(4000);
   live.send({ cmd: "time", t: 0 });
-  const before = readFileSync(log, "utf8").trim().split("\n").length;
   const t0 = performance.now();
   for (let k = 0; ; k++) {
     const t = (performance.now() - t0) / 1000;
@@ -61,7 +61,10 @@ async function realtime(name: string, room: string, cam: (t: number) => Cam, sec
   }
   await sleep(200);
   await live.quit();
-  const f = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).slice(before);
+  // The run's frames by the log's clock (its first frame came `first` ms after the launch): a count of the log's lines
+  // while the renderer runs misses the warm-up frames still in its write buffer.
+  const all = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const f = all.filter((x) => x.t >= all[0].t + (t0 - launch - first));
   const st = f.map((x) => x.start).filter((v) => typeof v === "number").sort((p, q) => p - q);
   const iv = f.slice(1).map((x) => x.interval as number).sort((p, q) => p - q);
   const g = f.map((x) => x.gpu).filter((v) => typeof v === "number" && v > 0).sort((p, q) => p - q);

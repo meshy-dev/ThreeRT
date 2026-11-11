@@ -40,12 +40,12 @@ const N = Math.round(route.secs * 60);
 
 // 1. Real time.
 const log = join(out, "frames.jsonl");
+const launch = performance.now();
 let live = startLive(b, bundle, { scale: "auto", frameLog: log, room: route.room });
-await live.firstFrame;
+const first = await live.firstFrame;
 live.send({ cmd: "camera", ...route.cam(0) });
 await sleep(4000);
 live.send({ cmd: "time", t: 0 });
-const before = readFileSync(log, "utf8").trim().split("\n").length;
 const t0 = performance.now();
 for (let k = 0; k <= N; k++) {
   live.send({ cmd: "camera", ...route.cam(Math.min(route.secs, (performance.now() - t0) / 1000)) });
@@ -53,7 +53,9 @@ for (let k = 0; k <= N; k++) {
 }
 await sleep(200);
 await live.quit();
-const run = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).slice(before);
+// (The run's frames by the log's clock, as tools/tokyo/accept-1a.ts cuts them.)
+const all = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+const run = all.filter((f) => f.t >= all[0].t + (t0 - launch - first));
 const shown = run.map((f) => ({ t: f.t - run[0].t, scale: f.scale as number })).filter((f) => f.t <= route.secs * 1000);
 const scales = shown.map((s) => s.scale).sort((p, q) => p - q);
 const scale = scales[Math.floor(scales.length / 2)];
