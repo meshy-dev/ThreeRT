@@ -1093,113 +1093,78 @@ pub(crate) mod cpu {
                 return Ok(hit);
             }
             let top = self.top;
+            let whole = self.node(top)?;
+            if Self::ray_aabb(o, inv_d, whole.bmin, whole.bmax, hit.t) == INF {
+                return Ok(hit);
+            }
             let (mut sp, mut node) = (0usize, top);
+            let mut rec = NO_INST;
+            let (mut ro, mut rd, mut rinv) = (o, d, inv_d);
+            let (mut off, mut first, mut base) = (top, 0u32, 0usize);
             loop {
                 self.step()?;
                 let n = self.node(node)?;
-                if Self::ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF {
-                    if sp == 0 {
-                        break;
-                    }
-                    sp -= 1;
-                    node = stack[sp];
-                    continue;
-                }
-                if n.count > 0 {
-                    let rec = n.left_or_first;
-                    let r = self.record(rec)?;
-                    if mode != TRACE_SHADOW || r.n[1][3].to_bits() != 0 {
-                        let mut lo = o - Vec3A::new(r.m[0][3], r.m[1][3], r.m[2][3]);
-                        let mut ld = d;
-                        let mut linv = inv_d;
-                        if r.n[2][3].to_bits() == 0 {
-                            lo = Self::proc_dir(&r, lo);
-                            ld = Self::proc_dir(&r, d);
-                            linv = Self::inv(ld);
+                if n.count == 0 {
+                    let l = off + n.left_or_first;
+                    let r = l + 1;
+                    let (nl, nr) = (self.node(l)?, self.node(r)?);
+                    let mut tl = Self::ray_aabb(ro, rinv, nl.bmin, nl.bmax, hit.t);
+                    let mut tr = Self::ray_aabb(ro, rinv, nr.bmin, nr.bmax, hit.t);
+                    if tl != INF || tr != INF {
+                        let (mut near, mut far) = (l, r);
+                        if tr < tl {
+                            (near, far) = (r, l);
+                            std::mem::swap(&mut tl, &mut tr);
                         }
-                        let root = r.n[0][3].to_bits();
-                        let first = r.info[0];
-                        let base = sp;
-                        let mut m = root;
-                        loop {
-                            self.step()?;
-                            let q = self.node(m)?;
-                            if q.count > 0 {
-                                for k in 0..q.count {
-                                    self.step()?;
-                                    let ti = first + q.left_or_first + k;
-                                    let x = self.intersect_tri(lo, ld, ti, hit.t)?;
-                                    if x < hit.t {
-                                        hit = Hit { t: x, tri: ti, inst: rec };
-                                        if mode != TRACE_CLOSEST {
-                                            return Ok(hit);
-                                        }
-                                    }
-                                }
-                                if sp == base {
-                                    break;
-                                }
-                                sp -= 1;
-                                m = stack[sp];
-                                continue;
-                            }
-                            let ml = root + q.left_or_first;
-                            let mr = ml + 1;
-                            let (ql, qr) = (self.node(ml)?, self.node(mr)?);
-                            let mut ul = Self::ray_aabb(lo, linv, ql.bmin, ql.bmax, hit.t);
-                            let mut ur = Self::ray_aabb(lo, linv, qr.bmin, qr.bmax, hit.t);
-                            if ul == INF && ur == INF {
-                                if sp == base {
-                                    break;
-                                }
-                                sp -= 1;
-                                m = stack[sp];
-                                continue;
-                            }
-                            let (mut mnear, mut mfar) = (ml, mr);
-                            if ur < ul {
-                                (mnear, mfar) = (mr, ml);
-                                std::mem::swap(&mut ul, &mut ur);
-                            }
-                            m = mnear;
-                            if ur != INF && sp < STACK {
-                                stack[sp] = mfar;
-                                sp += 1;
-                                self.deepest.set(self.deepest.get().max(sp));
+                        node = near;
+                        if tr != INF && sp < STACK {
+                            stack[sp] = far;
+                            sp += 1;
+                            self.deepest.set(self.deepest.get().max(sp));
+                        }
+                        continue;
+                    }
+                } else if rec == NO_INST {
+                    let u = self.record(n.left_or_first)?;
+                    if mode != TRACE_SHADOW || u.n[1][3].to_bits() != 0 {
+                        rec = n.left_or_first;
+                        ro = o - Vec3A::new(u.m[0][3], u.m[1][3], u.m[2][3]);
+                        if u.n[2][3].to_bits() == 0 {
+                            ro = Self::proc_dir(&u, ro);
+                            rd = Self::proc_dir(&u, d);
+                            rinv = Self::inv(rd);
+                        }
+                        off = u.n[0][3].to_bits();
+                        first = u.info[0];
+                        base = sp;
+                        node = off;
+                        continue;
+                    }
+                } else {
+                    for k in 0..n.count {
+                        self.step()?;
+                        let ti = first + n.left_or_first + k;
+                        let x = self.intersect_tri(ro, rd, ti, hit.t)?;
+                        if x < hit.t {
+                            hit = Hit { t: x, tri: ti, inst: rec };
+                            if mode != TRACE_CLOSEST {
+                                return Ok(hit);
                             }
                         }
                     }
-                    if sp == 0 {
-                        break;
-                    }
-                    sp -= 1;
-                    node = stack[sp];
-                    continue;
                 }
-                let l = top + n.left_or_first;
-                let r = l + 1;
-                let (nl, nr) = (self.node(l)?, self.node(r)?);
-                let mut tl = Self::ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);
-                let mut tr = Self::ray_aabb(o, inv_d, nr.bmin, nr.bmax, hit.t);
-                if tl == INF && tr == INF {
-                    if sp == 0 {
-                        break;
-                    }
-                    sp -= 1;
-                    node = stack[sp];
-                    continue;
+                if rec != NO_INST && sp == base {
+                    rec = NO_INST;
+                    ro = o;
+                    rd = d;
+                    rinv = inv_d;
+                    off = top;
                 }
-                let (mut near, mut far) = (l, r);
-                if tr < tl {
-                    (near, far) = (r, l);
-                    std::mem::swap(&mut tl, &mut tr);
+                if sp == 0 {
+                    break;
                 }
-                node = near;
-                if tr != INF && sp < STACK {
-                    stack[sp] = far;
-                    sp += 1;
-                    self.deepest.set(self.deepest.get().max(sp));
-                }
+                sp -= 1;
+                node = stack[sp];
             }
             Ok(hit)
         }
@@ -1230,63 +1195,62 @@ mod tests {
                 "fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32, stack: ptr<function, array<u32, 64>>) -> Hit {",
                 "if (bitcast<u32>(P.motion.w) == 0u) { return hit; }",
                 "let top = bitcast<u32>(P.motion.z);",
+                "let whole = nodes[top];",
+                "if (ray_aabb(o, inv_d, whole.bmin, whole.bmax, hit.t) == INF) { return hit; }",
                 "var sp = 0u;",
                 "var node = top;",
+                "var rec = NO_INST;",
+                "var ro = o;",
+                "var rd = d;",
+                "var rinv = inv_d;",
+                "var off = top;",
+                "var first = 0u;",
+                "var base = 0u;",
                 "let n = nodes[node];",
-                "if (ray_aabb(o, inv_d, n.bmin, n.bmax, hit.t) == INF) {",
-                "if (sp == 0u) { break; }",
-                "node = (*stack)[sp];",
-                "if (n.count > 0u) {",
-                "let rec = n.left_or_first;",
-                "let r = instances[rec];",
-                "if (mode != TRACE_SHADOW || bitcast<u32>(r.n1.w) != 0u) {",
-                "var lo = o - vec3<f32>(r.m0.w, r.m1.w, r.m2.w);",
-                "var ld = d;",
-                "var linv = inv_d;",
-                "if (bitcast<u32>(r.n2.w) == 0u) {",
-                "lo = proc_dir(r, lo);",
-                "ld = proc_dir(r, d);",
-                "linv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));",
-                "let root = bitcast<u32>(r.n0.w);",
-                "let first = r.info.x;",
-                "let base = sp;",
-                "var m = root;",
-                "let q = nodes[m];",
-                "if (q.count > 0u) {",
-                "for (var k = 0u; k < q.count; k++) {",
-                "let ti = first + q.left_or_first + k;",
-                "let x = intersect_tri(lo, ld, ti, hit.t);",
-                "if (x.x < hit.t) {",
-                "hit = Hit(x.x, ti, x.y, x.z, rec);",
-                "if (mode != TRACE_CLOSEST) { return hit; }",
-                "if (sp == base) { break; }",
-                "m = (*stack)[sp];",
-                "let ml = root + q.left_or_first;",
-                "let mr = ml + 1u;",
-                "var ul = ray_aabb(lo, linv, ql.bmin, ql.bmax, hit.t);",
-                "var ur = ray_aabb(lo, linv, qr.bmin, qr.bmax, hit.t);",
-                "if (ul == INF && ur == INF) {",
-                "if (sp == base) { break; }",
-                "if (ur < ul) {",
-                "m = mnear;",
-                "if (ur != INF && sp < 64u) {",
-                "(*stack)[sp] = mfar;",
-                "if (sp == 0u) { break; }",
-                "node = (*stack)[sp];",
-                "let l = top + n.left_or_first;",
+                "if (n.count == 0u) {",
+                "let l = off + n.left_or_first;",
                 "let r = l + 1u;",
-                "var tl = ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);",
-                "var tr = ray_aabb(o, inv_d, nr.bmin, nr.bmax, hit.t);",
-                "if (tl == INF && tr == INF) {",
-                "if (sp == 0u) { break; }",
+                "var tl = ray_aabb(ro, rinv, nl.bmin, nl.bmax, hit.t);",
+                "var tr = ray_aabb(ro, rinv, nr.bmin, nr.bmax, hit.t);",
+                "if (tl != INF || tr != INF) {",
                 "if (tr < tl) {",
                 "node = near;",
                 "if (tr != INF && sp < 64u) {",
                 "(*stack)[sp] = far;",
+                "continue;",
+                "} else if (rec == NO_INST) {",
+                "let u = instances[n.left_or_first];",
+                "if (mode != TRACE_SHADOW || bitcast<u32>(u.n1.w) != 0u) {",
+                "rec = n.left_or_first;",
+                "ro = o - vec3<f32>(u.m0.w, u.m1.w, u.m2.w);",
+                "if (bitcast<u32>(u.n2.w) == 0u) {",
+                "ro = proc_dir(u, ro);",
+                "rd = proc_dir(u, d);",
+                "rinv = 1.0 / select(rd, vec3<f32>(1e-20), abs(rd) < vec3<f32>(1e-20));",
+                "off = bitcast<u32>(u.n0.w);",
+                "first = u.info.x;",
+                "base = sp;",
+                "node = off;",
+                "continue;",
+                "} else {",
+                "for (var k = 0u; k < n.count; k++) {",
+                "let ti = first + n.left_or_first + k;",
+                "let x = intersect_tri(ro, rd, ti, hit.t);",
+                "if (x.x < hit.t) {",
+                "hit = Hit(x.x, ti, x.y, x.z, rec);",
+                "if (mode != TRACE_CLOSEST) { return hit; }",
+                "if (rec != NO_INST && sp == base) {",
+                "rec = NO_INST;",
+                "ro = o;",
+                "rd = d;",
+                "rinv = inv_d;",
+                "off = top;",
+                "if (sp == 0u) { break; }",
+                "node = (*stack)[sp];",
                 "return hit;",
             ],
         );
-        assert_eq!(units.matches("loop {").count(), 2, "two walks");
+        assert_eq!(units.matches("loop {").count(), 1, "one loop for both levels");
         let kernel = include_str!("../shaders/pathtrace.wgsl");
         ordered(
             kernel,
