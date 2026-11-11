@@ -375,8 +375,12 @@ benchmark level (4,172 objects; 515 M solid cells, 480 M of them the terrain's 1
 | --- | --- | --- | --- |
 | every solid cell | 515.3 M | 26.0 s | 1,279 MiB |
 | the shell | 61.6 M | 6.9 s (finding the cells 2.3) | 455 MiB |
+| the shell, objects of one file sharing a shape until one is edited | 61.6 M | **5.4 s** (finding the cells 2.1) | **303 MiB** |
 
-Still large: see ROADMAP § 6 step 8, "Open".
+A collider holds its object's own cells and stands by the object's placement, so the 2,572 objects that are no
+terrain, which come from 630 files, have 630 shapes between them (`physics_core::SharedVoxels`); an edit gives the
+edited object cells of its own. What is left is the terrain: 1,600 tiles, whose shells depend on their neighbours,
+a shape each. Natively this is a fixed cost of a level of this size (ROADMAP § 6 step 8, "Open").
 
 **An edit on the level, on the CPU** (`voxel.rs` `voxel_level_physics`; at the foot of the largest building part):
 
@@ -385,11 +389,11 @@ Still large: see ROADMAP § 6 step 8, "Open".
 | explosion, 0.5 m | 296 | 5.1 ms | 0.13 | 0.89 | 4.00 | – |
 | 1 m | 2,857 | 6.3 ms | 0.27 | 1.33 | 4.72 | – |
 | 2 m | 19,919 | 9.0 ms | 0.64 | 2.54 | 5.76 | – |
-| 4 m | 144,344 | 19.2 ms | 2.69 | 8.38 | 8.06 | – |
-| the cut of 30 x 30 m, 1 m thick | 577,519 | 123 ms | 24.3 | 44.3 | 41.4 | 12.6: six bodies of 112,889 voxels, the largest 95,694 |
+| 4 m | 144,344 | 19.8 ms | 2.96 | 8.50 | 8.27 | – |
+| the cut of 30 x 30 m, 1 m thick | 577,519 | 124 ms | 25.2 | 43.1 | 42.4 | 12.5: six bodies of 112,889 voxels, the largest 95,694 |
 
-After the cut the physics steps in 1.5 ms a frame (p95 1.8) while the parts fall and land, all six sleep within
-five seconds, and then it is 0. In step 6 the same cut cost 26–28 ms a frame for as long as the building fell (its
+After the cut the physics steps in 0.17 ms a frame (p95 0.44; a frame's physics at worst 2.7 ms) while the parts
+fall and land, all six sleep within five seconds, and then it is 0. In step 6 the same cut cost 26–28 ms a frame for as long as the building fell (its
 vertices written again every frame); now a part moves by its transform.
 
 **A body**: its grid in its own space, a mass from its voxels (a density per palette entry: by hardness 900 / 1,800 /

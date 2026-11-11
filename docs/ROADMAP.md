@@ -4077,10 +4077,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
        them); `voxel_core::Edit::cleared` and `Level::take`; in renderer/src/voxel.rs the level's colliders, the
        bodies, their sync, the carve of bodies, the cap; `voxelBodies()` in `packages/voxel`.
      - Measured on the CPU (this Mac; docs/VOXEL.md has the tables): voxels against the other shapes; on the
-       benchmark level, colliders of 61.6 M cells in 6.9 s and 455 MiB; an explosion of 4 m 19 ms (of it the
-       colliders 8.4); the 30 x 30 m cut 123 ms, and the building part it frees (95,694 voxels) then costs the
-       physics 1.5 ms a frame while it falls (step 6: 26–28 ms a frame of vertices written again) and nothing once
-       asleep.
+       benchmark level, colliders of 61.6 M cells in 5.4 s and 303 MiB (objects of one file share a shape until one
+       is edited); an explosion of 4 m 20 ms (of it the colliders 8.5); the 30 x 30 m cut 124 ms, and the building
+       part it frees (95,694 voxels) then costs the physics under 0.5 ms a frame while it falls (step 6: 26–28 ms a
+       frame of vertices written again) and nothing once asleep.
      - Three faults of Rapier 0.36 / parry 0.31 with voxel shapes, each with a test and a way round in physics-core
        (none patches the crates): the solver panics on a ball against voxels (parry's function for that pair keeps
        no workspace; the pair now goes through its general voxel function); parry's ray misses voxels along a
@@ -4089,15 +4089,17 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - Determinism: 300 voxel worlds and the adapter's script end in the same bits natively and in wasm32 (the
        physics job in CI); step 7's worlds end in the bits they did.
    - Open:
-     - **Every GPU run**: the acceptance's frame times, the falling parts on the real level, the old voxel tests
-       (three expect the fall through the lattice), software traversal with units.
-     - **The level's colliders cost 6.9 s of load and 455 MiB** on the benchmark level (a shell of the cells within
-       4 of the open; every solid cell was 26 s and 1.3 GiB). Next: objects of one file sharing a shape until
-       edited, a thinner shell for terrain, or building them after the first frame.
-     - The script surface is `voxelBodies()` and the bodies' ids in physics calls and hits; a voxel body as an
-       object with `.physics` in three's style is not designed (step 10).
-     - Paint and added voxels do not reach bodies. A body's mass is spread evenly over its cells (one density, its
-       voxels' mean).
+     - **Every GPU run**: the acceptance's frame times, the falling parts on the real level, the atomic tests (the
+       three `voxel/cut-falls*` keep the fall through the lattice with `physics: false`; `voxel/cut-body*` are the
+       same cut with the part as a body), software traversal with units.
+     - **The level's colliders cost 5.4 s of load and 303 MiB** on the benchmark level: natively this is a fixed
+       cost of every level of that size. They are a shell of the cells within 4 of the open (every solid cell was
+       26 s and 1.3 GiB), and objects of one file share one shape until one is edited (before that: 6.9 s and
+       455 MiB). What is left is the terrain's 1,600 tiles, a shape each. Decided against (2026-11-11): a shell of
+       2 cells (a body would get through it at 12 m/s), and building them after the first frame (a level whose
+       first seconds have no collision behaves by its load time).
+     - The script surface is `voxelBodies()`, `voxelImpulse` and the ids physics hits report; the rest is step 10's
+       (voxel bodies as objects with `.physics`, paint and added voxels on bodies, mass by cell).
      - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
        jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
      - A browser: a small voxel scene with bodies in Chrome is not run in this step.
@@ -4156,6 +4158,11 @@ benchmark level. The order follows the dependencies; a step that meets a further
        command's fixed-point shape (step 6).
 10. **[engine] The game API and effects.**
     - `packages/voxel`: voxel edits, bodies, joints, lights, scene queries and effects.
+    - **Voxel bodies as objects** (left by step 8, decided 2026-11-11): a loose part is today a body id
+      (`voxelBodies()`, a physics hit's `body`, `voxelImpulse`), drawn by objects scene code did not make. How it
+      appears to a game in three's style (an object with `.physics`: `applyImpulse`, `getLinearVelocity`, contact
+      events, joints between voxel objects) is designed here. With it: paint and added voxels reaching bodies, and
+      a body's mass spread by its cells' own densities (it is their mean today).
     - Fire and smoke on the existing volume and particle paths.
     - Vehicles and ropes on step 7's joints.
     - Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
