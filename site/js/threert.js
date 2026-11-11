@@ -61,8 +61,65 @@ export function compare(el) {
     }, { threshold: 0.5 });
     io.observe(el);
   }
+  if (d.video) clip(el, [$(".pa", el), $(".pb", el)]);
   el.cmp = { set, setX, get x() { return x; }, imgs: [ia, ib] };
   return el.cmp;
+}
+
+/**
+ * A clip over a comparison's two stills (`data-video`, and `data-video-sm` for a small screen): one file with both
+ * sides in it, the left one on top of the right one, so the two cannot drift apart. Each half is drawn onto its own
+ * pane, under the same divider. The stills stay until the clip plays, and for good where it does not (reduced motion,
+ * a data saver, autoplay refused); it plays only while it is on screen. A button pauses it.
+ */
+function clip(el, panes) {
+  const d = el.dataset;
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches || navigator.connection?.saveData) return;
+  const small = Math.min(screen.width, screen.height) < 700;
+  const v = Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, preload: "auto" });
+  v.setAttribute("muted", "");
+  v.setAttribute("playsinline", "");
+  const cvs = panes.map((p) => p.appendChild(document.createElement("canvas")));
+  const cxs = cvs.map((c) => c.getContext("2d", { alpha: false }));
+  const pp = el.appendChild(Object.assign(document.createElement("button"), { className: "pp", type: "button", hidden: true }));
+  const ICON = { pause: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" fill="currentColor"/></svg>`, play: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor"/></svg>` };
+  let w = 0, h = 0, shown = false, visible = false, paused = false;
+  const draw = () => {
+    if (!v.videoWidth) return;
+    if (!w) {
+      w = v.videoWidth; h = v.videoHeight / 2;
+      for (const c of cvs) { c.width = w; c.height = h; }
+    }
+    cxs[0].drawImage(v, 0, 0, w, h, 0, 0, w, h);
+    cxs[1].drawImage(v, 0, h, w, h, 0, 0, w, h);
+    if (!shown) {
+      shown = true;
+      el.classList.add("playing");
+      pp.hidden = false;
+    }
+  };
+  // A frame of the canvas for every frame of the clip, where the browser says when one is up; else every repaint.
+  const tick = () => {
+    draw();
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
+    else if (visible && !paused) requestAnimationFrame(tick);
+  };
+  const state = () => {
+    pp.innerHTML = paused ? ICON.play : ICON.pause;
+    pp.setAttribute("aria-label", paused ? "Play the clip" : "Pause the clip");
+    if (visible && !paused) v.play().then(() => { if (!v.requestVideoFrameCallback) requestAnimationFrame(tick); }, () => {});
+    else v.pause();
+  };
+  pp.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag of the divider
+  pp.addEventListener("click", () => { paused = !paused; state(); });
+  new IntersectionObserver(([en]) => {
+    visible = en.isIntersecting;
+    if (visible && !v.src) {
+      v.src = (small && d.videoSm) || d.video;
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
+    }
+    state();
+  }, { threshold: 0.05 }).observe(el);
 }
 
 /** Plays the 60-pose camera move of both engines in lockstep, wiped like a comparison. */

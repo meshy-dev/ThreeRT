@@ -22,7 +22,7 @@ const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json", ".ts": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream", ".hdr": "application/octet-stream", ".exr": "application/octet-stream", ".ktx2": "image/ktx2",
-  ".dmg": "application/x-apple-diskimage", ".zip": "application/zip",
+  ".mp4": "video/mp4", ".dmg": "application/x-apple-diskimage", ".zip": "application/zip",
 };
 
 for (const f of Object.values(VENDOR)) if (!existsSync(f)) console.warn(`missing ${f}: run npm install at the repo root`);

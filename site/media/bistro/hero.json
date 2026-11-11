@@ -1,0 +1,31 @@
+{
+ "at": "2026-11-11T18:21:38.264Z",
+ "machine": "Apple M3 Max",
+ "cores": 16,
+ "commit": "81f5da7",
+ "width": 1600,
+ "height": 900,
+ "fps": 60,
+ "seconds": 6,
+ "reach": 2.2,
+ "poses": 360,
+ "loop": 718,
+ "option_scale": "0.5",
+ "bounces": 4,
+ "seconds_loop": 11.97,
+ "realtime": {
+  "at": "2026-11-11T18:28:42.312Z",
+  "frames": 724,
+  "gpu_ms": {
+   "p50": 12.78,
+   "p95": 14.75,
+   "max": 16.01
+  },
+  "over_budget": 0,
+  "scale": {
+   "min": 0.5,
+   "p50": 0.5,
+   "max": 0.5
+  }
+ }
+}

@@ -100,6 +100,12 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .cmp .pa, .cmp .pb { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .cmp .pb { clip-path: inset(0 0 0 var(--x, 50%)); }
 .cmp img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+/* A clip over the stills (js/threert.js, clip): a canvas a pane, shown once it plays; its pause button. */
+.cmp canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; opacity: 0; transition: opacity 0.5s; }
+.cmp.playing canvas { opacity: 1; }
+.cmp .pp { position: absolute; z-index: 6; right: 14px; bottom: 14px; width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(236, 232, 225, 0.25); background: rgba(8, 9, 11, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); color: #ece8e1; display: grid; place-items: center; cursor: pointer; padding: 0; opacity: 0.7; transition: opacity 0.2s; }
+.cmp .pp:hover, .cmp .pp:focus-visible { opacity: 1; }
+.cmp .pp[hidden] { display: none; }
 .cmp.zoom img { transform: scale(var(--z, 2)); transform-origin: var(--o, 50% 50%); }
 .cmp .bar, .seqp .bar { position: absolute; top: 0; bottom: 0; left: var(--x, 50%); width: 2px; margin-left: -1px; background: var(--filament); box-shadow: 0 0 18px 2px color-mix(in srgb, var(--tungsten) 65%, transparent); z-index: 3; pointer-events: none; }
 .cmp .knob { position: absolute; top: 50%; left: var(--x, 50%); width: 42px; height: 42px; margin: -21px 0 0 -21px; border-radius: 50%; background: rgba(10, 11, 14, 0.66); border: 1.5px solid var(--filament); z-index: 4; display: grid; place-items: center; color: var(--filament); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); pointer-events: none; }
