@@ -40,6 +40,10 @@ name = "determinism"
 name = "determinism_wasm"
 crate-type = ["cdylib"]
 
+# Which collision shape voxel objects get (docs/VOXEL.md "Voxel bodies"): a measurement.
+[[example]]
+name = "voxel_shapes"
+
 # glamx with its eigen decomposition's acos / cos called through simba (libm on every platform): the physics' bits must
 # not depend on the platform's math functions (third_party/glamx/PATCH.md).
 # NOTE: this table only works when physics-core itself is what cargo builds. A crate that depends on physics-core must
