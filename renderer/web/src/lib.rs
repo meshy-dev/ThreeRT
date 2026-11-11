@@ -48,6 +48,8 @@ struct View {
     /// The camera the scene had when the view last followed it.
     scene_cam: Camera,
     fps: u32,
+    /// Lockstep (a scripted test): a frame's own time is the `dt` it is given, whatever the page's clock says.
+    lockstep: bool,
 }
 
 thread_local! {
@@ -402,7 +404,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, 
     });
     let on = |k: &str| info[k].as_array().is_some_and(|a| !a.is_empty());
     let scene_cam = core.scene_camera();
-    VIEW.set(Some(View { core, surface, blit, blit_bg, clock: 0.0, has_frame: info["frame"].as_bool().unwrap_or(false), has_on: on("on"), scene_cam, fps: fps.max(1) }));
+    VIEW.set(Some(View { core, surface, blit, blit_bg, clock: 0.0, has_frame: info["frame"].as_bool().unwrap_or(false), has_on: on("on"), scene_cam, fps: fps.max(1), lockstep: false }));
     Ok(out.to_string())
 }
 
@@ -426,12 +428,23 @@ fn commit_view(v: &mut View) -> Result<bool, JsValue> {
     Ok(rebuilt)
 }
 
+/// Lockstep on or off (a scripted test's clock: every frame takes the `dt` it is given, as the native runner's
+/// `lockstep` command).
+#[wasm_bindgen(js_name = setLockstep)]
+pub fn set_lockstep(on: bool) -> Result<(), JsValue> {
+    view(|v| {
+        v.lockstep = on;
+        Ok(())
+    })
+}
+
 /// A frame begins, `dt` seconds after the last (`GameSession::frame` up to the frame script): the scene's time, wind
 /// sway. True if the page is to run the node host's `frame` now (script.rs `ScriptHost::frames`: a frame script,
 /// world handlers, or a physics world whose events are delivered once a frame).
 #[wasm_bindgen(js_name = frameBegin)]
 pub fn frame_begin(dt: f32) -> Result<bool, JsValue> {
     view(|v| {
+        v.core.fixed_dt = v.lockstep.then_some(dt);
         v.core.advance_time(dt);
         let frames = v.has_frame || v.has_on || engine(|e| e.physics.is_some());
         if frames && v.has_frame {
@@ -535,6 +548,20 @@ pub fn commit(seq: f64) -> Result<bool, JsValue> {
         let rebuilt = commit_view(v)?;
         v.core.seq = seq as i64;
         Ok(rebuilt)
+    })
+}
+
+/// A frame's end without a view (no GPU, no canvas: tools/web-engine.ts runs the module in Node): the physics' ticks,
+/// as `frameEnd` makes them, and the scene's changes taken where a view would apply them. Returns the physics'
+/// numbers as JSON (null without a world).
+#[wasm_bindgen]
+pub fn tick(dt: f32) -> String {
+    engine(|e| {
+        if let Some(p) = e.physics.as_mut() {
+            p.advance(&mut e.world, dt as f64);
+        }
+        e.world.take_changes();
+        json!(e.physics.as_mut().map(|p| { let s = p.take_stats(); json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved }) })).to_string()
     })
 }
 

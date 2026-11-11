@@ -13,12 +13,14 @@
 // (the traced resolution's share, default 0: dynamic, toward `fps`), `fps` (default 60), `lockstep=1` (no frame runs
 // by itself: `threert.step(n, dt)` runs them, for scripted tests), `bench=1` (no game: `threert.bench()`).
 import { webEngine, type EngineExports, type WebEngine } from "./engine.ts";
+import type { FrameRow } from "./frame.ts";
 
 /** The session's exports (renderer/web/src/lib.rs) and wasm-bindgen's initialiser. */
 interface Module extends EngineExports {
   default(): Promise<unknown>;
   provide(path: string, bytes: Uint8Array): void;
   start(canvas: HTMLCanvasElement, width: number, height: number, info: string, scale: number, fps: number): Promise<string>;
+  setLockstep(on: boolean): void;
   frameBegin(dt: number): boolean;
   frameEnd(dt: number): string;
   click(u: number, v: number): string | undefined;
@@ -32,30 +34,6 @@ interface NodeHost {
   setup(roomId: string, seed?: number): string;
   event(type: string, payload: string, ts: number): string;
   frame(dt: number, now: number): void;
-}
-
-/** A frame's numbers (ms): the page's own times around the module's (`frameEnd`'s JSON). */
-export interface FrameRow {
-  /** Since the frame before (the page's frame callback). */
-  interval: number;
-  /** `frameBegin`, the node host's `frame` (of which the engine's calls: `calls` of them, `calls_ms`), `frameEnd`. */
-  begin: number;
-  script: number;
-  calls: number;
-  calls_ms: number;
-  end: number;
-  physics: { ticks: number; step: number; sync: number; bodies: number; moved: number } | null;
-  physics_ms: number;
-  commit_ms: number;
-  rebuilt: boolean;
-  rebuild_ms: number;
-  render_ms: number;
-  gpu_ms: number;
-  trace_ms: number;
-  scale: number;
-  frame: number;
-  /** The kernel's invocations the loop guard has stopped since the view opened (0: every frame is sound). */
-  guard_trips: number | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -192,12 +170,26 @@ async function main() {
       for (let k = 0; k < n; k++) frame(dt, 0);
       return frames.length;
     },
+    /**
+     * `n` frames in lockstep, a few at a time with the browser's own frame between them (the canvas is shown, the
+     * loop guard's count comes back): it stops early if the guard has stopped anything, and resolves to the frames
+     * it ran.
+     */
+    run: async (n: number, dt = 1 / 60) => {
+      let done = 0;
+      while (done < n && !frames.at(-1)?.guard_trips) {
+        for (let k = 0; k < 8 && done < n; k++, done++) frame(dt, 0);
+        await new Promise(requestAnimationFrame);
+      }
+      return done;
+    },
     click,
     event: (type: string, payload: unknown = {}) => event(type, JSON.stringify(payload)),
     physicsHash: () => wasm.physicsHash(),
     /** The loop guard's count as last read back (null: the kernel has no guard). */
     guardTrips: () => frames.at(-1)?.guard_trips ?? null,
   };
+  wasm.setLockstep(session.lockstep);
   Object.assign(window, { threert: session });
 
   // Frames at `fps` whatever the display's rate (a 120 Hz display shows each twice), as the native window.

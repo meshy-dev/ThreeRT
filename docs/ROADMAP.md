@@ -3888,6 +3888,26 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - This step: the library builds for `wasm32-unknown-unknown` with the native shell left out, the GPU from
        futures, `web_time`, and file reads behind one module (docs/RUNTIME.md "The engine's library in a browser").
        Natively the renders are byte-identical.
+   - **The engine in a browser** (2026-11-11, branch `web-hello`; the second half of layout C. **In progress: built
+     and run in Node, not yet run in a browser**).
+     - `renderer/web`: the wasm module (the engine API's 35 exports, one for one with the native `__engine`, on the
+       same code, `renderer/src/api.rs`; the session's), the page (`__engine` over the exports, the node host called
+       as `GameSession` calls it, the canvas' clicks) and `tools/build-web.ts`. The game bundle is the native one.
+     - The merged binding layout (`renderer/src/merged.rs`): the browser's shaders written from the one source with 8
+       storage buffers a stage (the kernel as written binds 20, the live passes 28), guarded by a test that reads
+       them with naga; `THREERT_MERGED=1` runs it natively.
+     - **A GPU job that did not end took the machine's display down** (2026-11-11 01:42, WindowServer's watchdog)
+       while the atomic tests ran under software traversal: at `geometry/instanced-procedural` in the layout as
+       written, then at `environment/background` in the merged one. Neither scene has a triangle. Cause, by reading
+       (no GPU run since): the tree over no triangle was one node with `count: 0`, an interior node to the kernel,
+       whose children were itself and the bytes after its 32-byte buffer; zeros end the walk, an earlier scene's
+       bytes need not. Fixed in `bvh.rs` (a leaf of the empty vertex buffer's zero triangle), with a test that walks
+       the kernel's loop on the CPU. And a **loop guard** (`merged::guard`): every loop of the kernel bounded and
+       what it stops counted and read back; always on in a browser, `THREERT_LOOP_GUARD` natively.
+     - `tools/web-engine.ts` (CI): the module in Node with the page's `__engine` and the native bundle runs the
+       physics hello world's script to the native test's numbers.
+     - To do, on a GPU: `tools/web-hello.ts` (Playwright, Chrome): the scripted test, frame times, the boundary's
+       cost; the merged layout's cost natively; docs/RUNTIME.md "The engine in a browser".
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

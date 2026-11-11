@@ -234,8 +234,8 @@ Decided by the user on 2026-11-10, with the measurements below.
   the Rust application, as now, and nothing in the design needs a JIT.
 - **On the web: layout C.** The Rust engine (scene, Rapier, voxels) is compiled to wasm, and the gameplay TypeScript
   runs in the browser's own JS engine, calling the wasm module's exports: the same game code and the same four
-  channels, with the `Engine` interface implemented by the wasm exports and a thin layer of JS. Not built yet (it is
-  what follows the world handlers; ROADMAP § 6). The layouts considered:
+  channels, with the `Engine` interface implemented by the wasm exports and a thin layer of JS ("The engine in a
+  browser" below: built, run in Node, not yet in a browser). The layouts considered:
 
   | layout | what | why not / why |
   | --- | --- | --- |
@@ -326,6 +326,78 @@ changed: the same sources, the same shaders, byte-identical renders. What runs i
   back to it). The dynamic sky's bake thread cannot start, so a sky whose sun moves keeps the sky it was built with.
 - Checked: the library's wasm32 build in CI; the physics' recorded hashes in the renderer's wasm32 graph
   (`tools/physics-determinism.ts`). Not yet run in a page: that is `renderer/web`'s to show.
+
+## The engine in a browser (`renderer/web`)
+
+Layout C's second half. **Status (2026-11-11): built, and run in Node; not yet run in a browser.** Everything below
+that needs a GPU is marked so. The first runs on a GPU wait for the loop guard (below) and for the user's word.
+
+- **The module** (`renderer/web`, a `cdylib` for `wasm32-unknown-unknown`, wasm-bindgen): the engine's world, the
+  voxels, the physics and the live view. Its exports are of two kinds:
+  - the engine API: one export for each function the native runtime installs as `__engine` (35; `script.rs`
+    `install_engine`), under the same name. Both call the same code (`renderer/src/api.rs`); a descriptor crosses as
+    JSON text, an array as a typed array;
+  - the session, what `GameSession` and the native window do around the script: `start` (the GPU from futures, the
+    view of the world the setup built, shown on a canvas), `frameBegin` / `frameEnd` around the node host's `frame`
+    (the scene's time and sway; then the physics' ticks, the commit, the frame), `click` (the pick and the event's
+    payload with the view ray), `commit`, `tick` (a frame's end with no view).
+- **The page** (`renderer/web/www`): `engine.ts` makes `__engine` of the exports (typed against `packages/scene`'s
+  `Engine`); `main.ts` loads **the game bundle the native runtime loads** (`tools/bundle-game.ts`, unchanged), calls
+  the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
+  [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
+- **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
+  kernel binds 20 and the live passes 28. There is one source: the browser's shaders are written from
+  `pathtrace.wgsl` and `live.wgsl` as text when a module is compiled, and the native ones are untouched.
+  - The kernel's seven tables become the arrays of one struct in one buffer; their lengths are in the source, each a
+    power of two above a floor, so a kernel is compiled again only when a table doubles. The renderer keeps writing
+    its own buffers and a frame copies them into the struct's.
+  - The kernel's seven group-1 buffers (radiance cache, reservoirs, what the live passes read of a trace) are ranges
+    of one buffer, the arrays of a second struct.
+  - The live passes' buffers of one element type are ranges of a slab each, indexed from offsets in a uniform: the
+    history's two bind groups are two sets of offsets.
+  - A use of a merged name the generator does not know, a declaration not found exactly once, a name it would add
+    that is taken: each stops the renderer, with the line. Locals that shadow a name are followed through their
+    scopes. A test reads the result with naga: valid WGSL, 8 storage buffers for the kernel and for the live passes
+    (20 and 28 as written), the structs' arrays where the Rust side puts them.
+  - `THREERT_MERGED=1` runs it natively (software traversal, the device held to 8).
+- **The loop guard** (`merged::guard`). The kernel's traversals follow indices they read from buffers and end only on
+  sound data. On 2026-11-11 two dispatches that did not end took this machine's display down (WindowServer's
+  watchdog; software traversal under the atomic tests, at two scenes without a triangle). A page's shader runs on the
+  player's GPU beside everything else, so **a browser's kernel always has the guard**: every loop body counts the
+  invocation's iterations and leaves past a limit (65,536). The arithmetic is untouched. What it stops it counts: the
+  count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
+  render in which it moved is an error, and anything but 0 means wrong pixels. Natively it is off unless
+  `THREERT_LOOP_GUARD=<limit>`. The live passes need none: their loops are counted loops over constants and clamped
+  parameters.
+- **A tree over nothing** (`bvh.rs`). A node with `count: 0` is an interior node to the kernel, and the one-node tree
+  of a scene without triangles had itself and the bytes after its buffer for children. It is now a leaf of triangle
+  0, which an empty vertex buffer's zeros make a triangle without area; a procedural object without boxes is left out
+  under software traversal. A test walks the kernel's loop on the CPU with every read checked.
+- **What a browser does not have.** Hardware ray queries, so software traversal: no particles of either kind, no
+  translucency pass, and no in-place edits (every added object and every frame a body moves rebuilds the scene; the
+  two-level tree is the step after this one). The denoiser (OIDN, offline only), the offline render, snapshots and
+  the profile's readbacks. The dynamic sky's bake thread (a sky whose sun moves keeps the sky it was built with).
+
+Checked without a GPU:
+- `tools/web-engine.ts` (CI): the module in Node (V8), `__engine` made by the page's code, the game bundle, the
+  physics hello world's five clicks (as view rays) and frames, and the native test's checks. It passes, and prints
+  what the native test prints: boxes at rest at (−1.000, 0.250, −0.305), (−1.011, 0.748, −0.300), (−1.002, 1.248,
+  −0.300), the kicked one 0.913 m along the kick (0.917 predicted).
+- The generator's and the guard's tests (naga), the tree walk, the web crate's wasm32 build (CI).
+
+Measured so far (Apple M5 Pro):
+
+| | |
+| --- | --- |
+| the module | 7.3 MiB (gzip 2.3 MiB, brotli 1.5 MiB); wasm-bindgen's JavaScript and the page's 104 KiB (17 KiB); no `wasm-opt` |
+| hello world natively, merged layout against the layout as written, offline, software traversal | the same bytes (HDR and PNG) |
+| hello world's scripted test natively in the merged layout (`THREERT_MERGED=1 node tools/physics-hello.ts`) | the same game numbers; the two checks software traversal fails either way (every box and every move rebuilds) |
+
+Not measured yet (`tools/web-hello.ts`, written, not run): the scripted test in Chrome and its numbers against the
+native run's; frame times in a browser (still, a body moving, a rebuild; the page's time split into script, engine
+calls, physics, commit and rebuild, recording; the GPU's and the trace's); the first frame and the shaders' compile;
+the boundary's cost in Chrome; the merged layout's and the guard's cost natively against the layout as written; the
+atomic tests in the merged layout.
 
 ## Correctness
 
