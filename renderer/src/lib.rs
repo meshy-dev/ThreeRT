@@ -122,6 +122,29 @@ pub fn emitter_power(e: &EmitterTri, materials: &[scene::GpuMaterial], objects: 
     e.area * lum * objects.get(e.obj as usize * stride).map_or(1.0, |o| o[3])
 }
 
+/// An emitter's power with its object switched on: its power now, or at full power if its object is off (0). What the
+/// light sampling is set up for at load (the light tree, the sky's light-sampling floor), so that it does not depend on
+/// which lights were on then: a time-of-day room switched in place samples as one loaded in that state.
+pub fn switchable_power(e: &EmitterTri, materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize) -> f32 {
+    let p = emitter_power(e, materials, objects, stride);
+    if p > 0.0 { p } else { emitter_power(e, materials, &[], stride) }
+}
+
+/// The light tree over a scene's emitters (`ltree::build`; `slot`: with the slot for emitters added in place). Its
+/// members and shape go by `switchable_power`: a time-of-day room's lamps and windows by day are in the tree at zero
+/// weight until they switch on, instead of in the flat CDF beyond it, where the kernel draws them by power share alone
+/// (no importance at the shading point) once they are on. Then, if some are off, the node powers are refit to the
+/// objects' powers now; a scene with every emitter on at load gets the tree it had before, bit for bit.
+pub fn light_tree_of(tris: &[EmitterTri], tri_verts: &[[f32; 4]], materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize, slot: bool) -> Option<ltree::LightTree> {
+    let build = if slot { ltree::build_slotted } else { ltree::build };
+    let mut t = build(tris, tri_verts, &|i| switchable_power(&tris[i], materials, objects, stride))?;
+    let now: Vec<f32> = t.order.iter().map(|&i| emitter_power(&tris[i as usize], materials, objects, stride)).collect();
+    if now.iter().any(|&w| !(w > 0.0)) {
+        t.refit(&|k| now[k]);
+    }
+    Some(t)
+}
+
 /// The live emitter cull: emitters farther than `radius` from the light LOD's reference are not proposed at all, unless
 /// they lie in the view cone (`dir`, cosine of the half-angle `cos`) within `far`. Far emitters behind or beside the
 /// camera are mostly occluded and cost long shadow rays; the ones ahead light what the camera sees (Bistro's square,
@@ -446,10 +469,10 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
     // code in its triangle's attrs x.w (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
-    let all_power: f32 = emitter_tris.iter().map(|e| emitter_power(e, &sc.materials, &sc.objects, sc.object_stride())).sum();
+    // (Switched-off objects at full power: `switchable_power`.)
+    let all_power: f32 = emitter_tris.iter().map(|e| switchable_power(e, &sc.materials, &sc.objects, sc.object_stride())).sum();
     let use_tree = std::env::var("THREERT_LTREE").map_or(true, |v| v != "0");
-    let build = if sc.emitter_slot { ltree::build_slotted } else { ltree::build };
-    let mut light_tree = if use_tree { build(&emitter_tris, &tri_verts, &|i| emitter_power(&emitter_tris[i], &sc.materials, &sc.objects, sc.object_stride())) } else { None };
+    let mut light_tree = if use_tree { light_tree_of(&emitter_tris, &tri_verts, &sc.materials, &sc.objects, sc.object_stride(), sc.emitter_slot) } else { None };
     if let Some(t) = &mut light_tree {
         // The tree's emitters first, in leaf order (each node covers a range of entries), then the rest as they were.
         let mut taken = vec![false; emitter_tris.len()];
@@ -532,7 +555,8 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     }
     let procs = [env_cdf.len() as u32, sc.procs.len() as u32, sc.gpu_instances.len() as u32, sc.vcolor_base];
     // Environment light sampling (one shadow ray per vertex) is skipped when the sky is negligible next to the emitters
-    // (night streets): escaping BSDF rays still pick it up, with full MIS weight.
+    // (night streets): escaping BSDF rays still pick it up, with full MIS weight. The emitters as if all on: a
+    // time-of-day room loaded by day decides at dusk as one loaded at night does (live.rs `put_sky`).
     let env_max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max).max(0.2126 * sky_color.x + 0.7152 * sky_color.y + 0.0722 * sky_color.z);
     let em_area: f32 = emitters[..emitter_tris.len()].iter().map(|e| e[3]).sum();
     let env_nee_floor = if emitter_tris.is_empty() { 0.0 } else { 0.01 * all_power / em_area.max(1e-6) };
@@ -716,6 +740,34 @@ mod light_lod_tests {
 
     fn light(p: [f32; 3], range: f32, shadowed: bool) -> scene::GpuLight {
         scene::GpuLight { pos: [p[0], p[1], p[2], 1.0], dir: [0.0, 0.0, 0.0, 0.05], color: [1.0, 1.0, 1.0, range], ext: [0.0, 0.0, 0.0, shadowed as u32 as f32], x: [1.0; 4] }
+    }
+
+    #[test]
+    fn emitters_switched_off_at_load_are_in_the_light_tree() {
+        // 600 triangles in a row, 100 on object 0 (on) and 500 on object 1 (switched off at load): too few on for a
+        // tree of their own (MIN_STATIC), yet all are in it, at zero weight. Switched on in place and refit, the tree is
+        // the one a load with all of them on builds: the plain build's, its powers summed bottom-up.
+        let mats = [scene::GpuMaterial { emissive: [1.0, 1.0, 1.0, 0.0], ..Default::default() }];
+        let tris: Vec<EmitterTri> = (0..600u32)
+            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false })
+            .collect();
+        let verts: Vec<[f32; 4]> = (0..600).flat_map(|i| [[2.0 * i as f32, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]).collect();
+        let (off, on) = ([[0.0, 0.0, 0.0, 1.0], [0.0; 4]], [[0.0, 0.0, 0.0, 1.0]; 2]);
+        assert!(ltree::build(&tris, &verts, &|i| emitter_power(&tris[i], &mats, &off, 1)).is_none());
+        let mut t = light_tree_of(&tris, &verts, &mats, &off, 1, false).unwrap();
+        assert_eq!(t.order.len(), 600);
+        assert!((t.power - 100.0 * 0.5).abs() < 1e-3, "{}", t.power);
+        let loaded = light_tree_of(&tris, &verts, &mats, &on, 1, false).unwrap();
+        let plain = ltree::build(&tris, &verts, &|i| emitter_power(&tris[i], &mats, &on, 1)).unwrap();
+        let bits = |t: &ltree::LightTree| t.nodes.iter().map(|n| n.map(f32::to_bits)).collect::<Vec<_>>();
+        assert_eq!((bits(&loaded), &loaded.order), (bits(&plain), &plain.order));
+        let w: Vec<f32> = t.order.iter().map(|&i| emitter_power(&tris[i as usize], &mats, &on, 1)).collect();
+        t.refit(&|k| w[k]);
+        assert_eq!(t.order, loaded.order);
+        for (a, b) in t.nodes.iter().zip(&loaded.nodes) {
+            assert_eq!([a[0], a[1], a[3]].map(f32::to_bits), [b[0], b[1], b[3]].map(f32::to_bits));
+            assert!((a[2] - b[2]).abs() <= 1e-4 * b[2], "{} {}", a[2], b[2]);
+        }
     }
 
     #[test]
