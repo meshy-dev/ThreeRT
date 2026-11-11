@@ -58,6 +58,10 @@ pub struct Edit {
     pub created: Vec<u32>,
     pub removed: Vec<u32>,
     pub debris: Vec<([i32; 3], u8)>,
+    /// By object: the world cells it lost (carved away, or gone into a loose part or debris), in the order they went.
+    /// What a collider of the object's cells takes out (ROADMAP § 6 step 8): by the cells that changed, not by the
+    /// object's size.
+    pub cleared: BTreeMap<u32, Vec<[i32; 3]>>,
     /// Per changed object, the world cells (inclusive bounds) its removed voxels were in.
     pub bounds: BTreeMap<u32, ([i32; 3], [i32; 3])>,
     /// Voxels the shape removed, painted or added.
@@ -328,6 +332,7 @@ impl Level {
             let o = self.objects[id as usize].as_mut().unwrap();
             let grid = Rc::make_mut(&mut o.grid);
             let keys = edit.changed.entry(id).or_default();
+            let lost = edit.cleared.entry(id).or_default();
             let (mut blo, mut bhi) = ([i32::MAX; 3], [i32::MIN; 3]);
             for (key, mask) in gone {
                 let b = grid.bricks.get_mut(&key).unwrap();
@@ -344,6 +349,7 @@ impl Level {
                         }
                         edit.debris.push((w, m));
                         edit.voxels += 1;
+                        lost.push(w);
                         if !anchor {
                             cleared.push(w);
                         }
@@ -522,11 +528,14 @@ impl Level {
             for (id, list) in taken {
                 grow(&mut edit.bounds, id, lo, hi);
                 let o = self.objects[id as usize].as_mut().unwrap();
+                let place = o.place;
                 let grid = Rc::make_mut(&mut o.grid);
                 let keys = edit.changed.entry(id).or_default();
+                let lost = edit.cleared.entry(id).or_default();
                 for g in list {
                     grid.take(g[0], g[1], g[2]);
                     keys.insert(brick_of(g));
+                    lost.push(place.to_world(g));
                 }
                 for k in keys.iter() {
                     grid.prune(*k);
@@ -619,6 +628,16 @@ impl Level {
             }
         }
         out
+    }
+
+    /// A falling object handed out of the level for good (ROADMAP § 6 step 8: it is a rigid body from here on, the
+    /// physics world's to move): its grid and where it is. The level no longer holds, ticks or hashes it; its id is
+    /// not used again. None: no such object, or one that is not falling.
+    pub fn take(&mut self, id: u32) -> Option<Object> {
+        if !self.falling.remove(&id) {
+            return None;
+        }
+        self.objects.get_mut(id as usize)?.take()
     }
 
     /// Objects falling now.
@@ -857,5 +876,36 @@ mod tests {
     fn edits_are_deterministic() {
         assert_eq!(crate::check::script(), crate::check::script());
         assert_eq!(crate::check::script(), crate::check::EXPECTED, "the script's level changed: if meant, record {:#x}", crate::check::script());
+    }
+
+    /// What an edit says a collider of an object's cells must lose (`Edit::cleared`): exactly the cells that are no
+    /// longer the object's, those carved and those gone into a loose part; and a loose part handed out (`take`) is
+    /// the level's no more.
+    #[test]
+    fn an_edit_names_the_cells_each_object_lost() {
+        let mut l = ground();
+        let tower = l.add_object(block([0, 0, 0], [3, 29, 3], 2), Placement::new([10, 1, 10], 0, [0, 0, 0]), false);
+        l.settle();
+        let before: BTreeSet<[i32; 3]> = { let o = l.objects[tower as usize].as_ref().unwrap(); o.grid.voxels().map(|(g, _)| o.place.to_world(g)).collect() };
+        let e = l.carve(sphere([11.5, 12.5, 11.5], 2.5), [256; 4]);
+        assert_eq!(e.created.len(), 1, "the top is loose");
+        let after: BTreeSet<[i32; 3]> = { let o = l.objects[tower as usize].as_ref().unwrap(); o.grid.voxels().map(|(g, _)| o.place.to_world(g)).collect() };
+        let lost: BTreeSet<[i32; 3]> = e.cleared[&tower].iter().copied().collect();
+        assert_eq!(lost.len(), e.cleared[&tower].len(), "no cell twice");
+        assert_eq!(lost, before.difference(&after).copied().collect::<BTreeSet<_>>());
+        assert!(lost.len() > e.voxels, "the carved cells and the top's");
+        // The ground lost nothing here; an anchor's carved cells are named too.
+        assert!(e.cleared.keys().all(|&k| k == tower));
+        let e2 = l.carve(sphere([25.5, 3.5, 25.5], 1.5), [256; 4]);
+        assert!(e2.cleared.values().map(|c| c.len()).sum::<usize>() == e2.voxels && e2.voxels > 0);
+        // The loose top, taken: gone from the level, which then has nothing falling; twice is None.
+        let top = e.created[0];
+        let (hash, falling) = (l.hash(), l.falling());
+        let o = l.take(top).unwrap();
+        assert!(o.fall.is_some() && o.grid.count() > 0);
+        assert_eq!((l.falling(), falling), (0, 1));
+        assert!(l.take(top).is_none() && l.take(tower).is_none() && l.take(9999).is_none());
+        assert!(l.objects[top as usize].is_none() && l.hash() != hash);
+        assert!(l.tick().falling.is_empty());
     }
 }

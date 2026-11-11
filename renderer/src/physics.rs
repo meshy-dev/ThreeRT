@@ -77,6 +77,15 @@ impl PhysicsWorld {
         r
     }
 
+    /// The bridge itself, for the engine's own bodies and colliders (the voxel world's: voxel.rs).
+    pub fn bridge(&mut self) -> &mut Bridge {
+        &mut self.bridge
+    }
+
+    pub fn bridge_ref(&self) -> &Bridge {
+        &self.bridge
+    }
+
     /// The scene removed these objects: their bodies go (`Bridge::objects_removed`).
     pub fn objects_removed(&mut self, objects: &[u32]) {
         self.bridge.objects_removed(objects);

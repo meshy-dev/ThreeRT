@@ -797,6 +797,11 @@ impl Physics {
         Ok(left)
     }
 
+    /// The memory the world's voxel shapes hold, bytes (parry's own count of each: cells, chunk tables, their tree).
+    pub fn voxel_bytes(&self) -> usize {
+        self.voxel_colliders.iter().filter_map(|id| self.world.colliders.get(self.colliders.get(id)?.0)?.shape().as_voxels().map(|v| v.total_memory_size())).sum()
+    }
+
     /// A voxel collider's solid cells, counted; None if it is none.
     pub fn voxels(&self, id: ColliderId) -> Option<usize> {
         let &(h, _) = self.colliders.get(&id)?;

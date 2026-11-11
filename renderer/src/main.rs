@@ -98,7 +98,7 @@ impl Hosts {
             host.setup(&job.room, job.seed)?;
             // A native voxel level the scene code asked for (`voxelLevel`), loaded now that the asset root is known: the
             // offline reference of the live view's level (ROADMAP § 6 step 4). Its changes are the setup's, dropped.
-            let realized = host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &job.assets)?;
+            let realized = host.voxels.borrow_mut().realize(&mut host.world.borrow_mut(), &mut host.physics.borrow_mut(), &job.assets)?;
             if let Some(r) = realized {
                 eprintln!("voxels: {r}");
                 host.world.borrow_mut().take_changes();

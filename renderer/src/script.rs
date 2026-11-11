@@ -156,12 +156,16 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     // knows the asset root; an explosion returns what it did as JSON.
     let v = voxels.clone();
     e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::voxel_level(&mut v.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
-    let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, w, p) = (voxels.clone(), world.clone(), physics.clone());
+    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
     // An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`), and the level's
     // hash (16 hex digits; "" before a level): the same commands give the same hash.
-    let (v, w) = (voxels.clone(), world.clone());
-    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, w, p) = (voxels.clone(), world.clone(), physics.clone());
+    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    // The voxel bodies (ROADMAP § 6 step 8), as JSON: [{ body, collider, voxels, asleep, position, rotation }]. `body`
+    // is the physics world's id: `physics("impulse", { body, ... })` and the other calls take it.
+    let (v, p) = (voxels.clone(), physics.clone());
+    e.set("voxelBodies", Function::new(ctx.clone(), move || -> String { api::voxel_bodies(&v.borrow(), &p.borrow()) })?)?;
     let v = voxels.clone();
     e.set("voxelHash", Function::new(ctx.clone(), move || -> String { api::voxel_hash(&v.borrow()) })?)?;
     let v = voxels.clone();
@@ -392,20 +396,12 @@ impl ScriptHost {
     /// A frame of the physics world, if scene code made one: its ticks, and the objects its bodies drive placed
     /// (renderer/src/physics.rs). True if there is a world (the caller commits what moved).
     pub fn advance_physics(&self, dt: f32) -> bool {
-        match self.physics.borrow_mut().as_mut() {
-            Some(p) => {
-                p.advance(&mut self.world.borrow_mut(), dt as f64);
-                true
-            }
-            None => false,
-        }
+        crate::api::physics_advance(&mut self.physics.borrow_mut(), &mut self.voxels.borrow_mut(), &mut self.world.borrow_mut(), dt as f64)
     }
 
     /// The physics world `ticks` ticks on (an offline render at a scene time).
     pub fn settle_physics(&self, ticks: u32) {
-        if let Some(p) = self.physics.borrow_mut().as_mut() {
-            p.settle(&mut self.world.borrow_mut(), ticks);
-        }
+        crate::api::physics_settle(&mut self.physics.borrow_mut(), &mut self.voxels.borrow_mut(), &mut self.world.borrow_mut(), ticks);
     }
 
     /// Runs the frame script for one rendered frame.
@@ -505,7 +501,7 @@ impl GameSession {
     /// that follows includes it, so its changes are dropped here (as the setup's are, `load`).
     fn realize_voxels(&self, assets: &std::path::Path) -> Result<()> {
         let mut w = self.host.world.borrow_mut();
-        if let Some(r) = self.host.voxels.borrow_mut().realize(&mut w, assets)? {
+        if let Some(r) = self.host.voxels.borrow_mut().realize(&mut w, &mut self.host.physics.borrow_mut(), assets)? {
             eprintln!("voxels: {r}");
             w.take_changes();
         }
