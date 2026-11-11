@@ -28,11 +28,20 @@ web-time = "1.1"
 # engine's library builds without them for wasm32 (docs/RUNTIME.md "The engine's library in a browser"): there the
 # page owns the window and the event loop, and scripts run in the browser's own engine.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Natively the physics world is stepped by Rapier's parallel solver (ROADMAP § 6 step 8; decided 2026-11-11), in a
+# pool of its own (src/physics.rs: 4 threads or the performance cores when fewer; THREERT_PHYSICS_THREADS changes it,
+# 1 is sequential). It steps to the sequential build's bits, which are wasm32's (tools/physics-determinism.ts holds
+# the three to the recorded hashes). wasm32 has no threads here and stays sequential: the dependency above.
+physics-core = { path = "physics-core", features = ["parallel"] }
 pollster = "0.4"
 winit = "0.30"
 oidn = { version = "2.5", optional = true }
 # Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
 rquickjs = "0.12"
+
+# The performance cores' count (src/physics.rs: the physics' threads).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 # src/merged.rs's tests read the generated shaders with the compiler wgpu uses: they are valid, and no stage binds more
 # storage buffers than a browser allows.
@@ -47,10 +56,6 @@ crate-type = ["cdylib"]
 [features]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
 oidn = ["dep:oidn"]
-# Rapier's parallel solver for the physics world (physics-core's `parallel`), stepped in a pool of its own
-# (src/physics.rs: 4 threads, THREERT_PHYSICS_THREADS). Native only; off by default (ROADMAP § 6 step 8: it steps to the
-# sequential build's bits, which are wasm32's; whether it becomes the native default is not decided).
-physics-parallel = ["physics-core/parallel"]
 
 [profile.release]
 opt-level = 3

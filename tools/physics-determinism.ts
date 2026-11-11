@@ -12,9 +12,10 @@
 // first run passes and the second fails.
 // Then the renderer's dependency graph, built for wasm32 (renderer/examples/physics_bits.rs), against the recorded
 // hashes: the engine's library in a browser.
-// Then Rapier's parallel solver (physics-core's `parallel` feature; native only, the renderer's `physics-parallel`),
-// on 2 and on 4 threads: the script and every one of the random worlds against the sequential native build's, which
-// the steps above hold to wasm32 and the recorded hashes. So a parallel native build steps as a browser does.
+// Then Rapier's parallel solver (physics-core's `parallel` feature: what the renderer's native build steps the world
+// with, ROADMAP § 6 step 8), on 2 and on 4 threads: the script and every one of the random worlds against the
+// sequential native build's, which the steps above hold to wasm32 and the recorded hashes. So native parallel =
+// native sequential = wasm32 = recorded: a native build steps as a browser does.
 // `--without` builds without Rapier's `enhanced-determinism` instead and reports (the hashes differ; no exit code).
 //   node tools/physics-determinism.ts [--without]      (needs the wasm32-unknown-unknown target)
 import { execFileSync } from "node:child_process";
@@ -72,9 +73,9 @@ if (!without && sequential) {
     const [script, cases] = [parallel(run), parallel([...run, "--", "--cases"])];
     const [mine, theirs] = [cases.split("\n"), sequential.cases.split("\n")];
     const differ = mine.filter((l, k) => l !== theirs[k]);
-    console.log(`physics determinism (parallel, ${threads} threads): script ${script}, sequential ${sequential.script}; ${mine.length - differ.length} of ${theirs.length} worlds equal the sequential build's`);
+    console.log(`physics determinism (parallel, ${threads} threads): script ${script}, sequential ${sequential.script}, recorded ${constant("EXPECTED")}; ${mine.length - differ.length} of ${theirs.length} worlds equal the sequential build's`);
     for (const d of differ.slice(0, 3)) console.log(`  ${d}`);
-    failed ||= script !== sequential.script || mine.length !== theirs.length || differ.length > 0;
+    failed ||= script !== sequential.script || script !== constant("EXPECTED") || mine.length !== theirs.length || differ.length > 0;
   }
 }
 // The renderer's own dependency graph built for wasm32 (the engine's library in a browser): the same recorded hashes.

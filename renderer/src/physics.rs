@@ -110,9 +110,9 @@ impl PhysicsWorld {
                 bridge.tick();
             }
         };
-        #[cfg(feature = "physics-parallel")]
+        #[cfg(not(target_arch = "wasm32"))]
         pool().install(tick);
-        #[cfg(not(feature = "physics-parallel"))]
+        #[cfg(target_arch = "wasm32")]
         tick();
         let t1 = Instant::now();
         let moved = self.bridge.sync(w);
@@ -156,17 +156,48 @@ impl PhysicsWorld {
     }
 }
 
-/// The threads Rapier's parallel solver steps the world on (the `physics-parallel` feature): a pool of the physics'
-/// own, of 4 (`THREERT_PHYSICS_THREADS`: 1 to 16), not the process's pool, which has every core for the renderer's
-/// own work. Measured (docs/VOXEL.md "Voxel bodies"): 4 threads take a third of the sequential step's time, 8 gain
-/// little more, and with little moving more threads cost. The bits do not depend on the count.
-#[cfg(feature = "physics-parallel")]
+/// The threads the physics world is stepped on natively (Rapier's parallel solver: physics-core's `parallel`): a pool
+/// of the physics' own, not the process's, which has every core for the renderer's own work. **4 threads, or the
+/// machine's performance cores when it has fewer**; `THREERT_PHYSICS_THREADS` sets another count (1 to 16), and 1 (or
+/// 0, or "off") is sequential: the solver on one thread, which costs what the sequential build does. Measured
+/// (docs/VOXEL.md "Voxel bodies"): 4 threads take a third of the sequential step's time, 8 gain nothing on the frame,
+/// and with little moving the pool costs 0.03 ms. The bits do not depend on the count (the recorded hashes at 1 to
+/// 15 threads on this machine: ROADMAP § 6 step 8 says what was checked and what was not). wasm32 has no threads
+/// here: there the world is stepped where it is called.
+#[cfg(not(target_arch = "wasm32"))]
 fn pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = std::env::var("THREERT_PHYSICS_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(4);
+        let threads = threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores());
         rayon::ThreadPoolBuilder::new().num_threads(threads).thread_name(|k| format!("physics-{k}")).build().expect("the physics' threads")
     })
+}
+
+/// The pool's size: what `THREERT_PHYSICS_THREADS` says (1 to 16; 0 and "off": 1, sequential; anything else is not
+/// taken), else 4 or the performance cores when fewer.
+#[cfg(not(target_arch = "wasm32"))]
+fn threads_from(env: Option<&str>, cores: usize) -> usize {
+    match env.map(str::trim) {
+        Some("off") | Some("0") => 1,
+        Some(v) => v.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).unwrap_or_else(|| threads_from(None, cores)),
+        None => cores.clamp(1, 4),
+    }
+}
+
+/// The machine's performance cores: on Apple silicon the first performance level's physical cores (the efficiency
+/// cores are left to the rest of the process); elsewhere the cores the process may use.
+#[cfg(not(target_arch = "wasm32"))]
+fn performance_cores() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        let (mut n, mut size) = (0i32, std::mem::size_of::<i32>());
+        // SAFETY: the name is a C string, and the value is read into an i32 whose size is passed with it.
+        let read = unsafe { libc::sysctlbyname(c"hw.perflevel0.physicalcpu".as_ptr(), (&mut n as *mut i32).cast(), &mut size, std::ptr::null_mut(), 0) };
+        if read == 0 && n > 0 {
+            return n as usize;
+        }
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 #[cfg(test)]
@@ -214,6 +245,17 @@ mod tests {
         w.remove(2);
         p.advance(&mut w, 1.0 / 60.0);
         assert_eq!(p.take_stats().bodies, 0);
+    }
+
+    /// The physics' threads: 4, the performance cores when fewer, what the environment says when it says a count;
+    /// 1 (0, "off") is sequential.
+    #[test]
+    fn the_physics_threads() {
+        assert_eq!([threads_from(None, 5), threads_from(None, 12), threads_from(None, 2), threads_from(None, 0)], [4, 4, 2, 1]);
+        assert_eq!([threads_from(Some("8"), 5), threads_from(Some("1"), 5), threads_from(Some("0"), 5), threads_from(Some("off"), 5), threads_from(Some(" 2 "), 5)], [8, 1, 1, 1, 2]);
+        assert_eq!([threads_from(Some("64"), 5), threads_from(Some("many"), 2), threads_from(Some(""), 5)], [4, 2, 4]);
+        assert!(performance_cores() >= 1);
+        assert_eq!(pool().current_num_threads(), threads_from(std::env::var("THREERT_PHYSICS_THREADS").ok().as_deref(), performance_cores()));
     }
 
     /// The renderer's build of the physics steps to the recorded bits, as physics-core's own build and its wasm32
