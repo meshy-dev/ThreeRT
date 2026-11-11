@@ -362,9 +362,14 @@
   pp.addEventListener("click", () => { playing = !playing; icon(); });
   $("#reel").addEventListener("pointerenter", () => (hover = true));
   $("#reel").addEventListener("pointerleave", () => (hover = false));
-  // The divider captures the pointer while dragging, so a drag can leave the reel: pause until it ends.
-  cmpEl.addEventListener("pointerdown", () => { dragging = touched = true; });
-  for (const ev of ["pointerup", "pointercancel"]) addEventListener(ev, () => (dragging = false));
+  // The divider captures the pointer while dragging, so a drag can leave the reel: pause until it ends. Only a real
+  // tap or horizontal drag keeps the reader's position; a touch that turns into a vertical scroll (pointercancel)
+  // lets the sweep go on.
+  let downX = 0;
+  cmpEl.addEventListener("pointerdown", (e) => { dragging = true; downX = e.clientX; });
+  cmpEl.addEventListener("pointermove", (e) => { if (dragging && Math.abs(e.clientX - downX) > 4) touched = true; });
+  addEventListener("pointerup", () => { if (dragging) touched = true; dragging = false; });
+  addEventListener("pointercancel", () => (dragging = false));
   new IntersectionObserver(([e]) => (visible = e.isIntersecting), { threshold: 0.35 }).observe($("#reel"));
   icon(); show(0); requestAnimationFrame(tick);
 
