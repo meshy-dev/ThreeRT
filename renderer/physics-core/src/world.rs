@@ -423,6 +423,14 @@ mod dispatch {
 /// every cell** (straight down at x = 1.5 onto cells of 0.1 m, which is where a game asks for the ground). Here a
 /// point belongs to the cell its coordinates floor to, the cell is stepped as an integer, and a cell that is solid
 /// is a hit.
+/// Every cell of a voxel shape. Not parry's `Voxels::voxels()`: it takes its range from the shape's box in metres, and
+/// f32's rounding can leave the lowest layer out (found by the fuzz: a body spanning -100.8 m .. 0.1 m listed 29 cells
+/// fewer than it holds, all of its lowest z row, at -67.3 m). `domain()` rounds from a voxel's centre, exactly.
+fn listed(v: &rapier3d::parry::shape::Voxels) -> impl Iterator<Item = rapier3d::parry::shape::VoxelData> + '_ {
+    let d = v.domain();
+    v.voxels_in_range(d[0], d[1])
+}
+
 fn voxel_ray(v: &rapier3d::parry::shape::Voxels, at: &Pose, ray: &Ray, max: f32) -> Option<(f32, Vector)> {
     let size = v.voxel_size().x;
     let (o, d) = (at.inverse_transform_point(ray.origin).to_array(), at.inverse_transform_vector(ray.dir).to_array());
@@ -842,7 +850,7 @@ impl Physics {
                 voxels.set_voxel(k, true);
             }
         }
-        let left = voxels.voxels().filter(|v| !v.state.is_empty()).count();
+        let left = listed(voxels).filter(|v| !v.state.is_empty()).count();
         for b in touching.into_iter().chain(parent) {
             if let Some(b) = self.world.bodies.get_mut(b) {
                 b.wake_up(true);
@@ -885,13 +893,13 @@ impl Physics {
     /// A voxel collider's solid cells, counted; None if it is none.
     pub fn voxels(&self, id: ColliderId) -> Option<usize> {
         let &(h, _) = self.colliders.get(&id)?;
-        self.world.colliders.get(h)?.shape().as_voxels().map(|v| v.voxels().filter(|v| !v.state.is_empty()).count())
+        self.world.colliders.get(h)?.shape().as_voxels().map(|v| listed(v).filter(|v| !v.state.is_empty()).count())
     }
 
     /// A voxel collider's cells, sorted (the checks').
     pub fn voxel_cells(&self, id: ColliderId) -> Option<Vec<[i32; 3]>> {
         let &(h, _) = self.colliders.get(&id)?;
-        let mut out: Vec<[i32; 3]> = self.world.colliders.get(h)?.shape().as_voxels()?.voxels().filter(|v| !v.state.is_empty()).map(|v| [v.grid_coords.x, v.grid_coords.y, v.grid_coords.z]).collect();
+        let mut out: Vec<[i32; 3]> = listed(self.world.colliders.get(h)?.shape().as_voxels()?).filter(|v| !v.state.is_empty()).map(|v| [v.grid_coords.x, v.grid_coords.y, v.grid_coords.z]).collect();
         out.sort_unstable();
         Some(out)
     }
@@ -1864,6 +1872,18 @@ mod tests {
         p.edit_voxels(c, &[[0, 0, 0]], &[]).unwrap();
         assert!((p.mass(b).unwrap() - m).abs() < 1e-5, "an edit keeps it");
         assert!(p.set_mass_properties(b, 0.0, com, [0.01; 6]).is_err() && p.set_mass_properties(b, 1.0, [f32::NAN; 3], [0.01; 6]).is_err());
+    }
+
+    /// Every cell of a voxel shape is counted and listed: one cell at (-1000, 9, -673) of 0.1 m, which parry's own
+    /// `Voxels::voxels()` leaves out (its range is from the shape's box in metres, rounded), and the same after an edit.
+    #[test]
+    fn every_voxel_is_listed() {
+        let mut p = Physics::new([0.0, 0.0, 0.0]);
+        let b = p.add_body(&BodyDesc::default()).unwrap();
+        let c = p.add_collider(Some(b), &ColliderDesc { density: 0.0, ..ColliderDesc::new(Shape::Voxels { size: 0.1, cells: vec![[-1000, 9, -673]] }) }).unwrap();
+        assert_eq!((p.voxels(c), p.voxel_cells(c)), (Some(1), Some(vec![[-1000, 9, -673]])));
+        assert_eq!(p.edit_voxels(c, &[], &[[0, 0, 0]]), Ok(2));
+        assert_eq!(p.voxel_cells(c), Some(vec![[-1000, 9, -673], [0, 0, 0]]));
     }
 
     #[test]
