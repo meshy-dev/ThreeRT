@@ -3939,7 +3939,23 @@ benchmark level. The order follows the dependencies; a step that meets a further
    - Every GPU run of the new walk has the loop guard, natively too (what hung on 2026-11-11 is not confirmed, so
      another path that does not end may exist); whether software traversal has it by default natively is decided
      with its measured cost.
-   - **Status: in progress** (branch `sw-two-level`).
+   - **Status: built and tested on the CPU; nothing run on a GPU yet** (branch `sw-two-level`, 2026-11-11).
+     - Done, without a GPU: `renderer/src/units.rs` (mesh trees, the top tree, where they go in the node buffer,
+       the checks made where a tree is written), `shaders/trace_units.wgsl` (spliced into software traversal by a
+       source feature, `F_UNITS`; `pathtrace.wgsl` not edited), `prepare` keeping instances as units, and the edits
+       in place through `gpu::Top` (the TLAS or the units), so `move_instances`, `update_instanced` and
+       `edit_geometry` are one path under both traversals. The CPU tests of the acceptance pass (the walks
+       transcribed from the shaders and compared with their lines; random scenes under random edits against brute
+       force; a prepared scene with units against the same scene flattened; broken and stale trees refused), and
+       every scene without units is handed the sources main hands it (`the_default_sources_are_untouched`).
+     - Not done: every GPU run. No image has been made with units, natively or in a browser; none of the
+       acceptance's measurements exists (hello world's two checks and its frame in Chrome, the voxel level's
+       triangle data, load, explosion and still frame, the pile of debris, Kabukichō's frame time).
+     - Open: whether a native kernel with units has the loop guard by default (the supervisor's decision, with the
+       measured cost); the edit room and the tree ranges do not grow under software traversal (an edit that finds
+       them full rebuilds the scene: how many explosions that is on the level is to be measured); procedural
+       edits, posed models and rigid groups' poses still rebuild under software traversal; the cost of overlapping
+       units (each one a ray's box meets is walked); a scene with more than 2^18 instances is flattened, as before.
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

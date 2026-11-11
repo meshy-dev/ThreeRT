@@ -363,7 +363,7 @@ pub(crate) fn units_on() -> bool {
 /// Whether `prepare` will keep the scene's instances as units (software traversal, and it has instances), asked
 /// before it runs (live.rs `load_scene`: the light tree's part for emitters edits add).
 pub fn units_wanted(hwrt: bool, sc: &scene::Scene) -> bool {
-    !hwrt && units_on() && !sc.instances.is_empty()
+    !hwrt && units_on() && !sc.instances.is_empty() && sc.instances.len() <= units::MAX_UNITS
 }
 
 /// `prepare` for a traversal: hardware ray queries, or software traversal with units (units.rs) or without.
@@ -371,11 +371,12 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let t = Instant::now();
     // Software traversal: the instances stay instances, units of a second level (units.rs; docs/RUNTIME.md "Software
     // traversal with units"), each mesh with a tree of its own over its model-space triangles, which are put in the
-    // tree's order here, before anything counts them. Without units (THREERT_UNITS=0, the A/B; or a mesh no tree
-    // can be made of) the instances become ordinary world-space triangles, as they all did before.
+    // tree's order here, before anything counts them. Without units (THREERT_UNITS=0, the A/B; a mesh no tree can
+    // be made of; more instances than a top tree holds) the instances become ordinary world-space triangles, as
+    // they all did before.
     let mut trees = None;
     if !hwrt && !sc.instances.is_empty() {
-        trees = if units { unit_trees(sc) } else { None };
+        trees = if units && sc.instances.len() <= units::MAX_UNITS { unit_trees(sc) } else { None };
         match &trees {
             Some(_) => flatten_deforming(sc),
             None => flatten_instances(sc),

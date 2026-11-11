@@ -491,7 +491,8 @@ through wgpu, default limits except buffer sizes, timestamp queries only if the 
 
 ## Software traversal with units (in-place edits without ray queries)
 
-ROADMAP § 6 step 7b. **Status: being built; nothing here has run on a GPU yet.**
+ROADMAP § 6 step 7b. **Status: built and tested on the CPU; nothing here has run on a GPU yet** (no image, no
+time: the measurements this section will carry are listed in the ROADMAP step).
 
 **What there was.** Software traversal (a browser's only one) walked one flat tree over every triangle in world
 space. Instances were written out into it (`flatten_instances`), so adding or moving anything rebuilt the scene, and a
@@ -502,27 +503,77 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
 **What there is now.** Under software traversal an instance stays an instance: a **unit**.
 - **The still scene is the flat tree it was**, walked first, exactly as before.
 - **A mesh's tree** is built once over its triangles in model space, where they already are (the pool hardware
-  traversal builds its BLASes from). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
+  traversal builds its BLASes from; under software traversal the mesh's triangles are put in its tree's order, a
+  cutout triangle carrying its flag). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
   (child indices count from its root, leaf triangles from its mesh's first).
 - **A unit** is the instance's kernel record (160 B), as under hardware traversal, with two of its unused words
   filled: its mesh tree's root, and whether it casts shadows.
 - **The top tree** is over the units' world boxes, one unit a leaf. It is rebuilt whole on the CPU whenever a unit
-  is added, moved or removed (as the TLAS is under hardware traversal: a few thousand boxes are a fraction of a
-  millisecond) and written into its own range of the node buffer.
+  is added, moved or removed (as the TLAS is under hardware traversal) and written into its own range of the node
+  buffer. Its root and the number of units reach the kernel in two words of the frame's parameters
+  (`Params.motion.z`, `.w`, as bits; no binding, no buffer more).
 - **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
   unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. The hit it returns
   is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
 - **`pathtrace.wgsl` is not edited.** The unit walk is `shaders/trace_units.wgsl`, spliced in by `kernel_source`
-  for scenes that have units under software traversal (a source feature, as vertex colours are). A scene without
-  units is handed the source it was handed before, byte for byte; hardware traversal's source never contains it.
-- Still flattened, as before: meshes that deform (a pose shared by a crowd).
+  for scenes that have units under software traversal (`F_UNITS`, a source feature, as vertex colours are). A scene
+  without units is handed the source it was handed before, byte for byte; hardware traversal's source never
+  contains it.
+- Still flattened, as before: meshes that deform (a pose shared by a crowd), and every instance of a scene with more
+  of them than a top tree holds (2^18). `THREERT_UNITS=0` flattens everything, as before this step (the A/B).
+
+**Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
+its BLASes, or the units), so the engine's path is the same under both traversals (`live.rs` `move_instances`,
+`update_instanced`, `edit_geometry`):
+
+| edit | under software traversal with units |
+| --- | --- |
+| a unit moves (a rigid body's box, a piece of debris) | its record and the top tree |
+| an instance of a mesh the scene has is added or removed | a record in the edit room, the top tree |
+| a mesh of its own is added (a new chunk, a new box) | its triangles and attributes into the edit room in its tree's order, its tree into the mesh range, a record, the top tree |
+| a mesh of its own changes (a voxel edit: the chunks it touched) | those meshes' trees made again (the old tree's nodes given back and filled), their records; no other unit is read |
+| a mesh is removed | its record cleared, its tree given back and filled, the top tree |
+
+The scene is rebuilt, as before this step, by: the first instanced mesh of a scene that has none (its kernel has no
+unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a posed model or
+a rigid group's pose (their triangles are in the still tree); an instance of a mesh that deforms; **room that is
+full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
+triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
+edit replaces stays behind until the next rebuild, under both); a top tree that is refused (below).
 
 **Why the loops end.** A walk follows indices it reads, so the trees are checked on the CPU where they are written
 (`units.rs`): every child index is greater than its parent's and inside its tree's range, a leaf's triangles inside
-its mesh's, a top leaf's record inside the records. A tree that fails is not uploaded: the scene is rebuilt. Room not
-yet used holds leaves that end, not zeros. Both levels share one stack of 48 entries; a push past it is dropped
-(geometry missed, never a hang), and the builders bound their depths so that it is not reached (below). And every
-kernel with units has the loop guard until this has run long enough to drop it.
+its mesh's and at most 16, a top leaf's record a unit's. A tree that fails is not uploaded: the scene is rebuilt.
+A unit's record names its mesh's tree by its root, so a top tree is refused while a shown unit's record names a root
+that is not its mesh's tree now (freed, or placed again elsewhere), or a unit sits past the kernel's records. Room
+not yet used, and a tree given back, hold leaves that end (`units::FILL`), not zeros (zeros are an interior node
+whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
+
+**The stack.** Both levels share one stack of 48 entries (the still walk's own, as before); a walk's stack is never
+deeper than its tree, and a unit's walk pushes above what the top walk has pending. The top tree is built by median
+splits, each halving: 18 levels hold 2^18 units, the most a top tree is given. That leaves 30 for a mesh tree: a
+binned-SAH tree deeper than that (a degenerate mesh) is built again by median splits, whose depth is
+log2(triangles / 4). A push past the stack is dropped (geometry missed, never a hang), and the builders' bounds mean
+it is not reached; `the_builders_keep_their_depths` holds them to it.
+
+**Checked on the CPU** (`units.rs`, `lib.rs` `units_tests`; no GPU):
+- the kernel's two walks transcribed line for line (a test compares the transcription's source lines with the
+  shaders'), with every buffer read through an accessor that refuses an index outside its buffer and every loop
+  iteration counted;
+- random scenes and random sequences of adding a mesh, adding, moving and removing units, removing a mesh: after each
+  step, for closest, shadow and any-hit rays, no read outside a buffer, an end within the nodes there are, and the
+  closest hit brute force over every triangle finds;
+- a scene prepared with units (`prepare`, what the renderer uploads) against the same scene flattened, ray for ray:
+  a hit where there was one, at the same distance to 2 × 10⁻⁴ (a unit's triangles are met in its own space), and
+  the same shadow rays blocked;
+- broken trees (a child at or before its parent, a cycle, a range outside, a leaf over 16, a record that is no unit)
+  refused; a record naming a tree that is gone refused;
+- the sources handed to wgpu for every scene without units: the hashes main has
+  (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers.
+
+**The loop guard.** A browser's kernel always has it (`merged::guard`). Natively it is `THREERT_LOOP_GUARD`, off by
+default; every native GPU run of a kernel with units is made with it until the walk has run enough to say otherwise,
+and whether a native kernel with units has it by default is open (ROADMAP § 6 step 7b).
 
 ## Correctness
 
