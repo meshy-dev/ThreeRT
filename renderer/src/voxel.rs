@@ -38,6 +38,12 @@ const MAX_TICKS: u32 = 8;
 /// The most voxel bodies a level holds unless it says otherwise (`LevelDesc::max_bodies`): past it the oldest that
 /// sleeps (else the oldest) goes, its voxels debris.
 pub const MAX_BODIES: usize = 512;
+/// A level object's collider holds its cells within this many cells of one that is not solid (six-connected steps):
+/// a shell. The benchmark level has 515 million solid cells, 480 million of them terrain down to the bedrock; a
+/// collider of every one took 26 s to build and 1.3 GiB. Four cells are 0.4 m of voxels of 0.1 m: a body would have
+/// to cross them in one tick (24 m/s, a fall of 29 m) to get behind the shell, and one that does falls out under
+/// the level and is taken out (`sync_bodies`). An edit keeps the shell whole around what it carved.
+const SHELL: i32 = 4;
 /// Friction of voxel colliders (the level's and the bodies').
 const FRICTION: f32 = 0.6;
 /// kg/m³ of a palette entry that names no density, by its hardness: soft (earth, wood), medium (brick), hard
@@ -139,6 +145,14 @@ struct VoxelObject {
     /// A falling object's mesh with its voxel (0, 0, 0) at the origin (mesh route): written again where the object is,
     /// every tick it moves.
     flying: Option<Vec<MeshPart>>,
+}
+
+/// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
+#[derive(Clone, Copy)]
+enum BrickRef<'a> {
+    Solid,
+    Empty,
+    Cells(&'a [u8; 512]),
 }
 
 /// A loose part as a rigid body (ROADMAP § 6 step 8): the level no longer holds it. Its voxels are its own grid, in
@@ -252,6 +266,10 @@ pub struct VoxelWorld {
     density: Vec<f32>,
     max_bodies: usize,
     pub retired: u64,
+    /// Under this height (m) a body has left the level: 100 m below its lowest cell.
+    floor: f32,
+    /// Time spent finding the colliders' cells (`shell`), ms: of the load, and of every edit since.
+    pub shell_ms: f64,
 }
 
 /// Debris voxels kept between two `take_debris` calls, and of one edit.
@@ -440,13 +458,15 @@ impl VoxelWorld {
         let t_col = Instant::now();
         let (mut colliders, mut collider_cells) = (0usize, 0usize);
         self.colliders = vec![None; self.objects.len()];
+        self.floor = self.level.as_ref().map_or(f32::MIN, |l| l.objects.iter().flatten().map(|o| o.lo[1]).min().map_or(f32::MIN, |y| y as f32 * size - 100.0));
         if self.physics {
             let p = ph.get_or_insert_with(Default::default);
+            let mut full = HashMap::new();
             for k in 0..self.objects.len() {
                 if d.objects.get(k).is_some_and(|o| o.collide == Some(false)) {
                     continue;
                 }
-                if let Some(n) = self.collide(p, k) {
+                if let Some(n) = self.collide(p, k, &mut full) {
                     colliders += 1;
                     collider_cells += n;
                 }
@@ -470,15 +490,17 @@ impl VoxelWorld {
             "place_ms": place_ms, "triangles": triangles, "explosions": edits, "frames": frames,
             "lattice_ms": lattice_ms, "lattice_bricks": lattice_bricks, "lattice_mb": lattice_mb, "floating_groups": floating.0, "floating_voxels": floating.1, "snapped": snapped,
             "occupancy_ms": occupancy_ms, "occupancy_bytes": self.occupancy.as_ref().map_or(0, |o| o.read().unwrap().words.len() * 4),
-            "colliders": colliders, "collider_cells": collider_cells, "colliders_ms": colliders_ms,
+            "colliders": colliders, "collider_cells": collider_cells, "colliders_ms": colliders_ms, "shell_ms": self.shell_ms,
         })))
     }
 
     /// Level object `k`'s fixed collider: its cells where they stand in the world's lattice. Returns the cells, or
     /// None if it got none (no voxel; a cell past what a shape may reach: said once).
-    fn collide(&mut self, p: &mut PhysicsWorld, k: usize) -> Option<usize> {
+    fn collide(&mut self, p: &mut PhysicsWorld, k: usize, full: &mut HashMap<(usize, (i32, i32, i32)), bool>) -> Option<usize> {
         let o = self.level.as_ref()?.objects.get(k)?.as_ref()?;
-        let cells: Vec<[i32; 3]> = o.grid.voxels().map(|(g, _)| o.place.to_world(g)).collect();
+        let t = Instant::now();
+        let cells: Vec<[i32; 3]> = self.shell(k, None, full).into_iter().map(|g| o.place.to_world(g)).collect();
+        self.shell_ms += t.elapsed().as_secs_f64() * 1e3;
         if cells.is_empty() {
             return None;
         }
@@ -619,10 +641,28 @@ impl VoxelWorld {
         // the objects that are gone go.
         let t_col = Instant::now();
         if let Some(p) = ph.as_mut().filter(|_| self.physics) {
+            // (Each object's lost cells out, and its shell made whole around them: the cells an edit brought within
+            // `SHELL` of the open. A terrain tile carved at its edge bares its neighbours' sides: theirs too.)
+            let mut work: Vec<(usize, &[[i32; 3]], ([i32; 3], [i32; 3]))> = vec![];
             for (&k, cells) in &e.cleared {
-                let Some(c) = self.colliders.get(k as usize).copied().flatten() else { continue };
-                match p.bridge().engine_edit_voxels(c, cells, &[]) {
-                    Ok(0) => self.colliders[k as usize] = None,
+                let Some(&(lo, hi)) = e.bounds.get(&k) else { continue };
+                let around = (lo.map(|x| x - SHELL - 1), hi.map(|x| x + SHELL + 1));
+                work.push((k as usize, cells.as_slice(), around));
+                if let Some((tx, tz)) = self.objects.get(k as usize).and_then(|o| o.as_ref()).and_then(|o| o.tile) {
+                    work.extend([(-1, 0), (1, 0), (0, -1), (0, 1)].iter().filter_map(|d| self.tiles.get(&(tx + d.0, tz + d.1))).filter(|n| !e.cleared.contains_key(&(**n as u32))).map(|&n| (n, &[][..], around)));
+                }
+            }
+            let mut full = HashMap::new();
+            for (k, cells, (lo, hi)) in work {
+                let Some(c) = self.colliders.get(k).copied().flatten() else { continue };
+                let t = Instant::now();
+                let fill: Vec<[i32; 3]> = match self.level.as_ref().and_then(|l| l.objects.get(k)?.as_ref()) {
+                    Some(o) => self.shell(k, Some(o.place.box_to_grid(lo, hi)), &mut full).into_iter().map(|g| o.place.to_world(g)).collect(),
+                    None => vec![],
+                };
+                self.shell_ms += t.elapsed().as_secs_f64() * 1e3;
+                match p.bridge().engine_edit_voxels(c, cells, &fill) {
+                    Ok(0) => self.colliders[k] = None,
                     Ok(_) => {}
                     Err(err) => eprintln!("voxels: a collider was not edited ({err})"),
                 }
@@ -718,7 +758,7 @@ impl VoxelWorld {
             piece_world_ms += tw.elapsed().as_secs_f64() * 1e3;
             // (Added voxels that hold: a collider of their own.)
             if let (false, true, Some(p)) = (falling, self.physics, ph.as_mut()) {
-                self.collide(p, k);
+                self.collide(p, k, &mut HashMap::new());
             }
         }
         let pieces_ms = t2.elapsed().as_secs_f64() * 1e3;
@@ -738,6 +778,135 @@ impl VoxelWorld {
             "batches": self.level.as_ref().unwrap().falling(), "faces": counts.0, "triangles": counts.1, "objects": self.objects.iter().flatten().count(),
             "occupancy_ms": occupancy_ms, "world_objects": self.world_objects(), "colliders_ms": colliders_ms,
         }))
+    }
+
+    /// Brick `key` of level object `k`'s grid as its collider's shell sees it: the object's own; and for a terrain
+    /// tile, what lies beside and under it: solid under the bedrock, the neighbouring tile's brick beside it (tiles
+    /// stand side by side on one lattice of bricks; one that does not is taken as standing alone, its sides bare).
+    /// With the brick, the object and key it is at (the fullness cache's key).
+    fn brick_at(&self, k: usize, key: (i32, i32, i32)) -> (BrickRef<'_>, (usize, (i32, i32, i32))) {
+        let own = |k: usize, key: (i32, i32, i32)| match self.level.as_ref().and_then(|l| l.objects.get(k)?.as_ref()).and_then(|o| o.grid.bricks.get(&key)) {
+            Some(b) => (BrickRef::Cells(b), (k, key)),
+            None => (BrickRef::Empty, (k, key)),
+        };
+        let Some(o) = self.objects.get(k).and_then(|o| o.as_ref()) else { return (BrickRef::Empty, (k, key)) };
+        let (Some((tx, tz)), true) = (o.tile, o.off.iter().all(|x| x % 8 == 0)) else { return own(k, key) };
+        // In the tile's own bricks: 8 a side from its corner.
+        let q = (key.0 + o.off[0] / 8, key.1 + o.off[1] / 8, key.2 + o.off[2] / 8);
+        if q.1 < 0 {
+            return (BrickRef::Solid, (k, key));
+        }
+        let side = TILE / 8;
+        if (0..side).contains(&q.0) && (0..side).contains(&q.2) {
+            return own(k, key);
+        }
+        let Some(&n) = self.tiles.get(&(tx + q.0.div_euclid(side), tz + q.2.div_euclid(side))) else { return (BrickRef::Empty, (k, key)) };
+        match self.objects[n].as_ref().filter(|t| t.off.iter().all(|x| x % 8 == 0)) {
+            Some(t) => own(n, (q.0.rem_euclid(side) - t.off[0] / 8, q.1 - t.off[1] / 8, q.2.rem_euclid(side) - t.off[2] / 8)),
+            None => (BrickRef::Empty, (k, key)),
+        }
+    }
+
+    /// The cells of brick `key` of object `k` that are in its collider's shell (`SHELL`), added to `out` (grid cells).
+    /// `full`: which bricks are solid through, remembered over a pass of many bricks (a brick is asked about by each
+    /// of its 26 neighbours; the level has a million of them, most deep in the ground).
+    fn shell_of(&self, k: usize, key: (i32, i32, i32), out: &mut Vec<[i32; 3]>, full: &mut HashMap<(usize, (i32, i32, i32)), bool>) {
+        let mut around = [BrickRef::Empty; 27];
+        let mut all = true;
+        for (i, b) in around.iter_mut().enumerate() {
+            let d = ((i % 3) as i32 - 1, ((i / 3) % 3) as i32 - 1, (i / 9) as i32 - 1);
+            let (brick, at) = self.brick_at(k, (key.0 + d.0, key.1 + d.1, key.2 + d.2));
+            *b = brick;
+            all &= match brick {
+                BrickRef::Solid => true,
+                BrickRef::Empty => false,
+                BrickRef::Cells(c) => *full.entry(at).or_insert_with(|| c.iter().all(|&m| m != 0)),
+            };
+            // (Not solid all around: the rest are read below as they are needed.)
+            if !all && i > 13 {
+                for (j, b) in around.iter_mut().enumerate().skip(i + 1) {
+                    let d = ((j % 3) as i32 - 1, ((j / 3) % 3) as i32 - 1, (j / 9) as i32 - 1);
+                    *b = self.brick_at(k, (key.0 + d.0, key.1 + d.1, key.2 + d.2)).0;
+                }
+                break;
+            }
+        }
+        let BrickRef::Cells(centre) = around[13] else { return };
+        // (Solid all around: every cell is more than `SHELL` from an empty one.)
+        if all {
+            return;
+        }
+        // The brick and `SHELL` cells around it, a row of bits along x for each (y, z): the cells that are not solid,
+        // then those within `SHELL` steps of one.
+        const W: usize = 8 + 2 * SHELL as usize;
+        let mut reach = [[0u32; W]; W];
+        for (wy, plane) in reach.iter_mut().enumerate() {
+            for (wz, row) in plane.iter_mut().enumerate() {
+                let (sy, sz) = (wy + 8 - SHELL as usize, wz + 8 - SHELL as usize);
+                for wx in 0..W {
+                    let sx = wx + 8 - SHELL as usize;
+                    let solid = match around[(sx >> 3) + 3 * (sy >> 3) + 9 * (sz >> 3)] {
+                        BrickRef::Solid => true,
+                        BrickRef::Empty => false,
+                        BrickRef::Cells(c) => c[(sx & 7) + 8 * (sy & 7) + 64 * (sz & 7)] != 0,
+                    };
+                    *row |= (!solid as u32) << wx;
+                }
+            }
+        }
+        for _ in 0..SHELL {
+            let was = reach;
+            for y in 0..W {
+                for z in 0..W {
+                    let mut r = was[y][z] | (was[y][z] << 1) | (was[y][z] >> 1);
+                    if y > 0 {
+                        r |= was[y - 1][z];
+                    }
+                    if y + 1 < W {
+                        r |= was[y + 1][z];
+                    }
+                    if z > 0 {
+                        r |= was[y][z - 1];
+                    }
+                    if z + 1 < W {
+                        r |= was[y][z + 1];
+                    }
+                    reach[y][z] = r;
+                }
+            }
+        }
+        for (v, &m) in centre.iter().enumerate() {
+            let (x, y, z) = (v & 7, (v >> 3) & 7, v >> 6);
+            if m != 0 && reach[y + SHELL as usize][z + SHELL as usize] >> (x + SHELL as usize) & 1 != 0 {
+                out.push([key.0 * 8 + x as i32, key.1 * 8 + y as i32, key.2 * 8 + z as i32]);
+            }
+        }
+    }
+
+    /// The cells of level object `k`'s collider (grid cells): its shell, whole, or of the bricks that reach into the
+    /// box `within` of its grid.
+    fn shell(&self, k: usize, within: Option<([i32; 3], [i32; 3])>, full: &mut HashMap<(usize, (i32, i32, i32)), bool>) -> Vec<[i32; 3]> {
+        let mut out = vec![];
+        let Some(o) = self.level.as_ref().and_then(|l| l.objects.get(k)?.as_ref()) else { return out };
+        match within {
+            None => {
+                for &key in o.grid.bricks.keys() {
+                    self.shell_of(k, key, &mut out, full);
+                }
+            }
+            Some((lo, hi)) => {
+                for bx in lo[0] >> 3..=hi[0] >> 3 {
+                    for by in lo[1] >> 3..=hi[1] >> 3 {
+                        for bz in lo[2] >> 3..=hi[2] >> 3 {
+                            if o.grid.bricks.contains_key(&(bx, by, bz)) {
+                                self.shell_of(k, (bx, by, bz), &mut out, full);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// A voxel grid as a rigid body at a pose: the objects that draw it (its mesh in its own space, placed by the
@@ -848,9 +1017,12 @@ impl VoxelWorld {
     /// moved and how many went.
     pub fn sync_bodies(&mut self, w: &mut World, p: &mut PhysicsWorld) -> (usize, usize) {
         let (mut moved, mut gone) = (0, vec![]);
+        // (A body far under the level's lowest cell got through the ground: it goes.)
+        let floor = self.floor;
         for (&k, b) in self.bodies.iter_mut() {
             match p.bridge_ref().engine_pose(b.body) {
                 None => gone.push(k),
+                Some((at, ..)) if at[1] < floor => gone.push(k),
                 Some((at, rot, _)) if (at, rot) != b.pose => {
                     b.pose = (at, rot);
                     let (t, r) = (Vec3::from(at), Quat::from_array(rot));
@@ -1543,6 +1715,97 @@ mod tests {
         assert!(a.2 > 0);
     }
 
+    /// A level of blocks of one palette entry made here (no file): each (corner cell, size in cells, terrain tile).
+    fn blocks(blocks: &[([i32; 3], [i32; 3], Option<(i32, i32)>)], w: &mut World, ph: &mut Option<PhysicsWorld>) -> VoxelWorld {
+        let mut v = VoxelWorld { route: Some(Route::Mesh), size: 0.1, palette: vec![0, 0], physics: true, max_bodies: MAX_BODIES, density: vec![1000.0; 2], floor: -100.0, ..Default::default() };
+        let mut level = Level::new(gravity_for(0.1, TICK_RATE));
+        for (n, &(at, size, tile)) in blocks.iter().enumerate() {
+            let mut grid = VoxelGrid::default();
+            for x in 0..size[0] {
+                for y in 0..size[1] {
+                    for z in 0..size[2] {
+                        grid.set(x, y, z, 1);
+                    }
+                }
+            }
+            let k = level.add_object(Rc::new(grid), Placement::new(at, 0, [0, 0, 0]), true) as usize;
+            let corner = Vec3::new(at[0] as f32, at[1] as f32, at[2] as f32) * 0.1;
+            v.objects.push(Some(VoxelObject { name: format!("block{n}"), world: Mat4::from_translation(corner), corner: Vec3::ZERO, off: [0; 3], tile, lo: corner, hi: corner + Vec3::new(size[0] as f32, size[1] as f32, size[2] as f32) * 0.1, shared: None, parts: vec![], flying: None }));
+            if let Some(t) = tile {
+                v.tiles.insert(t, k);
+            }
+        }
+        v.level = Some(level);
+        for k in 0..blocks.len() {
+            let g = v.make_geometry(w, k, None).unwrap();
+            v.place(w, k, &g).unwrap();
+        }
+        v.colliders = vec![None; blocks.len()];
+        let p = ph.get_or_insert_with(Default::default);
+        for k in 0..blocks.len() {
+            v.collide(p, k, &mut HashMap::new());
+        }
+        v
+    }
+
+    /// The solid world cells of a level within `SHELL` steps of one that is not (under the bedrock, y < 0, counts as
+    /// solid when `bedrock`): what the colliders must hold, by brute force.
+    fn shell_by_brute_force(v: &VoxelWorld, bedrock: bool) -> usize {
+        let level = v.level.as_ref().unwrap();
+        let solid: std::collections::HashSet<[i32; 3]> = level.objects.iter().flatten().flat_map(|o| o.grid.voxels().map(|(g, _)| o.place.to_world(g))).collect();
+        let is = |c: [i32; 3]| solid.contains(&c) || (bedrock && c[1] < 0);
+        solid
+            .iter()
+            .filter(|c| {
+                (-SHELL..=SHELL).any(|dx| (-SHELL + dx.abs()..=SHELL - dx.abs()).any(|dy| { let r = SHELL - dx.abs() - dy.abs(); (-r..=r).any(|dz| !is([c[0] + dx, c[1] + dy, c[2] + dz])) }))
+            })
+            .count()
+    }
+
+    fn collider_cells(v: &VoxelWorld, ph: &Option<PhysicsWorld>) -> usize {
+        v.colliders.iter().flatten().map(|&c| ph.as_ref().unwrap().bridge_ref().engine_voxels(c).unwrap_or(0)).sum()
+    }
+
+    /// A level object's collider is the shell of its cells near a surface, not its volume, and edits keep it so: a
+    /// block of 32³ cells has the four layers under its faces; a pit carved into it brings the pit's walls and floor
+    /// in (a ray finds the floor, which no collider held before), and what the colliders hold is what brute force
+    /// says, before and after. Terrain tiles side by side cover each other's sides, down to the bedrock, until one is
+    /// carved at the edge they share.
+    #[test]
+    fn a_collider_is_the_shell_of_its_cells() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = blocks(&[([0, 0, 0], [32, 32, 32], None)], &mut w, &mut ph);
+        assert_eq!(collider_cells(&v, &ph), 32 * 32 * 32 - 24 * 24 * 24);
+        assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, false));
+        let ray = |ph: &mut Option<PhysicsWorld>, w: &mut World, x: f32, z: f32| ph.as_mut().unwrap().call(w, "ray", &serde_json::json!({ "origin": [x, 9.0, z], "direction": [0, -1, 0], "max": 20 })).unwrap()["point"][1].as_f64().unwrap();
+        assert!((ray(&mut ph, &mut w, 1.65, 1.65) - 3.2).abs() < 1e-4);
+        // A pit 0.8 m wide, 1.2 m deep, in the middle of the top.
+        let e = v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [1.2, 2.0, 1.2, 2.0, 3.3, 2.0] }))).unwrap();
+        assert_eq!(e["voxels"].as_u64(), Some(8 * 8 * 12), "{e}");
+        assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, false));
+        assert!((ray(&mut ph, &mut w, 1.65, 1.65) - 2.0).abs() < 1e-4, "the pit's floor");
+        // Deeper, through cells no collider held, and out through the bottom: a shaft.
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [1.4, -0.1, 1.4, 1.8, 2.1, 1.8] }))).unwrap();
+        assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, false));
+        // Two terrain tiles (64 x 64 cells, 16 deep) side by side on the bedrock: the top four layers and the outer
+        // sides; nothing of the side they share, nor of their undersides.
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = blocks(&[([0, 0, 0], [64, 16, 64], Some((0, 0))), ([64, 0, 0], [64, 16, 64], Some((1, 0)))], &mut w, &mut ph);
+        assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, true));
+        assert_eq!(collider_cells(&v, &ph), 128 * 64 * 16 - 120 * 56 * 12);
+        // A trench in the second tile along the edge they share, six cells deep: the first tile's side is bare there,
+        // and its collider has those cells now.
+        let before = ph.as_ref().unwrap().bridge_ref().engine_voxels(v.colliders[0].unwrap()).unwrap();
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [6.4, 1.0, 1.0, 6.8, 1.7, 5.0] }))).unwrap();
+        assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, true));
+        assert!(ph.as_ref().unwrap().bridge_ref().engine_voxels(v.colliders[0].unwrap()).unwrap() > before, "the first tile's side");
+        // A ray along the trench's floor from inside the second tile meets the first tile's bared side.
+        let hit = ph.as_mut().unwrap().call(&mut w, "ray", &serde_json::json!({ "origin": [6.75, 1.25, 3.05], "direction": [-1, 0, 0], "max": 5 })).unwrap();
+        assert!((hit["point"][0].as_f64().unwrap() - 6.4).abs() < 1e-4 && hit["collider"].as_u64() == v.colliders[0].map(|c| c as u64), "{hit}");
+    }
+
     /// The cap on bodies: past it the oldest sleeping body goes, its voxels debris; and a body the physics world took
     /// out goes with its objects.
     #[test]
@@ -1640,6 +1903,94 @@ mod tests {
         assert!(v.edit(&mut w, &mut None, &op(serde_json::json!({ "op": "carve", "box": [-500, -500, -500, 500, 500, 500] }))).is_err());
         let e = v.edit(&mut w, &mut None, &op(serde_json::json!({ "op": "explode", "sphere": [0, 0, 0, 1e9] }))).unwrap();
         assert!(e["voxels"].as_u64().unwrap() > 0);
+    }
+
+    /// Step 8 on the benchmark level, on the CPU (no GPU; a measurement):
+    ///   VOXEL_PHYSICS=../out/bundles/voxel-level-destruction-mesh.js cargo test --release --lib voxel_level_physics -- --ignored --nocapture
+    /// The level's colliders (how many, their cells, the time to build them, their memory); explosions of 0.5 to 4 m
+    /// at a building's foot (the edit's parts: the level's carve, the colliders, the meshes, the bodies); then a cut
+    /// under the whole building (it comes loose as bodies) and the physics' ticks after each: step and sync ms a
+    /// frame, the bodies and how many sleep.
+    #[test]
+    #[ignore = "a measurement: VOXEL_PHYSICS=<bundle.js>"]
+    fn voxel_level_physics() {
+        let Ok(bundle) = std::env::var("VOXEL_PHYSICS") else { return println!("VOXEL_PHYSICS=<bundle.js>") };
+        let assets = assets();
+        let host = crate::script::ScriptHost::new(&std::fs::read_to_string(&bundle).unwrap()).unwrap();
+        host.setup("r", None).unwrap();
+        let (mut v, mut w, mut ph) = (host.voxels.borrow_mut(), host.world.borrow_mut(), host.physics.borrow_mut());
+        let t = Instant::now();
+        let r = v.realize(&mut w, &mut ph, &assets).unwrap().unwrap();
+        println!("level: {} objects, {} triangles; realize {:.2} s; colliders: {} of {} cells in {:.0} ms (of it finding the cells {:.0}), {:.1} MiB (parry's count)", r["objects"], r["triangles"], t.elapsed().as_secs_f64(), r["colliders"], r["collider_cells"], r["colliders_ms"].as_f64().unwrap(), r["shell_ms"].as_f64().unwrap(), ph.as_ref().unwrap().bridge_ref().voxel_bytes() as f64 / 1048576.0);
+        w.take_changes();
+        {
+            let level = v.level.as_ref().unwrap();
+            let tiles: Vec<usize> = (0..v.objects.len()).filter(|&k| v.objects[k].as_ref().is_some_and(|o| o.tile.is_some())).collect();
+            let cells: usize = tiles.iter().map(|&k| level.objects[k].as_ref().unwrap().grid.count()).sum();
+            let aligned = tiles.iter().filter(|&&k| { let (o, l) = (v.objects[k].as_ref().unwrap(), level.objects[k].as_ref().unwrap()); l.place.turn == 0 && o.off.iter().all(|x| x % 8 == 0) && l.place.t.iter().all(|x| x.rem_euclid(8) == 0) }).count();
+            let o = v.objects[tiles[0]].as_ref().unwrap();
+            let l = level.objects[tiles[0]].as_ref().unwrap();
+            println!("terrain: {} tiles of {} cells in all ({} aligned to the world's bricks); the first: off {:?}, placed at {:?} turn {}, cells {:?}..{:?}", tiles.len(), cells, aligned, o.off, l.place.t, l.place.turn, l.lo, l.hi);
+            let houses: BTreeMap<String, usize> = v.objects.iter().flatten().filter(|o| o.tile.is_none()).fold(BTreeMap::new(), |mut m, o| { *m.entry(o.name.split('-').next().unwrap_or("").to_string()).or_default() += 1; m });
+            println!("objects by kind: {houses:?}");
+            let anchors = (0..v.objects.len()).filter(|&k| v.objects[k].as_ref().is_some_and(|o| o.tile.is_none()) && level.objects[k].as_ref().is_some_and(|o| o.anchor)).count();
+            println!("anchors that are no tiles: {anchors}");
+        }
+        // The building with the most voxels, and the ground under its middle.
+        let level = v.level.as_ref().unwrap();
+        let (k, cells) = (0..v.objects.len()).filter(|&k| v.objects[k].as_ref().is_some_and(|o| o.name.starts_with("house") && o.tile.is_none())).map(|k| (k, level.objects[k].as_ref().map_or(0, |o| o.grid.count()))).max_by_key(|x| x.1).expect("a house");
+        let (lo, hi) = (v.objects[k].as_ref().unwrap().lo, v.objects[k].as_ref().unwrap().hi);
+        println!("the largest building part: {} ({cells} voxels), {:.1} x {:.1} x {:.1} m at {:?}", v.objects[k].as_ref().unwrap().name, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, lo);
+        let frames = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, n: usize, what: &str| {
+            let (mut step, mut sync, mut worst) = (vec![], vec![], 0.0f64);
+            for _ in 0..n {
+                let t = Instant::now();
+                crate::api::physics_advance(ph, v, w, 1.0 / 60.0);
+                let all = t.elapsed().as_secs_f64() * 1e3;
+                let s = ph.as_mut().unwrap().take_stats();
+                step.push(s.step_ms);
+                sync.push(all - s.step_ms);
+                worst = worst.max(all);
+                w.take_changes();
+            }
+            step.sort_by(f64::total_cmp);
+            sync.sort_by(f64::total_cmp);
+            let list = v.body_list(ph.as_ref().unwrap());
+            let asleep = list.as_array().unwrap().iter().filter(|b| b["asleep"] == true).count();
+            println!("  {what}: {n} frames: step p50 {:.3} p95 {:.3} ms, placing p50 {:.3} ms, a frame at worst {:.2} ms; {} bodies, {asleep} asleep", step[n / 2], step[n * 95 / 100], sync[n / 2], worst, v.bodies());
+        };
+        frames(&mut v, &mut w, &mut ph, 60, "the level at rest");
+        let foot = Vec3::new(lo.x + 0.3, lo.y + 1.0, (lo.z + hi.z) * 0.5);
+        for (n, r) in [0.5f32, 1.0, 2.0, 4.0].into_iter().enumerate() {
+            let at = foot + Vec3::new(0.0, 0.0, (n as f32 - 1.5) * (hi.z - lo.z) * 0.2);
+            let t = Instant::now();
+            let e = v.explode(&mut w, &mut ph, at, r).unwrap();
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            println!("explosion of {r} m: {ms:.2} ms in all: carve {:.2}, colliders {:.2}, meshes {:.2}, parts {:.2} (meshes and bodies {:.2}), bodies carved {:.2}; {} voxels, {} objects touched, {} parts of {} voxels; bodies now {}", e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["rebuild_ms"].as_f64().unwrap(), e["pieces_ms"].as_f64().unwrap(), e["piece_mesh_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["voxels"], e["touched"], e["pieces"], e["piece_voxels"], e["bodies"]);
+            w.take_changes();
+            frames(&mut v, &mut w, &mut ph, 120, "after it");
+        }
+        // The cut (the bench's `fell`): a slab 1 m thick through everything, half a metre above the building's foot,
+        // 30 x 30 m about its middle: the buildings, trees, lamps and cars there lose their footing.
+        let t = Instant::now();
+        let (cx, cz) = ((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
+        let e = v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [cx - 15.0, lo.y + 0.5, cz - 15.0, cx + 15.0, lo.y + 1.5, cz + 15.0] }))).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        println!("the cut under the building: {ms:.2} ms in all: carve {:.2}, colliders {:.2}, meshes {:.2}, parts {:.2}; {} voxels, {} objects touched, {} parts of {} voxels; bodies now {}", e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["rebuild_ms"].as_f64().unwrap(), e["pieces_ms"].as_f64().unwrap(), e["voxels"], e["touched"], e["pieces"], e["piece_voxels"], e["bodies"]);
+        let mut sizes: Vec<usize> = v.bodies.values().map(|b| b.grid.count()).collect();
+        sizes.sort_unstable();
+        println!("  bodies by voxels: the largest {:?}, the median {:?}, {} in all voxels; voxel shapes now {:.1} MiB", sizes.last(), sizes.get(sizes.len() / 2), sizes.iter().sum::<usize>(), ph.as_ref().unwrap().bridge_ref().voxel_bytes() as f64 / 1048576.0);
+        w.take_changes();
+        frames(&mut v, &mut w, &mut ph, 60, "the first second");
+        frames(&mut v, &mut w, &mut ph, 240, "the next four");
+        frames(&mut v, &mut w, &mut ph, 300, "the next five");
+        // An explosion into what fell.
+        let t = Instant::now();
+        let e = v.explode(&mut w, &mut ph, Vec3::new((lo.x + hi.x) * 0.5, lo.y + 2.0, (lo.z + hi.z) * 0.5), 3.0).unwrap();
+        println!("an explosion of 3 m into it: {:.2} ms in all: carve {:.2}, colliders {:.2}, bodies carved {:.2} ({} bodies, {} voxels); bodies now {}", t.elapsed().as_secs_f64() * 1e3, e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["bodies_carved"], e["body_voxels"], e["bodies"]);
+        w.take_changes();
+        frames(&mut v, &mut w, &mut ph, 300, "five seconds after");
+        println!("retired for the cap: {}", v.retired);
     }
 
     /// Meshing time on the benchmark level's files (`cargo test --release voxel_mesh_timing -- --ignored --nocapture`;

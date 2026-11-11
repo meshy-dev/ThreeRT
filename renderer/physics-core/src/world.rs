@@ -765,11 +765,19 @@ impl Physics {
         let parent = self.world.colliders[h].parent();
         let mut c = self.world.remove_collider(h).expect("the collider is there");
         let voxels = c.shape_mut().as_voxels_mut().expect("a voxel shape");
+        // (A cell that is already as asked is left alone: a look, not an edit.)
+        let solid = |v: &rapier3d::parry::shape::Voxels, k: IVector| v.voxel_state(k).is_some_and(|s| !s.is_empty());
         for k in clear {
-            voxels.set_voxel(IVector::new(k[0], k[1], k[2]), false);
+            let k = IVector::new(k[0], k[1], k[2]);
+            if solid(voxels, k) {
+                voxels.set_voxel(k, false);
+            }
         }
         for k in fill {
-            voxels.set_voxel(IVector::new(k[0], k[1], k[2]), true);
+            let k = IVector::new(k[0], k[1], k[2]);
+            if !solid(voxels, k) {
+                voxels.set_voxel(k, true);
+            }
         }
         let left = voxels.voxels().filter(|v| !v.state.is_empty()).count();
         for b in touching.into_iter().chain(parent) {
