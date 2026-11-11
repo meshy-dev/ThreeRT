@@ -4193,17 +4193,17 @@ benchmark level. The order follows the dependencies; a step that meets a further
        What is left is the terrain's 1,600 tiles, a shape each. Decided against (2026-11-11): a shell of 2 cells
        (a body would get through it at 12 m/s), and building them after the first frame (a level whose first
        seconds have no collision behaves by its load time).
-     - The script surface is `voxelBodies()`, `voxelImpulse` and the ids physics hits report; the rest is step 10's
-       (voxel bodies as objects with `.physics`, paint and added voxels on bodies, mass by cell).
+     - The script surface was `voxelBodies()`, `voxelImpulse` and the ids physics hits report; voxel bodies as
+       objects, paint and added voxels on bodies and mass by cell are step 10 (a), done.
+     - **Export and import of the voxel world's and the physics world's state** (a level's edits, its bodies, their
+       poses and velocities): waits for the general layer's design of saving (step 9 is that layer's).
      - A tick's time is still not bounded: the first tick after an edit that frees many parts steps them all (400
        jagged pieces in one heap: 7 ms a tick, at worst 19; 1,000: 23 ms, at worst 52).
      - **A large loose part's collider holds every cell** (the level's are shells): a solid block of 200³ cut
        loose is an edit of 2.8 s and 619 MB, and past 2²⁴ cells the part is refused and becomes debris (a large
        building cut loose whole would vanish, not fall). Measured by the review; a shell for bodies (they are hit
        from every side, so 4 cells all round), or a split into pieces, is for when a level has such parts.
-     - Scene code can put colliders of its own on the engine's voxel bodies (a design question: step 10's voxel
-       bodies as objects); scene code's and the engine's bodies and colliders share one count of the physics
-       world's limits (a level with `maxBodies: 20000` leaves scripts none); every part cut off a body leaves an
+     - Scene code's and the engine's bodies and colliders share one count of the physics world's limits (a level with `maxBodies: 20000` leaves scripts none); every part cut off a body leaves an
        empty slot in the level's object list for good.
      - Tree crowns cost more than buildings: five crowns of 10,616–18,894 voxels moving step in 1.6–2.2 ms (leaves
        make many contacts), a building part of 32,680 in under 0.5 ms. They sleep 5–10 s after the cut.
@@ -4222,7 +4222,9 @@ benchmark level. The order follows the dependencies; a step that meets a further
      that moves, on one thread, so a hundred moving bodies are the frame; its parallel solver, now the native
      default, is worth a factor of 3 on 4 threads at the same bits (about 450–500 moving bodies in a frame). What an engine of our own would have to beat is that step, and it would have
      to bring the determinism, the sleeping and the voxel-voxel contacts with it.
-9. **[ThreeRT] World data and command replay.** Binary world blocks on the node outside the JSON game state, changed by
+9. **[ThreeRT] World data and command replay.** *Not in this line's order (the user, 2026-11-12): world data, command
+   replay, multiplayer and saving belong to the general layer, to come later; the voxel line goes from step 8 to step
+   10. What is below stays as that layer's starting point.* Binary world blocks on the node outside the JSON game state, changed by
    deterministic commands the room logs and replays to late joiners.
    - Acceptance: a room replayed from its log gives bit-identical world data.
    - **The log carries world-hash checkpoints** (required by the supervisor of this line, 2026-11-10): at a fixed
@@ -4272,16 +4274,32 @@ benchmark level. The order follows the dependencies; a step that meets a further
      - A body that drives an object starts at `Scene::world_pose`, which is the renderer's own glam arithmetic (not
        under `enhanced-determinism`): the log should carry the pose the body was made at, as it should carry a voxel
        command's fixed-point shape (step 6).
-10. **[engine] The game API and effects.**
+10. **[engine] The game API and effects.** Four PRs, each reviewed and merged on its own (the user, 2026-11-12: the
+    four are independent, and step 8 in one PR of over 3,000 lines had four faults found in review): (a) voxel bodies
+    as objects; (b) fire and smoke; (c) vehicles and ropes; (d) the acceptance scene.
     - `packages/voxel`: voxel edits, bodies, joints, lights, scene queries and effects.
-    - **Voxel bodies as objects** (left by step 8, decided 2026-11-11): a loose part is today a body id
-      (`voxelBodies()`, a physics hit's `body`, `voxelImpulse`), drawn by objects scene code did not make. How it
-      appears to a game in three's style (an object with `.physics`: `applyImpulse`, `getLinearVelocity`, contact
-      events, joints between voxel objects) is designed here. With it: paint and added voxels reaching bodies, and
-      a body's mass spread by its cells' own densities (it is their mean today).
-    - Fire and smoke on the existing volume and particle paths.
-    - Vehicles and ropes on step 7's joints.
-    - Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
+    - **(a) Voxel bodies as objects** (branch `voxel-objects`; design `out/web-probe/step10/a-design.md`; docs/VOXEL.md
+      "Voxel bodies as objects"). A loose part is a `VoxelBody` (an `Object3D`): `voxelBodies()`, `voxelBody(id)` and
+      a physics hit give it, the same object for the same body. It has the physics methods every body has (at once:
+      the body exists), its pose read from the engine, contacts on request (to `addEventListener`, as any body's),
+      joints with voxel or scene objects, and edits of its own (`paint`, `addVoxels`, `carve`); cut, the part keeping
+      the body keeps the object; retired, carved away or fallen, it is `gone` with a reason and a "gone" event. Scene
+      code's colliders on a voxel body are refused. Paint reaches bodies; a body's mass is its cells', each at its
+      own density. Step 8's `voxelBodies()` fields stay (`position` / `rotation` are now the object's vector and
+      euler, the quaternion `quaternion`), `voxelImpulse` is kept and deprecated, `hit.object` on a body is its
+      object. `packages/scene` gets an internal hook (`setEngineBodies`) for hits, joints and the frame's events, and
+      delivers contacts with the voxel level (`other: engineColliders`). Checks: the adapter's recorded script with a
+      paint and an add (native at 1 to 8 threads = wasm32 = recorded), `physics_fuzz` with body edits, contact
+      switches, the gone list and the level's collider shells against brute force every 50 iterations.
+      - Found on the way and fixed: an add on a body could scan an unbounded box (at most 65,536 voxels added, 64
+        times that looked at), and both it and voxel-core's shape check counted cells in an i64 that wraps (a box of
+        1e30 m was 2^69 cells, counted as 0: a level `add` that large would never return).
+      - Open: a level `add` still accepts up to 2^27 cells (the fuzz keeps its adds tame for that, step 8's Open);
+        a voxel body's pose is read from the engine at every read of `position` (one call; no per-frame cache).
+    - (b) Fire and smoke on the existing volume and particle paths. Whether fire spreads along burning voxels is the
+      user's to decide; not started.
+    - (c) Vehicles and ropes on step 7's joints.
+    - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
 ## Known issues
 

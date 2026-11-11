@@ -216,16 +216,17 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   the engine's own shape (`physics_core::Shape::Voxels`: parry's voxel shape; a collider's cells are changed where
   it is by `Physics::edit_voxels`, at a cost by the cells that change). Rays, shape casts and contacts report them
   like any collider. They are **the engine's bodies**: their ids are from 2^30 up, scene code cannot make or remove
-  one (`body`, `collider` and `remove` refuse those ids), and can name one in every other call; `voxelBodies()`
-  (`packages/voxel`) lists the bodies with their ids, and `voxelImpulse(body, impulse, point?)` pushes one. A hit of
-  `Raycaster.intersectPhysics` or of a `Shapecaster` on one of them has `engineColliders` for its `object` (they
-  are no scene object's) and carries `collider` and, on a body, `body`: the id those calls take. **On the voxel
-  level `hit.object.physics` is null and there is no `body`; on a voxel body there is a `body`.** So hello world's
-  test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
-  `hit.object === engineColliders && hit.body === undefined`. A level that collides is in the physics world, and
-  the queries ask it, whether or not any scene object has `physics` (`tests/render/voxel-cut-body-push.ts`: a
-  ray's hit on a body, its `body` into `voxelImpulse`, the part thrown). (A voxel body as an object with `.physics`
-  is ROADMAP § 6 step 10's.) A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  one (`body`, `collider` and `remove` refuse those ids, and a `collider` on one of those bodies is refused too: the
+  engine edits and splits them by their cells), and can name one in every other call. **A voxel body is an object
+  to scene code** (ROADMAP § 6 step 10 a; docs/VOXEL.md "Voxel bodies as objects"): `voxelBodies()` (`packages/voxel`)
+  returns `VoxelBody` objects, the same object for the same body, with the physics methods every body has (sent at
+  once), its pose, contacts on request and its own edits; joints take it as one of their objects; a hit of
+  `Raycaster.intersectPhysics` or of a `Shapecaster` on it has it for its `object` and carries `collider` and `body`.
+  **On the voxel level `hit.object` is `engineColliders` (in no scene, `physics` null) and there is no `body`.** So
+  hello world's test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
+  `hit.object === engineColliders`. A level that collides is in the physics world, and the queries ask it, whether or
+  not any scene object has `physics`; contacts with it reach a body's listeners with `other: engineColliders`.
+  `voxelImpulse(body, impulse, point?)` (step 8's call by id) is kept, deprecated. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
   cells, each within 2^20 cells and 100 km of the shape's origin.
   - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
     (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it

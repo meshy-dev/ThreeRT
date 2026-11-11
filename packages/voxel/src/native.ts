@@ -5,7 +5,8 @@
 // world metres, applied in fixed point, so the same commands give the same voxels on every machine (`voxelHash`).
 // After an edit, what no chain of voxels sharing a face joins to an anchor (the terrain, objects marked `anchor`) is
 // cut loose: a rigid body of the physics world (it tumbles, lands on the level and on other bodies, and sleeps; an
-// explosion carves it like the level). The removed voxels are debris (`voxelDebris`).
+// explosion carves it like the level), and to scene code an object, `VoxelBody` (`voxelBodies()`, a physics hit's
+// `object`), with the physics methods every body has. The removed voxels are debris (`voxelDebris`).
 //
 // The level collides without being asked: every object is a fixed collider of its voxels, kept up to date by edits, so
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
