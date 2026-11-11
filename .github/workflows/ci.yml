@@ -14,9 +14,57 @@ concurrency:
   # A newer push to a PR supersedes its older run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The checks run as parallel jobs; `threert`, the last one, is the one to read: it fails when any of them failed or was
+# cancelled, and passes when every one passed or was skipped by its paths. A PR runs a job only when it changes that
+# job's inputs (the `changes` job); a push to main and a manual run run them all.
 jobs:
-  threert:
+  changes:
     runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      renderer: ${{ steps.paths.outputs.renderer }}
+      voxel: ${{ steps.paths.outputs.voxel }}
+      physics: ${{ steps.paths.outputs.physics }}
+      wasm: ${{ steps.paths.outputs.wasm }}
+    steps:
+      # Each job's inputs, as patterns on the paths a PR changes (the old and the new path of a rename). A change to the
+      # workflows, a PR of 3,000 files or more (the most the API lists) and any event other than a PR run every job.
+      - id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          all=false files=
+          if [ "$EVENT" != pull_request ] || [ "$CHANGED" -ge 3000 ]; then
+            all=true
+          else
+            files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
+            printf '%s\n' "$files"
+            if grep -Eq '^\.github/' <<< "$files"; then all=true; fi
+          fi
+          job() {
+            if [ "$all" = true ] || grep -Eq "$2" <<< "$files"; then run=true; else run=false; fi
+            echo "$1=$run" | tee -a "$GITHUB_OUTPUT"
+          }
+          # The renderer's release build: the crate, its path dependencies (voxel-core, physics-core, third_party) and
+          # the presets it embeds (src/files.rs).
+          job renderer '^(renderer/|presets/)'
+          # voxel-core and its determinism check.
+          job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
+          # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
+          # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file).
+          job physics '^(renderer/(physics-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$)|tools/physics-determinism\.ts$)'
+          # The engine's library for wasm32: the renderer's crate and everything it builds from.
+          job wasm '^(renderer/|presets/)'
+
+  ts:
+    name: "ts: typecheck, tests"
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -26,21 +74,88 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  renderer:
+    name: "renderer: release build"
+    needs: changes
+    if: needs.changes.outputs.renderer == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            renderer
-            renderer/voxel-core
-            renderer/physics-core
+          workspaces: renderer
       - run: cd renderer && cargo build --release --locked
-      # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
+
+  voxel:
+    name: "voxel: wasm32, tests, determinism"
+    needs: changes
+    if: needs.changes.outputs.voxel == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer/voxel-core
+      # The voxel engine's core builds for the browser (wasm32: players run the game there) and passes its tests.
       - run: cd renderer/voxel-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
       # Its edits are deterministic: the same script natively and in wasm32 leaves the same voxels (ROADMAP § 6 step 6).
       - run: node tools/voxel-determinism.ts
+
+  physics:
+    name: "physics: wasm32, tests, determinism"
+    needs: changes
+    if: needs.changes.outputs.physics == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: rustup target add wasm32-unknown-unknown
+      # physics-core's own target directory, and the renderer's (the determinism check builds the renderer's crate graph
+      # for wasm32 there).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            renderer/physics-core
+            renderer
       # The physics core (Rapier) builds for the browser too, passes its tests, and steps to the same bits natively and
       # in wasm32 (ROADMAP § 6 step 7).
       - run: cd renderer/physics-core && cargo build --release --locked --target wasm32-unknown-unknown && cargo test --release --locked
       - run: node tools/physics-determinism.ts
+
+  wasm:
+    name: "engine: wasm32 library"
+    needs: changes
+    if: needs.changes.outputs.wasm == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer
       # The engine's library builds for the browser (wasm32; docs/RUNTIME.md "The engine's library in a browser").
       - run: cd renderer && cargo build --release --locked --lib --target wasm32-unknown-unknown
+
+  # The check to read before merging (`gh pr checks <n>`: `threert`).
+  threert:
+    needs: [changes, ts, renderer, voxel, physics, wasm]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$RESULTS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<< "$RESULTS" > /dev/null
