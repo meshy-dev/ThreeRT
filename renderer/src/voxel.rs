@@ -157,7 +157,7 @@ struct VoxelObject {
 
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
-pub const EXPECTED_SCRIPT: u64 = 0xd26e_5461_62ad_7eec;
+pub const EXPECTED_SCRIPT: u64 = 0x0235_ba72_5c92_2a63;
 
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
@@ -286,6 +286,8 @@ pub struct VoxelWorld {
     pub capped: u64,
     /// The bodies the edit being made has carved or made: none of them is retired for the cap while it runs.
     this_edit: std::collections::BTreeSet<usize>,
+    /// The bodies gone since scene code last asked (`take_gone`): engine body id and why ("cap", "carved", "fell").
+    gone: Vec<(u32, &'static str)>,
     /// Under this height (m) a body has left the level: 100 m below its lowest cell.
     floor: f32,
     /// Time spent finding the colliders' cells (`shell`), ms: of the load, and of every edit since.
@@ -671,10 +673,16 @@ impl VoxelWorld {
         // The bodies the shape reaches are carved too (a carve only: paint and added voxels are the level's).
         if let (EditKind::Carve(radii), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
             let t = Instant::now();
-            let b = self.carve_bodies(w, p, op.shape, radii)?;
+            let b = self.carve_bodies(w, p, op.shape, radii, None)?;
             out["body_voxels"] = b.0.into();
             out["bodies_carved"] = b.1.into();
             out["bodies_ms"] = (t.elapsed().as_secs_f64() * 1e3).into();
+        }
+        // Paint reaches the bodies too; added voxels are the level's (`edit_body` adds to a body).
+        if let (EditKind::Paint(m), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
+            let b = self.paint_bodies(w, p, op.shape, m, None)?;
+            out["body_voxels"] = b.0.into();
+            out["bodies_painted"] = b.1.into();
         }
         out["bodies"] = self.bodies.len().into();
         Ok(out)
@@ -1051,6 +1059,30 @@ impl VoxelWorld {
         run(&mut h, &mut v, &mut w, &mut ph, 120);
         edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([at[0], 0.8, at[2]], 0.9));
         run(&mut h, &mut v, &mut w, &mut ph, 240);
+        // Step 10 (a): the largest body painted dense on one side from the world, then grown by a block of its own on
+        // that side (mass by cell: it settles another way).
+        v.density.push(7800.0);
+        v.palette.push(0);
+        // (Its middle: the centre of its grid's bounds, through its pose.)
+        let (b, at) = ph
+            .as_ref()
+            .and_then(|p| {
+                let x = v.bodies.values().max_by_key(|x| x.grid.count())?;
+                let (at, rot, _) = p.bridge_ref().engine_pose(x.body)?;
+                let (lo, hi) = x.grid.bounds()?;
+                let mid = (Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32) + Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32)) * 0.5 * v.size;
+                Some((x.body, Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(mid).to_array()))
+            })
+            .unwrap_or((0, [5.5, 1.0, 3.1]));
+        v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([at[0] + 0.3, at[1], at[2]], 0.7), kind: EditKind::Paint(2) }).expect("a paint");
+        w.take_changes();
+        fold(&mut h, &v, &ph);
+        if v.bodies.values().any(|x| x.body == b) {
+            v.edit_body(&mut w, &mut ph, b, &EditOp { shape: ShapeM::Box([at[0] + 0.2, at[1] - 0.3, at[2] - 0.3], [at[0] + 0.8, at[1] + 0.3, at[2] + 0.3]), kind: EditKind::Add(2) }).expect("an add");
+            w.take_changes();
+        }
+        fold(&mut h, &v, &ph);
+        run(&mut h, &mut v, &mut w, &mut ph, 180);
         h
     }
 
@@ -1076,7 +1108,7 @@ impl VoxelWorld {
                 .map(|(&k, b)| (!p.bridge_ref().engine_pose(b.body).is_none_or(|s| s.2), b.grid.count(), k))
                 .min();
             match least {
-                Some((_, n, k)) if n <= count => self.retire(w, p, k, true),
+                Some((_, n, k)) if n <= count => self.retire(w, p, k, true, "cap"),
                 _ => {
                     debris(self, &grid);
                     self.capped += 1;
@@ -1085,8 +1117,8 @@ impl VoxelWorld {
             }
         }
         let cells: Vec<[i32; 3]> = grid.voxels().map(|(g, _)| g).collect();
-        // (A body's density is its voxels' mean: carved, it weighs what its cells still do.)
-        let density = (grid.voxels().map(|(_, m)| self.density.get(m as usize).copied().unwrap_or(DENSITY[0]) as f64).sum::<f64>() / cells.len().max(1) as f64) as f32;
+        // (The collider carries no mass: the body's is its cells', each at its own density: `body_mass`.)
+        let density = 0.0;
         let (body, collider) = (self.id(), self.id());
         let made = p.bridge().engine_body(body, &BodyDesc { position: position.to_array(), rotation: rotation.to_array(), linvel: velocity.0, angvel: velocity.1, ..Default::default() }).and_then(|_| {
             let d = ColliderDesc { density, friction: FRICTION, ..ColliderDesc::new(physics_core::Shape::Voxels { size, cells }) };
@@ -1097,6 +1129,9 @@ impl VoxelWorld {
             p.bridge().engine_remove(Some(body), None);
             debris(self, &grid);
             return Ok(());
+        }
+        if let Err(e) = self.weigh(p, body, &grid) {
+            eprintln!("voxels: a body's mass was not set ({e})");
         }
         self.this_edit.insert(k);
         let parts = self.body_parts(w, k, &grid, position, rotation)?;
@@ -1160,8 +1195,9 @@ impl VoxelWorld {
 
     /// Body `k` gone: its objects, its body and collider. `debris`: its voxels are kept as debris where they are (it
     /// was retired for the cap; one that left the world leaves nothing).
-    fn retire(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, debris: bool) {
+    fn retire(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, debris: bool, reason: &'static str) {
         let Some(b) = self.bodies.remove(&k) else { return };
+        self.gone.push((b.body, reason));
         if debris {
             let m = Mat4::from_rotation_translation(Quat::from_array(b.pose.1), Vec3::from(b.pose.0));
             let size = self.size;
@@ -1202,7 +1238,7 @@ impl VoxelWorld {
             }
         }
         for &k in &gone {
-            self.retire(w, p, k, false);
+            self.retire(w, p, k, false, "fell");
         }
         (moved, gone.len())
     }
@@ -1212,39 +1248,14 @@ impl VoxelWorld {
     /// collider loses the cells, its mesh is made again); what the carve cut off it is a body of its own, moving as
     /// it did (parts under `MIN_PIECE` voxels: debris); a body with nothing left is gone. Returns the voxels carved
     /// and the bodies carved.
-    fn carve_bodies(&mut self, w: &mut World, p: &mut PhysicsWorld, shape: ShapeM, radii: [i32; 4]) -> Result<(usize, usize)> {
+    fn carve_bodies(&mut self, w: &mut World, p: &mut PhysicsWorld, shape: ShapeM, radii: [i32; 4], only: Option<usize>) -> Result<(usize, usize)> {
         let size = self.size;
         let hardness = self.level.as_ref().map_or([0u8; 256], |l| l.hardness);
-        // The shape as the level's carve takes it (voxel_core `Shape::checked`, `contains`): a radius within 0 and
-        // `MAX_RADIUS` voxels, each class's share of it; a box whole for every class it reaches at all.
-        let cap = voxel_core::MAX_RADIUS as f32 * size;
-        let shape = match shape {
-            ShapeM::Sphere(c, r) => ShapeM::Sphere(c, if r.is_nan() { 0.0 } else { r.clamp(0.0, cap) }),
-            ShapeM::Capsule(a, b, r) => ShapeM::Capsule(a, b, if r.is_nan() { 0.0 } else { r.clamp(0.0, cap) }),
-            other => other,
-        };
-        let inside = |q: Vec3, scale: f32| -> bool {
-            match shape {
-                ShapeM::Sphere(c, r) => q.distance_squared(Vec3::from(c)) <= (r * scale) * (r * scale),
-                ShapeM::Box(a, b) => {
-                    let (c, h) = ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).abs() * 0.5);
-                    (q - c).abs().cmple(h).all()
-                }
-                ShapeM::Capsule(a, b, r) => {
-                    let (a, ab) = (Vec3::from(a), Vec3::from(b) - Vec3::from(a));
-                    let t = if ab.length_squared() > 0.0 { ((q - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
-                    q.distance_squared(a + ab * t) <= (r * scale) * (r * scale)
-                }
-            }
-        };
-        // The shape's reach, for a body's bounding sphere.
-        let (centre, reach) = match shape {
-            ShapeM::Sphere(c, r) => (Vec3::from(c), r),
-            ShapeM::Box(a, b) => ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).length() * 0.5),
-            ShapeM::Capsule(a, b, r) => ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).length() * 0.5 + r),
-        };
+        let shape = level_shape(shape, size);
+        let (centre, reach) = shape_reach(shape);
+        let inside = |q: Vec3, scale: f32| shape_contains(shape, q, scale);
         let (mut voxels, mut carved) = (0usize, 0usize);
-        let keys: Vec<usize> = self.bodies.keys().copied().collect();
+        let keys: Vec<usize> = self.bodies.keys().copied().filter(|&k| only.is_none_or(|o| o == k)).collect();
         for k in keys {
             // (A body retired for the cap by a part cut off an earlier one in this same carve is no longer there.)
             let Some(b) = self.bodies.get(&k) else { continue };
@@ -1284,22 +1295,10 @@ impl VoxelWorld {
             }
             let (collider, left) = (b.collider, b.grid.count());
             if left == 0 {
-                self.retire(w, p, k, false);
+                self.retire(w, p, k, false, "carved");
             } else {
-                if let Err(e) = p.bridge().engine_edit_voxels(collider, &cleared, &[]) {
-                    eprintln!("voxels: a body's collider was not edited ({e})");
-                }
-                // Its mesh again: new objects in the old ones' place (a driven object given another geometry would
-                // rebuild the scene; one removed and one added are both in place).
-                let old = std::mem::take(&mut self.objects[k].as_mut().unwrap().parts);
-                for part in old {
-                    w.remove(part.1);
-                }
-                let grid = self.bodies[&k].grid.clone();
-                let parts = self.body_parts(w, k, &grid, Vec3::from(at), Quat::from_array(rot))?;
-                let o = self.objects[k].as_mut().unwrap();
-                o.parts = parts;
-                o.bounds(&grid, size);
+                let _ = collider;
+                self.redraw_body(w, p, k, &cleared, &[], Vec3::from(at), Quat::from_array(rot))?;
             }
             for part in loose {
                 if part.len() < MIN_PIECE {
@@ -1322,6 +1321,175 @@ impl VoxelWorld {
             }
         }
         Ok((voxels, carved))
+    }
+
+    /// A body's mass properties from its cells, each a cube of its palette entry's density (parry's voxel mass is the
+    /// same sum at one density): mass, centre of mass and inertia about it in the body's frame, summed in the grid's
+    /// fixed order in f64 (the same bits everywhere), then set on the body (its collider carries none).
+    fn weigh(&self, p: &mut PhysicsWorld, body: u32, grid: &VoxelGrid) -> std::result::Result<(), String> {
+        let s = self.size as f64;
+        let v = s * s * s;
+        let cell = |m: u8| self.density.get(m as usize).copied().unwrap_or(DENSITY[0]) as f64 * v;
+        let (mut mass, mut first) = (0.0f64, [0.0f64; 3]);
+        for (g, m) in grid.voxels() {
+            let (mm, c) = (cell(m), [0, 1, 2].map(|a| (g[a] as f64 + 0.5) * s));
+            mass += mm;
+            for a in 0..3 {
+                first[a] += mm * c[a];
+            }
+        }
+        if mass <= 0.0 {
+            return Err("no cell".into());
+        }
+        let com = first.map(|f| f / mass);
+        // About the centre of mass: each cube's own (m s² / 6 on the diagonal) and the parallel axes' (m (|d|² I - d dᵀ)).
+        let mut i = [0.0f64; 6];
+        for (g, m) in grid.voxels() {
+            let mm = cell(m);
+            let d = [0, 1, 2].map(|a| (g[a] as f64 + 0.5) * s - com[a]);
+            let (own, dd) = (mm * s * s / 6.0, d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            i[0] += own + mm * (dd - d[0] * d[0]);
+            i[1] += own + mm * (dd - d[1] * d[1]);
+            i[2] += own + mm * (dd - d[2] * d[2]);
+            i[3] -= mm * d[0] * d[1];
+            i[4] -= mm * d[0] * d[2];
+            i[5] -= mm * d[1] * d[2];
+        }
+        p.bridge().engine_mass(body, mass as f32, com.map(|c| c as f32), i.map(|c| c as f32))
+    }
+
+    /// Body `k` after its cells changed (`cleared` out of its grid, `filled` in): its collider edited by them, its mesh
+    /// made again as new objects in the old ones' place (a driven object given another geometry would rebuild the
+    /// scene; one removed and one added are both in place), its mass from its cells.
+    fn redraw_body(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, cleared: &[[i32; 3]], filled: &[[i32; 3]], at: Vec3, rot: Quat) -> Result<()> {
+        let (body, collider) = (self.bodies[&k].body, self.bodies[&k].collider);
+        if !(cleared.is_empty() && filled.is_empty()) {
+            if let Err(e) = p.bridge().engine_edit_voxels(collider, cleared, filled) {
+                eprintln!("voxels: a body's collider was not edited ({e})");
+            }
+        }
+        let old = std::mem::take(&mut self.objects[k].as_mut().unwrap().parts);
+        for part in old {
+            w.remove(part.1);
+        }
+        let grid = self.bodies[&k].grid.clone();
+        let parts = self.body_parts(w, k, &grid, at, rot)?;
+        let o = self.objects[k].as_mut().unwrap();
+        o.parts = parts;
+        o.bounds(&grid, self.size);
+        if let Err(e) = self.weigh(p, body, &grid) {
+            eprintln!("voxels: a body's mass was not set ({e})");
+        }
+        Ok(())
+    }
+
+    /// Paint reaching bodies (all, or `only` one): of each body the shape meets, the cells on its surface (a face
+    /// open to the outside of its grid, as the level's paint) whose centres are inside take `m`. Collider unchanged,
+    /// mesh and mass again. Returns the voxels painted and the bodies.
+    fn paint_bodies(&mut self, w: &mut World, p: &mut PhysicsWorld, shape: ShapeM, m: u8, only: Option<usize>) -> Result<(usize, usize)> {
+        let size = self.size;
+        let shape = level_shape(shape, size);
+        let (centre, reach) = shape_reach(shape);
+        let (mut voxels, mut painted) = (0, 0);
+        let keys: Vec<usize> = self.bodies.keys().copied().filter(|&k| only.is_none_or(|o| o == k)).collect();
+        for k in keys {
+            let b = &self.bodies[&k];
+            let Some((at, rot, _)) = p.bridge_ref().engine_pose(b.body) else { continue };
+            let pose = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at));
+            if !reaches(&b.grid, pose, size, centre, reach) {
+                continue;
+            }
+            let grid = &b.grid;
+            let open = |g: [i32; 3]| DIRS6.iter().any(|d| grid.get(g[0] + d[0], g[1] + d[1], g[2] + d[2]) == 0);
+            let these: Vec<[i32; 3]> = grid.voxels().filter(|&(g, mat)| mat != m && open(g) && shape_contains(shape, pose.transform_point3((Vec3::new(g[0] as f32, g[1] as f32, g[2] as f32) + 0.5) * size), 1.0)).map(|(g, _)| g).collect();
+            if these.is_empty() {
+                continue;
+            }
+            let b = self.bodies.get_mut(&k).unwrap();
+            for g in &these {
+                b.grid.set(g[0], g[1], g[2], m);
+            }
+            voxels += these.len();
+            painted += 1;
+            self.redraw_body(w, p, k, &[], &[], Vec3::from(at), Quat::from_array(rot))?;
+        }
+        Ok((voxels, painted))
+    }
+
+    /// Voxels added to body `k`: the empty cells of its grid whose centres are inside the shape (world metres, as the
+    /// level takes it), at most `voxel_core::MAX_CELLS` cells looked at. Collider, mesh and mass again. Returns the voxels.
+    fn add_to_body(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, shape: ShapeM, m: u8) -> Result<usize> {
+        let size = self.size;
+        let shape = level_shape(shape, size);
+        let b = &self.bodies[&k];
+        let Some((at, rot, _)) = p.bridge_ref().engine_pose(b.body) else { return Ok(0) };
+        let pose = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at));
+        // The shape's world box, into the grid's cells (through the inverse pose: the eight corners' bounds).
+        let (lo, hi) = shape_box(shape);
+        let inv = pose.inverse();
+        let corners = (0..8).map(|c| inv.transform_point3(Vec3::new([lo.x, hi.x][c & 1], [lo.y, hi.y][(c >> 1) & 1], [lo.z, hi.z][c >> 2])) / size);
+        let (mut a, mut z) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for c in corners {
+            (a, z) = (a.min(c), z.max(c));
+        }
+        if !(a.is_finite() && z.is_finite()) {
+            return Err(anyhow!("voxelEdit: the shape is not finite"));
+        }
+        let (ga, gz) = (a.floor().as_ivec3(), z.ceil().as_ivec3());
+        let n = (0..3).map(|i| (gz[i] as i64 - ga[i] as i64 + 1).max(0)).product::<i64>();
+        if n > voxel_core::MAX_CELLS {
+            return Err(anyhow!("voxelEdit: the shape is too large (at most {} voxels across its bounds)", voxel_core::MAX_CELLS));
+        }
+        let mut filled = vec![];
+        for x in ga.x..=gz.x {
+            for y in ga.y..=gz.y {
+                for z in ga.z..=gz.z {
+                    if b.grid.get(x, y, z) == 0 && shape_contains(shape, pose.transform_point3((Vec3::new(x as f32, y as f32, z as f32) + 0.5) * size), 1.0) {
+                        filled.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        if filled.is_empty() {
+            return Ok(0);
+        }
+        let b = self.bodies.get_mut(&k).unwrap();
+        for g in &filled {
+            b.grid.set(g[0], g[1], g[2], m);
+        }
+        self.redraw_body(w, p, k, &[], &filled, Vec3::from(at), Quat::from_array(rot))?;
+        Ok(filled.len())
+    }
+
+    /// An edit of one voxel body alone (scene code's `voxelBodyEdit`: a voxel object's `add`, `paint`, `carve`): the
+    /// shape in world metres; `explode` and `carve` cut it (parts cut off are bodies of their own), `paint` its
+    /// surface, `add` fills its empty cells in the shape.
+    pub fn edit_body(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, body: u32, op: &EditOp) -> Result<serde_json::Value> {
+        let k = self.bodies.iter().find(|(_, b)| b.body == body).map(|(&k, _)| k).ok_or_else(|| anyhow!("voxelBodyEdit: no voxel body {body}"))?;
+        let p = ph.as_mut().ok_or_else(|| anyhow!("voxelBodyEdit: no physics world"))?;
+        self.ticks.0 += 1;
+        self.this_edit.clear();
+        let (voxels, n) = match op.kind {
+            EditKind::Carve(radii) => self.carve_bodies(w, p, op.shape, radii, Some(k))?,
+            EditKind::Paint(m) => self.paint_bodies(w, p, op.shape, m, Some(k))?,
+            EditKind::Add(m) => {
+                let n = self.add_to_body(w, p, k, op.shape, m)?;
+                (n, (n > 0) as usize)
+            }
+        };
+        Ok(serde_json::json!({ "voxels": voxels, "bodies": n, "gone": !self.bodies.contains_key(&k) }))
+    }
+
+    /// A body's contacts reported to scene code or not (its collider's events: `__engine.physics("contacts")`).
+    pub fn body_contacts(&mut self, ph: &mut Option<PhysicsWorld>, body: u32, on: bool) -> Result<()> {
+        let b = self.bodies.values().find(|b| b.body == body).ok_or_else(|| anyhow!("voxelContacts: no voxel body {body}"))?;
+        let p = ph.as_mut().ok_or_else(|| anyhow!("voxelContacts: no physics world"))?;
+        p.bridge().engine_events(b.collider, on).map_err(|e| anyhow!(e))
+    }
+
+    /// The bodies gone since the last call, with why: [[body, "cap" | "carved" | "fell"], ...].
+    pub fn take_gone(&mut self) -> serde_json::Value {
+        serde_json::Value::Array(std::mem::take(&mut self.gone).into_iter().map(|(b, r)| serde_json::json!([b, r])).collect())
     }
 
     /// Voxel bodies now.
@@ -1637,6 +1805,64 @@ impl VoxelWorld {
 /// Where a level object's collider stands, its cells being the object's own: the rotation of its quarter turns about
 /// y and the translation that puts the cube of its cell g on the cube of world cell `place.to_world(g)` (a turned
 /// cube's lowest corner is not the turned corner: `voxel_core::Placement`).
+/// The six face neighbours.
+const DIRS6: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+/// A shape as the level's edits take it (voxel_core `Shape::checked`): a radius within 0 and `MAX_RADIUS` voxels (NaN:
+/// 0), a box as given.
+fn level_shape(shape: ShapeM, size: f32) -> ShapeM {
+    let cap = voxel_core::MAX_RADIUS as f32 * size;
+    let r = |r: f32| if r.is_nan() { 0.0 } else { r.clamp(0.0, cap) };
+    match shape {
+        ShapeM::Sphere(c, x) => ShapeM::Sphere(c, r(x)),
+        ShapeM::Capsule(a, b, x) => ShapeM::Capsule(a, b, r(x)),
+        other => other,
+    }
+}
+
+/// Whether a point (world metres) is inside the shape, its radius scaled by `scale` (a class's share; a box whole).
+fn shape_contains(shape: ShapeM, q: Vec3, scale: f32) -> bool {
+    match shape {
+        ShapeM::Sphere(c, r) => q.distance_squared(Vec3::from(c)) <= (r * scale) * (r * scale),
+        ShapeM::Box(a, b) => {
+            let (c, h) = ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).abs() * 0.5);
+            (q - c).abs().cmple(h).all()
+        }
+        ShapeM::Capsule(a, b, r) => {
+            let (a, ab) = (Vec3::from(a), Vec3::from(b) - Vec3::from(a));
+            let t = if ab.length_squared() > 0.0 { ((q - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+            q.distance_squared(a + ab * t) <= (r * scale) * (r * scale)
+        }
+    }
+}
+
+/// A sphere about the shape: its centre and radius.
+fn shape_reach(shape: ShapeM) -> (Vec3, f32) {
+    match shape {
+        ShapeM::Sphere(c, r) => (Vec3::from(c), r),
+        ShapeM::Box(a, b) => ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).length() * 0.5),
+        ShapeM::Capsule(a, b, r) => ((Vec3::from(a) + Vec3::from(b)) * 0.5, (Vec3::from(b) - Vec3::from(a)).length() * 0.5 + r),
+    }
+}
+
+/// The shape's world box.
+fn shape_box(shape: ShapeM) -> (Vec3, Vec3) {
+    match shape {
+        ShapeM::Sphere(c, r) => (Vec3::from(c) - r, Vec3::from(c) + r),
+        ShapeM::Box(a, b) => (Vec3::from(a).min(Vec3::from(b)), Vec3::from(a).max(Vec3::from(b))),
+        ShapeM::Capsule(a, b, r) => (Vec3::from(a).min(Vec3::from(b)) - r, Vec3::from(a).max(Vec3::from(b)) + r),
+    }
+}
+
+/// Whether a body's grid at its pose can reach the sphere about a shape (its bricks' bounding sphere against it).
+fn reaches(grid: &VoxelGrid, pose: Mat4, size: f32, centre: Vec3, reach: f32) -> bool {
+    let Some((lo, hi)) = grid.bounds() else { return false };
+    // (The grid's bounds are its bricks': from `lo` up to `hi`, not through it.)
+    let (lo, hi) = (Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32), Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32));
+    let (mid, half) = ((lo + hi) * 0.5 * size, ((hi - lo) * 0.5 * size).length());
+    pose.transform_point3(mid).distance(centre) <= reach + half
+}
+
 fn collider_pose(place: &Placement, size: f32) -> ([f32; 3], [f32; 4]) {
     const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
     let (rotation, corner) = match place.turn & 3 {
@@ -2106,6 +2332,61 @@ mod tests {
         cut(&mut v, &mut w, &mut ph, [3.9, 0.5, 3.9], [4.3, 0.7, 4.3]);
         assert_eq!(v.bodies.keys().copied().collect::<Vec<_>>(), before);
         assert_eq!((v.retired, v.capped), (1, capped + 1));
+    }
+
+    /// Step 10 (a): a voxel body weighed cell by cell; paint reaching it from the world and from its own edit; voxels
+    /// added to it alone; carved alone; its contacts reported when asked; gone, with why; and scene code's colliders
+    /// refused on it.
+    #[test]
+    fn voxel_bodies_are_weighed_painted_and_grown_cell_by_cell() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false), ([8, 4, 8], [4, 24, 4], None, false)], &mut w, &mut ph);
+        // A third palette entry of 8,000 kg/m³.
+        v.palette.push(0);
+        v.density.push(8000.0);
+        for x in [2.7f32, 0.7] {
+            v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [x, 0.5, x, x + 0.6, 0.7, x + 0.6] }))).unwrap();
+        }
+        assert_eq!(v.bodies(), 2);
+        let (k, b) = v.bodies.iter().find(|(_, b)| b.grid.count() == 336 && p_pose(&ph, b.body)[0] > 2.0).map(|(&k, b)| (k, b.body)).unwrap();
+        let mass = |ph: &mut Option<PhysicsWorld>, w: &mut World| ph.as_mut().unwrap().call(w, "state", &serde_json::json!({ "body": b })).unwrap()["mass"].as_f64().unwrap();
+        assert!((mass(&mut ph, &mut w) - 336.0).abs() < 1e-2, "336 cells of 1 l at 1,000 kg/m³");
+        // Paint from the world over the bar's upper half: its surface there (the outer ring of each layer) is dense.
+        let e = v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "paint", "material": 2, "box": [2.5, 1.75, 2.5, 3.5, 3.0, 3.5] }))).unwrap();
+        assert_eq!((e["bodies_painted"].as_u64(), e["body_voxels"].as_u64()), (Some(1), Some(12 * 11 + 4)), "{e}");
+        let painted = 12 * 11 + 4;
+        assert!((mass(&mut ph, &mut w) - (336.0 + painted as f64 * 7.0)).abs() < 1e-1, "{} kg", mass(&mut ph, &mut w));
+        // The other bar is untouched by it.
+        assert!(v.bodies.iter().filter(|(&kk, _)| kk != k).all(|(_, o)| o.grid.voxels().all(|(_, m)| m == 1)));
+        // A slab added to this body alone, on its top: 4 x 4 cells more; its collider has them.
+        let top = p_pose(&ph, b)[1] + 2.1;
+        let e = v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "add", "material": 1, "box": [2.7, top + 0.01, 2.7, 3.1, top + 0.09, 3.1] }))).unwrap();
+        assert_eq!(e["voxels"].as_u64(), Some(16), "{e}");
+        let grid_cells = v.bodies[&k].grid.count();
+        assert_eq!(ph.as_ref().unwrap().bridge_ref().engine_voxels(v.bodies[&k].collider), Some(grid_cells));
+        assert!((mass(&mut ph, &mut w) - (352.0 + painted as f64 * 7.0)).abs() < 1e-1);
+        // Scene code cannot put a collider of its own on it.
+        let r = ph.as_mut().unwrap().call(&mut w, "collider", &serde_json::json!({ "id": 7, "body": b, "shape": { "type": "sphere", "radius": 0.2 } }));
+        assert!(r.is_err(), "{r:?}");
+        // Its contacts, asked for: thrown up, it lands, and the landing is reported.
+        v.body_contacts(&mut ph, b, true).unwrap();
+        ph.as_mut().unwrap().call(&mut w, "velocity", &serde_json::json!({ "body": b, "linvel": [0, 3, 0] })).unwrap();
+        for _ in 0..90 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        let c = ph.as_mut().unwrap().call(&mut w, "contacts", &serde_json::json!({})).unwrap();
+        assert!(c.as_array().unwrap().iter().any(|c| c["started"] == true && (c["bodyA"].as_u64() == Some(b as u64) || c["bodyB"].as_u64() == Some(b as u64))), "{c}");
+        // Carved away whole, alone: gone, "carved"; the other body stays.
+        let e = v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "box": [1.5, -1.0, 1.5, 4.5, 5.0, 4.5] }))).unwrap();
+        assert_eq!(e["gone"], true, "{e}");
+        assert_eq!(v.bodies(), 1);
+        assert_eq!(v.take_gone(), serde_json::json!([[b, "carved"]]));
+        assert!(v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "paint", "material": 1, "box": [0, 0, 0, 1, 1, 1] }))).is_err());
+    }
+
+    fn p_pose(ph: &Option<PhysicsWorld>, body: u32) -> [f32; 3] {
+        ph.as_ref().unwrap().bridge_ref().engine_pose(body).unwrap().0
     }
 
     /// What scene code asks of a level before it is loaded is kept, and counted: past `MAX_QUEUED` an edit or a frame

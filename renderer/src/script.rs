@@ -219,6 +219,14 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     // is the physics world's id: `physics("impulse", { body, ... })` and the other calls take it.
     let (v, p) = (voxels.clone(), physics.clone());
     e.set("voxelBodies", Function::new(ctx.clone(), move || -> String { api::voxel_bodies(&v.borrow(), &p.borrow()) })?)?;
+    // One voxel body's edit (its object's `add` / `paint` / `carve`), its contacts on or off, the bodies gone since
+    // the last call (step 10: voxel bodies as objects).
+    let (v, w, p, d) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
+    e.set("voxelBodyEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, body: f64, d2: Value<'js>| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_body_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), body, &to_json(&d2)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    let (v, p) = (voxels.clone(), physics.clone());
+    e.set("voxelContacts", Function::new(ctx.clone(), move |ctx: Ctx, body: f64, on: bool| -> rquickjs::Result<()> { api::voxel_contacts(&mut v.borrow_mut(), &mut p.borrow_mut(), body, on).map_err(|e| thrown(&ctx, e)) })?)?;
+    let v = voxels.clone();
+    e.set("voxelGone", Function::new(ctx.clone(), move || -> String { api::voxel_gone(&mut v.borrow_mut()) })?)?;
     let v = voxels.clone();
     e.set("voxelHash", Function::new(ctx.clone(), move || -> String { api::voxel_hash(&v.borrow()) })?)?;
     let v = voxels.clone();

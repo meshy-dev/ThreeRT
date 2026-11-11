@@ -986,6 +986,31 @@ impl Physics {
         Some(self.body(id)?.mass())
     }
 
+    /// A body's mass properties given, on top of its colliders' (give its colliders no density and these are all of
+    /// it): `mass` kg, the centre of mass `com` and the inertia tensor about it (xx, yy, zz, xy, xz, yz, kg m²), in the
+    /// body's frame. For a body whose mass is not its shapes' at one density: a voxel body, cell by cell. Wakes it.
+    pub fn set_mass_properties(&mut self, id: BodyId, mass: f32, com: [f32; 3], inertia: [f32; 6]) -> Result<(), String> {
+        if !(mass.is_finite() && mass > 0.0 && mass <= 1e12) || !com.iter().chain(&inertia).all(|v| v.is_finite()) {
+            return Err("physics: mass properties must be finite, the mass above 0".into());
+        }
+        let h = *self.bodies.get(&id).ok_or("physics: unknown body")?;
+        let [xx, yy, zz, xy, xz, yz] = inertia;
+        let m = rapier3d::math::Matrix::from_cols(Vector::new(xx, xy, xz), Vector::new(xy, yy, yz), Vector::new(xz, yz, zz));
+        let props = MassProperties::with_inertia_matrix(Vector::new(com[0], com[1], com[2]), mass, m);
+        let world = &mut self.world;
+        let b = &mut world.bodies[h];
+        b.set_additional_mass_properties(props, true);
+        b.recompute_mass_properties_from_colliders(&world.colliders);
+        Ok(())
+    }
+
+    /// A collider's contacts reported (`take_contacts`) or not, from now on.
+    pub fn set_events(&mut self, id: ColliderId, on: bool) -> Result<(), String> {
+        let &(h, _) = self.colliders.get(&id).ok_or("physics: unknown collider")?;
+        self.world.colliders[h].set_active_events(if on { ActiveEvents::COLLISION_EVENTS } else { ActiveEvents::empty() });
+        Ok(())
+    }
+
     /// Bodies that moved in the last step (awake dynamic bodies and kinematic ones), with their poses, in id order.
     pub fn moved(&self) -> Vec<(BodyId, [f32; 3], [f32; 4])> {
         self.bodies
@@ -1807,6 +1832,25 @@ mod tests {
     }
 
     /// What a voxel shape refuses.
+    /// A body's mass given from outside (its collider of no density): the mass is it, the centre of mass where it was
+    /// put (a push there does not turn the body), and edits of the collider keep it; bad numbers are refused.
+    #[test]
+    fn mass_properties_set_from_outside() {
+        let mut p = Physics::new([0.0, 0.0, 0.0]);
+        let b = p.add_body(&BodyDesc::default()).unwrap();
+        let c = p.add_collider(Some(b), &ColliderDesc { density: 0.0, ..ColliderDesc::new(Shape::Voxels { size: 0.1, cells: block([0, 0, 0], [4, 4, 4]) }) }).unwrap();
+        // All the mass in the +x half: the centre of mass at x = 0.3, inertia of a 2 x 4 x 4 block of 0.1 m cells.
+        let (m, com) = (8.0f32, [0.3, 0.2, 0.2]);
+        p.set_mass_properties(b, m, com, [0.01, 0.02, 0.02, 0.0, 0.0, 0.0]).unwrap();
+        assert!((p.mass(b).unwrap() - m).abs() < 1e-5);
+        p.apply_impulse_at(b, [0.0, 0.0, 1.0], [0.3, 0.2, 0.2], [0.0; 3]).unwrap();
+        let (v, w) = p.velocity(b).unwrap();
+        assert!((v[2] - 1.0 / m).abs() < 1e-5 && w.iter().all(|x| x.abs() < 1e-5), "at the centre of mass: no turn ({v:?}, {w:?})");
+        p.edit_voxels(c, &[[0, 0, 0]], &[]).unwrap();
+        assert!((p.mass(b).unwrap() - m).abs() < 1e-5, "an edit keeps it");
+        assert!(p.set_mass_properties(b, 0.0, com, [0.01; 6]).is_err() && p.set_mass_properties(b, 1.0, [f32::NAN; 3], [0.01; 6]).is_err());
+    }
+
     #[test]
     fn voxel_shapes_are_checked() {
         let mut p = Physics::default();

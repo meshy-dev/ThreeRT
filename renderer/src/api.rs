@@ -69,6 +69,30 @@ pub fn voxel_edit(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld
     Ok(v.edit(w, p, &op)?.to_string())
 }
 
+/// An edit of one voxel body alone (`voxelBodyEdit(body, { op, sphere | box | capsule, material })`: a voxel object's
+/// `add`, `paint`, `carve`): what it did, as JSON.
+pub fn voxel_body_edit(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld>, body: f64, d: &Value) -> Result<String> {
+    let op = crate::voxel::EditOp::parse(d)?;
+    let body = whole(body).ok_or_else(|| Error::Type("voxelBodyEdit: body must be a body id".into()))?;
+    Ok(v.edit_body(w, p, body, &op)?.to_string())
+}
+
+/// A voxel body's contacts reported or not (`voxelContacts(body, on)`).
+pub fn voxel_contacts(v: &mut VoxelWorld, p: &mut Option<PhysicsWorld>, body: f64, on: bool) -> Result<()> {
+    let body = whole(body).ok_or_else(|| Error::Type("voxelContacts: body must be a body id".into()))?;
+    Ok(v.body_contacts(p, body, on)?)
+}
+
+/// The voxel bodies gone since the last call (`voxelGone()`): [[body, "cap" | "carved" | "fell"], ...].
+pub fn voxel_gone(v: &mut VoxelWorld) -> String {
+    v.take_gone().to_string()
+}
+
+/// A body id as scene code hands it: a whole number below 2^32.
+fn whole(x: f64) -> Option<u32> {
+    (x.is_finite() && x >= 0.0 && x <= u32::MAX as f64 && x.fract() == 0.0).then_some(x as u32)
+}
+
 /// The voxel bodies (loose parts the physics world moves): each one's body id for `physics` calls, its voxels,
 /// whether it sleeps, where it is. "[]" without any.
 pub fn voxel_bodies(v: &VoxelWorld, p: &Option<PhysicsWorld>) -> String {

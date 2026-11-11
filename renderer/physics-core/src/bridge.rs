@@ -294,6 +294,11 @@ impl Bridge {
                     return Err(format!("physics: collider {cid} exists"));
                 }
                 let owner = opt_id(a, "body")?;
+                // (The engine's voxel bodies are edited cell by cell, cut in parts and weighed by their cells: a
+                // collider of scene code's on one would ride along in no cell. Join a body of its own instead.)
+                if owner.is_some_and(|b| b >= ENGINE_IDS) {
+                    return Err("physics: a collider cannot be put on one of the engine's bodies (join a body of your own to it with a joint)".into());
+                }
                 let body = match owner {
                     Some(b) => Some(*self.bodies.get(&b).ok_or_else(|| format!("physics: unknown body {b}"))?),
                     None => None,
@@ -548,6 +553,18 @@ impl Bridge {
     /// A body's linear and angular velocity.
     pub fn engine_velocity_of(&self, id: u32) -> Option<([f32; 3], [f32; 3])> {
         self.core.velocity(*self.bodies.get(&id)?)
+    }
+
+    /// An engine body's mass properties (`Physics::set_mass_properties`).
+    pub fn engine_mass(&mut self, id: u32, mass: f32, com: [f32; 3], inertia: [f32; 6]) -> Result<(), String> {
+        let b = *self.bodies.get(&id).filter(|_| id >= ENGINE_IDS).ok_or_else(|| format!("physics: unknown engine body {id}"))?;
+        self.core.set_mass_properties(b, mass, com, inertia)
+    }
+
+    /// An engine collider's contacts reported or not (`Physics::set_events`).
+    pub fn engine_events(&mut self, id: u32, on: bool) -> Result<(), String> {
+        let c = *self.colliders.get(&id).filter(|_| id >= ENGINE_IDS).ok_or_else(|| format!("physics: unknown engine collider {id}"))?;
+        self.core.set_events(c, on)
     }
 
     /// The memory of the world's voxel shapes, bytes (`Physics::voxel_bytes`).
