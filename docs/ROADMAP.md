@@ -3922,6 +3922,24 @@ benchmark level. The order follows the dependencies; a step that meets a further
        1.4 s for a kernel's first compile and 1.09 s of sky bake on the page's thread before the first frame; a
        scene larger than hello world in a browser, and the merged layout's cost on one natively; what hung on
        2026-11-11 is not confirmed; other browsers.
+7b. **[ThreeRT] In-place edits under software traversal (a two-level tree).** Decided by the user on 2026-11-11, before
+   step 8: a browser has no ray queries, and under software traversal every added object and every frame in which
+   a body moves rebuilds the scene (hello world in Chrome: 16.5 ms of the page's 16.7 a frame; the voxel level: 7 s an
+   explosion; its triangle data 2.1 GiB because instances are written out). Design: docs/RUNTIME.md "Software
+   traversal with units".
+   - The still scene stays one flat tree; what can move or be added (an instance of a mesh: a body's box, a voxel
+     chunk) is a unit with a tree of its own in model space, found through a top tree walked after the still one. A
+     scene without units gets the kernel it has today, byte for byte.
+   - Acceptance: the two walks transcribed to the CPU and run against brute force over random scenes and random
+     add / move / remove sequences (no read outside a range, always an end, the same closest hit), before any GPU
+     run; scenes without units unchanged (the sources handed to wgpu, the catalog's bytes); hello world's two checks
+     that fail under software traversal pass, and in Chrome a frame in which a body moves no longer rebuilds; the
+     voxel level under software traversal: triangle data, load, an explosion, a still frame; overlap measured on a
+     pile of debris.
+   - Every GPU run of the new walk has the loop guard, natively too (what hung on 2026-11-11 is not confirmed, so
+     another path that does not end may exist); whether software traversal has it by default natively is decided
+     with its measured cost.
+   - **Status: in progress** (branch `sw-two-level`).
 8. **[engine] Voxel bodies.** The voxel collision shape and debris as bodies.
    - Acceptance: about a hundred debris bodies within the frame budget on the level, with the CPU split recorded.
    - Then the decision: keep Rapier or write our own.

@@ -489,6 +489,41 @@ trace is the frame (Kabukichō); the atomic tests in the merged layout as a suit
 without a triangle, both layouts, the tests' answers); Safari and Firefox (nothing Chrome-only was written: WebGPU
 through wgpu, default limits except buffer sizes, timestamp queries only if the adapter has them).
 
+## Software traversal with units (in-place edits without ray queries)
+
+ROADMAP § 6 step 7b. **Status: being built; nothing here has run on a GPU yet.**
+
+**What there was.** Software traversal (a browser's only one) walked one flat tree over every triangle in world
+space. Instances were written out into it (`flatten_instances`), so adding or moving anything rebuilt the scene, and a
+level of placed meshes held every placement's triangles. The kernel already shades a hit on an instance (`Hit.inst`
+names a record with the instance's rows; hardware traversal fills it), and already walks a second level for
+procedural objects (`trace_procs`: the ray into the object's space, a tree of its own).
+
+**What there is now.** Under software traversal an instance stays an instance: a **unit**.
+- **The still scene is the flat tree it was**, walked first, exactly as before.
+- **A mesh's tree** is built once over its triangles in model space, where they already are (the pool hardware
+  traversal builds its BLASes from). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
+  (child indices count from its root, leaf triangles from its mesh's first).
+- **A unit** is the instance's kernel record (160 B), as under hardware traversal, with two of its unused words
+  filled: its mesh tree's root, and whether it casts shadows.
+- **The top tree** is over the units' world boxes, one unit a leaf. It is rebuilt whole on the CPU whenever a unit
+  is added, moved or removed (as the TLAS is under hardware traversal: a few thousand boxes are a fraction of a
+  millisecond) and written into its own range of the node buffer.
+- **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
+  unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. The hit it returns
+  is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
+- **`pathtrace.wgsl` is not edited.** The unit walk is `shaders/trace_units.wgsl`, spliced in by `kernel_source`
+  for scenes that have units under software traversal (a source feature, as vertex colours are). A scene without
+  units is handed the source it was handed before, byte for byte; hardware traversal's source never contains it.
+- Still flattened, as before: meshes that deform (a pose shared by a crowd).
+
+**Why the loops end.** A walk follows indices it reads, so the trees are checked on the CPU where they are written
+(`units.rs`): every child index is greater than its parent's and inside its tree's range, a leaf's triangles inside
+its mesh's, a top leaf's record inside the records. A tree that fails is not uploaded: the scene is rebuilt. Room not
+yet used holds leaves that end, not zeros. Both levels share one stack of 48 entries; a push past it is dropped
+(geometry missed, never a hang), and the builders bound their depths so that it is not reached (below). And every
+kernel with units has the loop guard until this has run long enough to drop it.
+
 ## Correctness
 
 * `threert-render edit-check` builds the GPU tables both ways for a list of events: edited in place, and built fresh
