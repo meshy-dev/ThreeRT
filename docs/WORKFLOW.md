@@ -236,8 +236,10 @@ The supervisor never sits in `gh run watch` or `gh pr checks --watch`. Instead:
 - A background wait is allowed only when the next step depends on it within the same check. It needs a hard timeout
   of at most 10 minutes and is stopped as soon as it is not needed. Long-running "watchers" are never left behind.
 
-**CI cost.** The `threert` job dominates, with the renderer's release build. It uses `Swatinem/rust-cache`, and a
-newer push to a PR cancels that PR's older run. Main runs are never cancelled.
+**CI cost.** The checks run as parallel jobs, each with its own `Swatinem/rust-cache`; the physics job and the
+renderer's release build are the longest. A PR runs only the jobs whose inputs it changes (a docs-only PR runs `ts`
+alone, in about a minute), and the `threert` job sums them up: it is the check to read before merging. A newer push to
+a PR cancels that PR's older run. Main runs are never cancelled and run every job.
 Conflict re-runs are the other big cost: merge independent PRs before the ones that touch the same files, so fewer
 PRs need main merged in.
 
