@@ -5,12 +5,13 @@
 // `click` handler), four boxes added, one kicked, where they rest and how far the kicked one slid.
 //
 //   node tools/web-hello.ts                 the scripted test (exit 1 on a failed check)
-//   node tools/web-hello.ts --small         only the first step: a 320 x 180 view, ten frames (a new kernel's first run)
+//   node tools/web-hello.ts --small         only the first step: a 160 x 90 view, fourteen frames (a new kernel's first run)
 //   node tools/web-hello.ts --frames        then the frame times: the same clicks in real time, still and moving frames
 //   node tools/web-hello.ts --bench         then the boundary's cost: engine calls and the pose table, in this Chrome
 //   --native out.json   compare with the native test's numbers (node tools/physics-hello.ts --json out.json)
 //   --json out.json     everything measured
 //   --headless          no window (Chrome's new headless; WebGPU there is not checked on every version)
+//   --view WxH --scale S  the scripted test's view and the traced share of it (default 1280x720, 0.5)
 //   --guard N           the loop guard's limit for every page (default: 8192 for the small step, the page's 65536 after)
 //   --cold              a fresh browser profile: the shaders compiled again (the first visit's times)
 //
@@ -77,6 +78,10 @@ const context = await chromium.launchPersistentContext(profile, {
 // The loop guard's limit for the small first step (hello world's tree has 77 nodes: a sample is a few hundred
 // iterations); the page's default, 65,536, after it.
 const GUARD_FIRST = Number(opt("--guard") ?? 8192);
+// The view of the scripted test and the frame times: `--view 640x360` (default the game's 1280 x 720), `--scale`
+// (the traced share of it, default 0.5).
+const [VW, VH] = (opt("--view") ?? `${CAMERA.width}x${CAMERA.height}`).split("x").map(Number);
+const VIEW = `width=${VW}&height=${VH}&scale=${opt("--scale") ?? "0.5"}`;
 const failures: string[] = [];
 const check = (ok: boolean, what: string) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failures.push(what); };
 const out: Record<string, unknown> = { build: { wasm: build.wasm, js: build.js, game: build.game } };
@@ -88,6 +93,7 @@ type Session = {
   clicks: unknown[];
   step(n: number, dt?: number): number;
   run(n: number, dt?: number): Promise<number>;
+  click(u: number, v: number): unknown;
   event(type: string, payload?: unknown): unknown;
   guardTrips(): number | null;
   bench(n: number): unknown;
@@ -127,9 +133,9 @@ const r3 = (v: number) => Math.round(v * 1000) / 1000;
 const pair = (xs: number[]) => [r3(q(xs, 0.5)), r3(q(xs, 0.95))];
 
 try {
-  // 1. Small: the kernel's first frames in this browser, 320 x 180, in lockstep.
+  // 1. Small: the kernel's first frames in this browser, 160 x 90, in lockstep.
   {
-    const { page, info } = await open(`width=320&height=180&scale=1&lockstep=1&guard=${GUARD_FIRST}`);
+    const { page, info } = await open(`width=160&height=90&scale=1&lockstep=1&guard=${GUARD_FIRST}`);
     const adapter = info.adapter as { name: string; type: string; backend: string };
     // What the browser itself says of the adapter (a fallback adapter is a software one: not what this measures).
     const gpu = await inPage(page, "asking the browser for its adapter", async () => {
@@ -141,22 +147,28 @@ try {
     check(info.merged === true && (info.limits as { maxStorageBuffersPerShaderStage: number }).maxStorageBuffersPerShaderStage === 8, "the device was asked for eight storage buffers a stage, the merged layout fits them");
     check(typeof info.loop_guard === "number", `the kernel has the loop guard (${info.loop_guard} iterations an invocation)`);
     // One frame first, alone; then nine, then a few more for the count (it is read back a frame or two late).
-    const first = await inPage(page, "the first frame at 320 x 180", () => (globalThis as unknown as { threert: Session }).threert.run(1));
+    const first = await inPage(page, "the first frame at 160 x 90", () => (globalThis as unknown as { threert: Session }).threert.run(1));
     const more = await inPage(page, "thirteen more frames", () => (globalThis as unknown as { threert: Session }).threert.run(13));
     const trips = await inPage(page, "reading the loop guard's count", () => (globalThis as unknown as { threert: Session }).threert.guardTrips());
-    check(first + more === 14 && trips === 0, `fourteen frames drawn at 320 x 180, the loop guard stopped nothing (${trips})`);
+    check(first + more === 14 && trips === 0, `fourteen frames drawn at 160 x 90, the loop guard stopped nothing (${trips})`);
     out.small = { gpu, adapter, info };
     await page.screenshot({ path: join(repoRoot, "out/web/hello-small.png") });
     await page.close();
     if (failures.length || has("--small")) throw new Error(failures.length ? "the small run failed: nothing larger is run" : "small");
   }
 
-  // 2. The scripted test, 1280 x 720, in lockstep: tools/physics-hello.ts's steps.
+  // 2. The scripted test in lockstep (1280 x 720 traced at half unless told otherwise): tools/physics-hello.ts's steps.
   {
-    const { page, lines, info } = await open(`width=${CAMERA.width}&height=${CAMERA.height}&scale=0.5&lockstep=1`);
+    const { page, lines, info } = await open(`${VIEW}&lockstep=1`);
     // (`run` stops early if the loop guard stops anything: then the frames are short of what was asked, and it shows below.)
     const step = (n: number) => inPage(page, `${n} frames`, (k: number) => (globalThis as unknown as { threert: Session }).threert.run(k), n);
-    const click = async (at: V3, settle: number) => { await clickAt(page, project(at)); await step(settle); };
+    // The clicks at the exact (u, v) the native test sends (`threert.click`: what the canvas' own click listener
+    // calls with the mouse's place; a mouse lands on whole pixels, 2 cm apart on the ground at this distance, so its
+    // boxes would not be the native run's to the millimetre). The mouse itself is checked after the report.
+    const click = async (at: V3, settle: number) => {
+      await inPage(page, "a click", (uv: { u: number; v: number }) => { const s = (globalThis as unknown as { threert: Session }).threert; s.clicks.push(s.click(uv.u, uv.v)); }, project(at));
+      await step(settle);
+    };
     await step(10);
     const column: V3 = [-1, 0, WALL_Z + OFF], lone: V3 = [1.5, 0, 2.5];
     await click(column, 120);
@@ -166,6 +178,10 @@ try {
     await click([lone[0], 0.3, lone[2]], 240);
     await inPage(page, "the report event", () => (globalThis as unknown as { threert: Session }).threert.event("report"));
     await step(2);
+    // The mouse: a real click on the canvas, on the ground to the left: a fifth box appears over where it landed.
+    const spot: V3 = [-3, 0, 3.5];
+    await clickAt(page, project(spot));
+    await step(4);
     const state = await inPage(page, "reading the run", () => { const s = (globalThis as unknown as { threert: Session }).threert; return { clicks: s.clicks, trips: s.guardTrips(), frames: s.frames.length, rebuilt: s.frames.filter((f) => f.rebuilt).length, moved: s.frames.filter((f) => (f.physics?.moved ?? 0) > 0).length }; });
     await page.screenshot({ path: join(repoRoot, "out/web/hello.png") });
     await page.close();
@@ -176,9 +192,13 @@ try {
     const fmt = (a: V3) => `(${a.map((v) => v.toFixed(3)).join(", ")})`;
     console.log("web hello: the clicks");
     for (const h of hello) console.log(`  click ${h.click}: ${h.add ? `adds ${h.add} over the ${h.on} at ${fmt(h.at!)}` : h.kick ? `kicks ${h.kick}` : "meets nothing"}`);
+    // (The mouse's box, added after the report, apart.)
+    const mouse = hello.length === 6 ? hello.pop() : undefined;
     check(hello.filter((h) => h.add).length === 4 && hello.filter((h) => h.kick).length === 1, "4 boxes added, 1 kick");
     check(hello.filter((h) => h.add).map((h) => h.on).join() === "ground,wall,wall,ground", "added over the ground, the wall twice, the ground");
     check(hello.find((h) => h.kick)?.kick === "box3", "the kick meets box3");
+    // A pixel of the view on the ground there is about 9 m / (view width) x 1.47 wide and a few times that deep.
+    check(!!mouse?.add && mouse.on === "ground" && near(mouse.at!, [-3, OFF, 3.5], 60 / VW), `a mouse click on the canvas adds a box where it landed: ${mouse?.add} at ${mouse?.at ? fmt(mouse.at) : "?"}, (-3.000, 1.500, 3.500) within ${(60 / VW).toFixed(3)} m (a pixel)`);
     const boxes = report?.boxes ?? [];
     check(boxes.length === 4 && report?.kicks === 1, "the scene holds 4 boxes");
     if (boxes.length === 4) {
@@ -210,7 +230,7 @@ try {
 
   // 3. Frame times: the same clicks in real time (2.5 s apart), frames by what they did.
   if (has("--frames")) {
-    const { page, info } = await open(`width=${CAMERA.width}&height=${CAMERA.height}&scale=0.5&fps=60${has("--profile-calls") ? "&profile=1" : ""}`);
+    const { page, info } = await open(`${VIEW}&fps=60${has("--profile-calls") ? "&profile=1" : ""}`);
     const sleep = (ms: number) => inPage(page, `${ms} ms of frames`, (t: number) => new Promise((ok) => setTimeout(ok, t)), ms);
     await sleep(4000);
     const column: V3 = [-1, 0, WALL_Z + OFF], lone: V3 = [1.5, 0, 2.5];
