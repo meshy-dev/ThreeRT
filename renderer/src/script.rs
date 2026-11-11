@@ -208,13 +208,13 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     // The voxel engine's level and explosions (renderer/src/voxel.rs): the level is loaded natively once the session
     // knows the asset root; an explosion returns what it did as JSON.
     let v = voxels.clone();
-    e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::voxel_level(&mut v.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::voxel_level(&mut v.borrow_mut(), &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let (v, w, p, d) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
     e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
     // An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`), and the level's
     // hash (16 hex digits; "" before a level): the same commands give the same hash.
     let (v, w, p, dl) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
-    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &dl)?; api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("voxelEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, d: Value<'js>| -> rquickjs::Result<String> { let json = to_json(&d)?; let _lent = Lent::new(&ctx, &dl)?; api::voxel_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), &json).map_err(|e| thrown(&ctx, e)) })?)?;
     // The voxel bodies (ROADMAP § 6 step 8), as JSON: [{ body, collider, voxels, asleep, position, rotation }]. `body`
     // is the physics world's id: `physics("impulse", { body, ... })` and the other calls take it.
     let (v, p) = (voxels.clone(), physics.clone());
@@ -222,7 +222,7 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     // One voxel body's edit (its object's `add` / `paint` / `carve`), its contacts on or off, the bodies gone since
     // the last call (step 10: voxel bodies as objects).
     let (v, w, p, d) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
-    e.set("voxelBodyEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, body: f64, d2: Value<'js>| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_body_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), body, &to_json(&d2)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("voxelBodyEdit", Function::new(ctx.clone(), move |ctx: Ctx<'js>, body: f64, d2: Value<'js>| -> rquickjs::Result<String> { let json = to_json(&d2)?; let _lent = Lent::new(&ctx, &d)?; api::voxel_body_edit(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), body, &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let (v, p) = (voxels.clone(), physics.clone());
     e.set("voxelContacts", Function::new(ctx.clone(), move |ctx: Ctx, body: f64, on: bool| -> rquickjs::Result<()> { api::voxel_contacts(&mut v.borrow_mut(), &mut p.borrow_mut(), body, on).map_err(|e| thrown(&ctx, e)) })?)?;
     let v = voxels.clone();
@@ -243,7 +243,8 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     })?)?;
     let w = world.clone();
     e.set("texture", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value, data: Option<TypedArray<u8>>| -> rquickjs::Result<()> {
-        api::texture(&mut w.borrow_mut(), id, &to_json(&d)?, data.as_ref().map(|d| d.as_ref())).map_err(|e| thrown(&ctx, e))
+        let json = to_json(&d)?;
+        api::texture(&mut w.borrow_mut(), id, &json, data.as_ref().map(|d| d.as_ref())).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
     e.set("shader", Function::new(ctx.clone(), move |name: String, code: String, helpers: String| w.borrow_mut().set_shader(&name, code, helpers))?)?;
@@ -278,9 +279,9 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         w.borrow_mut().set_proc_asset(id, function, uri).map_err(|e| fail(&ctx, e))
     })?)?;
     let w = world.clone();
-    e.set("material", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::material(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("material", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::material(&mut w.borrow_mut(), id, &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
-    e.set("object", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::object(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("object", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::object(&mut w.borrow_mut(), id, &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     e.set("transform", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, t: TypedArray<f32>| -> rquickjs::Result<()> { api::transform(&mut w.borrow_mut(), id, t.as_ref()).map_err(|e| thrown(&ctx, e)) })?)?;
     // An instanced mesh's instances: count drawn, then matrices (16 numbers each), colours (3) and per-instance data
@@ -302,9 +303,9 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         api::sway(&mut w.borrow_mut(), id, j.as_ref()).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
-    e.set("light", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::light(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("light", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::light(&mut w.borrow_mut(), id, &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
-    e.set("camera", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { api::camera(&mut w.borrow_mut(), id, &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("camera", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::camera(&mut w.borrow_mut(), id, &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     e.set("animation", Function::new(ctx.clone(), move |ctx: Ctx, id: u32, d: Value| -> rquickjs::Result<()> {
         let j = if d.is_null() || d.is_undefined() { None } else { Some(to_json(&d)?) };
@@ -314,10 +315,11 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     let p = physics.clone();
     e.set("remove", Function::new(ctx.clone(), move |id: u32| api::remove(&mut w.borrow_mut(), &mut p.borrow_mut(), id))?)?;
     let w = world.clone();
-    e.set("environment", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { api::environment(&mut w.borrow_mut(), &to_json(&d)?).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("environment", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::environment(&mut w.borrow_mut(), &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let w = world.clone();
     e.set("settings", Function::new(ctx.clone(), move |d: Value| -> rquickjs::Result<()> {
-        api::settings(&mut w.borrow_mut(), &to_json(&d)?);
+        let json = to_json(&d)?;
+        api::settings(&mut w.borrow_mut(), &json);
         Ok(())
     })?)?;
     ctx.globals().set("__engine", e)
@@ -872,6 +874,35 @@ mod tests {
         assert!(format!("{err}").contains("interrupted"), "{err}");
         let ms = t.elapsed().as_millis();
         assert!((250..800).contains(&ms), "ended after {ms} ms (50 of script and at most 250 lent)");
+    }
+
+    /// A descriptor whose getter calls the engine again (the review of #25: the engine was borrowed while the
+    /// descriptor was read, and the second call panicked, "already mutably borrowed"): each entry that takes one reads
+    /// it first. None panics; each answers or throws a script error.
+    #[test]
+    fn a_getter_in_a_descriptor_that_calls_the_engine_does_not_panic_it() {
+        let h = ScriptHost::new(GAME).unwrap();
+        *h.voxels.borrow_mut() = crate::voxel::VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut h.world.borrow_mut(), &mut h.physics.borrow_mut());
+        h.voxels.borrow_mut().edit(&mut h.world.borrow_mut(), &mut h.physics.borrow_mut(), &crate::voxel::EditOp::parse(&serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] })).unwrap()).unwrap();
+        // (Every getter calls into the voxel world, the physics and the scene's world: whichever one the entry borrows.)
+        let poke = "__engine.voxelBodies(); __engine.voxelHash(); __engine.physics('hash', {}); __engine.visible(1, true)";
+        let cases = [
+            ("voxelEdit", format!("__engine.voxelEdit({{ get op() {{ {poke}; return 'carve'; }}, sphere: [1, 0.3, 1, 0.2] }})")),
+            ("voxelBodyEdit", format!("__engine.voxelBodyEdit(JSON.parse(__engine.voxelBodies())[0].body, {{ get op() {{ {poke}; return 'paint'; }}, material: 1, sphere: [3, 1.5, 3, 0.3] }})")),
+            ("voxelLevel", format!("__engine.voxelLevel({{ get route() {{ {poke}; return 'mesh'; }}, palette: [], objects: [] }})")),
+            ("material", format!("__engine.material(9, {{ get color() {{ {poke}; return [1, 1, 1]; }} }})")),
+            ("object", format!("__engine.object(9, {{ get name() {{ {poke}; return 'x'; }}, kind: 'group' }})")),
+            ("light", format!("__engine.light(9, {{ get type() {{ {poke}; return 'point'; }} }})")),
+            ("camera", format!("__engine.camera(9, {{ get fov() {{ {poke}; return 50; }} }})")),
+            ("environment", format!("__engine.environment({{ get kind() {{ {poke}; return 'color'; }} }})")),
+            ("settings", format!("__engine.settings({{ get exposure() {{ {poke}; return 0; }} }})")),
+            ("texture", format!("__engine.texture(9, {{ get uri() {{ {poke}; return 'x.png'; }} }})")),
+            ("physics", format!("__engine.physics('ray', {{ get origin() {{ {poke}; return [0, 5, 0]; }}, direction: [0, -1, 0] }})")),
+        ];
+        for (name, js) in cases {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.call(1000, |ctx| ctx.eval::<rquickjs::Value, _>(js.as_str()).map(|_| ()))));
+            assert!(r.is_ok(), "{name}: the engine panicked");
+        }
     }
 
     /// An id scene code read out of an answer goes back into a call: a ray's hit on a voxel body, its `body` into an

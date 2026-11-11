@@ -1012,6 +1012,13 @@ impl Physics {
         Ok(())
     }
 
+    /// A body's mass properties as the world has them: mass, centre of mass (body frame), principal inertia (the checks').
+    pub fn mass_properties(&self, id: BodyId) -> Option<(f32, [f32; 3], [f32; 3])> {
+        let m = self.body(id)?.mass_properties().local_mprops;
+        let (c, i) = (m.local_com, m.principal_inertia());
+        Some((m.mass(), [c.x, c.y, c.z], [i.x, i.y, i.z]))
+    }
+
     /// A collider's contacts reported (`take_contacts`) or not, from now on.
     pub fn set_events(&mut self, id: ColliderId, on: bool) -> Result<(), String> {
         let &(h, _) = self.colliders.get(&id).ok_or("physics: unknown collider")?;

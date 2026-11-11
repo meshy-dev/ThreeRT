@@ -52,6 +52,12 @@ pub struct Bridge {
     colliders: BTreeMap<u32, ColliderId>,
     /// The world's collider -> the caller's id of it and of its body.
     collider_ids: BTreeMap<ColliderId, (u32, Option<u32>)>,
+    /// The pairs of colliders (the caller's ids, lower first) touching as reported, with their bodies: a start is
+    /// reported once (a collider edited in place, taken out and put back, starts again without having ended), and a
+    /// collider that goes ends its pairs (`ended`; the world's own end events of a collider it no longer has are lost).
+    touching: BTreeMap<(u32, u32), (Option<u32>, Option<u32>)>,
+    /// Ends of pairs whose collider went, for the next `contacts`.
+    ended: Vec<Value>,
     joints: BTreeMap<u32, JointId>,
     /// Body (the world's id) -> the scene object it drives and its slot in `poses`.
     drives: BTreeMap<BodyId, (u32, Option<u32>)>,
@@ -136,6 +142,8 @@ impl Default for Bridge {
             body_ids: BTreeMap::new(),
             colliders: BTreeMap::new(),
             collider_ids: BTreeMap::new(),
+            touching: BTreeMap::new(),
+            ended: vec![],
             joints: BTreeMap::new(),
             drives: BTreeMap::new(),
             driven: Default::default(),
@@ -362,7 +370,7 @@ impl Bridge {
                 }
                 if let Some(c) = collider.and_then(|c| self.colliders.remove(&c)) {
                     self.core.remove_collider(c);
-                    self.collider_ids.remove(&c);
+                    self.unmap(c);
                 }
                 if let Some(j) = joint.and_then(|j| self.joints.remove(&j)) {
                     self.core.remove_joint(j);
@@ -459,16 +467,19 @@ impl Bridge {
             }
             // The contacts begun and ended since the last call (colliders with `events`), in the order they happened:
             // [{a, b, bodyA, bodyB, started}].
-            "contacts" => Value::Array(
-                self.core
-                    .take_contacts()
-                    .into_iter()
-                    .filter_map(|c| {
-                        let (&(a, ba), &(b, bb)) = (self.collider_ids.get(&c.a)?, self.collider_ids.get(&c.b)?);
-                        Some(if a <= b { json!({ "a": a, "b": b, "bodyA": ba, "bodyB": bb, "started": c.started }) } else { json!({ "a": b, "b": a, "bodyA": bb, "bodyB": ba, "started": c.started }) })
-                    })
-                    .collect(),
-            ),
+            "contacts" => {
+                let mut out = std::mem::take(&mut self.ended);
+                for c in self.core.take_contacts() {
+                    let (Some(&(a, ba)), Some(&(b, bb))) = (self.collider_ids.get(&c.a), self.collider_ids.get(&c.b)) else { continue };
+                    let (a, b, ba, bb) = if a <= b { (a, b, ba, bb) } else { (b, a, bb, ba) };
+                    // (A start of a pair touching already, or an end of one that is not: not reported again.)
+                    let new = if c.started { self.touching.insert((a, b), (ba, bb)).is_none() } else { self.touching.remove(&(a, b)).is_some() };
+                    if new {
+                        out.push(json!({ "a": a, "b": b, "bodyA": ba, "bodyB": bb, "started": c.started }));
+                    }
+                }
+                Value::Array(out)
+            }
             // The world's hash and ticks (16 hex digits): the same calls at the same ticks give the same one.
             "hash" => json!({ "hash": format!("{:016x}", self.core.hash()), "ticks": self.core.ticks(), "bodies": self.core.bodies(), "contactsDropped": self.core.contacts_dropped() }),
             // The bodies the world took out after a tick since the last call (`Physics::step`), with the object each
@@ -521,7 +532,7 @@ impl Bridge {
         let left = self.core.edit_voxels(c, clear, fill);
         if !self.core.has_collider(c) {
             self.colliders.remove(&id);
-            self.collider_ids.remove(&c);
+            self.unmap(c);
         }
         left
     }
@@ -533,7 +544,7 @@ impl Bridge {
         }
         if let Some(c) = collider.filter(|&c| c >= ENGINE_IDS).and_then(|c| self.colliders.remove(&c)) {
             self.core.remove_collider(c);
-            self.collider_ids.remove(&c);
+            self.unmap(c);
         }
     }
 
@@ -553,6 +564,11 @@ impl Bridge {
     /// A body's linear and angular velocity.
     pub fn engine_velocity_of(&self, id: u32) -> Option<([f32; 3], [f32; 3])> {
         self.core.velocity(*self.bodies.get(&id)?)
+    }
+
+    /// An engine body's mass properties as the world has them (`Physics::mass_properties`).
+    pub fn engine_mass_properties(&self, id: u32) -> Option<(f32, [f32; 3], [f32; 3])> {
+        self.core.mass_properties(*self.bodies.get(&id).filter(|_| id >= ENGINE_IDS)?)
     }
 
     /// An engine body's mass properties (`Physics::set_mass_properties`).
@@ -599,6 +615,21 @@ impl Bridge {
     }
 
     /// Removes a body (the world's id) with its colliders and joints, and their ids.
+    /// A collider's ids forgotten (it is gone from the world), and the pairs it touched ended for scene code.
+    fn unmap(&mut self, c: ColliderId) -> Option<(u32, Option<u32>)> {
+        let ids = self.collider_ids.remove(&c)?;
+        let gone: Vec<(u32, u32)> = self.touching.keys().copied().filter(|&(a, b)| a == ids.0 || b == ids.0).collect();
+        for k in gone {
+            let (ba, bb) = self.touching.remove(&k).unwrap();
+            // (Held as the world's own contacts are, up to `MAX_CONTACTS`: nobody may take them.)
+            if self.ended.len() >= crate::world::limits::MAX_CONTACTS {
+                self.ended.remove(0);
+            }
+            self.ended.push(json!({ "a": k.0, "b": k.1, "bodyA": ba, "bodyB": bb, "started": false }));
+        }
+        Some(ids)
+    }
+
     fn forget_body(&mut self, b: BodyId) {
         let gone = self.core.remove_body(b);
         self.forget_ids(b, &gone);
@@ -608,7 +639,7 @@ impl Bridge {
     /// its joints.
     fn forget_ids(&mut self, b: BodyId, colliders: &[ColliderId]) {
         for c in colliders {
-            if let Some((id, _)) = self.collider_ids.remove(c) {
+            if let Some((id, _)) = self.unmap(*c) {
                 self.colliders.remove(&id);
             }
         }
@@ -728,7 +759,7 @@ impl Bridge {
 
     fn forget_colliders(&mut self, colliders: &[ColliderId]) {
         for c in colliders {
-            if let Some((id, _)) = self.collider_ids.remove(c) {
+            if let Some((id, _)) = self.unmap(*c) {
                 self.colliders.remove(&id);
             }
         }

@@ -46,6 +46,18 @@ pub const MAX_BODIES: usize = 300;
 /// size (the review of #24, item 6: a block of 200³ cut loose is 2.8 s of edit and 619 MB), so a body is not grown
 /// into a building by one call.
 pub const MAX_BODY_ADD: usize = 1 << 16;
+/// The most cells a voxel body grows to by adds (`edit_body`): 2^21, a block of 128³. Past it an add is refused: an edit
+/// of a body that size takes half a second (its collider, mesh and mass are made from all its cells) and 171 MB (the
+/// review of #24, item 6); the physics refuses a voxel shape past 2^24 cells, which no body reaches this way.
+pub const MAX_BODY_CELLS: usize = 1 << 21;
+/// The largest box a voxel body's cells may span: 1,024 cells a side (102.4 m at 0.1 m, more than any building of the
+/// benchmark level) and 2^25 cells in all. Its mesh is made over that box (voxel_core `greedy_mesh`: a byte a cell and
+/// 3/8 of one in bit columns, so at most 47 MB a redraw), and its cells stay within the physics' coordinate range. An
+/// add past it is refused; a part past it is debris, not a body.
+pub const MAX_BODY_SIDE: i32 = 1024;
+pub const MAX_BODY_BOX: i64 = 1 << 25;
+/// The most "gone" records kept for scene code (`take_gone`) when nothing takes them: older ones are let go.
+const MAX_GONE: usize = 1 << 16;
 
 /// The most edits and frames scene code can ask for before the level is loaded (in setup), kept until it is: they are
 /// outside the script engine's memory, so they are counted. 4,096: a setup that cuts a level into its starting state
@@ -264,6 +276,8 @@ pub struct VoxelWorld {
     objects: Vec<Option<VoxelObject>>,
     tiles: HashMap<(i32, i32), usize>,
     next_id: u32,
+    /// After the ids wrapped: those still in use then, passed over (`id`).
+    in_use: Option<std::collections::HashSet<u32>>,
     /// Debris kept for scene code (`LevelDesc::debris`): world-space centre and palette index of each removed voxel
     /// that is in no new object, since `take_debris` last took them (at most `MAX_DEBRIS`; of an edit that removes
     /// more than `EDIT_DEBRIS`, every n-th).
@@ -323,8 +337,26 @@ impl VoxelWorld {
         if self.next_id == 0 {
             self.next_id = FIRST_ID;
         }
-        self.next_id += 1;
-        self.next_id
+        loop {
+            if self.next_id == u32::MAX {
+                // (The ids ran out: from the first again, past the ones still in use, which are all the voxel world's
+                // own: its objects' and their geometries', its colliders', its bodies'.)
+                self.next_id = FIRST_ID;
+                self.in_use = Some(self.live_ids());
+            }
+            self.next_id += 1;
+            if !self.in_use.as_ref().is_some_and(|u| u.contains(&self.next_id)) {
+                return self.next_id;
+            }
+        }
+    }
+
+    /// Every id the voxel world holds now (`id`'s after a wrap).
+    fn live_ids(&self) -> std::collections::HashSet<u32> {
+        let mut u: std::collections::HashSet<u32> = self.objects.iter().flatten().flat_map(|o| o.parts.iter().flat_map(|p| [p.1, p.2])).collect();
+        u.extend(self.colliders.iter().flatten());
+        u.extend(self.bodies.values().flat_map(|b| [b.body, b.collider]));
+        u
     }
 
     fn grid(&self, k: usize) -> &Rc<VoxelGrid> {
@@ -1157,6 +1189,11 @@ impl VoxelWorld {
         // more voxels than the part that would take its place; else that part is debris itself (a chip cut off at
         // the cap does not make a bigger body vanish).
         let count = grid.count();
+        // (A part whose cells span more than a body may is debris, as one the physics refuses.)
+        if !grid.bounds().is_some_and(|(lo, hi)| body_fits(lo, hi.map(|v| v - 1))) {
+            debris(self, &grid);
+            return Ok(());
+        }
         while self.bodies.len() >= self.max_bodies.max(1) {
             let least = self
                 .bodies
@@ -1254,6 +1291,9 @@ impl VoxelWorld {
     /// was retired for the cap; one that left the world leaves nothing).
     fn retire(&mut self, w: &mut World, p: &mut PhysicsWorld, k: usize, debris: bool, reason: &'static str) {
         let Some(b) = self.bodies.remove(&k) else { return };
+        if self.gone.len() >= MAX_GONE {
+            self.gone.drain(..MAX_GONE / 2);
+        }
         self.gone.push((b.body, reason));
         if debris {
             let m = Mat4::from_rotation_translation(Quat::from_array(b.pose.1), Vec3::from(b.pose.0));
@@ -1265,6 +1305,7 @@ impl VoxelWorld {
         if let Some(o) = self.objects.get_mut(k).and_then(|o| o.take()) {
             for part in o.parts {
                 w.remove(part.1);
+                w.drop_geometry(part.2);
             }
         }
     }
@@ -1425,9 +1466,15 @@ impl VoxelWorld {
                 eprintln!("voxels: a body's collider was not edited ({e})");
             }
         }
+        // (A body whose collider the physics took out is not kept drawn and weighed without it: its voxels are debris.)
+        if p.bridge_ref().engine_voxels(collider).is_none() {
+            self.retire(w, p, k, true, "carved");
+            return Ok(());
+        }
         let old = std::mem::take(&mut self.objects[k].as_mut().unwrap().parts);
         for part in old {
             w.remove(part.1);
+            w.drop_geometry(part.2);
         }
         let grid = self.bodies[&k].grid.clone();
         let parts = self.body_parts(w, k, &grid, at, rot)?;
@@ -1515,11 +1562,32 @@ impl VoxelWorld {
         if filled.is_empty() {
             return Ok(0);
         }
+        // What the body would be: refused before anything changes if it is too large, or its cells too far apart.
+        if b.grid.count() + filled.len() > MAX_BODY_CELLS {
+            return Err(anyhow!("voxelBodyEdit: a body grows to at most {MAX_BODY_CELLS} voxels"));
+        }
+        let (mut lo, mut hi) = b.grid.bounds().map_or(([i32::MAX; 3], [i32::MIN; 3]), |(lo, hi)| (lo, hi.map(|v| v - 1)));
+        for g in &filled {
+            for a in 0..3 {
+                (lo[a], hi[a]) = (lo[a].min(g[a]), hi[a].max(g[a]));
+            }
+        }
+        if !body_fits(lo, hi) {
+            return Err(anyhow!("voxelBodyEdit: a body's voxels span at most {MAX_BODY_SIDE} cells a side and {MAX_BODY_BOX} in all"));
+        }
+        // The collider first: if the physics refuses the cells, nothing changes.
+        let collider = b.collider;
+        if let Err(e) = p.bridge().engine_edit_voxels(collider, &[], &filled) {
+            if p.bridge_ref().engine_voxels(collider).is_none() {
+                self.retire(w, p, k, true, "carved");
+            }
+            return Err(anyhow!("voxelBodyEdit: {e}"));
+        }
         let b = self.bodies.get_mut(&k).unwrap();
         for g in &filled {
             b.grid.set(g[0], g[1], g[2], m);
         }
-        self.redraw_body(w, p, k, &[], &filled, Vec3::from(at), Quat::from_array(rot))?;
+        self.redraw_body(w, p, k, &[], &[], Vec3::from(at), Quat::from_array(rot))?;
         Ok(filled.len())
     }
 
@@ -1529,6 +1597,11 @@ impl VoxelWorld {
     pub fn edit_body(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, body: u32, op: &EditOp) -> Result<serde_json::Value> {
         let k = self.bodies.iter().find(|(_, b)| b.body == body).map(|(&k, _)| k).ok_or_else(|| anyhow!("voxelBodyEdit: no voxel body {body}"))?;
         let p = ph.as_mut().ok_or_else(|| anyhow!("voxelBodyEdit: no physics world"))?;
+        if let EditKind::Add(m) | EditKind::Paint(m) = op.kind {
+            if m as usize >= self.palette.len() {
+                return Err(anyhow!("voxelBodyEdit: material {m} is not in the level's palette ({} entries)", self.palette.len()));
+            }
+        }
         self.ticks.0 += 1;
         self.this_edit.clear();
         let (voxels, n) = match op.kind {
@@ -1694,12 +1767,17 @@ impl VoxelWorld {
             w.set_object(id, format!("{name}#{m}"), None, kind, true, false)?;
             parts.push((m, id, g));
         }
-        for p in old {
+        for p in &old {
             if !geometry.iter().any(|g| g.0 == p.0) {
                 w.remove(p.1);
             }
         }
-        // Its old geometries (unless another object still shares them) are no longer drawn.
+        // Its old geometries are let go, unless another object (of the same file) still draws them.
+        for p in old {
+            if !geometry.iter().any(|g| g.1 == p.2) {
+                w.drop_geometry(p.2);
+            }
+        }
         let o = self.objects[k].as_mut().unwrap();
         o.shared = None;
         o.parts = parts;
@@ -1867,6 +1945,12 @@ impl VoxelWorld {
 /// Where a level object's collider stands, its cells being the object's own: the rotation of its quarter turns about
 /// y and the translation that puts the cube of its cell g on the cube of world cell `place.to_world(g)` (a turned
 /// cube's lowest corner is not the turned corner: `voxel_core::Placement`).
+/// Whether cells spanning `lo` ..= `hi` fit a voxel body (`MAX_BODY_SIDE`, `MAX_BODY_BOX`).
+fn body_fits(lo: [i32; 3], hi: [i32; 3]) -> bool {
+    let side = |a: usize| hi[a] as i64 - lo[a] as i64 + 1;
+    (0..3).all(|a| (1..=MAX_BODY_SIDE as i64).contains(&side(a))) && side(0) * side(1) * side(2) <= MAX_BODY_BOX
+}
+
 /// The six face neighbours.
 const DIRS6: [[i32; 3]; 6] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 
@@ -2445,6 +2529,129 @@ mod tests {
         assert_eq!(v.bodies(), 1);
         assert_eq!(v.take_gone(), serde_json::json!([[b, "carved"]]));
         assert!(v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "paint", "material": 1, "box": [0, 0, 0, 1, 1, 1] }))).is_err());
+    }
+
+    /// The review of #25: adds that would make a body huge or far-flung are refused before anything changes (grid,
+    /// collider and mass stay as they were); a body grows to `MAX_BODY_CELLS` and no further; a body is never left
+    /// without its collider; redraws let their old geometries go (the level's edits too); a material outside the
+    /// palette is refused.
+    #[test]
+    fn a_body_is_not_grown_too_large_or_too_far() {
+        let (mut w, mut ph, mut v) = one_body();
+        let (k, b) = v.bodies.iter().map(|(&k, b)| (k, b.body)).next().unwrap();
+        let cells = |v: &VoxelWorld, ph: &Option<PhysicsWorld>| (v.bodies[&k].grid.count(), ph.as_ref().unwrap().bridge_ref().engine_voxels(v.bodies[&k].collider));
+        let at = p_pose(&ph, b);
+        let before = cells(&v, &ph);
+        // Far: 120 m out on every axis (it took 2.4 GB), 2e8 m out on one (it ran out of memory), 101 km (past the
+        // physics' cell range: the mesh had the cells, the collider not).
+        for far in [[120.0f32, 120.0, 120.0], [2e8, 0.0, 0.0], [101_000.0, 0.0, 0.0]] {
+            let c = [at[0] + far[0], at[1] + far[1], at[2] + far[2]];
+            let t = Instant::now();
+            let e = v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "add", "material": 1, "box": [c[0], c[1], c[2], c[0] + 0.3, c[1] + 0.3, c[2] + 0.3] })));
+            assert!(e.is_err(), "{far:?}: {e:?}");
+            assert!(t.elapsed().as_millis() < 50, "{far:?}: refused after {} ms", t.elapsed().as_millis());
+            assert_eq!(cells(&v, &ph), before, "{far:?}: nothing changed");
+        }
+        // A material the palette does not have.
+        assert!(v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "paint", "material": 255, "box": [0, 0, 0, 9, 9, 9] }))).is_err());
+        // Grown by adds of 64,000 voxels next to it, again and again: refused at `MAX_BODY_CELLS`, collider and grid
+        // alike all the way.
+        let mut x = at[0] + 0.4;
+        let (mut grown, mut refused) = (0, false);
+        for _ in 0..40 {
+            match v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "add", "material": 1, "box": [x, at[1], at[2], x + 3.99, at[1] + 3.99, at[2] + 3.99] }))) {
+                Ok(e) => grown += e["voxels"].as_u64().unwrap(),
+                Err(e) => {
+                    assert!(format!("{e}").contains("at most"), "{e}");
+                    refused = true;
+                    break;
+                }
+            }
+            x += 4.0;
+            let (g, c) = cells(&v, &ph);
+            assert_eq!(Some(g), c, "grid and collider");
+        }
+        assert!(refused && v.bodies[&k].grid.count() <= MAX_BODY_CELLS, "{grown} grown, {} cells", v.bodies[&k].grid.count());
+        // Its redraws let their geometries go: 200 paints back and forth leave the world's geometries as they were.
+        let geometries = w.geometries.len() + w.proc_geometries.len();
+        for n in 0..200 {
+            v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "paint", "material": 1 + (n % 2), "box": [at[0] - 1.0, at[1] - 1.0, at[2] - 1.0, at[0] + 1.0, at[1] + 4.0, at[2] + 1.0] }))).unwrap();
+        }
+        assert!(w.geometries.len() + w.proc_geometries.len() <= geometries + 2, "{} geometries for {geometries}", w.geometries.len());
+        // And so do the level's edits: 200 small pits in the slab.
+        let geometries = w.geometries.len();
+        for n in 0..200 {
+            let x = 0.3 + (n % 20) as f32 * 0.25;
+            v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "sphere": [x, 0.4, 0.3 + (n / 20) as f32 * 0.25, 0.08] }))).unwrap();
+        }
+        assert!(w.geometries.len() <= geometries + 4, "{} geometries for {geometries}", w.geometries.len());
+    }
+
+    /// Contacts of a listening body: a start once per pair, even when an edit takes its collider out and puts it back;
+    /// an end when the body goes (the world's own end of a collider it no longer has was lost).
+    #[test]
+    fn a_bodys_contacts_start_once_and_end_when_it_goes() {
+        let (mut w, mut ph, mut v) = one_body();
+        let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        v.body_contacts(&mut ph, b, true).unwrap();
+        let mut take = |ph: &mut Option<PhysicsWorld>, w: &mut World| ph.as_mut().unwrap().call(w, "contacts", &serde_json::json!({})).unwrap().as_array().unwrap().iter().filter(|c| c["bodyA"].as_u64() == Some(b as u64) || c["bodyB"].as_u64() == Some(b as u64)).map(|c| c["started"].as_bool().unwrap()).collect::<Vec<_>>();
+        let step = |n: usize, v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>| (0..n).for_each(|_| { crate::api::physics_advance(ph, v, w, 1.0 / 60.0); });
+        ph.as_mut().unwrap().call(&mut w, "velocity", &serde_json::json!({ "body": b, "linvel": [0, 2, 0] })).unwrap();
+        step(90, &mut v, &mut w, &mut ph);
+        let landed = take(&mut ph, &mut w);
+        assert!(landed.contains(&true), "it landed: {landed:?}");
+        // Resting on the stump, a voxel added and one carved (each takes its collider out and puts it back): no start again.
+        let at = p_pose(&ph, b);
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "add", "material": 1, "box": [at[0] + 0.41, at[1] + 1.0, at[2] + 0.1, at[0] + 0.49, at[1] + 1.08, at[2] + 0.18] }))).unwrap();
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "box": [at[0] + 0.41, at[1] + 1.0, at[2] + 0.1, at[0] + 0.49, at[1] + 1.08, at[2] + 0.18] }))).unwrap();
+        step(30, &mut v, &mut w, &mut ph);
+        let edited = take(&mut ph, &mut w);
+        assert!(!edited.contains(&true), "no second start: {edited:?}");
+        // Carved away whole: its contacts end.
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "box": [at[0] - 1.0, at[1] - 1.0, at[2] - 1.0, at[0] + 2.0, at[1] + 4.0, at[2] + 2.0] }))).unwrap();
+        assert_eq!(v.bodies(), 0);
+        let gone = take(&mut ph, &mut w);
+        assert!(!gone.is_empty() && gone.iter().all(|s| !s), "its contacts end: {gone:?}");
+    }
+
+    /// The same body as one more check: a slab and a bar cut loose (336 voxels of 1,000 kg/m³).
+    fn one_body() -> (World, Option<PhysicsWorld>, VoxelWorld) {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut w, &mut ph);
+        v.palette.push(0);
+        v.density.push(8000.0);
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] }))).unwrap();
+        assert_eq!(v.bodies(), 1);
+        (w, ph, v)
+    }
+
+    /// A body of two densities weighed cell by cell is what parry itself makes of the same cubes (each a cuboid of its
+    /// density, placed, summed): mass, centre of mass and principal inertia.
+    #[test]
+    fn a_body_of_two_densities_weighs_what_parry_says() {
+        use physics_core::rapier3d::parry::{mass_properties::MassProperties, math::{Pose, Vector}};
+        let (mut w, mut ph, mut v) = one_body();
+        let (k, b) = v.bodies.iter().map(|(&k, b)| (k, b.body)).next().unwrap();
+        // One side of the bar dense (8,000 kg/m³), the rest 1,000: an off-centre, non-diagonal case.
+        let at = p_pose(&ph, b);
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "paint", "material": 2, "box": [at[0] - 1.0, at[1] - 1.0, at[2] - 1.0, at[0] + 0.15, at[1] + 1.2, at[2] + 0.15] }))).unwrap();
+        let grid = &v.bodies[&k].grid;
+        assert!(grid.voxels().any(|(_, m)| m == 2) && grid.voxels().any(|(_, m)| m == 1));
+        let s = v.size;
+        let parry = grid.voxels().fold(MassProperties::default(), |acc, (g, m)| {
+            let c = MassProperties::from_cuboid(v.density[m as usize], Vector::splat(s / 2.0));
+            acc + c.transform_by(&Pose::from_translation(Vector::new((g[0] as f32 + 0.5) * s, (g[1] as f32 + 0.5) * s, (g[2] as f32 + 0.5) * s)))
+        });
+        let (mass, com, inertia) = ph.as_ref().unwrap().bridge_ref().engine_mass_properties(b).unwrap();
+        let (pc, pi) = (parry.local_com, parry.principal_inertia());
+        let rel = |a: f32, b: f32| (a - b).abs() / b.abs().max(1e-6);
+        assert!(rel(mass, parry.mass()) < 1e-5, "mass {mass} for parry's {}", parry.mass());
+        assert!((Vector::from(com) - pc).length() < 1e-5, "centre of mass {com:?} for parry's {pc:?}");
+        let (mut ours, mut theirs) = (inertia, [pi.x, pi.y, pi.z]);
+        ours.sort_by(f32::total_cmp);
+        theirs.sort_by(f32::total_cmp);
+        assert!((0..3).all(|a| rel(ours[a], theirs[a]) < 1e-4), "principal inertia {ours:?} for parry's {theirs:?}");
     }
 
     fn p_pose(ph: &Option<PhysicsWorld>, body: u32) -> [f32; 3] {

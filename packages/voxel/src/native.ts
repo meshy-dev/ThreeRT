@@ -145,6 +145,8 @@ const CONTACTS = new Set(["contactstart", "contactend"]);
  */
 export class VoxelBody extends Object3D {
   readonly isVoxelBody = true;
+  /** @internal Drawn by the engine, in no scene: `scene.add` refuses it. */
+  readonly engineOwned = true;
   override type = "VoxelBody";
   /** The physics world's ids of its body and its collider (physics calls and hits name them). */
   readonly body: number;
@@ -174,8 +176,7 @@ export class VoxelBody extends Object3D {
     };
     place(r.position, r.rotation);
     const pull = () => {
-      if (this.gone) return;
-      const s = physicsQuery("state", { body: this.body }) as { position?: number[]; rotation?: number[]; sleeping?: boolean } | null;
+      const s = this.ask(() => physicsQuery("state", { body: this.body }) as { position?: number[]; rotation?: number[]; sleeping?: boolean } | null, null);
       if (!s?.position || !s.rotation) return;
       place(s.position, s.rotation);
       this.asleep = s.sleeping ?? this.asleep;
@@ -196,8 +197,8 @@ export class VoxelBody extends Object3D {
 
   /** What the body is: dynamic, its mass (kg). Read-only: the engine makes and unmakes these bodies. */
   override get physics(): Readonly<PhysicsDesc> | null {
-    if (this.gone) return null;
-    const s = physicsQuery("state", { body: this.body }) as { mass?: number } | null;
+    const s = this.ask(() => physicsQuery("state", { body: this.body }) as { mass?: number } | null, undefined);
+    if (s === undefined) return null;
     return Object.freeze({ type: "dynamic" as const, ...(s?.mass !== undefined ? { mass: s.mass } : {}) });
   }
   override set physics(_v: PhysicsDesc | "dynamic" | "fixed" | "kinematic" | null) {
@@ -232,7 +233,8 @@ export class VoxelBody extends Object3D {
   addVoxels(shape: VoxelShape, material: number): VoxelBodyEdit | null {
     return this.edit({ op: "add", material, ...shape });
   }
-  /** This body alone cut by the shape, whatever the hardness (parts cut off are bodies of their own). */
+  /** This body alone cut by the shape, whatever the hardness but the indestructible (parts cut off are bodies of
+   *  their own). */
   carve(shape: VoxelShape): VoxelBodyEdit | null {
     return this.edit({ op: "carve", ...shape });
   }
@@ -240,24 +242,40 @@ export class VoxelBody extends Object3D {
   override addEventListener(type: string, listener: (e: ObjectEvent) => void): void {
     super.addEventListener(type, listener);
     if (CONTACTS.has(type) && !this.contactsOn && !this.gone) {
-      engine()?.voxelContacts?.(this.body, true);
-      this.contactsOn = true;
-      listening++;
+      if (this.ask(() => (engine()?.voxelContacts?.(this.body, true), true), false)) {
+        this.contactsOn = true;
+        listening++;
+      }
     }
   }
 
   private call(op: string, args: object): this {
-    if (!this.gone) engine()?.physics?.(op, { body: this.body, ...args });
+    this.ask(() => engine()?.physics?.(op, { body: this.body, ...args }), undefined);
     return this;
   }
 
   private edit(d: object): VoxelBodyEdit | null {
-    if (this.gone) return null;
     const e = engine();
     if (!e?.voxelBodyEdit) throw new Error("voxel body edits need the renderer's native voxels");
-    const r = JSON.parse(e.voxelBodyEdit(this.body, d)) as VoxelBodyEdit;
-    refresh();
+    const r = this.ask(() => JSON.parse(e.voxelBodyEdit!(this.body, d)) as VoxelBodyEdit, null);
+    if (r) refresh();
     return r;
+  }
+
+  /**
+   * A call on the engine's body: `otherwise` once it is gone. The engine may have taken the body out since the
+   * registry last looked (an edit of the level, the cap, a fall): a call that fails is then the registry's cue to look
+   * again, and on a body found gone it does nothing, as the class promises. Any other error is thrown.
+   */
+  private ask<T, U>(f: () => T, otherwise: U): T | U {
+    if (this.gone) return otherwise;
+    try {
+      return f();
+    } catch (err) {
+      refresh();
+      if (this.gone) return otherwise;
+      throw err;
+    }
   }
 
   /** @internal It is no longer a body. */
@@ -313,7 +331,9 @@ function register(): void {
     object: (body) => registry.get(body) ?? (body >= 2 ** 30 ? (refresh(), registry.get(body)) : undefined),
     bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
     frame: () => {
+      // (With no object made yet, the engine's list of gone bodies is only let go of: nothing holds them.)
       if (registry.size) refresh();
+      else engine()?.voxelGone?.();
       // (Every "gone" since the last frame's events, noticed here or by any call in between.)
       const gone = pendingGone;
       pendingGone = [];
@@ -355,7 +375,10 @@ export function voxelLevel(level: NativeLevel): void {
 function edit(d: object): VoxelEdit | { queued: true } {
   const e = engine();
   if (!e?.voxelEdit) throw new Error("voxel edits need the renderer's native voxels");
-  return JSON.parse(e.voxelEdit(d)) as VoxelEdit | { queued: true };
+  const r = JSON.parse(e.voxelEdit(d)) as VoxelEdit | { queued: true };
+  // (An edit of the level carves the bodies too: the objects of those it took out are gone from now on.)
+  if (registry.size) refresh();
+  return r;
 }
 
 /**

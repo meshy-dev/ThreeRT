@@ -30,7 +30,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use threert_render::api;
 use threert_render::physics::PhysicsWorld;
-use threert_render::voxel::{EditOp, VoxelWorld, MAX_BODIES};
+use threert_render::voxel::{EditOp, VoxelWorld, MAX_BODIES, MAX_BODY_CELLS};
 use threert_render::world::World;
 
 struct Rng(u64);
@@ -136,13 +136,21 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                 let list = v.body_list(ph.as_ref().unwrap());
                 if let Some(b) = list.as_array().unwrap().get(r.below(list.as_array().unwrap().len().max(1) as u64) as usize) {
                     let (id, at) = (b["body"].as_u64().unwrap() as u32, [0, 1, 2].map(|k| b["position"][k].as_f64().unwrap()));
-                    let c = [at[0] + r.range(-0.5, 1.0), at[1] + r.range(-0.5, 1.5), at[2] + r.range(-0.5, 1.0)];
+                    // Near it mostly; now and then far (up to 10^8 m out: the review of #25 grew a body's mesh over
+                    // that), with a wild size, or grown again and again beside it.
+                    let off = if r.chance(0.1) { [1e2, 1e5, 1e8][r.below(3) as usize] * if r.chance(0.5) { 1.0 } else { -1.0 } } else { 0.0 };
+                    let c = [at[0] + r.range(-0.5, 1.0) + off, at[1] + r.range(-0.5, 1.5), at[2] + r.range(-0.5, 1.0) + off * r.range(0.0, 1.0)];
                     let rad = if wild && r.chance(0.2) { weird(&mut r) } else { r.range(0.05, 0.8) };
                     let op = ["add", "paint", "carve"][r.below(3) as usize];
-                    let d = if r.chance(0.5) { json!({ "op": op, "material": 1, "sphere": [c[0], c[1], c[2], rad] }) } else { json!({ "op": op, "material": 1, "box": [c[0], c[1], c[2], c[0] + rad, c[1] + rad, c[2] + rad] }) };
-                    match EditOp::parse(&d).and_then(|e| v.edit_body(&mut w, &mut ph, id, &e)) {
-                        Ok(_) => body_edits += 1,
-                        Err(_) => refused += 1,
+                    let material = if r.chance(0.05) { 255 } else { 1 };
+                    let d = if r.chance(0.5) { json!({ "op": op, "material": material, "sphere": [c[0], c[1], c[2], rad] }) } else { json!({ "op": op, "material": material, "box": [c[0], c[1], c[2], c[0] + rad, c[1] + rad, c[2] + rad] }) };
+                    let grow = if op == "add" && r.chance(0.02) { 4 } else { 1 };
+                    for g in 0..grow {
+                        let d = if grow > 1 { json!({ "op": "add", "material": 1, "box": [at[0] + 0.4 + 3.2 * g as f64, at[1], at[2], at[0] + 3.59 + 3.2 * g as f64, at[1] + 3.19, at[2] + 3.19] }) } else { d.clone() };
+                        match EditOp::parse(&d).and_then(|e| v.edit_body(&mut w, &mut ph, id, &e)) {
+                            Ok(_) => body_edits += 1,
+                            Err(_) => refused += 1,
+                        }
                     }
                 }
             }
@@ -208,6 +216,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
         for b in list {
             let (id, collider, voxels) = (b["body"].as_u64().unwrap() as u32, b["collider"].as_u64().unwrap() as u32, b["voxels"].as_u64().unwrap() as usize);
             assert!(voxels > 0, "seed {seed}, iteration {it}: body {id} has no voxel");
+            assert!(voxels <= MAX_BODY_CELLS.max(1 << 24), "seed {seed}, iteration {it}: body {id} has {voxels} voxels");
             assert_eq!(p.bridge_ref().engine_voxels(collider), Some(voxels), "seed {seed}, iteration {it}: body {id}'s collider cells are not its grid's");
             assert!(b["position"].as_array().unwrap().iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "seed {seed}, iteration {it}: body {id} at {}", b["position"]);
         }

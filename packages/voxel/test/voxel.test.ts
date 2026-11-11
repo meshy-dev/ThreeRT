@@ -229,3 +229,62 @@ test("a voxel body in the scene's physics: a ray's hit has its object, a joint t
     g.__engine = before;
   }
 });
+
+test("a voxel body the engine took out before the objects noticed: every call does nothing, as on a gone one (the review of #25)", async () => {
+  const { voxelLevel, voxelBodies, voxelBody, voxelExplode, VoxelBody } = await import("../src/native.ts");
+  const { RecordingEngine, Scene, SceneBinding, PerspectiveCamera, Vector3 } = await import("@threert/scene");
+  // As the real bridge and voxel world: a call on a body that is not there throws.
+  class Bridge extends RecordingEngine {
+    bodies: { body: number }[] = [];
+    gone: [number, string][] = [];
+    override physics(op: string, args: { body?: number }): string {
+      super.physics(op, args);
+      if (["state", "impulse", "force", "velocity"].includes(op) && (args.body ?? 0) >= 2 ** 30 && !this.bodies.some((b) => b.body === args.body)) throw new Error(`physics: unknown body ${args.body}`);
+      if (op === "state") return JSON.stringify({ position: [1, 2, 3], rotation: [0, 0, 0, 1], linvel: [0, 1, 0], angvel: [0, 0, 0], sleeping: false, mass: 5 });
+      return op === "contacts" || op === "faults" ? "[]" : "null";
+    }
+    voxelLevel() {}
+    voxelBodies() { return JSON.stringify(this.bodies.map((b) => ({ ...b, collider: b.body + 1, voxels: 100, asleep: false, position: [0, 1, 0], rotation: [0, 0, 0, 1] }))); }
+    voxelGone() { const x = this.gone; this.gone = []; return JSON.stringify(x); }
+    voxelContacts(body: number) { if (!this.bodies.some((b) => b.body === body)) throw new Error(`voxelContacts: no voxel body ${body}`); }
+    voxelBodyEdit(body: number) { if (!this.bodies.some((b) => b.body === body)) throw new Error(`voxelBodyEdit: no voxel body ${body}`); return JSON.stringify({ voxels: 1, bodies: 1, gone: false }); }
+    voxelEdit() { return "{}"; }
+    takeOut(body: number, why: string) { this.bodies = this.bodies.filter((b) => b.body !== body); this.gone.push([body, why]); }
+  }
+  const engine = new Bridge();
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  const [a, b] = [2 ** 30 + 7, 2 ** 30 + 9];
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    engine.bodies = [{ body: a }, { body: b }];
+    const [va, vb] = voxelBodies();
+    // Taken out by the engine on its own (the cap, a fall), nothing told the objects yet: no call throws, and the first
+    // that finds it gone retires the object.
+    engine.takeOut(a, "fell");
+    const calls: [string, () => unknown][] = [
+      ["applyImpulse", () => va.applyImpulse(new Vector3(0, 1, 0))], ["position", () => va.position.x], ["sleeping", () => va.sleeping],
+      ["getLinearVelocity", () => va.getLinearVelocity().y], ["physics", () => va.physics], ["contacts", () => va.addEventListener("contactstart", () => {})],
+      ["paint", () => va.paint({ sphere: [0, 0, 0, 1] }, 1)], ["carve", () => va.carve({ box: [0, 0, 0, 1, 1, 1] })], ["addVoxels", () => va.addVoxels({ box: [0, 0, 0, 1, 1, 1] }, 1)],
+    ];
+    for (const [name, f] of calls) assert.doesNotThrow(f, name);
+    assert.deepEqual([va.gone, va.goneReason, va.physics, va.getLinearVelocity().toArray(), va.position.toArray()], [true, "fell", null, [0, 0, 0], [0, 1, 0]]);
+    // An edit of the level that carves one away: its object is gone as soon as the edit returns.
+    engine.voxelEdit = () => (engine.takeOut(b, "carved"), "{}");
+    voxelExplode(0, 0, 0, 5);
+    assert.deepEqual([vb.gone, vb.goneReason, voxelBody(b)], [true, "carved", undefined]);
+    // Their "gone" events with the frame's events.
+    const got: string[] = [];
+    va.addEventListener("gone", (e) => got.push(`a ${e.reason}`));
+    vb.addEventListener("gone", (e) => got.push(`b ${e.reason}`));
+    const scene = new Scene();
+    const binding = new SceneBinding(engine, scene, new PerspectiveCamera());
+    binding.deliverPhysicsEvents();
+    assert.deepEqual(got.sort(), ["a fell", "b carved"]);
+    // A voxel body is in no scene.
+    assert.throws(() => scene.add(new VoxelBody({ body: 2 ** 30 + 99, collider: 0, voxels: 1, asleep: false, position: [0, 0, 0], rotation: [0, 0, 0, 1] })), /in no scene/);
+  } finally {
+    g.__engine = before;
+  }
+});
