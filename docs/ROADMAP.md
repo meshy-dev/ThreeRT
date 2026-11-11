@@ -4116,3 +4116,4 @@ benchmark level. The order follows the dependencies; a step that meets a further
   - The luminance profile across the Khronos horizon now has UE's shape (ramp to 48 vs UE's 50 over the same rows;
     the sky above stays ~15 % brighter, the item above).
   - Atomic tests `sky/horizon-black` and `sky/horizon-fade`.
+<!-- CI routing check: a docs-only change (temporary PR, closed unmerged). -->
