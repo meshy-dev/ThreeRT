@@ -14,6 +14,7 @@ export interface EngineExports {
   voxelEdit(d: string): string;
   voxelHash(): string;
   voxelDebris(): Float32Array;
+  voxelBodies(): string;
   voxelFrame(dt: number): string;
   geometry(id: number, p: Float32Array, n: Float32Array, uv: Float32Array, idx: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, d: string, data?: Uint8Array | null): void;
@@ -52,6 +53,7 @@ export interface VoxelCalls {
   voxelFrame(dt: number): string;
   voxelDebris(): Float32Array;
   voxelHash(): string;
+  voxelBodies(): string;
 }
 
 export type WebEngine = Engine & VoxelCalls & { physicsPoses(): Float32Array };
@@ -68,6 +70,7 @@ export function webEngine(w: EngineExports): WebEngine {
     voxelEdit: (d) => w.voxelEdit(json(d)),
     voxelHash: () => w.voxelHash(),
     voxelDebris: () => w.voxelDebris(),
+    voxelBodies: () => w.voxelBodies(),
     voxelFrame: (dt) => w.voxelFrame(dt),
     geometry: (id, p, n, uv, idx, groups, colors) => w.geometry(id, p, n, uv, idx, groups, colors),
     texture: (id, d, data) => w.texture(id, json(d), data),

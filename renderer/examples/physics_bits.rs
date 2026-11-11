@@ -15,3 +15,10 @@ pub extern "C" fn physics_script() -> u64 {
 pub extern "C" fn physics_cases() -> u64 {
     physics_core::check::cases()
 }
+
+/// The voxel bodies' script (renderer/src/voxel.rs `VoxelWorld::check_script`: the level's colliders, a part that
+/// topples as a body, carved as it lies): the adapter between the voxels and the physics, in wasm32.
+#[no_mangle]
+pub extern "C" fn voxel_bodies_script() -> u64 {
+    threert_render::voxel::VoxelWorld::check_script()
+}

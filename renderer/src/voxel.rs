@@ -147,6 +147,10 @@ struct VoxelObject {
     flying: Option<Vec<MeshPart>>,
 }
 
+/// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
+/// behaviour, of the physics or of a platform's arithmetic shows here).
+pub const EXPECTED_SCRIPT: u64 = 0x0a53_c865_f7e3_d7ef;
+
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
 enum BrickRef<'a> {
@@ -907,6 +911,87 @@ impl VoxelWorld {
             }
         }
         out
+    }
+
+    /// A level of solid blocks of palette entry 1 made here, no file (the checks' and the tests'): each block's corner
+    /// cell, its size in cells, its terrain tile if it is one, and whether it is an anchor. Voxels of 0.1 m, the mesh
+    /// route, the level's physics on.
+    pub fn of_blocks(blocks: &[([i32; 3], [i32; 3], Option<(i32, i32)>, bool)], w: &mut World, ph: &mut Option<PhysicsWorld>) -> VoxelWorld {
+        let mut v = VoxelWorld { route: Some(Route::Mesh), size: 0.1, palette: vec![0, 0], physics: true, max_bodies: MAX_BODIES, density: vec![1000.0; 2], floor: -100.0, ..Default::default() };
+        let mut level = Level::new(gravity_for(0.1, TICK_RATE));
+        for (n, &(at, size, tile, anchor)) in blocks.iter().enumerate() {
+            let mut grid = VoxelGrid::default();
+            for x in 0..size[0] {
+                for y in 0..size[1] {
+                    for z in 0..size[2] {
+                        grid.set(x, y, z, 1);
+                    }
+                }
+            }
+            let k = level.add_object(Rc::new(grid), Placement::new(at, 0, [0, 0, 0]), anchor) as usize;
+            let corner = Vec3::new(at[0] as f32, at[1] as f32, at[2] as f32) * 0.1;
+            v.objects.push(Some(VoxelObject { name: format!("block{n}"), world: Mat4::from_translation(corner), corner: Vec3::ZERO, off: [0; 3], tile, lo: corner, hi: corner + Vec3::new(size[0] as f32, size[1] as f32, size[2] as f32) * 0.1, shared: None, parts: vec![], flying: None }));
+            if let Some(t) = tile {
+                v.tiles.insert(t, k);
+            }
+        }
+        level.settle();
+        v.level = Some(level);
+        for k in 0..blocks.len() {
+            let g = v.make_geometry(w, k, None).expect("a block's mesh");
+            v.place(w, k, &g).expect("a block's object");
+        }
+        v.colliders = vec![None; blocks.len()];
+        let p = ph.get_or_insert_with(Default::default);
+        let mut full = HashMap::new();
+        for k in 0..blocks.len() {
+            v.collide(p, k, &mut full);
+        }
+        v
+    }
+
+    /// The voxel bodies' determinism script (tools/physics-determinism.ts runs it natively and in wasm32, in the
+    /// renderer's graph): a tower on two terrain tiles is undercut on one side, so what is above the cut is a body
+    /// that lands on the stump off its balance and topples; an explosion where it lies carves it as it is turned (its
+    /// cells' centres through the body's pose) and cuts it in bodies; the ground under them is carved. The level's
+    /// hash and the physics world's, folded every 20 ticks and after every edit.
+    pub fn check_script() -> u64 {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 8, 64], Some((0, 0)), true), ([64, 0, 0], [64, 8, 64], Some((1, 0)), true), ([52, 8, 28], [6, 40, 6], None, false)], &mut w, &mut ph);
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let fold = |h: &mut u64, v: &VoxelWorld, ph: &Option<PhysicsWorld>| {
+            for x in [v.hash().unwrap_or(0), ph.as_ref().map_or(0, |p| p.hash()), v.bodies() as u64] {
+                *h = (*h ^ x).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let run = |h: &mut u64, v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, ticks: u32| {
+            for t in 0..ticks {
+                crate::api::physics_advance(ph, v, w, 1.0 / 60.0);
+                w.take_changes();
+                if t % 20 == 19 {
+                    fold(h, v, ph);
+                }
+            }
+        };
+        let edit = |h: &mut u64, v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, shape: ShapeM| {
+            v.edit(w, ph, &EditOp { shape, kind: EditKind::Carve([256; 4]) }).expect("an edit");
+            w.take_changes();
+            fold(h, v, ph);
+        };
+        // The undercut: a ball out of the tower's foot on its +x side, then a cut through what is left of that level:
+        // 1,260 voxels come down on a stump with a hollow in it.
+        edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([5.9, 1.1, 3.1], 0.45));
+        edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Box([5.0, 1.0, 2.6], [5.9, 1.2, 3.6]));
+        run(&mut h, &mut v, &mut w, &mut ph, 240);
+        // Where the body stands now: an explosion into its foot (it is carved through its pose, and goes over), then
+        // a pit in the ground under it.
+        let at = ph.as_ref().and_then(|p| v.body_list(p).as_array().and_then(|l| l.iter().max_by_key(|b| b["voxels"].as_u64()).map(|b| [0, 1, 2].map(|k| b["position"][k].as_f64().unwrap_or(0.0) as f32)))).unwrap_or([5.5, 1.0, 3.1]);
+        edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([at[0] + 0.3, at[1] + 0.3, at[2] + 0.3], 0.5));
+        run(&mut h, &mut v, &mut w, &mut ph, 120);
+        edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([at[0], 0.8, at[2]], 0.9));
+        run(&mut h, &mut v, &mut w, &mut ph, 240);
+        h
     }
 
     /// A voxel grid as a rigid body at a pose: the objects that draw it (its mesh in its own space, placed by the
@@ -1715,39 +1800,6 @@ mod tests {
         assert!(a.2 > 0);
     }
 
-    /// A level of blocks of one palette entry made here (no file): each (corner cell, size in cells, terrain tile).
-    fn blocks(blocks: &[([i32; 3], [i32; 3], Option<(i32, i32)>)], w: &mut World, ph: &mut Option<PhysicsWorld>) -> VoxelWorld {
-        let mut v = VoxelWorld { route: Some(Route::Mesh), size: 0.1, palette: vec![0, 0], physics: true, max_bodies: MAX_BODIES, density: vec![1000.0; 2], floor: -100.0, ..Default::default() };
-        let mut level = Level::new(gravity_for(0.1, TICK_RATE));
-        for (n, &(at, size, tile)) in blocks.iter().enumerate() {
-            let mut grid = VoxelGrid::default();
-            for x in 0..size[0] {
-                for y in 0..size[1] {
-                    for z in 0..size[2] {
-                        grid.set(x, y, z, 1);
-                    }
-                }
-            }
-            let k = level.add_object(Rc::new(grid), Placement::new(at, 0, [0, 0, 0]), true) as usize;
-            let corner = Vec3::new(at[0] as f32, at[1] as f32, at[2] as f32) * 0.1;
-            v.objects.push(Some(VoxelObject { name: format!("block{n}"), world: Mat4::from_translation(corner), corner: Vec3::ZERO, off: [0; 3], tile, lo: corner, hi: corner + Vec3::new(size[0] as f32, size[1] as f32, size[2] as f32) * 0.1, shared: None, parts: vec![], flying: None }));
-            if let Some(t) = tile {
-                v.tiles.insert(t, k);
-            }
-        }
-        v.level = Some(level);
-        for k in 0..blocks.len() {
-            let g = v.make_geometry(w, k, None).unwrap();
-            v.place(w, k, &g).unwrap();
-        }
-        v.colliders = vec![None; blocks.len()];
-        let p = ph.get_or_insert_with(Default::default);
-        for k in 0..blocks.len() {
-            v.collide(p, k, &mut HashMap::new());
-        }
-        v
-    }
-
     /// The solid world cells of a level within `SHELL` steps of one that is not (under the bedrock, y < 0, counts as
     /// solid when `bedrock`): what the colliders must hold, by brute force.
     fn shell_by_brute_force(v: &VoxelWorld, bedrock: bool) -> usize {
@@ -1775,7 +1827,7 @@ mod tests {
     fn a_collider_is_the_shell_of_its_cells() {
         let mut w = World::default();
         let mut ph: Option<PhysicsWorld> = None;
-        let mut v = blocks(&[([0, 0, 0], [32, 32, 32], None)], &mut w, &mut ph);
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [32, 32, 32], None, true)], &mut w, &mut ph);
         assert_eq!(collider_cells(&v, &ph), 32 * 32 * 32 - 24 * 24 * 24);
         assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, false));
         let ray = |ph: &mut Option<PhysicsWorld>, w: &mut World, x: f32, z: f32| ph.as_mut().unwrap().call(w, "ray", &serde_json::json!({ "origin": [x, 9.0, z], "direction": [0, -1, 0], "max": 20 })).unwrap()["point"][1].as_f64().unwrap();
@@ -1792,7 +1844,7 @@ mod tests {
         // sides; nothing of the side they share, nor of their undersides.
         let mut w = World::default();
         let mut ph: Option<PhysicsWorld> = None;
-        let mut v = blocks(&[([0, 0, 0], [64, 16, 64], Some((0, 0))), ([64, 0, 0], [64, 16, 64], Some((1, 0)))], &mut w, &mut ph);
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 16, 64], Some((0, 0)), true), ([64, 0, 0], [64, 16, 64], Some((1, 0)), true)], &mut w, &mut ph);
         assert_eq!(collider_cells(&v, &ph), shell_by_brute_force(&v, true));
         assert_eq!(collider_cells(&v, &ph), 128 * 64 * 16 - 120 * 56 * 12);
         // A trench in the second tile along the edge they share, six cells deep: the first tile's side is bare there,
@@ -1804,6 +1856,13 @@ mod tests {
         // A ray along the trench's floor from inside the second tile meets the first tile's bared side.
         let hit = ph.as_mut().unwrap().call(&mut w, "ray", &serde_json::json!({ "origin": [6.75, 1.25, 3.05], "direction": [-1, 0, 0], "max": 5 })).unwrap();
         assert!((hit["point"][0].as_f64().unwrap() - 6.4).abs() < 1e-4 && hit["collider"].as_u64() == v.colliders[0].map(|c| c as u64), "{hit}");
+    }
+
+    /// The voxel bodies' script ends in the recorded bits (tools/physics-determinism.ts: in wasm32 too), and in it a
+    /// tower toppled, was cut in bodies and they came to rest.
+    #[test]
+    fn voxel_bodies_step_to_the_recorded_bits() {
+        assert_eq!(format!("{:016x}", VoxelWorld::check_script()), format!("{:016x}", EXPECTED_SCRIPT));
     }
 
     /// The cap on bodies: past it the oldest sleeping body goes, its voxels debris; and a body the physics world took

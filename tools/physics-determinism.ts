@@ -62,10 +62,21 @@ for (const [label, features] of builds) {
 if (!without) {
   const renderer = join(import.meta.dirname, "../renderer");
   execFileSync("cargo", ["build", "--release", "--locked", "--quiet", "--target", "wasm32-unknown-unknown", "--example", "physics_bits"], { cwd: renderer, stdio: ["ignore", "ignore", "inherit"] });
-  const bits = await WebAssembly.instantiate(readFileSync(join(renderer, "target/wasm32-unknown-unknown/release/examples/physics_bits.wasm")), {});
+  // (The voxel adapter is in the renderer's library, whose clock and logging are the browser's: imports this check
+  // has no use for. Each is given a function that returns 0; the scripts read no clock and log nothing.)
+  const module = await WebAssembly.compile(readFileSync(join(renderer, "target/wasm32-unknown-unknown/release/examples/physics_bits.wasm")));
+  const imports: Record<string, Record<string, () => number>> = {};
+  for (const i of WebAssembly.Module.imports(module)) (imports[i.module] ??= {})[i.name] = () => 0;
+  const bits = { instance: await WebAssembly.instantiate(module, imports) };
   const [script, cases] = [hex((bits.instance.exports.physics_script as () => bigint)()), hex((bits.instance.exports.physics_cases as () => bigint)())];
   console.log(`physics determinism (the renderer's graph, wasm32): script ${script}, cases ${cases}`);
   failed ||= script !== constant("EXPECTED") || cases !== constant("EXPECTED_CASES");
+  // The voxel bodies' script (renderer/src/voxel.rs `VoxelWorld::check_script`: ROADMAP § 6 step 8): the adapter between
+  // the voxels and the physics. The native side is the renderer's test `voxel_bodies_step_to_the_recorded_bits`.
+  const voxel = hex((bits.instance.exports.voxel_bodies_script as () => bigint)());
+  const recorded = /EXPECTED_SCRIPT: u64 = 0x([0-9a-f_]+);/.exec(readFileSync(join(renderer, "src/voxel.rs"), "utf8"))![1].replaceAll("_", "").padStart(16, "0");
+  console.log(`physics determinism (the renderer's graph, wasm32): voxel bodies ${voxel}, recorded ${recorded}`);
+  failed ||= voxel !== recorded;
 }
 if (without) process.exit(0);
 if (failed) {
