@@ -729,6 +729,16 @@ What is left is carried over in § 0. The phase's plan and results, as they were
            moving emitters by their share of power: 0.41; no light tree at all: 0.59). Not the root's split between
            the two subtrees: a 25 % floor on either side of it changed nothing. Open (item 4); no light tree also means
            one candidate and no far-node culling, so that comparison is not one change.
+       - The GPU time's outliers (2026-11-11, branch `crowd-timer`): 3–4 % of the crowd's frames read 70–80 ms of GPU
+         while frames came every 16.7 ms.
+         - The live view times a frame from its first pass to its post pass's end. A slot of the timer read, in those
+           frames, the post pair of the frame that used the slot next, 4 frames on: the same timestamps, bit for bit.
+         - A post pass that begins more than 2 ms after the trace ends (it follows within ~0.2 ms) is now counted by its
+           own length. Every other frame reads as before.
+         - w150-v60, 30 s of the path, 3 alternated pairs: frames over 2 × their interval 3.4–4.2 % → 0–0.1 %, GPU max
+           81–82 → 20.4–20.6 ms, p95 15.3–15.4 → 14.95–15.0 ms. Frame interval p50 / p95 16.65 / 16.9 ms, frame start
+           p95 16.67 ms and scale (the 0.5 floor) unchanged. GPU p50 reads 0.13–0.15 ms higher in every pair (Bistro's
+           perf smoke: +0.14), though the change can only lower a reading; not explained.
   2. Then the costs, in measured order. The method is chosen per measurement. Candidates:
      - GPU (compute) skinning;
      - the dynamic BLAS update strategy:
