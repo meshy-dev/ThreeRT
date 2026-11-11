@@ -119,8 +119,12 @@ highest tier any of its changes needs.
    or main's new commits touch none of the PR's files and the PR changes neither `renderer/` nor `packages/`.
    Otherwise the author merges main in and reruns (re-validation above). Trivial conflicts may still be resolved by
    the supervisor (see above); logic conflicts go back to the author.
-6. **Combinations:** PRs land one at a time, each tested on the main it lands on (5), so no combined tree is built at
-   merge time; what two landed changes do together is the scheduled suites' to catch.
+6. **Combinations:** a PR lands tested on the main it lands on (5). When several PRs passed their gates on the same
+   main, the supervisor lands them as one batch instead of sending each back after the one before (a merge queue's
+   batch): it merges them locally in order, runs the trivial-merge checks once on the combined tree under the GPU lock
+   (release build, `cargo test`, typecheck, `npm test`, `test:render`), merges them in that order with a PR comment on
+   each, and checks main's tree against the tested one. A PR that conflicts drops out and goes back to its author.
+   What landed changes do together beyond these checks is the scheduled suites' to catch.
 7. **Visuals:** the supervisor opens the crops and checks that the conclusion matches the pictures.
 
 PRs are merged with `gh pr merge --merge`, which keeps one merge commit per PR on main's first-parent line. Branches
