@@ -60,7 +60,9 @@ function plate(w, h, r) {
 const mesh = (g, m, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(g, m); o.position.set(x, y, z); o.castShadow = o.receiveShadow = true; return o; };
 
 // ---------- materials ----------
-const M = {
+// One set per shelf: each shelf has its own WebGL context and environment map, so materials (which carry the env map)
+// must not be shared between shelves. The builders below read `M`; deviceShelf sets it before it builds its devices.
+const makeMaterials = () => ({
   silver: new THREE.MeshStandardMaterial({ color: 0xc9cbce, metalness: 1, roughness: 0.32 }),
   graphite: new THREE.MeshStandardMaterial({ color: 0x3a3c41, metalness: 0.85, roughness: 0.42 }),
   spaceGray: new THREE.MeshStandardMaterial({ color: 0x5d6066, metalness: 1, roughness: 0.38 }),
@@ -72,7 +74,8 @@ const M = {
   glass: new THREE.MeshPhysicalMaterial({ color: 0x030304, metalness: 0, roughness: 0.12, clearcoat: 0.6, clearcoatRoughness: 0.1 }),
   sheen: new THREE.MeshPhysicalMaterial({ color: 0x000000, metalness: 0, roughness: 0.05, transparent: true, opacity: 0.1, depthWrite: false }),
   black: new THREE.MeshStandardMaterial({ color: 0x020203, metalness: 0, roughness: 0.3 }),
-};
+});
+let M;
 
 // ---------- textures ----------
 const loader = new THREE.TextureLoader();
@@ -253,11 +256,12 @@ export function deviceShelf(el, devices, opt = {}) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = opt.exposure ?? 1.0;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap; // r187: PCFSoftShadowMap was removed; PCF + shadow.radius is soft
   el.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
+  M = makeMaterials();
   const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
   scene.environment = env;
   const ENV = { silver: 1.25, graphite: 0.7, spaceGray: 0.8, titanium: 0.9, monitor: 0.35, deck: 0.12, deckDark: 0.1, deckPad: 0.16, glass: 0.06, sheen: 0.3, black: 0.04 };
@@ -346,7 +350,8 @@ export function deviceShelf(el, devices, opt = {}) {
     renderer.render(scene, camera);
   };
   fit(); placeCaps(); renderer.render(scene, camera);
-  addEventListener("resize", () => { fit(); placeCaps(); });
+  // setSize clears the canvas: draw again at once (with reduced motion no animation loop would).
+  addEventListener("resize", () => { fit(); placeCaps(); renderer.render(scene, camera); });
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   new IntersectionObserver(([e]) => renderer.setAnimationLoop(e.isIntersecting && !reduce ? frame : null), { rootMargin: "100px" }).observe(el);
   // textures arrive asynchronously; redraw a few times so a static (reduced-motion) shelf still shows them
