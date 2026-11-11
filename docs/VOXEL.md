@@ -472,7 +472,8 @@ bodies that moved in them (physics step and the frame's CPU time, p50 / p95):
 | 350–399 | 85 | 6.74 / 9.21 | 10.7 / 13.6 | 0 |
 | 400–449 (every body of the cap in the air or landing) | 31 | 8.86 / 9.40 | 13.1 / 14.9 | 0 |
 
-**No frame of 1,094 is over 16.7 ms** (the worst 16.7). That is why the cap is 400. With a cap of 512 the count
+**No frame of 1,094 is over 16.7 ms** (the worst 16.7; a second run, with nothing set but the scenario, has one
+of 17.8 ms while the heap lies still and the step is 0.8 ms: not the physics). That is why the cap is 400. With a cap of 512 the count
 holds at 512 as well, but with all of them in the air a frame is 16.3 ms at the median and 5 of 22 such frames are
 over (16.8–17.4 ms; the worst frame of the run 19.0 ms with 499 moving): just past the frame.
 
