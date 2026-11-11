@@ -1176,12 +1176,15 @@ impl VoxelWorld {
         let (mut voxels, mut carved) = (0usize, 0usize);
         let keys: Vec<usize> = self.bodies.keys().copied().collect();
         for k in keys {
-            let Some((at, rot, _)) = p.bridge_ref().engine_pose(self.bodies[&k].body) else { continue };
+            // (A body retired for the cap by a part cut off an earlier one in this same carve is no longer there.)
+            let Some(b) = self.bodies.get(&k) else { continue };
+            let Some((at, rot, _)) = p.bridge_ref().engine_pose(b.body) else { continue };
             let m = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at));
             let centre_of = |g: [i32; 3]| m.transform_point3((Vec3::new(g[0] as f32, g[1] as f32, g[2] as f32) + 0.5) * size);
-            let b = &self.bodies[&k];
             let Some((lo, hi)) = b.grid.bounds() else { continue };
-            let (mid, half) = ((Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32) + Vec3::new(hi[0] as f32 + 1.0, hi[1] as f32 + 1.0, hi[2] as f32 + 1.0)) * 0.5 * size, (Vec3::new((hi[0] - lo[0] + 1) as f32, (hi[1] - lo[1] + 1) as f32, (hi[2] - lo[2] + 1) as f32) * 0.5 * size).length());
+            // (The grid's bounds are its bricks': from `lo` up to `hi`, not through it.)
+            let (lo, hi) = (Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32), Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32));
+            let (mid, half) = ((lo + hi) * 0.5 * size, ((hi - lo) * 0.5 * size).length());
             if m.transform_point3(mid).distance(centre) > reach + half {
                 continue;
             }
@@ -1951,6 +1954,47 @@ mod tests {
             crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
         }
         assert!(w.objects[&v.objects[part].as_ref().unwrap().parts[0].1].position.y > 1.2, "the part went up with it");
+    }
+
+    /// A carve that cuts bodies into more bodies than the cap holds, in one edit: the bodies it retires for the cap
+    /// while it is still going through them are passed over, not looked up (the benchmark level's `shatter` with a
+    /// cap of 128 ended the renderer here: gpu-runs-8.md L7).
+    #[test]
+    fn a_carve_that_passes_the_cap_while_cutting_bodies() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        // A slab and six bars standing on it in a row, each cut loose in turn: six bodies; the cap is six.
+        let mut blocks = vec![([0, 0, 0], [64, 4, 64], Some((0, 0)), true)];
+        blocks.extend((0..6).map(|k| ([8 + 8 * k, 4, 8], [4, 24, 4], None, false)));
+        let mut v = VoxelWorld::of_blocks(&blocks, &mut w, &mut ph);
+        v.max_bodies = 6;
+        v.keep_debris = true;
+        for k in 0..6 {
+            let x = 0.8 + 0.8 * k as f32;
+            v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([x - 0.1, 0.5, 0.7], [x + 0.5, 0.7, 1.3]), kind: EditKind::Carve([256; 4]) }).unwrap();
+        }
+        assert_eq!(v.bodies(), 6);
+        for _ in 0..120 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        // Cuts across all six at once, each making two bodies of every one it meets where six may be. (A later cut
+        // meets fewer: the cap has taken the parts it would have.)
+        let mut carved = 0;
+        for y in [1.0, 1.6, 2.2] {
+            let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([0.0, y, 0.0], [6.4, y + 0.1, 6.4]), kind: EditKind::Carve([256; 4]) }).unwrap();
+            carved += e["bodies_carved"].as_u64().unwrap();
+            assert!(v.bodies() <= 6, "{} bodies", v.bodies());
+        }
+        assert!(carved >= 6, "{carved} bodies carved");
+        assert_eq!(v.bodies(), 6);
+        assert!(v.retired >= 6, "{} retired", v.retired);
+        // Every body there is has its objects, and no object is left of one that went.
+        let parts: usize = v.bodies.keys().map(|&k| v.objects[k].as_ref().unwrap().parts.len()).sum();
+        assert_eq!(v.world_objects(), 1 + 6 + parts);
+        for _ in 0..240 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        assert!(!v.take_debris().is_empty());
     }
 
     /// The cap on bodies: past it the oldest sleeping body goes, its voxels debris; and a body the physics world took
