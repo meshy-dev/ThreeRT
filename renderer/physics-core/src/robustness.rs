@@ -577,3 +577,4 @@ fn random_calls_never_panic() {
         }
     }
 }
+// CI routing check: a physics-only change (temporary PR, closed unmerged).
