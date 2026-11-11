@@ -92,7 +92,10 @@ export function sequence(el) {
     const pad = (i) => String(i).padStart(2, "0");
     const get = (tag) => Array.from({ length: n }, (_, i) => Object.assign(new Image(), { src: `${d.scene}/move/${tag}-${pad(i)}.webp` }));
     frames = { rt: get("rt"), three: get("three") };
-    Promise.all([...frames.rt, ...frames.three].map((im) => im.decode().catch(() => {}))).then(() => {
+    // Wait for the bytes only. Decoding all 120 frames up front would pin ~240 MB of bitmaps per player; drawImage
+    // decodes a frame when it is shown and the browser is free to drop decoded frames again.
+    const loaded = (im) => (im.complete ? Promise.resolve() : new Promise((r) => { im.onload = im.onerror = r; }));
+    Promise.all([...frames.rt, ...frames.three].map(loaded)).then(() => {
       ready = true;
       $(".loading", el).remove();
       draw();

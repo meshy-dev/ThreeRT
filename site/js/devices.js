@@ -245,6 +245,13 @@ const BUILD = {
 
 // ---------- the shelf ----------
 export function deviceShelf(el, devices, opt = {}) {
+  try { return build(el, devices, opt); } catch (e) {
+    console.error("deviceShelf:", e);
+    if (opt.fallback) { el.classList.add("fallback"); el.innerHTML = `<img src="${opt.fallback}" alt="${devices.map((d) => d.name).join(", ")}">`; }
+  }
+}
+
+function build(el, devices, opt) {
   let renderer;
   try { renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); } catch {
     // no WebGL: show a pre-rendered still of the same lineup

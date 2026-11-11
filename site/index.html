@@ -303,86 +303,106 @@
 
 <script type="module">
   import { $, $$, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
-  import { deviceShelf } from "./js/devices.js";
+
+  // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
+  reveal();
+  const guard = (name, f) => { try { const r = f(); if (r?.catch) r.catch((e) => console.error(`${name}:`, e)); } catch (e) { console.error(`${name}:`, e); } };
+
+  guard("comparisons", () => {
+    compare($("#hero"));
+    for (const el of $$(".details .cmp")) compare(el);
+    for (const el of $$(".seqp")) sequence(el);
+  });
+
+  // Against three.js: scene tabs above, the left side picked on the left side.
+  guard("against three.js", () => {
+    const main = compare($("#main"));
+    const st = { scene: "bistro", left: "tuned" };
+    const names = { tuned: "three.js · WebGL", strongest: "three.js · WebGPU + SSGI", ref: "Path-traced reference" };
+    const render = () => main.set({ a: `media/${st.scene}/${st.left}.webp`, b: `media/${st.scene}/live.webp`, la: names[st.left], lb: "ThreeRT" });
+    seg($("#sceneTabs"), (v) => { st.scene = v; render(); }).pick("bistro");
+    seg($("#leftPick"), (v) => { st.left = v; render(); }).pick("tuned");
+    $("#leftPick").addEventListener("pointerdown", (e) => e.stopPropagation());
+  });
 
   // Everywhere: real-proportion 3D devices, each showing a real render (ThreeRT natively, three.js in the WebView).
-  deviceShelf($("#shelfNative"), [
+  // three.js loads on demand; if it can't, the rows show their stills.
+  const NATIVE = [
     { kind: "monitor", img: "media/bistro/live.webp", name: "Desktop", req: "RTX 20 · RX 6000 and later", width: 3.3 },
     { kind: "macbook", img: "media/zero-day/live.webp", name: "Mac", req: "M3 and later", width: 2.8 },
     { kind: "deck", img: "media/bistro/live.webp", name: "Steam Deck", req: "all models", width: 3.3 },
     { kind: "iphone", img: "media/zero-day/live.webp", name: "iPhone", req: "15 Pro and later", width: 2.3 },
-  ], { warm: true, fallback: "media/devices/native.webp" });
-  deviceShelf($("#shelfWeb"), [
+  ];
+  const WEB = [
     { kind: "laptop", img: "media/bistro/tuned.webp", browser: true, name: "Any laptop", req: "WebGL · WebGPU", width: 3.0 },
     { kind: "tablet", img: "media/zero-day/tuned.webp", name: "Any tablet", req: "browser or WebView", width: 2.4 },
     { kind: "phone", img: "media/bistro/tuned.webp", name: "Any phone", req: "browser or WebView", width: 2.2 },
-  ], { fallback: "media/devices/web.webp" });
-
-  compare($("#hero"));
-  for (const el of $$(".details .cmp")) compare(el);
-  for (const el of $$(".seqp")) sequence(el);
+  ];
+  const still = (el, src, list) => { el.classList.add("fallback"); el.innerHTML = `<img src="${src}" alt="${list.map((d) => d.name).join(", ")}">`; };
+  guard("devices", () => import("./js/devices.js").then(
+    ({ deviceShelf }) => {
+      deviceShelf($("#shelfNative"), NATIVE, { warm: true, fallback: "media/devices/native.webp" });
+      deviceShelf($("#shelfWeb"), WEB, { fallback: "media/devices/web.webp" });
+    },
+    (e) => { console.error("devices:", e); still($("#shelfNative"), "media/devices/native.webp", NATIVE); still($("#shelfWeb"), "media/devices/web.webp", WEB); },
+  ));
 
   // Hello world: an auto-advancing reel. Each slide shows the scene's code and sweeps from three.js to ThreeRT.
-  const SLIDES = ["material-grid", "sun-room", "glb-asset"], DUR = 7000;
-  const helloCmp = compare($("#helloCmp"));
-  const code = {};
-  await Promise.all(SLIDES.map(async (id) => (code[id] = highlight((await (await fetch(`media/code/${id}.threert.ts`)).text()).trim()))));
-  for (const id of SLIDES) for (const k of ["three", "rt"]) new Image().src = `media/hello/${id}-${k}.webp`;
-  const sts = $$("#story .st"), pp = $("#reelPP"), codeEl = $("#helloCode"), cmpEl = $("#helloCmp");
-  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let cur = -1, elapsed = 0, last = performance.now(), playing = !reduce, hover = false, visible = false, dragging = false, touched = false;
-  const icon = () => { pp.innerHTML = playing ? '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>' : '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 1v8l7-4z" fill="currentColor"/></svg>'; pp.setAttribute("aria-label", playing ? "Pause" : "Play"); };
-  const show = (i) => {
-    cur = (i + SLIDES.length) % SLIDES.length; elapsed = 0; touched = false;
-    const id = SLIDES[cur];
-    cmpEl.classList.add("fade"); codeEl.classList.add("fade");
-    setTimeout(() => {
-      helloCmp.set({ a: `media/hello/${id}-three.webp`, b: `media/hello/${id}-rt.webp`, la: "three.js", lb: "ThreeRT", x: reduce ? 45 : 92 });
-      codeEl.innerHTML = code[id]; codeEl.scrollTop = 0;
-      cmpEl.classList.remove("fade"); codeEl.classList.remove("fade");
-    }, 280);
-    sts.forEach((b, k) => b.setAttribute("aria-current", String(k === cur)));
-  };
-  // Divider keyframes over a slide: hold on three.js, sweep to reveal ThreeRT, settle in the middle.
-  const ease = (t) => t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
-  const sweep = (p) => p < 0.1 ? 92 : p < 0.5 ? 92 - 82 * ease((p - 0.1) / 0.4) : p < 0.8 ? 10 + 36 * ease((p - 0.5) / 0.3) : 46;
-  const tick = (now) => {
-    const dt = now - last; last = now;
-    if (playing && !hover && !dragging && visible && cur >= 0) {
-      elapsed += dt;
-      const p = Math.min(1, elapsed / DUR);
-      if (!touched) helloCmp.setX(sweep(p)); // once the reader moves the divider, the slide keeps their position
-      const max = codeEl.scrollHeight - codeEl.clientHeight;
-      if (max > 0) codeEl.scrollTop = max * Math.min(1, Math.max(0, (p - 0.15) / 0.75));
-      if (elapsed >= DUR) show(cur + 1);
-    }
-    sts.forEach((b, k) => b.style.setProperty("--p", `${k < cur ? 100 : k === cur ? Math.min(100, (elapsed / DUR) * 100) : 0}%`));
-    requestAnimationFrame(tick);
-  };
-  sts.forEach((b) => b.addEventListener("click", () => show(+b.dataset.i)));
-  pp.addEventListener("click", () => { playing = !playing; icon(); });
-  $("#reel").addEventListener("pointerenter", () => (hover = true));
-  $("#reel").addEventListener("pointerleave", () => (hover = false));
-  // The divider captures the pointer while dragging, so a drag can leave the reel: pause until it ends. Only a press
-  // that ends in a release (a tap or a drag) keeps the reader's position for the slide; a touch the browser turns
-  // into a scroll ends in pointercancel instead, and the sweep goes on.
-  cmpEl.addEventListener("pointerdown", () => { dragging = true; });
-  cmpEl.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") touched = true; }); // keyboard slider
-  addEventListener("pointerup", () => { if (dragging) touched = true; dragging = false; });
-  addEventListener("pointercancel", () => (dragging = false));
-  new IntersectionObserver(([e]) => (visible = e.isIntersecting), { threshold: 0.35 }).observe($("#reel"));
-  icon(); show(0); requestAnimationFrame(tick);
-
-  // Against three.js: scene tabs above, the left side picked on the left side.
-  const main = compare($("#main"));
-  const st = { scene: "bistro", left: "tuned" };
-  const names = { tuned: "three.js · WebGL", strongest: "three.js · WebGPU + SSGI", ref: "Path-traced reference" };
-  const render = () => main.set({ a: `media/${st.scene}/${st.left}.webp`, b: `media/${st.scene}/live.webp`, la: names[st.left], lb: "ThreeRT" });
-  seg($("#sceneTabs"), (v) => { st.scene = v; render(); }).pick("bistro");
-  seg($("#leftPick"), (v) => { st.left = v; render(); }).pick("tuned");
-  $("#leftPick").addEventListener("pointerdown", (e) => e.stopPropagation());
-
-  reveal();
+  guard("hello world", async () => {
+    const SLIDES = ["material-grid", "sun-room", "glb-asset"], DUR = 7000;
+    const helloCmp = compare($("#helloCmp"));
+    const code = {};
+    // A source that fails to load leaves its slide without code, not the reel without slides.
+    await Promise.all(SLIDES.map(async (id) => {
+      try { const r = await fetch(`media/code/${id}.threert.ts`); code[id] = r.ok ? highlight((await r.text()).trim()) : ""; } catch { code[id] = ""; }
+    }));
+    for (const id of SLIDES) for (const k of ["three", "rt"]) new Image().src = `media/hello/${id}-${k}.webp`;
+    const sts = $$("#story .st"), pp = $("#reelPP"), codeEl = $("#helloCode"), cmpEl = $("#helloCmp");
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let cur = -1, elapsed = 0, last = performance.now(), playing = !reduce, hover = false, visible = false, dragging = false, touched = false, swap = 0;
+    const icon = () => { pp.innerHTML = playing ? '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>' : '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 1v8l7-4z" fill="currentColor"/></svg>'; pp.setAttribute("aria-label", playing ? "Pause" : "Play"); };
+    const show = (i) => {
+      cur = (i + SLIDES.length) % SLIDES.length; elapsed = 0; touched = false;
+      const id = SLIDES[cur];
+      cmpEl.classList.add("fade"); codeEl.classList.add("fade");
+      clearTimeout(swap); // a newer slide supersedes a swap still waiting on the fade
+      swap = setTimeout(() => {
+        helloCmp.set({ a: `media/hello/${id}-three.webp`, b: `media/hello/${id}-rt.webp`, la: "three.js", lb: "ThreeRT", x: reduce ? 45 : 92 });
+        codeEl.innerHTML = code[id]; codeEl.scrollTop = 0;
+        cmpEl.classList.remove("fade"); codeEl.classList.remove("fade");
+      }, 280);
+      sts.forEach((b, k) => b.setAttribute("aria-current", String(k === cur)));
+    };
+    // Divider keyframes over a slide: hold on three.js, sweep to reveal ThreeRT, settle in the middle.
+    const ease = (t) => t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    const sweep = (p) => p < 0.1 ? 92 : p < 0.5 ? 92 - 82 * ease((p - 0.1) / 0.4) : p < 0.8 ? 10 + 36 * ease((p - 0.5) / 0.3) : 46;
+    const tick = (now) => {
+      const dt = now - last; last = now;
+      if (playing && !hover && !dragging && visible && cur >= 0) {
+        elapsed += dt;
+        const p = Math.min(1, elapsed / DUR);
+        if (!touched) helloCmp.setX(sweep(p)); // once the reader moves the divider, the slide keeps their position
+        const max = codeEl.scrollHeight - codeEl.clientHeight;
+        if (max > 0) codeEl.scrollTop = max * Math.min(1, Math.max(0, (p - 0.15) / 0.75));
+        if (elapsed >= DUR) show(cur + 1);
+      }
+      sts.forEach((b, k) => b.style.setProperty("--p", `${k < cur ? 100 : k === cur ? Math.min(100, (elapsed / DUR) * 100) : 0}%`));
+      requestAnimationFrame(tick);
+    };
+    sts.forEach((b) => b.addEventListener("click", () => show(+b.dataset.i)));
+    pp.addEventListener("click", () => { playing = !playing; icon(); });
+    $("#reel").addEventListener("pointerenter", () => (hover = true));
+    $("#reel").addEventListener("pointerleave", () => (hover = false));
+    // The divider captures the pointer while dragging, so a drag can leave the reel: pause until it ends. Only a press
+    // that ends in a release (a tap or a drag) keeps the reader's position for the slide; a touch the browser turns
+    // into a scroll ends in pointercancel instead, and the sweep goes on.
+    cmpEl.addEventListener("pointerdown", () => { dragging = true; });
+    cmpEl.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") touched = true; }); // keyboard slider
+    addEventListener("pointerup", () => { if (dragging) touched = true; dragging = false; });
+    addEventListener("pointercancel", () => (dragging = false));
+    new IntersectionObserver(([e]) => (visible = e.isIntersecting), { threshold: 0.35 }).observe($("#reel"));
+    icon(); show(0); requestAnimationFrame(tick);
+  });
 </script>
 </body>
 </html>
