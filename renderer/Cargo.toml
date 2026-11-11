@@ -34,6 +34,11 @@ oidn = { version = "2.5", optional = true }
 # Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
 rquickjs = "0.12"
 
+# src/merged.rs's tests read the generated shaders with the compiler wgpu uses: they are valid, and no stage binds more
+# storage buffers than a browser allows.
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 # tools/physics-determinism.ts: the physics' recorded hashes in this crate's wasm32 graph.
 [[example]]
 name = "physics_bits"

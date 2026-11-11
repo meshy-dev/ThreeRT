@@ -1,6 +1,7 @@
 //! threert-render as a library: scene loading, the GPU path tracer, the real-time LiveCore (used by the
 //! `threert-render` CLI and by the native playground client).
 
+pub mod api;
 pub mod bvh;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compare;
@@ -11,6 +12,7 @@ pub mod files;
 pub mod gpu;
 pub mod live;
 pub mod ltree;
+pub mod merged;
 pub mod post;
 pub mod procasset;
 pub mod scene;
@@ -353,6 +355,11 @@ pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f
     // Software traversal has no instancing: the instances become ordinary world-space triangles.
     if !g.hwrt && !sc.instances.is_empty() {
         flatten_instances(sc);
+    }
+    // Software traversal walks each procedural object's boxes through a tree of its own, and the tree over no box is
+    // not one the kernel can walk (bvh.rs `EMPTY`): an object without boxes has nothing to meet, and is left out.
+    if !g.hwrt {
+        sc.procs.retain(|p| !p.blob.boxes.is_empty());
     }
     // Hardware RT only needs triangles grouped by shadow casting; software traversal needs our BVH.
     let bvh = if g.hwrt {

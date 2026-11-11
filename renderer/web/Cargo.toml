@@ -1,0 +1,33 @@
+[package]
+name = "threert-web"
+version = "0.1.0"
+edition = "2021"
+description = "ThreeRT in a browser: the engine's library as a wasm32 module (the world, the physics, the live view on WebGPU), driven by the page's own JavaScript."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+threert-render = { path = ".." }
+wgpu = "30"
+glam = "0.30"
+serde_json = "1"
+# The module's JavaScript side (tools/build-web.ts runs the wasm-bindgen CLI of this exact version on the build).
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
+# The page's clock (`performance.now()`), as the engine's library reads it.
+web-time = "1.1"
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+
+# As the renderer's own manifest: cargo reads this table from the crate it builds only, and the physics' bits must not
+# depend on the platform's math functions (../third_party/glamx/PATCH.md).
+[patch.crates-io]
+glamx = { path = "../third_party/glamx" }
