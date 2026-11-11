@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreeRT Docs — getting started</title>
+<meta name="description" content="Install the ThreeRT client, open an example, write a scene with a three.js-style API, run it on a Mac and an iPhone with threert dev, and publish it as a package.">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/threert.css">
+<style>
+  .doc { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 64px; align-items: start; padding-bottom: 112px; }
+  .toc { position: sticky; top: 96px; display: grid; gap: 2px; font-size: 14px; }
+  .toc a { text-decoration: none; color: var(--mute); padding: 6px 0 6px 14px; border-left: 1.5px solid var(--line); }
+  .toc a:hover { color: var(--bone); border-left-color: var(--bone-2); }
+  .toc .ext { margin-top: 14px; padding-left: 0; border-left: 0; color: var(--bone-2); }
+  .prose { max-width: 820px; min-width: 0; }
+  .prose section { padding: 0 0 64px; scroll-margin-top: 88px; }
+  .prose section + section { padding-top: 56px; border-top: 1px solid var(--line); }
+  .prose .num { display: block; font: 500 12.5px/1 var(--font-mono); color: var(--tungsten); margin-bottom: 14px; }
+  .prose h2 { font: 620 clamp(28px, 3vw, 38px)/1.08 var(--font-sans); letter-spacing: -0.04em; }
+  .prose h3 { font: 600 18px/1.3 var(--font-sans); letter-spacing: -0.015em; margin-top: 30px; }
+  .prose p { margin-top: 16px; color: var(--bone-2); font-size: 16px; line-height: 1.62; max-width: 70ch; }
+  .prose p a, .prose li a, .prose td a { color: var(--bone); }
+  .prose ul { margin: 16px 0 0; padding-left: 20px; color: var(--bone-2); display: grid; gap: 8px; max-width: 70ch; }
+  .prose .code { margin-top: 20px; font-size: 12.5px; line-height: 1.7; max-height: 460px; }
+  .prose .code.sh { color: var(--bone); }
+  .prose .code.sh .c { font-style: normal; }
+  .prose .acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+  .tbl { width: 100%; margin-top: 20px; border-collapse: collapse; font-size: 14.5px; }
+  .tbl th { text-align: left; font: 500 12px/1 var(--font-mono); color: var(--mute); padding: 0 16px 10px 0; border-bottom: 1px solid var(--line-2); }
+  .tbl td { padding: 11px 16px 11px 0; border-bottom: 1px solid var(--line); color: var(--bone-2); vertical-align: top; line-height: 1.5; }
+  .tbl td:first-child { white-space: nowrap; color: var(--bone); }
+  .tbl-wrap { overflow-x: auto; }
+  .callout { margin-top: 22px; padding: 16px 18px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--ink-1); font-size: 14.5px; line-height: 1.55; color: var(--bone-2); max-width: 70ch; }
+  .refs { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .refs a { display: block; text-decoration: none; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--ink-1); transition: border-color 0.2s; }
+  .refs a:hover { border-color: var(--line-2); }
+  .refs b { display: block; font: 600 15px/1.3 var(--font-sans); color: var(--bone); }
+  .refs span { display: block; margin-top: 5px; font-size: 13.5px; line-height: 1.5; color: var(--mute); }
+  /* A phone: each table row is a block, the command above what it does. */
+  @media (max-width: 700px) {
+    .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; }
+    .tbl thead { display: none; }
+    .tbl tr { padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .tbl td { padding: 0; border: 0; }
+    .tbl td:first-child { white-space: normal; line-height: 1.9; }
+    .tbl td + td { margin-top: 6px; }
+  }
+  @media (max-width: 960px) { .doc { grid-template-columns: 1fr; gap: 28px; } .toc { position: static; display: flex; flex-wrap: wrap; gap: 6px 18px; } .toc a { padding: 2px 0; border-left: 0; } .toc .ext { margin-top: 0; } .refs { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/" aria-current="page">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 1h6v6M9 1 1 9"/></svg></a></div>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Docs · Getting started</span>
+    <h1 class="h-1">Write three.js-style code.<br><span class="mute">Get it traced.</span></h1>
+    <p class="lede">A ThreeRT game is a TypeScript file. The client runs it and path-traces the scene it builds; the same file runs as three.js in a browser. This page takes you from the client to a game on your phone.</p>
+  </div>
+</header>
+
+<div class="wrap doc">
+  <nav class="toc" aria-label="On this page">
+    <a href="#install">1 · Install the client</a>
+    <a href="#open">2 · Open an example</a>
+    <a href="#scene">3 · Write a scene</a>
+    <a href="#dev">4 · The dev loop</a>
+    <a href="#package">5 · Packages</a>
+    <a href="#reference">6 · Reference</a>
+    <a class="ext" href="https://github.com/taichi-dev/ThreeRT/tree/main/docs" rel="noopener">All docs on GitHub ↗</a>
+  </nav>
+
+  <main class="prose">
+    <section id="install">
+      <span class="num">01</span>
+      <h2>Install the client</h2>
+      <p>The client is the runtime: it fetches a game’s code, runs it and traces it on the device’s own GPU. There is one for macOS (macOS 14 or later, Apple silicon) and one for iPhone and iPad (iOS 17 or later). The macOS one also carries the <code>threert</code> command line you develop with (<a href="#dev">step 4</a>).</p>
+      <div class="acts"><a class="btn primary sm" href="../download/" data-dl><span>Download</span></a></div>
+    </section>
+
+    <section id="open">
+      <span class="num">02</span>
+      <h2>Open an example</h2>
+      <p>ThreeRT for macOS opens on its library: the dev servers running on your machine, the games you opened recently and a set of examples. The <a href="../showcase/#open">Showcase</a> hosts the same examples as packages: <b>Open in ThreeRT</b> hands the link to the client, and a phone scans the code next to it.</p>
+      <p>A client opens three kinds of link: <code>threert://host:port/path</code> (plain HTTP, what a dev server on your network uses), <code>threerts://host/path</code> (HTTPS) and an ordinary <code>https://</code> URL of a package.</p>
+      <p>In a game: drag to orbit, right-drag and <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to fly, scroll or pinch to zoom, click to play. On a phone, one finger orbits, two pan and a tap plays.</p>
+    </section>
+
+    <section id="scene">
+      <span class="num">03</span>
+      <h2>Write a scene</h2>
+      <p>A scene is a module whose default export builds a <code>Scene</code> and a camera with <code>@threert/scene</code>, a three.js-style API: meshes, geometries, <code>MeshStandardMaterial</code>, lights, glTF models. Leave the settings alone. The sky, the shadows, the bounce light and the reflections come from tracing the scene, not from options.</p>
+      <pre class="code" id="sceneCode" aria-label="material-grid.ts">Loading material-grid.ts…</pre>
+      <p>This is the first slide of the <a href="../#hello">hello world on the front page</a>, where it runs next to the same code in three.js. Light is in physical units: the sun above is 80,000 lux, and an emissive surface is a light source.</p>
+
+      <h3>From a scene to a game</h3>
+      <p><code>@threert/gameplay</code> adds state and input. <code>defineGame</code> takes the initial state, a <code>setup</code> that builds the scene, handlers that change the state, and a <code>frame</code> script that shows the state in the scene every frame.</p>
+      <pre class="code" id="gameCode" aria-label="A game">import { Mesh, MeshStandardMaterial } from "@threert/scene";
+import { defineGame } from "@threert/gameplay";
+
+export default defineGame({
+  state: { lit: {}, night: false },
+
+  setup() {
+    // build the scene as above; give the objects you will change an id
+    //   orb.id = "orb_0";
+    return { scene, camera };
+  },
+
+  // Handlers change the state, and only the state.
+  handlers: {
+    click(tx, ev) {
+      tx.decide(ev.target.startsWith("orb_"), `nothing happens when you click ${ev.target}`);
+      tx.state.lit[ev.target] = !tx.state.lit[ev.target];
+    },
+    night(tx) {
+      tx.state.night = !tx.state.night;
+    },
+  },
+  keys: { L: "night" },
+
+  // The frame script derives the scene from the state, every frame.
+  frame(f) {
+    const orb = f.object("orb_0");
+    orb.material.emissiveIntensity = f.state.lit.orb_0 ? 2500 : 0;
+    orb.position.y = 1 + 0.08 * Math.sin(f.time * 2);
+  },
+});</pre>
+      <p>A click reaches the game as a <code>click</code> event with the object under the cursor as its <code>target</code>; <code>keys</code> maps a key to a handler. Handlers are transactions: <code>tx.decide</code> refuses one, and nothing is half-written. What needs the engine’s own world (physics, a ray cast into the scene) goes in world handlers, described in <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/RUNTIME.md" rel="noopener">RUNTIME.md</a>.</p>
+    </section>
+
+    <section id="dev">
+      <span class="num">04</span>
+      <h2>The dev loop</h2>
+      <p>The <code>threert</code> command line creates a project, serves it to every client on your network and reloads them on each save. It ships inside ThreeRT for macOS, with everything it needs: open the app and press <b>Install threert</b> under <b>Develop</b> in its library. That links the command into <code>/usr/local/bin</code> (macOS asks for your password), or into <code>~/.local/bin</code> when that is already on your PATH.</p>
+      <pre class="code sh" aria-label="Terminal"><span class="c">$</span> threert create my-game
+<span class="c">$</span> cd my-game
+<span class="c">$</span> threert dev          <span class="c"># bundles on save, serves the package, prints a QR code</span></pre>
+      <ul>
+        <li><b style="color:var(--bone)">On the Mac</b>, ThreeRT for macOS opens the game as the server starts.</li>
+        <li><b style="color:var(--bone)">On an iPhone</b>, scan the QR code with the ThreeRT app (or the camera): it carries <code>threert://</code> and your machine’s address.</li>
+        <li><b style="color:var(--bone)">In any browser</b>, the server’s address shows the same game as three.js.</li>
+      </ul>
+      <p>Save the file and every client reloads. A build error shows over the last good build, and the game’s <code>console.*</code> lines print in the terminal that runs the server.</p>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>threert create &lt;dir&gt;</code></td><td>A new game from the template: an interactive scene, a tsconfig, and AGENTS.md / CLAUDE.md so a coding agent can drive the same loop</td></tr>
+          <tr><td><code>threert dev</code></td><td>The dev server: the package, the three.js page, live reload, the clients’ logs</td></tr>
+          <tr><td><code>threert check</code></td><td>Bundles, typechecks and runs setup and three frames without a window: objects, lights, files read and missing, handlers, keys</td></tr>
+          <tr><td><code>threert shot</code></td><td>The traced frame as a PNG, once it has settled</td></tr>
+          <tr><td><code>threert click</code> · <code>key</code> · <code>event</code> · <code>state</code></td><td>Play the open game from the terminal and read its state</td></tr>
+          <tr><td><code>threert pack</code></td><td>A static package of the game for any web host (below)</td></tr>
+        </tbody>
+      </table></div>
+      <p class="callout">The command is a link into the app, so updating the app updates it. If you move the app, press <b>Install threert</b> again; <code>threert dev</code> and <code>threert check</code> repair a project’s <code>tsconfig.json</code> when it still names the old place.</p>
+    </section>
+
+    <section id="package">
+      <span class="num">05</span>
+      <h2>Packages</h2>
+      <p>A game is distributed as code. A package is a directory on any static host, with a manifest, <code>threert.json</code>, at its base URL. <code>threert pack</code> writes one; the dev server serves one that changes as you save.</p>
+      <pre class="code sh" aria-label="Terminal"><span class="c">$</span> threert pack          <span class="c"># -> dist/: threert.json, game.js, game.mjs, index.html, assets/</span>
+<span class="c"># upload dist/ to any static host, then, on any device with the client:</span>
+<span class="c">#   threerts://your.host/path</span></pre>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>threert.json</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><code>format</code></td><td><code>"threert/1"</code></td></tr>
+          <tr><td><code>id</code> · <code>name</code> · <code>version</code></td><td>What the game is called; <code>id</code> is lowercase letters, digits and dashes</td></tr>
+          <tr><td><code>hash</code></td><td>The hash of the code: it changes on every build, and a client caches the code by it</td></tr>
+          <tr><td><code>entry</code></td><td>The game as one script, with the runtime it was built against (<code>game.js</code>)</td></tr>
+          <tr><td><code>module</code></td><td>Optional: the game as an ES module that imports <code>@threert/scene</code> and <code>@threert/gameplay</code> from the client (<code>game.mjs</code>)</td></tr>
+          <tr><td><code>assets</code></td><td>The files the game may read, each with its size and SHA-256. A client fetches the ones the scene uses, on demand, and checks them</td></tr>
+          <tr><td><code>web</code></td><td>The same game as a three.js page (<code>index.html</code>), for screens the client cannot trace on</td></tr>
+          <tr><td><code>minClient</code></td><td>The oldest client version that runs this package</td></tr>
+        </tbody>
+      </table></div>
+      <p>Game code runs in the engine’s embedded JavaScript runtime with no file system, network or timers of its own, and the files it reads stay inside the package.</p>
+    </section>
+
+    <section id="reference">
+      <span class="num">06</span>
+      <h2>Reference</h2>
+      <p>The engine is open source, and its documents live with the code.</p>
+      <div class="refs">
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/RUNTIME.md" rel="noopener"><b>Runtime</b><span>How scene code runs in the engine: setup, handlers, world handlers, frame scripts, physics</span></a>
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/ARCHITECTURE.md" rel="noopener"><b>Architecture</b><span>The serverless gameplay and rendering runtime the engine was built for</span></a>
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/MATERIAL_FUNCTIONS.md" rel="noopener"><b>Material functions</b><span>A WGSL body on a material, run by the path tracer at every hit</span></a>
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/VOXEL.md" rel="noopener"><b>Voxel engine</b><span>A voxel game engine built around ThreeRT, measured on a destructible level</span></a>
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/COMPARE.md" rel="noopener"><b>Against three.js</b><span>three.js at its strongest against ThreeRT: frame rate and image quality</span></a>
+        <a href="https://github.com/taichi-dev/ThreeRT/blob/main/docs/ROADMAP.md" rel="noopener"><b>Roadmap</b><span>The goal, the plan, and what each step measured</span></a>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer class="foot">
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <p style="margin-top:14px">Real-time path tracing behind a three.js-style API.</p>
+      <div class="site"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
+    </div>
+    <div class="note">
+      <p>The engine, <code>@threert/scene</code> and <code>@threert/gameplay</code> are open source: <a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">taichi-dev/ThreeRT</a>. The clients are free to use.</p>
+      <p>three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+    </div>
+  </div>
+</footer>
+
+<script type="module">
+  import { $, highlight } from "../js/threert.js";
+  import { guard, downloadButtons } from "../js/site.js";
+
+  guard("download", () => downloadButtons());
+
+  // The scene sample is the hello world's own source (media/code); the game sample is on the page.
+  guard("code", async () => {
+    const game = $("#gameCode");
+    game.innerHTML = highlight(game.textContent);
+    const el = $("#sceneCode");
+    try {
+      const r = await fetch("../media/code/material-grid.threert.ts");
+      if (!r.ok) throw new Error(String(r.status));
+      el.innerHTML = highlight((await r.text()).trim());
+    } catch {
+      el.innerHTML = `The sample did not load. It is <a href="https://github.com/taichi-dev/ThreeRT/blob/main/compare/hello/threert/material-grid.ts" rel="noopener">compare/hello/threert/material-grid.ts</a> in the repository.`;
+    }
+  });
+</script>
+</body>
+</html>
