@@ -28,6 +28,7 @@ jobs:
       voxel: ${{ steps.paths.outputs.voxel }}
       physics: ${{ steps.paths.outputs.physics }}
       wasm: ${{ steps.paths.outputs.wasm }}
+      web: ${{ steps.paths.outputs.web }}
     steps:
       # Each job's inputs, as patterns on the paths a PR changes (the old and the new path of a rename). A change to the
       # workflows, a PR of 3,000 files or more (the most the API lists) and any event other than a PR run every job.
@@ -46,20 +47,24 @@ jobs:
             printf '%s\n' "$files"
             if grep -Eq '^\.github/' <<< "$files"; then all=true; fi
           fi
+          # job <name> <the paths it runs for> [<paths among those it does not>]
           job() {
-            if [ "$all" = true ] || grep -Eq "$2" <<< "$files"; then run=true; else run=false; fi
+            if [ "$all" = true ] || grep -Ev "${3:-^$}" <<< "$files" | grep -Eq "$2"; then run=true; else run=false; fi
             echo "$1=$run" | tee -a "$GITHUB_OUTPUT"
           }
           # The renderer's release build: the crate, its path dependencies (voxel-core, physics-core, third_party) and
-          # the presets it embeds (src/files.rs).
-          job renderer '^(renderer/|presets/)'
+          # the presets it embeds (src/files.rs); not the browser module's crate (renderer/web), which it does not build.
+          job renderer '^(renderer/|presets/)' '^renderer/web/'
           # voxel-core and its determinism check.
           job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
           # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
           # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file).
           job physics '^(renderer/(physics-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$)|tools/physics-determinism\.ts$)'
-          # The engine's library for wasm32: the renderer's crate and everything it builds from.
-          job wasm '^(renderer/|presets/)'
+          # The engine's library for wasm32: the same as the renderer's.
+          job wasm '^(renderer/|presets/)' '^renderer/web/'
+          # The browser module (renderer/web, on the engine's library) and tools/web-engine.ts: the module in Node with
+          # the physics hello world's bundle (games/, packages/, the bundler's and the build's tools, the npm manifests).
+          job web '^(renderer/|presets/|games/|packages/|tools/(web-engine\.ts|bundle-game\.ts|lib/)|package(-lock)?\.json$)'
 
   ts:
     name: "ts: typecheck, tests"
@@ -147,9 +152,40 @@ jobs:
       # The engine's library builds for the browser (wasm32; docs/RUNTIME.md "The engine's library in a browser").
       - run: cd renderer && cargo build --release --locked --lib --target wasm32-unknown-unknown
 
+  web:
+    name: "web: browser module, hello world in Node"
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: renderer/web
+      # The module a page loads: the engine's exports for the browser's JavaScript (renderer/web; docs/RUNTIME.md
+      # "The engine in a browser"). Running it needs a browser with a GPU: tools/web-hello.ts, on a developer's machine.
+      - run: cd renderer/web && cargo build --release --locked --target wasm32-unknown-unknown
+      # wasm-bindgen's CLI writes the module's JavaScript; its version is the crate's (renderer/web/Cargo.toml). The
+      # release's prebuilt binary, checksummed by the action (it falls back to cargo-binstall for a version it lacks).
+      - id: bindgen
+        run: echo "version=$(grep -o 'wasm-bindgen = "=[0-9.]*"' renderer/web/Cargo.toml | grep -o '[0-9][0-9.]*')" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.bindgen.outputs.version }}
+      # The browser's side of it without a browser or a GPU: the module in Node, the page's `__engine` over its exports,
+      # the game bundle the native runtime loads, the physics hello world's script and its checks (tools/web-engine.ts).
+      - run: node tools/web-engine.ts
+
   # The check to read before merging (`gh pr checks <n>`: `threert`).
   threert:
-    needs: [changes, ts, renderer, voxel, physics, wasm]
+    needs: [changes, ts, renderer, voxel, physics, wasm, web]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5

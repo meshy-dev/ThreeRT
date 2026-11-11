@@ -2357,6 +2357,7 @@ dependencies = [
  "gltf",
  "half",
  "image",
+ "naga",
  "oidn",
  "physics-core",
  "pollster",

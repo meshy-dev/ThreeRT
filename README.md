@@ -78,12 +78,13 @@ npm run test:render                       # the render test suite on the GPU
 - `renderer`: the renderer's release build;
 - `voxel`: the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
 - `physics`: the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
-- `wasm`: the engine library's wasm32 build.
+- `wasm`: the engine library's wasm32 build;
+- `web`: the browser module's build (`renderer/web`), and the physics hello world on that module in Node (`tools/web-engine.ts`: no browser, no GPU).
 
 A PR runs a job only when it changes that job's inputs (the paths in the workflow's `changes` job; a change to the workflows runs them all); a push to main runs them all.
 `threert` sums them up and is the check to read before merging: it fails when a job failed or was cancelled, and passes when each one passed or was skipped by its paths.
 
-The GPU checks (`test:render`, the perf smoke, the benches) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
 
 ## Assets and third-party content
 
