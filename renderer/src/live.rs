@@ -3634,7 +3634,7 @@ impl LiveCore {
         let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(self.min_scale, 1.0);
         // The hysteresis (0.03) does not hold the scale just short of either end: 0.525 with the floor as the target
         // kept the district's return drive at 21-22 ms.
-        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > MIN_SCALE);
+        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > self.min_scale);
         // (The hysteresis, the steps and the grid of scales are a view in points'; on a display of k pixels a point the
         // same share of the rays is 1 / k of the scale. Left absolute, a Retina view held 0.325 at 17.3 ms: its target,
         // 0.30, was inside the hysteresis.)
@@ -4605,7 +4605,8 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
         height: num("--height", 720)?,
         fps: num("--fps", 60)?,
         bounces: num("--bounces", 4)?,
-        scale: parse_scale(flag("--scale").as_deref(), Some(1.0))?,
+        // (Without `--scale`: full resolution, or dynamic resolution on a display's physical pixels.)
+        scale: parse_scale(flag("--scale").as_deref(), if flag("--display-scale").is_some() { None } else { Some(1.0) })?,
         bundle: PathBuf::from(args.get(2).filter(|a| !a.starts_with("--")).ok_or_else(|| anyhow!("game bundle required"))?),
         assets: PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())),
         room: flag("--room").unwrap_or_else(|| "local".into()),
@@ -4620,13 +4621,22 @@ pub fn parse_scale(v: Option<&str>, default: Option<f32>) -> Result<Option<f32>>
     match v {
         None => Ok(default),
         Some("auto") => Ok(None),
-        Some(v) => v.parse::<f32>().map(|s| Some(s.clamp(0.25, 1.0))).map_err(|_| anyhow!("--scale must be a number or auto")),
+        Some(v) => v.parse::<f32>().map(|s| Some(s.clamp(SCALE_FLOOR, 1.0))).map_err(|_| anyhow!("--scale must be a number or auto")),
     }
 }
 
 #[cfg(test)]
 mod timer_tests {
     use super::*;
+
+    #[test]
+    fn a_view_in_physical_pixels_starts_with_dynamic_resolution() {
+        let opts = |extra: &[&str]| parse_opts(&["threert-render", "live", "game.js"].iter().chain(extra).map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
+        assert_eq!(opts(&[]).scale, Some(1.0));
+        assert_eq!(opts(&["--display-scale", "2"]).scale, None);
+        assert_eq!(opts(&["--display-scale", "2", "--scale", "0.2"]).scale, Some(0.2));
+        assert_eq!(opts(&["--scale", "auto"]).scale, None);
+    }
 
     #[test]
     fn a_post_pass_from_another_frame_counts_by_its_own_length() {
