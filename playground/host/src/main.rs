@@ -648,16 +648,11 @@ impl State {
         let core = self.core.as_mut();
         match (name, core) {
             ("viewMode", Some(core)) => core.view_mode = c["mode"].as_u64().unwrap_or(0) as u32 % 6,
-            // A/B switches for review (docs/REVIEW-21-26.md): motion blur, and PR #24's history clamp after translation.
+            // A/B switch for review (docs/REVIEW-21-26.md): motion blur.
             ("toggleMotionBlur", Some(core)) => {
                 core.motion_blur_off = !core.motion_blur_off;
                 let on = !core.motion_blur_off;
                 self.log("info", "viewport", if on { "Motion blur ON (scene setting; key N toggles)" } else { "Motion blur OFF (key N toggles)" });
-            }
-            ("toggleGhostFix", Some(core)) => {
-                core.ghost_fix_off = !core.ghost_fix_off;
-                let on = !core.ghost_fix_off;
-                self.log("info", "viewport", if on { "Ghosting fix (PR #24, clamp after translation) ON (key H toggles)" } else { "Ghosting fix (PR #24) OFF: pre-#24 specular history (key H toggles)" });
             }
             ("bounces", Some(core)) => {
                 // 0 = auto (governed, up to 4); 1..8 = fixed.
@@ -868,7 +863,6 @@ impl State {
             "F11" => self.host_command(&c("fullscreen")),
             "1" | "2" | "3" | "4" | "5" | "6" if alt => self.host_command(&json!({ "name": "viewMode", "mode": name.parse::<u32>().unwrap() - 1 })),
             "N" if !cmd => self.host_command(&c("toggleMotionBlur")),
-            "H" if !cmd => self.host_command(&c("toggleGhostFix")),
             _ if !cmd => {
                 // Game input while playing (the backend ignores keys when no game runs).
                 let msg = json!({ "type": "key", "key": name });
