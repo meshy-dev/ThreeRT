@@ -518,10 +518,11 @@ test("a vehicle drives while it and its chassis are in the scene; its wheels are
   assert.deepEqual(tyre.position.toArray(), [0.8, 0.33, 1.4]);
   assert.ok(Math.abs(tyre.quaternion.y - 0.7071068) < 1e-6);
   assert.deepEqual(physics().map((c) => c[0]).filter((op) => op !== "faults"), ["vehicle_changes", "vehicle_state"]);
-  // Its description changed: made anew.
+  // Its description changed: made anew, every wheel on it again (the lost one too).
   car.wheels[1].radius = 0.4;
   car.needsUpdate = true;
   binding.sync();
+  assert.deepEqual([car.wheels[0].lost, car.speed], [false, 0]);
   const remade = physics();
   assert.deepEqual(remade[0], ["remove", { vehicle: v.id }]);
   assert.equal(remade[1][0], "vehicle");

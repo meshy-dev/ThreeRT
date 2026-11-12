@@ -247,7 +247,7 @@ impl Physics {
             between(w.radius, WHEEL_RADIUS[0], WHEEL_RADIUS[1], "a wheel's radius")?;
             between(w.travel, 0.0, MAX_TRAVEL, "a wheel's travel")?;
             between(w.rest, w.travel, MAX_TRAVEL + w.travel, "a wheel's rest length (at least its travel)")?;
-            between(w.width, 0.0, 2.0 * w.radius, "a wheel's width")?;
+            between(w.width, 0.01, 2.0 * w.radius, "a wheel's width (at least 1 cm)")?;
             for (x, what) in [(w.stiffness, "stiffness"), (w.compression, "compression damping"), (w.relaxation, "relaxation damping"), (w.bump_stiffness, "bump stiffness")] {
                 between(x, 0.0, super::MAX_FORCE, what)?;
             }
@@ -293,7 +293,16 @@ impl Physics {
             stop.position = at.to_array();
             stop.density = 0.0;
             stop.friction = 0.0;
-            let id = self.add_collider(Some(d.chassis), &stop)?;
+            // (A stop that cannot be made takes the ones made before it with it: a refused vehicle leaves nothing.)
+            let id = match self.add_collider(Some(d.chassis), &stop) {
+                Ok(id) => id,
+                Err(e) => {
+                    for s in stops {
+                        self.remove_collider(s);
+                    }
+                    return Err(e);
+                }
+            };
             let h = self.colliders[&id].0;
             self.world.colliders[h].set_active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS);
             stops.push(id);
@@ -734,6 +743,7 @@ mod tests {
             VehicleDesc { wheels: vec![WheelDesc { travel: f32::INFINITY, ..Default::default() }], ..ok.clone() },
             VehicleDesc { wheels: vec![WheelDesc { axle: [0.0, -1.0, 0.0], ..Default::default() }], ..ok.clone() },
             VehicleDesc { wheels: vec![WheelDesc { stiffness: -1.0, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc::default(), WheelDesc { width: 0.0, ..Default::default() }], ..ok.clone() },
             VehicleDesc { wheels: vec![WheelDesc::default(); 9], ..ok.clone() },
             VehicleDesc { wheels: vec![], ..ok.clone() },
             VehicleDesc { forward_axis: 1, ..ok.clone() },

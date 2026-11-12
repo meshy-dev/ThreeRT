@@ -788,7 +788,18 @@ export class SceneBinding {
     // (One whose chassis went is already gone from the world; out of the scene, it may be added again, made anew.)
     if (bv && bv.key !== REMOVED && bv.key !== REFUSED) this.engine.physics("remove", { vehicle: bv.id });
     this.vehicles.delete(v);
+    this.resetVehicle(v);
+  }
+
+  /** A vehicle made anew (or out of the scene): what was read back of the one before is gone, its lost wheels too. */
+  private resetVehicle(v: Vehicle): void {
     v.removed = false;
+    v.speed = 0;
+    for (const w of v.wheels) {
+      w.lost = false;
+      w.contact = false;
+      w.suspension = 0;
+    }
   }
 
   /** The collider of an object's body: the engine's shape description and where it sits in the body. */
@@ -894,6 +905,7 @@ export class SceneBinding {
         try {
           this.engine.physics("vehicle", { id, ...desc });
           this.vehicles.set(v, { id, key, controls: "" });
+          this.resetVehicle(v);
         } catch (e) {
           // (Refused: not sent again until its description changes; the sync throws once it is done.)
           this.vehicles.set(v, { id: -1, key: REFUSED, controls: key });

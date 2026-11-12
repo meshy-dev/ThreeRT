@@ -799,7 +799,7 @@ and sticky tyre, Chaos's hard stop and Jolt's max-up do. Bullet and Rapier have 
 each checked before anything is made (a refused call changes nothing): at most 64 vehicles, 1 to 8 wheels; radius 0.05
 to 5 m; travel 0 to 2 m, the rest length at least the travel; width up to the diameter; stiffness, damping, bump
 stiffness and the largest force 0 to 1e8; friction and side grip 0 to 1,000; the bump stop no longer than the travel;
-the stop's inset up to half the radius; an axle across the suspension; the centre of mass within 1e4 m; a dynamic
+the stop's inset up to half the radius; width at least 1 cm; an axle across the suspension; the centre of mass within 1e4 m; a dynamic
 chassis. Controls: the drive's force within ±1e8 N, the brake 0 to 1e6 N s, the steering within ±1.5 rad; held until
 changed, a wheel or a control left out held. NaN and infinities are refused everywhere. A wheel's state is by its index
 as described, a lost one included.
