@@ -1771,9 +1771,11 @@ Measured on the M5 Pro (`out/liveq/gpu-runs-std.md`; single runs unless said):
   7.38 ms against main's 8.33–8.36 / 8.63–9.19.
 - Layer B, Bistro against the unbiased offline render: ΔE 2.98 / SSIM 0.859 (main 3.62 / 0.812 when its limits were
   set), luminance 0.994.
-- bench-ghosting: Bistro passes. Kabukichō fails two of its five limits as they stand, the p95 excess 0.5 s after the
-  turn and the strafe return (5.1 for limits of 4.2 and 4.5): the excess is taken over the settled frame, whose own
-  p95 fell from 7.9 to 4.2; the shots' raw p95 are 9.3 for main's 10.8 and 11.3. The limits are to be set again.
+- bench-ghosting: Bistro passes. Kabukichō failed two of its five limits as they stood, the p95 excess 0.5 s after the
+  turn's and the strafe's return (5.1 for limits of 4.2 and 4.5): the excess is taken over the settled frame, whose
+  own p95 fell from 7.9 to 4.2, while the shots' raw p95 are 9.3 for main's 10.8 and 11.3. Those two shots' limits are
+  set again from this build's readings with the margins the old ones had (tools/bench-ghosting.ts); the trails'
+  limits and the other shots' stand.
 
 Not done here: the whole-frame history caps of the traced grid's accumulations (48 frames while the camera moves, 16
 after a lighting change, 4 after a geometry edit, 24 with spark lights) and filters sized by hit distance; the
