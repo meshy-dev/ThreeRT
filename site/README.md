@@ -86,8 +86,8 @@ puts up a Download button with nothing behind it.
   "macos": { "file": "ThreeRT-0.1.0-macos-arm64.dmg", "size": 33981234, "sha256": "…", "minOS": "14.0", "arch": "arm64",
              "url": null,              // null: `releases/<file>` on this host (R2 behind the Worker; site/releases/ locally);
                                        // or the https URL of the image when it is hosted elsewhere (`release.ts --macos-url`)
-             "signed": "adhoc",        // or "developer-id"
-             "notarized": false },     // unless signed with a Developer ID and notarized, the page explains the first launch
+             "signed": "developer-id", // or "adhoc" (a local preview)
+             "notarized": true },      // build.ts --require-release (the deploy) refuses anything but a notarized Developer ID build
   "ios": { "url": null,                // the TestFlight / App Store link; null: "TestFlight beta not open yet"
            "channel": "testflight",    // or "appstore"
            "minOS": "17.0" }
