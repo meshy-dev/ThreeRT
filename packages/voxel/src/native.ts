@@ -340,7 +340,8 @@ function refresh(): void {
   }
 }
 
-/** The voxel level's fixed body (none before the level is loaded); the epoch moves when it changes. */
+/** The body that stands for the voxel level in joints (the world's anchor: fixed, no collider; none before the level is
+ *  loaded); the epoch moves when it changes. */
 let level: number | undefined;
 let epoch = 0;
 function levelBody(): number | undefined {
@@ -357,7 +358,7 @@ function levelBody(): number | undefined {
 function register(): void {
   setEngineBodies({
     object: (body) => registry.get(body) ?? recentlyGone.get(body)?.o ?? (body >= 2 ** 30 ? (refresh(), registry.get(body) ?? recentlyGone.get(body)?.o) : undefined),
-    // (The voxel level is `engineColliders`: in a joint, its fixed body, once the level is loaded.)
+    // (The voxel level is `engineColliders`: in a joint, the world's anchor, once the level is loaded.)
     bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : o === engineColliders ? levelBody() : undefined),
     epoch: () => {
       levelBody();

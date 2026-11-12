@@ -150,7 +150,7 @@ test("a voxel body is an object: the same one for the same body, with the physic
   }
 });
 
-test("a rope to the level (`engineColliders`): made on the level's fixed body once the level is loaded, its anchor in the world's frame", async () => {
+test("a rope to the level (`engineColliders`): made on the world's anchor once the level is loaded, its anchor in the world's frame", async () => {
   const { voxelLevel } = await import("../src/native.ts");
   const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
   const engine = await voxelEngine();
@@ -181,7 +181,7 @@ test("a rope to the level (`engineColliders`): made on the level's fixed body on
     rope.needsUpdate = true;
     engine.calls.length = 0;
     binding.sync();
-    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0])).map((c) => [c[0], c[1].length]), [["joint_set", 1.5]]);
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0])).map((c) => [c[0], c[1].length]), [["joint_set", 1.5]]);
   } finally {
     g.__engine = before;
   }
@@ -361,16 +361,16 @@ test("a joint the engine let go of: broken, a \"broken\" event, not made again u
     const id = engine.physicsCalls().find((c) => c[0] === "joint")![1].id as number;
     const events: unknown[] = [];
     rope.addEventListener("broken", (e) => events.push(e.type));
-    engine.answers.broken = [id];
+    engine.answers.joint_changes = { moved: [], broken: [id] };
     binding.deliverPhysicsEvents();
     assert.deepEqual([rope.broken, events], [true, ["broken"]]);
-    engine.answers.broken = [];
+    engine.answers.joint_changes = { moved: [], broken: [] };
     // Changed: still let go of (no joint, no joint_set).
     rope.length = 1;
     rope.needsUpdate = true;
     engine.calls.length = 0;
     binding.sync();
-    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0]) || c[0] === "remove"), []);
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0]) || c[0] === "remove"), []);
     // Out of the scene (nothing to remove: it is gone) and back: joined anew.
     scene.remove(rope);
     binding.sync();
@@ -405,15 +405,146 @@ test("a joint let go of during the frame script: the next sync knows it before a
     const events: string[] = [];
     rope.addEventListener("broken", (e) => events.push(e.type));
     // The frame script carves the anchor (the engine lets go) and sets the rope's length in the same frame.
-    engine.answers.broken = [id];
+    engine.answers.joint_changes = { moved: [], broken: [id] };
     rope.length = 1;
     rope.needsUpdate = true;
     engine.calls.length = 0;
     binding.sync();
-    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0])), [], "no joint_set on the gone joint");
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0])), [], "no joint_set on the gone joint");
     assert.deepEqual([rope.broken, events], [true, ["broken"]]);
   } finally {
     g.__engine = before;
   }
 });
 
+
+test("a joint the engine moved onto a part cut off names that part: its body going later does not let go of the joint", async () => {
+  const { voxelLevel, voxelBodies } = await import("../src/native.ts");
+  const { Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const X = 2 ** 30 + 507, X2 = 2 ** 30 + 511;
+    const rec = (body: number, voxels: number) => ({ body, collider: body + 1, voxels, asleep: false, position: [0, 1, 0], rotation: [0, 0, 0, 1] });
+    engine.bodies = [rec(X, 300)];
+    const [beam] = voxelBodies();
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const rope = new RopeJoint(beam, lamp, { length: 2, anchorA: new Vector3(0.2, 0.05, 0.2) });
+    const events: string[] = [];
+    rope.addEventListener("broken", (e) => events.push(e.type));
+    scene.add(camera, lamp, rope);
+    binding.sync();
+    const id = engine.physicsCalls().find((c) => c[0] === "joint")![1].id as number;
+    // The engine cuts X: the rope's anchor cell is in the part cut off, X2; it moves the joint there.
+    engine.bodies = [rec(X, 160), rec(X2, 140)];
+    engine.answers.joint_changes = { moved: [{ joint: id, end: "a", body: X2, anchor: [0.2, 0.35, 0.2] }], broken: [] };
+    engine.calls.length = 0;
+    binding.deliverPhysicsEvents();
+    engine.answers.joint_changes = { moved: [], broken: [] };
+    const part = voxelBodies().find((b) => b.body === X2)!;
+    assert.equal(rope.bodyA, part, "the joint names the part it is on");
+    assert.deepEqual(rope.anchorA.toArray(), [0.2, 0.35, 0.2]);
+    // X goes later (retired); then something makes the binding look at its joints (a body added): the joint stays.
+    engine.bodies = [rec(X2, 140)];
+    engine.gone = [[X, "cap"]];
+    const crate = new Mesh(new BoxGeometry(1, 1, 1));
+    crate.physics = "dynamic";
+    scene.add(crate);
+    engine.calls.length = 0;
+    binding.deliverPhysicsEvents();
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0]) || c[1].joint !== undefined), [], "nothing sent for the joint");
+    assert.deepEqual([rope.broken, events], [false, []]);
+    // A parameter changed: in place, the same joint.
+    rope.length = 1;
+    rope.needsUpdate = true;
+    engine.calls.length = 0;
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0])).map((c) => [c[0], c[1].id, c[1].length]), [["joint_set", id, 1]]);
+  } finally {
+    g.__engine = before;
+  }
+});
+
+test("a joint to the level the engine moved onto a loose part: the lamp's body made anew joins it to that part, not to the level", async () => {
+  const { voxelLevel, voxelBodies } = await import("../src/native.ts");
+  const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  (engine as unknown as { voxelLevelBody: () => number }).voxelLevelBody = () => 2 ** 30 + 1;
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const rope = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(4, 6, 1) });
+    scene.add(camera, lamp, rope);
+    binding.sync();
+    const id = engine.physicsCalls().find((c) => c[0] === "joint")![1].id as number;
+    // The level cut under the anchor: its material is a body now, the joint on it.
+    const P = 2 ** 30 + 521;
+    engine.bodies = [{ body: P, collider: P + 1, voxels: 400, asleep: false, position: [3.8, 4, 0.8], rotation: [0, 0, 0, 1] }];
+    engine.answers.joint_changes = { moved: [{ joint: id, end: "a", body: P, anchor: [0.2, 2, 0.2] }], broken: [] };
+    binding.deliverPhysicsEvents();
+    engine.answers.joint_changes = { moved: [], broken: [] };
+    const part = voxelBodies().find((b) => b.body === P)!;
+    assert.equal(rope.bodyA, part);
+    // The lamp's body made anew: the joint is made anew on the part, at its anchor there.
+    lamp.physics = { type: "dynamic", density: 300 };
+    engine.calls.length = 0;
+    binding.sync();
+    const made = engine.physicsCalls().filter((c) => c[0] === "joint");
+    assert.deepEqual(made.map((c) => [c[1].a, c[1].anchor1]), [[P, [0.2, 2, 0.2]]]);
+  } finally {
+    g.__engine = before;
+  }
+});
+
+test("joints broken in one batch: all are marked before any \"broken\" event; a listener that throws does not stop the others", async () => {
+  const { voxelLevel } = await import("../src/native.ts");
+  const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  (engine as unknown as { voxelLevelBody: () => number }).voxelLevelBody = () => 2 ** 30 + 1;
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const r1 = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(4, 6, 1) });
+    const r2 = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(5, 6, 1) });
+    scene.add(camera, lamp, r1, r2);
+    binding.sync();
+    const ids = engine.physicsCalls().filter((c) => c[0] === "joint").map((c) => c[1].id as number);
+    const seen: string[] = [];
+    r1.addEventListener("broken", () => {
+      seen.push(`r1 sees r2 broken: ${r2.broken}`);
+      throw new Error("listener");
+    });
+    r2.addEventListener("broken", () => seen.push("r2"));
+    engine.answers.joint_changes = { moved: [], broken: ids };
+    assert.throws(() => binding.deliverPhysicsEvents(), /listener/);
+    engine.answers.joint_changes = { moved: [], broken: [] };
+    assert.deepEqual([r1.broken, r2.broken, seen], [true, true, ["r1 sees r2 broken: true", "r2"]]);
+    // Changed afterwards: nothing sent (both are gone), no error.
+    r2.length = 1;
+    r2.needsUpdate = true;
+    engine.calls.length = 0;
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => /^joint(_set)?$/.test(c[0]) || c[0] === "remove"), []);
+  } finally {
+    g.__engine = before;
+  }
+});

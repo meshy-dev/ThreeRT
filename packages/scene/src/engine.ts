@@ -824,9 +824,10 @@ export class SceneBinding {
     }
     // A joint holds while it and both its objects' bodies are in the scene; whatever it was made from changing (a body
     // made anew included) makes it anew. (The engine's bodies changing what stands for what: looked at again too.)
-    // (The joints the engine let go of since the last look, during the frame script too, first: one let go of is not
-    // to be changed or remade here; one whose voxel body went is broken, not merely without a body.)
-    if (this.engineJoints.size) this.takeBroken();
+    // (What the engine did to the joints since the last look, during the frame script too, first: one it moved onto a
+    // part cut off names that part now, and is not remade from what it named before; one let go of is not to be changed
+    // or remade here; one whose voxel body went is broken, not merely without a body.)
+    if (this.engineJoints.size) this.takeJointChanges();
     const engine = getEngineBodies();
     const epoch = engine?.epoch?.() ?? 0;
     if (epoch !== this.engineEpoch) {
@@ -835,34 +836,14 @@ export class SceneBinding {
     }
     const joints = this.jointsDirty ? this.joints : [];
     this.jointsDirty = false;
-    // (An object that stands for one of the engine's bodies, a voxel body or the voxel level, is taken as that body: its
-    // anchor is in the body's own frame, unscaled; the level's frame is the world's.)
-    const bodyOf = (o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined => {
-      if (!o) return undefined;
-      const id = engine?.bodyOf(o);
-      return id !== undefined ? { id, scale: [1, 1, 1] } : this.objects.get(o)?.body;
-    };
     for (const [j, bj] of joints) {
-      const a = bodyOf(j.bodyA), b = bodyOf(j.bodyB);
-      let key = "", shape = "";
-      let desc: Record<string, unknown> | null = null;
-      if (a && b) {
-        const [sa, sb] = [a.scale, b.scale];
-        desc = {
-          ...j.jointDesc(), a: a.id, b: b.id,
-          anchor1: [j.anchorA.x * sa[0], j.anchorA.y * sa[1], j.anchorA.z * sa[2]], anchor2: [j.anchorB.x * sb[0], j.anchorB.y * sb[1], j.anchorB.z * sb[2]],
-        };
-        key = JSON.stringify(desc);
-        // What makes it this joint: its kind, bodies, anchors and axis. The rest (limits, motor, a rope's length) are
-        // its parameters, changed where it is (`joint_set`: its frames are not taken anew from the bodies' poses).
-        const { limits: _l, motor: _m, length: _n, ...rest } = desc;
-        shape = JSON.stringify(rest);
-      }
+      const { a, b, desc, key, shape } = this.jointDescOf(j);
       if (key === (bj?.key ?? "")) continue;
       // (A joint the engine let go of stays let go of until it leaves the scene: `broken`.)
       if (bj?.key === BROKEN) continue;
       if (bj && desc && shape === bj.shape) {
-        this.engine.physics("joint_set", { id: bj.id, ...desc });
+        const { a: _a, b: _b, anchor1: _a1, anchor2: _a2, axis: _x, ...params } = desc;
+        this.engine.physics("joint_set", { id: bj.id, ...params });
         this.joints.set(j, { id: bj.id, key, shape });
         stats.updated++;
         continue;
@@ -891,20 +872,81 @@ export class SceneBinding {
     if (this.bodies) physicsStepped();
   }
 
-  /** The joints the engine let go of (their anchor's material carved away, or an engine body they held to gone): each
-   *  `broken`, a "broken" event on it; it stays let go of until it leaves the scene. */
-  private takeBroken(): void {
-    const ids = JSON.parse(this.engine.physics("broken", {})) as number[] | null;
-    if (!ids?.length) return;
-    for (const id of ids) {
-      for (const [j, bj] of this.joints) {
-        if (bj?.id !== id) continue;
-        this.joints.set(j, { id: -1, key: BROKEN, shape: BROKEN });
-        this.engineJoints.delete(j);
-        j.broken = true;
+  /**
+   * A joint as the engine takes it: its bodies (an object that stands for one of the engine's bodies, a voxel body or
+   * the voxel level, is taken as that body: its anchor is in the body's own frame, unscaled; the level's frame is the
+   * world's), its description, `key` (all of it) and `shape` (what makes it this joint: its kind, bodies, anchors and
+   * axis; the rest, limits, motor and a rope's length, are its parameters, changed where it is: `joint_set`). No
+   * description while either body is missing.
+   */
+  private jointDescOf(j: Joint): { a?: { id: number }; b?: { id: number }; desc: Record<string, unknown> | null; key: string; shape: string } {
+    const engine = getEngineBodies();
+    const bodyOf = (o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined => {
+      if (!o) return undefined;
+      const id = engine?.bodyOf(o);
+      return id !== undefined ? { id, scale: [1, 1, 1] } : this.objects.get(o)?.body;
+    };
+    const a = bodyOf(j.bodyA), b = bodyOf(j.bodyB);
+    if (!a || !b) return { desc: null, key: "", shape: "" };
+    const [sa, sb] = [a.scale, b.scale];
+    const desc: Record<string, unknown> = {
+      ...j.jointDesc(), a: a.id, b: b.id,
+      anchor1: [j.anchorA.x * sa[0], j.anchorA.y * sa[1], j.anchorA.z * sa[2]], anchor2: [j.anchorB.x * sb[0], j.anchorB.y * sb[1], j.anchorB.z * sb[2]],
+    };
+    const { limits: _l, motor: _m, length: _n, ...rest } = desc;
+    return { a, b, desc, key: JSON.stringify(desc), shape: JSON.stringify(rest) };
+  }
+
+  /**
+   * What the engine did to the joints since the last call (one engine call), in this order:
+   * - moved: a joint whose anchor's material went into a part cut off is on that part's body now: its `bodyA` (or
+   *   `bodyB`) is that part's object and its `anchorA` (or `anchorB`) the point in it, where it was in the world (the
+   *   same joint in the engine: nothing is sent for it);
+   * - broken: one whose anchor's material was carved away, or whose engine body went: `broken`, then a "broken" event
+   *   on each. Every one is marked before any event: a listener that throws does not leave the rest unmarked; the
+   *   events after it are still dispatched, and the first error is thrown once they have been.
+   */
+  private takeJointChanges(): void {
+    const c = JSON.parse(this.engine.physics("joint_changes", {})) as { moved?: { joint: number; end: "a" | "b"; body: number; anchor: [number, number, number] }[]; broken?: number[] } | null;
+    if (!c?.moved?.length && !c?.broken?.length) return;
+    const byId = new Map<number, Joint>();
+    for (const j of this.engineJoints) {
+      const bj = this.joints.get(j);
+      if (bj) byId.set(bj.id, j);
+    }
+    for (const m of c.moved ?? []) {
+      const j = byId.get(m.joint);
+      const o = getEngineBodies()?.object(m.body);
+      if (!j || !o) continue;
+      if (m.end === "a") {
+        j.bodyA = o;
+        j.anchorA.set(m.anchor[0], m.anchor[1], m.anchor[2]);
+      } else {
+        j.bodyB = o;
+        j.anchorB.set(m.anchor[0], m.anchor[1], m.anchor[2]);
+      }
+      // (What the binding holds for it is the engine's joint as it is now: not sent again.)
+      const { key, shape } = this.jointDescOf(j);
+      if (key) this.joints.set(j, { id: m.joint, key, shape });
+    }
+    const broken: Joint[] = [];
+    for (const id of c.broken ?? []) {
+      const j = byId.get(id);
+      if (!j) continue;
+      this.joints.set(j, { id: -1, key: BROKEN, shape: BROKEN });
+      this.engineJoints.delete(j);
+      j.broken = true;
+      broken.push(j);
+    }
+    let error: unknown = null;
+    for (const j of broken) {
+      try {
         j.dispatchEvent({ type: "broken", target: j });
+      } catch (e) {
+        error ??= e;
       }
     }
+    if (error !== null) throw error;
   }
 
   /**
@@ -916,7 +958,7 @@ export class SceneBinding {
    */
   deliverPhysicsEvents(): void {
     if (this.bodies) this.takeFaults();
-    if (this.engineJoints.size) this.takeBroken();
+    if (this.engineJoints.size) this.takeJointChanges();
     // (The engine's own bodies' events first: voxel bodies gone; and whether any of them listens for contacts.)
     const engineListens = getEngineBodies()?.frame() ?? false;
     if (!this.contactBodies && !engineListens) return;

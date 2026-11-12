@@ -161,8 +161,9 @@ export function usePhysicsEngine(e: PhysicsEngine): void {
  * @internal The engine's own bodies as objects (`@threert/voxel` registers its voxel bodies): the object of an engine
  * body id, the engine body an object stands for (joints take it), and a call once a frame when the binding delivers
  * the physics events, which says whether any of them listens for contacts. `epoch`: a number that changes whenever
- * what `bodyOf` answers may have (the level's body made, a joint's body changed by the engine): the binding then looks
- * at its joints again.
+ * what `bodyOf` answers may have (the level's anchor body made anew): the binding then looks at its joints again. (A
+ * joint the engine moves onto another body is not an epoch: the engine reports it, `joint_changes`, and the binding
+ * changes the joint's `bodyA` / `anchorA` or `bodyB` / `anchorB`.)
  */
 export interface EngineBodies {
   object(body: number): Object3D | undefined;
@@ -818,7 +819,9 @@ export class Joint extends Object3D {
   /**
    * True once the engine let go of it (a "broken" event too): a joint to a voxel body or to the voxel level belongs to
    * the material at its anchor, and that material was carved away, or the voxel body went. It stays let go of until it
-   * is taken out of the scene (and may be added again, joined anew).
+   * is taken out of the scene (and may be added again, joined anew). When that material is cut off instead (a part
+   * that comes loose), the joint goes with it: the engine moves it, and `bodyA` (or `bodyB`) becomes that part's voxel
+   * body, `anchorA` (or `anchorB`) the same point in the part's frame. A rope drawn from `bodyA` and `anchorA` follows.
    */
   broken = false;
   constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {

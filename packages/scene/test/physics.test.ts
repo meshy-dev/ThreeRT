@@ -373,7 +373,8 @@ test("a joint holds while it and both its objects are in the scene", () => {
   hinge.limits = [-1, 1];
   hinge.needsUpdate = true;
   binding.sync();
-  assert.deepEqual(physics(), [["joint_set", { type: "revolute", axis: [0, 1, 0], limits: [-1, 1], motor: { velocity: -2, maxForce: 80 }, a: 1, b: 2, anchor1: [0.1, 0, 0], anchor2: [-1, 0, 0], id: 3 }]]);
+  // (Only what may change: its bodies, anchors and axis are what make it this joint, and the engine refuses them.)
+  assert.deepEqual(physics(), [["joint_set", { type: "revolute", limits: [-1, 1], motor: { velocity: -2, maxForce: 80 }, id: 3 }]]);
   hinge.motor = null;
   hinge.needsUpdate = true;
   binding.sync();
