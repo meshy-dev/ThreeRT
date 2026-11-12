@@ -18,6 +18,9 @@ import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./
 import { Matrix4, Quaternion, Vector3 } from "./math.ts";
 import { ENGINE_IDS, engineColliders } from "./raycaster.ts";
 
+/** A joint's state in the binding once the engine let go of it (`Joint.broken`). */
+const BROKEN = "broken";
+
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -361,6 +364,8 @@ export class SceneBinding {
   private readonly joints = new Map<Joint, { id: number; key: string; shape: string } | null>();
   /** A joint or a body came, went or changed: the joints are looked at again. */
   private jointsDirty = false;
+  /** Joints made to one of the engine's bodies (a voxel body, the voxel level): the engine may let go of them. */
+  private readonly engineJoints = new Set<Joint>();
   /** The engine bodies' `epoch` at the last look at the joints. */
   private engineEpoch = 0;
   /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
@@ -762,8 +767,11 @@ export class SceneBinding {
 
   private dropJoint(j: Joint): void {
     const bj = this.joints.get(j);
-    if (bj) this.engine.physics("remove", { joint: bj.id });
+    // (A broken one is already gone from the world; out of the scene, it may be added again, joined anew.)
+    if (bj && bj.key !== BROKEN) this.engine.physics("remove", { joint: bj.id });
     this.joints.delete(j);
+    this.engineJoints.delete(j);
+    j.broken = false;
   }
 
   /** The collider of an object's body: the engine's shape description and where it sits in the body. */
@@ -848,6 +856,8 @@ export class SceneBinding {
         shape = JSON.stringify(rest);
       }
       if (key === (bj?.key ?? "")) continue;
+      // (A joint the engine let go of stays let go of until it leaves the scene: `broken`.)
+      if (bj?.key === BROKEN) continue;
       if (bj && desc && shape === bj.shape) {
         this.engine.physics("joint_set", { id: bj.id, ...desc });
         this.joints.set(j, { id: bj.id, key, shape });
@@ -859,7 +869,12 @@ export class SceneBinding {
         const id = this.nextBody++;
         this.engine.physics("joint", { id, ...desc });
         this.joints.set(j, { id, key, shape });
-      } else this.joints.set(j, null);
+        if (a!.id >= ENGINE_IDS || b!.id >= ENGINE_IDS) this.engineJoints.add(j);
+        else this.engineJoints.delete(j);
+      } else {
+        this.joints.set(j, null);
+        this.engineJoints.delete(j);
+      }
       stats.updated++;
     }
     for (const c of takePhysicsCommands()) {
@@ -873,6 +888,22 @@ export class SceneBinding {
     if (this.bodies) physicsStepped();
   }
 
+  /** The joints the engine let go of (their anchor's material carved away, or an engine body they held to gone): each
+   *  `broken`, a "broken" event on it; it stays let go of until it leaves the scene. */
+  private takeBroken(): void {
+    const ids = JSON.parse(this.engine.physics("broken", {})) as number[] | null;
+    if (!ids?.length) return;
+    for (const id of ids) {
+      for (const [j, bj] of this.joints) {
+        if (bj?.id !== id) continue;
+        this.joints.set(j, { id: -1, key: BROKEN, shape: BROKEN });
+        this.engineJoints.delete(j);
+        j.broken = true;
+        j.dispatchEvent({ type: "broken", target: j });
+      }
+    }
+  }
+
   /**
    * The contacts since the last call, to their listeners: "contactstart" / "contactend" on each of the two objects
    * (`other`: the other one), then "contacts" on the scene with the whole batch (`contacts`: { a, b, started } in the
@@ -882,6 +913,7 @@ export class SceneBinding {
    */
   deliverPhysicsEvents(): void {
     if (this.bodies) this.takeFaults();
+    if (this.engineJoints.size) this.takeBroken();
     // (The engine's own bodies' events first: voxel bodies gone; and whether any of them listens for contacts.)
     const engineListens = getEngineBodies()?.frame() ?? false;
     if (!this.contactBodies && !engineListens) return;

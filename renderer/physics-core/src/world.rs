@@ -904,6 +904,52 @@ impl Physics {
         Ok(())
     }
 
+    /// The joints on a body: each one's id, whether the body is its first, and its anchor in the body's space.
+    /// In joint id order.
+    pub fn joints_of(&self, body: BodyId) -> Vec<(JointId, bool, [f32; 3])> {
+        let Some(&h) = self.bodies.get(&body) else { return vec![] };
+        self.joints
+            .iter()
+            .filter_map(|(&id, &jh)| {
+                let j = self.world.impulse_joints.get(jh)?;
+                if j.body1() == h {
+                    Some((id, true, j.data.local_frame1.translation.to_array()))
+                } else if j.body2() == h {
+                    Some((id, false, j.data.local_frame2.translation.to_array()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Moves one end of a joint from body `from` to body `to`, the same joint (its id, kind and parameters): that
+    /// end's frame is where it was in the world, now in `to`'s space (a joint whose anchor's material went into
+    /// another body, step 10 c1). Err: no such joint or body, `from` not one of its bodies, `to` its other body.
+    pub fn rebind_joint(&mut self, id: JointId, from: BodyId, to: BodyId) -> Result<(), String> {
+        let jh = *self.joints.get(&id).ok_or("physics: unknown joint")?;
+        let (hf, ht) = (*self.bodies.get(&from).ok_or("physics: unknown body")?, *self.bodies.get(&to).ok_or("physics: unknown body")?);
+        let j = self.world.impulse_joints.get(jh).ok_or("physics: unknown joint")?;
+        let first = if j.body1() == hf { true } else if j.body2() == hf { false } else { return Err("physics: the joint is not on that body".into()) };
+        let other = if first { j.body2() } else { j.body1() };
+        if other == ht {
+            return Err("physics: a joint joins two different bodies".into());
+        }
+        let mut data = j.data;
+        let (pf, pt) = (*self.world.bodies[hf].position(), *self.world.bodies[ht].position());
+        let frame = if first { data.local_frame1 } else { data.local_frame2 };
+        let moved = pt.inverse() * (pf * frame);
+        if first {
+            data.local_frame1 = moved;
+        } else {
+            data.local_frame2 = moved;
+        }
+        self.world.remove_impulse_joint(jh);
+        let nh = if first { self.world.insert_impulse_joint(ht, other, data) } else { self.world.insert_impulse_joint(other, ht, data) };
+        self.joints.insert(id, nh);
+        Ok(())
+    }
+
     pub fn remove_joint(&mut self, id: JointId) {
         self.joint_kinds.remove(&id);
         if let Some(h) = self.joints.remove(&id) {

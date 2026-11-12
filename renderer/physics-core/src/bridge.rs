@@ -56,6 +56,9 @@ pub struct Bridge {
     /// to queries and contacts they are on no body, as the level's colliders always were (`hit.object` is
     /// `engineColliders`, with no `body`).
     level_body: Option<u32>,
+    /// Scene code's joints the engine let go of since the last `broken` call: their anchor's material carved away, or
+    /// an engine body they held to gone (step 10 c1).
+    broken: Vec<u32>,
     /// The pairs of colliders (the caller's ids, lower first) touching as reported, with their bodies: a start is
     /// reported once (a collider edited in place, taken out and put back, starts again without having ended), and a
     /// collider that goes ends its pairs (`ended`; the world's own end events of a collider it no longer has are lost).
@@ -168,6 +171,7 @@ impl Default for Bridge {
             colliders: BTreeMap::new(),
             collider_ids: BTreeMap::new(),
             level_body: None,
+            broken: vec![],
             touching: BTreeMap::new(),
             ended: vec![],
             joints: BTreeMap::new(),
@@ -369,6 +373,9 @@ impl Bridge {
                 self.joints.insert(jid, j);
                 Value::Null
             }
+            // The joints the engine let go of since the last call: [id]: their anchor's material carved away, or an engine
+            // body they held to gone (a voxel body retired, carved away, fallen). Scene code's ids; gone from the world.
+            "broken" => json!(std::mem::take(&mut self.broken)),
             // {id, type, limits?, motor?, length?}: a joint's parameters changed where it is (a hinge's or a slider's
             // limits and motor, a rope's length); its bodies, anchors and axis stay as made (`Physics::set_joint`).
             "joint_set" => {
@@ -557,6 +564,37 @@ impl Bridge {
         Ok(())
     }
 
+    /// The joints on an engine body (step 10 c1): each one's world id, whether the body is its first, and its anchor
+    /// in the body's space; in id order.
+    pub fn engine_joints_of(&self, body: u32) -> Vec<(JointId, bool, [f32; 3])> {
+        self.bodies.get(&body).map_or(vec![], |&b| self.core.joints_of(b))
+    }
+
+    /// One end of a joint moved from engine body `from` to `to` (its anchor's material went into another body), the same
+    /// joint to scene code.
+    pub fn engine_rebind_joint(&mut self, joint: JointId, from: u32, to: u32) -> Result<(), String> {
+        let (f, t) = (*self.bodies.get(&from).ok_or("physics: unknown body")?, *self.bodies.get(&to).ok_or("physics: unknown body")?);
+        self.core.rebind_joint(joint, f, t)
+    }
+
+    /// A joint let go of by the engine (its anchor's material carved away): gone from the world, reported to scene code
+    /// as broken (`broken`).
+    pub fn engine_break_joint(&mut self, joint: JointId) {
+        if let Some(id) = self.joints.iter().find(|(_, &v)| v == joint).map(|(&k, _)| k) {
+            self.joints.remove(&id);
+            self.note_broken(id);
+        }
+        self.core.remove_joint(joint);
+    }
+
+    /// A broken joint noted for `broken` (the newest `MAX_JOINTS` kept: nobody asking does not make it grow).
+    fn note_broken(&mut self, id: u32) {
+        if self.broken.len() >= MAX_JOINTS {
+            self.broken.remove(0);
+        }
+        self.broken.push(id);
+    }
+
     /// The level's fixed body, if a level with colliders is loaded.
     pub fn engine_level(&self) -> Option<u32> {
         self.level_body
@@ -577,6 +615,12 @@ impl Bridge {
     /// An engine body with its colliders and joints, or an engine collider, gone. (Unknown ids: nothing.)
     pub fn engine_remove(&mut self, body: Option<u32>, collider: Option<u32>) {
         if let Some(b) = body.filter(|&b| b >= ENGINE_IDS).and_then(|b| self.bodies.get(&b).copied()) {
+            // (Scene code's joints on it go with it: broken.)
+            for (j, _, _) in self.core.joints_of(b) {
+                if let Some(id) = self.joints.iter().find(|(_, &v)| v == j).map(|(&k, _)| k) {
+                    self.note_broken(id);
+                }
+            }
             self.forget_body(b);
         }
         if let Some(c) = collider.filter(|&c| c >= ENGINE_IDS).and_then(|c| self.colliders.remove(&c)) {

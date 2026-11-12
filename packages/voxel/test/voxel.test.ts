@@ -339,3 +339,47 @@ test("a voxel body the engine took out before the objects noticed: every call do
     g.__engine = before;
   }
 });
+
+// (Last: its frame of the physics events retires the earlier tests' bodies, whose ids the tests share.)
+test("a joint the engine let go of: broken, a \"broken\" event, not made again until it leaves the scene", async () => {
+  const { voxelLevel } = await import("../src/native.ts");
+  const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  (engine as unknown as { voxelLevelBody: () => number }).voxelLevelBody = () => 2 ** 30 + 1;
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const rope = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(4, 6, 1) });
+    scene.add(camera, lamp, rope);
+    binding.sync();
+    const id = engine.physicsCalls().find((c) => c[0] === "joint")![1].id as number;
+    const events: unknown[] = [];
+    rope.addEventListener("broken", (e) => events.push(e.type));
+    engine.answers.broken = [id];
+    binding.deliverPhysicsEvents();
+    assert.deepEqual([rope.broken, events], [true, ["broken"]]);
+    engine.answers.broken = [];
+    // Changed: still let go of (no joint, no joint_set).
+    rope.length = 1;
+    rope.needsUpdate = true;
+    engine.calls.length = 0;
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0]) || c[0] === "remove"), []);
+    // Out of the scene (nothing to remove: it is gone) and back: joined anew.
+    scene.remove(rope);
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => c[0] === "remove"), []);
+    assert.equal(rope.broken, false);
+    scene.add(rope);
+    binding.sync();
+    assert.equal(engine.physicsCalls().filter((c) => c[0] === "joint").length, 1);
+  } finally {
+    g.__engine = before;
+  }
+});

@@ -173,6 +173,32 @@ struct VoxelObject {
     flying: Option<Vec<MeshPart>>,
 }
 
+/// The cell a joint's anchor is held by (step 10 c1): the cell the point is in if it is solid, else the solid one of its
+/// 26 neighbours whose centre is nearest the point (first in x, y, z order on a tie); none if all are empty (the
+/// joint is then on the body, not on a cell, and follows the body).
+fn anchor_cell(a: [f32; 3], size: f32, mut solid: impl FnMut([i32; 3]) -> bool) -> Option<[i32; 3]> {
+    let c = a.map(|v| (v / size).floor() as i32);
+    if solid(c) {
+        return Some(c);
+    }
+    let mut best: Option<([i32; 3], f32)> = None;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let n = [c[0] + dx, c[1] + dy, c[2] + dz];
+                if (dx, dy, dz) == (0, 0, 0) || !solid(n) {
+                    continue;
+                }
+                let d = (0..3).map(|k| ((n[k] as f32 + 0.5) * size - a[k]).powi(2)).sum::<f32>();
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((n, d));
+                }
+            }
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
 pub const EXPECTED_SCRIPT: u64 = 0x2b38_c79e_27e8_9063;
@@ -714,6 +740,15 @@ impl VoxelWorld {
             ShapeM::Capsule(a, b, r) => Shape::Capsule { a: fp(a), b: fp(b), r: to_fp(r as f64 / size) },
         };
         let Some(shape) = shape.checked() else { return Err(anyhow!("voxelEdit: the shape is too large (at most {} voxels across a box or line's bounds in all)", voxel_core::MAX_CELLS)) };
+        // Scene code's joints on the level, each by the cell its anchor is held by (a carve may take it: step 10 c1).
+        let level_joints: Vec<(physics_core::JointId, [i32; 3])> = match (op.kind, self.level_body, ph.as_ref()) {
+            (EditKind::Carve(_), Some(lb), Some(p)) => {
+                let joints = p.bridge_ref().engine_joints_of(lb);
+                let level = self.level.as_mut().unwrap();
+                joints.into_iter().filter_map(|(j, _, a)| anchor_cell(a, self.size, |c| level.solid(c)).map(|c| (j, c))).collect()
+            }
+            _ => vec![],
+        };
         let t0 = Instant::now();
         let level = self.level.as_mut().unwrap();
         let e = match op.kind {
@@ -727,6 +762,26 @@ impl VoxelWorld {
         let bounds = (Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32) * s, Vec3::new(hi[0] as f32 + 1.0, hi[1] as f32 + 1.0, hi[2] as f32 + 1.0) * s);
         let mut out = self.apply(w, ph, &e, vec![bounds])?;
         out["carve_ms"] = carve_ms.into();
+        // The level's joints whose cell is no longer the level's: on the body its loose part became (they move onto it),
+        // or carved (they let go).
+        if let (Some(lb), Some(p)) = (self.level_body, ph.as_mut()) {
+            for (j, c) in level_joints {
+                if self.level.as_mut().unwrap().solid(c) {
+                    continue;
+                }
+                let at = Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) * self.size;
+                let holder = e.created.iter().filter_map(|&id| self.bodies.get(&(id as usize))).find_map(|x| {
+                    let (pos, rot, _) = p.bridge_ref().engine_pose(x.body)?;
+                    let local = Quat::from_array(rot).inverse() * (at - Vec3::from(pos)) / self.size;
+                    let g = [local.x.floor() as i32, local.y.floor() as i32, local.z.floor() as i32];
+                    (x.grid.get(g[0], g[1], g[2]) != 0).then_some(x.body)
+                });
+                match holder {
+                    Some(nb) if p.bridge().engine_rebind_joint(j, lb, nb).is_ok() => {}
+                    _ => p.bridge().engine_break_joint(j),
+                }
+            }
+        }
         // The bodies the shape reaches are carved too (a carve only: paint and added voxels are the level's).
         if let (EditKind::Carve(radii), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
             let t = Instant::now();
@@ -1397,6 +1452,9 @@ impl VoxelWorld {
             }
             voxels += gone.len();
             carved += 1;
+            // Scene code's joints on it, each by the cell its anchor is held by (before the carve takes cells).
+            let body_id = b.body;
+            let anchored: Vec<(physics_core::JointId, [i32; 3])> = p.bridge_ref().engine_joints_of(body_id).into_iter().filter_map(|(j, _, a)| anchor_cell(a, size, |c| b.grid.get(c[0], c[1], c[2]) != 0).map(|c| (j, c))).collect();
             // (What is left of it is not retired for the cap while this carve makes the parts it cut off.)
             self.this_edit.insert(k);
             self.keep(gone.iter().map(|&(g, mat)| (centre_of(g), mat)));
@@ -1415,6 +1473,16 @@ impl VoxelWorld {
                 cleared.extend(part);
                 loose.push(with);
             }
+            // Each anchored joint: its cell carved (broken), gone into a part cut off (it moves with that part), or still
+            // here. A joint is the material's at its anchor.
+            let mut moves: Vec<(physics_core::JointId, usize)> = vec![];
+            for &(j, c) in &anchored {
+                if gone.iter().any(|&(g, _)| g == c) {
+                    p.bridge().engine_break_joint(j);
+                } else if let Some(i) = loose.iter().position(|part| part.iter().any(|&(g, _)| g == c)) {
+                    moves.push((j, i));
+                }
+            }
             let (collider, left) = (b.collider, b.grid.count());
             if left == 0 {
                 self.retire(w, p, k, false, "carved");
@@ -1422,8 +1490,12 @@ impl VoxelWorld {
                 let _ = collider;
                 self.redraw_body(w, p, k, &cleared, &[], Vec3::from(at), Quat::from_array(rot))?;
             }
-            for part in loose {
+            for (i, part) in loose.into_iter().enumerate() {
                 if part.len() < MIN_PIECE {
+                    // (Debris: a joint held by a cell of it lets go.)
+                    for &(j, _) in moves.iter().filter(|m| m.1 == i) {
+                        p.bridge().engine_break_joint(j);
+                    }
                     self.keep(part.iter().map(|&(g, mat)| (centre_of(g), mat)));
                     continue;
                 }
@@ -1440,6 +1512,14 @@ impl VoxelWorld {
                     l.objects.resize_with(n + 1, || None);
                 }
                 self.add_body(w, p, n, grid, corner, Quat::from_array(rot), velocity)?;
+                // The joints held by a cell of this part move onto its body (or let go if it was not made one).
+                let new_body = self.bodies.get(&n).map(|x| x.body);
+                for &(j, _) in moves.iter().filter(|m| m.1 == i) {
+                    match new_body {
+                        Some(nb) if p.bridge().engine_rebind_joint(j, body_id, nb).is_ok() => {}
+                        _ => p.bridge().engine_break_joint(j),
+                    }
+                }
             }
         }
         Ok((voxels, carved))
@@ -2673,6 +2753,72 @@ mod tests {
         assert!(!mine.is_empty() && mine.iter().all(|c| c["bodyA"].is_null() || c["bodyB"].is_null()), "the level's end on no body: {contacts}");
         let crate_ = p.call(&mut w, "state", &serde_json::json!({ "body": 1 })).unwrap();
         assert_eq!(crate_["sleeping"], serde_json::json!(true), "{crate_}");
+    }
+
+    /// A joint belongs to the material at its anchor (step 10 c1). On a voxel body: cut so that its anchor's cell is in
+    /// the part cut off, the joint moves onto that part's body (the same joint to scene code, its anchor where it was);
+    /// its anchor's cell carved, it breaks (reported, gone from the world); its body carved away whole, it breaks. On the
+    /// level: its anchor in a part that comes loose, it moves onto that body; its anchor's cell carved, it breaks.
+    #[test]
+    fn joints_follow_the_cells_their_anchors_are_in() {
+        let ball = |p: &mut PhysicsWorld, w: &mut World, id: u32, at: [f32; 3]| {
+            p.call(w, "body", &serde_json::json!({ "id": id, "position": at })).unwrap();
+            p.call(w, "collider", &serde_json::json!({ "id": id, "body": id, "shape": { "type": "sphere", "radius": 0.05 } })).unwrap();
+        };
+        let broken = |p: &mut PhysicsWorld, w: &mut World| p.call(w, "broken", &serde_json::json!({})).unwrap().as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect::<Vec<_>>();
+        let on = |p: &PhysicsWorld, body: u32| p.bridge_ref().engine_joints_of(body).len();
+        // The bar cut loose (4 x 21 x 4 cells from (2.8, 0.7, 2.8)); a rope from a ball to its lowest layer, one to its top.
+        let (mut w, mut ph, mut v) = one_body();
+        let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        let p = ph.as_mut().unwrap();
+        ball(p, &mut w, 1, [5.0, 1.0, 3.0]);
+        ball(p, &mut w, 2, [5.0, 3.0, 3.0]);
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 10, "a": b, "b": 1, "type": "rope", "length": 2.5, "anchor1": [0.2, 0.05, 0.2] })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 11, "a": b, "b": 2, "type": "rope", "length": 2.5, "anchor1": [0.2, 1.95, 0.2] })).unwrap();
+        assert_eq!(on(p, b), 2);
+        // Cut across its layers 9 and 10: the lower part (144 cells) is cut off, the upper (160) keeps the body.
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "box": [2.7, 1.6, 2.7, 3.3, 1.8, 3.3] }))).unwrap();
+        assert_eq!(v.bodies(), 2);
+        let low = *v.bodies.values().map(|x| &x.body).find(|&&x| x != b).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!((on(p, b), on(p, low)), (1, 1), "the lower rope moved with the lower part");
+        let (_, _, anchor) = p.bridge_ref().engine_joints_of(low)[0];
+        let (at, _, _) = p.bridge_ref().engine_pose(low).unwrap();
+        let world = [at[0] + anchor[0], at[1] + anchor[1], at[2] + anchor[2]];
+        assert!((world[0] - 3.0).abs() < 1e-4 && (world[1] - 0.75).abs() < 1e-4 && (world[2] - 3.0).abs() < 1e-4, "its anchor where it was: {world:?}");
+        assert_eq!(broken(p, &mut w), Vec::<u64>::new());
+        // The top rope's anchor cell carved: it breaks.
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "sphere": [3.0, 2.65, 3.0, 0.08] }))).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!(broken(p, &mut w), vec![11]);
+        assert_eq!(on(p, b), 0);
+        assert!(p.call(&mut w, "joint_set", &serde_json::json!({ "id": 11, "type": "rope", "length": 1.0 })).is_err(), "gone from the world");
+        // The lower part carved away whole: its rope breaks.
+        v.edit_body(&mut w, &mut ph, low, &op(serde_json::json!({ "op": "carve", "box": [2.0, 0.0, 2.0, 4.0, 1.7, 4.0] }))).unwrap();
+        assert_eq!(broken(ph.as_mut().unwrap(), &mut w), vec![10]);
+
+        // The level: a rope to the bar's top while it still stands, another to the slab's top.
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut w, &mut ph);
+        let lb = v.level_body().unwrap();
+        let p = ph.as_mut().unwrap();
+        ball(p, &mut w, 1, [3.0, 3.5, 3.0]);
+        ball(p, &mut w, 2, [1.0, 1.0, 1.0]);
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 20, "a": lb, "b": 1, "type": "rope", "length": 1.0, "anchor1": [3.0, 2.75, 3.0] })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 21, "a": lb, "b": 2, "type": "rope", "length": 1.0, "anchor1": [1.05, 0.35, 1.05] })).unwrap();
+        // The bar cut at its foot: it is a body now, and the rope to its top is on it.
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] }))).unwrap();
+        assert_eq!(v.bodies(), 1);
+        let bar = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!((on(p, lb), on(p, bar)), (1, 1), "the rope to the bar's top moved onto its body");
+        assert_eq!(broken(p, &mut w), Vec::<u64>::new());
+        // The slab's anchor cell carved: that rope breaks.
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "sphere": [1.05, 0.35, 1.05, 0.1] }))).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!(broken(p, &mut w), vec![21]);
+        assert_eq!(on(p, lb), 0);
     }
 
     /// The same body as one more check: a slab and a bar cut loose (336 voxels of 1,000 kg/m³).

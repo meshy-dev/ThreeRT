@@ -815,6 +815,12 @@ export class Joint extends Object3D {
   bodyB: Object3D | null;
   readonly anchorA = new Vector3();
   readonly anchorB = new Vector3();
+  /**
+   * True once the engine let go of it (a "broken" event too): a joint to a voxel body or to the voxel level belongs to
+   * the material at its anchor, and that material was carved away, or the voxel body went. It stays let go of until it
+   * is taken out of the scene (and may be added again, joined anew).
+   */
+  broken = false;
   constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
     super();
     this.bodyA = bodyA ?? null;
