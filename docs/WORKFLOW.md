@@ -236,7 +236,8 @@ The supervisor never sits in `gh run watch` or `gh pr checks --watch`. Instead:
 - A background wait is allowed only when the next step depends on it within the same check. It needs a hard timeout
   of at most 10 minutes and is stopped as soon as it is not needed. Long-running "watchers" are never left behind.
 
-**CI cost.** The checks run as parallel jobs, each with its own `Swatinem/rust-cache`. With warm caches a run of every
+**CI cost.** The checks run as parallel jobs, each with its own cache (`.github/actions/cargo-cache`, on GitHub's
+`actions/cache`: the organization allows GitHub's actions and verified creators' only). With warm caches a run of every
 job takes about 3 minutes (the renderer's release build and the browser module's are the longest); with none, about 8
 and a half (the physics job's five builds of Rapier). A PR runs only the jobs whose inputs it changes (a docs-only PR
 runs `ts` alone, in about a minute), and the `threert` job sums them up: it is the check to read before merging. A
