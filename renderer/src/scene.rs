@@ -600,7 +600,8 @@ pub struct PoseGroup {
 /// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop.
 type PoseKey = (String, Option<Vec<String>>, String, u32, bool);
 
-/// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape, -, -),
+/// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape, homogeneous,
+/// animated),
 /// (majorant 1/m, HG anisotropy, -, -), the node's customData, 32 parameter floats.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1559,7 +1560,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 }
                 _ => {}
             },
-            Kind::Volume { function, params, shape, majorant, g, homogeneous, grid } if shown => {
+            Kind::Volume { function, params, shape, majorant, g, homogeneous, animated, grid } if shown => {
                 let func = volume_fns.iter().position(|(k, _, _)| k == function).ok_or_else(|| anyhow!("object {}: unknown volume function {function}", n.name))? as u32;
                 let mut p = [0.0f32; 32];
                 for (k, v) in params.iter().take(32).enumerate() {
@@ -1600,7 +1601,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if media.len() >= MAX_MEDIA {
                     return Err(anyhow!("object {}: more than {MAX_MEDIA} volumes shown at once (the kernel takes {MAX_MEDIA}; the rest would not be drawn)", n.name));
                 }
-                media.push(MediumGpu { w: medium_rows(m), a: [func, *shape, *homogeneous as u32, 0], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
+                media.push(MediumGpu { w: medium_rows(m), a: [func, *shape, *homogeneous as u32, *animated as u32], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
                 media_nodes.push(*id);
             }
             Kind::Procedural { .. } if shown => {
@@ -2328,7 +2329,7 @@ mod instance_tests {
             w.set_object(1000, "camera".into(), None, world::Kind::Camera(cam), false, false).unwrap();
             w.set_settings(world::Settings { camera: Some(1000), ..Default::default() });
             for id in 1..=n + hidden {
-                let kind = world::Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, grid: None };
+                let kind = world::Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid: None };
                 w.set_object(id, format!("v{id}"), None, kind, false, false).unwrap();
                 if id > n {
                     w.set_visible(id, false).unwrap();

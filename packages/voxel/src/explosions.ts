@@ -272,8 +272,6 @@ export class Explosions extends Group {
         l.position.set(...PARK);
         continue;
       }
-      // (Its change each frame also caps the live view's history, which keeps the fire from ghosting: a temporary way
-      // round relied on, docs/VOXEL.md "Temporary ways round on the engine's shared paths".)
       lit++;
       const { k, rgb } = g;
       const peak = Math.max(...rgb);

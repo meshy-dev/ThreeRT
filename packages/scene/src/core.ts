@@ -1416,18 +1416,23 @@ export class GpuParticles extends Object3D {
  * `i.lp` (the volume's own space: the box [-0.5, 0.5]^3 or the sphere of radius 0.5), `i.time`, `i.custom` (the node's
  * customData); outputs `o.extinction`, `o.albedo`, `o.emission` (defaults 0, white, black). Parameters are `$Name`,
  * like a MaterialFunction's. See docs/MATERIAL_FUNCTIONS.md, "Volume functions".
+ *
+ * `animated`: the medium changes with time (fire, drifting smoke), so the live view keeps a short history of the
+ * pixels it fills, as it does for a surface whose shading is animated. By default: whether the code reads `i.time`.
  */
 export class VolumeFunction {
   readonly name: string;
   readonly params: Record<string, number | Vec4Like>;
   readonly code: string;
   readonly helpers: string;
-  constructor(name: string, o: { params?: Record<string, number | Vec4Like>; code: string; helpers?: string }) {
+  readonly animated: boolean;
+  constructor(name: string, o: { params?: Record<string, number | Vec4Like>; code: string; helpers?: string; animated?: boolean }) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`VolumeFunction name "${name}" must be an identifier`);
     this.name = name;
     this.params = o.params ?? {};
     this.code = o.code;
     this.helpers = o.helpers ?? "";
+    this.animated = o.animated ?? /\bi\.time\b/.test(o.code + this.helpers);
   }
   /** Binding for a `VolumeMesh`: parameter overrides. */
   with(params: Partial<Record<string, number | Vec4Like>> = {}): VolumeBinding {
@@ -1548,6 +1553,10 @@ export class VolumeMesh extends Object3D {
   readonly homogeneous: boolean;
   /** A density grid across the box, which `volume` reads with `vgrid(i, i.lp)` (`DensityGrid`; box volumes). */
   readonly grid: DensityGrid | null;
+  /** The medium changes with time: its function says so (`VolumeFunction` `animated`), or its grid is simulated. */
+  get animated(): boolean {
+    return this.volume.fn.animated || !!this.grid?.program;
+  }
   constructor(o: { shape?: "box" | "sphere"; volume: VolumeBinding; majorant: number; anisotropy?: number; homogeneous?: boolean; grid?: DensityGrid | null }) {
     super();
     if (!(o.majorant > 0)) throw new Error("VolumeMesh: majorant must be > 0 (1/m)");

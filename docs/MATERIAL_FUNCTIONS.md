@@ -315,6 +315,13 @@ return o; }`:
 | `albedo` | scattering / extinction |
 | `emission` | emitted radiance per metre |
 
+A function whose medium changes with time is `animated`: by default, one whose code reads `i.time`; `animated: true` or
+`false` in its options says otherwise (a medium that changes only through its node's `customData` sets it; one that
+reads the time for something that does not show clears it). A volume with a simulated `DensityGrid` is animated
+whatever its function. The live view keeps a short history where such a medium fills a quarter of a pixel or more
+(four samples in the upscaler, as for a surface with `o.animated`): without it a fire shows the frames before it. A
+still medium keeps the long history, and its noise falls with it.
+
 A `VolumeMesh` has these settings:
 - `shape`: box or sphere;
 - `volume`: the function binding;

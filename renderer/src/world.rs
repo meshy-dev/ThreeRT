@@ -141,8 +141,9 @@ pub enum Kind {
     /// its volume function and 32 parameter floats, majorant (1/m) and HG anisotropy.
     /// `homogeneous`: constant coefficients in the function's first parameters (albedo rgb + extinction, emission
     /// rgb), so the live kernel can use them without the function (pathtrace.wgsl `media_homogeneous`).
+    /// `animated`: it changes with time (the live view keeps a short history of the pixels it fills).
     /// `grid`: its density grid (`World::grids`; box volumes), which the volume function reads with `vgrid`.
-    Volume { function: String, params: Vec<f32>, shape: u32, majorant: f32, g: f32, homogeneous: bool, grid: Option<u32> },
+    Volume { function: String, params: Vec<f32>, shape: u32, majorant: f32, g: f32, homogeneous: bool, animated: bool, grid: Option<u32> },
     /// Procedural geometry (`ProceduralMesh`) under the node's transform, shaded with `materials[k]` for the k its
     /// geometry function returns. Always instanced: a move rewrites its transform, never a rebuild.
     Procedural { geometry: u32, materials: Vec<u32> },
@@ -1168,7 +1169,7 @@ mod tests {
         w.set_grid(1, [2, 2, 4], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
         assert!(w.take_changes().structural, "another size");
         // Sources.
-        let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, grid };
+        let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid };
         w.set_object(5, "plain".into(), None, volume(None), false, false).unwrap();
         w.set_object(6, "smoke".into(), None, volume(Some(1)), false, false).unwrap();
         assert!(w.add_grid_sources(5, &[0.0; 12]).is_err());
