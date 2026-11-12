@@ -210,7 +210,9 @@ pub struct Wheel {
 impl Wheel {
     fn new(info: WheelDesc) -> Self {
         Self {
-            raycast_info: RayCastInfo::default(),
+            // (ThreeRT) At its rest length until first probed (it is probed before the length is used): where the
+            // wheel is reported to be before the first tick.
+            raycast_info: RayCastInfo { suspension_length: info.suspension_rest_length, ..RayCastInfo::default() },
             suspension_rest_length: info.suspension_rest_length,
             max_suspension_travel: info.max_suspension_travel,
             radius: info.radius,

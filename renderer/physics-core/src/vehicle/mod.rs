@@ -471,10 +471,9 @@ impl Physics {
     }
 
     /// A wheel's centre where it is on the chassis now: its anchor plus the suspension's length down, in the chassis's
-    /// pose after the step (a wheel not yet probed at its rest length).
+    /// pose after the step (a wheel not yet probed is at its rest length: the controller starts it there).
     fn wheel_center(chassis: &RigidBody, w: &controller::Wheel, dir: Vector) -> Vector {
-        let len = if w.raycast_info().suspension_length > 0.0 { w.raycast_info().suspension_length } else { w.suspension_rest_length };
-        *chassis.position() * w.chassis_connection_point_cs + chassis.position().rotation * dir * len
+        *chassis.position() * w.chassis_connection_point_cs + chassis.position().rotation * dir * w.raycast_info().suspension_length
     }
 
     /// A vehicle's wheels that are not lost: each one's index as described and its anchor (the hard point, in the
@@ -792,6 +791,21 @@ mod tests {
         let st = p.vehicle_state(v).unwrap();
         assert!((at[2] - (pos[2] + SEDAN.wheels()[1].anchor[2])).abs() < 0.05 && st.wheels[1].lost && st.wheels[1].center == at, "{at:?}, the chassis at {pos:?}");
         assert!(p.remove_wheel(v, 1).is_none());
+        // A wheel whose rest length is its travel, fully compressed on the ground at length 0: lost there, not at its
+        // unloaded length.
+        let mut p = Physics::default();
+        flat(&mut p);
+        let b = p.add_body(&BodyDesc { position: [0.0, 0.5, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+        p.add_collider(Some(b), &ColliderDesc { density: 300.0, ..ColliderDesc::new(Shape::Box([0.8, 0.2, 1.5])) }).unwrap();
+        let w = |x: f32, z: f32| WheelDesc { anchor: [x, 0.0, z], rest: 0.2, travel: 0.2, radius: 0.3, stiffness: 5.0, ..Default::default() };
+        let v = p.add_vehicle(&VehicleDesc { chassis: b, wheels: vec![w(-0.7, 1.2), w(0.7, 1.2), w(-0.7, -1.2), w(0.7, -1.2)], forward_axis: 2, up_axis: 1, center_of_mass: None }).unwrap();
+        for _ in 0..60 {
+            p.step();
+        }
+        let st = p.vehicle_state(v).unwrap();
+        let (pos, _) = p.pose(b).unwrap();
+        let at = p.remove_wheel(v, 0).unwrap();
+        assert!(st.wheels[0].suspension == 0.0 && (at[1] - pos[1]).abs() < 0.02, "compressed to {} m; lost at {at:?}, the anchor at {pos:?}", st.wheels[0].suspension);
     }
 
     /// A chassis removed takes its vehicle with it, reported once.
