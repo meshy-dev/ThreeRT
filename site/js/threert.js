@@ -8,6 +8,33 @@ export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const KNOB = `<svg width="18" height="12" viewBox="0 0 18 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 1.5 1 6l4.5 4.5M12.5 1.5 17 6l-4.5 4.5"/></svg>`;
+/**
+ * Dragging a divider. A mouse drags from where it is pressed. A finger does only once it has moved sideways: a touch
+ * that turns out to be a scroll (or a tap on the way past) leaves the divider where it was. `move(e)` places it.
+ */
+function dragging(el, move, skip = () => false) {
+  let drag = false, from = null;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button") || skip(e)) return;
+    if (e.pointerType === "touch") { from = [e.clientX, e.clientY]; return; }
+    drag = true;
+    el.setPointerCapture(e.pointerId);
+    move(e);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (from && !drag) {
+      const dx = Math.abs(e.clientX - from[0]), dy = Math.abs(e.clientY - from[1]);
+      if (dx > 10 && dx > 1.5 * dy) { drag = true; el.setPointerCapture(e.pointerId); }
+      else if (dy > 10) from = null;
+    }
+    if (drag) move(e);
+  });
+  const end = () => { drag = false; from = null; };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end); // a touch the browser took as a scroll
+  return () => drag;
+}
+
 const label = (cls, l, s) => `<div class="lab ${cls}"><i></i><span>${l ?? ""}${s ? `<small>${s}</small>` : ""}</span></div>`;
 
 /** Wipe comparison. Drag (or click, or arrow keys) to move the divider; `el.cmp.set({...})` swaps the pair. */
@@ -36,12 +63,9 @@ export function compare(el) {
   };
   set({});
   setX(x);
-  let drag = false;
   const at = (e) => setX(((e.clientX - el.getBoundingClientRect().left) / el.clientWidth) * 100);
-  el.addEventListener("pointerdown", (e) => { drag = true; el.setPointerCapture(e.pointerId); at(e); });
-  el.addEventListener("pointermove", (e) => { if (drag || d.hover !== undefined) at(e); });
-  el.addEventListener("pointerup", () => (drag = false));
-  el.addEventListener("pointercancel", () => (drag = false));
+  const dragged = dragging(el, at);
+  if (d.hover !== undefined) el.addEventListener("pointermove", (e) => { if (e.pointerType !== "touch") at(e); });
   el.addEventListener("keydown", (e) => {
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") { setX(x + (e.key === "ArrowLeft" ? -4 : 4)); e.preventDefault(); }
   });
@@ -53,7 +77,7 @@ export function compare(el) {
       const from = x, t0 = performance.now();
       const step = (t) => {
         const k = clamp((t - t0) / 1600, 0, 1);
-        if (drag) return;
+        if (dragged()) return;
         setX(from + Math.sin(k * Math.PI * 2) * 14 * (1 - k));
         if (k < 1) requestAnimationFrame(step);
       };
@@ -110,7 +134,6 @@ function clip(el, panes) {
     if (visible && !paused) v.play().then(() => { if (!v.requestVideoFrameCallback) requestAnimationFrame(tick); }, () => {});
     else v.pause();
   };
-  pp.addEventListener("pointerdown", (e) => e.stopPropagation()); // not a drag of the divider
   pp.addEventListener("click", () => { paused = !paused; state(); });
   new IntersectionObserver(([en]) => {
     visible = en.isIntersecting;
@@ -118,6 +141,50 @@ function clip(el, panes) {
       v.src = (small && d.videoSm) || d.video;
       if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
     }
+    state();
+  }, { threshold: 0.05 }).observe(el);
+}
+
+/**
+ * A reel behind a page's opening words: a still (`data-poster`), and over it a clip (`data-video`) that plays, muted
+ * and looping, while it is on screen. A screen taller than it is wide gets `data-video-tall` / `data-poster-tall`,
+ * laid out for it. Nothing in it takes a touch, so a finger scrolling the page passes over it; a button pauses it.
+ * The still stays where the clip should not or cannot play (reduced motion, a data saver, autoplay refused).
+ */
+export function backdrop(el) {
+  const d = el.dataset, mq = matchMedia("(max-aspect-ratio: 4/5)");
+  const isTall = () => !!d.videoTall && mq.matches;
+  let tall = isTall(), v = null, state = () => {};
+  const img = el.appendChild(Object.assign(new Image(), { alt: "", draggable: false, src: (tall && d.posterTall) || d.poster }));
+  img.decoding = "async";
+  // A rotation crosses the breakpoint the page's overlay uses (the same media query in the page's CSS): the still and
+  // the clip follow it, so the grid under the overlay is always the one laid out for the screen's shape.
+  mq.addEventListener("change", () => {
+    if (isTall() === tall) return;
+    tall = isTall();
+    img.src = (tall && d.posterTall) || d.poster;
+    if (v?.getAttribute("src")) { v.src = (tall && d.videoTall) || d.video; state(); }
+  });
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches || navigator.connection?.saveData) return;
+  v = el.appendChild(Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, preload: "auto" }));
+  v.setAttribute("muted", "");
+  v.setAttribute("playsinline", "");
+  v.setAttribute("aria-hidden", "true");
+  v.disablePictureInPicture = true;
+  const pp = el.appendChild(Object.assign(document.createElement("button"), { className: "pp", type: "button", hidden: true }));
+  const ICON = { pause: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" fill="currentColor"/></svg>`, play: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor"/></svg>` };
+  let visible = false, paused = false;
+  v.addEventListener("playing", () => { el.classList.add("playing"); pp.hidden = false; }, { once: true });
+  state = () => {
+    pp.innerHTML = paused ? ICON.play : ICON.pause;
+    pp.setAttribute("aria-label", paused ? "Play the reel" : "Pause the reel");
+    if (visible && !paused) v.play().catch(() => {});
+    else v.pause();
+  };
+  pp.addEventListener("click", () => { paused = !paused; state(); });
+  new IntersectionObserver(([en]) => {
+    visible = en.isIntersecting;
+    if (visible && !v.getAttribute("src")) v.src = (tall && d.videoTall) || d.video;
     state();
   }, { threshold: 0.05 }).observe(el);
 }
@@ -174,12 +241,8 @@ export function sequence(el) {
     if (visible && !raf) raf = requestAnimationFrame(loop);
   }, { rootMargin: "400px" });
   io.observe(el);
-  let drag = false;
   const at = (e) => { x = clamp(((e.clientX - el.getBoundingClientRect().left) / el.clientWidth) * 100, 0, 100); draw(); };
-  el.addEventListener("pointerdown", (e) => { if (e.target.closest(".ctl")) return; drag = true; el.setPointerCapture(e.pointerId); at(e); });
-  el.addEventListener("pointermove", (e) => drag && at(e));
-  el.addEventListener("pointerup", () => (drag = false));
-  el.addEventListener("pointercancel", () => (drag = false)); // a touch the browser took as a scroll
+  dragging(el, at, (e) => !!e.target.closest(".ctl"));
   pp.addEventListener("click", () => { playing = !playing; icon(); });
   $(".track", el).addEventListener("click", (e) => {
     const r = e.currentTarget.getBoundingClientRect();

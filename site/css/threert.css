@@ -77,7 +77,10 @@ p { margin: 0; }
 .nav .links a { text-decoration: none; display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; border-bottom: 1.5px solid transparent; transition: color 0.2s; }
 .nav .links a:hover { color: var(--bone); }
 .nav .links a[aria-current="page"] { color: var(--bone); border-bottom-color: var(--bone-2); }
-.nav .links a svg { opacity: 0.6; }
+/* GitHub, Discord and X, as their marks. */
+.si { display: block; width: 18px; height: 18px; flex: none; }
+.nav .links a.ic { padding: 6px 0; }
+.nav .links a.ic + a.ic { margin-left: -10px; }
 .nav.overlay { position: absolute; left: 0; right: 0; background: transparent; border-bottom-color: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--tungsten); outline-offset: 3px; border-radius: 4px; }
 .btn:focus-visible { border-radius: 999px; }
@@ -100,6 +103,14 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .cmp .pa, .cmp .pb { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .cmp .pb { clip-path: inset(0 0 0 var(--x, 50%)); }
 .cmp img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+/* A reel behind a page's opening words (js/threert.js, backdrop): a still, the clip over it once it plays. */
+.backdrop { position: absolute; inset: 0; overflow: hidden; background: #000; }
+.backdrop img, .backdrop video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.backdrop video { opacity: 0; transition: opacity 0.6s; }
+.backdrop.playing video { opacity: 1; }
+.backdrop .pp { position: absolute; z-index: 6; right: 32px; bottom: 30px; width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(236, 232, 225, 0.25); background: rgba(8, 9, 11, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); color: #ece8e1; display: grid; place-items: center; cursor: pointer; padding: 0; opacity: 0.7; transition: opacity 0.2s; }
+.backdrop .pp:hover, .backdrop .pp:focus-visible { opacity: 1; }
+.backdrop .pp[hidden] { display: none; }
 /* A clip over the stills (js/threert.js, clip): a canvas a pane, shown once it plays; its pause button. */
 .cmp canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; opacity: 0; transition: opacity 0.5s; }
 .cmp.playing canvas { opacity: 1; }
@@ -144,7 +155,14 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .foot a { color: var(--bone-2); }
 .foot .cols { display: grid; grid-template-columns: 1.2fr 2fr; gap: 48px; }
 .foot .site { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 18px; font-size: 14px; }
+.foot .site { align-items: center; }
 .foot .site a { text-decoration: none; }
+.foot .site a.ic { display: inline-flex; }
+.foot .site a.ic + a.ic { margin-left: -6px; }
+.foot .site .si { width: 17px; height: 17px; }
+.foot .legal { margin-top: 18px; }
+.foot .legal a { text-decoration: none; }
+.foot .legal a:hover { color: var(--bone); }
 .foot .site a:hover { color: var(--bone); }
 .foot .note { font: 400 12px/1.6 var(--font-mono); color: var(--mute); }
 .foot .note p + p { margin-top: 12px; }
@@ -203,5 +221,15 @@ code, kbd { font: 500 0.9em var(--font-mono); color: var(--bone); background: rg
 @media (max-width: 520px) {
   .nav .logo > span { display: none; }
   .nav .links { gap: 16px; font-size: 14px; }
-  .nav .links a svg { display: none; }
+  .nav .links a.ic + a.ic { margin-left: 0; }
+  .nav .links { gap: 14px; }
+}
+/* The narrowest phones: three words and three marks still on one line. */
+@media (max-width: 380px) {
+  .nav .wrap { gap: 10px; }
+  .nav .links { gap: 11px; font-size: 13px; }
+  .nav .si { width: 16px; height: 16px; }
+}
+@media (max-width: 340px) {
+  .nav .links { gap: 8px; font-size: 12.5px; }
 }
