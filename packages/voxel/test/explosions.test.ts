@@ -37,10 +37,10 @@ test("the pool: the next fireball each fire, the oldest taken over when every on
   assert.equal(x.stats.lit, 2);
   const at = x.lights.map((l) => l.position.x).sort();
   assert.deepEqual(at, [3, 4]);
-  // Its intensity: the table at its age, times its size² and the fireball's intensity (40 nits).
+  // Its intensity: the table at its age, times its size² and the fireball's intensity (30,000 nits).
   const l = x.lights.find((q) => q.position.x === 3)!;
   const rgb = fireLight(0.15 / 1.6), peak = Math.max(...rgb);
-  assert.ok(Math.abs(l.intensity - peak * 4.4 * 4.4 * 40) < 1e-6);
+  assert.ok(Math.abs(l.intensity - peak * 4.4 * 4.4 * 30000) < 1e-3);
   assert.ok(Math.abs(l.color.g - rgb[1] / peak) < 1e-9);
   // Burnt out: parked, the lights off.
   x.step(20);

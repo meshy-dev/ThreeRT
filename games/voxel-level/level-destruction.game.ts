@@ -45,7 +45,7 @@ interface State { scenario: Scenario | null; started: number }
 
 /** Spots for explosions: alternately on the ground ahead of the camera and on the walls of the buildings nearest it
  *  (deterministic: the k-th spot is always the same). */
-function spots(seed: number): [number, number, number][] {
+export function spots(seed: number): [number, number, number][] {
   const plan = levelPlan(seed);
   const key = cameraPath(seed)[0];
   const [cx, , cz] = key.pos, [tx, , tz] = key.target;

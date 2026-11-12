@@ -78,7 +78,7 @@ export interface ExplosionsOptions {
   fireballs?: number;
   /** Fire lights (0..8; default min(fireballs, 8)): the youngest fireballs have one. */
   lights?: number;
-  /** A fireball's life (s; default 1.6), peak radiance (nits; default 40) and extinction (1/m; default 6). */
+  /** A fireball's life (s; default 1.6), peak radiance at the core (nits; default 30,000: a flame's, which by day shows over sunlit walls; `Fireball`'s own default of 40 is a stylised night's) and extinction (1/m; default 6). */
   life?: number;
   intensity?: number;
   density?: number;
@@ -139,7 +139,7 @@ export class Explosions extends Group {
     const n = whole("fireballs", o.fireballs ?? 8, 1, MAX_FIREBALLS);
     const nl = whole("lights", o.lights ?? Math.min(n, MAX_FIRE_LIGHTS), 0, Math.min(n, MAX_FIRE_LIGHTS));
     this.life = o.life ?? 1.6;
-    this.intensity = o.intensity ?? 40;
+    this.intensity = o.intensity ?? 30000;
     const density = o.density ?? 6;
     if (!(finite(this.life) && this.life > 0) || !(finite(this.intensity) && this.intensity >= 0) || !(finite(density) && density > 0)) throw new RangeError("Explosions: life and density must be above 0, intensity at least 0");
     for (let k = 0; k < n; k++) {
