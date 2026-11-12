@@ -9,14 +9,13 @@
 <link rel="stylesheet" href="css/threert.css">
 <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
 <style>
-  /* ---- Hero: the comparison is the page ---- */
+  /* ---- Hero: a reel of what the engine draws, the words over its darker side ---- */
   .hero { position: relative; height: min(100vh, 1000px); min-height: 640px; overflow: hidden; background: #000; }
-  .hero .cmp { position: absolute; inset: 0; aspect-ratio: auto; border-radius: 0; }
-  .hero .cmp .lab { top: auto; bottom: 32px; }
-  .hero .cmp .lab.a { left: 32px; } .hero .cmp .lab.b { right: 32px; }
-  .hero .cmp::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(90deg, rgba(6,7,9,.86) 0%, rgba(6,7,9,.55) 34%, rgba(6,7,9,0) 62%), linear-gradient(180deg, rgba(6,7,9,.7) 0%, rgba(6,7,9,0) 16%), linear-gradient(0deg, rgba(6,7,9,.6) 0%, rgba(6,7,9,0) 16%); }
-  .hero .cmp .knob { top: 74%; }
-  .hero .cmp .pp { right: auto; left: 50%; bottom: 30px; margin-left: -17px; }
+  .hero .backdrop .lab { top: auto; bottom: 32px; left: 32px; z-index: 6; }
+  .hero .backdrop .lab i { background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .hero .backdrop::after { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none; background: linear-gradient(90deg, rgba(6,7,9,.93) 0%, rgba(6,7,9,.8) 30%, rgba(6,7,9,.3) 58%, rgba(6,7,9,0) 76%), linear-gradient(180deg, rgba(6,7,9,.72) 0%, rgba(6,7,9,0) 16%), linear-gradient(0deg, rgba(6,7,9,.66) 0%, rgba(6,7,9,0) 16%); }
+  /* A screen held upright: the words run the width, so the reel darkens from the top instead. */
+  @media (max-aspect-ratio: 4/5) { .hero .backdrop::after { background: linear-gradient(180deg, rgba(6,7,9,.9) 0%, rgba(6,7,9,.78) 46%, rgba(6,7,9,.28) 74%, rgba(6,7,9,.5) 100%); } .hero .backdrop .lab { left: 20px; bottom: 22px; } .hero .backdrop .pp { right: 20px; bottom: 20px; } }
   .hero .copy { position: absolute; z-index: 7; left: 0; right: 0; top: 132px; pointer-events: none; }
   .hero .copy .wrap { display: grid; gap: 24px; }
   .hero .copy a { pointer-events: auto; }
@@ -150,7 +149,7 @@
 </nav>
 
 <header class="hero">
-  <div class="cmp" id="hero" data-a="media/bistro/hero-three.webp" data-b="media/bistro/hero-rt.webp" data-video="media/bistro/hero.mp4" data-video-sm="media/bistro/hero-720.mp4" data-la="three.js" data-lb="ThreeRT" data-x="44" data-intro></div>
+  <div class="backdrop" id="hero" data-poster="media/reel/reel.webp" data-video="media/reel/reel.mp4" data-poster-tall="media/reel/reel-tall.webp" data-video-tall="media/reel/reel-tall.mp4"><div class="lab"><i></i><span>ThreeRT, live<small>this repository’s demos and OpenStrike</small></span></div></div>
   <div class="copy">
     <div class="wrap">
       <h1 class="h-display">Path tracing<span class="l2 ray-text">at 60 fps.</span></h1>
@@ -329,14 +328,14 @@
       <div class="site"><a href="showcase/">Showcase</a><a href="download/">Download</a><a href="docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
     </div>
     <div class="note">
-      <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine. The clip at the top of this page is ThreeRT live on an Apple M3 Max at 1600 × 900 (render scale 0.5), every frame as it drew it: 12.8 ms of GPU time a frame at the median, 14.8 ms at the 95th percentile, none over 16.7 ms.</p>
-      <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+      <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine. The reel at the top of this page is ThreeRT live on an Apple M3 Max: this repository’s demos and OpenStrike, a shooter built on the engine, each clip recorded frame by frame at 60 fps at 960 × 540 (render scale 0.7 to 1).</p>
+      <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. Tokyo: 3D city model, Project PLATEAU (MLIT Japan); elevation and aerial photos, GSI; roads and places © OpenStreetMap contributors. The maps in the OpenStrike clips (cs_assault, de_inferno, de_dust2) are Counter-Strike maps, © Valve, and part of neither project. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
     </div>
   </div>
 </footer>
 
 <script type="module">
-  import { $, $$, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
+  import { $, $$, backdrop, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
   import { downloadButtons, packages, packageLinks } from "./js/site.js";
 
   // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
@@ -355,7 +354,7 @@
   guard("download", () => downloadButtons());
 
   guard("comparisons", () => {
-    compare($("#hero"));
+    backdrop($("#hero"));
     for (const el of $$(".details .cmp")) compare(el);
     for (const el of $$(".seqp")) sequence(el);
   });
