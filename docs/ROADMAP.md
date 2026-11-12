@@ -4314,9 +4314,11 @@ benchmark level. The order follows the dependencies; a step that meets a further
       and smoke"). The user's scope (2026-11-12): an explosion's fireball and smoke, on the existing volume and particle
       paths. `Explosions` (`packages/voxel`): a pool of fireballs, one smoke grid and a pool of point lights made in
       setup; `fire` / `explode` / `step`; caps on fireballs (32), lights (8), smoke cells (2^20) and puffs a frame
-      (16), with what happens past each; arguments refused before anything changes. No engine call of its own, so
-      nothing new for `physics_fuzz` (`voxelExplode` is in its set already; the grid's sources and the lights go
-      through the scene sync, which checks them). The light stands in for the fireball's own (live rays do not see
+      (16 a step), with what happens past each; every number checked before anything changes. No engine call of its
+      own, so nothing new for `physics_fuzz` (`voxelExplode` is in its set already). The scene sync checks grid sources
+      and `customData` only, not transforms or lights: `Explosions` checks everything it sends (positions within
+      1,000 km, every option's range). `scene::build` refuses a scene with more than 32 volumes shown (the kernel's
+      32-bit mask; the 33rd was not drawn, silently): with the grid the pool has at most 31 fireballs. The light stands in for the fireball's own (live rays do not see
       media): `FIRE_LIGHT`, measured against the offline renderer per size and age (`tools/bench-voxel-fire.ts`);
       `voxel/fire-light` 0.987 for 1. The destruction game has a `-fire` variant.
       - Measured on the benchmark level at render scale 0.75 against offline (docs/VOXEL.md): the whole image meets ΔE
@@ -4326,6 +4328,15 @@ benchmark level. The order follows the dependencies; a step that meets a further
         0.946. GPU: 9.5 → 11.5 ms while a 4 m fire burns (smoke grid alone 9.2 → 10.1), 13.3 with 8 burning.
       - Found on the way and fixed: each pool object's first move promoted it to movable with a rebuild (281 ms, and
         it wiped the live smoke); idle lights had unbounded reach (0.9 ms of GPU with nothing burning).
+      - The independent review of #29 found, fixed here with tests: 32 fireballs and the grid were 33 volumes, the
+        33rd never drawn (now refused, above); finite positions past f32 passed the check and, with the grid, threw
+        after the fireball had moved; the puff options and the smoke's and pool's settings went unchecked to the
+        engine; the 16-puff cap was per distinct time, not per frame (1,000 fires 1 µs apart sent 1,000 sources), and
+        a fire set for later puffed at once (puffs are now sent by `step`, when their fire has started); puffs piled
+        up while the pool was in no synced scene (the grid now holds at most 64 unsent); a new fire at age 0 took a
+        light from an older one for a frame; time going back left fires to burn again later; a fire waiting to start
+        was taken over without being counted; the pool's objects lived in the group's space and its puffs in the
+        world's (the group must now stay at the world's frame); no `dispose`.
       - Open, the user's scope of 2026-11-12: **fire spreading along burnable voxels**, and **smoke stopped by
         voxels** (the grid ignores the level), are not done.
       - Open: a live rebuild starts every simulated grid again (the smoke vanishes; a structural change anywhere does

@@ -563,13 +563,17 @@ point lights. It adds no engine call.
 const boom = new Explosions({ smoke: { center: [x, y, z], size: [22, 14, 36], cells: [88, 56, 144] } });
 scene.add(boom);
 // frame(f):
-boom.step(f.time);                       // once a frame: the lights follow their fireballs, burnt-out ones parked
 boom.explode(x, y, z, 4, f.time);        // voxelExplode, then fire([x, y, z], 4, f.time)
+boom.step(f.time);                       // once a frame: puffs sent, lights follow their fireballs, burnt-out ones parked
 ```
 
-- **A fire** (`fire(at, r, time)`): the next fireball of the pool, full size 2.2 r (at most 40 m), its centre 0.3 r
-  above the explosion's point, started at `time`; a puff of hot smoke into the grid (radius 0.8 r + 0.3 m); a light at
-  its centre while it burns. The fireball's default peak is 30,000 nits (a flame's; `Fireball`'s own 40 is a stylised
+Positions are the world's: the group stays at the origin, unrotated, unscaled (a fire throws otherwise). `dispose()`
+takes the pool out of the scene for good.
+
+- **A fire** (`fire(at, r, time)`): the next fireball of the pool, full size 2.2 r (5 cm to 40 m), its centre 0.3 r
+  above the explosion's point, started at `time` (now or later); its puff of hot smoke (radius 0.8 r + 0.3 m) goes into
+  the grid at the first `step` at or after `time`; a light at its centre while it burns, from the first step after it
+  starts (at age 0 it gives none, and takes no light from an older fire). Time going back (a restart) ends every fire. The fireball's default peak is 30,000 nits (a flame's; `Fireball`'s own 40 is a stylised
   night's and does not show by day). Every object of the pool is made in setup and `movable`: firing moves them in
   place (a fixed object's first move rebuilds the live scene once: 281 ms on the benchmark level, and every pool
   member would do it once).
@@ -586,17 +590,26 @@ Caps, and what happens past them (node tests in `packages/voxel/test/explosions.
 
 | what | cap | past it |
 | --- | --- | --- |
-| fireballs | `fireballs`, default 8, at most 32 (`MAX_FIREBALLS`) | the oldest burning one is taken over: it ends early, the new one starts (`stats.reused`) |
+| fireballs | `fireballs`, default 8, at most 32 (`MAX_FIREBALLS`), with the smoke grid 31: the kernel draws at most 32 volumes (`MAX_MEDIA`; a scene with more is refused by `scene::build`, no longer drawn without the last) | the oldest burning or waiting one is taken over: it ends early, the new one starts (`stats.reused`) |
 | fire lights | `lights`, default min(fireballs, 8), at most 8 (`MAX_FIRE_LIGHTS`: the kernel evaluates up to 8 shadowed local lights exactly, `RIS_EXACT`) | the youngest fires have them; the rest burn without (`stats.unlit`: the most at once) |
 | smoke grid | at most 2^20 cells, 4 to 256 an axis (`MAX_SMOKE_CELLS`, `SMOKE_AXIS`) | the constructor throws (a setup error) |
-| puffs a frame | 16 (`MAX_PUFFS`; the engine takes 64 a grid a frame and drops the rest) | the fire burns and lights without a puff (`stats.unpuffed`) |
+| puffs a step | 16 (`MAX_PUFFS`; the engine takes 64 a grid a frame and drops the rest) | the rest at the next step; dropped (`stats.unpuffed`) while the grid holds 64 unsent sources (a pool in no synced scene piles nothing up), or when their fire is taken over before it starts |
 | fireball size | 40 m (`MAX_FIREBALL`: r over about 18 m) | the largest; `voxelExplode` keeps its own limits |
 
-Arguments: a position, radius or time that is not finite, or a radius of 0 or less, throws a `RangeError` before
-anything changes (`fire`, `explode` before its voxel call, `step`); a huge radius (1e30) gives the largest fireball;
-1,000 fires in one frame make no object (the pool cycles; the last 8 burn, 16 puff, 992 counted as taken over). An idle
-light has a reach of 1 mm where it is parked (a distance of 0 would be unbounded: every pixel tested it, 0.9 ms of GPU
+Arguments: every number is checked before anything changes, since the scene sync checks only grid sources and
+`customData` (not transforms or lights): a position outside ±1,000 km (finite numbers past f32 included) or not three
+finite numbers, a radius not finite or not above 0, a time outside ±1e9 s, or the pool moved off the world's frame,
+throws a `RangeError` from `fire`, `explode` (before its voxel call) and `step`; a huge radius (1e30) gives the largest
+fireball, a tiny one (1e-46) the smallest; the constructor checks every option (ranges in the code; `center: [1, 2]`,
+NaN in `wind`, `intensity: 1e308`, a puff of density -5 are refused). 1,000 fires in one frame, at one time or 1 µs
+apart, make no object (the pool cycles; the last ones burn; 16 puffs a step). An idle light has a reach of 1 mm where
+it is parked (a distance of 0 is unbounded reach: the sphere of its group of 16 lights held every pixel, 0.9 ms of GPU
 with nothing burning).
+
+**Offline, the fireball's light counts twice unless the game passes `lights: 0`**: an offline path reaches the
+fireball's emission, and the stand-in light is there as well. The bench's references are made with `lights: 0`
+(`fireShot({ light: false })`); `level-destruction-fire` rendered offline has both. Live, surfaces see only the light
+(their rays have no media code).
 
 #### Measured: fire and smoke on the benchmark level (2026-11-12)
 

@@ -7,22 +7,30 @@
 // (paths reach the medium). Each burning fireball therefore has a point light at its centre whose intensity and colour
 // follow the fireball's age, from a table measured against the offline renderer (`FIRE_LIGHT`; tools/bench-voxel-fire.ts
 // --only calibrate).
-import { Fireball, Group, PointLight, SimulatedSmoke } from "@threert/scene";
+import { Fireball, Group, PointLight, SimulatedSmoke, type Object3D } from "@threert/scene";
 import { voxelExplode, type VoxelEdit } from "./native.ts";
 
-/** The most fireballs a pool may have. */
+/** The most fireballs a pool may have; with the smoke grid one fewer: the kernel draws at most 32 volumes
+ *  (`MAX_MEDIA`, renderer/src/scene.rs; a scene with more is refused). */
 export const MAX_FIREBALLS = 32;
+export const MAX_MEDIA = 32;
 /** The most fire lights: the kernel evaluates up to 8 shadowed local lights exactly at camera hits (`RIS_EXACT` in
  *  pathtrace.wgsl); past that they are resampled, noisier. */
 export const MAX_FIRE_LIGHTS = 8;
 /** The most cells the smoke grid may have (each is simulated every frame), and per axis. */
 export const MAX_SMOKE_CELLS = 1 << 20;
 export const SMOKE_AXIS: [number, number] = [4, 256];
-/** Puffs of smoke a frame (the engine takes 64 a grid a frame and drops the rest). */
+/** Puffs of smoke a frame, and the sources a grid takes a frame (the engine drops the rest: world.rs
+ *  `GRID_MAX_SOURCES`). */
 export const MAX_PUFFS = 16;
+const GRID_SOURCES = 64;
+/** Positions (m) and scene times (s) a fire takes: past them f32 coordinates and times lose their meaning. */
+export const MAX_COORD = 1e6;
+export const MAX_TIME = 1e9;
 /** A fireball's full size (diameter) for an explosion of radius r, and the largest one. */
 export const FIREBALL_SIZE = 2.2;
 export const MAX_FIREBALL = 40;
+export const MIN_FIREBALL = 0.05;
 /** Where idle fireballs wait: tiny, far below any level (moving a volume is done in place; hiding one is not
  *  promised to be). */
 const PARK: [number, number, number] = [0, -10000, 0];
@@ -80,11 +88,13 @@ export function fireLight(u: number, size: number): [number, number, number] {
 }
 
 export interface ExplosionSmoke {
-  /** The box's centre and size (world, m), and its cells (each axis 4..256, at most 2^20 in all). */
+  /** The box's centre (within ±1,000 km) and size (world, m), and its cells (each axis 4..256, at most 2^20 in all). */
   center: [number, number, number];
   size: [number, number, number];
   cells: [number, number, number];
-  /** `SimulatedSmoke`'s settings (its defaults when not given, but those noted). */
+  /** `SimulatedSmoke`'s settings (its defaults when not given, but density 2.5, wind [0.8, 0, 0.3], buoyancy 3.5,
+   *  cooling 0.9, dissipation 0.2). Checked: density, cooling, dissipation, turbulence 0..1,000; buoyancy ±1,000;
+   *  albedo 0..1, glow 0..1e7, wind ±100 m/s each. */
   density?: number;
   albedo?: [number, number, number];
   glow?: [number, number, number];
@@ -93,16 +103,20 @@ export interface ExplosionSmoke {
   cooling?: number;
   dissipation?: number;
   turbulence?: number;
-  /** A puff: its density (0..1), temperature, and the push outward (m/s); its radius is 0.8 r + 0.3 m. */
+  /** A puff: its density (0..1), temperature (0..100), and the push outward (0..100 m/s); its radius is 0.8 r + 0.3 m. */
   puff?: { density?: number; temperature?: number; push?: number };
 }
 
 export interface ExplosionsOptions {
-  /** Fireballs in the pool (1..32; default 8): at most this many burn at once, the oldest taken over past it. */
+  /** Fireballs in the pool (1..32, with the smoke grid 1..31: the kernel draws 32 volumes; default 8): at most this
+   *  many burn at once, the oldest taken over past it. */
   fireballs?: number;
   /** Fire lights (0..8; default min(fireballs, 8)): the youngest fireballs have one. */
   lights?: number;
-  /** A fireball's life (s; default 1.6), peak radiance at the core (nits; default 30,000: a flame's, which by day shows over sunlit walls; `Fireball`'s own default of 40 is a stylised night's) and extinction (1/m; default 6). */
+  /** A fireball's life (s, 0.001..60; default 1.6), peak radiance at the core (nits, 0..1e7; default 30,000: a flame's,
+   *  which by day shows over sunlit walls; `Fireball`'s own 40 is a stylised night's) and extinction (1/m, up to 1,000;
+   *  default 6). The fire light's table was measured with the defaults' density and life scaled; other densities do
+   *  not change it. */
   life?: number;
   intensity?: number;
   density?: number;
@@ -114,11 +128,11 @@ export interface ExplosionsOptions {
 export interface ExplosionStats {
   /** Fires made. */
   fired: number;
-  /** Fireballs taken over while still burning (the pool was full). */
+  /** Fireballs taken over while still burning or waiting to start (the pool was full). */
   reused: number;
   /** The most fires burning without a light at once (more burning than there are lights). */
   unlit: number;
-  /** Fires made without a puff (past 16 in a frame). */
+  /** Puffs never sent: their fireball taken over before it started, time going back, or the grid not being synced. */
   unpuffed: number;
   /** The most burning at once. */
   most: number;
@@ -127,21 +141,31 @@ export interface ExplosionStats {
   lit: number;
 }
 
-const finite = (v: number) => typeof v === "number" && Number.isFinite(v);
-function check(what: string, at: readonly number[], radius: number, time: number): void {
-  if (!Array.isArray(at) || at.length !== 3 || !at.every(finite)) throw new RangeError(`${what}: the position must be three finite numbers`);
-  if (!finite(radius) || radius <= 0) throw new RangeError(`${what}: the radius must be a finite number above 0`);
-  if (!finite(time)) throw new RangeError(`${what}: the time must be a finite number (the frame's f.time)`);
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+function within(what: string, v: unknown, lo: number, hi: number): number {
+  if (!finite(v) || v < lo || v > hi) throw new RangeError(`${what} must be a number from ${lo} to ${hi}`);
+  return v;
+}
+function triple(what: string, v: unknown, lo: number, hi: number): [number, number, number] {
+  if (!Array.isArray(v) || v.length !== 3) throw new RangeError(`${what} must be three numbers`);
+  return v.map((x, k) => within(`${what}[${k}]`, x, lo, hi)) as [number, number, number];
 }
 function whole(what: string, v: number, lo: number, hi: number): number {
   if (!Number.isInteger(v) || v < lo || v > hi) throw new RangeError(`Explosions: ${what} must be a whole number from ${lo} to ${hi}`);
   return v;
 }
+function check(what: string, at: readonly number[], radius: number, time: number): void {
+  triple(`${what}: the position`, at, -MAX_COORD, MAX_COORD);
+  if (!finite(radius) || radius <= 0) throw new RangeError(`${what}: the radius must be a finite number above 0`);
+  within(`${what}: the time (the frame's f.time)`, time, -MAX_TIME, MAX_TIME);
+}
 
 /**
  * `scene.add(new Explosions({ smoke: { center, size, cells } }))` in setup; `explosions.explode(x, y, z, r, f.time)`
  * (or `fire([x, y, z], r, f.time)` after a `voxelExplode` of your own) when something blows; `explosions.step(f.time)`
- * once a frame. Past its caps nothing is added to the scene: see each option.
+ * once a frame. Positions are the world's: the group stays at the origin, unrotated, unscaled (a fire throws if it or
+ * a parent is not). Past its caps nothing is added to the scene: see each option. Every number is checked before
+ * anything changes.
  */
 export class Explosions extends Group {
   readonly fireballs: Fireball[] = [];
@@ -150,27 +174,52 @@ export class Explosions extends Group {
   readonly life: number;
   readonly intensity: number;
   readonly stats: ExplosionStats = { fired: 0, reused: 0, unlit: 0, unpuffed: 0, most: 0, burning: 0, lit: 0 };
-  /** Per fireball: when it started (scene time; NaN = idle), its full size, its centre, the order it was fired in. */
+  /** Per fireball: when it started (scene time; NaN = idle), its full size, its centre, the order it was fired in, and
+   *  its puff while not yet sent (centre, radius). */
   private started: number[] = [];
   private sizes: number[] = [];
   private centers: [number, number, number][] = [];
   private order: number[] = [];
+  private puffsDue: ({ c: [number, number, number]; radius: number } | null)[] = [];
   private next = 0;
-  private puffs = 0;
-  private puffTime = NaN;
+  /** The scene time of the last `step` (-Infinity before the first). */
+  private now = -Infinity;
+  private disposed = false;
   private puffOpts: { density: number; temperature: number; push: number };
-  /** The fireballs with a light after the last `step`. */
-  private litNow = new Set<number>();
 
   constructor(o: ExplosionsOptions = {}) {
     super();
     this.name = "explosions";
-    const n = whole("fireballs", o.fireballs ?? 8, 1, MAX_FIREBALLS);
+    const s = o.smoke ?? null;
+    const n = whole("fireballs", o.fireballs ?? 8, 1, s ? Math.min(MAX_FIREBALLS, MAX_MEDIA - 1) : MAX_FIREBALLS);
     const nl = whole("lights", o.lights ?? Math.min(n, MAX_FIRE_LIGHTS), 0, Math.min(n, MAX_FIRE_LIGHTS));
-    this.life = o.life ?? 1.6;
-    this.intensity = o.intensity ?? 30000;
-    const density = o.density ?? 6;
-    if (!(finite(this.life) && this.life > 0) || !(finite(this.intensity) && this.intensity >= 0) || !(finite(density) && density > 0)) throw new RangeError("Explosions: life and density must be above 0, intensity at least 0");
+    this.life = within("Explosions: life", o.life ?? 1.6, 1e-3, 60);
+    this.intensity = within("Explosions: intensity", o.intensity ?? 30000, 0, 1e7);
+    const density = within("Explosions: density", o.density ?? 6, 1e-9, 1e3);
+    // The smoke's settings, all checked before anything is made.
+    let smokeSettings: ConstructorParameters<typeof SimulatedSmoke>[0] | null = null;
+    let box: { center: [number, number, number]; size: [number, number, number] } | null = null;
+    const puff = s?.puff ?? {};
+    this.puffOpts = {
+      density: within("Explosions: smoke.puff.density", puff.density ?? 0.9, 0, 1),
+      temperature: within("Explosions: smoke.puff.temperature", puff.temperature ?? 1, 0, 100),
+      push: within("Explosions: smoke.puff.push", puff.push ?? 1.2, 0, 100),
+    };
+    if (s) {
+      if (!Array.isArray(s.cells) || s.cells.length !== 3) throw new RangeError("Explosions: smoke.cells must be three whole numbers");
+      const cells = s.cells.map((c) => whole("smoke cells (each axis)", c, ...SMOKE_AXIS)) as [number, number, number];
+      if (cells[0] * cells[1] * cells[2] > MAX_SMOKE_CELLS) throw new RangeError(`Explosions: the smoke grid may have at most ${MAX_SMOKE_CELLS} cells (each is simulated every frame)`);
+      box = { center: triple("Explosions: smoke.center", s.center, -MAX_COORD, MAX_COORD), size: triple("Explosions: smoke.size", s.size, 1e-3, MAX_COORD) };
+      const opt = (k: string, v: number | undefined, d: number, lo: number, hi: number) => within(`Explosions: smoke.${k}`, v ?? d, lo, hi);
+      smokeSettings = {
+        size: cells, density: opt("density", s.density, 2.5, 0, 1e3),
+        albedo: s.albedo === undefined ? undefined : triple("Explosions: smoke.albedo", s.albedo, 0, 1),
+        glow: s.glow === undefined ? undefined : triple("Explosions: smoke.glow", s.glow, 0, 1e7),
+        wind: triple("Explosions: smoke.wind", s.wind ?? [0.8, 0, 0.3], -100, 100),
+        buoyancy: opt("buoyancy", s.buoyancy, 3.5, -1e3, 1e3), cooling: opt("cooling", s.cooling, 0.9, 0, 1e3),
+        dissipation: opt("dissipation", s.dissipation, 0.2, 0, 1e3), turbulence: opt("turbulence", s.turbulence, 15, 0, 1e3),
+      };
+    }
     for (let k = 0; k < n; k++) {
       const f = new Fireball({ life: this.life, intensity: this.intensity, density });
       f.name = `fireball-${k}`;
@@ -185,29 +234,23 @@ export class Explosions extends Group {
       this.sizes.push(0);
       this.centers.push([...PARK]);
       this.order.push(-1);
+      this.puffsDue.push(null);
     }
     for (let k = 0; k < nl; k++) {
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
-      // Off: no reach (a distance of 0 would be unbounded: every pixel would test it, shadow ray and all).
+      // Off: a reach of 1 mm where it is parked. (A distance of 0 is unbounded reach: the sphere of its group of 16
+      // lights would hold every pixel, and the kernel would test that group's lights everywhere.)
       l.distance = IDLE_REACH;
       l.movable = true;
       l.position.set(...PARK);
       this.add(l);
       this.lights.push(l);
     }
-    const s = o.smoke;
-    this.puffOpts = { density: s?.puff?.density ?? 0.9, temperature: s?.puff?.temperature ?? 1, push: s?.puff?.push ?? 1.2 };
-    if (s) {
-      const cells = s.cells.map((c) => whole("smoke cells (each axis)", c, ...SMOKE_AXIS)) as [number, number, number];
-      if (cells[0] * cells[1] * cells[2] > MAX_SMOKE_CELLS) throw new RangeError(`Explosions: the smoke grid may have at most ${MAX_SMOKE_CELLS} cells (each is simulated every frame)`);
-      if (![...s.center, ...s.size].every(finite) || !s.size.every((v) => v > 0)) throw new RangeError("Explosions: the smoke box needs a finite centre and a size above 0");
-      const smoke = new SimulatedSmoke({
-        size: cells, density: s.density ?? 2.5, albedo: s.albedo, glow: s.glow, wind: s.wind ?? [0.8, 0, 0.3], buoyancy: s.buoyancy ?? 3.5,
-        cooling: s.cooling ?? 0.9, dissipation: s.dissipation ?? 0.2, turbulence: s.turbulence,
-      });
-      smoke.position.set(...s.center);
-      smoke.scale.set(...s.size);
+    if (smokeSettings && box) {
+      const smoke = new SimulatedSmoke(smokeSettings);
+      smoke.position.set(...box.center);
+      smoke.scale.set(...box.size);
       this.add(smoke);
       this.smoke = smoke;
     }
@@ -215,20 +258,25 @@ export class Explosions extends Group {
 
   /**
    * A fire where an explosion of radius `r` (m) went off at `at` (world, m), starting at scene time `time` (the frame's
-   * `f.time`): the next fireball of the pool (the oldest taken over if every one burns), a puff of hot smoke into the
-   * grid (at most 16 a frame), a light while it burns. Throws a `RangeError` before changing anything for a non-finite
-   * position, radius or time, or a radius of 0 or less; a radius over 18 m gives the largest fireball (40 m).
-   * Returns the fireball's index in the pool.
+   * `f.time`): the next fireball of the pool (the oldest taken over if every one burns or waits to start), a puff of
+   * hot smoke into the grid at the first `step` at or after `time` (at most 16 a frame), a light while it burns.
+   * Throws a `RangeError` before changing anything for a position outside ±1,000 km or not three finite numbers, a
+   * radius that is not finite or not above 0, a time outside ±1e9 s, or the group moved off the world's frame. A radius
+   * over 18 m gives the largest fireball (40 m); a tiny one the smallest (5 cm). Returns the fireball's index.
    */
   fire(at: readonly [number, number, number], r: number, time: number): number {
     check("Explosions.fire", at, r, time);
-    const k = this.next;
-    this.next = (k + 1) % this.fireballs.length;
-    if (this.burning(k, time)) this.stats.reused++;
-    const size = Math.min(FIREBALL_SIZE * r, MAX_FIREBALL);
+    this.inWorldFrame("Explosions.fire");
+    const rr = Math.min(r, MAX_FIREBALL / FIREBALL_SIZE);
+    const size = Math.max(FIREBALL_SIZE * rr, MIN_FIREBALL);
     // The centre a little above the explosion's (as the smoke's puff): a ground blast's fireball is not half in the
     // crater, its light not in the hole.
-    const c: [number, number, number] = [at[0], at[1] + 0.3 * Math.min(r, MAX_FIREBALL / FIREBALL_SIZE), at[2]];
+    const c: [number, number, number] = [at[0], at[1] + 0.3 * rr, at[2]];
+    const k = this.next;
+    this.next = (k + 1) % this.fireballs.length;
+    const s = this.started[k];
+    if (!Number.isNaN(s) && time - s < this.life) this.stats.reused++;
+    if (this.puffsDue[k]) this.stats.unpuffed++;
     const f = this.fireballs[k];
     f.position.set(...c);
     f.scale.setScalar(size);
@@ -237,19 +285,7 @@ export class Explosions extends Group {
     this.sizes[k] = size;
     this.centers[k] = c;
     this.order[k] = this.stats.fired++;
-    if (this.smoke) {
-      if (time !== this.puffTime) {
-        this.puffTime = time;
-        this.puffs = 0;
-      }
-      if (this.puffs < MAX_PUFFS) {
-        this.puffs++;
-        this.smoke.puff(c, 0.8 * Math.min(r, MAX_FIREBALL / FIREBALL_SIZE) + 0.3, this.puffOpts);
-      } else {
-        this.stats.unpuffed++;
-      }
-    }
-    this.step(time);
+    this.puffsDue[k] = this.smoke ? { c, radius: 0.8 * rr + 0.3 } : null;
     return k;
   }
 
@@ -257,35 +293,59 @@ export class Explosions extends Group {
    *  they are refused). Returns the voxel edit's result. */
   explode(x: number, y: number, z: number, r: number, time: number): VoxelEdit | { queued: true } {
     check("Explosions.explode", [x, y, z], r, time);
+    this.inWorldFrame("Explosions.explode");
     const e = voxelExplode(x, y, z, r);
     this.fire([x, y, z], r, time);
     return e;
   }
 
-  /** Once a frame (scene time): each light set from its fireball's age (the youngest fireballs have them), what has
-   *  burnt out parked. */
+  /**
+   * Once a frame (scene time): the puffs of fires that have started go into the grid (at most 16 a step, the rest at
+   * the next; dropped while the grid already holds 64 not yet sent, as when the pool is in no synced scene); each light is set from its fireball's age
+   * (the youngest burning fires have them); what has burnt out is parked. Time going back (a restart) ends every fire.
+   */
   step(time: number): void {
-    if (!finite(time)) throw new RangeError("Explosions.step: the time must be a finite number (the frame's f.time)");
-    const alive: number[] = [];
-    for (let k = 0; k < this.fireballs.length; k++) {
-      if (this.burning(k, time)) {
-        alive.push(k);
-      } else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) {
-        this.started[k] = NaN;
-        this.fireballs[k].position.set(...PARK);
-        this.fireballs[k].scale.setScalar(PARKED);
+    within("Explosions.step: the time (the frame's f.time)", time, -MAX_TIME, MAX_TIME);
+    if (this.disposed) return;
+    if (time < this.now) {
+      for (let k = 0; k < this.fireballs.length; k++) {
+        if (this.puffsDue[k]) this.stats.unpuffed++;
+        this.puffsDue[k] = null;
+        this.park(k);
       }
     }
-    alive.sort((a, b) => this.order[b] - this.order[a]);
+    this.now = time;
+    if (this.smoke) {
+      let sent = 0;
+      const held = () => this.smoke!.grid!.pendingSources.reduce((m, a) => m + a.length / 12, 0);
+      for (let k = 0; k < this.fireballs.length; k++) {
+        const p = this.puffsDue[k];
+        if (!p || this.started[k] > time) continue;
+        if (sent >= MAX_PUFFS) break; // the rest at the next step
+        this.puffsDue[k] = null;
+        if (held() < GRID_SOURCES) {
+          sent++;
+          this.smoke.puff(p.c, p.radius, this.puffOpts);
+        } else {
+          this.stats.unpuffed++; // the grid is not being synced (no scene): dropped, not piled up
+        }
+      }
+    }
+    const alive: number[] = [];
+    for (let k = 0; k < this.fireballs.length; k++) {
+      if (this.burning(k, time)) alive.push(k);
+      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.park(k);
+    }
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
-    this.stats.unlit = Math.max(this.stats.unlit, alive.length - this.lights.length);
-    this.litNow.clear();
+    // Lights for the youngest that give light (a fire at age 0 gives none yet: it takes no light from an older one).
+    const glowing = alive.filter((k) => time > this.started[k]).sort((a, b) => this.order[b] - this.order[a]);
+    this.stats.unlit = Math.max(this.stats.unlit, glowing.length - this.lights.length);
+    let lit = 0;
     for (let j = 0; j < this.lights.length; j++) {
       const l = this.lights[j];
-      const k = alive[j];
+      const k = glowing[j];
       const rgb = k === undefined ? [0, 0, 0] : fireLight((time - this.started[k]) / this.life, this.sizes[k]);
-      const scale = k === undefined ? 0 : this.sizes[k] * this.sizes[k] * this.intensity;
       const peak = Math.max(...rgb);
       if (k === undefined || !(peak > 0)) {
         l.intensity = 0;
@@ -293,20 +353,45 @@ export class Explosions extends Group {
         l.position.set(...PARK);
         continue;
       }
-      this.litNow.add(k);
+      lit++;
       l.position.set(...this.centers[k]);
       l.color.setRGB(rgb[0] / peak, rgb[1] / peak, rgb[2] / peak);
-      l.intensity = peak * scale;
+      l.intensity = peak * this.sizes[k] * this.sizes[k] * this.intensity;
       // Its reach: 25 sizes (the light group's sphere; past it the fire's light is under a thousandth of its peak).
       l.distance = 25 * this.sizes[k];
       l.radius = 0.15 * this.sizes[k];
     }
-    this.stats.lit = this.litNow.size;
+    this.stats.lit = lit;
+  }
+
+  /** Takes the pool out of the scene for good: its objects removed, nothing more sent. A fire after it throws. */
+  dispose(): void {
+    this.disposed = true;
+    for (const o of [...this.children]) this.remove(o);
+    this.puffsDue.fill(null);
+    this.parent?.remove(this);
   }
 
   /** Whether fireball `k` burns at `time`. */
   private burning(k: number, time: number): boolean {
     const s = this.started[k];
     return !Number.isNaN(s) && time - s >= 0 && time - s < this.life;
+  }
+
+  private park(k: number): void {
+    this.started[k] = NaN;
+    this.fireballs[k].position.set(...PARK);
+    this.fireballs[k].scale.setScalar(PARKED);
+  }
+
+  /** The pool's positions are the world's: it and every parent at the origin, unrotated, unscaled. */
+  private inWorldFrame(what: string): void {
+    if (this.disposed) throw new Error(`${what}: the pool was disposed`);
+    for (let o: Object3D | null = this; o; o = o.parent) {
+      const p = o.position, q = o.quaternion, sc = o.scale;
+      if (p.x !== 0 || p.y !== 0 || p.z !== 0 || q.x !== 0 || q.y !== 0 || q.z !== 0 || q.w !== 1 || sc.x !== 1 || sc.y !== 1 || sc.z !== 1) {
+        throw new RangeError(`${what}: the pool (and its parents) must stay at the origin, unrotated and unscaled: its positions are the world's`);
+      }
+    }
   }
 }

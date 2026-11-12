@@ -912,6 +912,10 @@ pub fn card_material(color: [f32; 3], intensity: f32) -> GpuMaterial {
 }
 
 /// Builds the GPU scene from the engine's world. Asset files (models, file textures) resolve against `assets`.
+/// The most volumes a scene may show at once: the kernel loops over at most 32 media with a 32-bit mask
+/// (pathtrace.wgsl `media_track`, `media_march`, `media_shadows`). A scene past it is refused, not drawn without some.
+pub const MAX_MEDIA: usize = 32;
+
 pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<Scene> {
     let t0 = web_time::Instant::now();
     let st = &w.settings;
@@ -1592,6 +1596,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     };
                     let b = &grids[k];
                     at = [f32::from_bits(b.z0), f32::from_bits(b.dims[0] | b.dims[1] << 10 | b.dims[2] << 20)];
+                }
+                if media.len() >= MAX_MEDIA {
+                    return Err(anyhow!("object {}: more than {MAX_MEDIA} volumes shown at once (the kernel takes {MAX_MEDIA}; the rest would not be drawn)", n.name));
                 }
                 media.push(MediumGpu { w: medium_rows(m), a: [func, *shape, *homogeneous as u32, 0], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
                 media_nodes.push(*id);
@@ -2308,5 +2315,30 @@ mod instance_tests {
         assert_eq!(node_ranges(&nodes, "lamp").collect::<Vec<_>>(), vec![10..12, 40..90]);
         assert_eq!(node_ranges(&nodes, "box").collect::<Vec<_>>(), vec![12..20]);
         assert_eq!(node_ranges(&nodes, "none").count(), 0);
+    }
+
+    /// More volumes shown than the kernel takes (32): the scene is refused, not drawn without the last ones; hidden
+    /// volumes do not count.
+    #[test]
+    fn a_scene_past_the_kernels_volumes_is_refused() {
+        let build_with = |n: u32, hidden: u32| {
+            let mut w = World::default();
+            w.set_volume_fn("f", "o.extinction = 1.0;".into(), String::new());
+            let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+            w.set_object(1000, "camera".into(), None, world::Kind::Camera(cam), false, false).unwrap();
+            w.set_settings(world::Settings { camera: Some(1000), ..Default::default() });
+            for id in 1..=n + hidden {
+                let kind = world::Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, grid: None };
+                w.set_object(id, format!("v{id}"), None, kind, false, false).unwrap();
+                if id > n {
+                    w.set_visible(id, false).unwrap();
+                }
+            }
+            build(&w, Path::new("."), &crate::default_presets_dir(), None)
+        };
+        assert_eq!(build_with(MAX_MEDIA as u32, 0).unwrap().media.len(), MAX_MEDIA);
+        let e = build_with(MAX_MEDIA as u32 + 1, 0).err().expect("33 volumes refused");
+        assert!(format!("{e:#}").contains("more than 32 volumes"), "{e:#}");
+        assert_eq!(build_with(MAX_MEDIA as u32, 4).unwrap().media.len(), MAX_MEDIA, "hidden ones do not count");
     }
 }
