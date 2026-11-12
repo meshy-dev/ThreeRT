@@ -178,7 +178,8 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                     2 => ("pose", json!({ "body": body, "position": [pos(&mut r, false), r.range(-300.0, 20.0), 3.0], "rotation": [r.unit(), r.unit(), r.unit(), r.unit() + 0.01] })),
                     3 => ("body", json!({ "id": 1 + r.below(6), "position": [r.range(0.0, 12.0), r.range(1.0, 6.0), 3.0], "kind": (["dynamic", "kinematic", "fixed"][r.below(3) as usize]) })),
                     4 => ("collider", json!({ "id": 10 + r.below(12), "body": body, "shape": { "type": "box", "halfExtents": [r.range(0.05, 2.0), 0.2, 0.2] }, "mass": if r.chance(0.3) { 1e7 } else { 10.0 }, "events": true })),
-                    5 => ("joint", json!({ "id": 30 + r.below(8), "a": body, "b": if ids.is_empty() { 2 } else { ids[r.below(ids.len() as u64) as usize] }, "type": (["fixed", "revolute", "spherical", "rope", "prismatic"][r.below(5) as usize]), "length": 1.0, "limits": [-0.5, 0.5] })),
+                    // (Joints to the level's fixed body too: step 10 c1.)
+                    5 => ("joint", json!({ "id": 30 + r.below(8), "a": if r.chance(0.3) { v.level_body().map_or(body, |l| l as u64) } else { body }, "b": if ids.is_empty() { 2 } else { ids[r.below(ids.len() as u64) as usize] }, "type": (["fixed", "revolute", "spherical", "rope", "prismatic"][r.below(5) as usize]), "length": 1.0, "limits": [-0.5, 0.5] })),
                     6 => ("remove", json!({ "body": if r.chance(0.5) { body } else { 1 + r.below(6) }, "collider": if r.chance(0.5) && !cols.is_empty() { cols[0] } else { 10 + r.below(12) }, "joint": 30 + r.below(8) })),
                     7 => ("force", json!({ "body": body, "force": [big(&mut r) * 100.0, 0.0, 0.0], "torque": [0.0, big(&mut r) * 100.0, 0.0] })),
                     8 => ("ray", json!({ "origin": [r.range(0.0, 12.0), 8.0, r.range(0.0, 6.0)], "direction": [r.range(-0.2, 0.2), -1.0, 0.0], "all": r.chance(0.5), "skip": body })),

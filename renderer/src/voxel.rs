@@ -175,7 +175,7 @@ struct VoxelObject {
 
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
-pub const EXPECTED_SCRIPT: u64 = 0x0235_ba72_5c92_2a63;
+pub const EXPECTED_SCRIPT: u64 = 0x2b38_c79e_27e8_9063;
 
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
@@ -297,6 +297,8 @@ pub struct VoxelWorld {
     /// the loose parts that are bodies (by their index in `objects`), each palette entry's density, the cap on
     /// bodies, and how many it retired.
     physics: bool,
+    /// The level's fixed body (ROADMAP § 6 step 10 c1): its colliders hang on it, so joints can hold to the level.
+    level_body: Option<u32>,
     colliders: Vec<Option<u32>>,
     bodies: BTreeMap<usize, VoxelBody>,
     density: Vec<f32>,
@@ -339,6 +341,12 @@ impl VoxelWorld {
         Ok(())
     }
 
+    /// The level's fixed body (its colliders hang on it; joints to the level hold to it), once a level that collides is
+    /// loaded.
+    pub fn level_body(&self) -> Option<u32> {
+        self.level_body
+    }
+
     fn id(&mut self) -> u32 {
         if self.next_id == 0 {
             self.next_id = FIRST_ID;
@@ -361,6 +369,7 @@ impl VoxelWorld {
     fn live_ids(&self) -> std::collections::HashSet<u32> {
         let mut u: std::collections::HashSet<u32> = self.objects.iter().flatten().flat_map(|o| o.parts.iter().flat_map(|p| [p.1, p.2])).collect();
         u.extend(self.colliders.iter().flatten());
+        u.extend(self.level_body);
         u.extend(self.bodies.values().flat_map(|b| [b.body, b.collider]));
         u
     }
@@ -527,6 +536,10 @@ impl VoxelWorld {
         self.floor = self.level.as_ref().map_or(f32::MIN, |l| l.objects.iter().flatten().map(|o| o.lo[1]).min().map_or(f32::MIN, |y| y as f32 * size - 100.0));
         if self.physics {
             let p = ph.get_or_insert_with(Default::default);
+            // The level's fixed body first (at the origin, unturned: its colliders keep their world poses).
+            let lb = self.id();
+            p.bridge().engine_level_body(lb).map_err(|e| anyhow!(e))?;
+            self.level_body = Some(lb);
             let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
             for k in 0..self.objects.len() {
                 if d.objects.get(k).is_some_and(|o| o.collide == Some(false)) {
@@ -589,7 +602,7 @@ impl VoxelWorld {
         };
         let id = self.id();
         let (position, rotation) = collider_pose(&place, self.size);
-        match made.and_then(|(shape, n)| p.bridge().engine_collider(id, None, &ColliderDesc { position, rotation, friction: FRICTION, ..ColliderDesc::new(physics_core::Shape::SharedVoxels(shape)) }).map(|()| n)) {
+        match made.and_then(|(shape, n)| p.bridge().engine_collider(id, self.level_body, &ColliderDesc { position, rotation, friction: FRICTION, ..ColliderDesc::new(physics_core::Shape::SharedVoxels(shape)) }).map(|()| n)) {
             Ok(n) => {
                 if self.colliders.len() <= k {
                     self.colliders.resize(k + 1, None);
@@ -1107,6 +1120,10 @@ impl VoxelWorld {
         }
         v.colliders = vec![None; blocks.len()];
         let p = ph.get_or_insert_with(Default::default);
+        // (The level's fixed body first, as a loaded level has.)
+        let lb = v.id();
+        p.bridge().engine_level_body(lb).unwrap();
+        v.level_body = Some(lb);
         let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
         for k in 0..blocks.len() {
             v.collide(p, k, &mut full, &mut shapes);
@@ -2620,6 +2637,42 @@ mod tests {
         assert_eq!(v.bodies(), 0);
         let gone = take(&mut ph, &mut w);
         assert!(!gone.is_empty() && gone.iter().all(|s| !s), "its contacts end: {gone:?}");
+    }
+
+    /// The level's colliders hang on its fixed body (step 10 c1): a scene body hangs from the level by a rope (2 m,
+    /// held within 2 cm); to a ray and to contacts the level is still on no body (`body` null: `engineColliders` with no
+    /// `body`, as before); a body resting on it falls asleep.
+    #[test]
+    fn the_level_has_a_fixed_body_that_joints_hold_to() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true)], &mut w, &mut ph);
+        let level = v.level_body().expect("a level body");
+        assert!(level >= physics_core::bridge::ENGINE_IDS);
+        let p = ph.as_mut().unwrap();
+        assert_eq!(p.bridge().engine_level(), Some(level));
+        // A ray down at the slab: the level, on no body.
+        let hit = p.call(&mut w, "ray", &serde_json::json!({ "origin": [3.0, 5.0, 3.0], "direction": [0, -1, 0] })).unwrap();
+        assert!(hit["collider"].as_u64().is_some() && hit["body"].is_null(), "{hit}");
+        // A box resting on it, listening: its contact's other end is on no body; it falls asleep.
+        p.call(&mut w, "body", &serde_json::json!({ "id": 1, "position": [1.0, 0.6, 1.0] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 1, "body": 1, "shape": { "type": "box", "halfExtents": [0.2, 0.2, 0.2] }, "events": true })).unwrap();
+        // A ball hanging from the level by a rope 2 m long, from a point 3 m above the slab's top.
+        p.call(&mut w, "body", &serde_json::json!({ "id": 2, "position": [4.0, 3.4, 4.0] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 2, "body": 2, "shape": { "type": "sphere", "radius": 0.1 } })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 3, "a": level, "b": 2, "type": "rope", "length": 2.0, "anchor1": [4.0, 3.4, 4.0] })).unwrap();
+        for _ in 0..240 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        let p = ph.as_mut().unwrap();
+        let ball = p.call(&mut w, "state", &serde_json::json!({ "body": 2 })).unwrap();
+        let y = ball["position"][1].as_f64().unwrap();
+        assert!((3.4 - y - 2.0).abs() < 0.02, "hangs 2 m below its anchor: {ball}");
+        let contacts = p.call(&mut w, "contacts", &serde_json::json!({})).unwrap();
+        let mine: Vec<_> = contacts.as_array().unwrap().iter().filter(|c| c["bodyA"].as_u64() == Some(1) || c["bodyB"].as_u64() == Some(1)).collect();
+        assert!(!mine.is_empty() && mine.iter().all(|c| c["bodyA"].is_null() || c["bodyB"].is_null()), "the level's end on no body: {contacts}");
+        let crate_ = p.call(&mut w, "state", &serde_json::json!({ "body": 1 })).unwrap();
+        assert_eq!(crate_["sleeping"], serde_json::json!(true), "{crate_}");
     }
 
     /// The same body as one more check: a slab and a bar cut loose (336 voxels of 1,000 kg/m³).

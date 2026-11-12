@@ -150,6 +150,43 @@ test("a voxel body is an object: the same one for the same body, with the physic
   }
 });
 
+test("a rope to the level (`engineColliders`): made on the level's fixed body once the level is loaded, its anchor in the world's frame", async () => {
+  const { voxelLevel } = await import("../src/native.ts");
+  const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  let levelBody = -1;
+  (engine as unknown as { voxelLevelBody: () => number }).voxelLevelBody = () => levelBody;
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const rope = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(4, 6, 1) });
+    scene.add(camera, lamp, rope);
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => c[0] === "joint"), [], "no level yet: no joint");
+    // The level loaded (its body made): the next sync makes the joint on it.
+    levelBody = 2 ** 30 + 1;
+    engine.calls.length = 0;
+    binding.sync();
+    const joint = engine.physicsCalls().find((c) => c[0] === "joint");
+    assert.ok(joint, "made once the level is there");
+    assert.deepEqual([joint![1].a, joint![1].type, joint![1].length, joint![1].anchor1], [levelBody, "rope", 2, [4, 6, 1]]);
+    // Its length changed: in place.
+    rope.length = 1.5;
+    rope.needsUpdate = true;
+    engine.calls.length = 0;
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().map((c) => [c[0], c[1].length]), [["joint_set", 1.5]]);
+  } finally {
+    g.__engine = before;
+  }
+});
+
 test("a voxel body in the scene's physics: a ray's hit has its object, a joint takes it, its contacts arrive, and it goes with a reason", async () => {
   const { voxelLevel, voxelBodies, VoxelBody } = await import("../src/native.ts");
   const { BoxGeometry, engineColliders, FixedJoint, Mesh, PerspectiveCamera, Raycaster, Scene, SceneBinding, Vector3 } = await import("@threert/scene");

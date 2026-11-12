@@ -12,7 +12,7 @@
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
 // all of it off (no collider; loose parts fall straight down until they rest, as before); `collide: false` on an
 // object leaves that object without a collider.
-import { bindBody, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
+import { bindBody, engineColliders, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
 
 export type Hardness = "soft" | "medium" | "hard" | "indestructible";
 
@@ -340,11 +340,29 @@ function refresh(): void {
   }
 }
 
+/** The voxel level's fixed body (none before the level is loaded); the epoch moves when it changes. */
+let level: number | undefined;
+let epoch = 0;
+function levelBody(): number | undefined {
+  const id = engine()?.voxelLevelBody?.();
+  const now = id !== undefined && id >= 0 ? id : undefined;
+  if (now !== level) {
+    level = now;
+    epoch++;
+  }
+  return level;
+}
+
 /** The registry, known to `@threert/scene` (hits, joints, the frame's events). */
 function register(): void {
   setEngineBodies({
     object: (body) => registry.get(body) ?? recentlyGone.get(body)?.o ?? (body >= 2 ** 30 ? (refresh(), registry.get(body) ?? recentlyGone.get(body)?.o) : undefined),
-    bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
+    // (The voxel level is `engineColliders`: in a joint, its fixed body, once the level is loaded.)
+    bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : o === engineColliders ? levelBody() : undefined),
+    epoch: () => {
+      levelBody();
+      return epoch;
+    },
     frame: () => {
       // (Those that went before the last frame's events have had their contacts' ends delivered.)
       frameCount++;
@@ -372,6 +390,7 @@ interface NativeEngine {
   voxelBodyEdit?: (body: number, d: object) => string;
   voxelContacts?: (body: number, on: boolean) => void;
   voxelGone?: () => string;
+  voxelLevelBody?: () => number;
   physics?: (op: string, args: object) => string;
   physicsPoses?: () => Float32Array;
 }

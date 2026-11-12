@@ -361,6 +361,8 @@ export class SceneBinding {
   private readonly joints = new Map<Joint, { id: number; key: string; shape: string } | null>();
   /** A joint or a body came, went or changed: the joints are looked at again. */
   private jointsDirty = false;
+  /** The engine bodies' `epoch` at the last look at the joints. */
+  private engineEpoch = 0;
   /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
   private bodyError: unknown = null;
   /** Objects with bodies under a parent scaled anew in this sync: checked once every transform is sent. */
@@ -813,12 +815,17 @@ export class SceneBinding {
       stats.updated++;
     }
     // A joint holds while it and both its objects' bodies are in the scene; whatever it was made from changing (a body
-    // made anew included) makes it anew.
+    // made anew included) makes it anew. (The engine's bodies changing what stands for what: looked at again too.)
+    const engine = getEngineBodies();
+    const epoch = engine?.epoch?.() ?? 0;
+    if (epoch !== this.engineEpoch) {
+      this.engineEpoch = epoch;
+      this.jointsDirty = true;
+    }
     const joints = this.jointsDirty ? this.joints : [];
     this.jointsDirty = false;
-    // (An object that stands for one of the engine's bodies, a voxel body, is taken as that body: its anchor is in the
-    // body's own frame, unscaled.)
-    const engine = getEngineBodies();
+    // (An object that stands for one of the engine's bodies, a voxel body or the voxel level, is taken as that body: its
+    // anchor is in the body's own frame, unscaled; the level's frame is the world's.)
     const bodyOf = (o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined => {
       if (!o) return undefined;
       const id = engine?.bodyOf(o);

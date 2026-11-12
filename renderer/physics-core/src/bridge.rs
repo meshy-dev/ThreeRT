@@ -52,6 +52,10 @@ pub struct Bridge {
     colliders: BTreeMap<u32, ColliderId>,
     /// The world's collider -> the caller's id of it and of its body.
     collider_ids: BTreeMap<ColliderId, (u32, Option<u32>)>,
+    /// The voxel level's fixed body (`engine_level_body`): its colliders hang on it, so a joint can hold to the level;
+    /// to queries and contacts they are on no body, as the level's colliders always were (`hit.object` is
+    /// `engineColliders`, with no `body`).
+    level_body: Option<u32>,
     /// The pairs of colliders (the caller's ids, lower first) touching as reported, with their bodies: a start is
     /// reported once (a collider edited in place, taken out and put back, starts again without having ended), and a
     /// collider that goes ends its pairs (`ended`; the world's own end events of a collider it no longer has are lost).
@@ -163,6 +167,7 @@ impl Default for Bridge {
             body_ids: BTreeMap::new(),
             colliders: BTreeMap::new(),
             collider_ids: BTreeMap::new(),
+            level_body: None,
             touching: BTreeMap::new(),
             ended: vec![],
             joints: BTreeMap::new(),
@@ -534,8 +539,27 @@ impl Bridge {
         };
         let c = self.core.add_collider(owner, d)?;
         self.colliders.insert(id, c);
-        self.collider_ids.insert(c, (id, body));
+        // (The level's colliders are on no body to queries and contacts.)
+        self.collider_ids.insert(c, (id, body.filter(|&b| Some(b) != self.level_body)));
         Ok(())
+    }
+
+    /// The voxel level's fixed body (at the origin, unturned): the engine hangs the level's colliders on it
+    /// (`engine_collider` with this body) so that joints can hold to the level, as Rapier hangs static colliders on a
+    /// fixed body. To queries and contacts its colliders are on no body (the level has no `body`). A level loaded
+    /// again makes it anew (the old one goes, with its colliders and joints).
+    pub fn engine_level_body(&mut self, id: u32) -> Result<(), String> {
+        if let Some(old) = self.level_body.take() {
+            self.engine_remove(Some(old), None);
+        }
+        self.engine_body(id, &BodyDesc { kind: BodyKind::Fixed, ..Default::default() })?;
+        self.level_body = Some(id);
+        Ok(())
+    }
+
+    /// The level's fixed body, if a level with colliders is loaded.
+    pub fn engine_level(&self) -> Option<u32> {
+        self.level_body
     }
 
     /// An engine voxel collider's cells changed (`Physics::edit_voxels`). Returns the cells it has; with none left
@@ -675,7 +699,7 @@ impl Bridge {
     fn hit(&self, h: Option<Hit>) -> Value {
         match h {
             Some(h) => json!({
-                "collider": self.collider_ids.get(&h.collider).map(|c| c.0), "body": h.body.and_then(|b| self.body_ids.get(&b)), "object": h.body.and_then(|b| self.drives.get(&b)).map(|d| d.0),
+                "collider": self.collider_ids.get(&h.collider).map(|c| c.0), "body": h.body.and_then(|b| self.body_ids.get(&b)).filter(|&&b| Some(b) != self.level_body), "object": h.body.and_then(|b| self.drives.get(&b)).map(|d| d.0),
                 "distance": h.distance, "point": h.point, "normal": h.normal,
             }),
             None => Value::Null,

@@ -160,12 +160,15 @@ export function usePhysicsEngine(e: PhysicsEngine): void {
 /**
  * @internal The engine's own bodies as objects (`@threert/voxel` registers its voxel bodies): the object of an engine
  * body id, the engine body an object stands for (joints take it), and a call once a frame when the binding delivers
- * the physics events, which says whether any of them listens for contacts.
+ * the physics events, which says whether any of them listens for contacts. `epoch`: a number that changes whenever
+ * what `bodyOf` answers may have (the level's body made, a joint's body changed by the engine): the binding then looks
+ * at its joints again.
  */
 export interface EngineBodies {
   object(body: number): Object3D | undefined;
   bodyOf(o: Object3D): number | undefined;
   frame(): boolean;
+  epoch?(): number;
 }
 let engineBodies: EngineBodies | null = null;
 
