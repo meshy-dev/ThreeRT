@@ -1,0 +1,39 @@
+# Cargo's downloads and the target directories of the given workspaces, kept between runs with GitHub's own cache
+# action. (The organization's policy allows GitHub's actions and verified creators' only, so CI uses no other.)
+#
+# The key: the runner's OS, the compiler, the job, `key` (what else the build depends on), and the lock files of the
+# workspaces. A run whose lock files changed starts from the newest cache of the same job, compiler and `key`, and
+# saves its own; a run with the same lock files saves nothing. Cargo rebuilds the checkout's own crates each run (their
+# sources are newer than the cached build), so what the cache saves is the dependencies.
+name: cargo cache
+description: Keeps Cargo's registry and the workspaces' target directories between runs (actions/cache).
+inputs:
+  workspaces:
+    description: Directories with a Cargo.lock and a target directory, one a line.
+    required: true
+  key:
+    description: More for the key (a hash of sources the cached build depends on).
+    default: ""
+runs:
+  using: composite
+  steps:
+    - id: k
+      shell: bash
+      env:
+        WORKSPACES: ${{ inputs.workspaces }}
+      run: |
+        paths=$'~/.cargo/registry/index\n~/.cargo/registry/cache\n~/.cargo/git/db'
+        locks=()
+        for w in $WORKSPACES; do
+          paths+=$'\n'"$w/target"
+          locks+=("$w/Cargo.lock")
+        done
+        { echo 'paths<<END_OF_PATHS'; echo "$paths"; echo END_OF_PATHS; } >> "$GITHUB_OUTPUT"
+        echo "rustc=$(rustc -vV | sed -n 's/^commit-hash: //p' | cut -c1-12)" >> "$GITHUB_OUTPUT"
+        echo "locks=$(cat "${locks[@]}" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      with:
+        path: ${{ steps.k.outputs.paths }}
+        key: cargo-${{ runner.os }}-${{ steps.k.outputs.rustc }}-${{ github.job }}-${{ inputs.key }}-${{ steps.k.outputs.locks }}
+        restore-keys: |
+          cargo-${{ runner.os }}-${{ steps.k.outputs.rustc }}-${{ github.job }}-${{ inputs.key }}-
