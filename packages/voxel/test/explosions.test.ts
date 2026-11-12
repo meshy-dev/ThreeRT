@@ -4,16 +4,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PerspectiveCamera, RecordingEngine, Scene, SceneBinding } from "@threert/scene";
-import { Explosions, FIRE_LIGHT, MAX_FIRE_LIGHTS, MAX_PUFFS, fireLight } from "../src/index.ts";
+import { Explosions, FIRE_LIGHT, FIRE_LIGHT_SIZES, MAX_FIRE_LIGHTS, MAX_PUFFS, fireLight } from "../src/index.ts";
 
 const smoke = { center: [0, 5, 0] as [number, number, number], size: [20, 10, 20] as [number, number, number], cells: [40, 20, 40] as [number, number, number] };
 
-test("the fire light: the table's rows, linear between them, nothing before the fire or after its life", () => {
-  for (const [u, r, g, b] of FIRE_LIGHT.slice(1, -1)) assert.deepEqual(fireLight(u).map((v) => +v.toFixed(9)), [r, g, b]);
+test("the fire light: the table's rows at the measured sizes, linear in age between them, in log size between sizes, nothing before the fire or after its life", () => {
+  const r9 = (v: number[]) => v.map((x) => +x.toFixed(9));
+  for (const row of FIRE_LIGHT.slice(1, -1)) FIRE_LIGHT_SIZES.forEach((d, j) => assert.deepEqual(r9(fireLight(row[0], d)), r9([...(row[j + 1] as readonly number[])]), `u ${row[0]} size ${d}`));
   const [a, c] = [FIRE_LIGHT[1], FIRE_LIGHT[2]];
-  const mid = fireLight((a[0] + c[0]) / 2);
-  assert.ok(Math.abs(mid[0] - (a[1] + c[1]) / 2) < 1e-9);
-  for (const u of [-1, 0, 1, 2, NaN, Infinity]) assert.deepEqual(fireLight(u), [0, 0, 0], `u ${u}`);
+  const mid = fireLight((a[0] + c[0]) / 2, FIRE_LIGHT_SIZES[0]);
+  assert.ok(Math.abs(mid[0] - (a[1][0] + c[1][0]) / 2) < 1e-9);
+  // Between two sizes: at their geometric mean, the mean of the two.
+  const [d0, d1] = [FIRE_LIGHT_SIZES[1], FIRE_LIGHT_SIZES[2]];
+  const g = fireLight(c[0], Math.sqrt(d0 * d1));
+  assert.ok(Math.abs(g[0] - (c[2][0] + c[3][0]) / 2) < 1e-9);
+  // Past the end sizes: the end sizes'.
+  assert.deepEqual(fireLight(c[0], 0.1), fireLight(c[0], FIRE_LIGHT_SIZES[0]));
+  assert.deepEqual(fireLight(c[0], 40), fireLight(c[0], FIRE_LIGHT_SIZES[FIRE_LIGHT_SIZES.length - 1]));
+  for (const u of [-1, 0, 1, 2, NaN, Infinity]) assert.deepEqual(fireLight(u, 2), [0, 0, 0], `u ${u}`);
+  for (const d of [0, -1, NaN]) assert.deepEqual(fireLight(0.2, d), [0, 0, 0], `size ${d}`);
 });
 
 test("the pool: the next fireball each fire, the oldest taken over when every one burns, lights for the youngest", () => {
@@ -39,7 +48,7 @@ test("the pool: the next fireball each fire, the oldest taken over when every on
   assert.deepEqual(at, [3, 4]);
   // Its intensity: the table at its age, times its size² and the fireball's intensity (30,000 nits).
   const l = x.lights.find((q) => q.position.x === 3)!;
-  const rgb = fireLight(0.15 / 1.6), peak = Math.max(...rgb);
+  const rgb = fireLight(0.15 / 1.6, 4.4), peak = Math.max(...rgb);
   assert.ok(Math.abs(l.intensity - peak * 4.4 * 4.4 * 30000) < 1e-3);
   assert.ok(Math.abs(l.color.g - rgb[1] / peak) < 1e-9);
   // Burnt out: parked, the lights off.

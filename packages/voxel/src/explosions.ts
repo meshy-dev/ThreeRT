@@ -28,31 +28,53 @@ export const MAX_FIREBALL = 40;
 const PARK: [number, number, number] = [0, -10000, 0];
 const PARKED = 1e-3;
 
+/** The fireball sizes (full size, m) the fire light was measured at. */
+export const FIRE_LIGHT_SIZES = [1.1, 2.2, 4.4, 8.8] as const;
+
+type Rgb = readonly [number, number, number];
 /**
  * The fire light's luminous intensity over the fireball's life, per m² of its full size squared and per nit of its
- * `intensity` (a row: age / life, then cd for r, g, b). Measured against the offline renderer: the light that gives a
- * floor and a wall near the fireball what the fireball's own emission gives them there (tools/bench-voxel-fire.ts
- * --only calibrate; docs/VOXEL.md, "Fire and smoke"). Linear between rows; 0 past the last.
+ * `intensity`: a row is age / life, then (r, g, b) cd for each of `FIRE_LIGHT_SIZES`. Measured against the offline
+ * renderer: the light at the fireball's centre that gives a floor and a wall near it what the fireball's own emission
+ * gives them there (tools/bench-voxel-fire.ts --only calibrate; docs/VOXEL.md, "Fire and smoke"). Not one curve
+ * scaled by the size²: a larger fireball's hot core lies under more of its own smoke, so its light falls sooner.
+ * Linear in age between rows, in log size between sizes (the end sizes past them); 0 before the fire and after it.
  */
-export const FIRE_LIGHT: readonly (readonly [number, number, number, number])[] = [
-  [0, 0, 0, 0],
-  [0.05, 0.6, 0.45, 0.25],
-  [0.15, 1.0, 0.7, 0.35],
-  [0.3, 1.0, 0.6, 0.25],
-  [0.5, 0.7, 0.35, 0.12],
-  [0.7, 0.35, 0.14, 0.04],
-  [0.9, 0.08, 0.03, 0.01],
-  [1, 0, 0, 0],
+export const FIRE_LIGHT: readonly (readonly [number, Rgb, Rgb, Rgb, Rgb])[] = [
+  [0, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+  [0.02, [0.000862, 0.000656, 0.000383], [0.00152, 0.00113, 0.000641], [0.00162, 0.00123, 0.000718], [0.00309, 0.00225, 0.00126]],
+  [0.05, [0.00291, 0.00217, 0.00124], [0.00476, 0.00351, 0.00199], [0.00596, 0.00431, 0.0024], [0.00788, 0.00562, 0.00308]],
+  [0.1, [0.00662, 0.00475, 0.00262], [0.00958, 0.00697, 0.00388], [0.0121, 0.00849, 0.0046], [0.0121, 0.00805, 0.00413]],
+  [0.15, [0.00986, 0.00685, 0.00367], [0.0129, 0.00905, 0.00486], [0.0152, 0.0101, 0.00524], [0.0132, 0.00804, 0.00373]],
+  [0.2, [0.0122, 0.00812, 0.00419], [0.0149, 0.00983, 0.00501], [0.0161, 0.0101, 0.00489], [0.0126, 0.00708, 0.00299]],
+  [0.3, [0.0136, 0.00838, 0.00392], [0.0153, 0.00911, 0.0041], [0.014, 0.00781, 0.00323], [0.00864, 0.00418, 0.00143]],
+  [0.4, [0.012, 0.00665, 0.00273], [0.0126, 0.0068, 0.00266], [0.0102, 0.00508, 0.0018], [0.00477, 0.00202, 0.000567]],
+  [0.5, [0.00858, 0.0043, 0.00147], [0.009, 0.00435, 0.00143], [0.00601, 0.00264, 0.000763], [0.00204, 0.000756, 0.000176]],
+  [0.6, [0.00495, 0.00219, 0.000591], [0.00552, 0.00238, 0.000622], [0.00299, 0.00115, 0.00026], [0.000681, 0.00022, 0.0000448]],
+  [0.7, [0.00234, 0.000885, 0.000179], [0.00298, 0.00114, 0.000235], [0.00122, 0.000407, 0.0000776], [0.000186, 0.0000526, 0.00000949]],
+  [0.8, [0.000989, 0.000331, 0.0000596], [0.00133, 0.000449, 0.0000811], [0.000399, 0.000111, 0.0000199], [0.000031, 0.00000687, 0.0000012]],
+  [0.9, [0.000394, 0.00011, 0.0000194], [0.000429, 0.000119, 0.0000208], [0.0000941, 0.0000217, 0.00000379], [0.00000445, 7.18e-7, 1.24e-7]],
+  [1, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
 ];
 
-/** The table at `u` (age / life): rgb cd per m² of size² per nit. */
-export function fireLight(u: number): [number, number, number] {
-  if (!(u > 0) || u >= 1) return [0, 0, 0];
+/** The table at `u` (age / life) for a fireball of full size `size` (m): rgb cd per m² of size² per nit. */
+export function fireLight(u: number, size: number): [number, number, number] {
+  if (!(u > 0) || u >= 1 || !(size > 0)) return [0, 0, 0];
   let k = 1;
   while (k < FIRE_LIGHT.length - 1 && FIRE_LIGHT[k][0] < u) k++;
   const a = FIRE_LIGHT[k - 1], b = FIRE_LIGHT[k];
   const s = (u - a[0]) / (b[0] - a[0]);
-  return [a[1] + s * (b[1] - a[1]), a[2] + s * (b[2] - a[2]), a[3] + s * (b[3] - a[3])];
+  const at = (j: number): Rgb => {
+    const p = a[j + 1] as Rgb, q = b[j + 1] as Rgb;
+    return [p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1]), p[2] + s * (q[2] - p[2])];
+  };
+  const n = FIRE_LIGHT_SIZES.length;
+  const x = Math.min(Math.max(Math.log(size), Math.log(FIRE_LIGHT_SIZES[0])), Math.log(FIRE_LIGHT_SIZES[n - 1]));
+  let j = 0;
+  while (j < n - 2 && Math.log(FIRE_LIGHT_SIZES[j + 1]) < x) j++;
+  const t = (x - Math.log(FIRE_LIGHT_SIZES[j])) / (Math.log(FIRE_LIGHT_SIZES[j + 1]) - Math.log(FIRE_LIGHT_SIZES[j]));
+  const p = at(j), q = at(j + 1);
+  return [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2])];
 }
 
 export interface ExplosionSmoke {
@@ -250,7 +272,7 @@ export class Explosions extends Group {
     for (let j = 0; j < this.lights.length; j++) {
       const l = this.lights[j];
       const k = alive[j];
-      const rgb = k === undefined ? [0, 0, 0] : fireLight((time - this.started[k]) / this.life);
+      const rgb = k === undefined ? [0, 0, 0] : fireLight((time - this.started[k]) / this.life, this.sizes[k]);
       const scale = k === undefined ? 0 : this.sizes[k] * this.sizes[k] * this.intensity;
       const peak = Math.max(...rgb);
       if (k === undefined || !(peak > 0)) {

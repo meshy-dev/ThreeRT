@@ -1,7 +1,7 @@
 // An explosion's fire and smoke (ROADMAP § 6 step 10 b; docs/VOXEL.md, "Fire and smoke"): what the fire light must be,
 // how the live frame compares with our offline render, and what it costs on the benchmark level.
 //
-//  calibrate  games/voxel-level/level-fire.game.ts `fireRoom`: a fireball of 2.2 m and of 8.8 m burning over a grey
+//  calibrate  games/voxel-level/level-fire.game.ts `fireRoom`: fireballs of 1.1, 2.2, 4.4 and 8.8 m burning over a grey
 //             floor before a grey wall, offline at ages through its life, against a 1,000 cd point light at its centre:
 //             per channel the floor's and the wall's radiance near it, fire over light x 1,000 cd, per m² of the
 //             fireball's size² and per nit of its intensity: the rows of `FIRE_LIGHT`.
@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fireRoomView, fireShotView } from "../games/voxel-level/level-fire.game.ts";
-import { FIRE_LIGHT, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
+import { FIRE_LIGHT, FIRE_LIGHT_SIZES, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
 import { bundleGame } from "./bundle-game.ts";
 import { frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
 import { generate } from "./voxel-level/generate.ts";
@@ -160,10 +160,10 @@ function live(name: string, b: string, o: { env?: Record<string, string>; frameL
 }
 
 if (only.includes("calibrate")) {
-  const ages = [0.05, 0.15, 0.3, 0.5, 0.7, 0.9], life = 1.6, intensity = 30000, W = 640, H = 360;
+  const ages = [0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9], life = 1.6, intensity = 30000, W = 640, H = 360;
   const rows: Record<string, unknown>[] = [];
   console.log(`\ncalibrate: the fireball's equivalent point light (cd per m² of size² per nit; floor | wall), offline ${SPP} spp`);
-  for (const d of [2.2, 8.8]) {
+  for (const d of FIRE_LIGHT_SIZES) {
     const v = fireRoomView(d);
     const proj = projector(v.pos, v.target, v.fov);
     const floor = box(corners([1.2 * d, 0, -0.4 * d], [2.0 * d, 0, 0.4 * d]).map(proj));
@@ -180,22 +180,22 @@ if (only.includes("calibrate")) {
       console.log(`  ${String(d).padStart(4)} m  u ${u.toFixed(2)}  ${f.map((x) => x.toFixed(3)).join(" ")} | ${w.map((x) => x.toFixed(3)).join(" ")}`);
     }
   }
-  // The table: per age the mean over sizes and surfaces.
-  const ages2 = [...new Set(rows.map((r) => r.u as number))];
-  const table = ages2.map((u) => {
-    const at = rows.filter((r) => r.u === u);
-    const m = [0, 1, 2].map((c) => at.reduce((s, r) => s + (r.floor as number[])[c] + (r.wall as number[])[c], 0) / (2 * at.length));
-    return [u, ...m.map((x) => +x.toPrecision(3))];
-  });
+  // The table: per age and size the mean of the floor's and the wall's.
+  const table = ages.map((u) => [u, ...FIRE_LIGHT_SIZES.map((d) => {
+    const r = rows.find((x) => x.u === u && x.size === d)!;
+    return [0, 1, 2].map((c) => +(((r.floor as number[])[c] + (r.wall as number[])[c]) / 2).toPrecision(3));
+  })]);
   result.calibrate = { rows, table, current: FIRE_LIGHT };
-  console.log(`  measured table (u, r, g, b): ${JSON.stringify(table)}`);
+  console.log(`  measured table (u, then rgb per size ${FIRE_LIGHT_SIZES.join(", ")} m):`);
+  for (const row of table) console.log(`    ${JSON.stringify(row)},`);
 }
 
-/** The fire shot's regions: the fireball at full size, the street before it, and 3 x 3. */
-function shotRegions(r = 4) {
+/** The fire shot's regions at the fireball's age (s; it grows as the root of age / life): the fireball's box, the
+ *  street below it, and 3 x 3. */
+function shotRegions(age: number, r = 4, life = 1.6) {
   const v = fireShotView(1);
   const proj = projector(v.pos, v.target, v.fov);
-  const c = [v.spot[0], v.spot[1] + 0.3 * r, v.spot[2]], rad = (FIREBALL_SIZE * r) / 2;
+  const c = [v.spot[0], v.spot[1] + 0.3 * r, v.spot[2]], rad = ((FIREBALL_SIZE * r) / 2) * Math.sqrt(Math.min(age / life, 1));
   const fire = box(corners([c[0] - rad, c[1] - rad, c[2] - rad], [c[0] + rad, c[1] + rad, c[2] + rad]).map(proj));
   const regions: [string, number[]][] = [["all", [0, 0, 1, 1]], ["fireball", fire], ["street", [clamp01(fire[0] - 0.15), fire[3], clamp01(fire[2] + 0.15), 1]]];
   if (fire[3] >= 0.98) regions.pop();
@@ -203,12 +203,12 @@ function shotRegions(r = 4) {
   return regions;
 }
 
-function judge(ref: string, test: string) {
-  return Object.fromEntries(shotRegions().map(([k, reg]) => [k, compare(ref, test, k === "all" ? undefined : reg)]));
+function judge(ref: string, test: string, age: number) {
+  return Object.fromEntries(shotRegions(age).map(([k, reg]) => [k, compare(ref, test, k === "all" ? undefined : reg)]));
 }
 function report(tag: string, j: Record<string, M>) {
   const short = ["all", "fireball", "street"].filter((k) => j[k]).map((k) => `${k} ${fmt(j[k])}${meets(j[k]) ? "" : " ✗"}`).join("  ");
-  const grid = Object.entries(j).filter(([k]) => k.startsWith("r")).map(([k, m]) => `${k} ${m.mean_delta_e.toFixed(1)}/${m.ssim.toFixed(2)}`).join(" ");
+  const grid = Object.entries(j).filter(([k]) => k.startsWith("r")).map(([k, m]) => `${k} ${m.mean_delta_e.toFixed(1)}/${m.p99_delta_e.toFixed(0)}/${m.ssim.toFixed(2)}`).join(" ");
   console.log(`  ${tag.padEnd(26)} ${short}\n  ${"".padEnd(26)} ${grid}`);
 }
 
@@ -218,10 +218,12 @@ if (only.includes("quality")) {
   const refB = await bundle("shot-ref", "games/voxel-level/level-fire.game.ts", "fireShot", { light: false, at });
   const litB = await bundle("shot-lit", "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, at });
   console.log(`\nquality: the live frame (lockstep 60 fps, scale ${SCALE}) against our offline render (${SPP} spp), the 4 m explosion's fire; ΔE mean / p99 / SSIM / luminance (✗: ΔE > 3 or SSIM < 0.9)`);
-  console.log(`  regions: ${shotRegions().slice(0, 3).map(([k, r]) => `${k} ${r.map((x) => x.toFixed(3)).join(",")}`).join("; ")}`);
+  for (const a of ages) console.log(`  regions at ${a} s: ${shotRegions(a).slice(1, 3).map(([k, r]) => `${k} ${r.map((x) => x.toFixed(3)).join(",")}`).join("; ")} (cells: ΔE mean / p99 / SSIM)`);
   const truths = ages.map((a) => offline(`shot-${a}`, refB, at + a));
   const rows: Record<string, unknown>[] = [];
-  for (const [tag, b] of [["with the fire light", litB], ["without", refB]] as const) {
+  // The fire light twice (the live view's run-to-run spread: its radiance cache trains in an order the GPU decides).
+  const lives: string[][] = [];
+  for (const [tag, b] of [["with the fire light", litB], ["with it again", litB], ["without", refB]] as const) {
     const s = live(`shot-${tag}`, b);
     const shots: string[] = [];
     for (const a of ages) {
@@ -231,18 +233,24 @@ if (only.includes("quality")) {
       await s.frames(1, png);
       shots.push(png);
     }
-    const fireLine = s.lines.find((l) => l.startsWith("fire "));
+    const fireLine = s.lines.find((l) => l.includes("] fire {"));
     await s.quit();
     for (let k = 0; k < ages.length; k++) {
-      const j = judge(truths[k].png, shots[k]);
+      const j = judge(truths[k].png, shots[k], ages[k]);
       rows.push({ tag, age: ages[k], j });
       report(`${tag}, ${ages[k]} s`, j);
     }
     console.log(`  (${fireLine ?? "no fire line"})`);
+    lives.push(shots);
+  }
+  for (let k = 0; k < ages.length; k++) {
+    const j = judge(lives[0][k], lives[1][k], ages[k]);
+    rows.push({ tag: "live A/A", age: ages[k], j });
+    report(`live run 2 vs run 1, ${ages[k]} s`, j);
   }
   // The offline reference's own noise: the same frame at half the samples.
   const half = offline(`shot-0.5-half`, refB, at + 0.5, SPP / 2);
-  const own = judge(truths[1].png, half.png);
+  const own = judge(truths[1].png, half.png, 0.5);
   report(`offline ${SPP / 2} vs ${SPP} spp, 0.5 s`, own);
   result.quality = { rows, own };
 }
@@ -267,7 +275,7 @@ if (only.includes("smoke")) {
     }
     await s.quit();
     for (let k = 0; k < times.length; k++) {
-      const j = judge(truths[k].png, shots[k]);
+      const j = judge(truths[k].png, shots[k], times[k]);
       rows.push({ turbulence: t, time: times[k], j });
       report(`${t}, ${times[k]} s`, j);
     }
