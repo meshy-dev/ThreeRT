@@ -358,7 +358,7 @@ export class SceneBinding {
   private readonly freeSlots: number[] = [];
   private bodies = 0;
   private contactBodies = 0;
-  private readonly joints = new Map<Joint, { id: number; key: string } | null>();
+  private readonly joints = new Map<Joint, { id: number; key: string; shape: string } | null>();
   /** A joint or a body came, went or changed: the joints are looked at again. */
   private jointsDirty = false;
   /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
@@ -826,7 +826,7 @@ export class SceneBinding {
     };
     for (const [j, bj] of joints) {
       const a = bodyOf(j.bodyA), b = bodyOf(j.bodyB);
-      let key = "";
+      let key = "", shape = "";
       let desc: Record<string, unknown> | null = null;
       if (a && b) {
         const [sa, sb] = [a.scale, b.scale];
@@ -835,13 +835,23 @@ export class SceneBinding {
           anchor1: [j.anchorA.x * sa[0], j.anchorA.y * sa[1], j.anchorA.z * sa[2]], anchor2: [j.anchorB.x * sb[0], j.anchorB.y * sb[1], j.anchorB.z * sb[2]],
         };
         key = JSON.stringify(desc);
+        // What makes it this joint: its kind, bodies, anchors and axis. The rest (limits, motor, a rope's length) are
+        // its parameters, changed where it is (`joint_set`: its frames are not taken anew from the bodies' poses).
+        const { limits: _l, motor: _m, length: _n, ...rest } = desc;
+        shape = JSON.stringify(rest);
       }
       if (key === (bj?.key ?? "")) continue;
+      if (bj && desc && shape === bj.shape) {
+        this.engine.physics("joint_set", { id: bj.id, ...desc });
+        this.joints.set(j, { id: bj.id, key, shape });
+        stats.updated++;
+        continue;
+      }
       if (bj) this.engine.physics("remove", { joint: bj.id });
       if (desc) {
         const id = this.nextBody++;
         this.engine.physics("joint", { id, ...desc });
-        this.joints.set(j, { id, key });
+        this.joints.set(j, { id, key, shape });
       } else this.joints.set(j, null);
       stats.updated++;
     }

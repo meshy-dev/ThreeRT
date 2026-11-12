@@ -86,6 +86,27 @@ pub struct Bridge {
 /// The most faults "faults" holds until it is called, and "state" remembers.
 pub const MAX_FAULTS: usize = 1024;
 
+/// A joint's description in a call (`joint`, `joint_set`).
+fn joint_desc(a: &Value) -> Result<JointDesc, String> {
+    let (anchor1, anchor2) = (vec3(a, "anchor1", [0.0; 3])?, vec3(a, "anchor2", [0.0; 3])?);
+    let limits = match &a["limits"] {
+        Value::Null => None,
+        v => Some(nums::<2>(v).map(|l| Limits { min: l[0], max: l[1] }).ok_or("physics: limits must be [min, max]")?),
+    };
+    let motor = match &a["motor"] {
+        Value::Null => None,
+        m => Some(Motor { velocity: num(m, "velocity", 0.0)?, damping: num(m, "damping", 1e4)?, max_force: num(m, "maxForce", f32::MAX)? }),
+    };
+    Ok(match a["type"].as_str() {
+        Some("fixed") => JointDesc::Fixed { anchor1, anchor2 },
+        Some("revolute") => JointDesc::Revolute { anchor1, anchor2, axis: vec3(a, "axis", [0.0, 1.0, 0.0])?, limits, motor },
+        Some("prismatic") => JointDesc::Prismatic { anchor1, anchor2, axis: vec3(a, "axis", [1.0, 0.0, 0.0])?, limits, motor },
+        Some("spherical") => JointDesc::Spherical { anchor1, anchor2 },
+        Some("rope") => JointDesc::Rope { anchor1, anchor2, length: num(a, "length", f32::NAN)? },
+        other => return Err(format!("physics: joint type {other:?} is none of fixed, revolute, prismatic, spherical, rope")),
+    })
+}
+
 fn nums<const N: usize>(v: &Value) -> Option<[f32; N]> {
     let a = v.as_array().filter(|a| a.len() == N)?;
     let mut out = [0.0f32; N];
@@ -337,26 +358,18 @@ impl Bridge {
                 if self.joints.contains_key(&jid) {
                     return Err(format!("physics: joint {jid} exists"));
                 }
-                let (anchor1, anchor2) = (vec3(a, "anchor1", [0.0; 3])?, vec3(a, "anchor2", [0.0; 3])?);
-                let limits = match &a["limits"] {
-                    Value::Null => None,
-                    v => Some(nums::<2>(v).map(|l| Limits { min: l[0], max: l[1] }).ok_or("physics: limits must be [min, max]")?),
-                };
-                let motor = match &a["motor"] {
-                    Value::Null => None,
-                    m => Some(Motor { velocity: num(m, "velocity", 0.0)?, damping: num(m, "damping", 1e4)?, max_force: num(m, "maxForce", f32::MAX)? }),
-                };
-                let d = match a["type"].as_str() {
-                    Some("fixed") => JointDesc::Fixed { anchor1, anchor2 },
-                    Some("revolute") => JointDesc::Revolute { anchor1, anchor2, axis: vec3(a, "axis", [0.0, 1.0, 0.0])?, limits, motor },
-                    Some("prismatic") => JointDesc::Prismatic { anchor1, anchor2, axis: vec3(a, "axis", [1.0, 0.0, 0.0])?, limits, motor },
-                    Some("spherical") => JointDesc::Spherical { anchor1, anchor2 },
-                    Some("rope") => JointDesc::Rope { anchor1, anchor2, length: num(a, "length", f32::NAN)? },
-                    other => return Err(format!("physics: joint type {other:?} is none of fixed, revolute, prismatic, spherical, rope")),
-                };
+                let d = joint_desc(a)?;
                 let (ba, bb) = (self.body(a, "a")?, self.body(a, "b")?);
                 let j = self.core.add_joint(ba, bb, &d)?;
                 self.joints.insert(jid, j);
+                Value::Null
+            }
+            // {id, type, limits?, motor?, length?}: a joint's parameters changed where it is (a hinge's or a slider's
+            // limits and motor, a rope's length); its bodies, anchors and axis stay as made (`Physics::set_joint`).
+            "joint_set" => {
+                let jid = id(a, "id")?;
+                let &j = self.joints.get(&jid).ok_or_else(|| format!("physics: unknown joint {jid}"))?;
+                self.core.set_joint(j, &joint_desc(a)?)?;
                 Value::Null
             }
             "remove" => {

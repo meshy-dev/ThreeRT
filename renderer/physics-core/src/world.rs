@@ -188,6 +188,28 @@ pub enum JointDesc {
     Rope { anchor1: [f32; 3], anchor2: [f32; 3], length: f32 },
 }
 
+/// What kind of joint a `JointDesc` makes (what `Physics::set_joint` may not change).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointKind {
+    Fixed,
+    Revolute,
+    Prismatic,
+    Spherical,
+    Rope,
+}
+
+impl JointKind {
+    pub fn of(d: &JointDesc) -> JointKind {
+        match d {
+            JointDesc::Fixed { .. } => JointKind::Fixed,
+            JointDesc::Revolute { .. } => JointKind::Revolute,
+            JointDesc::Prismatic { .. } => JointKind::Prismatic,
+            JointDesc::Spherical { .. } => JointKind::Spherical,
+            JointDesc::Rope { .. } => JointKind::Rope,
+        }
+    }
+}
+
 /// Two colliders began or stopped touching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contact {
@@ -529,6 +551,9 @@ pub struct Physics {
     /// The voxel colliders there are: rays are cast at them here (`voxel_ray`), not by the broad phase's query.
     voxel_colliders: std::collections::BTreeSet<ColliderId>,
     joints: BTreeMap<JointId, ImpulseJointHandle>,
+    /// Per joint: its kind (what `set_joint` may change), and for a hinge the centre of its limits (rad) by which its
+    /// first frame is turned (`add_joint`).
+    joint_kinds: BTreeMap<JointId, (JointKind, f32)>,
     /// The kinematic bodies (`awake`: the islands hold dynamic ones only).
     kinematic: std::collections::BTreeSet<BodyId>,
     next: u32,
@@ -567,6 +592,7 @@ impl Physics {
             shape_data: 0,
             voxel_colliders: Default::default(),
             joints: BTreeMap::new(),
+            joint_kinds: BTreeMap::new(),
             kinematic: Default::default(),
             next: 0,
             ticks: 0,
@@ -646,6 +672,8 @@ impl Physics {
         if jointed {
             let world = &self.world;
             self.joints.retain(|_, j| world.impulse_joints.get(*j).is_some());
+            let joints = &self.joints;
+            self.joint_kinds.retain(|id, _| joints.contains_key(id));
         }
         gone
     }
@@ -793,10 +821,91 @@ impl Physics {
         let h = self.world.insert_impulse_joint(ha, hb, joint);
         let id = self.id();
         self.joints.insert(id, h);
+        self.joint_kinds.insert(id, (JointKind::of(d), centre));
         Ok(id)
     }
 
+    /// A joint's parameters changed where it is (`joint_set`): a hinge's or a slider's limits and motor, a rope's
+    /// length. Its bodies, anchors, axis and frames stay as they were made (nothing is taken anew from the bodies'
+    /// poses, no warm-started impulse is lost); its bodies are woken. Err, the joint unchanged: no such joint, another
+    /// kind of joint than it was made as, a kind without parameters (fixed, ball), bad numbers.
+    pub fn set_joint(&mut self, id: JointId, d: &JointDesc) -> Result<(), String> {
+        let (&h, &(kind, old_centre)) = match (self.joints.get(&id), self.joint_kinds.get(&id)) {
+            (Some(h), Some(k)) => (h, k),
+            _ => return Err("physics: unknown joint".into()),
+        };
+        if JointKind::of(d) != kind {
+            return Err("physics: a joint's kind is not changed in place (make a new joint)".into());
+        }
+        let limits = |l: &Option<Limits>| -> Result<Option<[f32; 2]>, String> {
+            match l {
+                None => Ok(None),
+                Some(l) => {
+                    within(&[l.min, l.max], MAX_COORD, "a joint's limits")?;
+                    if l.min > l.max {
+                        return Err("physics: a joint's limits must be [min, max] with min <= max".into());
+                    }
+                    Ok(Some([l.min, l.max]))
+                }
+            }
+        };
+        let motor = |m: &Option<Motor>| -> Result<Option<Motor>, String> {
+            match m {
+                None => Ok(None),
+                Some(m) => {
+                    within(&[m.velocity], MAX_MOTOR_VELOCITY, "a motor's velocity")?;
+                    between(m.damping, 0.0, MAX_MOTOR_DAMPING, "a motor's damping")?;
+                    between(m.max_force, 0.0, f32::MAX, "a motor's maximum force")?;
+                    Ok(Some(*m))
+                }
+            }
+        };
+        // Everything checked before anything changes.
+        let (axis, l, m, length) = match d {
+            JointDesc::Revolute { limits: l, motor: m, .. } => (JointAxis::AngX, limits(l)?, motor(m)?, None),
+            JointDesc::Prismatic { limits: l, motor: m, .. } => (JointAxis::LinX, limits(l)?, motor(m)?, None),
+            JointDesc::Rope { length, .. } => {
+                between(*length, 0.0, MAX_COORD, "a rope's length")?;
+                (JointAxis::LinX, None, None, Some(*length))
+            }
+            JointDesc::Fixed { .. } | JointDesc::Spherical { .. } => return Err("physics: a fixed or ball joint has no parameters to change".into()),
+        };
+        let j = &mut self.world.impulse_joints.get_mut(h, true).ok_or("physics: unknown joint")?.data;
+        if let Some(length) = length {
+            j.set_limits(JointAxis::LinX, [0.0, length]);
+            return Ok(());
+        }
+        let mut centre = 0.0f32;
+        match (l, kind) {
+            // A hinge's limits centred as `add_joint` does: the first frame turned back by the old centre, on by the new.
+            (Some([min, max]), JointKind::Revolute) => {
+                centre = (min + max) * 0.5;
+                j.set_limits(axis, [-(max - min) * 0.5, (max - min) * 0.5]);
+            }
+            (Some(lim), _) => {
+                j.set_limits(axis, lim);
+            }
+            (None, _) => j.limit_axes.remove(axis.into()),
+        }
+        if kind == JointKind::Revolute && centre != old_centre {
+            let (s0, c0) = libm::sincosf(-old_centre * 0.5);
+            let (s1, c1) = libm::sincosf(centre * 0.5);
+            let back = j.local_frame1.rotation * Rotation::from_xyzw(s0, 0.0, 0.0, c0);
+            j.local_frame1.rotation = (back.normalize() * Rotation::from_xyzw(s1, 0.0, 0.0, c1)).normalize();
+        }
+        match m {
+            Some(m) => {
+                j.set_motor_velocity(axis, m.velocity, m.damping);
+                j.set_motor_max_force(axis, m.max_force);
+            }
+            None => j.motor_axes.remove(axis.into()),
+        }
+        self.joint_kinds.insert(id, (kind, centre));
+        Ok(())
+    }
+
     pub fn remove_joint(&mut self, id: JointId) {
+        self.joint_kinds.remove(&id);
         if let Some(h) = self.joints.remove(&id) {
             self.world.remove_impulse_joint(h);
         }
@@ -1478,6 +1587,61 @@ mod tests {
             let down = (-(pos[1] - 5.0)).atan2(pos[0]);
             assert!((down - rests).abs() < 0.03, "limits [{min}, {max}]: rests {down} rad down, expected {rests}");
         }
+    }
+
+    /// A joint's parameters changed in place (`set_joint`): the same Rapier joint (no frame taken anew); a hinge whose
+    /// limits move from [-0.9, -0.2] to [0.2, 0.9] comes to rest at the new lower one, as a hinge made with those limits
+    /// does; a motor turned on drives it; a rope shortened holds its weight at the new length; another kind, a fixed
+    /// joint, an unknown id or bad numbers are refused and change nothing.
+    #[test]
+    fn joints_change_in_place() {
+        let mut p = Physics::default();
+        let post = fixed(&mut p, [0.0, 5.0, 0.0]);
+        let door = p.add_body(&BodyDesc { position: [0.5, 5.0, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+        p.add_collider(Some(door), &ColliderDesc::new(Shape::Box([0.5, 0.05, 0.4]))).unwrap();
+        let hinge = |limits: Option<Limits>, motor: Option<Motor>| JointDesc::Revolute { anchor1: [0.0; 3], anchor2: [-0.5, 0.0, 0.0], axis: [0.0, 0.0, 1.0], limits, motor };
+        let j = p.add_joint(post, door, &hinge(Some(Limits { min: -0.9, max: -0.2 }), None)).unwrap();
+        let h = p.joints[&j];
+        run(&mut p, 400);
+        let down = |p: &Physics| { let pos = p.pose(door).unwrap().0; (-(pos[1] - 5.0)).atan2(pos[0]) };
+        assert!((down(&p) - 0.9).abs() < 0.03, "rests at its limit: {}", down(&p));
+        let frame2 = p.world.impulse_joints.get(h).unwrap().data.local_frame2;
+        p.set_joint(j, &hinge(Some(Limits { min: 0.2, max: 0.9 }), None)).unwrap();
+        assert_eq!(p.joints[&j], h, "the same joint");
+        assert_eq!(p.world.impulse_joints.get(h).unwrap().data.local_frame2, frame2, "its frame on the door not taken anew");
+        run(&mut p, 400);
+        assert!((down(&p) + 0.2).abs() < 0.03, "rests at the new limit (0.2 rad up): {}", down(&p));
+        // A motor, no limits: it turns.
+        p.set_joint(j, &hinge(None, Some(Motor { velocity: 2.0, damping: 1e5, max_force: 1e5 }))).unwrap();
+        run(&mut p, 30);
+        assert!((p.velocity(door).unwrap().1[2] - 2.0).abs() < 0.1, "{:?}", p.velocity(door));
+        // Refused, nothing changed.
+        let before = p.world.impulse_joints.get(h).unwrap().data.clone();
+        for bad in [
+            JointDesc::Prismatic { anchor1: [0.0; 3], anchor2: [0.0; 3], axis: [1.0, 0.0, 0.0], limits: None, motor: None },
+            hinge(Some(Limits { min: 1.0, max: 0.0 }), None),
+            hinge(None, Some(Motor { velocity: f32::NAN, damping: 1.0, max_force: 1.0 })),
+            hinge(None, Some(Motor { velocity: 1.0, damping: -1.0, max_force: 1.0 })),
+        ] {
+            assert!(p.set_joint(j, &bad).is_err(), "{bad:?}");
+            assert_eq!(format!("{:?}", p.world.impulse_joints.get(h).unwrap().data), format!("{before:?}"));
+        }
+        assert!(p.set_joint(9999, &hinge(None, None)).is_err());
+        let weld = p.add_joint(post, door, &JointDesc::Fixed { anchor1: [0.0; 3], anchor2: [-0.5, 0.0, 0.0] }).unwrap();
+        assert!(p.set_joint(weld, &JointDesc::Fixed { anchor1: [0.0; 3], anchor2: [0.0; 3] }).is_err());
+        p.remove_joint(weld);
+        // A rope from 3 m to 1.5 m.
+        let mut q = Physics::default();
+        let top = fixed(&mut q, [0.0, 10.0, 0.0]);
+        let w = q.add_body(&BodyDesc { position: [0.0, 8.0, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+        q.add_collider(Some(w), &ColliderDesc::new(Shape::Sphere(0.1))).unwrap();
+        let rope = q.add_joint(top, w, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: 3.0 }).unwrap();
+        run(&mut q, 200);
+        assert!((10.0 - q.pose(w).unwrap().0[1] - 3.0).abs() < 0.03);
+        q.set_joint(rope, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: 1.5 }).unwrap();
+        run(&mut q, 300);
+        assert!((10.0 - q.pose(w).unwrap().0[1] - 1.5).abs() < 0.03, "{:?}", q.pose(w));
+        assert!(q.set_joint(rope, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: -1.0 }).is_err());
     }
 
     /// A slider along x: gravity does not take it off its axis (within 2 mm); its motor brings it to 1.5 m/s; it stops at

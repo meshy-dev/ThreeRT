@@ -801,7 +801,9 @@ export interface JointParameters {
  * A joint between two objects with bodies: an object itself, so it holds while it is in the scene (`scene.add(joint)`)
  * and both its objects are, and lets go when it is removed. It joins the objects as they are turned when it is made (a
  * door that stands open stays open; its anchors are pulled together if they are apart). After changing one that is in
- * the scene, set `needsUpdate`.
+ * the scene, set `needsUpdate`: its parameters (limits, motor, a rope's length) change where it is, the same joint (a
+ * motor set every frame is cheap and keeps the joint's frames); a change of its bodies, anchors or axis makes it anew,
+ * joined as the bodies are turned then.
  */
 export class Joint extends Object3D {
   readonly isJoint = true;

@@ -368,11 +368,25 @@ test("a joint holds while it and both its objects are in the scene", () => {
   assert.deepEqual(made[2][1], { type: "revolute", axis: [0, 1, 0], limits: [-1.5, 1.5], motor: { velocity: 1, maxForce: 50 }, a: 1, b: 2, anchor1: [0.1, 0, 0], anchor2: [-1, 0, 0], id: 3 });
   binding.sync();
   assert.deepEqual(physics(), []);
-  // Changed in the scene: made anew.
+  // Its parameters changed (motor, limits): changed where it is, the same joint (its frames not taken anew).
+  hinge.motor = { velocity: -2, maxForce: 80 };
+  hinge.limits = [-1, 1];
+  hinge.needsUpdate = true;
+  binding.sync();
+  assert.deepEqual(physics(), [["joint_set", { type: "revolute", axis: [0, 1, 0], limits: [-1, 1], motor: { velocity: -2, maxForce: 80 }, a: 1, b: 2, anchor1: [0.1, 0, 0], anchor2: [-1, 0, 0], id: 3 }]]);
   hinge.motor = null;
   hinge.needsUpdate = true;
   binding.sync();
-  assert.deepEqual(physics().map((c) => [c[0], c[1].joint ?? c[1].motor]), [["remove", 3], ["joint", undefined]]);
+  assert.deepEqual(physics().map((c) => [c[0], c[1].id, c[1].motor]), [["joint_set", 3, undefined]]);
+  // What makes it this joint changed (its axis, an anchor): made anew.
+  hinge.axis.set(0, 0, 1);
+  hinge.needsUpdate = true;
+  binding.sync();
+  assert.deepEqual(physics().map((c) => [c[0], c[1].joint ?? c[1].id]), [["remove", 3], ["joint", 4]]);
+  hinge.anchorA.set(0.1, 0.5, 0);
+  hinge.needsUpdate = true;
+  binding.sync();
+  assert.deepEqual(physics().map((c) => [c[0], c[1].joint ?? c[1].id]), [["remove", 4], ["joint", 5]]);
   // The door's body made anew: so is the joint, on the new body.
   door.physics = { type: "dynamic", density: 300 };
   binding.sync();
