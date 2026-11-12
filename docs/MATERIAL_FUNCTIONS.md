@@ -463,7 +463,8 @@ Layer A:
 - `volume/grid-smoke`: `SimulatedSmoke`'s puff rises (a regression value).
 
 Not done: collision of the smoke with scene geometry or voxels; grids in sphere volumes; reflection, GI and shadow
-rays through grid media live (as for every medium but the homogeneous ones).
+rays through grid media live (as for every medium but the homogeneous ones). A live rebuild (any structural change) starts every
+simulated grid again from its data: the smoke there vanishes (ROADMAP § 6 step 10 b, Open).
 
 ### Water
 

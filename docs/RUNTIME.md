@@ -226,7 +226,9 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   hello world's test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
   `hit.object === engineColliders`. A level that collides is in the physics world, and the queries ask it, whether or
   not any scene object has `physics`; contacts with it reach a body's listeners with `other: engineColliders`.
-  `voxelImpulse(body, impulse, point?)` (step 8's call by id) is kept, deprecated. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  `voxelImpulse(body, impulse, point?)` (step 8's call by id) is kept, deprecated. An explosion's fire and smoke are
+  `Explosions` (`packages/voxel`, step 10 b; docs/VOXEL.md "Fire and smoke"): scene objects pooled in setup, no engine
+  call of their own. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
   cells, each within 2^20 cells and 100 km of the shape's origin.
   - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
     (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it

@@ -4310,8 +4310,45 @@ benchmark level. The order follows the dependencies; a step that meets a further
         a voxel body's pose is read from the engine at every read of `position` (one call; no per-frame cache);
         `World::drop_geometry` looks through every object for a user (a few hundred microseconds an edit on the
         benchmark level's 10,000 objects; a count per geometry would make it nothing).
-    - (b) Fire and smoke on the existing volume and particle paths. Whether fire spreads along burning voxels is the
-      user's to decide; not started.
+    - **(b) Fire and smoke** (branch `explosion-fire`; design `out/web-probe/step10/b-design.md`; docs/VOXEL.md "Fire
+      and smoke"). The user's scope (2026-11-12): an explosion's fireball and smoke, on the existing volume and particle
+      paths. `Explosions` (`packages/voxel`): a pool of fireballs (each cooling to its own dark smoke) and a pool of
+      point lights made in setup; `fire` / `explode` / `step` / `dispose`. No smoke grid: its box is a volume, a
+      fireball in it would overlap it, and volumes must not overlap (`Explosions` refuses one; the destruction game's
+      `-fire` variant is fireballs only, `-smoke` unchanged). Caps on fireballs (32) and lights (8), with what happens
+      past each; every number checked before anything changes. No engine call of its own, so nothing new for
+      `physics_fuzz` (`voxelExplode` is in its set already). The scene sync checks grid sources and `customData` only,
+      not transforms or lights: `Explosions` checks everything it sends. `scene::build` refuses a scene with more than
+      32 volumes shown (the kernel's 32-bit mask; the 33rd was not drawn, silently). The stand-in light's table
+      `FIRE_LIGHT`, measured against offline (`tools/bench-voxel-fire.ts`); `voxel/fire-light` 0.987 for 1.
+      - Measured at render scale 0.75 against offline (docs/VOXEL.md): the whole image meets ΔE ≤ 3 / SSIM ≥ 0.9 at
+        0.2 s (2.11 / 0.949), not at 1.0 s (3.53 / 0.876); the street meets at every age; the fireball itself not (ΔE
+        4.4-6.9): half the live march's own picture (held: 2.8-4.3), half the temporal filter. With a smoke grid around
+        the fireballs (the first `-fire`) the fire was not seen at all at 0.2 and 0.5 s (its region ΔE 19.9, 9.4): kept
+        in the docs as the evidence for the rule. The fire burning in the grid instead was tried and set aside
+        (coverage, one to four cells for a small fire, every cell every frame, no offline reference).
+      - Found on the way and fixed: each pool object's first move promoted it to movable with a rebuild (281 ms, and
+        it wiped the live smoke); idle lights had unbounded reach (0.9 ms of GPU with nothing burning).
+      - The independent review of #29 found, fixed here with tests: the fireballs sat inside the smoke box and the
+        puff hid them whole (no grid now); 32 fireballs and the grid were 33 volumes, the 33rd never drawn; finite
+        positions past f32 passed the check; options went unchecked to the engine; the puffs' cap was per distinct
+        time and they piled up out of a scene (no puffs now); a new fire at age 0 took a light from an older one; time
+        going back left fires to burn again later; a fire waiting to start was taken over uncounted; the pool's
+        objects lived in the group's space; no `dispose`.
+      - Temporary ways round the shared renderer, in `Explosions` until the shared paths are fixed (the user and the
+        supervisor, 2026-11-12; docs/VOXEL.md "Temporary ways round on the engine's shared paths", with each one's
+        cause, side effects, and when and how to take it out; this line's worker takes them out in a PR of its own once
+        the shared paths are fixed): the stand-in light (live rays have no media code: offline it counts the fire's
+        light twice unless `lights: 0`, live it lights the fireball a second time); idle objects parked far away
+        (hiding a volume rebuilds); idle lights reaching 1 mm (a black rangeless light reaches without limit); the
+        fire's history capped by its light's change (the temporal filter has no "this medium changes" signal: a fire
+        without a light ghosts); the smoke kept by never rebuilding (a rebuild loses a grid's simulation); and volumes
+        that must not overlap (`media_track` / `media_march` take media whole in entry order: no smoke grid around
+        explosions, and two fires close together still overlap).
+      - Open, the user's scope of 2026-11-12: **fire spreading along burnable voxels**, and **smoke stopped by
+        voxels**, are not done.
+      - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
+        from the cache): the fireball reads lighter than offline.
     - (c) Vehicles and ropes on step 7's joints.
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
