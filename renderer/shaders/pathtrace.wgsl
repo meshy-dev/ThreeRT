@@ -70,7 +70,7 @@ struct Params {
     fog_color: vec4<f32>, // ambient inscattering radiance, max opacity
     vol: vec4<f32>,       // volumetric scattering albedo (0 = off), HG anisotropy, extinction scale in range, -
     vol2: vec4<f32>,      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    raster: vec4<f32>,    // live primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y; ray tracing off (1)
+    raster: vec4<f32>,    // live: primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1)
     cache: vec4<f32>,     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     motion: vec4<f32>,    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1].x)
     prev_pos: vec4<f32>,  // live: the previous frame's camera (emitter reservoir reprojection), as cam_*
@@ -2919,9 +2919,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
     let raster = LIVE && P.raster.x > 0.5 && P.cam_right.w <= 0.0;
+    // Live: one sub-pixel jitter a frame for the whole image (live.rs: Halton 2, 3), which the temporal upscaler
+    // resolves (live.wgsl `upscale`) and the raster pass draws at. Offline, every sample draws its own.
     var jx = rnd();
     var jy = rnd();
-    if (raster) {
+    if (LIVE) {
         jx = P.raster.y;
         jy = P.raster.z;
     }
