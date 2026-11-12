@@ -10,7 +10,8 @@ export interface EngineExports {
   physics(op: string, args: string): string;
   physicsPoses(): Float32Array;
   voxelLevel(d: string): void;
-  voxelExplode(x: number, y: number, z: number, r: number): string;
+  voxelExplode(x: number, y: number, z: number, r: number, push?: number): string;
+  voxelLevelBody(): number;
   voxelEdit(d: string): string;
   voxelHash(): string;
   voxelDebris(): Float32Array;
@@ -51,7 +52,8 @@ export interface EngineExports {
 /** The voxel engine's calls (packages/voxel/src/native.ts reads them off `__engine`). */
 export interface VoxelCalls {
   voxelLevel(d: object): void;
-  voxelExplode(x: number, y: number, z: number, r: number): string;
+  voxelExplode(x: number, y: number, z: number, r: number, push?: number): string;
+  voxelLevelBody(): number;
   voxelEdit(d: object): string;
   voxelFrame(dt: number): string;
   voxelDebris(): Float32Array;
@@ -72,7 +74,8 @@ export function webEngine(w: EngineExports): WebEngine {
     physics: (op, args) => w.physics(op, json(args)),
     physicsPoses: () => w.physicsPoses(),
     voxelLevel: (d) => w.voxelLevel(json(d)),
-    voxelExplode: (x, y, z, r) => w.voxelExplode(x, y, z, r),
+    voxelExplode: (x, y, z, r, push) => w.voxelExplode(x, y, z, r, push),
+    voxelLevelBody: () => w.voxelLevelBody(),
     voxelEdit: (d) => w.voxelEdit(json(d)),
     voxelHash: () => w.voxelHash(),
     voxelDebris: () => w.voxelDebris(),
