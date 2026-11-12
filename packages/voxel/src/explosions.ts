@@ -110,14 +110,19 @@ export interface ExplosionsOptions {
   smoke?: ExplosionSmoke | null;
 }
 
-/** What the pool did: fires, fireballs taken over while burning, fires without a light or a puff, the most burning at
- *  once, lights lit now. */
+/** What the pool did. */
 export interface ExplosionStats {
+  /** Fires made. */
   fired: number;
+  /** Fireballs taken over while still burning (the pool was full). */
   reused: number;
+  /** The most fires burning without a light at once (more burning than there are lights). */
   unlit: number;
+  /** Fires made without a puff (past 16 in a frame). */
   unpuffed: number;
+  /** The most burning at once. */
   most: number;
+  /** Burning, and lit, at the last `step`. */
   burning: number;
   lit: number;
 }
@@ -245,7 +250,6 @@ export class Explosions extends Group {
       }
     }
     this.step(time);
-    if (!this.litNow.has(k)) this.stats.unlit++;
     return k;
   }
 
@@ -275,6 +279,7 @@ export class Explosions extends Group {
     alive.sort((a, b) => this.order[b] - this.order[a]);
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
+    this.stats.unlit = Math.max(this.stats.unlit, alive.length - this.lights.length);
     this.litNow.clear();
     for (let j = 0; j < this.lights.length; j++) {
       const l = this.lights[j];

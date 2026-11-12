@@ -44,6 +44,7 @@ test("the pool: the next fireball each fire, the oldest taken over when every on
   x.step(10.35);
   assert.equal(x.stats.burning, 3);
   assert.equal(x.stats.lit, 2);
+  assert.equal(x.stats.unlit, 1, "one burning without a light");
   const at = x.lights.map((l) => l.position.x).sort();
   assert.deepEqual(at, [3, 4]);
   // Its intensity: the table at its age, times its size² and the fireball's intensity (30,000 nits).
@@ -105,6 +106,7 @@ test("caps: 1,000 fires in one frame keep the pool's objects, 16 puffs, the last
   assert.equal(x.stats.reused, 1000 - 8);
   assert.equal(x.stats.burning, 8);
   assert.equal(x.stats.lit, 8);
+  assert.equal(x.stats.unlit, 0);
   // The last 8 fires (992..999) are what burn.
   assert.deepEqual(x.fireballs.map((f) => f.position.x).sort((a, b) => a - b), [42, 43, 44, 45, 46, 47, 48, 49]);
   // The next frame takes puffs again.
