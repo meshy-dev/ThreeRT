@@ -1668,11 +1668,22 @@ impl LiveCore {
         if !changes.any() {
             return Ok(false);
         }
-        // Particle systems shown or hidden by their own `visible`: in place when the build has them (a rain curtain
-        // the weather turns off costs nothing while off), else with the rebuild.
+        // Objects shown or hidden by their own `visible`: in place when the build has them (a rain curtain the weather
+        // turns off, a pool's idle fireball and its light cost nothing while off), else with the rebuild.
         if !changes.structural {
-            for id in std::mem::take(&mut changes.particles_shown) {
-                if !self.g.set_particles_hidden(&self.sc.up, id, !world.shown(id)) {
+            for id in std::mem::take(&mut changes.shown) {
+                let hide = !world.shown(id);
+                let done = match world.objects.get(&id).map(|o| &o.kind) {
+                    Some(crate::world::Kind::Particles { .. }) => self.g.set_particles_hidden(&self.sc.up, id, hide),
+                    Some(crate::world::Kind::Volume { shape, .. }) => self.g.set_medium_hidden(&self.sc.up, id, *shape, hide),
+                    // (Its table entry, black while hidden: `Tables::update_light`.)
+                    Some(crate::world::Kind::Light(_)) if self.sc.tables.light_index.contains_key(&id) => {
+                        changes.lights.insert(id);
+                        true
+                    }
+                    _ => false,
+                };
+                if !done {
                     changes.structural = true;
                 }
             }
@@ -1876,6 +1887,9 @@ impl LiveCore {
         }
         let (q, up, e) = (&self.g.queue, &self.sc.up, &mut self.sc.tables);
         if d.lights && !e.lights.is_empty() {
+            if d.lights_moved {
+                e.regroup_lights();
+            }
             q.write_buffer(&up.lights, 0, bytemuck::cast_slice(&crate::lights_with_groups(&e.lights)));
         }
         if d.objects {
@@ -1938,6 +1952,7 @@ impl LiveCore {
         if let (Some(idx), Some(o)) = (e.light_index.get(&id), world.objects.get(&id)) {
             if let crate::world::Kind::Light(l) = &o.kind {
                 if let Some(mut gl) = scene::gpu_light(l, world.world_matrix(id), o.power) {
+                    // (The sun: hidden with a rebuild, `World::set_visible`.)
                     gl.color = [colour.x, colour.y, colour.z, 0.0];
                     for &i in idx {
                         e.lights[i] = gl;
@@ -3779,7 +3794,8 @@ impl LiveCore {
         let g = &self.g;
         let t_submit = Instant::now();
         let pipeline = g.pipeline(&self.sc.up.kernel, true);
-        let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0;
+        // (No media pass while every medium is hidden: a pool of idle fireballs costs the frame nothing.)
+        let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
         let media_train = (media && self.cache.is_some()).then(|| g.media_pipeline(&self.sc.up.kernel, "media_train"));
         let media_composite = media.then(|| g.media_pipeline(&self.sc.up.kernel, "media_composite"));
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at

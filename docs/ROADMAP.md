@@ -1902,6 +1902,31 @@ fire shot reads 6.28 / 5.56 / 3.69 as before, to the digit.
 - test-render 181 pass. Not done: `Explosions` still refuses a smoke grid and says why in the old words (the voxel
   line's to change, with the comparison that found it); at most 32 media a scene, as before.
 
+**Hiding in place, black lights (2026-11-13, after it).** `World::set_visible` rebuilt the live scene for anything but
+a particle system, so a pool parked its idle fireballs 10 km below the level and gave its idle lights a 1 mm range
+(§ 6 step 10 b). And the build placed every light whatever its visibility: hiding a light cost the rebuild and
+changed nothing (`light/hidden`: 238 for 39.8). Now, by an object's own `visible`, in place (`Changes::shown`):
+- a volume keeps its medium in the table with no shape (`MEDIUM_HIDDEN`: `medium_span` gives no crossing). Hidden
+  ones are built while the kernel has room after those shown (32 in all); no media pass runs while every medium is
+  hidden;
+- a light without a card keeps its entry in the light table, black. The kernel skips black lights first in its exact
+  loop, and they are in no group's sphere (a group of them alone holds no point), so a light parked anywhere costs
+  nothing; a hidden ancestor still rebuilds, and the build then places the lights under it black;
+- when a local light moves, or goes dark or lit, the groups are sorted again (`Tables::regroup_lights`): they were
+  sorted when the scene was built, and lights that drifted apart made their group's sphere as wide as the level.
+A rect light's card and the sun still rebuild (geometry; the sky's bake).
+
+- A fireball and a light hidden and shown every half second for 3 s (a scratch game): 6 rebuilds before (1,958 ms
+  the first, 9 ms each after), none now; the frame's CPU p50 4.70 ms, max 18 ms.
+- New tests: `light/hidden`, `light/hidden-in-place-live`, `light/shown-in-place-live`, `volume/hidden-in-place-live`,
+  `volume/shown-in-place-live`; test-render 186 pass. Bistro held still, Kabukichō's ghosting and the fire shot read
+  as before.
+- Seen on the way, not this change's: 2 s after a 5,000 cd light is hidden beside a 1,000 cd one the plane under
+  them still reads 6 % high. 45 frames after a lighting edit the long history comes back, and what is left of the
+  old light then averages out as 1 / n (NRD's fixed 30 frames would decay it for good). And 0.3 s after a fireball
+  is hidden a faint ring stays where its edge was (the upscaler's history: nothing says a medium went).
+- Not done: `Explosions` still parks (the voxel line's to change); a mesh hidden by its own `visible` still rebuilds.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.

@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 pub struct Dirty {
     pub materials: bool,
     pub lights: bool,
+    /// A local light moved, or went dark or lit: the light groups are sorted again (`Tables::regroup_lights`).
+    pub lights_moved: bool,
     pub objects: bool,
     /// Emitter weights changed (powers): the emitter CDF and the light tree's powers are rebuilt.
     pub emitters: bool,
@@ -191,11 +193,37 @@ impl Tables {
         }
         let (Some(idx), Some(o)) = (self.light_index.get(&id), w.objects.get(&id)) else { return };
         let Kind::Light(l) = &o.kind else { return };
-        if let Some(gl) = scene::gpu_light(l, w.world_matrix(id), o.power) {
+        if let Some(gl) = scene::gpu_light_shown(l, w.world_matrix(id), o.power, w.shown(id)) {
+            // A local light somewhere else, or lit where it was dark: the groups are sorted again (`regroup_lights`).
+            let moved = idx.iter().any(|&i| self.lights[i].pos != gl.pos || (self.lights[i].color[..3] == [0.0; 3]) != (gl.color[..3] == [0.0; 3]));
             for &i in idx {
                 self.lights[i] = gl;
             }
             d.lights = true;
+            d.lights_moved |= moved && gl.pos[3] != 0.0;
+        }
+    }
+
+    /// The lights in the kernel's order again (`crate::light_order`: each class in spatially compact groups), after
+    /// local lights moved: a group's sphere holds every point its lights reach, and lights that have drifted apart
+    /// make it large. `light_index` and the retained nodes follow.
+    pub fn regroup_lights(&mut self) {
+        let order = crate::light_order(&self.lights);
+        if order.iter().enumerate().all(|(k, &i)| k == i) {
+            return;
+        }
+        self.lights = order.iter().map(|&i| self.lights[i]).collect();
+        if self.retained.light_nodes.len() == order.len() {
+            self.retained.light_nodes = order.iter().map(|&i| self.retained.light_nodes[i]).collect();
+        }
+        let mut at = vec![0usize; order.len()];
+        for (k, &i) in order.iter().enumerate() {
+            at[i] = k;
+        }
+        for idx in self.light_index.values_mut() {
+            for i in idx.iter_mut() {
+                *i = at[*i];
+            }
         }
     }
 

@@ -231,6 +231,8 @@ pub struct Uploaded {
     /// Vertex colours (F_VCOLOR): their byte offset in `prev_verts` (three words per triangle, room included).
     pub vcolor_base: Option<u64>,
     pub media_nodes: Vec<u32>,
+    /// Per medium: its node is hidden (`set_medium_hidden`). The live view runs no media pass while all are.
+    pub media_hidden: std::cell::RefCell<Vec<bool>>,
     /// The model instances' kernel records (`GpuInstance`): movable ones are rewritten when they move.
     pub instances: wgpu::Buffer,
     /// Room for in-place geometry edits (`EditRoom`), and the binding that holds the environment CDF and the
@@ -2072,7 +2074,7 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
-        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2469,6 +2471,22 @@ impl Gpu {
             size,
         );
         self.queue.write_buffer(&up.cdf, 0, bytemuck::cast_slice(cdf));
+    }
+
+    /// A volume node shown or hidden by its own `visible`, in place: its media keep their place in the table with
+    /// their shape (`shape`: the node's) or none (pathtrace.wgsl `medium_span`: no ray crosses it). False when no
+    /// medium of the build is that node's (the build left it out: a rebuild).
+    pub fn set_medium_hidden(&self, up: &Uploaded, node: u32, shape: u32, hide: bool) -> bool {
+        let size = std::mem::size_of::<crate::scene::MediumGpu>();
+        let mut hidden = up.media_hidden.borrow_mut();
+        let mut found = false;
+        for (k, _) in up.media_nodes.iter().enumerate().filter(|(_, n)| **n == node) {
+            found = true;
+            hidden[k] = hide;
+            let at = k * size + std::mem::offset_of!(crate::scene::MediumGpu, a) + 4;
+            self.queue.write_buffer(&up.media, at as u64, bytemuck::bytes_of(&if hide { crate::scene::MEDIUM_HIDDEN } else { shape }));
+        }
+        found
     }
 
     pub fn set_medium(&self, up: &Uploaded, node: u32, rows: Option<[[f32; 4]; 3]>, custom: Option<[f32; 4]>) {
