@@ -315,7 +315,7 @@ pub fn case(kind: u32, seed: u32) -> u64 {
 }
 
 /// The hash `vehicles(600)` leaves (recorded, as `EXPECTED`; step 10 c2). Natively, in parallel and in wasm32 alike.
-pub const EXPECTED_VEHICLES: u64 = 0x7f75_5c73_317e_6c82;
+pub const EXPECTED_VEHICLES: u64 = 0x54c7_b733_ebae_c0dc;
 
 /// Vehicles (step 10 c2) for `ticks` ticks: the sedan and the SUV of `vehicle::scenarios` (voxel chassis, the
 /// centre of mass given on the vehicle) on voxel ground with debris and a step, driven, steered and braked; a car on a

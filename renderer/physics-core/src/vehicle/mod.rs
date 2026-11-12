@@ -457,9 +457,12 @@ impl Physics {
                 Some(w) => {
                     let r = w.raycast_info();
                     let (dir, axle) = veh.frames[k];
-                    // (Bullet's wheel turn: the steering about the suspension's up, then the spin about the axle.)
+                    // (Bullet's wheel turn: the steering about the suspension's up, then the spin about the axle. Both
+                    // and the centre from the chassis's pose now, after the step: the controller's own centre is of the
+                    // pose before it, a tick behind.)
                     let q = rot * rapier3d::math::rotation_from_angle(-dir * w.steering) * rapier3d::math::rotation_from_angle(axle * -w.rotation);
-                    WheelState { center: w.center().to_array(), orientation: q.to_array(), spin: w.rotation, steering: w.steering, contact: r.is_in_contact, suspension: r.suspension_length, point: r.contact_point_ws.to_array(), normal: r.contact_normal_ws.to_array(), lost: false }
+                    let center = *b.position() * w.chassis_connection_point_cs + rot * dir * r.suspension_length;
+                    WheelState { center: center.to_array(), orientation: q.to_array(), spin: w.rotation, steering: w.steering, contact: r.is_in_contact, suspension: r.suspension_length, point: r.contact_point_ws.to_array(), normal: r.contact_normal_ws.to_array(), lost: false }
                 }
                 None => WheelState { center: veh.lost_at[k].unwrap_or([0.0; 3]), orientation: [0.0, 0.0, 0.0, 1.0], spin: 0.0, steering: 0.0, contact: false, suspension: 0.0, point: [0.0; 3], normal: [0.0; 3], lost: true },
             })
@@ -689,6 +692,56 @@ mod tests {
         p.add_collider(None, &fill).unwrap();
         p.step();
         assert!(p.vehicle_state(v).unwrap().wheels[0].contact, "the wheel did not find the ground added this tick");
+    }
+
+    /// A wall beside the right wheels (x 1.0 .. 1.2: clear of the body at 0.9 and the tyres at 0.91, inside the probe
+    /// balls, which reach 1.13 from the hard points at 0.8): the balls start in touch with it, its faces steeper than
+    /// the slope rule allows, and it is passed over; the car settles on its springs as on open ground. (Taken as the
+    /// suspension fully compressed, it pushed the right side up.)
+    #[test]
+    fn a_wall_beside_the_wheels_is_not_ground() {
+        let settle = |wall: bool| {
+            let mut p = Physics::default();
+            flat(&mut p);
+            if wall {
+                p.add_collider(None, &ColliderDesc { position: [1.1, 0.75, 0.0], ..ColliderDesc::new(Shape::Box([0.1, 0.75, 3.0])) }).unwrap();
+            }
+            let (b, v) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], false);
+            for _ in 0..180 {
+                p.step();
+            }
+            let st = p.vehicle_state(v).unwrap();
+            (p.pose(b).unwrap(), st.wheels.iter().map(|w| w.suspension).collect::<Vec<_>>())
+        };
+        let (open, s0) = settle(false);
+        let (walled, s1) = settle(true);
+        assert!((walled.0[1] - open.0[1]).abs() < 0.01 && (walled.1[2] - open.1[2]).abs() < 0.01, "the chassis {walled:?}, on open ground {open:?}");
+        for (a, b) in s0.iter().zip(&s1) {
+            assert!((a - b).abs() < 0.01, "suspensions {s1:?}, on open ground {s0:?}");
+        }
+    }
+
+    /// A wheel's centre as reported is where it is on the chassis now: its anchor plus the suspension's length down,
+    /// in the chassis's frame after the step (not a tick behind: 13 cm at 8 m/s).
+    #[test]
+    fn a_wheels_reported_centre_moves_with_the_chassis() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (b, v) = SEDAN.add(&mut p, [0.0, 0.0, -4.0], false);
+        p.set_velocity(b, Some([0.0, 0.0, 8.0]), None).unwrap();
+        let drive: Vec<WheelControl> = (0..4).map(|i| WheelControl { engine: if i < 2 { 3000.0 } else { 0.0 }, ..Default::default() }).collect();
+        p.set_vehicle_controls(v, &drive).unwrap();
+        for _ in 0..30 {
+            p.step();
+        }
+        let (at, q) = p.pose(b).unwrap();
+        let pose = Pose::from_parts(Vector::from(at), rapier3d::math::Rotation::from_array(q));
+        let st = p.vehicle_state(v).unwrap();
+        assert!(st.speed > 7.0, "{}", st.speed);
+        for (w, d) in st.wheels.iter().zip(SEDAN.wheels()) {
+            let local = pose.inverse_transform_point(Vector::from(w.center));
+            assert!((local.x - d.anchor[0]).abs() < 1e-3 && (local.z - d.anchor[2]).abs() < 1e-3 && (local.y - (d.anchor[1] - w.suspension)).abs() < 1e-3, "{local:?} against {:?} less {}", d.anchor, w.suspension);
+        }
     }
 
     /// A car asleep, pushed by a blast: it wakes and moves.

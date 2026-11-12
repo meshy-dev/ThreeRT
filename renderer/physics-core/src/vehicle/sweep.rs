@@ -21,13 +21,14 @@ pub struct Hit {
     /// The ground's outward normal and the point the ball touches (world).
     pub normal: Vector,
     pub point: Vector,
-    /// The ball started in the ground (distance 0, no normal of its own).
+    /// The ball started in touch (distance 0). Its normal: from the ground's nearest point to the ball's centre, ZERO
+    /// with the centre inside the ground.
     pub inside: bool,
 }
 
 /// A ball of radius `r` at `o` moving along `d` (unit) against the box of half extents `h` about the origin, within
-/// `max`: the distance it goes before touching and the box's outward normal there; `(0, ZERO)` if it starts touching
-/// or overlapping it.
+/// `max`: the distance it goes before touching and the box's outward normal there. Starting in touch: distance 0, the
+/// normal from the box's nearest point to the ball's centre (ZERO with the centre inside the box).
 pub fn ball_box(o: Vector, d: Vector, h: Vector, r: Real, max: Real) -> Option<(Real, Vector)> {
     ball_box_inv(o, d, inverse(d), h, r, max)
 }
@@ -41,8 +42,10 @@ fn inverse(d: Vector) -> Vector {
 /// `ball_box` with `1 / d` given (`inverse`): one sweep against many cells divides once.
 fn ball_box_inv(o: Vector, d: Vector, inv: Vector, h: Vector, r: Real, max: Real) -> Option<(Real, Vector)> {
     let near = o.clamp(-h, h);
-    if (o - near).length_squared() <= r * r {
-        return Some((0.0, Vector::ZERO));
+    let off = o - near;
+    if off.length_squared() <= r * r {
+        let l = off.length();
+        return Some((0.0, if l > 0.0 { off / l } else { Vector::ZERO }));
     }
     // The box grown by the radius: where the ray enters it.
     let (mut t0, mut t1) = (0.0 as Real, max);
@@ -146,8 +149,10 @@ pub fn sweep_ball(queries: &QueryPipeline, fresh: &[(ColliderHandle, Pose)], sta
 /// One collider's part of `sweep_ball`, the collider at `pose`.
 #[allow(clippy::too_many_arguments)]
 fn sweep_collider(h: ColliderHandle, shape: &dyn Shape, pose: &Pose, swept: Aabb, starts: &[Vector], dir: Vector, r: Real, max: Real, up: Vector, cos_max: Real, best: &mut Option<Hit>) {
+    // (A ball that starts in touch is judged as any hit by the normal of its touch: a wall beside the wheel is passed
+    // over, ground under it holds. Only a ball whose centre is inside the ground has no normal: fully compressed.)
     let keep = |hit: Hit, best: &mut Option<Hit>| {
-        let ok = hit.inside || hit.normal.dot(up) > cos_max;
+        let ok = (hit.inside && hit.normal == Vector::ZERO) || hit.normal.dot(up) > cos_max;
         if ok && best.is_none_or(|b| hit.distance < b.distance) {
             *best = Some(hit);
         }
@@ -180,7 +185,7 @@ fn sweep_collider(h: ColliderHandle, shape: &dyn Shape, pose: &Pose, swept: Aabb
                 for (k, &o) in local_starts.iter().enumerate() {
                     let limit = best.map_or(max, |b| b.distance);
                     if let Some((t, n)) = ball_box_inv(o - c, d, inv, half, r, limit) {
-                        let normal = pose.rotation * n;
+                        let normal = if n == Vector::ZERO { Vector::ZERO } else { pose.rotation * n };
                         let centre = starts[k] + dir * t;
                         keep(Hit { collider: h, distance: t, normal, point: centre - normal * r, inside: t == 0.0 }, best);
                     }
@@ -192,8 +197,8 @@ fn sweep_collider(h: ColliderHandle, shape: &dyn Shape, pose: &Pose, swept: Aabb
                 let limit = best.map_or(max, |b| b.distance);
                 let options = ShapeCastOptions { max_time_of_impact: limit, target_distance: 0.0, stop_at_penetration: true, compute_impact_geometry_on_penetration: true };
                 if let Ok(Some(hit)) = cast_shapes(pose, Vector::ZERO, shape, &Pose::from_translation(start), dir, &Ball::new(r), options) {
-                    let normal = pose.rotation * hit.normal1;
                     let inside = hit.time_of_impact == 0.0;
+                    let normal = if hit.normal1.is_finite() && hit.normal1.length_squared() > 0.5 { pose.rotation * hit.normal1 } else { Vector::ZERO };
                     keep(Hit { collider: h, distance: hit.time_of_impact, normal, point: pose * hit.witness1, inside }, best);
                 }
             }
@@ -284,6 +289,7 @@ mod tests {
             }
         }
         assert!(hits > 5_000 && misses > 3_000, "{hits} hits, {misses} misses");
-        assert_eq!(ball_box(Vector::new(0.0, 0.2, 0.0), Vector::new(0.0, -1.0, 0.0), Vector::splat(0.1), 0.15, 1.0), Some((0.0, Vector::ZERO)));
+        assert_eq!(ball_box(Vector::new(0.0, 0.2, 0.0), Vector::new(0.0, -1.0, 0.0), Vector::splat(0.1), 0.15, 1.0), Some((0.0, Vector::Y)), "in touch from above");
+        assert_eq!(ball_box(Vector::new(0.05, 0.0, 0.0), Vector::new(0.0, -1.0, 0.0), Vector::splat(0.1), 0.15, 1.0), Some((0.0, Vector::ZERO)), "the centre inside");
     }
 }

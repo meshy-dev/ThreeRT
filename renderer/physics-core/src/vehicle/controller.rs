@@ -11,7 +11,9 @@
 //!   properties, a local `inv`, the 2D items dropped;
 //! - the ground found by a ball swept down the suspension (`sweep::sweep_ball`), not a ray: ground steeper than the
 //!   80-degree slope passed over, the probe also swept from where it will be after the tick (forward reach);
-//! - a probe that starts in the ground: the suspension fully compressed against ground straight up;
+//! - a probe that starts in touch with ground (its touch within the slope rule, `sweep::sweep_ball`, or its centre
+//!   inside the ground): the suspension fully compressed against ground straight up; a steep touch (a wall beside the
+//!   wheel) passed over as any steep hit;
 //! - the suspension's and the tyre's impulses applied on the suspension's axis (the hard point plus the rest length),
 //!   not at the contact point;
 //! - a bump stop spring in the suspension's last centimetres, its stiffness rising with the square of the compression
@@ -361,8 +363,9 @@ impl DynamicRayCastVehicleController {
     /// (ThreeRT) The ground under a wheel: a ball of the wheel's radius swept from the hard point along the
     /// suspension to its rest length (as far as Rapier's ray reached), and again from where the hard point will be
     /// after this tick (a face the wheel reaches this tick met now); the nearer kept. The swept distance is the
-    /// suspension's length; the contact point and normal are where the ball touches. Started in the ground: the
-    /// suspension fully compressed against ground whose normal is the suspension's "up".
+    /// suspension's length; the contact point and normal are where the ball touches. Started in touch with ground (a
+    /// touch the slope rule accepts, or its centre inside the ground): the suspension fully compressed against ground
+    /// whose normal is the suspension's "up".
     fn probe(&mut self, queries: &QueryPipeline, fresh: &[(ColliderHandle, Pose)], chassis: &RigidBody, wheel_id: usize) {
         let (up, cos_max, dt) = (self.up, self.cos_max_slope, self.last_dt);
         let wheel = &mut self.wheels[wheel_id];
@@ -380,6 +383,8 @@ impl DynamicRayCastVehicleController {
             wheel.clipped_inv_contact_dot_suspension = 1.0;
             return;
         };
+        // (A ball in touch with ground the slope rule accepts touches several cells at once, at distance 0: no one
+        // touch's normal is the ground's; it pushes straight up, as one whose centre is inside.)
         let (normal, point) = if hit.inside { (-dir, source + dir * wheel.radius) } else { (hit.normal, hit.point) };
         wheel.raycast_info.contact_normal_ws = normal;
         wheel.raycast_info.is_in_contact = true;
