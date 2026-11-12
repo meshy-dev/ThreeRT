@@ -19,7 +19,7 @@
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
 //             `--software`: instead, the fire route's crater under software traversal (THREERT_HWRT=0, loop guard 8,192).
 //
-//   node tools/bench-voxel-fire.ts [--only calibrate,quality,smoke,cost] [--spp 2048] [--software]
+//   node tools/bench-voxel-fire.ts [--only calibrate,quality,smoke,cost] [--spp 2048] [--software] [--ages 1,3 (smoke)]
 //
 // One renderer at a time. A step that gives no answer in its time ends this script with exit 3 and leaves the renderer
 // alone (never killed). Result: out/bench/voxel-fire/<time>.json and tables on stdout.
@@ -276,7 +276,7 @@ if (only.includes("quality")) {
 
 if (only.includes("smoke")) {
   generate(1, "object");
-  const ages = [1.0, 3.0], T0 = 2;
+  const ages = opt("--ages", "1,3").split(",").map(Number), T0 = 2;
   const rows: Record<string, unknown>[] = [];
   // Offline a grid takes the sources pending at the render at its first step (time 0): the reference fires at 0 and is
   // rendered at the age. Live fires at 2 s, after the level's load (whether a puff made before that survives is
