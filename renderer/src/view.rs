@@ -12,7 +12,7 @@
 //!   stdout JSON lines: {"type":"ready"} | {"type":"click","u":..,"v":..,"cam":{..},"seq":n} | {"type":"key","key":"L"}
 
 use crate::gpu;
-use crate::live::{next_spp, parse_cmd, parse_scale, save_bgra, Camera, Cmd, LiveCore, MIN_SCALE};
+use crate::live::{next_spp, parse_cmd, parse_scale, save_bgra, Camera, Cmd, LiveCore};
 use crate::script::GameSession;
 use anyhow::Result;
 use glam::Vec3;
@@ -129,10 +129,15 @@ impl App {
             color_space: Default::default(),
         };
         surface.configure(&g.device, &config);
-        let (game, mut core) = GameSession::start(&a.bundle, &a.room, &a.assets, g, &a.presets, a.width, a.height)?;
+        // The view is the window's physical pixels (`--width` / `--height` are its size in points): the temporal upscaler
+        // resolves to the display, and nothing is stretched after it.
+        let (vw, vh) = (config.width, config.height);
+        let (game, mut core) = GameSession::start(&a.bundle, &a.room, &a.assets, g, &a.presets, vw, vh)?;
+        core.set_display_scale(window.scale_factor() as f32);
         core.bounces = a.bounces;
-        core.render_scale = a.scale.unwrap_or(1.0);
-        core.dynamic_res = a.scale.is_none();
+        if let Some(s) = a.scale {
+            core.set_scale(s);
+        }
         let d = &core.g.device;
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blit"), source: wgpu::ShaderSource::Wgsl(BLIT.into()) });
         let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -149,7 +154,7 @@ impl App {
             label: Some("blit"),
             layout: Some(&pl),
             vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), targets: &[Some(format.into())], compilation_options: wgpu::PipelineCompilationOptions { constants: &[("W", a.width as f64), ("H", a.height as f64), ("SW", config.width as f64), ("SH", config.height as f64)], ..Default::default() } }),
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), targets: &[Some(format.into())], compilation_options: wgpu::PipelineCompilationOptions { constants: &[("W", vw as f64), ("H", vh as f64), ("SW", config.width as f64), ("SH", config.height as f64)], ..Default::default() } }),
             primitive: Default::default(),
             depth_stencil: None,
             multisample: Default::default(),
@@ -159,7 +164,7 @@ impl App {
         let blit_bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: core.targets.out.as_entire_binding() }] });
         let cam = core.scene_camera();
         let home = Orbit::from_camera(&cam);
-        eprintln!("view: {}x{} on {} ({}), {:?}", a.width, a.height, core.g.adapter_info.name, if core.g.hwrt { "HW RT" } else { "BVH" }, format);
+        eprintln!("view: {}x{} ({}x{} points) on {} ({}), {:?}", vw, vh, a.width, a.height, core.g.adapter_info.name, if core.g.hwrt { "HW RT" } else { "BVH" }, format);
         emit(serde_json::json!({ "type": "ready", "adapter": core.g.adapter_info.name, "hwrt": core.g.hwrt }));
         self.state = Some(State {
             window,
@@ -416,7 +421,7 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, fps: u32) -> Result<()> {
     s.spp = if s.core.render_scale < 1.0 { 1 } else { next_spp(s.spp, s.core.gpu_ms, fps).min(s.spp_cap) };
     if s.core.frame % 30 == 1 {
         let budget = 1000.0 / fps as f32;
-        let lowest = !s.core.dynamic_res || s.core.render_scale <= MIN_SCALE;
+        let lowest = !s.core.dynamic_res || s.core.render_scale <= s.core.min_scale;
         if s.spp == 1 && lowest && s.core.gpu_ms > budget * 0.92 && s.core.bounces > 2 {
             s.core.bounces -= 1;
         } else if s.core.gpu_ms < budget * 0.55 && s.core.bounces < s.max_bounces {
@@ -502,7 +507,7 @@ fn texel(x: i32, y: i32) -> vec4<f32> {
 }
 
 @fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    // Bilinear upscale from the internal resolution to the (Retina) window.
+    // The view's pixels are the window's (1 : 1); bilinear if the window moved to a display of another density.
     let dims = vec2<f32>(W, H);
     let uv = p.xy / vec2<f32>(SW, SH);
     let q = uv * dims - 0.5;

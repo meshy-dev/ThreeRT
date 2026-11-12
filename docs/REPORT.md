@@ -143,9 +143,10 @@ traces 1+ spp with hardware ray queries (primary visibility, GI, soft shadows, r
 roulette), reprojects and accumulates history validated per pixel by depth/normal (TSR/Lumen-style temporal reuse),
 denoises with an edge-avoiding à-trous filter (two extra wide passes where history is short, the role Lumen's radiance
 cache plays; directly seen emission bypasses it), and applies UE's post chain (UE auto / local exposure, six-stage
-bloom, cos⁴ vignette, filmic tonemap through a 32³ log LUT). Below 100 % render scale the temporal pass also upsamples
-jittered samples to the output (TSR-style). Dynamic resolution (50–100 %) and then samples per frame adapt to the
-GPU budget. Scene changes from the game keep history (geometry stays valid) and cap it briefly so
+bloom, cos⁴ vignette, filmic tonemap through a 32³ log LUT). The frame is traced, denoised and composed at the render
+resolution with one sub-pixel jitter a frame, and one temporal upscaler takes it to the window's physical pixels (the
+structure of UE's TSR after Lumen; ROADMAP § 1a). Dynamic resolution (down to half of the window's points a side) and
+then samples per frame adapt to the GPU budget. Scene changes from the game keep history (geometry stays valid) and cap it briefly so
 lighting changes converge within a few frames.
 
 `node tools/bench-live.ts` (1280×720, M5): frame `k` frames after a full history reset, vs the UE5 references.

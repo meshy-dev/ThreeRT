@@ -78,11 +78,17 @@ const SCENES: Record<string, View> = {
     regions: { ground: "0,0.62,1,1", signs: "0.2,0,0.8,0.45", facades: "0,0.1,0.25,0.62" },
     // Set from the renderer of 2026-11-06 with ~0.3 dE of margin (runs repeat to ~0.1); the shots the translation clamp
     // improved are set below the old renderer's values, so it fails them.
+    // The two return shots' mean and p95 were set again on 2026-11-12 (the frame at render resolution with one
+    // upscaler, ROADMAP § 1a): two runs read 1.25 / 5.11-5.15 / 22 px and 1.30 / 5.12-5.13 / 23 px, set with 0.3 dE and
+    // 1.35 p95 of margin (what the old limits, 1.3 / 4.2 and 1.35 / 4.5, stood over the old renderer's 0.83 / 2.84 and
+    // 0.97 / 3.35). An excess is the shot's error less the settled frame's, and the settled frame got cleaner (all
+    // regions: dE 1.83 -> 1.09, p95 7.9 -> 4.2), which raises the excess of shots whose own error fell (dE 2.66 -> 2.34
+    // and 2.80 -> 2.39, p95 10.8 -> 9.3 and 11.3 -> 9.3). The trails' limits and the other shots' stand.
     limits: [
       { shot: "turn-mid", region: "ground", mean: 3.2, p95: 12.5, trail: 80 },
       { shot: "strafe-mid", region: "ground", mean: 4.1, p95: 17.5, trail: 75 },
-      { shot: "turn-return+0.5s", region: "all", mean: 1.3, p95: 4.2, trail: 30 },
-      { shot: "strafe-return+0.5s", region: "all", mean: 1.35, p95: 4.5, trail: 28 },
+      { shot: "turn-return+0.5s", region: "all", mean: 1.55, p95: 6.5, trail: 30 },
+      { shot: "strafe-return+0.5s", region: "all", mean: 1.6, p95: 6.5, trail: 28 },
       { shot: "stop+0.1s", region: "ground", mean: 2.95, p95: 11.2, trail: 35 },
     ],
     rainOff: true,

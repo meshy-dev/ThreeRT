@@ -1,11 +1,15 @@
-// Real-time viewport passes, run after the 1-spp LIVE path-trace dispatch (UE-editor-style real-time path):
-//   temporal  - reprojects last frame's history with depth/normal validation and accumulates the new sample
-//               (static camera => progressive convergence to the path-traced reference, like Lumen/TSR history);
-//               below 100% render scale it also upsamples: samples traced at the internal resolution with their
-//               sub-pixel jitter are splatted onto the output grid (UE TSR's reconstruction)
-//   atrous*   - edge-avoiding wavelet denoise of demodulated irradiance, strength ~ 1/sqrt(history length)
-//   bloom_*   - UE Standard bloom: six Gaussian stages on a 1/4 .. 1/64 downsample chain, summed from the widest up
-//   post      - exposure, bloom, UE cos^4 vignette, UE filmic tonemap via a log-encoded 3D LUT, BGRA8 output
+// Real-time viewport passes, run after the 1-spp LIVE path-trace dispatch. The frame is traced, denoised and composed
+// at the render resolution (the traced grid: `isz`), and one temporal upscaler takes it to the output grid (`size`), as
+// UE's TSR does after Lumen and the vendor upscalers after a denoiser:
+//   refl               - the specular reflection resolved from neighbours' rays
+//   dtemporal, atrous* - diffuse irradiance: accumulated over its reprojected history, edge-avoiding wavelet filter
+//   stemporal, sfilt*  - specular: accumulated over its surface / reflection-hit history, filtered by roughness
+//   compose            - albedo x irradiance + specular + what the camera ray saw + deterministic direct light
+//   judge, reject      - what of the output-grid colour history this frame's samples contradict
+//   upscale            - the composed frame, by its sub-pixel jitter, into the output grid's one colour history
+//   dof*, mblur        - depth of field and motion blur on the output grid
+//   bloom_*            - UE Standard bloom: six Gaussian stages on a 1/4 .. 1/64 downsample chain, summed from the widest up
+//   post               - exposure, bloom, UE cos^4 vignette, UE filmic tonemap via a log-encoded 3D LUT, BGRA8 output
 
 struct Cam { pos: vec4<f32>, fwd: vec4<f32>, right: vec4<f32>, up: vec4<f32> }; // pos.w = tan(fov/2), fwd.w = aspect
 struct LiveParams {
@@ -26,6 +30,7 @@ struct LiveParams {
     bt: vec4<f32>,     // bloom stage 0..3 tint (BloomN Tint * intensity / 6)
     bt2: vec4<f32>,    // bloom stage 4, 5 tint, -, -
     dof: vec4<f32>,    // depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -
+    jit: vec4<f32>,    // this frame's sub-pixel jitter (every traced sample's: x, y in 0 .. 1 of a traced pixel), -, -
 };
 // color = diffuse lighting + first-hit distance, emit = directly seen emission / sky + roughness, spec = specular lighting
 // + reflection hit distance (see pathtrace.wgsl).
@@ -33,11 +38,16 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 
 @group(0) @binding(0) var<uniform> L: LiveParams;
 @group(0) @binding(1) var<storage, read> sample_px: array<Pixel>;          // color.w = first-hit distance (0 = sky)
-// Diffuse irradiance history (rgb, frames) on the traced grid (`dtemporal`); `mom_in` / `mom_out` hold its moments.
+// Diffuse irradiance history (rgb, frames) on the traced grid (`dtemporal`; `mom_in` / `mom_out` hold its moments),
+// then the output grid's colour history (rgb, samples; `out_hist`, `upscale`).
 @group(0) @binding(2) var<storage, read> hist_in: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> hist_out: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> gb_in: array<vec2<u32>>;          // octahedral normal, view depth (0 = sky), roughness (`GB`)
+// The traced grid's g-buffer (`stemporal`): octahedral normal, view depth (0 = sky), roughness (`GB`).
+@group(0) @binding(4) var<storage, read> gb_in: array<vec2<u32>>;
 @group(0) @binding(5) var<storage, read_write> gb_out: array<vec2<u32>>;
+// fa: the irradiance filter's ping-pong on the traced grid, then the image on the output grid (what the post chain
+// reads). fb: its other half, then the composed colour of the traced grid (`compose`; w: first-hit distance), then
+// depth of field's output when motion blur follows.
 @group(0) @binding(6) var<storage, read_write> fa: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> fb: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> bloom_a: array<vec4<f32>>;     // bloom pyramid levels, then stage sums
@@ -49,20 +59,21 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;    // exposure, target, mean log2 lum, valid
 @group(0) @binding(15) var<storage, read_write> lumq: array<f32>;                 // quarter res log2 luminance (unexposed)
 @group(0) @binding(16) var<storage, read_write> lumb: array<f32>;                 // edge-aware blur of lumq
-// Accumulated base color (the denoiser's demodulation) + animated flag, and accumulated directly seen emission (kept
-// out of the denoiser, added back after it), as f16: (albedo.rg, albedo.b | anim, emission.rg, emission.b | roughness).
+// Per traced sample, what `judge` finds of the output grid's colour history (`Judged`, f16). (`ae_in`: its ping-pong
+// partner, not read.)
 @group(0) @binding(17) var<storage, read> ae_in: array<vec4<u32>>;
 @group(0) @binding(18) var<storage, read_write> ae_out: array<vec4<u32>>;
-// Specular history (rgb + history length), diffuse luminance moments (mean, mean square, fast mean, -).
+// Specular history on the traced grid (rgb + history length), diffuse luminance moments (mean, mean square, fast mean, -).
 @group(0) @binding(19) var<storage, read> shist_in: array<vec4<f32>>;
 @group(0) @binding(20) var<storage, read_write> shist_out: array<vec4<f32>>;
 @group(0) @binding(21) var<storage, read> mom_in: array<vec4<f32>>;
 @group(0) @binding(22) var<storage, read_write> mom_out: array<vec4<f32>>;
-// The specular denoiser's ping-pong (`temporal` -> `spec0` -> `spec1` -> `spec2`): (rgb, history length) as f16, two
-// slots of one entry per output pixel. The three passes are bandwidth-bound: 8 bytes per pixel instead of 16.
+// The specular denoiser's ping-pong on the traced grid (`stemporal` -> `sfilt0` -> `sfilt1` -> `sfilt2`): (rgb, history
+// length) as f16, two slots (the passes are bandwidth-bound: 8 bytes per pixel instead of 16). The result is slot 1;
+// slot 0 then holds `reject`'s verdict.
 @group(0) @binding(23) var<storage, read_write> spec_pp: array<vec2<u32>>;
-// Scratch: the traced surfaces for the diffuse denoiser and upsample (`dtemporal`), then depth of field's output when
-// motion blur follows.
+// Scratch: the traced surfaces for the diffuse denoiser (`dtemporal`), then the upscaled image when depth of field /
+// motion blur follow (they read it; w: the circle of confusion).
 @group(0) @binding(24) var<storage, read_write> sb: array<vec4<f32>>;
 // Reflection resolve: the trace kernel's specular-lobe rays, 2 per traced pixel ((radiance back, lobe pdf; 0 = none),
 // (specular albedo E, octahedral direction)), and the resolved specular reflection per traced pixel.
@@ -70,8 +81,9 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(26) var<storage, read_write> refl_res: array<vec4<f32>>;
 // Per traced pixel: where its surface point was the previous frame, as a world-space offset (w = 1: a moving object).
 @group(0) @binding(27) var<storage, read> motion_in: array<vec4<f32>>;
-// Directional lights' direct light (the sun: nearly deterministic) at camera hits per traced pixel, and its
-// history per output pixel (ping-pong): no denoiser, a short clamped history like emission (UE lights directly).
+// Directional lights' direct light (the sun: nearly deterministic) at camera hits per traced pixel: no denoiser
+// (`compose` adds it as it is, UE lights directly). `xhist_out`: per traced sample, its screen velocity (output pixels
+// this frame), view depth and whether its shading is animated (`compose`). (`xhist_in`: its ping-pong partner, not read.)
 @group(0) @binding(28) var<storage, read> direct_in: array<vec4<f32>>;
 @group(0) @binding(29) var<storage, read> xhist_in: array<vec4<f32>>;
 @group(0) @binding(30) var<storage, read_write> xhist_out: array<vec4<f32>>;
@@ -83,14 +95,6 @@ fn spec_load(slot: u32, i: u32) -> vec4<f32> {
 fn spec_store(slot: u32, i: u32, c: vec4<f32>) {
     let v = min(c, vec4<f32>(6.0e4));
     spec_pp[slot * L.size.x * L.size.y + i] = vec2<u32>(pack2x16float(v.rg), pack2x16float(v.ba));
-}
-
-fn hist_albedo(v: vec4<u32>) -> vec3<f32> { return vec3<f32>(unpack2x16float(v.x), unpack2x16float(v.y).x); }
-fn hist_emission(v: vec4<u32>) -> vec3<f32> { return vec3<f32>(unpack2x16float(v.z), unpack2x16float(v.w).x); }
-// Albedo, the frames of the output-grid histories, emission, roughness (f16).
-fn pack_ae(alb: vec3<f32>, frames: f32, em: vec3<f32>, rough: f32) -> vec4<u32> {
-    let e = min(em, vec3<f32>(6.0e4));
-    return vec4<u32>(pack2x16float(alb.rg), pack2x16float(vec2<f32>(alb.b, frames)), pack2x16float(e.rg), pack2x16float(vec2<f32>(e.b, rough)));
 }
 
 fn ray_dir(c: Cam, x: f32, y: f32) -> vec3<f32> {
@@ -221,7 +225,7 @@ fn refl(@builtin(global_invocation_id) gid: vec3<u32>) {
             let n = normalize(px.normal.xyz + vec3<f32>(1e-6));
             let rough = max(px.emit.w, 0.02);
             let a2 = rough * rough * rough * rough;
-            let sp = sample_pos(i32(gid.x), i32(gid.y), i);
+            let sp = sample_pos(i32(gid.x), i32(gid.y));
             let d = ray_dir(L.cur, sp.x, sp.y);
             let x = L.cur.pos.xyz + d * t;
             let v = -d;
@@ -253,7 +257,7 @@ fn refl(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let st = pj.spec.w;
                 if (k > 0u && st > 0.0 && st < 1.0e3) {
                     // Re-aim at j's hit from this surface point (contact reflections).
-                    let pjp = sample_pos(q.x, q.y, j);
+                    let pjp = sample_pos(q.x, q.y);
                     let xj = L.cur.pos.xyz + ray_dir(L.cur, pjp.x, pjp.y) * tj;
                     l = normalize(xj + l * st - x);
                 }
@@ -287,228 +291,20 @@ fn sample_color(q: u32) -> vec3<f32> {
     return s[0] + s[1] + s[2];
 }
 
-// Traced sample under an output pixel (nearest; raw-sample view mode).
+// The traced sample under an output pixel (nearest by the pixels' centres).
 fn sample_under(x: u32, y: u32) -> u32 {
     let sx = min(u32((f32(x) + 0.5) * f32(L.isz.x) / f32(L.size.x)), L.isz.x - 1u);
     let sy = min(u32((f32(y) + 0.5) * f32(L.isz.y) / f32(L.size.y)), L.isz.y - 1u);
     return sy * L.isz.x + sx;
 }
 
-// Jittered position of traced sample (qx, qy), in output pixels.
-fn sample_pos(qx: i32, qy: i32, q: u32) -> vec2<f32> {
-    let j = sample_px[q].normal.w;
-    let jx = floor(j / 4096.0);
-    let jit = vec2<f32>(jx, j - jx * 4096.0) / 4095.0;
-    return (vec2<f32>(f32(qx), f32(qy)) + jit) * vec2<f32>(f32(L.size.x) / f32(L.isz.x), f32(L.size.y) / f32(L.isz.y));
+// Position of traced sample (qx, qy), in output pixels: every sample of a frame has the frame's jitter.
+fn sample_pos(qx: i32, qy: i32) -> vec2<f32> {
+    return (vec2<f32>(f32(qx), f32(qy)) + L.jit.xy) * vec2<f32>(f32(L.size.x) / f32(L.isz.x), f32(L.size.y) / f32(L.isz.y));
 }
 
-// This frame's samples for one output pixel. t / n / anim / rough / st: the nearest sample's surface. tmin / tmax /
-// sky: hit distances present among the gathered samples (sky = 1 if any missed): an edge pixel's history may come
-// from either side while the jitter flips its surface. smean: mean of the neighbourhood's specular in YCoCg (the
-// temporal pass keeps the specular history, surface or reflection hit, that is closer to it).
-struct Gathered {
-    c: vec3<f32>, s: vec3<f32>, e: vec3<f32>, alb: vec3<f32>, t: f32, n: vec3<f32>, anim: f32, rough: f32, st: f32, bq: u32,
-    conf: f32, tmin: f32, tmax: f32, sky: f32, smean: vec3<f32>,
-    // Range of the 3x3 samples' emission and albedo (noise-free: their history is clamped into it while moving).
-    emin: vec3<f32>, emax: vec3<f32>, amin: vec3<f32>, amax: vec3<f32>,
-    // The nearest sample's motion offset (w = 1: on a moving object).
-    mv: vec4<f32>,
-    // Deterministic direct light (splatted like the emission) and the 3x3 samples' range of it.
-    x: vec3<f32>, xmin: vec3<f32>, xmax: vec3<f32>,
-};
-
-fn gather(gid: vec3<u32>) -> Gathered {
-    var g: Gathered;
-    let full = L.isz.x == L.size.x && L.isz.y == L.size.y;
-    let pc = vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
-    let ic = vec2<i32>(floor(pc * vec2<f32>(f32(L.isz.x) / f32(L.size.x), f32(L.isz.y) / f32(L.size.y))));
-    // nearest traced sample
-    var bq = u32(ic.y) * L.isz.x + u32(ic.x);
-    var bx = ic;
-    if (!full) {
-        var best = 1e9;
-        for (var k = 0; k < 9; k++) {
-            let qx = ic.x + k % 3 - 1;
-            let qy = ic.y + k / 3 - 1;
-            if (qx < 0 || qy < 0 || qx >= i32(L.isz.x) || qy >= i32(L.isz.y)) { continue; }
-            let q = u32(qy) * L.isz.x + u32(qx);
-            let d = sample_pos(qx, qy, q) - pc;
-            if (dot(d, d) < best) { best = dot(d, d); bq = q; bx = vec2<i32>(qx, qy); }
-        }
-    }
-    let sb = sample_px[bq];
-    g.bq = bq;
-    let nb = normalize(sb.normal.xyz + vec3<f32>(1e-6));
-    g.t = sb.color.w;
-    g.n = sb.normal.xyz;
-    g.anim = sb.albedo.w;
-    g.rough = sb.emit.w;
-    // Reflection hit distance for the mirror-image reprojection: on near-mirror surfaces (wet street, puddles) the
-    // resolved one (pass `refl`), else this sample's own. Rougher ones (signs, 0.22) resolve over a wider disk whose
-    // mean distance mixes what different neighbours reflect (bench-ghosting strafe-mid sign band +0.1 dE).
-    g.st = select(sb.spec.w, refl_res[bq].w, refl_res[bq].w > 0.0 && sb.emit.w < NEAR_MIRROR);
-    g.mv = motion_in[bq];
-    g.tmin = 1e30;
-    g.emin = vec3<f32>(1e30);
-    g.xmin = vec3<f32>(1e30);
-    g.amin = vec3<f32>(1e30);
-    // Specular neighbourhood mean around the nearest sample (same surface only), in YCoCg.
-    var m1 = vec3<f32>(0.0);
-    var mn = 0.0;
-    var wsum = 0.0;
-    for (var k = 0; k < 9; k++) {
-        let qx = bx.x + k % 3 - 1;
-        let qy = bx.y + k / 3 - 1;
-        if (qx < 0 || qy < 0 || qx >= i32(L.isz.x) || qy >= i32(L.isz.y)) { continue; }
-        let q = u32(qy) * L.isz.x + u32(qx);
-        let s = sample_px[q];
-        if (s.color.w > 0.0) {
-            g.tmin = min(g.tmin, s.color.w);
-            g.tmax = max(g.tmax, s.color.w);
-        } else {
-            g.sky = 1.0;
-        }
-        // Emission / albedo range over all nine (edges: the history holds a blend of both sides).
-        let p = sample_parts(q);
-        g.emin = min(g.emin, p[2]);
-        let xd = direct_in[q].rgb;
-        g.xmin = min(g.xmin, xd);
-        g.xmax = max(g.xmax, xd);
-        g.emax = max(g.emax, p[2]);
-        g.amin = min(g.amin, s.albedo.rgb);
-        g.amax = max(g.amax, s.albedo.rgb);
-        var ok = false;
-        if (g.t > 0.0) {
-            ok = s.color.w > 0.0 && abs(s.color.w - g.t) < 0.05 * g.t + 0.01 && dot(normalize(s.normal.xyz + vec3<f32>(1e-6)), nb) > 0.8;
-        } else {
-            ok = s.color.w == 0.0;
-        }
-        if (!ok) { continue; }
-        m1 += ycocg(p[1]);
-        mn += 1.0;
-        if (full && q != bq) { continue; }
-        // At 100% render scale only the pixel's own sample is accumulated; below, the 3x3 samples are splatted with
-        // a Gaussian on the jittered distance (sigma ~ 0.48 output px).
-        var wt = select(0.0, 1.0, q == bq);
-        if (!full) {
-            let d = sample_pos(qx, qy, q) - pc;
-            wt = max(exp(-2.2 * dot(d, d)), select(0.0, 1e-4, q == bq));
-        }
-        if (wt <= 0.0) { continue; }
-        g.c += p[0] * wt;
-        g.s += p[1] * wt;
-        g.e += p[2] * wt;
-        g.x += direct_in[q].rgb * wt;
-        g.alb += s.albedo.rgb * wt;
-        wsum += wt;
-    }
-    if (wsum > 0.0) {
-        g.c /= wsum;
-        g.s /= wsum;
-        g.e /= wsum;
-        g.x /= wsum;
-        g.alb /= wsum;
-    }
-    g.conf = min(wsum, 1.0);
-    g.smean = m1 / max(mn, 1.0);
-    return g;
-}
-
-// The output-grid diffuse history follows the traced grid's in hist_in / hist_out (sized for both).
+// The output grid's colour history follows the traced grid's diffuse history in hist_in / hist_out (sized for both).
 fn out_hist(i: u32) -> u32 { return L.size.x * L.size.y + i; }
-
-// Bilinear history fetch at previous-frame pixel position (fx, fy) for a surface at previous-view depth z with normal
-// n; `virt` = specular history through a reflection (only the reflecting surface's normal / roughness must match).
-// d: the output-grid diffuse irradiance history (rgb, frames); f: frames of the other output-grid histories.
-struct Hist { d: vec4<f32>, s: vec4<f32>, f: f32, alb: vec3<f32>, em: vec3<f32>, w: f32 };
-
-fn fetch_history(fx: f32, fy: f32, z: f32, zr: f32, n: vec3<f32>, t: f32, s: Gathered, virt: bool) -> Hist {
-    var h: Hist;
-    let w = L.size.x;
-    let hh = L.size.y;
-    let upsampled = L.isz.x != L.size.x || L.isz.y != L.size.y;
-    let x0 = i32(floor(fx));
-    let y0 = i32(floor(fy));
-    let ax = fx - f32(x0);
-    let ay = fy - f32(y0);
-    var wsum = 0.0;
-    for (var k = 0; k < 4; k++) {
-        let qx = x0 + (k & 1);
-        let qy = y0 + (k >> 1u);
-        if (qx < 0 || qy < 0 || qx >= i32(w) || qy >= i32(hh)) { continue; }
-        let q = u32(qy) * w + u32(qx);
-        let g = gb_unpack(gb_in[q]);
-        var ok = false;
-        if (virt) {
-            ok = g.depth > 0.0 && dot(g.n, n) > 0.95 && abs(g.rough - s.rough) < 0.1;
-        } else if (t > 0.0) {
-            ok = g.depth > 0.0 && abs(g.depth - z) < 0.04 * z + 0.002 && dot(g.n, n) > 0.8;
-        } else {
-            ok = g.depth == 0.0;
-        }
-        // Upsampling: also accept history of any surface among this frame's neighbourhood samples (depths scaled to
-        // the previous view like this pixel's own), or sky if some sample missed.
-        if (!ok && upsampled && !virt) {
-            let in_range = (g.depth > zr * s.tmin * 0.97 - 0.002) && (g.depth < zr * s.tmax * 1.03 + 0.002);
-            ok = select(s.sky > 0.5, in_range, g.depth > 0.0);
-        }
-        if (!ok) { continue; }
-        let bw = select(1.0 - ax, ax, (k & 1) == 1) * select(1.0 - ay, ay, (k >> 1u) == 1);
-        h.s += shist_in[q] * bw;
-        if (!virt) {
-            h.d += hist_in[out_hist(q)] * bw;
-            let ae = ae_in[q];
-            h.f += unpack2x16float(ae.y).y * bw;
-            h.alb += hist_albedo(ae) * bw;
-            h.em += hist_emission(ae) * bw;
-        }
-        wsum += bw;
-    }
-    if (wsum > 1e-3) {
-        h.d /= wsum;
-        h.s /= wsum;
-        h.f /= wsum;
-        h.alb /= wsum;
-        h.em /= wsum;
-        h.w = wsum;
-    } else {
-        h = Hist(vec4<f32>(0.0), vec4<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
-    }
-    if (non_finite(h.d.rgb) || non_finite(h.s.rgb) || non_finite(h.alb) || non_finite(h.em) || non_finite(vec3<f32>(h.d.w, h.s.w, h.f))) {
-        h = Hist(vec4<f32>(0.0), vec4<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
-    }
-    return h;
-}
-
-// Albedo and emission history at previous-frame position (fx, fy), Catmull-Rom over 4x4 pixels (bilinear resampling
-// every frame blurs texture and sign detail while the view moves). No surface test: these signals are noise-free, so
-// the caller clamps them into this frame's neighbourhood range instead (TAA), which also removes the filter's ringing.
-struct TexHist { alb: vec3<f32>, em: vec3<f32>, x: vec3<f32> };
-
-fn fetch_tex_history(fx: f32, fy: f32) -> TexHist {
-    let x1 = floor(fx);
-    let y1 = floor(fy);
-    let t = vec2<f32>(fx - x1, fy - y1);
-    let w0 = t * (-0.5 + t * (1.0 - 0.5 * t));
-    let w1 = 1.0 + t * t * (-2.5 + 1.5 * t);
-    let w2 = t * (0.5 + t * (2.0 - 1.5 * t));
-    let w3 = t * t * (-0.5 + 0.5 * t);
-    let wx = array<f32, 4>(w0.x, w1.x, w2.x, w3.x);
-    let wy = array<f32, 4>(w0.y, w1.y, w2.y, w3.y);
-    var h = TexHist(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-    for (var j = 0; j < 4; j++) {
-        let qy = u32(clamp(i32(y1) + j - 1, 0, i32(L.size.y) - 1));
-        for (var i = 0; i < 4; i++) {
-            let qx = u32(clamp(i32(x1) + i - 1, 0, i32(L.size.x) - 1));
-            let ae = ae_in[qy * L.size.x + qx];
-            let wt = wx[i] * wy[j];
-            h.alb += hist_albedo(ae) * wt;
-            h.em += hist_emission(ae) * wt;
-            h.x += xhist_in[qy * L.size.x + qx].rgb * wt;
-        }
-    }
-    return h;
-}
 
 // Previous-frame pixel position of world point p (x < 0: behind the previous camera).
 fn prev_pixel(p: vec3<f32>) -> vec3<f32> {
@@ -521,16 +317,8 @@ fn prev_pixel(p: vec3<f32>) -> vec3<f32> {
 }
 
 // ------------------------------------------------------------------------------------------------ diffuse, traced grid
-// UE denoises at the internal resolution and upsamples after: the diffuse irradiance is accumulated (`dtemporal`) and
-// filtered (`atrous*`) on the traced grid, a quarter of the pixels at the 0.5 floor, then upsampled per output pixel
-// (`upsample_irradiance`) and remodulated by its sharp albedo. Irradiance is smooth, so little is lost.
-
-// The previous frame's output pixel covering its traced pixel (tx, ty) (its g-buffer checks history on the traced grid).
-fn prev_out_index(tx: i32, ty: i32) -> u32 {
-    let o = (vec2<f32>(f32(tx), f32(ty)) + 0.5) * vec2<f32>(f32(L.size.x), f32(L.size.y)) / vec2<f32>(L.isz.zw);
-    let oi = clamp(vec2<i32>(o), vec2<i32>(0), vec2<i32>(i32(L.size.x) - 1, i32(L.size.y) - 1));
-    return u32(oi.y) * L.size.x + u32(oi.x);
-}
+// The diffuse irradiance (diffuse lighting / albedo) is accumulated (`dtemporal`) and filtered (`atrous*`) on the traced
+// grid; `compose` remodulates it by each sample's own albedo.
 
 // The previous frame's surface at its traced pixel (tx, ty) is this one (previous-view depth z, normal n; t = 0: sky).
 fn same_surface(tx: i32, ty: i32, z: f32, n: vec3<f32>, t: f32) -> bool {
@@ -539,7 +327,7 @@ fn same_surface(tx: i32, ty: i32, z: f32, n: vec3<f32>, t: f32) -> bool {
 
 // same_surface with the normals' least cosine `ncos`.
 fn same_surface_n(tx: i32, ty: i32, z: f32, n: vec3<f32>, t: f32, ncos: f32) -> bool {
-    let g = gb_unpack(gb_in[prev_out_index(tx, ty)]);
+    let g = gb_unpack(gb_in[u32(ty) * L.isz.z + u32(tx)]);
     if (t > 0.0) { return g.depth > 0.0 && abs(g.depth - z) < 0.04 * z + 0.002 && dot(g.n, n) > ncos; }
     return g.depth == 0.0;
 }
@@ -565,7 +353,7 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A compact copy of the sample's surface for the denoiser's and the upsample's edge stops (`sb` is free until
     // `spec0`; the 80-byte samples cost twice the bandwidth): normal, first-hit distance, negative on animated emitters.
     sb[q] = vec4<f32>(n, select(t, -t, anim && t > 0.0));
-    let sp = sample_pos(i32(gid.x), i32(gid.y), q);
+    let sp = sample_pos(i32(gid.x), i32(gid.y));
     let dir = ray_dir(L.cur, sp.x, sp.y);
     let p = select(L.cur.pos.xyz + dir * 1.0e6, L.cur.pos.xyz + dir * t, t > 0.0);
     var irr = sample_parts(q)[0] / max(px.albedo.rgb, vec3<f32>(0.02));
@@ -676,192 +464,6 @@ fn traced_surface(q: u32) -> vec4<f32> {
     return vec4<f32>(v.xyz, abs(v.w));
 }
 
-// The denoised irradiance of the traced grid (fa after the last à-trous stage) at output pixel gid: bilinear over the
-// four nearest traced pixels, each only if it shows this pixel's surface (depth, normal; joint bilateral), else the
-// nearest sample's. lo / hi: the range of all four (either side of an edge), for the output-grid history's clamp.
-struct Upsampled { irr: vec3<f32>, lo: vec3<f32>, hi: vec3<f32> };
-
-fn upsample_irradiance(gid: vec3<u32>, s: Gathered, n: vec3<f32>) -> Upsampled {
-    let tc = (vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5) * vec2<f32>(L.isz.xy) / vec2<f32>(f32(L.size.x), f32(L.size.y)) - 0.5;
-    let x0 = i32(floor(tc.x));
-    let y0 = i32(floor(tc.y));
-    let f = tc - floor(tc);
-    var sum = vec3<f32>(0.0);
-    var wsum = 0.0;
-    var u: Upsampled;
-    u.lo = fa[s.bq].rgb;
-    u.hi = u.lo;
-    for (var k = 0; k < 4; k++) {
-        let tx = x0 + (k & 1);
-        let ty = y0 + (k >> 1u);
-        if (tx < 0 || ty < 0 || tx >= i32(L.isz.x) || ty >= i32(L.isz.y)) { continue; }
-        let q = u32(ty) * L.isz.x + u32(tx);
-        let fq = fa[q].rgb;
-        u.lo = min(u.lo, fq);
-        u.hi = max(u.hi, fq);
-        let pq = traced_surface(q);
-        var ok = false;
-        if (s.t > 0.0) {
-            ok = pq.w > 0.0 && abs(pq.w - s.t) < 0.05 * s.t + 0.01 && dot(pq.xyz, n) > 0.8;
-        } else {
-            ok = pq.w == 0.0;
-        }
-        if (!ok) { continue; }
-        let bw = max(select(1.0 - f.x, f.x, (k & 1) == 1) * select(1.0 - f.y, f.y, (k >> 1u) == 1), 1e-4);
-        sum += fq * bw;
-        wsum += bw;
-    }
-    u.irr = select(fa[s.bq].rgb, sum / wsum, wsum > 0.0);
-    if (non_finite(u.irr) || non_finite(u.lo) || non_finite(u.hi)) { u = Upsampled(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)); }
-    return u;
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let w = L.size.x;
-    let h = L.size.y;
-    if (gid.x >= w || gid.y >= h) { return; }
-    let i = gid.y * w + gid.x;
-    let s = gather(gid);
-    let t = s.t;
-    let n = normalize(s.n + vec3<f32>(1e-6));
-    let dir = ray_dir(L.cur, f32(gid.x) + 0.5, f32(gid.y) + 0.5);
-    var p = L.cur.pos.xyz + dir * 1.0e6;
-    var depth = 0.0;
-    if (t > 0.0) {
-        p = L.cur.pos.xyz + dir * t;
-        depth = dot(p - L.cur.pos.xyz, L.cur.fwd.xyz);
-    }
-
-    var hist = Hist(vec4<f32>(0.0), vec4<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0), 0.0);
-    var virt = vec4<f32>(0.0);
-    var texp = vec2<f32>(-1.0);
-    if (L.size.w == 0u) {
-        // Moving objects reproject through where their surface point was (motion vectors), the rest with the camera.
-        let pp = prev_pixel(p + select(vec3<f32>(0.0), s.mv.xyz, s.mv.w > 0.5 && t > 0.0));
-        if (pp.z > 0.0) {
-            texp = pp.xy;
-            let zr = select(dot(dir, L.prev.fwd.xyz), pp.z / t, t > 0.0);
-            hist = fetch_history(pp.x, pp.y, pp.z, zr, n, t, s, false);
-        }
-        // Reflections: also reproject through the mirror image of what they show (planar-mirror virtual point, UE's
-        // history "from hit"). Not on moving objects: the camera-only reprojection ignores a moving reflector's own
-        // motion, so on the crowd's vans it landed on other surfaces (a level street's normal passes the test) and,
-        // picked as the history closer to a mostly dark neighbourhood mean, replaced the roofs' reflections with darker
-        // ones. The Bistro crowd in motion (lockstep, 10 s): specular 0.55 -> 0.83 of our offline render, the vans'
-        // roofs 0.46 -> 0.85. Limited to near mirrors as well (roughness < 0.2), Bistro's glossy surfaces gained a
-        // little more, but Kabukichō's wet street lost the history that carries it through strafes (bench-ghosting
-        // --scene kabukicho strafe-mid 3.3 -> 4.3): every static surface keeps it.
-        if (t > 0.0 && s.st > 0.0 && s.mv.w <= 0.5) {
-            let pv = prev_pixel(L.cur.pos.xyz + dir * (t + min(s.st, 1.0e3)));
-            if (pv.z > 0.0) {
-                virt = fetch_history(pv.x, pv.y, pv.z, 1.0, n, t, s, true).s;
-            }
-        }
-    }
-
-    // History length of this pixel's output-grid histories (specular, albedo, emission, direct): global cap (camera
-    // motion / resets), animated shading keeps ~4 frames.
-    let cap = select(L.misc.y, min(L.misc.y, 4.0), s.anim > 1.5);
-    let count = min(hist.f + s.conf, cap);
-    let a = clamp(s.conf / max(count, 1e-4), 0.0, 1.0);
-
-    // Specular (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the surface history and the reflection-hit
-    // one (reprojected through the mirror image of what it shows); the one closer to this frame's neighbourhood mean
-    // wins. While the view moves the frame count is capped: 12 frames (mirror-like surfaces at full resolution ~2), and
-    // 4 for 8 frames after the view last translated (the stop included): neither reprojection is exact for glossy
-    // reflections moving against their surface, and history that lands wrong smears them (bench-ghosting: strafes,
-    // sudden stops). A pure rotation reprojects exactly and keeps the longer history; holding still the cap lifts
-    // (static reflections keep converging, as under UE's TSR).
-    // Not clamped to the neighbourhood (UE clamps to 4 sigma of its spatially resolved reflections; ours, 4 to 8 sigma
-    // of nine resolved 1-spp samples until 2026-11-09): around sparse bright reflections and highlights the nine samples
-    // are mostly all dark, so the box clipped converged history every frame the view moved and the light was lost, not
-    // delayed. The Bistro crowd in motion (lockstep, 10 s): specular 0.26 -> 0.55 of our offline render. bench-ghosting
-    // excess turn-mid 3.43 -> 0.76, strafe-mid 5.14 -> 2.19, stop+0.1s 4.41 -> 1.86: each shot is compared with its
-    // converged frame, and the clipped reflections were most of the error.
-    let full = L.isz.x == L.size.x && L.isz.y == L.size.y;
-    let moving = any(L.cur.pos.xyz != L.prev.pos.xyz) || any(L.cur.fwd.xyz != L.prev.fwd.xyz);
-    let translated = L.mode.y < 8u && !xflag(16384u);
-    let ys = ycocg(hist.s.rgb);
-    let yv = ycocg(virt.rgb);
-    var surf = select(0.0, 0.8, length(s.smean - yv) > length(s.smean - ys) + 0.01 / exposure_scale());
-    surf = select(surf, 1.0, virt.w <= 0.0);
-    surf = select(surf, 0.0, hist.s.w <= 0.0 && virt.w > 0.0);
-    let hy = mix(yv, ys, surf);
-    var max_s = select(cap, select(12.0, mix(2.0, 12.0, clamp(s.rough / 0.05, 0.0, 1.0)), full), moving);
-    if (translated) { max_s = min(max_s, 4.0); }
-    let frames_s = select(virt.w, hist.s.w, surf > 0.5);
-    var count_s = 0.0;
-    var s_out = s.s;
-    if (hist.s.w > 0.0 || virt.w > 0.0) {
-        count_s = min(min(frames_s + s.conf, max_s), cap);
-        s_out = mix(max(ycocg_rgb(hy), vec3<f32>(0.0)), s.s, clamp(s.conf / max(count_s, 1e-4), 0.0, 1.0));
-    } else {
-        count_s = s.conf;
-    }
-
-    // The diffuse history holds irradiance (lighting / albedo; smooth, so resampling it every frame costs no detail),
-    // remodulated by albedo. Albedo and emission are noise-free: their history is resampled sharply (Catmull-Rom),
-    // clamped into this frame's 3x3 range (TAA) and held to 4 frames while the view moves, 16 when still, so texture
-    // and sign detail don't blur through resampling (bench-temporal move59 vs converged 5.87 -> 5.07; bilinear at 4
-    // frames 5.12, at 2 frames 4.94 but shimmering).
-    var h_alb = hist.alb;
-    var h_em = hist.em;
-    var h_x = s.x;
-    if (texp.x >= 0.0 && hist.w > 0.0) {
-        let th = fetch_tex_history(texp.x, texp.y);
-        h_alb = th.alb;
-        h_em = th.em;
-        h_x = th.x;
-    }
-    // Deterministic direct light, no denoiser. While anything changes (the view, this object, lighting) a short clamped
-    // history like the emission's, as short on moving objects (a turning surface turns from the sun): crisp moving
-    // shadows. Otherwise it accumulates like the diffuse history, so soft-shadow penumbrae converge.
-    let changing = moving || s.mv.w > 0.5 || L.mode.z != 0u;
-    var x_out = mix(h_x, s.x, a);
-    if (changing) { x_out = mix(clamp(h_x, s.xmin, s.xmax), s.x, max(a, 0.25)); }
-    // w: screen-space velocity (output pixels this frame; camera and object motion) for motion blur, f16 x 2.
-    var vel = vec2<f32>(0.0);
-    if (L.size.w == 0u) {
-        let pv = prev_pixel(p + select(vec3<f32>(0.0), s.mv.xyz, s.mv.w > 0.5 && t > 0.0));
-        if (pv.z > 0.0) { vel = clamp(vec2<f32>(f32(gid.x), f32(gid.y)) - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0)); }
-    }
-    let x_fin = select(x_out, vec3<f32>(0.0), non_finite(x_out));
-    xhist_out[i] = vec4<f32>(x_fin, bitcast<f32>(pack2x16float(vel)));
-    h_alb = clamp(h_alb, s.amin, s.amax);
-    // The emission is clamped while something changes (the view, this object, lighting, animated shading), as the
-    // specular is. Holding still, small emitters (lamp globes, string-light bulbs, sign strokes) that the jitter finds
-    // in only some frames' 3x3 boxes below full resolution lost their light to the clamp: Bistro at the 0.5 floor had
-    // 69 % of the offline radiance in the 1-53 nit blocks (89 % now), 94.5 % overall (98 %). Background pixels too: the
-    // sky through media, 0 or 1 per sample, read high with the clamp (volume/furnace-live 0.9965 with it, 0.993
-    // without, since the media lookups stopped losing light at the boundary).
-    if (changing || L.mode.y < 8u || s.anim > 1.5) { h_em = clamp(h_em, s.emin, s.emax); }
-    let tex_a = max(a, select(1.0 / 16.0, 0.25, moving));
-    let alb_out = mix(h_alb, s.alb, tex_a);
-    let em = mix(h_em, s.e, tex_a);
-    shist_out[i] = vec4<f32>(s_out, count_s);
-
-    // Diffuse: the traced grid's denoised irradiance (`dtemporal`, `atrous*`), upsampled. Each frame that is the
-    // irradiance of the surface this pixel's nearest jittered sample hit; at an edge that flips between both sides while
-    // the albedo history holds their blend, so it is accumulated here too, like the albedo (TAA: clamped into the range
-    // of the traced values around, 16 frames still, 4 moving), else edges dither (Kabukicho at the 0.5 floor, @16 / @256
-    // SSIM 0.711 / 0.721 -> 0.721 / 0.726).
-    let up = upsample_irradiance(gid, s, n);
-    let tc = hist_out[s.bq].w;
-    // Its frames follow the traced history's (restarted there by anti-lag and disocclusion).
-    let count_d = min(min(hist.d.w + s.conf, select(16.0, 4.0, moving || s.mv.w > 0.5)), max(tc, 1.0));
-    let irr = mix(clamp(hist.d.rgb, up.lo, up.hi), up.irr, clamp(s.conf / max(count_d, 1e-4), 0.0, 1.0));
-    hist_out[out_hist(i)] = vec4<f32>(select(irr, vec3<f32>(0.0), non_finite(irr)), count_d);
-    // Times this pixel's albedo, plus the directly seen emission and the sun's direct light as the final image shows
-    // them (the emission as its f16 history holds it), and the view depth: `spec2` only adds the specular, reading one
-    // vector instead of four (the composition was most of that pass's cost).
-    let ae = pack_ae(alb_out, count, em, s.rough);
-    fb[i] = vec4<f32>(max(irr * max(alb_out, vec3<f32>(0.02)), vec3<f32>(0.0)) + hist_emission(ae) + x_fin, depth);
-    spec_store(0u, i, vec4<f32>(max(s_out, vec3<f32>(0.0)), count_s)); // specular denoiser input
-    ae_out[i] = ae;
-    gb_out[i] = gb_pack(n, depth, s.rough);
-}
-
 // ------------------------------------------------------------------------------------------------ denoise
 
 // Diffuse: edge-avoiding a-trous on demodulated irradiance, luminance edge-stop scaled by the pixel's temporal
@@ -963,28 +565,147 @@ fn atrous_gated(gid: vec3<u32>, stage: u32, step: i32, max_noise: f32) {
 @compute @workgroup_size(8, 8, 1) fn atrous3(@builtin(global_invocation_id) gid: vec3<u32>) { atrous_gated(gid, 3u, 8, 0.05); }
 @compute @workgroup_size(8, 8, 1) fn atrous4(@builtin(global_invocation_id) gid: vec3<u32>) { atrous_gated(gid, 4u, 16, 0.05); }
 
-// Specular: not demodulated (reflections carry their own image); a small kernel scaled by roughness, so mirror-like
-// surfaces keep sharp reflections and glossy ones are smoothed. Three passes over `spec_pp`: slot 0 -> 1 -> 0 -> 1.
-fn spec_filter(gid: vec3<u32>, step: i32, from_a: bool) {
-    let w = L.size.x;
-    let h = L.size.y;
+// ------------------------------------------------------------------------------------------------ render resolution
+// Everything noisy is accumulated and filtered on the traced grid (the render resolution), composed there into one
+// colour, and one temporal upscaler takes that to the output grid (`upscale`): the structure of UE's TSR after Lumen
+// and of the vendor upscalers after a denoiser. `gb_out` is the traced grid's g-buffer.
+
+// Specular history at previous-frame position pp (prev_pixel: output pixels, view depth) on the previous traced grid:
+// bilinear over the taps that show this surface; `virt`: through a reflection (the reflecting surface's normal and
+// roughness must match, not its depth).
+fn spec_history(pp: vec3<f32>, n: vec3<f32>, t: f32, rough: f32, virt: bool) -> vec4<f32> {
+    let ps = vec2<i32>(L.isz.zw);
+    let tc = (pp.xy + 0.5) * vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y)) - 0.5;
+    let x0 = i32(floor(tc.x));
+    let y0 = i32(floor(tc.y));
+    let f = tc - floor(tc);
+    var h = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let tx = x0 + (k & 1);
+        let ty = y0 + (k >> 1u);
+        if (tx < 0 || ty < 0 || tx >= ps.x || ty >= ps.y) { continue; }
+        let j = u32(ty * ps.x + tx);
+        let g = gb_unpack(gb_in[j]);
+        var ok = false;
+        if (virt) {
+            ok = g.depth > 0.0 && dot(g.n, n) > 0.95 && abs(g.rough - rough) < 0.1;
+        } else if (t > 0.0) {
+            ok = g.depth > 0.0 && abs(g.depth - pp.z) < 0.04 * pp.z + 0.002 && dot(g.n, n) > 0.8;
+        } else {
+            ok = g.depth == 0.0;
+        }
+        if (!ok) { continue; }
+        let bw = select(1.0 - f.x, f.x, (k & 1) == 1) * select(1.0 - f.y, f.y, (k >> 1u) == 1);
+        h += shist_in[j] * bw;
+        wsum += bw;
+    }
+    if (wsum <= 1e-3) { return vec4<f32>(0.0); }
+    h /= wsum;
+    if (non_finite(h.rgb) || non_finite(vec3<f32>(h.w))) { return vec4<f32>(0.0); }
+    return h;
+}
+
+// Specular temporal accumulation on the traced grid (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the
+// surface history and the reflection-hit one (reprojected through the mirror image of what it shows); the one closer to
+// this frame's neighbourhood mean wins. Writes the specular filter's input and the traced grid's g-buffer.
+@compute @workgroup_size(8, 8, 1)
+fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let iw = L.isz.x;
+    let ih = L.isz.y;
+    if (gid.x >= iw || gid.y >= ih) { return; }
+    let q = gid.y * iw + gid.x;
+    let px = sample_px[q];
+    let t = px.color.w;
+    let n = normalize(px.normal.xyz + vec3<f32>(1e-6));
+    let rough = px.emit.w;
+    // The history is the traced pixel's, whatever sub-pixel point each frame's jitter sampled it at: it is fetched
+    // where the pixel's centre was (the sample's surface, through the centre). Fetched where the jittered sample
+    // itself was, it was resampled at a new sub-pixel offset every frame, each time a little blurrier: the wet
+    // street's reflections converged to blobs (Kabukichō, bench-ghosting's converged frames).
+    let sp = (vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5) * vec2<f32>(f32(L.size.x) / f32(iw), f32(L.size.y) / f32(ih));
+    let dir = ray_dir(L.cur, sp.x, sp.y);
+    var p = L.cur.pos.xyz + dir * 1.0e6;
+    var depth = 0.0;
+    if (t > 0.0) {
+        p = L.cur.pos.xyz + dir * t;
+        depth = dot(p - L.cur.pos.xyz, L.cur.fwd.xyz);
+    }
+    let cur = sample_parts(q)[1];
+    // This frame's neighbourhood mean (same surface), in YCoCg.
+    var m1 = vec3<f32>(0.0);
+    var mn = 0.0;
+    for (var k = 0; k < 9; k++) {
+        let qx = i32(gid.x) + k % 3 - 1;
+        let qy = i32(gid.y) + k / 3 - 1;
+        if (qx < 0 || qy < 0 || qx >= i32(iw) || qy >= i32(ih)) { continue; }
+        let j = u32(qy) * iw + u32(qx);
+        let s = sample_px[j];
+        var ok = false;
+        if (t > 0.0) {
+            ok = s.color.w > 0.0 && abs(s.color.w - t) < 0.05 * t + 0.01 && dot(normalize(s.normal.xyz + vec3<f32>(1e-6)), n) > 0.8;
+        } else {
+            ok = s.color.w == 0.0;
+        }
+        if (!ok) { continue; }
+        m1 += ycocg(sample_parts(j)[1]);
+        mn += 1.0;
+    }
+    let smean = m1 / max(mn, 1.0);
+    // Reflection hit distance for the mirror-image reprojection: on near mirrors the resolved one (pass `refl`).
+    let st = select(px.spec.w, refl_res[q].w, refl_res[q].w > 0.0 && rough < NEAR_MIRROR);
+    let mv = motion_in[q];
+    var hs = vec4<f32>(0.0);
+    var hv = vec4<f32>(0.0);
+    if (L.size.w == 0u && L.isz.z > 0u) {
+        let pp = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, mv.w > 0.5 && t > 0.0));
+        if (pp.z > 0.0) { hs = spec_history(pp, n, t, rough, false); }
+        // (Not on moving objects: the camera-only reprojection ignores a moving reflector's own motion.)
+        if (t > 0.0 && st > 0.0 && mv.w <= 0.5) {
+            let pv = prev_pixel(L.cur.pos.xyz + dir * (t + min(st, 1.0e3)));
+            if (pv.z > 0.0) { hv = spec_history(pv, n, t, rough, true); }
+        }
+    }
+    let cap = select(L.misc.y, min(L.misc.y, 4.0), px.albedo.w > 1.5);
+    let moving = any(L.cur.pos.xyz != L.prev.pos.xyz) || any(L.cur.fwd.xyz != L.prev.fwd.xyz);
+    let translated = L.mode.y < 8u && !xflag(16384u);
+    let ys = ycocg(hs.rgb);
+    let yv = ycocg(hv.rgb);
+    var surf = select(0.0, 0.8, length(smean - yv) > length(smean - ys) + 0.01 / exposure_scale());
+    surf = select(surf, 1.0, hv.w <= 0.0);
+    surf = select(surf, 0.0, hs.w <= 0.0 && hv.w > 0.0);
+    let hy = mix(yv, ys, surf);
+    var max_s = select(cap, mix(2.0, 12.0, clamp(rough / 0.05, 0.0, 1.0)), moving);
+    if (translated) { max_s = min(max_s, 4.0); }
+    let frames_s = select(hv.w, hs.w, surf > 0.5);
+    var count_s = 1.0;
+    var s_out = cur;
+    if (hs.w > 0.0 || hv.w > 0.0) {
+        count_s = min(min(frames_s + 1.0, max_s), cap);
+        s_out = mix(max(ycocg_rgb(hy), vec3<f32>(0.0)), cur, clamp(1.0 / max(count_s, 1e-4), 0.0, 1.0));
+    }
+    s_out = select(max(s_out, vec3<f32>(0.0)), vec3<f32>(0.0), non_finite(s_out));
+    shist_out[q] = vec4<f32>(s_out, count_s);
+    spec_store(0u, q, vec4<f32>(s_out, count_s));
+    gb_out[q] = gb_pack(n, depth, rough);
+}
+
+// The specular filter (`spec_filter`'s kernel) on the traced grid: three passes over `spec_pp`, slot 0 -> 1 -> 0 -> 1.
+fn spec_filter_traced(gid: vec3<u32>, step: i32, from_a: bool) {
+    let w = L.isz.x;
+    let h = L.isz.y;
     if (gid.x >= w || gid.y >= h) { return; }
     let i = gid.y * w + gid.x;
     let src = select(1u, 0u, from_a);
     let c = spec_load(src, i);
     let g = gb_unpack(gb_out[i]);
     let rough = g.rough;
-    // Kernel radius x saturate(roughness x 8) (UE LumenReflectionDenoiserSpatial.usf): mirror-like surfaces are not
-    // filtered spatially; a pass of step s runs where the scaled radius reaches it.
-    // Fresh history (disocclusions, < 4 frames): every pass and a loose normal test, since 1-spp reflections on rippled
-    // wet ground are speckle that the normal-map detail would otherwise keep apart (Kabukicho k = 1 SSIM vs UE +0.02).
     let fresh = c.w < 4.0;
     let reach = select(4.0 * clamp(rough * 8.0, 0.0, 1.0), 4.0, xflag(2u) || fresh);
     let npow = select(64.0, 8.0, fresh);
     let strength = (0.25 + smoothstep(0.08, 0.5, rough)) / sqrt(max(c.w, 1.0)) * 4.0;
     var outv = c.rgb;
     if (strength >= 0.02 && f32(step) <= reach) {
-        // Edge-stop relative to the local mean: a dark 1-spp centre must still accept its neighbours.
         var li = 0.0;
         var nl = 0.0;
         for (var k = 0; k < 9; k++) {
@@ -1012,11 +733,6 @@ fn spec_filter(gid: vec3<u32>, step: i32, from_a: bool) {
                 if ((g.depth == 0.0) != (gq.depth == 0.0)) { wt = 0.0; }
                 wt *= exp(-abs(gq.depth - g.depth) / (0.02 * g.depth + 0.01));
                 wt *= exp(-abs(gq.rough - rough) * 10.0);
-                // Edge stop on luminance: wide (8 x strength x the local mean). Narrow (2 x), it kept sparse bright
-                // reflections out of their neighbours' means and their own (the centre weighs itself by its distance
-                // from the mean): their energy was lost, not spread. Static Bistro's specular 0.80 -> 0.84 of our
-                // offline render (layer B pose, 64 frames). Without it (no luminance stop) 0.85, but Zero Day's
-                // layer B rose 3.46 -> 3.53 (reflections blurred across sharp edges).
                 wt *= exp(-abs(lum(sq) - li) / (strength * 8.0 * (li + 1e-3)));
                 sum += sq * wt;
                 wsum += wt;
@@ -1026,19 +742,357 @@ fn spec_filter(gid: vec3<u32>, step: i32, from_a: bool) {
         if (non_finite(outv)) { outv = c.rgb; }
     }
     spec_store(1u - src, i, vec4<f32>(outv, c.w));
-    // The last pass also composes the final image: the rest (fb, from `temporal`: diffuse, directly seen emission, the
-    // sun's direct light; w: view depth) and this specular. Into fa, or back into fb for depth of field / motion blur to
-    // read (w: the CoC).
-    if (step == 4) {
-        let rest = fb[i];
-        let img = vec4<f32>(rest.rgb + outv, dof_coc(rest.w));
-        if (L.misc2.z > 0.0 || L.dof.x > 0.0) { fb[i] = img; } else { fa[i] = img; }
-    }
 }
 
-@compute @workgroup_size(8, 8, 1) fn spec0(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter(gid, 1, true); }
-@compute @workgroup_size(8, 8, 1) fn spec1(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter(gid, 2, false); }
-@compute @workgroup_size(8, 8, 1) fn spec2(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter(gid, 4, true); }
+@compute @workgroup_size(8, 8, 1) fn sfilt0(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter_traced(gid, 1, true); }
+@compute @workgroup_size(8, 8, 1) fn sfilt1(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter_traced(gid, 2, false); }
+@compute @workgroup_size(8, 8, 1) fn sfilt2(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter_traced(gid, 4, true); }
+
+// The frame at render resolution: each traced sample's colour (its own albedo times the denoised irradiance, the
+// denoised specular, what the camera ray saw directly and the deterministic direct light) into fb (w: first-hit
+// distance), and its motion into `xhist_out`: screen velocity (output pixels this frame; camera and object), view depth,
+// and whether its shading is animated (signs, screens: the upscaler's reactive mask, as FSR 2 and UE's responsive AA
+// take one: what changes there has no motion vector).
+@compute @workgroup_size(8, 8, 1)
+fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let iw = L.isz.x;
+    let ih = L.isz.y;
+    if (gid.x >= iw || gid.y >= ih) { return; }
+    let q = gid.y * iw + gid.x;
+    let px = sample_px[q];
+    let t = px.color.w;
+    let c = fa[q].rgb * max(px.albedo.rgb, vec3<f32>(0.02)) + spec_load(1u, q).rgb + sample_parts(q)[2] + direct_in[q].rgb;
+    let sp = sample_pos(i32(gid.x), i32(gid.y));
+    let dir = ray_dir(L.cur, sp.x, sp.y);
+    var p = L.cur.pos.xyz + dir * 1.0e6;
+    var depth = 0.0;
+    if (t > 0.0) {
+        p = L.cur.pos.xyz + dir * t;
+        depth = dot(p - L.cur.pos.xyz, L.cur.fwd.xyz);
+    }
+    // (A static surface under a camera that holds still has no velocity: exactly none, not the reprojection's rounding,
+    // so the upscaler reads its history where it wrote it.)
+    var vel = vec2<f32>(0.0);
+    let mv = motion_in[q];
+    let object_moves = mv.w > 0.5 && t > 0.0;
+    let camera_moves = any(L.cur.pos != L.prev.pos) || any(L.cur.fwd != L.prev.fwd) || any(L.cur.right != L.prev.right) || any(L.cur.up != L.prev.up);
+    if (L.size.w == 0u && (camera_moves || object_moves)) {
+        let pv = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, object_moves));
+        if (pv.z > 0.0) { vel = clamp(sp - 0.5 - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0)); }
+    }
+    fb[q] = vec4<f32>(finite_or_zero(max(c, vec3<f32>(0.0))), t);
+    xhist_out[q] = vec4<f32>(vel, depth, select(0.0, 1.0, px.albedo.w > 1.5));
+}
+
+// The upscaler works on linear radiance and its means are plain ones. (Weighted by 1 / (1 + luminance x exposure), so
+// that a bright sample does not outweigh its neighbours, the blend with the history lost light around lamps: Bistro
+// read 0.974 of offline's luminance for 1.015, with no less flicker and no shorter a trail in motion to show for it.)
+
+// Samples of colour history an output pixel holds at most (a frame adds its nearest traced sample's weight): holding
+// still, and moving UP_SPEED output pixels a frame or faster.
+const UP_SAMPLES: f32 = 16.0;
+const UP_MOVING: f32 = 4.0;
+const UP_SPEED: f32 = 1.0;
+// The reconstruction kernel exp(-UP_SHARP d^2), d in output pixels from the pixel's centre to a traced sample.
+const UP_SHARP: f32 = 3.5;
+// A history that this frame's samples lie outside of by this share of their luminance is dropped entirely (`reject`).
+const UP_REJECT: f32 = 0.25;
+// The same on animated shading (`compose`'s reactive mask): it shows this frame's picture, not a mean of the last ones.
+const UP_REACTIVE: f32 = 4.0;
+// How far outside the range of the history's pixels around it a point sample may lie, in that range's widths (`judge`).
+const UP_POINT: f32 = 0.5;
+// A surface counts as gone from in front when what is nearest now lies behind what was nearest by this share of its
+// depth (`judge`), and the history as stale there when it lies outside this frame's range by UP_STALE of its luminance.
+const UP_GONE: f32 = 0.05;
+const UP_STALE: f32 = 0.05;
+
+// History rejection at the render resolution (where UE's TSR judges its history too), in two passes. What a frame
+// can say about the history is its low frequencies. Clipping each output pixel's history into the traced colours'
+// range (a full-resolution TAA's rule) cut the detail finer than a traced pixel every frame; here the test is turned
+// round: each traced sample is held against the range of the history around the very point it was taken at (where
+// that point was a frame ago). A still, converged image explains every sample, however fine its detail and whichever
+// side of an edge the jitter put the sample on; what the history cannot explain (a disocclusion, a light switched) is
+// how far the sample lies outside that range.
+
+// The one case that test cannot see is the rim of something that went away: output pixels that were part object, part
+// background, whose colour the background's samples next to them explain. That is a disocclusion, and it is found the
+// way every upscaler finds one, by depth: what is nearest the camera among the nine samples now lies behind what was
+// nearest among the nine of the previous frame there (both dilated, so a still edge under the jitter mostly agrees
+// with itself), confirmed by colour (the history there lies outside this frame's range), so the still edges that the
+// jitter does catch keep their history.
+
+// `judge`: per traced sample, into `ae_out` (f16): that distance (linear RGB), the sample's luminance (< 0: no
+// history there), the motion its output pixels reproject by: the surface nearest the camera among the nine samples
+// around (the sky the farthest), since an edge moves with what is in front of it; and whether its history is of
+// something that is gone.
+struct Judged { d: vec3<f32>, lum: f32, vel: vec2<f32>, gone: bool };
+fn judged_at(q: u32) -> Judged {
+    let v = ae_out[q];
+    let b = unpack2x16float(v.y);
+    return Judged(vec3<f32>(unpack2x16float(v.x), b.x), b.y, unpack2x16float(v.z), v.w != 0u);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let iw = i32(L.isz.x);
+    let ih = i32(L.isz.y);
+    if (i32(gid.x) >= iw || i32(gid.y) >= ih) { return; }
+    let q = gid.y * L.isz.x + gid.x;
+    var near = 1.0e30;
+    var vel = vec2<f32>(0.0);
+    for (var k = 0; k < 9; k++) {
+        let qx = i32(gid.x) + k % 3 - 1;
+        let qy = i32(gid.y) + k / 3 - 1;
+        if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
+        let mv = xhist_out[u32(qy * iw + qx)];
+        let z = select(1.0e29, mv.z, mv.z > 0.0);
+        if (z < near) {
+            near = z;
+            vel = mv.xy;
+        }
+    }
+    var d = vec3<f32>(0.0);
+    var l = -1.0;
+    var gone = false;
+    if (L.size.w == 0u) {
+        let up = vec2<f32>(f32(L.size.x), f32(L.size.y)) / vec2<f32>(f32(iw), f32(ih));
+        // Where this sample's point was a frame ago (output pixels; a pixel's centre at + 0.5).
+        let was = (vec2<f32>(f32(gid.x), f32(gid.y)) + L.jit.xy) * up - vel;
+        let pp = vec2<i32>(floor(was));
+        var lo = vec3<f32>(1.0e30);
+        var hi = vec3<f32>(-1.0e30);
+        var hsum = vec3<f32>(0.0);
+        var hn = 0.0;
+        for (var k = 0; k < 9; k++) {
+            let x = pp.x + k % 3 - 1;
+            let y = pp.y + k / 3 - 1;
+            if (x < 0 || y < 0 || x >= i32(L.size.x) || y >= i32(L.size.y)) { continue; }
+            let hv = hist_in[out_hist(u32(y) * L.size.x + u32(x))];
+            if (hv.w <= 0.0 || non_finite(hv.rgb)) { continue; }
+            lo = min(lo, hv.rgb);
+            hi = max(hi, hv.rgb);
+            hsum += hv.rgb;
+            hn += 1.0;
+        }
+        if (hn > 0.0) {
+            // The history's pixels are means over a pixel and the sample is a point: of a feature finer than a pixel
+            // it can lie outside their range by as much as they differ among themselves (UP_POINT of it allowed).
+            let slack = UP_POINT * (hi - lo);
+            let c = fb[q].rgb;
+            d = clamp(c - clamp(c, lo - slack, hi + slack), vec3<f32>(-6.0e4), vec3<f32>(6.0e4));
+            l = min(lum(c), 6.0e4);
+            // Gone from in front: the previous frame's nearest depth around where this point was (its traced grid's
+            // g-buffer) against this frame's nearest, taken to the previous view by this sample's own depths.
+            let ps = vec2<i32>(L.isz.zw);
+            if (ps.x > 0) {
+                var zr = 1.0;
+                let t = fb[q].w;
+                let z = xhist_out[q].z;
+                if (t > 0.0 && z > 0.0) {
+                    let sp = sample_pos(i32(gid.x), i32(gid.y));
+                    let mv = motion_in[q];
+                    let pv = prev_pixel(L.cur.pos.xyz + ray_dir(L.cur, sp.x, sp.y) * t + select(vec3<f32>(0.0), mv.xyz, mv.w > 0.5));
+                    if (pv.z > 0.0) { zr = pv.z / z; }
+                }
+                let pc = vec2<i32>(floor(was * vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y))));
+                var was_near = 1.0e30;
+                for (var k = 0; k < 9; k++) {
+                    let x = pc.x + k % 3 - 1;
+                    let y = pc.y + k / 3 - 1;
+                    if (x < 0 || y < 0 || x >= ps.x || y >= ps.y) { continue; }
+                    let zq = gb_unpack(gb_in[u32(y * ps.x + x)]).depth;
+                    was_near = min(was_near, select(1.0e29, zq, zq > 0.0));
+                }
+                let now_near = select(near * zr, 1.0e29, near >= 1.0e29);
+                if (was_near < 1.0e29 && now_near > was_near * (1.0 + UP_GONE) + 0.01) {
+                    var clo = vec3<f32>(1.0e30);
+                    var chi = vec3<f32>(-1.0e30);
+                    for (var k = 0; k < 9; k++) {
+                        let qx = i32(gid.x) + k % 3 - 1;
+                        let qy = i32(gid.y) + k / 3 - 1;
+                        if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
+                        let cq = fb[u32(qy * iw + qx)].rgb;
+                        clo = min(clo, cq);
+                        chi = max(chi, cq);
+                    }
+                    let hm = hsum / hn;
+                    gone = lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale();
+                }
+            }
+        }
+    }
+    ae_out[q] = vec4<u32>(pack2x16float(d.xy), pack2x16float(vec2<f32>(d.z, l)), pack2x16float(vel), u32(gone));
+}
+
+// `reject`: per traced pixel, into `spec_pp`'s slot 0 (free once the specular filter is done; f16): the correction
+// `upscale` adds to every output pixel's history here (linear RGB), and the share of that history to drop. The
+// correction is the mean of the nine samples' distances less what their scatter explains (noise, which the blend
+// averages); a correction that is a large share of the colour drops the history too, as do samples that found none
+// and one whose history is of something gone.
+@compute @workgroup_size(8, 8, 1)
+fn reject(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let iw = i32(L.isz.x);
+    let ih = i32(L.isz.y);
+    if (i32(gid.x) >= iw || i32(gid.y) >= ih) { return; }
+    let q = gid.y * L.isz.x + gid.x;
+    let e = exposure_scale();
+    var kern = array<f32, 2>(0.5, 0.25);
+    var d1 = vec3<f32>(0.0);
+    var x1 = 0.0;
+    var x2 = 0.0;
+    var level = 0.0;
+    var wsum = 0.0;
+    var wall = 0.0;
+    for (var k = 0; k < 9; k++) {
+        let dx = k % 3 - 1;
+        let dy = k / 3 - 1;
+        let qx = i32(gid.x) + dx;
+        let qy = i32(gid.y) + dy;
+        if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
+        let wt = kern[abs(dx)] * kern[abs(dy)];
+        wall += wt;
+        let j = judged_at(u32(qy * iw + qx));
+        if (j.lum < 0.0) { continue; }
+        let hw = 1.0 / (1.0 + j.lum * e);
+        let x = lum(j.d) * hw;
+        d1 += j.d * wt;
+        x1 += x * wt;
+        x2 += x * x * wt;
+        level += j.lum * hw * wt;
+        wsum += wt;
+    }
+    var delta = vec3<f32>(0.0);
+    var drop = 1.0;
+    if (wsum > 0.0) {
+        // The scatter of the distances about their mean (in luminances compressed by the exposure, so a bright
+        // sample's noise counts as a dark one's): a mean of nine carries about a third of it.
+        let mean = x1 / wsum;
+        let sd = sqrt(max(x2 / wsum - mean * mean, 0.0));
+        let keep = clamp(1.0 - 0.5 * sd / max(abs(mean), 1e-12), 0.0, 1.0);
+        delta = d1 / wsum * keep;
+        let found = wsum / wall;
+        drop = clamp(abs(mean) * keep / (UP_REJECT * level / wsum + 0.01 / e), 0.0, 1.0) * found + (1.0 - found);
+    }
+    // (Its history is of something that is gone from in front of this: all of it goes.)
+    if (judged_at(q).gone) {
+        delta = vec3<f32>(0.0);
+        drop = 1.0;
+    }
+    spec_store(0u, q, vec4<f32>(clamp(delta, vec3<f32>(-6.0e4), vec3<f32>(6.0e4)), drop));
+}
+
+// Colour history (linear, w = samples) at previous-frame output position (fx, fy): Catmull-Rom over 4 x 4 pixels
+// (bilinear resampling every frame blurs while the view moves), held within the range of the four pixels around the
+// position (the filter's negative lobes ring at strong edges).
+fn up_history(fx: f32, fy: f32) -> vec4<f32> {
+    let x1 = floor(fx);
+    let y1 = floor(fy);
+    let t = vec2<f32>(fx - x1, fy - y1);
+    let w0 = t * (-0.5 + t * (1.0 - 0.5 * t));
+    let w1 = 1.0 + t * t * (-2.5 + 1.5 * t);
+    let w2 = t * (0.5 + t * (2.0 - 1.5 * t));
+    let w3 = t * t * (-0.5 + 0.5 * t);
+    let wx = array<f32, 4>(w0.x, w1.x, w2.x, w3.x);
+    let wy = array<f32, 4>(w0.y, w1.y, w2.y, w3.y);
+    var h = vec4<f32>(0.0);
+    var lo = vec4<f32>(1.0e30);
+    var hi = vec4<f32>(-1.0e30);
+    for (var j = 0; j < 4; j++) {
+        let qy = u32(clamp(i32(y1) + j - 1, 0, i32(L.size.y) - 1));
+        for (var i = 0; i < 4; i++) {
+            let qx = u32(clamp(i32(x1) + i - 1, 0, i32(L.size.x) - 1));
+            let v = hist_in[out_hist(qy * L.size.x + qx)];
+            h += v * (wx[i] * wy[j]);
+            if ((i == 1 || i == 2) && (j == 1 || j == 2)) {
+                lo = min(lo, v);
+                hi = max(hi, v);
+            }
+        }
+    }
+    return clamp(h, lo, hi);
+}
+
+// The temporal upscaler: the composed frame of the traced grid (fb, `compose`) to the output grid, one colour history. Each output pixel takes this frame's traced samples around it by their distance (the frame's jitter moves
+// them), reprojects its history by the motion `judge` chose there, corrects and discounts that history by `reject`'s
+// verdict, and blends by how near a sample came.
+@compute @workgroup_size(8, 8, 1)
+fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = L.size.x;
+    let h = L.size.y;
+    if (gid.x >= w || gid.y >= h) { return; }
+    let i = gid.y * w + gid.x;
+    let iw = i32(L.isz.x);
+    let ih = i32(L.isz.y);
+    let up = vec2<f32>(f32(w), f32(h)) / vec2<f32>(f32(iw), f32(ih)); // output pixels a traced pixel
+    // In traced-sample units: sample (qx, qy) sits at (qx, qy), this pixel's centre at rc.
+    let rc = vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5) / up - L.jit.xy;
+    let bc = clamp(vec2<i32>(round(rc)), vec2<i32>(0), vec2<i32>(iw - 1, ih - 1));
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    var xlo = vec3<f32>(1.0e30);
+    var xhi = vec3<f32>(-1.0e30);
+    for (var k = 0; k < 9; k++) {
+        let qx = bc.x + k % 3 - 1;
+        let qy = bc.y + k / 3 - 1;
+        if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
+        let d = (vec2<f32>(f32(qx), f32(qy)) - rc) * up;
+        let wt = exp(-UP_SHARP * dot(d, d));
+        let c = fb[u32(qy * iw + qx)].rgb;
+        sum += c * wt;
+        wsum += wt;
+        xlo = min(xlo, c);
+        xhi = max(xhi, c);
+    }
+    let cur = select(fb[u32(bc.y * iw + bc.x)].rgb, sum / wsum, wsum > 1e-9);
+    let conf = min(wsum, 1.0);
+    // `reject`'s verdict, bilinear over the four traced pixels around; the motion `judge` chose at the nearest.
+    let f0 = vec2<i32>(floor(rc));
+    let ft = rc - floor(rc);
+    var verdict = vec4<f32>(0.0);
+    var vsum = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let qx = f0.x + (k & 1);
+        let qy = f0.y + (k >> 1u);
+        if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
+        let bw = select(1.0 - ft.x, ft.x, (k & 1) == 1) * select(1.0 - ft.y, ft.y, (k >> 1u) == 1);
+        verdict += spec_load(0u, u32(qy * iw + qx)) * bw;
+        vsum += bw;
+    }
+    verdict = select(vec4<f32>(0.0, 0.0, 0.0, 1.0), verdict / vsum, vsum > 1e-4);
+    let vel = judged_at(u32(bc.y * iw + bc.x)).vel;
+    var hist = vec4<f32>(0.0);
+    if (L.size.w == 0u) {
+        let hp = vec2<f32>(f32(gid.x), f32(gid.y)) - vel;
+        if (hp.x > -0.5 && hp.y > -0.5 && hp.x < f32(w) - 0.5 && hp.y < f32(h) - 0.5) {
+            if (vel.x == 0.0 && vel.y == 0.0) { hist = hist_in[out_hist(i)]; } else { hist = up_history(hp.x, hp.y); }
+        }
+        if (non_finite(hist.rgb) || non_finite(vec3<f32>(hist.w))) { hist = vec4<f32>(0.0); }
+    }
+    var outc = cur;
+    var count = conf;
+    // In motion the history is resampled every frame, each time a little blurrier, and what it holds of another
+    // surface (the band behind a moving edge reprojects by the edge's motion) nothing else removes: so, as the pixel's
+    // speed nears UP_SPEED, it holds fewer samples (UE TSR's r.TSR.Velocity.WeightClampingSampleCount / PixelSpeed) and
+    // is clamped into the range of this frame's nine samples (every temporal AA's rule; FSR 2's rectification). Holding
+    // still it keeps both its length and the detail finer than a traced pixel, which the clamp would cut. The orbit of
+    // Thames at 9 pixels a frame against offline (detail / trail px): neither 0.48 / 49, the clamp 0.45 / 36, 4 samples
+    // 0.57 / 37, both 0.53 / 31.
+    let moving = clamp(length(vel) / UP_SPEED, 0.0, 1.0);
+    let kept = hist.w * (1.0 - verdict.w);
+    if (kept > 0.0) {
+        var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
+        hc = mix(hc, clamp(hc, xlo, xhi), moving);
+        let most = min(mix(UP_SAMPLES, UP_MOVING, moving), select(UP_SAMPLES, UP_REACTIVE, xhist_out[u32(bc.y * iw + bc.x)].w > 0.5));
+        count = min(kept + conf, most);
+        let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);
+        outc = mix(hc, cur, a);
+    }
+    let lin = finite_or_zero(max(outc, vec3<f32>(0.0)));
+    hist_out[out_hist(i)] = vec4<f32>(lin, count);
+    // The image: into fa, or into sb for depth of field / motion blur to read (w: the CoC of the nearest sample's depth).
+    let img = vec4<f32>(lin, dof_coc(xhist_out[u32(bc.y * iw + bc.x)].z));
+    if (L.misc2.z > 0.0 || L.dof.x > 0.0) { sb[i] = img; } else { fa[i] = img; }
+}
 
 // ------------------------------------------------------------------------------------------------ exposure
 
@@ -1309,13 +1363,13 @@ fn dof_tiles(@builtin(global_invocation_id) gid: vec3<u32>) {
     var m = 0.0;
     for (var y = gid.y * DOF_TILE; y < min((gid.y + 1u) * DOF_TILE, L.size.y); y++) {
         for (var x = gid.x * DOF_TILE; x < min((gid.x + 1u) * DOF_TILE, L.size.x); x++) {
-            m = max(m, abs(fb[y * L.size.x + x].w));
+            m = max(m, abs(sb[y * L.size.x + x].w));
         }
     }
     lumq[gid.y * tw + gid.x] = m;
 }
 
-// Depth of field on the composed HDR image (fb -> fa, or sb when motion blur follows), before motion blur as in UE.
+// Depth of field on the upscaled HDR image (sb -> fa, or fb when motion blur follows), before motion blur as in UE.
 // Scatter as gather over the largest CoC around: each pixel spreads its colour over its own CoC disk. Samples in front
 // of this pixel form a foreground layer over the rest, its coverage from their spread; samples behind count only as
 // far as this pixel's own CoC reaches, so blurred background doesn't cover a sharp pixel.
@@ -1325,7 +1379,7 @@ fn dof(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = L.size.y;
     if (gid.x >= w || gid.y >= h || L.dof.x <= 0.0) { return; }
     let i = gid.y * w + gid.x;
-    let center = fb[i];
+    let center = sb[i];
     let ci = abs(center.w);
     let tw = (w + DOF_TILE - 1u) / DOF_TILE;
     let th = (h + DOF_TILE - 1u) / DOF_TILE;
@@ -1354,7 +1408,7 @@ fn dof(@builtin(global_invocation_id) gid: vec3<u32>) {
             let q = vec2<i32>(round(pc + r * sqrt((f32(k) + 0.5) / f32(DOF_SAMPLES)) * vec2<f32>(cos(a), sin(a))));
             if (q.x < 0 || q.y < 0 || q.x >= i32(w) || q.y >= i32(h)) { continue; }
             let j = u32(q.y) * w + u32(q.x);
-            let sj = fb[j];
+            let sj = sb[j];
             let cj = abs(sj.w);
             let d = length(vec2<f32>(q) - pc);
             let front = clamp((zi - view_depth(j)) / (0.02 * zi + 0.05), 0.0, 1.0);
@@ -1370,23 +1424,28 @@ fn dof(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (fw > 1e-6) { outv = mix(outv, fg / fw, clamp(fw, 0.0, 1.0)); }
         if (non_finite(outv)) { outv = center.rgb; }
     }
-    if (L.misc2.z > 0.0) { sb[i] = vec4<f32>(outv, 0.0); } else { fa[i] = vec4<f32>(outv, 0.0); }
+    if (L.misc2.z > 0.0) { fb[i] = vec4<f32>(outv, 0.0); } else { fa[i] = vec4<f32>(outv, 0.0); }
 }
 
 // ------------------------------------------------------------------------------------------------ motion blur
 
 // The image motion blur reads: depth of field's output, or the composed image.
 fn mb_src(q: u32) -> vec3<f32> {
-    if (L.dof.x > 0.0) { return sb[q].rgb; }
-    return fb[q].rgb;
+    if (L.dof.x > 0.0) { return fb[q].rgb; }
+    return sb[q].rgb;
+}
+
+// Output pixel q's motion and depth: those of the traced sample under it (`compose`).
+fn motion_under(q: u32) -> vec4<f32> {
+    return xhist_out[sample_under(q % L.size.x, q / L.size.x)];
 }
 
 fn velocity(q: u32) -> vec2<f32> {
-    return unpack2x16float(bitcast<u32>(xhist_out[q].w)) * L.misc2.z;
+    return motion_under(q).xy * L.misc2.z;
 }
 
 fn view_depth(q: u32) -> f32 {
-    let z = gb_unpack(gb_out[q]).depth;
+    let z = motion_under(q).z;
     return select(z, 1.0e6, z <= 0.0);
 }
 
@@ -1396,8 +1455,8 @@ const MB_SAMPLES: i32 = 12;
 // velocity to the blur length, post.w caps it). A reconstruction filter after McGuire et al. 2012 without tiles:
 // samples along the pixel's own blur; a sample counts where it is in front and its own blur reaches this pixel, or
 // behind and this pixel's blur reaches it, so moving objects smear over a static background but a static foreground
-// stays sharp. fb (`spec2` composes there while it runs: misc2.z > 0, set only when the view or an object moved), or
-// sb after depth of field -> fa.
+// stays sharp. sb (`upscale` writes there while it runs: misc2.z > 0, set only when the view or an object moved), or
+// fb after depth of field -> fa.
 @compute @workgroup_size(8, 8, 1)
 fn mblur(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = L.size.x;
@@ -1459,10 +1518,10 @@ fn post(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (mode == 1u || mode == 2u || mode == 5u) {
         var d = vec3<f32>(0.0);
         if (mode == 1u) {
-            let a = clamp(hist_albedo(ae_out[i]), vec3<f32>(0.0), vec3<f32>(1.0));
+            let a = clamp(sample_px[sample_under(gid.x, gid.y)].albedo.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
             d = select(pow((a + 0.055) / 1.055, vec3<f32>(1.0 / 2.4)) * 1.055 - 0.055, a * 12.92, a <= vec3<f32>(0.0031308));
         } else if (mode == 2u) {
-            let g = gb_unpack(gb_out[i]);
+            let g = gb_unpack(gb_out[sample_under(gid.x, gid.y)]);
             d = select(g.n * 0.5 + 0.5, vec3<f32>(0.0), g.depth == 0.0);
         } else {
             let t = clamp(log2(max(hist_out[sample_under(gid.x, gid.y)].w, 1.0)) / 12.0, 0.0, 1.0); // 1 .. 4096 frames (diffuse)
@@ -1473,12 +1532,15 @@ fn post(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var src = fa[i].rgb;
-    if (mode == 3u) { src = hist_out[sample_under(gid.x, gid.y)].rgb * max(hist_albedo(ae_out[i]), vec3<f32>(0.02)) + shist_out[i].rgb + hist_emission(ae_out[i]) + xhist_out[i].rgb; }
-    if (mode == 4u) { src = sample_color(sample_under(gid.x, gid.y)); }
-    // Signals apart, denoised: diffuse (6), specular (7).
-    if (mode == 6u) { src = max(fa[i].rgb - spec_load(1u, i).rgb - hist_emission(ae_out[i]) - xhist_out[i].rgb, vec3<f32>(0.0)); }
-    if (mode == 8u) { src = xhist_out[i].rgb; }
-    if (mode == 7u) { src = spec_load(1u, i).rgb; }
+    // The traced sample under the pixel: its accumulations without the spatial filters (3), the raw sample (4), and the
+    // denoised signals apart: diffuse (6: the composed colour less the rest), specular (7), deterministic direct light (8).
+    // (6 does not hold with depth of field and motion blur both on: the composed colour's buffer is theirs then.)
+    let tq = sample_under(gid.x, gid.y);
+    if (mode == 3u) { src = hist_out[tq].rgb * max(sample_px[tq].albedo.rgb, vec3<f32>(0.02)) + shist_out[tq].rgb + sample_parts(tq)[2] + direct_in[tq].rgb; }
+    if (mode == 4u) { src = sample_color(tq); }
+    if (mode == 6u) { src = max(fb[tq].rgb - spec_load(1u, tq).rgb - sample_parts(tq)[2] - direct_in[tq].rgb, vec3<f32>(0.0)); }
+    if (mode == 8u) { src = direct_in[tq].rgb; }
+    if (mode == 7u) { src = spec_load(1u, tq).rgb; }
     if (L.post.x > 0.0 && mode == 0u) {
         // Scene fringe: red sampled radially outward, blue inward (nearest texel).
         let k = L.post.x * 0.0025;
