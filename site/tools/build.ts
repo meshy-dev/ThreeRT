@@ -22,7 +22,7 @@ const problems: string[] = [];
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 copyFileSync(join(site, "index.html"), join(out, "index.html"));
-for (const d of ["showcase", "download", "docs", "css", "js", "brand", "media"]) cpSync(join(site, d), join(out, d), { recursive: true });
+for (const d of ["showcase", "download", "docs", "privacy", "css", "js", "brand", "media"]) cpSync(join(site, d), join(out, d), { recursive: true });
 for (const [rel, file] of Object.entries(VENDOR)) {
   mkdirSync(dirname(join(out, rel)), { recursive: true });
   copyFileSync(file, join(out, rel));
