@@ -4168,7 +4168,9 @@ impl LiveCore {
             for x in 0..w {
                 // live.wgsl `sample_under`.
                 let q = (((y as f32 + 0.5) * ih as f32 / h as f32) as usize).min(ih - 1) * iw + (((x as f32 + 0.5) * iw as f32 / w as f32) as usize).min(iw - 1);
-                let s = [half(spec[q][0], false), half(spec[q][0], true), half(spec[q][1], false)];
+                // The media before the surface (live.wgsl `medium_tr`): the specular as the frame shows it.
+                let tr = (samples[q][11].fract() * 2.0).clamp(0.0, 1.0);
+                let s = [half(spec[q][0], false), half(spec[q][0], true), half(spec[q][1], false)].map(|v| v * tr);
                 for c in 0..3 {
                     let e = finite(samples[q][12 + c] / self.shown_spp as f32);
                     spe.push(s[c]);

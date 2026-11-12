@@ -167,7 +167,7 @@ type ObjectKindDesc =
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "particles"; count: number; emitter: { id: string; params: number[] }; material: number; emitterArea?: number }
   /** `GpuParticles`: `program` (its id and 8 vec4 of parameters), `rate` per s, `collide` (plane height, voxels, restitution, friction). */
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "gpuParticles"; capacity: number; program: { id: string; params: number[] }; material: number; rate: number; collide: { plane?: number; voxels?: boolean; restitution?: number; friction?: number }; emitterArea?: number }
-  | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "volume"; shape: "box" | "sphere"; volume: { id: string; params: number[] }; majorant: number; g: number; homogeneous?: boolean; grid?: number }
+  | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "volume"; shape: "box" | "sphere"; volume: { id: string; params: number[] }; majorant: number; g: number; homogeneous?: boolean; animated?: boolean; grid?: number }
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "procedural"; geometry: number; materials: number[] }
   /** `InstancedMesh`: `count` instances (its capacity) of triangle geometry (`materials[0]`) or procedural geometry. */
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "instanced"; geometry: number; procedural?: boolean; materials: number[]; count: number };
@@ -1025,7 +1025,7 @@ export class SceneBinding {
     }
     if (o instanceof Mesh) return `mesh:${this.geometryId(this.drawnGeometry(o))}:${this.meshMaterials(o).join(",")}:${o.castShadow}:${o.dynamicGeometry || o.geometry.dynamic}`;
     if (o instanceof ProceduralMesh) return `procedural:${this.proceduralId(o.geometry)}:${o.materials.map((m) => this.materialId(m)).join(",")}:${o.castShadow}`;
-    if (o instanceof VolumeMesh) return `volume:${o.shape}:${JSON.stringify(this.volumeBinding(o.volume))}:${o.majorant}:${o.anisotropy}:${o.homogeneous}:${o.grid ? this.gridId(o.grid) : ""}`;
+    if (o instanceof VolumeMesh) return `volume:${o.shape}:${JSON.stringify(this.volumeBinding(o.volume))}:${o.majorant}:${o.anisotropy}:${o.homogeneous}:${o.animated}:${o.grid ? this.gridId(o.grid) : ""}`;
     if (o instanceof GpuParticles) return `gpuParticles:${o.capacity}:${JSON.stringify(this.particleProgram(o.program))}:${this.materialId(o.material)}:${o.castShadow}:${o.emitterArea}:${o.rate}:${JSON.stringify(o.collide)}`;
     if (o instanceof Particles) return `particles:${o.count}:${JSON.stringify(this.particleEmitter(o.emitter))}:${this.materialId(o.material)}:${o.castShadow}:${o.emitterArea}`;
     if (o instanceof GLTFModel) return `model:${o.uri}:${o.nodes?.join(",") ?? ""}:${o.castShadow}:${o.functions ? JSON.stringify(this.modelFunctions(o)) : ""}`;
@@ -1049,7 +1049,7 @@ export class SceneBinding {
       return { ...base, kind: "mesh", geometry: this.geometryId(this.drawnGeometry(o)), material: mats[0], ...(mats.length > 1 ? { materials: mats } : {}), ...(o.dynamicGeometry || o.geometry.dynamic ? { dynamicGeometry: true } : {}) };
     }
     if (o instanceof ProceduralMesh) return { ...base, kind: "procedural", geometry: this.proceduralId(o.geometry), materials: o.materials.map((m) => this.materialId(m)) };
-    if (o instanceof VolumeMesh) return { ...base, kind: "volume", shape: o.shape, volume: this.volumeBinding(o.volume), majorant: o.majorant, g: o.anisotropy, ...(o.homogeneous ? { homogeneous: true } : {}), ...(o.grid ? { grid: this.gridId(o.grid) } : {}) };
+    if (o instanceof VolumeMesh) return { ...base, kind: "volume", shape: o.shape, volume: this.volumeBinding(o.volume), majorant: o.majorant, g: o.anisotropy, ...(o.homogeneous ? { homogeneous: true } : {}), ...(o.animated ? { animated: true } : {}), ...(o.grid ? { grid: this.gridId(o.grid) } : {}) };
     if (o instanceof GpuParticles) return { ...base, kind: "gpuParticles", capacity: o.capacity, program: this.particleProgram(o.program), material: this.materialId(o.material), rate: o.rate, collide: { ...o.collide }, ...(o.emitterArea > 0 ? { emitterArea: o.emitterArea } : {}) };
     if (o instanceof Particles) return { ...base, kind: "particles", count: o.count, emitter: this.particleEmitter(o.emitter), material: this.materialId(o.material), ...(o.emitterArea > 0 ? { emitterArea: o.emitterArea } : {}) };
     if (o instanceof GLTFModel) {

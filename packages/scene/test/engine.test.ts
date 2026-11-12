@@ -380,6 +380,22 @@ test("GpuParticles: the program's WGSL is sent once, the node's desc carries cap
   assert.throws(() => new GpuParticles({ capacity: 4, program: prog.with(), material: mat, collide: { friction: 2 } }), /friction/);
 });
 
+test("volume functions: one that reads the time is animated, unless it says otherwise; the volume's description carries it", () => {
+  const still = new VolumeFunction("still_fog", { code: "o.extinction = 1.0;" });
+  const drift = new VolumeFunction("drift", { code: "o.extinction = fract(i.time);" });
+  const helper = new VolumeFunction("drift_helper", { helpers: "fn dh(i: VIn) -> f32 { return fract(i.time); }", code: "o.extinction = dh(i);" });
+  const custom = new VolumeFunction("by_custom", { code: "o.extinction = i.custom.x;", animated: true });
+  const held = new VolumeFunction("held", { code: "o.extinction = 1.0 + 0.0 * i.time;", animated: false });
+  assert.deepEqual([still, drift, helper, custom, held].map((f) => f.animated), [false, true, true, true, false]);
+  const scene = new Scene();
+  scene.add(new VolumeMesh({ volume: still.with(), majorant: 1 }), new VolumeMesh({ volume: drift.with(), majorant: 1 }));
+  const cam = new PerspectiveCamera();
+  scene.add(cam);
+  const { calls } = bind(scene, cam);
+  const volumes = (ofType(calls, "object").map((c) => c[2]) as ObjectDesc[]).filter((o) => o.kind === "volume") as Extract<ObjectDesc, { kind: "volume" }>[];
+  assert.deepEqual(volumes.map((v) => v.animated), [undefined, true]);
+});
+
 test("density grids: the grid goes before its volume, with its program's WGSL once; new data and sources go in place", () => {
   const scene = new Scene();
   const fn = new VolumeFunction("grid_reader", { params: { K: 2 }, code: "o.extinction = $K * vgrid(i, i.lp).x;" });
@@ -400,6 +416,8 @@ test("density grids: the grid goes before its volume, with its program's WGSL on
   assert.deepEqual([grids[1][2].size, grids[1][2].channels, grids[1][2].program!.id, grids[1][2].program!.params.slice(0, 8), grids[1][3]], [[4, 2, 2], 4, "fill", [5, 0, 0, 0, 1, 0, 0, 0], null]);
   const volumes = (ofType(calls, "object").map((c) => c[2]) as ObjectDesc[]).filter((o) => o.kind === "volume") as Extract<ObjectDesc, { kind: "volume" }>[];
   assert.deepEqual(volumes.map((v) => v.grid), [grids[0][1], grids[1][1]]);
+  // A simulated grid's medium changes with time whatever its function reads; stored data alone does not.
+  assert.deepEqual(volumes.map((v) => v.animated), [undefined, true]);
   const at = (pred: (c: [string, ...unknown[]]) => boolean) => calls.findIndex(pred);
   assert.ok(at((c) => c[0] === "densityGrid") < at((c) => c[0] === "object" && (c[2] as ObjectDesc).kind === "volume"), "the grid before the volume that names it");
   // New data: sent again (the engine uploads it in place); sources: after, once.

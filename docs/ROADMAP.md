@@ -1807,6 +1807,38 @@ beyond their noise (ReBLUR's form; it was on / off). No edit cuts anything.
   direct light and the upscaler's own history carry the frame. A geometry edit by night was not measured.
 - Cost: none that shows (Bistro's passes 6.64–6.66 ms a frame in both builds).
 
+**Media in the live frame's histories (2026-11-12, after it).** The fire of § 6 step 10 b read worse after #30 and
+#33 (its box, ΔE at 0.2 / 0.5 / 1 s after it starts: 6.90 / 6.61 / 4.36, then 7.18 / 7.53 / 5.25, then 7.32 / 7.81 /
+5.71). Until #33 a fire's stand-in light changed every frame and so cut the whole frame's history to 16 frames, which
+hid two faults of the live path's own:
+- `media_composite` multiplied the media's transmittance into each frame's diffuse and specular lighting before the
+  denoisers accumulated them, so a surface's history held the medium of the frames before: 16 frames after a medium
+  ends, the wall behind it read 0.88 of its 2 nits (`volume/animated-clears-live`; now 2.00). The transmittance now
+  goes with the sample (`Pixel` `normal.w`) and `compose` applies it to the denoised lighting, as volumetrics are
+  composed over a denoised surface elsewhere. What the camera ray sees and the deterministic direct light have no
+  history before `compose` and take it as before.
+- Nothing said a medium changes. A volume function is `animated` when its code reads `i.time` (or says so), a
+  simulated grid always (the medium table's `a.w`); the march gives the share of the pixel such media take (what they
+  hide, or their light's share of it), and the upscaler's reactive mask rises with it to 1 at a quarter
+  (`UP_MEDIUM`): four samples of history, as for animated shading.
+
+| the fire shot (bench-voxel-fire, lockstep, 0.75), the fireball's box ΔE at 0.2 / 0.5 / 1 s | with the fire light | without |
+|---|---|---|
+| main before | 7.32 / 7.81 / 5.71 | 7.51 / 8.47 / 7.56 |
+| the transmittance out of the histories, alone | 6.78 / 6.35 / 4.59 | 6.86 / 6.42 / 5.02 |
+| animated media reactive, alone | 7.02 / 7.24 / 4.91 | |
+| both | 6.28 / 5.56 / 3.69 | 6.36 / 5.62 / 4.19 |
+| the bound of #33 back at 16 frames instead (what #33 changed for the fire) | 7.18 / 7.55 / 5.27 | |
+
+- The real-time frame against the same moment held: 5.33 / 2.71 / 1.57 (5.74 / 4.65 / 3.52); the held frame against
+  offline 3.64 / 4.32 / 2.70 as before (the march's own picture, not this).
+- Reactive by the share itself, without the quarter: a little worse (6.44 / 5.70 / 3.78).
+- Elsewhere: bench-ghosting passes with the numbers of the table above for Bistro and 2.42, 3.27, 1.17, 1.22, 2.48 for
+  Kabukichō; the Bistro slice half a second after its explosion 6.03 / SSIM 0.832 in both builds (its fireball is a
+  small part of that view). test-render 179 pass.
+- Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), overlapping media are
+  still taken whole in entry order, and a medium has no motion vector (smoke that drifts is reactive, not followed).
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
@@ -4424,7 +4456,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
         the shared paths are fixed): the stand-in light (live rays have no media code: offline it counts the fire's
         light twice unless `lights: 0`, live it lights the fireball a second time); idle objects parked far away
         (hiding a volume rebuilds); idle lights reaching 1 mm (a black rangeless light reaches without limit); the
-        fire's history once capped by its light's change (gone since #33: see the Open below); the smoke kept by never
+        fire's history once capped by its light's change (gone since #33, and closed at its source: below); the smoke kept by never
         rebuilding (a rebuild loses a grid's simulation); and volumes
         that must not overlap (`media_track` / `media_march` take media whole in entry order: no smoke grid around
         explosions, and two fires close together still overlap).
@@ -4432,12 +4464,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
         voxels**, are not done.
       - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
         from the cache): the fireball reads lighter than offline.
-      - Open (measured on `0a89089`, after #33): the fireball ghosts and nothing mitigates it. #33 bounds each pixel's
-        history at 32 frames while the lighting changes instead of cutting the whole frame's to 16, so the fire
-        light's change no longer holds the fireball's history down: its region reads ΔE 7.32 / 7.81 / 5.71 at 0.2 /
-        0.5 / 1 s (6.90 / 6.61 / 4.36 before; without the light 7.51 / 8.47 / 7.55); the street as before. The cause
-        is the temporal filter's: no per-medium "changes with time" signal; measured again once the shared path has
-        one (docs/VOXEL.md, the temporary ways round).
+      - Closed at its source (§ 1a, "Media in the live frame's histories"): the fireball's ghosting. After #33 its
+        region read ΔE 7.32 / 7.81 / 5.71 at 0.2 / 0.5 / 1 s (6.90 / 6.61 / 4.36 when this step merged); now 6.28 /
+        5.56 / 3.69, without the fire light 6.36 / 5.62 / 4.19, and the whole image meets at 0.2 and 0.5 s (1.77 /
+        0.964, 2.54 / 0.942; 2.99 / 0.895 at 1 s). What is left is the live march's own picture (the Open above).
     - **(c1) Joints and the blast** (branch `vehicles-ropes`; design `out/web-probe/step10/c-design.md`; docs/VOXEL.md
       "Joints, the level's anchor and the blast"). (c) split in two (the supervisor, 2026-11-12: engine structure
       first, features after). The user's decisions 1-4 (2026-11-12), each the standard structure where the engine did
