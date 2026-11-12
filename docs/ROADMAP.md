@@ -4358,6 +4358,12 @@ benchmark level. The order follows the dependencies; a step that meets a further
       carved or its body goes: `Joint.broken`, a "broken" event); an explosion's blast pushes the bodies within 3 radii
       (impulse by area and distance, through the centre of mass, at most 30 m/s; `push`). Recorded hashes changed once:
       physics-core's script 7c0699cb79f4ac66, the voxel bodies' e91cec99f6e4e026; native = parallel = wasm32.
+      - Found on the way and fixed: with the level's colliders on its body an explosion's frame took 26 s of CPU (Rapier
+        integrated each of ~4,000 voxel shapes' mass again whenever one changed): a fixed body's colliders carry no
+        mass now; the crater's explosion frame is within main's spread.
+      - Open: the default push (400) barely moves heavy wall debris (a 1,000-voxel part weighs 1-2 t; the impulse goes
+        with area, not mass: hundredths of a m/s), while a 100 kg crate at 1 m takes 3.2 m/s: a game-feel question
+        (a stronger default, or a term for the parts the blast itself cuts loose).
       - Open: the blast is not shielded by walls (decision 4: one voxel ray per body would do it); a joint's anchor on
         a face between two cells is held by the cell the point falls in, else the nearest solid neighbour.
     - (c2) Vehicles and ropes: the ray-cast vehicle (Rapier's `DynamicRayCastVehicleController`; the comparison in

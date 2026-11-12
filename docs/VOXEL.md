@@ -690,7 +690,10 @@ otherwise (the user's decisions 1-4, 2026-11-12).
 - **The level has a fixed body.** Its colliders hang on one fixed engine body (made at load, at the origin, unturned),
   as Rapier hangs static colliders on a fixed body; a joint whose object is `engineColliders` holds to it (a rope tied
   to a wall). To queries and contacts the level is still on no body (`hit.object` is `engineColliders`, `hit.body`
-  undefined, a contact's other end `engineColliders`), and bodies resting on it sleep as before. The voxel bodies'
+  undefined, a contact's other end `engineColliders`), and bodies resting on it sleep as before. A collider on a fixed
+  body carries no mass (a fixed body's is never used): found on the way, Rapier sums a body's colliders' mass
+  properties whenever one changes and integrates each voxel shape again, which with the level's ~4,000 shapes on its
+  body made an explosion's frame 26 s of CPU; now it is within main's spread (28 ms on the crater). The voxel bodies'
   script moves bit for bit as before with it (end poses and cell counts compared); its recorded hash changed only
   because the world lists one more body and later ids shift by one.
 - **A joint belongs to the material at its anchor.** Each joint on a voxel body or on the level is held by the cell its
