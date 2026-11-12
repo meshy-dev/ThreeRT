@@ -34,9 +34,8 @@ references in `out/ue/{lumen,pathtracer}`.
 Viewport: LMB drag orbit · RMB drag look (+ WASD / QE fly, Shift faster) · MMB or Shift-drag pan · wheel or trackpad
 pinch dolly · click select · F focus selection · Home scene camera · G outline / game view · F11 fullscreen.
 Editor: Alt+P Play / Stop · Esc stop / deselect · Cmd+Z / Cmd+Shift+Z undo / redo · Alt+1..6 view modes.
-A/B switches (editor and Play; the Output Log shows the state): N motion blur on / off (whatever the scene's post
-settings say) · H the specular history clamp after camera translation on / off (bench-ghosting's fix, docs/ROADMAP.md
-§ 2c).
+A/B switch (editor and Play; the Output Log shows the state): N motion blur on / off (whatever the scene's post
+settings say).
 Details fields: drag horizontally across a field to scrub its value (intensities scrub multiplicatively).
 
 Compare (toolbar): ThreeRT Live · UE5 Lumen · UE5 Path Tracer — the UE5 modes split the viewport (drag to move the split).

@@ -1839,6 +1839,44 @@ hid two faults of the live path's own:
 - Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), overlapping media are
   still taken whole in entry order, and a medium has no motion vector (smoke that drifts is reactive, not followed).
 
+**The specular history per pixel (2026-11-13, after it).** `stemporal` still set every pixel's history by what the
+camera did: 2 .. 12 frames by roughness whenever it moved or turned at all, 4 for the 8 frames after it translated
+(§ 2c's fix). Now each pixel's own, from two things it knows (output pixels a frame): its speed (a resampled history
+blurs: 48 frames at a pixel a frame, as the diffuse) and its reflection's parallax, how far what it reflects moved
+against the surface: the history may be no longer than keeps its trail (frames × parallax) within 2 px (`SPEC_TRAIL`),
+2 frames at least on a mirror, 4 from roughness 0.05. The parallax is the reflected point's where this frame's sample
+has one, the farthest possible point's where it has none, and a moving reflector's own speed. A turn has no parallax
+and keeps its history; a translation shortens it where the reflection slides, by how fast. NRD's ReBLUR bounds the
+specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumulation`).
+
+| bench-ghosting --quick, excess over the settled frame / trail px (turn-mid, strafe-mid ground; the two returns + 0.5 s; stop + 0.1 s) | main | this |
+|---|---|---|
+| Kabukichō | 2.42 / 29, 3.27 / 60, 1.18 / 22, 1.23 / 23, 2.48 / 32 | 1.97 / 28, 2.86 / 56, 1.10 / 22, 1.10 / 22, 2.07 / 30 |
+| Bistro | 1.08 / 5, 1.76 / 6, 1.25 / 12, 1.34 / 12, 1.50 / 5 | 0.84 / 7, 1.60 / 6, 1.17 / 12, 1.26 / 11, 1.34 / 5 |
+
+- What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, S1–S20):
+  - the parallax weighed against the reflection's own blur, as ReBLUR weighs it against the lobe's angle (the
+    history may trail K lobe footprints behind): a wet street's lobe is 27–245 px wide here, the history ran through
+    a forward move, and the stop dragged a 65–112 px trail (limit 35);
+  - two thresholds instead of one budget (2 .. 12 frames from 0.25 px of parallax, 4 from 2 px): passes, a little
+    behind the budget on every reading;
+  - the pixel's speed taken for the parallax where the frame's sample has no reflected point: a turn then lost its
+    history on rough surfaces (2.14 for 1.97);
+  - budgets of 1, 2, 4 and 8 px: no reading tells them apart at these speeds (the floor of 2 .. 4 frames decides);
+    2 is the tighter trail.
+- bench-temporal (Kabukichō, a 2.5 m dolly with a 12° turn in 1 s, real time, against each build's own converged
+  frames): the move reads 3.97 / 4.16 / 4.21 and the stop 2.92 on average over four runs of this rule (budgets 1 .. 4
+  px), main's one run of the day 3.92 / 4.07 / 4.12 and 2.88: 0.05–0.09 above main each time, inside the spread of
+  main's own runs across two days (move40 3.88–4.07). Stated as it is: the ghosting bench counts frames and repeats
+  to 0.02, this one does not.
+- Not changed, measured: what makes the scene's lighting "live" for the whole frame. Anything that moves or is edited
+  does, for 45 frames, so a scene with a walker in it is always at the 32-frame bound (NRD's own: 30), and the rule
+  for spark lights adds nothing there (the Bistro slice reads the same without it). The radiance cache's history is
+  cut to 4 frames by the same switch: at 32 the slice reads 2.66 for 2.82 at rest and 5.80 for 6.03 at its
+  explosion, and all of test-render passes; what the 4 frames buy is how fast indirect light follows an edit, which
+  no bench here counts in frames. It waits for a lockstep lighting-edit measure.
+- Gone with it: the frames-since-translation counter, temporal flag 16384 and the Playground's H switch.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
@@ -2041,8 +2079,9 @@ dynamic-resolution floor, 60 Hz camera input.
   - No effect: Catmull-Rom instead of bilinear specular history, counting only disocclusions as fresh history,
     picking one of the surface / mirror-image histories instead of blending them, a 4σ box everywhere.
 - Fix: for 8 frames after the view last translated (the stop included), the specular history is clamped at 4σ and
-  held to 4 frames; a rotation keeps the long history (`THREERT_TEMPORAL_FLAGS=16384` switches it off). Excess mean dE /
-  trail, old → new:
+  held to 4 frames; a rotation keeps the long history (`THREERT_TEMPORAL_FLAGS=16384` switches it off). (2026-11-13:
+  the whole frame's rule and its switch are gone: each pixel's history is bounded by its own reflection's parallax,
+  § 1a "The specular history per pixel".) Excess mean dE / trail, old → new:
   - strafe mid, street: 4.10 / 79 px → 3.82 / 58 px;
   - strafe back + 0.5 s, whole frame: 1.47 → 1.13;
   - stop + 0: 3.85 / 68 px → 3.24 / 38 px;
