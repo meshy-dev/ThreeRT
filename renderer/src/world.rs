@@ -66,6 +66,9 @@ pub struct DensityGrid {
     pub data: Option<Arc<Vec<f32>>>,
     /// The grid program (by name) and its 32 parameter floats.
     pub program: Option<(String, Vec<f32>)>,
+    /// A number of its own for the grid as it was made: another when it is made again with another size or another
+    /// program. What a program has simulated in it is carried across a rebuild while this stays (gpu.rs `carry_grids`).
+    pub made: u32,
 }
 
 /// A grid's most cells per axis (pathtrace.wgsl `vgrid` packs them in 10 bits each) and in all (8 bytes a cell and
@@ -358,6 +361,8 @@ pub struct World {
     /// live view last took them: per volume object, (x, y, z, radius, a rgba, b rgba) each.
     pub grids: HashMap<u32, DensityGrid>,
     pub grid_dirty: BTreeSet<u32>,
+    /// The last `DensityGrid::made` given.
+    pub grids_made: u32,
     pub grid_programs: BTreeMap<String, (String, String)>,
     pub grid_sources: BTreeMap<u32, Vec<f32>>,
     /// Volume functions by name: (WGSL code, helpers) (pathtrace.wgsl `vf_<name>`).
@@ -386,6 +391,7 @@ impl Default for World {
             voxel_occupancy: None,
             grids: HashMap::new(),
             grid_dirty: BTreeSet::new(),
+            grids_made: 0,
             grid_programs: BTreeMap::new(),
             grid_sources: BTreeMap::new(),
             volume_fns: BTreeMap::new(),
@@ -1067,7 +1073,16 @@ impl World {
         }
         // (No data with a same grid: its contents stay, e.g. a simulated grid whose parameters were sent again.)
         let keep = if same && data.is_none() { self.grids.get(&id).and_then(|g| g.data.clone()) } else { None };
-        self.grids.insert(id, DensityGrid { dims, data: data.or(keep), program });
+        // The same grid still, for what its program has simulated: its size and its program's name (new parameters
+        // rebuild the scene, and the smoke stays).
+        let made = match self.grids.get(&id) {
+            Some(g) if g.dims == dims && g.program.as_ref().map(|p| &p.0) == program.as_ref().map(|p| &p.0) => g.made,
+            _ => {
+                self.grids_made = self.grids_made.wrapping_add(1);
+                self.grids_made
+            }
+        };
+        self.grids.insert(id, DensityGrid { dims, data: data.or(keep), program, made });
         Ok(())
     }
 
@@ -1183,8 +1198,14 @@ mod tests {
         assert!(!w.take_changes().structural && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
         assert!(w.take_changes().structural, "another program");
-        w.set_grid(1, [2, 2, 4], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
-        assert!(w.take_changes().structural, "another size");
+        let made = w.grids[&1].made;
+        w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![2.0]))).unwrap();
+        assert!(w.take_changes().structural && w.grids[&1].made == made, "new parameters rebuild; it is the same grid still (what it simulated is carried)");
+        w.set_grid(1, [2, 2, 2], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
+        assert!(w.grids[&1].made != made, "another program: another grid");
+        let made = w.grids[&1].made;
+        w.set_grid(1, [2, 2, 4], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
+        assert!(w.take_changes().structural && w.grids[&1].made != made, "another size");
         // Sources.
         let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid };
         w.set_object(5, "plain".into(), None, volume(None), false, false).unwrap();

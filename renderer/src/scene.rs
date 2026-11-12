@@ -626,6 +626,8 @@ pub struct GridBuild {
     pub params: [f32; 32],
     pub node: u32,
     pub medium: u32,
+    /// `world::DensityGrid::made`.
+    pub made: u32,
 }
 
 /// The world -> local rows of a medium whose node has world matrix `m` (pathtrace.wgsl `Medium.w0..w2`).
@@ -1605,13 +1607,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 gp[k] = *v;
                             }
                             let z0 = grids.iter().map(|b| b.dims[2]).sum::<u32>();
-                            let cells = grids.iter().chain([&GridBuild { id: 0, dims: dg.dims, z0, data: None, program: None, params: [0.0; 32], node: 0, medium: 0 }]).map(|b| b.dims.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
+                            let cells = grids.iter().chain([&GridBuild { id: 0, dims: dg.dims, z0, data: None, program: None, params: [0.0; 32], node: 0, medium: 0, made: 0 }]).map(|b| b.dims.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
                             // (The atlas is as wide and high as the widest and highest grid: its texels count too.)
                             let atlas = grids.iter().map(|b| b.dims[0]).chain([dg.dims[0]]).max().unwrap() as u64 * grids.iter().map(|b| b.dims[1]).chain([dg.dims[1]]).max().unwrap() as u64 * (z0 + dg.dims[2]) as u64;
                             if cells > world::GRID_MAX_SCENE_CELLS || atlas > 2 * world::GRID_MAX_SCENE_CELLS || z0 + dg.dims[2] > world::GRID_MAX_LAYERS {
                                 return Err(anyhow!("object {}: the scene's density grids exceed {} cells or {} layers along z together (or differ too much in width and height)", n.name, world::GRID_MAX_SCENE_CELLS, world::GRID_MAX_LAYERS));
                             }
-                            grids.push(GridBuild { id: *gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node: *id, medium: media.len() as u32 });
+                            grids.push(GridBuild { id: *gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node: *id, medium: media.len() as u32, made: dg.made });
                             grids.len() - 1
                         }
                     };

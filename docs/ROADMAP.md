@@ -1927,6 +1927,16 @@ A rect light's card and the sun still rebuild (geometry; the sky's bake).
   is hidden a faint ring stays where its edge was (the upscaler's history: nothing says a medium went).
 - Not done: `Explosions` still parks (the voxel line's to change); a mesh hidden by its own `visible` still rebuilds.
 
+**Simulated grids across a rebuild (2026-11-13, after it).** A rebuild of the live scene made new grid textures, so
+any structural change in a game (an object hidden, a texture, an edit's fallback) started every simulated grid again
+from its data: the smoke vanished (§ 6 step 10 b kept its pool movable and parked for that). Now the scene before
+hands what its grid programs had simulated to the scene after (`Gpu::carry_grids`): per grid that is the same grid
+still (`world::DensityGrid::made`: its size and its program's name; new parameters keep it), field A (its layers of
+the atlas) and field B are copied texture to texture, and the programs' step count goes with them.
+`volume/grid-rebuild-live`: a grid filled at 1.5 a second for 24 frames, the scene rebuilt after 12, reads 0.6075 of
+0.6024 (as without the rebuild); main 0.90. test-render 187 pass. Not carried: GPU particles (a rebuild still starts
+them afresh), and a grid whose size or program changed.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
