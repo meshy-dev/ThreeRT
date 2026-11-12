@@ -5,13 +5,14 @@
 // world metres, applied in fixed point, so the same commands give the same voxels on every machine (`voxelHash`).
 // After an edit, what no chain of voxels sharing a face joins to an anchor (the terrain, objects marked `anchor`) is
 // cut loose: a rigid body of the physics world (it tumbles, lands on the level and on other bodies, and sleeps; an
-// explosion carves it like the level). The removed voxels are debris (`voxelDebris`).
+// explosion carves it like the level), and to scene code an object, `VoxelBody` (`voxelBodies()`, a physics hit's
+// `object`), with the physics methods every body has. The removed voxels are debris (`voxelDebris`).
 //
 // The level collides without being asked: every object is a fixed collider of its voxels, kept up to date by edits, so
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
 // all of it off (no collider; loose parts fall straight down until they rest, as before); `collide: false` on an
 // object leaves that object without a collider.
-import { usePhysicsEngine } from "@threert/scene";
+import { bindBody, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
 
 export type Hardness = "soft" | "medium" | "hard" | "indestructible";
 
@@ -89,16 +90,6 @@ export interface VoxelEdit {
   bodies_ms?: number;
 }
 
-/** A loose part as a rigid body. `body` and `collider` are the physics world's ids of it: ray and shape cast hits
- *  and contacts report them. */
-export interface VoxelBody {
-  body: number;
-  collider: number;
-  voxels: number;
-  asleep: boolean;
-  position: [number, number, number];
-  rotation: [number, number, number, number];
-}
 /** (The name before step 6.) */
 export type Explosion = VoxelEdit;
 
@@ -114,6 +105,262 @@ export interface VoxelFrame {
   world_objects?: number;
 }
 
+/** A voxel body as the engine lists it (`__engine.voxelBodies()`). */
+interface BodyRecord {
+  body: number;
+  collider: number;
+  voxels: number;
+  asleep: boolean;
+  position: [number, number, number];
+  rotation: [number, number, number, number];
+}
+
+/** Why a voxel body is gone: retired for the cap, carved away whole, or taken out by the physics world (it fell). */
+export type VoxelBodyGone = "cap" | "carved" | "fell";
+
+/** Every voxel body's object, by its engine body id: the same object for as long as the body is. */
+const registry = new Map<number, VoxelBody>();
+/** Objects that listen for contacts (the binding then asks the engine for them each frame). */
+let listening = 0;
+/** Objects retired since the frame's events were last delivered, and why: their "gone" events, whoever noticed. */
+let pendingGone: { o: VoxelBody; reason: VoxelBodyGone }[] = [];
+/** Objects retired lately, by body id, with the frame they went in: the frame's contacts still name them (a pair's
+ *  end when its body goes), so they are found for those until the frame after (`frame`). */
+const recentlyGone = new Map<number, { o: VoxelBody; frame: number }>();
+let frameCount = 0;
+const CONTACTS = new Set(["contactstart", "contactend"]);
+
+/**
+ * A loose voxel part, a rigid body of the engine's (ROADMAP § 6 step 10), as an object: `voxelBodies()`, `voxelBody(id)`
+ * and a physics hit on it (`hit.object`) give it, the same object for the same body as long as the body is.
+ *
+ * - It has the physics methods every body has (`applyImpulse`, `applyForce`, `setLinearVelocity`, ...,
+ *   `getLinearVelocity`, `sleeping`), with the same names and units as a `Mesh` with `physics`; they reach the engine
+ *   at once (a voxel body exists already: no sync to wait for).
+ * - `position` / `quaternion` / `rotation` read the body's pose (its grid's corner): the engine moves it, and a write is
+ *   overwritten at the next read. `physics` describes it and cannot be set.
+ * - "contactstart" / "contactend" listeners turn on its contact reports; contacts arrive as for any body (`other`:
+ *   the other object; the voxel level is `engineColliders`). Joints take it as one of their objects.
+ * - Cut: the part that keeps the body (the largest) keeps this object; the parts cut off are new ones. Retired for the
+ *   cap, carved away or fallen out of the world: `gone` (with `goneReason`), a "gone" event when the binding delivers
+ *   the frame's events, and every call does nothing from then on.
+ * - `paint`, `addVoxels`, `carve`: edits of this body alone (shapes in world metres).
+ * It is in no scene: its meshes are the engine's.
+ */
+export class VoxelBody extends Object3D {
+  readonly isVoxelBody = true;
+  /** @internal Drawn by the engine, in no scene: `scene.add` refuses it. */
+  readonly engineOwned = true;
+  override type = "VoxelBody";
+  /** The physics world's ids of its body and its collider (physics calls and hits name them). */
+  readonly body: number;
+  collider: number;
+  /** Its voxels, and whether it slept, as of the last time it was listed or its pose read. */
+  voxels: number;
+  asleep: boolean;
+  /** It is no longer a body (see the class); `goneReason` says why. */
+  gone = false;
+  goneReason: VoxelBodyGone | undefined;
+  private contactsOn = false;
+
+  /** @internal Made by the registry (`voxelBodies`, `voxelBody`, a hit), never by scene code. */
+  constructor(r: BodyRecord) {
+    super();
+    this.body = r.body;
+    this.collider = r.collider;
+    this.voxels = r.voxels;
+    this.asleep = r.asleep;
+    this.name = `voxel body ${r.body}`;
+    // (Known to the physics bindings by its body id: contacts and hits find it; it has no slot in the pose table.)
+    bindBody(this, { id: r.body, slot: -1, epoch: 0, trs: new Float64Array(10), euler: false });
+    const p = this.position as Vector3 & { _x: number; _y: number; _z: number }, q = this.quaternion, e = this.rotation;
+    const place = (at: readonly number[], rot: readonly number[]) => {
+      [p._x, p._y, p._z] = at;
+      [q._x, q._y, q._z, q._w] = rot;
+    };
+    place(r.position, r.rotation);
+    const pull = () => {
+      const s = this.ask(() => physicsQuery("state", { body: this.body }) as { position?: number[]; rotation?: number[]; sleeping?: boolean } | null, null);
+      if (!s?.position || !s.rotation) return;
+      place(s.position, s.rotation);
+      this.asleep = s.sleeping ?? this.asleep;
+    };
+    this.update = (rec) => {
+      this.collider = rec.collider;
+      this.voxels = rec.voxels;
+      this.asleep = rec.asleep;
+      place(rec.position, rec.rotation);
+    };
+    Object.defineProperty(this, "position", { configurable: true, enumerable: true, get: () => (pull(), p) });
+    Object.defineProperty(this, "quaternion", { configurable: true, enumerable: true, get: () => (pull(), q) });
+    Object.defineProperty(this, "rotation", { configurable: true, enumerable: true, get: () => (pull(), e.setFromQuaternion(q, false), e) });
+  }
+
+  /** @internal The engine's record of it, taken in. */
+  update: (r: BodyRecord) => void;
+
+  /** What the body is: dynamic, its mass (kg). Read-only: the engine makes and unmakes these bodies. */
+  override get physics(): Readonly<PhysicsDesc> | null {
+    const s = this.ask(() => physicsQuery("state", { body: this.body }) as { mass?: number } | null, undefined);
+    if (s === undefined) return null;
+    return Object.freeze({ type: "dynamic" as const, ...(s?.mass !== undefined ? { mass: s.mass } : {}) });
+  }
+  override set physics(_v: PhysicsDesc | "dynamic" | "fixed" | "kinematic" | null) {
+    throw new TypeError(`${this.name}: a voxel body's physics is the engine's (move it with impulses, forces and velocities)`);
+  }
+
+  override applyImpulse(impulse: Vector3, point?: Vector3): this {
+    return this.call("impulse", { impulse: impulse.toArray(), ...(point ? { point: point.toArray() } : {}) });
+  }
+  override applyTorqueImpulse(torque: Vector3): this {
+    return this.call("impulse", { torque: torque.toArray() });
+  }
+  override applyForce(force: Vector3): this {
+    return this.call("force", { force: force.toArray() });
+  }
+  override applyTorque(torque: Vector3): this {
+    return this.call("force", { torque: torque.toArray() });
+  }
+  override setLinearVelocity(v: Vector3): this {
+    return this.call("velocity", { linvel: v.toArray() });
+  }
+  override setAngularVelocity(v: Vector3): this {
+    return this.call("velocity", { angvel: v.toArray() });
+  }
+  // (The readers too: `Object3D`'s would throw on a body the engine took out before the objects noticed.)
+  override getLinearVelocity(target?: Vector3): Vector3 {
+    return this.ask(() => super.getLinearVelocity(target), undefined) ?? (target ?? new Vector3Ctor()).set(0, 0, 0);
+  }
+  override getAngularVelocity(target?: Vector3): Vector3 {
+    return this.ask(() => super.getAngularVelocity(target), undefined) ?? (target ?? new Vector3Ctor()).set(0, 0, 0);
+  }
+  override get sleeping(): boolean {
+    return this.ask(() => super.sleeping, false);
+  }
+
+  /** The exposed voxels of this body inside the shape take palette entry `material`. */
+  paint(shape: VoxelShape, material: number): VoxelBodyEdit | null {
+    return this.edit({ op: "paint", material, ...shape });
+  }
+  /** Voxels of palette entry `material` in every empty cell of this body inside the shape (they are part of it).
+   *  (`add` is `Object3D`'s: children.) */
+  addVoxels(shape: VoxelShape, material: number): VoxelBodyEdit | null {
+    return this.edit({ op: "add", material, ...shape });
+  }
+  /** This body alone cut by the shape, whatever the hardness but the indestructible (parts cut off are bodies of
+   *  their own). */
+  carve(shape: VoxelShape): VoxelBodyEdit | null {
+    return this.edit({ op: "carve", ...shape });
+  }
+
+  override addEventListener(type: string, listener: (e: ObjectEvent) => void): void {
+    super.addEventListener(type, listener);
+    if (CONTACTS.has(type) && !this.contactsOn && !this.gone) {
+      if (this.ask(() => (engine()?.voxelContacts?.(this.body, true), true), false)) {
+        this.contactsOn = true;
+        listening++;
+      }
+    }
+  }
+
+  private call(op: string, args: object): this {
+    this.ask(() => engine()?.physics?.(op, { body: this.body, ...args }), undefined);
+    return this;
+  }
+
+  private edit(d: object): VoxelBodyEdit | null {
+    const e = engine();
+    if (!e?.voxelBodyEdit) throw new Error("voxel body edits need the renderer's native voxels");
+    const r = this.ask(() => JSON.parse(e.voxelBodyEdit!(this.body, d)) as VoxelBodyEdit, null);
+    if (r) refresh();
+    return r;
+  }
+
+  /**
+   * A call on the engine's body: `otherwise` once it is gone. The engine may have taken the body out since the
+   * registry last looked (an edit of the level, the cap, a fall): a call that fails is then the registry's cue to look
+   * again, and on a body found gone it does nothing, as the class promises. Any other error is thrown.
+   */
+  private ask<T, U>(f: () => T, otherwise: U): T | U {
+    if (this.gone) return otherwise;
+    try {
+      return f();
+    } catch (err) {
+      refresh();
+      if (this.gone) return otherwise;
+      throw err;
+    }
+  }
+
+  /** @internal It is no longer a body. */
+  retire(reason: VoxelBodyGone): void {
+    if (this.gone) return;
+    this.gone = true;
+    this.goneReason = reason;
+    recentlyGone.set(this.body, { o: this, frame: frameCount });
+    if (this.contactsOn) listening--;
+    registry.delete(this.body);
+    unbindBody(this);
+  }
+}
+
+/** What an edit of one voxel body did. */
+export interface VoxelBodyEdit {
+  /** Voxels painted, added or removed; whether the body is gone (carved away whole). */
+  voxels: number;
+  gone: boolean;
+}
+
+/** The engine's list of bodies taken in: objects made for new ones, the gone ones retired (with the engine's reasons),
+ *  their "gone" events kept for the frame's events (`pendingGone`), whichever call noticed. */
+function refresh(): void {
+  const e = engine();
+  const out = pendingGone;
+  for (const [body, reason] of JSON.parse(e?.voxelGone?.() ?? "[]") as [number, VoxelBodyGone][]) {
+    const o = registry.get(body);
+    if (o) {
+      o.retire(reason);
+      out.push({ o, reason });
+    }
+  }
+  if (!e?.voxelBodies) return;
+  const seen = new Set<number>();
+  for (const r of JSON.parse(e.voxelBodies()) as BodyRecord[]) {
+    seen.add(r.body);
+    const o = registry.get(r.body);
+    if (o) o.update(r);
+    else registry.set(r.body, new VoxelBody(r));
+  }
+  // (One the engine no longer lists without having said why: gone all the same.)
+  for (const [body, o] of registry) {
+    if (!seen.has(body)) {
+      o.retire("carved");
+      out.push({ o, reason: "carved" });
+    }
+  }
+}
+
+/** The registry, known to `@threert/scene` (hits, joints, the frame's events). */
+function register(): void {
+  setEngineBodies({
+    object: (body) => registry.get(body) ?? recentlyGone.get(body)?.o ?? (body >= 2 ** 30 ? (refresh(), registry.get(body) ?? recentlyGone.get(body)?.o) : undefined),
+    bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
+    frame: () => {
+      // (Those that went before the last frame's events have had their contacts' ends delivered.)
+      frameCount++;
+      for (const [body, g] of recentlyGone) if (g.frame < frameCount - 1) recentlyGone.delete(body);
+      // (With no object made yet, the engine's list of gone bodies is only let go of: nothing holds them.)
+      if (registry.size) refresh();
+      else engine()?.voxelGone?.();
+      // (Every "gone" since the last frame's events, noticed here or by any call in between.)
+      const gone = pendingGone;
+      pendingGone = [];
+      for (const { o, reason } of gone) o.dispatchEvent({ type: "gone", reason });
+      return listening > 0;
+    },
+  });
+}
+
 interface NativeEngine {
   voxelLevel?: (d: NativeLevel) => void;
   voxelExplode?: (x: number, y: number, z: number, r: number) => string;
@@ -122,6 +369,9 @@ interface NativeEngine {
   voxelDebris?: () => Float32Array;
   voxelHash?: () => string;
   voxelBodies?: () => string;
+  voxelBodyEdit?: (body: number, d: object) => string;
+  voxelContacts?: (body: number, on: boolean) => void;
+  voxelGone?: () => string;
   physics?: (op: string, args: object) => string;
   physicsPoses?: () => Float32Array;
 }
@@ -134,13 +384,19 @@ export function voxelLevel(level: NativeLevel): void {
   const e = engine();
   if (!e?.voxelLevel) throw new Error("voxelLevel: needs the renderer's native voxels");
   e.voxelLevel(level);
-  if (level.physics !== false && e.physics) usePhysicsEngine(e as Parameters<typeof usePhysicsEngine>[0]);
+  if (level.physics !== false && e.physics) {
+    usePhysicsEngine(e as Parameters<typeof usePhysicsEngine>[0]);
+    register();
+  }
 }
 
 function edit(d: object): VoxelEdit | { queued: true } {
   const e = engine();
   if (!e?.voxelEdit) throw new Error("voxel edits need the renderer's native voxels");
-  return JSON.parse(e.voxelEdit(d)) as VoxelEdit | { queued: true };
+  const r = JSON.parse(e.voxelEdit(d)) as VoxelEdit | { queued: true };
+  // (An edit of the level carves the bodies too: the objects of those it took out are gone from now on.)
+  if (registry.size) refresh();
+  return r;
 }
 
 /**
@@ -191,18 +447,26 @@ export function voxelFrame(dt: number): VoxelFrame | { queued: true } {
   return JSON.parse(e.voxelFrame(dt)) as VoxelFrame | { queued: true };
 }
 
-/** The voxel bodies there are now (loose parts the physics world moves), oldest first. */
+/** The voxel bodies there are now (loose parts the physics world moves), oldest first, as objects (`VoxelBody`): the
+ *  same object for the same body each time. Bodies gone since the last call are retired here too (their "gone" event
+ *  comes with the frame's next events, as for every way a body is found gone). */
 export function voxelBodies(): VoxelBody[] {
   const e = engine();
   if (!e?.voxelBodies) throw new Error("voxelBodies: needs the renderer's native voxels");
-  return JSON.parse(e.voxelBodies()) as VoxelBody[];
+  refresh();
+  return [...registry.values()].sort((a, b) => a.body - b.body);
+}
+
+/** The object of voxel body `body` (an id a hit or a contact reported), or undefined if there is no such body now. */
+export function voxelBody(body: number): VoxelBody | undefined {
+  if (!registry.has(body)) refresh();
+  return registry.get(body);
 }
 
 /**
- * An impulse (N s) on a voxel body: at its centre of mass, or at a point of the world (which turns it too). `body` is
- * the id `voxelBodies()` lists and a physics hit reports (`Raycaster.intersectPhysics`: `hit.body`; a hit on the
- * level itself has `hit.object === engineColliders`, a null `hit.object.physics` and no `body`: the level is fixed).
- * Throws if there is no such body (it may have been carved away, or retired for the cap, since the id was read).
+ * An impulse (N s) on a voxel body by its id.
+ * @deprecated Use the object: `voxelBody(id)?.applyImpulse(new Vector3(...), point)` (or `hit.object.applyImpulse`):
+ * the same call. Kept for step 8's scripts; throws if there is no such body.
  */
 export function voxelImpulse(body: number, impulse: readonly [number, number, number], point?: readonly [number, number, number]): void {
   const e = engine();

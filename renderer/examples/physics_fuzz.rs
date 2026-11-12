@@ -30,7 +30,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use threert_render::api;
 use threert_render::physics::PhysicsWorld;
-use threert_render::voxel::{EditOp, VoxelWorld, MAX_BODIES};
+use threert_render::voxel::{EditOp, VoxelWorld, MAX_BODIES, MAX_BODY_CELLS};
 use threert_render::world::World;
 
 struct Rng(u64);
@@ -55,33 +55,37 @@ impl Rng {
     }
 }
 
+/// How often (iterations) a run checks the level's colliders against their shells by brute force (`--shells`).
+const SHELLS: u32 = 50;
+
 /// Where the fuzz is (seed in the high half, iteration in the low), for the watchdog.
 static AT: AtomicU64 = AtomicU64::new(0);
 
 /// One run; returns the kicks its steps took.
-fn run(seed: u64, iterations: u32, many: bool) -> u32 {
+fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
     let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut w = World::default();
     let mut ph: Option<PhysicsWorld> = None;
-    // Two terrain tiles side by side and bars standing on them (a few of them anchors).
-    let mut blocks = vec![([0, 0, 0], [64, 6, 64], Some((0, 0)), true), ([64, 0, 0], [64, 6, 64], Some((1, 0)), true)];
+    // Two terrain tiles side by side, 1.6 m deep (deep enough to have cells under their shells), and bars standing on
+    // them (a few of them anchors).
+    let mut blocks = vec![([0, 0, 0], [64, 16, 64], Some((0, 0)), true), ([64, 0, 0], [64, 16, 64], Some((1, 0)), true)];
     if many {
         for i in 0..24 {
             for j in 0..20 {
-                blocks.push(([2 + i * 5, 6, 2 + j * 3], [2, 8 + r.below(12) as i32, 2], None, false));
+                blocks.push(([2 + i * 5, 16, 2 + j * 3], [2, 8 + r.below(12) as i32, 2], None, false));
             }
         }
     } else {
         for i in 0..10 {
             for j in 0..5 {
-                blocks.push(([6 + i * 11, 6, 6 + j * 11], [2 + r.below(4) as i32, 6 + r.below(20) as i32, 2 + r.below(4) as i32], None, r.chance(0.1)));
+                blocks.push(([6 + i * 11, 16, 6 + j * 11], [2 + r.below(4) as i32, 6 + r.below(20) as i32, 2 + r.below(4) as i32], None, r.chance(0.1)));
             }
         }
     }
     let mut v = VoxelWorld::of_blocks(&blocks, &mut w, &mut ph);
     if many {
         // Every bar cut loose at its foot, then again: more loose parts than the cap holds.
-        for y in [0.7, 1.1] {
+        for y in [1.7, 2.1] {
             let _ = v.edit(&mut w, &mut ph, &EditOp::parse(&json!({ "op": "carve", "box": [0.0, y, 0.0, 12.8, y + 0.1, 6.4] })).unwrap());
             w.take_changes();
         }
@@ -95,6 +99,7 @@ fn run(seed: u64, iterations: u32, many: bool) -> u32 {
         }
     };
     let (mut edits, mut refused, mut calls_refused, mut most, mut kicks) = (0u32, 0u32, 0u32, 0usize, 0u32);
+    let (mut body_edits, mut checked) = (0u32, 0usize);
     let mut advance = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>| {
         api::physics_advance(ph, v, w, 1.0 / 60.0);
         w.take_changes();
@@ -103,14 +108,14 @@ fn run(seed: u64, iterations: u32, many: bool) -> u32 {
     for it in 0..iterations {
         AT.store(seed << 32 | it as u64, Ordering::Relaxed);
         let wild = it > iterations / 3;
-        match r.below(10) {
+        match r.below(12) {
             0..=4 => {
                 let op = ["carve", "carve", "explode", "add", "paint"][r.below(5) as usize];
                 let wild = wild && op != "add";
                 let rad = if wild && r.chance(0.2) { weird(&mut r) } else { r.range(0.1, 1.5) };
                 let d = match if many && r.chance(0.5) { 3 } else { r.below(3) } {
                     3 => {
-                        let y = r.range(0.5, 2.5);
+                        let y = r.range(1.5, 3.5);
                         json!({ "op": "carve", "box": [r.range(0.0, 6.0), y, 0.0, r.range(6.0, 12.8), y + 0.1, 6.4] })
                     }
                     0 => json!({ "op": op, "material": 1, "sphere": [pos(&mut r, wild), r.range(0.0, 3.0), pos(&mut r, wild) * 0.5, rad] }),
@@ -124,6 +129,36 @@ fn run(seed: u64, iterations: u32, many: bool) -> u32 {
                 match EditOp::parse(&d).and_then(|e| v.edit(&mut w, &mut ph, &e)) {
                     Ok(_) => edits += 1,
                     Err(_) => refused += 1,
+                }
+            }
+            // One body's own edit (a voxel object's addVoxels / paint / carve), around where it is.
+            10 => {
+                let list = v.body_list(ph.as_ref().unwrap());
+                if let Some(b) = list.as_array().unwrap().get(r.below(list.as_array().unwrap().len().max(1) as u64) as usize) {
+                    let (id, at) = (b["body"].as_u64().unwrap() as u32, [0, 1, 2].map(|k| b["position"][k].as_f64().unwrap()));
+                    // Near it mostly; now and then far (up to 10^8 m out: the review of #25 grew a body's mesh over
+                    // that), with a wild size, or grown again and again beside it.
+                    let off = if r.chance(0.1) { [1e2, 1e5, 1e8][r.below(3) as usize] * if r.chance(0.5) { 1.0 } else { -1.0 } } else { 0.0 };
+                    let c = [at[0] + r.range(-0.5, 1.0) + off, at[1] + r.range(-0.5, 1.5), at[2] + r.range(-0.5, 1.0) + off * r.range(0.0, 1.0)];
+                    let rad = if wild && r.chance(0.2) { weird(&mut r) } else { r.range(0.05, 0.8) };
+                    let op = ["add", "paint", "carve"][r.below(3) as usize];
+                    let material = if r.chance(0.05) { 255 } else { 1 };
+                    let d = if r.chance(0.5) { json!({ "op": op, "material": material, "sphere": [c[0], c[1], c[2], rad] }) } else { json!({ "op": op, "material": material, "box": [c[0], c[1], c[2], c[0] + rad, c[1] + rad, c[2] + rad] }) };
+                    let grow = if op == "add" && r.chance(0.02) { 4 } else { 1 };
+                    for g in 0..grow {
+                        let d = if grow > 1 { json!({ "op": "add", "material": 1, "box": [at[0] + 0.4 + 3.2 * g as f64, at[1], at[2], at[0] + 3.59 + 3.2 * g as f64, at[1] + 3.19, at[2] + 3.19] }) } else { d.clone() };
+                        match EditOp::parse(&d).and_then(|e| v.edit_body(&mut w, &mut ph, id, &e)) {
+                            Ok(_) => body_edits += 1,
+                            Err(_) => refused += 1,
+                        }
+                    }
+                }
+            }
+            // A body's contacts on or off.
+            11 => {
+                let list = v.body_list(ph.as_ref().unwrap());
+                if let Some(b) = list.as_array().unwrap().first() {
+                    let _ = v.body_contacts(&mut ph, b["body"].as_u64().unwrap() as u32, r.chance(0.7));
                 }
             }
             5 => {
@@ -166,17 +201,28 @@ fn run(seed: u64, iterations: u32, many: bool) -> u32 {
         let list = v.body_list(p);
         let list = list.as_array().unwrap();
         most = most.max(list.len());
+        // The bodies said to be gone are gone, with a reason.
+        for g in v.take_gone().as_array().unwrap() {
+            let id = g[0].as_u64().unwrap();
+            assert!(["cap", "carved", "fell"].contains(&g[1].as_str().unwrap()), "seed {seed}, iteration {it}: {g}");
+            assert!(!list.iter().any(|b| b["body"].as_u64() == Some(id)), "seed {seed}, iteration {it}: body {id} said gone and listed");
+        }
+        // The level's colliders against their shells by brute force, every `shells` iterations and at the end.
+        if shells > 0 && (it % shells == shells - 1 || it + 1 == iterations) {
+            checked += v.check_shells(p).unwrap_or_else(|e| panic!("seed {seed}, iteration {it}: {e}"));
+        }
         assert_eq!(list.len(), v.bodies(), "seed {seed}, iteration {it}: a voxel body without an engine body");
         assert!(list.len() <= MAX_BODIES, "seed {seed}, iteration {it}: {} bodies", list.len());
         for b in list {
             let (id, collider, voxels) = (b["body"].as_u64().unwrap() as u32, b["collider"].as_u64().unwrap() as u32, b["voxels"].as_u64().unwrap() as usize);
             assert!(voxels > 0, "seed {seed}, iteration {it}: body {id} has no voxel");
+            assert!(voxels <= MAX_BODY_CELLS.max(1 << 24), "seed {seed}, iteration {it}: body {id} has {voxels} voxels");
             assert_eq!(p.bridge_ref().engine_voxels(collider), Some(voxels), "seed {seed}, iteration {it}: body {id}'s collider cells are not its grid's");
             assert!(b["position"].as_array().unwrap().iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "seed {seed}, iteration {it}: body {id} at {}", b["position"]);
         }
     }
     println!(
-        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), calls refused {calls_refused}, most bodies {most}, retired {}, kicks {kicks}, hash {:016x}/{:016x}",
+        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), body edits {body_edits}, calls refused {calls_refused}, most bodies {most}, retired {}, shells checked {checked}, kicks {kicks}, hash {:016x}/{:016x}",
         v.retired,
         v.hash().unwrap_or(0),
         ph.as_ref().unwrap().hash()
@@ -212,6 +258,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let number = |name: &str, default: u64| args.iter().position(|a| a == name).and_then(|k| args.get(k + 1)).and_then(|v| v.parse().ok()).unwrap_or(default);
     let (runs, from, iterations, steps, limit) = (number("--runs", 20), number("--from", 1), number("--iterations", 1500) as u32, number("--stress", 2_000_000), number("--limit", 30));
+    // (The level's colliders against brute force every this many iterations, and at a run's end; 0: never.)
+    let shells = number("--shells", SHELLS as u64) as u32;
     let many = args.iter().any(|a| a == "--many");
     // The watchdog: the same place for `limit` seconds is a step (or an edit) that does not return.
     std::thread::spawn(move || {
@@ -239,7 +287,7 @@ fn main() {
         assert_eq!((script, cases, voxels), (check::EXPECTED, check::EXPECTED_CASES, threert_render::voxel::EXPECTED_SCRIPT), "the recorded hashes");
     }
     let t = std::time::Instant::now();
-    let kicks: u32 = (from..from + runs).map(|seed| run(seed, iterations, many)).sum();
+    let kicks: u32 = (from..from + runs).map(|seed| run(seed, iterations, many, shells)).sum();
     if runs > 0 {
         println!("physics fuzz: {runs} runs of {iterations} iterations in {:.1} s, every check held, no step hung; kicks {kicks}", t.elapsed().as_secs_f64());
     }

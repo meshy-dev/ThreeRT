@@ -881,6 +881,21 @@ impl World {
     }
 
     /// Removes an object and its descendants. Returns their ids (those it had: the bodies that drove them go too).
+    /// A geometry (triangles or procedural) no object uses any more, let go (the voxel engine's, when it draws a part
+    /// again in new objects: the old objects' geometries would otherwise stay for good). One an object still uses is
+    /// kept. Returns whether it went.
+    pub fn drop_geometry(&mut self, id: u32) -> bool {
+        let used = self.objects.values().any(|o| match &o.kind {
+            Kind::Mesh { geometry, .. } | Kind::Procedural { geometry, .. } | Kind::Instanced { geometry, .. } => *geometry == id,
+            _ => false,
+        });
+        if used {
+            return false;
+        }
+        self.changes.geometries.remove(&id);
+        self.geometries.remove(&id).is_some() | self.proc_geometries.remove(&id).is_some()
+    }
+
     pub fn remove(&mut self, id: u32) -> Vec<u32> {
         let mut doomed = vec![id];
         let mut k = 0;

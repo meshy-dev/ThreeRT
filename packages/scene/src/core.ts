@@ -157,6 +157,28 @@ export function usePhysicsEngine(e: PhysicsEngine): void {
   physicsEngine = e;
 }
 
+/**
+ * @internal The engine's own bodies as objects (`@threert/voxel` registers its voxel bodies): the object of an engine
+ * body id, the engine body an object stands for (joints take it), and a call once a frame when the binding delivers
+ * the physics events, which says whether any of them listens for contacts.
+ */
+export interface EngineBodies {
+  object(body: number): Object3D | undefined;
+  bodyOf(o: Object3D): number | undefined;
+  frame(): boolean;
+}
+let engineBodies: EngineBodies | null = null;
+
+/** @internal Registers (or with null drops) the engine's bodies as objects. */
+export function setEngineBodies(e: EngineBodies | null): void {
+  engineBodies = e;
+}
+
+/** @internal The registered engine bodies, if any. */
+export function getEngineBodies(): EngineBodies | null {
+  return engineBodies;
+}
+
 /** @internal The engine may have stepped the world: poses are read again. */
 export function physicsStepped(): void {
   physicsEpoch++;
@@ -498,6 +520,8 @@ export class Object3D {
   add(...objects: Object3D[]): this {
     for (const o of objects) {
       if (o === this) throw new Error("object can't be added as a child of itself");
+      // (An object the engine draws itself, a voxel body: it is in no scene.)
+      if ((o as { engineOwned?: boolean }).engineOwned) throw new TypeError(`${o.name || o.type}: the engine draws it; it is in no scene`);
       o.parent?.remove(o);
       o.parent = this;
       this.children.push(o);

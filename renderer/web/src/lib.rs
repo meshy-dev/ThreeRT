@@ -116,6 +116,25 @@ pub fn voxel_bodies() -> String {
     engine(|e| api::voxel_bodies(&e.voxels, &e.physics))
 }
 
+/// One voxel body's edit (`api::voxel_body_edit`).
+#[wasm_bindgen(js_name = voxelBodyEdit)]
+pub fn voxel_body_edit(body: f64, d: &str) -> Result<String, JsValue> {
+    let d = desc("voxelBodyEdit", d)?;
+    engine(|e| api::voxel_body_edit(&mut e.voxels, &mut e.world, &mut e.physics, body, &d)).map_err(thrown)
+}
+
+/// A voxel body's contacts on or off (`api::voxel_contacts`).
+#[wasm_bindgen(js_name = voxelContacts)]
+pub fn voxel_contacts(body: f64, on: bool) -> Result<(), JsValue> {
+    engine(|e| api::voxel_contacts(&mut e.voxels, &mut e.physics, body, on)).map_err(thrown)
+}
+
+/// The voxel bodies gone since the last call (`api::voxel_gone`).
+#[wasm_bindgen(js_name = voxelGone)]
+pub fn voxel_gone() -> String {
+    engine(|e| api::voxel_gone(&mut e.voxels))
+}
+
 #[wasm_bindgen(js_name = voxelHash)]
 pub fn voxel_hash() -> String {
     engine(|e| api::voxel_hash(&e.voxels))

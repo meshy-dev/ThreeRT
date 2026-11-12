@@ -518,6 +518,55 @@ asleep at the same frames as under hardware traversal. Explosions of 1, 2, 4 m: 
 194 ms (the parts' trees are built on the CPU: the commit is 117 ms of it); after it a frame's CPU p50 8.1, p95
 9.1 ms, none over 16.7 ms; a frame's GPU 7.5–8.1 ms (trace 4.2–4.6).
 
+### Voxel bodies as objects (ROADMAP § 6 step 10 a; design: `out/web-probe/step10/a-design.md`)
+
+A loose part is, to scene code, an object: `voxelBodies()` returns `VoxelBody` objects (`@threert/voxel`, an
+`Object3D`), the same object for the same body as long as it is; `voxelBody(id)` and a physics hit (`hit.object`) give
+it too (the level itself stays `engineColliders`).
+
+- **What it has**: the physics methods every body has, same names and units as a `Mesh` with `physics`
+  (`applyImpulse`, `applyForce`, `setLinearVelocity`, `getLinearVelocity`, `sleeping`, ...), sent to the engine at
+  once (the body exists: no sync to wait for); `position` / `quaternion` / `rotation` read from the engine (writes do
+  not move it); `physics` read-only (`{ type: "dynamic", mass }`); `paint`, `addVoxels`, `carve` of that body alone.
+- **Contacts**: a "contactstart" / "contactend" listener turns its collider's reports on; contacts arrive as for any
+  body, on both objects with `other` (the level is `engineColliders`: a contact with a collider on no body was
+  dropped before, for scene objects too), and in the scene's "contacts" batch. World handlers (`on`) are for the
+  game's named events; a listener added in setup acts on the scene directly, as for ordinary bodies.
+- **Joints**: `FixedJoint`, `HingeJoint`, ... between voxel objects, or a voxel object and a scene object with
+  `physics`: the binding takes a voxel object's engine body (anchors in its own frame, unscaled). Removing a body
+  removes its joints in the engine.
+- **When it stops being one**: cut, the part that keeps the body keeps the object; retired for the cap, carved away
+  or fallen out of the world, it is `gone` (`goneReason`: "cap", "carved", "fell") with a "gone" event at the frame's
+  events, and its calls do nothing. A level edit looks at the bodies again at once; a call on a body the engine took
+  out before the objects noticed finds it gone then and does nothing either (it does not throw).
+- **Contacts, kept straight** (the bridge): a pair's start is reported once, even when an edit takes the collider out
+  and puts it back; a collider that goes (a body carved away, retired, removed) ends its pairs.
+- **Refused**: scene code's own colliders on a voxel body (the engine edits and splits it by its cells, and weighs it
+  by them); join a body of your own with a `FixedJoint`.
+- **Paint, added voxels, mass**: paint from the world reaches bodies (their surface cells, as the level's paint);
+  `addVoxels` fills the body's empty cells in the shape, at most 65,536 at once and 64 times that looked at, and only
+  if the body stays within 2^21 cells (`MAX_BODY_CELLS`) spanning at most 1,024 cells a side and 2^25 in all
+  (`MAX_BODY_SIDE`, `MAX_BODY_BOX`: its mesh is made over that box, at most 47 MB a redraw; one add 120 m out took
+  2.4 GB before); the collider is edited first, and if anything is refused nothing changes. A part spanning more is
+  debris, not a body; a body is never kept without its collider. A material outside the palette is refused. A body's
+  mass, centre of mass and inertia are the sum of its cells, each a cube of its palette entry's density (the collider
+  carries none). Step 8's `voxelImpulse` is kept, deprecated.
+
+### Where the engine works round its dependencies
+
+Each is a way round a fault or a gap of Rapier 0.36.1, parry 0.31.1, glamx 0.3.1 or rayon 1.12, in our code (no
+crate is patched but glamx, in `renderer/third_party`). When a new release comes, this says what can go.
+
+| What | Way round | Where | It can go when | How to tell |
+| --- | --- | --- | --- | --- |
+| The parallel step can hang: Rapier joins its deferred BVH pass with a blocking `recv` on a pool worker, and rayon does not promise another worker takes the job (ROADMAP § 6 step 8) | the wait for a step injects an empty job into the pool every 0.5 ms (`THREERT_PHYSICS_KICK=off` waits without) | `renderer/src/physics.rs` `in_pool` | Rapier joins that pass without blocking a worker (or runs it inline) | `cargo run --release --example physics_fuzz -- --runs 0 --stress 10000000` with `THREERT_PHYSICS_KICK=off`: no hang (today it hangs within 10⁵–10⁶ steps); then delete `in_pool`'s kick |
+| A ball on voxels panics the solver ("stale ContactRef manifold ordinal"): parry's voxels-ball contact keeps no workspace, so Rapier takes the pair for a simple one | the pair goes through parry's general voxels-shape function (a query dispatcher) | `renderer/physics-core/src/world.rs` `VoxelsWithBalls` | parry's voxels-ball contact keeps a workspace (or Rapier stops deciding by it) | take the dispatcher out and run `check::cases` (its voxel kind), `voxel_worlds_never_panic` (20,000 worlds, ignored: `-- --ignored`) and `random_calls_on_voxel_shapes_never_panic`: none panics |
+| parry's ray misses voxels when it lies on a lattice plane and runs along it | the world walks the cells itself (Amanatides–Woo) | `world.rs` `voxel_ray`, `shape_ray` | parry's ray cast on `Voxels` hits along lattice planes | `rays_at_voxel_shapes` with parry's ray in place of `voxel_ray` (it compares with brute force) |
+| parry's `Voxels::voxels()` leaves cells out: it takes its range from the shape's box in metres, and f32 rounding can drop a layer (one cell at (-1000, 9, -673) of 0.1 m is listed as none; found by the fuzz, a body's count 29 short) | the world lists a shape's cells over its exact `domain()` (`voxels_in_range`) | `world.rs` `listed` | `Voxels::voxels()` takes its range as `domain()` does (from voxel centres) | `every_voxel_is_listed` with `voxels()` in place of `listed` |
+| A voxel shape edited where it sits (`shape_mut`) leaves stale recycled contacts on pairs that do not move | `edit_voxels` takes the collider out and puts it back under the same id | `world.rs` `Physics::edit_voxels` | Rapier refreshes a collider's manifolds when its shape is edited in place | `voxel_shapes_are_edited` and the voxel fuzz with the edit done through `shape_mut` |
+| glamx's eigen decomposition calls the platform's `acos` / `cos` when `std` is in the crate graph: other bits natively than in wasm32 | the three calls through `simba`'s libm, by name | `renderer/third_party/glamx` (`PATCH.md`), `[patch.crates-io]` in both manifests | a glamx release has the fix (dimforge/glamx #9, #10) and Rapier uses it | delete the copy and the patch tables; `tools/physics-determinism.ts` (its "std in the crate graph" run) and the recorded hashes hold |
+| Rapier takes the sine and cosine of a hinge's limits' centre with the platform's methods (0.024 % of angles differ in the last bit between macOS and wasm32) | limits reach Rapier centred, [−h, h], and the centre turns the first body's joint frame | `world.rs` `Physics::add_joint` | Rapier computes them with libm under `enhanced-determinism` (dimforge/rapier #1054 lists such calls) | `revolute_limits_off_centre` and `tools/physics-determinism.ts` (cases with joints) with the limits passed as given |
+
 ## Two published designs for destructible voxel worlds
 
 - **Dense grids and a world occupancy volume** (the raster-era design):

@@ -284,7 +284,9 @@ fn memory_is_bounded() {
         run(&mut b, &mut s, 1);
     }
     let dropped = ok(&mut b, &mut s, "hash", json!({}))["contactsDropped"].as_u64().unwrap();
-    assert_eq!(ok(&mut b, &mut s, "contacts", Value::Null).as_array().unwrap().len(), MAX_CONTACTS);
+    // (At most that many; fewer, since an end whose start was dropped is not reported.)
+    let n = ok(&mut b, &mut s, "contacts", Value::Null).as_array().unwrap().len();
+    assert!(n > 0 && n <= MAX_CONTACTS, "{n}");
     assert!(dropped > 100_000, "{dropped} dropped");
     // `moved`, 1,000 awake bodies through 3,600 ticks without a sync.
     let (mut b, mut s) = world();
