@@ -41,6 +41,9 @@ if (existsSync(latest)) {
     if (!/^https:\/\//.test(r.macos.url)) problems.push(`site/releases/latest.json: macos.url is not an https URL (${r.macos.url})`);
   } else if (!file || !existsSync(file)) problems.push(`site/releases/latest.json names ${r.macos?.file ?? "no macOS file"}, which is not in site/releases/`);
   else if (statSync(file).size !== r.macos.size) problems.push(`site/releases/${r.macos.file} is ${statSync(file).size} bytes, latest.json says ${r.macos.size}`);
+  // A public build opens like any app: never one that asks the user to get past Gatekeeper.
+  if (r.macos && (r.macos.signed !== "developer-id" || r.macos.notarized !== true))
+    problems.push(`site/releases/latest.json: the macOS build is ${r.macos.signed ?? "unsigned"}${r.macos.notarized ? "" : ", not notarized"} (release.ts --sign <Developer ID> --notarize <profile>)`);
   cpSync(join(site, "releases"), join(out, "releases"), { recursive: true, filter: (src) => withImage || !src.endsWith(".dmg") });
   console.log(`release ${r.version}: ${r.macos?.url ?? r.macos?.file ?? "no macOS build"}${r.macos?.url || withImage ? "" : " (served from R2: deploy.ts uploads it)"}; iOS ${r.ios?.url ?? "not published"}`);
 } else {

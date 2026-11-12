@@ -158,11 +158,10 @@
     // macOS: the disk image this host carries.
     const m = r?.macos;
     if (m?.file) {
-      const trusted = m.signed === "developer-id" && m.notarized === true;
+      // Signed with a Developer ID and notarized (the deploy refuses anything else): it opens like any app.
       mac.innerHTML = `
         <div class="row"><a class="btn primary" href="${esc(macUrl(m))}" download>${DL}<span>Download for macOS</span></a>
           <span class="kv"><span><b>${esc(r.version)}</b></span><span>${megabytes(m.size)}</span>${r.date ? `<span>${esc(r.date)}</span>` : ""}</span></div>
-        ${trusted ? "" : `<p class="fine">This build is not notarized by Apple yet, so macOS stops it the first time. Open <b>System Settings → Privacy &amp; Security</b> and choose <b>Open Anyway</b> (on macOS 14: right-click the app, then <b>Open</b>). macOS remembers the choice.</p>`}
         <details><summary>${esc(m.file)} · SHA-256</summary><p>${esc(m.sha256 ?? "")}</p></details>`;
     } else {
       mac.innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">No build on this host</span></div>
