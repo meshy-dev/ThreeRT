@@ -239,18 +239,21 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
     cloud.position.set(cx, cy + 5, cz + 21);
     cloud.scale.set(22, 14, 36);
   }
+  // (With physics: the voxel bodies' speeds just after an explosion, its blast's push and its debris' kick included:
+  // their top speed, and of those moving faster than 0.1 m/s how many and their median and 90th percentile: step 10 c1.)
+  const speedsNow = () => {
+    if (!physics) return {};
+    const v = voxelBodies().map((x) => x.getLinearVelocity().length());
+    const moving = v.filter((x) => x > 0.1).sort((a, b) => a - b);
+    const at = (q: number) => +(moving[Math.floor(moving.length * q)] ?? 0).toFixed(2);
+    return { fastest: +Math.max(0, ...v).toFixed(2), speeds: { n: moving.length, p50: at(0.5), p90: at(0.9) } };
+  };
   const fire = (r: number, spot?: number) => {
     const [x, y, z] = at[(spot ?? next++) % at.length];
     const e = boom ? boom.explode(x, y, z, r, now) : voxelExplode(x, y, z, r);
     const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
-    // (With physics: the voxel bodies' speeds just after it, its blast's push and its debris' kick included: their
-    // top speed, and of those moving faster than 0.1 m/s how many and their median and 90th percentile: step 10 c1.)
-    const v = physics ? voxelBodies().map((x) => x.getLinearVelocity().length()) : [];
-    const fastest = physics ? +Math.max(0, ...v).toFixed(2) : undefined;
-    const moving = v.filter((x) => x > 0.1).sort((a, b) => a - b);
-    const speeds = physics ? { n: moving.length, p50: +(moving[Math.floor(moving.length * 0.5)] ?? 0).toFixed(2), p90: +(moving[Math.floor(moving.length * 0.9)] ?? 0).toFixed(2) } : undefined;
-    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...(fastest !== undefined ? { fastest, speeds } : {}) })}`);
+    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...speedsNow() })}`);
   };
   return defineGame<State>({
     state: { scenario: null, started: 0 },
@@ -325,7 +328,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           const [x, y, z] = trunks[k];
           const e = voxelExplode(x, y + 0.8, z, 0.6);
           const thrown = flying ? flying.spawn(voxelDebris(), [x, y + 0.8, z]) : dust ? dust.spawn(voxelDebris(), [x, y + 0.8, z]) : 0;
-          console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0.6, ...e, ...(flying || dust ? { thrown } : {}) })}`);
+          console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0.6, ...e, ...(flying || dust ? { thrown } : {}), ...speedsNow() })}`);
         }
       } else if (s === "fell") {
         if (t >= 1 && last !== 0) {

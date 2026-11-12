@@ -14,6 +14,8 @@
 //             goes): the frame's CPU and GPU ms for 2 s before and 4 s after the 4 m explosion (`crater`); with fire,
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
 //             `--software`: instead, the fire route's crater under software traversal (THREERT_HWRT=0, loop guard 8,192).
+//             `--scenario name`: instead, that scenario of the game on every route (`sustained`, `topple`: explosions that
+//             cut parts loose): each such explosion's parts kicked and the bodies' speeds just after it (step 10 c1).
 //
 //   node tools/bench-voxel-fire.ts [--only calibrate,quality,cost] [--spp 2048] [--software]
 //
@@ -280,18 +282,27 @@ if (only.includes("cost")) {
   const st = (xs: number[]) => { const s = frameStats(xs); return `${s.p50.toFixed(1)} / ${s.p95.toFixed(1)} / ${Math.max(...xs).toFixed(1)}`; };
   for (const [tag, game, env] of routes) {
     const b = (await bundleGame(join(repoRoot, "games/voxel-level", game), join(dir, game.replace(".ts", ".js")))).out;
-    for (const scenario of tag === "fire" && !args.includes("--crater") ? ["crater", "sustained", "peak"] : ["crater"]) {
+    // (`--scenario name`: that scenario of the game instead, on every route.)
+    for (const scenario of args.includes("--scenario") ? [opt("--scenario", "crater")] : tag === "fire" && !args.includes("--crater") ? ["crater", "sustained", "peak"] : ["crater"]) {
       const log = join(dir, `cost-${tag.replace(/\W+/g, "-")}-${scenario}.jsonl`);
       const s = live(`cost-${tag}-${scenario}`, b, { env, frameLog: log });
       await s.frames(240); // warm: the level loaded, the radiance cache trained
       s.event(scenario);
-      await s.frames(scenario === "sustained" ? 11 * 60 : scenario === "peak" ? 4 * 60 : 5 * 60);
+      await s.frames(scenario === "sustained" ? 11 * 60 : scenario === "peak" ? 4 * 60 : scenario === "singles" ? 10 * 60 : scenario === "topple" ? 6 * 60 : 5 * 60);
       const explosions = s.lines.filter((l) => /^(\[game\] )?explosion \{/.test(l)).map((l) => JSON.parse(l.slice(l.indexOf("{"))) as { burning?: number; lit?: number });
       // The loose parts' top speed after the explosion (the game logs it every half second; step 10 c1's blast).
       const fastest = Math.max(0, ...s.lines.filter((l) => /^(\[game\] )?(bodies|explosion) \{/.test(l)).map((l) => (JSON.parse(l.slice(l.indexOf("{"))) as { fastest?: number }).fastest ?? 0));
       // The bodies' speeds just after the first explosion (the parts it cut loose, kicked: step 10 c1).
       const speeds = (explosions[0] as { speeds?: { n: number; p50: number; p90: number }; fastest?: number; kicked?: number } | undefined) ?? {};
       await s.quit();
+      // (The renderer's and the game's lines beside the frame log.)
+      writeFileSync(log.replace(/\.jsonl$/, ".log"), s.lines.join("\n") + "\n");
+      // The explosions that cut parts loose: each one's radius, the parts it kicked and the bodies' speeds just after it.
+      const cutting = (explosions as { r?: number; pieces?: number; kicked?: number; pushed?: number; fastest?: number; speeds?: { n: number; p50: number; p90: number } }[]).filter((e) => (e.pieces ?? 0) > 0 || (e.kicked ?? 0) > 0);
+      console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} ${explosions.length} explosions, ${cutting.length} cut parts loose`);
+      for (const e of cutting) {
+        if (e.speeds) console.log(`  ${"".padEnd(25)} r ${e.r} m: ${e.pieces ?? 0} parts cut loose, ${e.kicked ?? 0} kicked, ${e.pushed ?? 0} pushed; bodies moving ${e.speeds.n}, speed p50 ${e.speeds.p50} / p90 ${e.speeds.p90} / max ${e.fastest} m/s`);
+      }
       const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Frame);
       const ex = F.findIndex((f, k) => k > 200 && (f.voxel?.[0] ?? 0) > 0);
       if (ex < 0) {

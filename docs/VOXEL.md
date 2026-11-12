@@ -723,7 +723,11 @@ otherwise (the user's decisions 1-4, 2026-11-12; the independent review of #31).
   the push's, a body's whole change at most 30 m/s (what the solver and CCD follow). A charge throws what it breaks off
   at a speed of the charge's (as in the Gurney model of fragments: set by the charge and what holds it, not by each
   fragment's size); by area
-  alone a 1 m³ chunk of stone (2,400 kg) took 0.1 m/s and stayed where it was cut. `push` 0: neither. Only +, -, x, /
+  alone a 1 m³ chunk of stone (2,400 kg) took 0.1 m/s and stayed where it was cut. `push` 0: neither. On the
+  benchmark level (`tools/bench-voxel-fire.ts --only cost --scenario topple | sustained`, against the push alone): a
+  tree a 0.6 m explosion cuts loose leaves at 6.5-8.2 m/s (0.2-4.7), a part of a wall a 1 m one cuts loose at 7.9
+  (0.75-1.24; the run's top speed 7.9 for 3.06); frame times within run-to-run spread. The level's 4 m explosions (the
+  crater on the road, the wall spots of `singles`) cut nothing loose: there is no debris for them to kick. Only +, -, x, /
   and square roots: the same bits natively, in parallel and in wasm32. **Not shielded** (decision 4): a body behind a
   wall is pushed too; one voxel ray per body would shield (ROADMAP Open).
 
