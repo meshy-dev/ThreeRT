@@ -2155,9 +2155,17 @@ mod tests {
         assert!(p.cast_ray([-5.0, 0.3, 0.05], [1.0, 0.0, 0.0], 20.0, None).unwrap().is_none(), "the top face's plane is above the cells");
         let h = p.cast_ray([-5.0, 0.2, 0.05], [1.0, 0.0, 0.0], 20.0, None).unwrap().unwrap();
         assert!((h.distance - 3.0).abs() < 1e-5 && h.normal == [-1.0, 0.0, 0.0], "{h:?}");
-        // From inside a cell: at once, no normal (as every shape answers from inside).
+        // From inside a cell: at once, no normal (as every shape answers from inside). Also from a point on one of
+        // the lattice's planes inside the slab, along that plane (the cell it floors into is solid; its box, centre
+        // +- half a cell, may round off the plane and graze), every plane and direction of a grid of them.
         let h = p.cast_ray([0.05, 0.15, 0.05], [0.0, 1.0, 0.0], 20.0, None).unwrap().unwrap();
         assert!(h.distance == 0.0 && h.normal == [0.0; 3], "{h:?}");
+        for x in -19..19 {
+            for (o, d) in [([x as f32 * 0.1, 0.15, 0.05], [0.0, 0.0, 1.0]), ([x as f32 * 0.1, 0.15, 0.05], [0.0, 1.0, 0.0]), ([0.05, 0.1, x as f32 * 0.1], [1.0, 0.0, 0.0]), ([x as f32 * 0.1, 0.2, x as f32 * 0.1 + 0.05], [0.0, 0.0, -1.0])] {
+                let h = p.cast_ray(o, d, 20.0, None).unwrap();
+                assert!(h.is_some_and(|h| h.distance == 0.0), "from {o:?} along {d:?}, inside the slab: {h:?}");
+            }
+        }
         // Far out at negative coordinates (chunks of negative keys: parry's listing once lost a row there). Straight
         // down on planes or mid-cell: the column the ray's x and z floor into, met at its highest solid cell's top (by
         // this rule, not the cells' boxes: at 500 m a box's centre +- half its size and the plane k x size round apart

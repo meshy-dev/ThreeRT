@@ -32,8 +32,8 @@ impl<'a> RayCast for VoxelsChunkRef<'a> {
     /// one of the box's face planes (a ray straight down at x = 1.5 over cells of 0.1 m) grazes that box, which
     /// answered none: the walk went on and the ray missed every cell. Here a ray along the planes of an axis belongs
     /// to the cells its coordinate floors into (on a plane between two cells or chunks, the upper one), and a cell
-    /// that is solid is a hit. Only a ray that starts inside a cell still asks the cell's box (inside a solid shape: a
-    /// hit at 0 with no normal, as every shape answers).
+    /// that is solid is a hit. A ray that starts in a solid cell is, `solid`, a hit at 0 with no normal (as every shape
+    /// answers from inside); only the hollow cast still asks that cell's box where the ray leaves it.
     #[inline]
     fn cast_local_ray_and_get_normal(
         &self,
@@ -110,8 +110,12 @@ impl<'a> RayCast for VoxelsChunkRef<'a> {
                             let face = if up { i as u32 } else { i as u32 + 3 };
                             RayIntersection::new(t, normal, FeatureId::Face(face))
                         }
-                        // The ray starts in this cell: the cell's box answers.
-                        // TODO: if `solid` is false, the ray should go on until it reaches empty space again.
+                        // The ray starts in this cell (the cell its origin floors into): inside a solid shape, a hit at
+                        // once with no normal, as every shape answers; the cell's box is not asked (centre +- half a
+                        // cell, it may round off a plane the origin lies on, and graze).
+                        None if solid => RayIntersection::new(0.0, Vector::ZERO, FeatureId::Unknown),
+                        // Hollow: where the ray leaves the cell's box, as before.
+                        // TODO: the ray should go on until it reaches empty space again.
                         None => self
                             .voxel_aabb_unchecked(key)
                             .cast_local_ray_and_get_normal(ray, t1, solid)?,

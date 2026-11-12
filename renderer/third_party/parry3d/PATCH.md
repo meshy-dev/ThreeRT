@@ -32,8 +32,9 @@ In `VoxelsChunkRef::cast_local_ray_and_get_normal` (the chunk level, `impl RayCa
   - the normal points against the ray along that axis;
   - the feature is `Face(axis)` or `Face(axis + 3)`, as the box reports;
   - on a tie between axes, the lower axis is taken (the box reported `-dir` on an exact edge).
-- Only a ray that starts inside a cell still asks the cell's box for the hit. Inside a solid shape that is a hit at
-  0 with no normal, as every shape answers.
+- A ray that starts in a solid cell (the one its origin floors into) is, cast `solid`, a hit at 0 with no normal, as
+  every shape answers from inside; the cell's box is not asked (it may round off a plane the origin lies on and
+  graze: found by Bugbot on the first draft). Only the hollow cast still asks that box where the ray leaves it.
 - The next cell is the one across the nearest lattice plane ahead, computed from the integer key. The walk never
   steps back behind where the ray already is.
 - A ray running along the planes of an axis belongs to the cells its coordinate floors into, the same rule as
