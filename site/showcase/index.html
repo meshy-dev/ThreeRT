@@ -188,7 +188,7 @@
   // The community's entries (showcase/community.json: repositories registered through the issue form below).
   $("#submit").href = `${GITHUB}/issues/new?template=showcase.yml`;
   guard("community", async () => {
-    const r = await fetch(new URL("showcase/community.json", ROOT));
+    const r = await fetch(new URL("showcase/community.json", ROOT), { cache: "no-cache" }); // a fixed path: always revalidate
     const items = r.ok ? (await r.json()).items ?? [] : [];
     $("#made").innerHTML = items.map((g) => {
       const open = g.package ? g.package.replace(/^https:/, "threerts:").replace(/^http:/, "threert:") : null;

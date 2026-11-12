@@ -93,7 +93,7 @@ const CLIPS: Record<string, Clip> = {
     src: "showcase/moon-phases/moon-phases.game.ts",
   },
   showroom: {
-    what: "Boutique Showroom in the evening: walking to the sneaker, then the chair",
+    what: "Boutique Showroom in the evening: walking to the sneaker, then the sunglasses",
     src: "showcase/showroom/showroom.game.ts", at: [[0.6, ev("next")], [4.4, ev("next")]],
   },
 };

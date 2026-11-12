@@ -152,11 +152,21 @@ function clip(el, panes) {
  * The still stays where the clip should not or cannot play (reduced motion, a data saver, autoplay refused).
  */
 export function backdrop(el) {
-  const d = el.dataset, tall = !!d.videoTall && matchMedia("(max-aspect-ratio: 4/5)").matches;
+  const d = el.dataset, mq = matchMedia("(max-aspect-ratio: 4/5)");
+  const isTall = () => !!d.videoTall && mq.matches;
+  let tall = isTall(), v = null, state = () => {};
   const img = el.appendChild(Object.assign(new Image(), { alt: "", draggable: false, src: (tall && d.posterTall) || d.poster }));
   img.decoding = "async";
+  // A rotation crosses the breakpoint the page's overlay uses (the same media query in the page's CSS): the still and
+  // the clip follow it, so the grid under the overlay is always the one laid out for the screen's shape.
+  mq.addEventListener("change", () => {
+    if (isTall() === tall) return;
+    tall = isTall();
+    img.src = (tall && d.posterTall) || d.poster;
+    if (v?.getAttribute("src")) { v.src = (tall && d.videoTall) || d.video; state(); }
+  });
   if (matchMedia("(prefers-reduced-motion: reduce)").matches || navigator.connection?.saveData) return;
-  const v = el.appendChild(Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, preload: "auto" }));
+  v = el.appendChild(Object.assign(document.createElement("video"), { muted: true, loop: true, playsInline: true, preload: "auto" }));
   v.setAttribute("muted", "");
   v.setAttribute("playsinline", "");
   v.setAttribute("aria-hidden", "true");
@@ -165,7 +175,7 @@ export function backdrop(el) {
   const ICON = { pause: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" fill="currentColor"/></svg>`, play: `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.5v9l7.5-4.5z" fill="currentColor"/></svg>` };
   let visible = false, paused = false;
   v.addEventListener("playing", () => { el.classList.add("playing"); pp.hidden = false; }, { once: true });
-  const state = () => {
+  state = () => {
     pp.innerHTML = paused ? ICON.play : ICON.pause;
     pp.setAttribute("aria-label", paused ? "Play the reel" : "Pause the reel");
     if (visible && !paused) v.play().catch(() => {});
@@ -174,7 +184,7 @@ export function backdrop(el) {
   pp.addEventListener("click", () => { paused = !paused; state(); });
   new IntersectionObserver(([en]) => {
     visible = en.isIntersecting;
-    if (visible && !v.src) v.src = (tall && d.videoTall) || d.video;
+    if (visible && !v.getAttribute("src")) v.src = (tall && d.videoTall) || d.video;
     state();
   }, { threshold: 0.05 }).observe(el);
 }
