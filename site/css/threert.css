@@ -77,12 +77,10 @@ p { margin: 0; }
 .nav .links a { text-decoration: none; display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; border-bottom: 1.5px solid transparent; transition: color 0.2s; }
 .nav .links a:hover { color: var(--bone); }
 .nav .links a[aria-current="page"] { color: var(--bone); border-bottom-color: var(--bone-2); }
-.nav .links a svg.ext { opacity: 0.6; }
-/* Discord and X, as their marks (and GitHub's on a phone, where the word does not fit). */
+/* GitHub, Discord and X, as their marks. */
 .si { display: block; width: 18px; height: 18px; flex: none; }
-.nav .links a.ic { padding: 6px 0; margin-left: -6px; }
-.nav .links a.ic + a.ic { margin-left: -8px; }
-.nav .links .gh .gh-i { display: none; }
+.nav .links a.ic { padding: 6px 0; }
+.nav .links a.ic + a.ic { margin-left: -10px; }
 .nav.overlay { position: absolute; left: 0; right: 0; background: transparent; border-bottom-color: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--tungsten); outline-offset: 3px; border-radius: 4px; }
 .btn:focus-visible { border-radius: 999px; }
@@ -162,6 +160,9 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .foot .site a.ic { display: inline-flex; }
 .foot .site a.ic + a.ic { margin-left: -6px; }
 .foot .site .si { width: 17px; height: 17px; }
+.foot .legal { margin-top: 18px; }
+.foot .legal a { text-decoration: none; }
+.foot .legal a:hover { color: var(--bone); }
 .foot .site a:hover { color: var(--bone); }
 .foot .note { font: 400 12px/1.6 var(--font-mono); color: var(--mute); }
 .foot .note p + p { margin-top: 12px; }
@@ -220,9 +221,7 @@ code, kbd { font: 500 0.9em var(--font-mono); color: var(--bone); background: rg
 @media (max-width: 520px) {
   .nav .logo > span { display: none; }
   .nav .links { gap: 16px; font-size: 14px; }
-  .nav .links a svg.ext, .nav .links .gh span { display: none; }
-  .nav .links .gh .gh-i { display: block; }
-  .nav .links a.ic, .nav .links a.ic + a.ic { margin-left: 0; }
+  .nav .links a.ic + a.ic { margin-left: 0; }
   .nav .links { gap: 14px; }
 }
 /* The narrowest phones: three words and three marks still on one line. */
