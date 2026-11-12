@@ -4312,38 +4312,46 @@ benchmark level. The order follows the dependencies; a step that meets a further
         benchmark level's 10,000 objects; a count per geometry would make it nothing).
     - **(b) Fire and smoke** (branch `explosion-fire`; design `out/web-probe/step10/b-design.md`; docs/VOXEL.md "Fire
       and smoke"). The user's scope (2026-11-12): an explosion's fireball and smoke, on the existing volume and particle
-      paths. `Explosions` (`packages/voxel`): a pool of fireballs, one smoke grid and a pool of point lights made in
-      setup; `fire` / `explode` / `step`; caps on fireballs (32), lights (8), smoke cells (2^20) and puffs a frame
-      (16 a step), with what happens past each; every number checked before anything changes. No engine call of its
-      own, so nothing new for `physics_fuzz` (`voxelExplode` is in its set already). The scene sync checks grid sources
-      and `customData` only, not transforms or lights: `Explosions` checks everything it sends (positions within
-      1,000 km, every option's range). `scene::build` refuses a scene with more than 32 volumes shown (the kernel's
-      32-bit mask; the 33rd was not drawn, silently): with the grid the pool has at most 31 fireballs. The light stands in for the fireball's own (live rays do not see
-      media): `FIRE_LIGHT`, measured against the offline renderer per size and age (`tools/bench-voxel-fire.ts`);
-      `voxel/fire-light` 0.987 for 1. The destruction game has a `-fire` variant.
-      - Measured on the benchmark level at render scale 0.75 against offline (docs/VOXEL.md): the whole image meets ΔE
-        ≤ 3 / SSIM ≥ 0.9 0.2 s into the fire (2.11 / 0.949), not at 1.0 s (3.53 / 0.876); the street around it meets at
-        every age; the fireball itself does not (ΔE 4.4-6.9, SSIM 0.84-0.85): half the live march's own picture of it
-        (held: ΔE 2.8-4.3), half the temporal filter keeping the hotter fireball of earlier frames. Smoke 3 s on: 3.36 /
-        0.946. GPU: 9.5 → 11.5 ms while a 4 m fire burns (smoke grid alone 9.2 → 10.1), 13.3 with 8 burning.
+      paths. `Explosions` (`packages/voxel`): one smoke grid, a pool of fireballs and a pool of point lights made in
+      setup; `fire` / `explode` / `step` / `dispose`. Volumes must not overlap, so a fire touching the grid burns in it
+      (hot smoke that flames: `SimulatedSmoke`'s new `fire`, one medium with its smoke; the user's decision A,
+      2026-11-12), and a fireball is placed only where it touches no other volume. Caps on fireballs (32, with the grid
+      31), lights (8), fires remembered (64), smoke cells (2^20) and puffs a step (16), with what happens past each;
+      every number checked before anything changes. No engine call of its own, so nothing new for `physics_fuzz`
+      (`voxelExplode` is in its set already). The scene sync checks grid sources and `customData` only, not transforms
+      or lights: `Explosions` checks everything it sends. `scene::build` refuses a scene with more than 32 volumes shown
+      (the kernel's 32-bit mask; the 33rd was not drawn, silently). The stand-in light's tables, `FIRE_LIGHT` and
+      `FIRE_LIGHT_GRID`, measured against offline (`tools/bench-voxel-fire.ts`); `voxel/fire-light` 0.987 for 1. The
+      destruction game has a `-fire` variant.
+      - Measured at render scale 0.75 against offline (docs/VOXEL.md). A fireball (no grid): the whole image meets ΔE
+        ≤ 3 / SSIM ≥ 0.9 at 0.2 s (2.11 / 0.949), not at 1.0 s (3.53 / 0.876); the street meets at every age; the
+        fireball itself not (ΔE 4.4-6.9): half the live march's own picture (held: 2.8-4.3), half the temporal filter.
+        The fire in its smoke: seen in it now (before, with the fireball in the smoke box, not at all at 0.2 and 0.5 s);
+        its region 6.91 / 0.946 at 0.2 s, about 1.5 times offline's luminance at 0.5-1 s (live smoke see-through, the
+        hot inside showing), 3.99 / 0.938 at 3 s. GPU: 9.5 → 11.3 ms while a 4 m fire burns, 12.6 at 7 a second.
       - Found on the way and fixed: each pool object's first move promoted it to movable with a rebuild (281 ms, and
         it wiped the live smoke); idle lights had unbounded reach (0.9 ms of GPU with nothing burning).
-      - The independent review of #29 found, fixed here with tests: 32 fireballs and the grid were 33 volumes, the
-        33rd never drawn (now refused, above); finite positions past f32 passed the check and, with the grid, threw
-        after the fireball had moved; the puff options and the smoke's and pool's settings went unchecked to the
-        engine; the 16-puff cap was per distinct time, not per frame (1,000 fires 1 µs apart sent 1,000 sources), and
-        a fire set for later puffed at once (puffs are now sent by `step`, when their fire has started); puffs piled
-        up while the pool was in no synced scene (the grid now holds at most 64 unsent); a new fire at age 0 took a
-        light from an older one for a frame; time going back left fires to burn again later; a fire waiting to start
-        was taken over without being counted; the pool's objects lived in the group's space and its puffs in the
-        world's (the group must now stay at the world's frame); no `dispose`.
+      - The independent review of #29 found, fixed here with tests: the fireballs sat inside the smoke box and the
+        puff hid them whole (fixed by the fire in the grid, above); 32 fireballs and the grid were 33 volumes, the 33rd
+        never drawn; finite positions past f32 passed the check and, with the grid, threw after a fireball had moved;
+        the puff options and the smoke's and pool's settings went unchecked to the engine; the 16-puff cap was per
+        distinct time, not per frame, and a fire set for later puffed at once (puffs are now sent by `step`); puffs
+        piled up while the pool was in no synced scene; a new fire at age 0 took a light from an older one; time going
+        back left fires to burn again later; a fire waiting to start was taken over uncounted; the pool's objects lived
+        in the group's space and its puffs in the world's; no `dispose`.
+      - Temporary ways round the shared live renderer, in `Explosions` until the shared paths are fixed (the user,
+        2026-11-12; docs/VOXEL.md "Temporary ways round on the engine's shared paths", with each one's cause, side
+        effects, and when and how to take it out; this line's worker takes them out in a PR of its own once the shared
+        paths are fixed): the stand-in light (live rays have no media code: offline it counts the fire's light twice
+        unless `lights: 0`, live it lights the smoke a second time); idle objects parked far away (hiding a volume
+        rebuilds); idle lights reaching 1 mm (a black rangeless light reaches without limit); the fire's history capped
+        by its light's change (the temporal filter has no "this medium changes" signal: a fire without a light ghosts);
+        the smoke kept by never rebuilding (a rebuild makes new grid textures and loses the simulation).
       - Open, the user's scope of 2026-11-12: **fire spreading along burnable voxels**, and **smoke stopped by
         voxels** (the grid ignores the level), are not done.
-      - Open: a live rebuild starts every simulated grid again (the smoke vanishes; a structural change anywhere does
-        it); the live temporal filter does not know a procedural medium changes with time (the fire light's change
-        caps the history; a medium without one ghosts); the live march's fireball is lighter and more see-through than
-        offline (8 steps through finer noise; in-scattering isotropic from the cache). All three are the live media
-        path's, shared with every volume.
+      - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
+        from the cache): the fireball reads lighter, and the fire in the grid shows its hot inside through its smoke. A
+        fire in the grid starts at full size, hot throughout (a puff), where a fireball grows: a look to decide.
     - (c) Vehicles and ropes on step 7's joints.
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 

@@ -440,7 +440,11 @@ const grid = new DensityGrid({ size: [64, 64, 64], data, program: DRIFT.with({})
 and a pressure. Per cell and half step: semi-Lagrangian advection; one Jacobi step of the pressure that takes the
 divergence out of the velocity (kept from step to step: a relaxation, not a full solve); diffusion; buoyancy;
 turbulence; drag toward the wind (`wind`, plus the node's `customData.xyz`, live); cooling and thinning; sources; open
-sides. `smoke.puff(center, radius, { density, temperature, push })` adds smoke.
+sides. `smoke.puff(center, radius, { density, temperature, push })` adds smoke. `fire: { intensity, ignition }` makes it burn: where the
+smoke is hotter than `ignition` (0..1; default 0.5) it flames in the `Fireball`'s colours (dark red, orange,
+white-yellow by temperature²), `intensity` nits at the hottest, and cools to the smoke it is: fire and smoke one medium
+(volumes must not overlap, so a fireball cannot sit inside a smoke grid; ROADMAP § 6 step 10 b). `glow` stays a plain
+emission by temperature.
 
 ```ts
 const smoke = new SimulatedSmoke({ size: [88, 56, 144], density: 2.5, wind: [0.8, 0, 0.3] });

@@ -27,7 +27,11 @@ const GRID_SOURCES = 64;
 /** Positions (m) and scene times (s) a fire takes: past them f32 coordinates and times lose their meaning. */
 export const MAX_COORD = 1e6;
 export const MAX_TIME = 1e9;
-/** A fireball's full size (diameter) for an explosion of radius r, and the largest one. */
+/** Fires remembered at once (their lights; their puffs until sent): past it the oldest go. */
+export const MAX_FIRES = 64;
+/** The smoke's ignition temperature by default: hotter, it flames (a puff starts at 1 and cools at `cooling`). */
+export const GRID_IGNITION = 0.25;
+/** A fire's full size (diameter) for an explosion of radius r, and the largest one. */
 export const FIREBALL_SIZE = 2.2;
 export const MAX_FIREBALL = 40;
 export const MIN_FIREBALL = 0.05;
@@ -42,6 +46,7 @@ const IDLE_REACH = 1e-3;
 export const FIRE_LIGHT_SIZES = [1.1, 2.2, 4.4, 8.8] as const;
 
 type Rgb = readonly [number, number, number];
+type LightTable = readonly (readonly [number, Rgb, Rgb, Rgb, Rgb])[];
 /**
  * The fire light's luminous intensity over the fireball's life, per m² of its full size squared and per nit of its
  * `intensity`: a row is age / life, then (r, g, b) cd for each of `FIRE_LIGHT_SIZES`. Measured against the offline
@@ -50,7 +55,7 @@ type Rgb = readonly [number, number, number];
  * scaled by the size²: a larger fireball's hot core lies under more of its own smoke, so its light falls sooner.
  * Linear in age between rows, in log size between sizes (the end sizes past them); 0 before the fire and after it.
  */
-export const FIRE_LIGHT: readonly (readonly [number, Rgb, Rgb, Rgb, Rgb])[] = [
+export const FIRE_LIGHT: LightTable = [
   [0, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
   [0.02, [0.000862, 0.000656, 0.000383], [0.00152, 0.00113, 0.000641], [0.00162, 0.00123, 0.000718], [0.00309, 0.00225, 0.00126]],
   [0.05, [0.00291, 0.00217, 0.00124], [0.00476, 0.00351, 0.00199], [0.00596, 0.00431, 0.0024], [0.00788, 0.00562, 0.00308]],
@@ -67,24 +72,55 @@ export const FIRE_LIGHT: readonly (readonly [number, Rgb, Rgb, Rgb, Rgb])[] = [
   [1, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
 ];
 
-/** The table at `u` (age / life) for a fireball of full size `size` (m): rgb cd per m² of size² per nit. */
-export function fireLight(u: number, size: number): [number, number, number] {
-  if (!(u > 0) || u >= 1 || !(size > 0)) return [0, 0, 0];
+/** A light table at `x` (its first column) for a fire of full size `size` (m): linear in x between rows, in log size
+ *  between `FIRE_LIGHT_SIZES` (the end sizes past them); 0 outside the table. */
+function lookup(table: LightTable, x: number, size: number): [number, number, number] {
+  if (!(x > table[0][0]) || x >= table[table.length - 1][0] || !(size > 0)) return [0, 0, 0];
   let k = 1;
-  while (k < FIRE_LIGHT.length - 1 && FIRE_LIGHT[k][0] < u) k++;
-  const a = FIRE_LIGHT[k - 1], b = FIRE_LIGHT[k];
-  const s = (u - a[0]) / (b[0] - a[0]);
+  while (k < table.length - 1 && table[k][0] < x) k++;
+  const a = table[k - 1], b = table[k];
+  const s = (x - a[0]) / (b[0] - a[0]);
   const at = (j: number): Rgb => {
     const p = a[j + 1] as Rgb, q = b[j + 1] as Rgb;
     return [p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1]), p[2] + s * (q[2] - p[2])];
   };
   const n = FIRE_LIGHT_SIZES.length;
-  const x = Math.min(Math.max(Math.log(size), Math.log(FIRE_LIGHT_SIZES[0])), Math.log(FIRE_LIGHT_SIZES[n - 1]));
+  const lx = Math.min(Math.max(Math.log(size), Math.log(FIRE_LIGHT_SIZES[0])), Math.log(FIRE_LIGHT_SIZES[n - 1]));
   let j = 0;
-  while (j < n - 2 && Math.log(FIRE_LIGHT_SIZES[j + 1]) < x) j++;
-  const t = (x - Math.log(FIRE_LIGHT_SIZES[j])) / (Math.log(FIRE_LIGHT_SIZES[j + 1]) - Math.log(FIRE_LIGHT_SIZES[j]));
+  while (j < n - 2 && Math.log(FIRE_LIGHT_SIZES[j + 1]) < lx) j++;
+  const t = (lx - Math.log(FIRE_LIGHT_SIZES[j])) / (Math.log(FIRE_LIGHT_SIZES[j + 1]) - Math.log(FIRE_LIGHT_SIZES[j]));
   const p = at(j), q = at(j + 1);
   return [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2])];
+}
+
+/** `FIRE_LIGHT` at `u` (age / life) for a fireball of full size `size` (m): rgb cd per m² of size² per nit. */
+export function fireLight(u: number, size: number): [number, number, number] {
+  return lookup(FIRE_LIGHT, u, size);
+}
+
+/**
+ * The fire light of a fire in the smoke grid (hot smoke burning, `SimulatedSmoke`'s `fire`): a row is the fire's age
+ * (s), then (r, g, b) cd per m² of the fire's size² per nit for each of `FIRE_LIGHT_SIZES` (the fire's size: its puff's
+ * diameter). Measured as `FIRE_LIGHT` was (tools/bench-voxel-fire.ts --only calibrate-grid), with `Explosions`'s smoke
+ * defaults on a grid of 0.25 m cells; past its last row the fire gives no light.
+ */
+export const FIRE_LIGHT_GRID: LightTable = [
+  [0, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+  [0.05, [0.112, 0.0778, 0.0421], [0.278, 0.214, 0.131], [0.346, 0.268, 0.166], [0.278, 0.2, 0.117]],
+  [0.1, [0.0759, 0.0456, 0.0207], [0.203, 0.141, 0.077], [0.298, 0.217, 0.128], [0.246, 0.169, 0.0939]],
+  [0.2, [0.0391, 0.0181, 0.0048], [0.135, 0.0769, 0.0319], [0.194, 0.117, 0.0539], [0.18, 0.105, 0.0473]],
+  [0.3, [0.0172, 0.00665, 0.00119], [0.0854, 0.0402, 0.0108], [0.141, 0.0711, 0.0234], [0.122, 0.0597, 0.0191]],
+  [0.45, [0.00321, 0.000767, 0.000135], [0.0389, 0.0153, 0.0028], [0.0784, 0.0329, 0.00634], [0.0698, 0.0288, 0.00566]],
+  [0.6, [0.000327, 0.0000355, 0.00000602], [0.0141, 0.0043, 0.000775], [0.0389, 0.0142, 0.00262], [0.0379, 0.0137, 0.00258]],
+  [0.8, [3.47e-8, 3.47e-9, 5.84e-10], [0.0026, 0.000402, 0.0000706], [0.0121, 0.00288, 0.000526], [0.0132, 0.00327, 0.000607]],
+  [1, [0, 0, 0], [0.000223, 0.0000223, 0.0000038], [0.00298, 0.000384, 0.0000681], [0.00378, 0.00052, 0.0000941]],
+  [1.3, [0, 0, 0], [0, 0, 0], [0.000075, 0.0000075, 0.0000013], [0.000191, 0.0000191, 0.0000034]],
+  [1.6, [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+];
+
+/** `FIRE_LIGHT_GRID` at `age` (s) for a fire of size `size` (m). */
+export function gridFireLight(age: number, size: number): [number, number, number] {
+  return lookup(FIRE_LIGHT_GRID, age, size);
 }
 
 export interface ExplosionSmoke {
@@ -103,7 +139,11 @@ export interface ExplosionSmoke {
   cooling?: number;
   dissipation?: number;
   turbulence?: number;
-  /** A puff: its density (0..1), temperature (0..100), and the push outward (0..100 m/s); its radius is 0.8 r + 0.3 m. */
+  /** The temperature above which the smoke flames (0..0.99; default 0.25: a puff starts at its temperature, 1, and
+   *  cools at `cooling`). */
+  ignition?: number;
+  /** A fire's puff: its density (0..1), temperature (0..100), and the push outward (0..100 m/s); its radius is the
+   *  fire's, 1.1 r. */
   puff?: { density?: number; temperature?: number; push?: number };
 }
 
@@ -126,19 +166,32 @@ export interface ExplosionsOptions {
 
 /** What the pool did. */
 export interface ExplosionStats {
-  /** Fires made. */
+  /** Fires made; of them in the smoke grid (burning smoke), and as fireballs outside it. */
   fired: number;
+  inGrid: number;
   /** Fireballs taken over while still burning or waiting to start (the pool was full). */
   reused: number;
+  /** Fireballs a new fire would have overlapped: taken over by it, or ended (volumes must not overlap). */
+  merged: number;
   /** The most fires burning without a light at once (more burning than there are lights). */
   unlit: number;
-  /** Puffs never sent: their fireball taken over before it started, time going back, or the grid not being synced. */
+  /** Puffs never sent: time going back, or the grid not being synced. */
   unpuffed: number;
   /** The most burning at once. */
   most: number;
   /** Burning, and lit, at the last `step`. */
   burning: number;
   lit: number;
+}
+
+/** A fire: where, when, how big; in the grid (`ball` -1) or a fireball of the pool; its puff while not yet sent. */
+interface Fire {
+  start: number;
+  size: number;
+  c: [number, number, number];
+  ball: number;
+  order: number;
+  puff: { c: [number, number, number]; radius: number } | null;
 }
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -163,9 +216,10 @@ function check(what: string, at: readonly number[], radius: number, time: number
 /**
  * `scene.add(new Explosions({ smoke: { center, size, cells } }))` in setup; `explosions.explode(x, y, z, r, f.time)`
  * (or `fire([x, y, z], r, f.time)` after a `voxelExplode` of your own) when something blows; `explosions.step(f.time)`
- * once a frame. Positions are the world's: the group stays at the origin, unrotated, unscaled (a fire throws if it or
- * a parent is not). Past its caps nothing is added to the scene: see each option. Every number is checked before
- * anything changes.
+ * once a frame. A fire that touches the smoke grid's box burns in the grid (hot smoke, one medium with the smoke); one
+ * elsewhere is a fireball, which never overlaps another volume. Positions are the world's: the group stays at the
+ * origin, unrotated, unscaled (a fire throws if it or a parent is not). Every number is checked before anything
+ * changes.
  */
 export class Explosions extends Group {
   readonly fireballs: Fireball[] = [];
@@ -173,14 +227,12 @@ export class Explosions extends Group {
   readonly smoke: SimulatedSmoke | null = null;
   readonly life: number;
   readonly intensity: number;
-  readonly stats: ExplosionStats = { fired: 0, reused: 0, unlit: 0, unpuffed: 0, most: 0, burning: 0, lit: 0 };
-  /** Per fireball: when it started (scene time; NaN = idle), its full size, its centre, the order it was fired in, and
-   *  its puff while not yet sent (centre, radius). */
-  private started: number[] = [];
-  private sizes: number[] = [];
-  private centers: [number, number, number][] = [];
-  private order: number[] = [];
-  private puffsDue: ({ c: [number, number, number]; radius: number } | null)[] = [];
+  readonly stats: ExplosionStats = { fired: 0, inGrid: 0, reused: 0, merged: 0, unlit: 0, unpuffed: 0, most: 0, burning: 0, lit: 0 };
+  /** The fires that may still burn (oldest first; at most `MAX_FIRES`). */
+  private fires: Fire[] = [];
+  /** Per fireball: its fire, or null while parked. */
+  private balls: (Fire | null)[] = [];
+  private box: { lo: [number, number, number]; hi: [number, number, number] } | null = null;
   private next = 0;
   /** The scene time of the last `step` (-Infinity before the first). */
   private now = -Infinity;
@@ -192,7 +244,7 @@ export class Explosions extends Group {
     this.name = "explosions";
     const s = o.smoke ?? null;
     const n = whole("fireballs", o.fireballs ?? 8, 1, s ? Math.min(MAX_FIREBALLS, MAX_MEDIA - 1) : MAX_FIREBALLS);
-    const nl = whole("lights", o.lights ?? Math.min(n, MAX_FIRE_LIGHTS), 0, Math.min(n, MAX_FIRE_LIGHTS));
+    const nl = whole("lights", o.lights ?? Math.min(n, MAX_FIRE_LIGHTS), 0, MAX_FIRE_LIGHTS);
     this.life = within("Explosions: life", o.life ?? 1.6, 1e-3, 60);
     this.intensity = within("Explosions: intensity", o.intensity ?? 30000, 0, 1e7);
     const density = within("Explosions: density", o.density ?? 6, 1e-9, 1e3);
@@ -218,29 +270,29 @@ export class Explosions extends Group {
         wind: triple("Explosions: smoke.wind", s.wind ?? [0.8, 0, 0.3], -100, 100),
         buoyancy: opt("buoyancy", s.buoyancy, 3.5, -1e3, 1e3), cooling: opt("cooling", s.cooling, 0.9, 0, 1e3),
         dissipation: opt("dissipation", s.dissipation, 0.2, 0, 1e3), turbulence: opt("turbulence", s.turbulence, 15, 0, 1e3),
+        fire: { intensity: this.intensity, ignition: opt("ignition", s.ignition, GRID_IGNITION, 0, 0.99) },
       };
     }
     for (let k = 0; k < n; k++) {
       const f = new Fireball({ life: this.life, intensity: this.intensity, density });
       f.name = `fireball-${k}`;
-      // Moved at every fire: movable from the start (a fixed object's first move rebuilds the live scene once).
+      // Moved at every fire: movable from the start (a fixed object's first move rebuilds the live scene once, and a
+      // rebuild wipes the smoke grid: a temporary way round, docs/VOXEL.md "Temporary ways round on the engine's
+      // shared paths").
       f.movable = true;
+      // Parked while idle: a temporary way round (docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
       f.position.set(...PARK);
       f.scale.setScalar(PARKED);
       f.customData = [-1e6, 0, 0, 0];
       this.add(f);
       this.fireballs.push(f);
-      this.started.push(NaN);
-      this.sizes.push(0);
-      this.centers.push([...PARK]);
-      this.order.push(-1);
-      this.puffsDue.push(null);
+      this.balls.push(null);
     }
     for (let k = 0; k < nl; k++) {
+      // The stand-in light, and its idle reach of 1 mm where it is parked: temporary ways round (docs/VOXEL.md,
+      // "Temporary ways round on the engine's shared paths").
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
-      // Off: a reach of 1 mm where it is parked. (A distance of 0 is unbounded reach: the sphere of its group of 16
-      // lights would hold every pixel, and the kernel would test that group's lights everywhere.)
       l.distance = IDLE_REACH;
       l.movable = true;
       l.position.set(...PARK);
@@ -253,39 +305,66 @@ export class Explosions extends Group {
       smoke.scale.set(...box.size);
       this.add(smoke);
       this.smoke = smoke;
+      const half = box.size.map((v) => v / 2);
+      this.box = { lo: box.center.map((v, k) => v - half[k]) as [number, number, number], hi: box.center.map((v, k) => v + half[k]) as [number, number, number] };
     }
   }
 
   /**
    * A fire where an explosion of radius `r` (m) went off at `at` (world, m), starting at scene time `time` (the frame's
-   * `f.time`): the next fireball of the pool (the oldest taken over if every one burns or waits to start), a puff of
-   * hot smoke into the grid at the first `step` at or after `time` (at most 16 a frame), a light while it burns.
-   * Throws a `RangeError` before changing anything for a position outside ±1,000 km or not three finite numbers, a
-   * radius that is not finite or not above 0, a time outside ±1e9 s, or the group moved off the world's frame. A radius
-   * over 18 m gives the largest fireball (40 m); a tiny one the smallest (5 cm). Returns the fireball's index.
+   * `f.time`; now or later), 2.2 r across (5 cm to 40 m), its centre 0.3 r above the explosion's point:
+   * - touching the smoke grid's box: it burns in the grid, a puff of hot smoke (sent at the first `step` at or after
+   *   `time`; at most 16 a step) that flames above the ignition temperature and cools to smoke: fire and smoke one
+   *   medium. Returns -1.
+   * - elsewhere: a fireball of the pool. A burning or waiting fireball it would overlap is taken over by it (and any
+   *   other it would overlap ends): volumes never overlap. Otherwise the next of the pool (the oldest taken over when
+   *   every one burns or waits). Returns its index.
+   * Either way a light while it burns. Throws a `RangeError` before changing anything for a position outside ±1,000
+   * km or not three finite numbers, a radius that is not finite or not above 0, a time outside ±1e9 s, or the group
+   * moved off the world's frame.
    */
   fire(at: readonly [number, number, number], r: number, time: number): number {
     check("Explosions.fire", at, r, time);
     this.inWorldFrame("Explosions.fire");
     const rr = Math.min(r, MAX_FIREBALL / FIREBALL_SIZE);
     const size = Math.max(FIREBALL_SIZE * rr, MIN_FIREBALL);
-    // The centre a little above the explosion's (as the smoke's puff): a ground blast's fireball is not half in the
-    // crater, its light not in the hole.
+    // The centre a little above the explosion's: a ground blast's fire is not half in the crater, its light not in the
+    // hole.
     const c: [number, number, number] = [at[0], at[1] + 0.3 * rr, at[2]];
-    const k = this.next;
-    this.next = (k + 1) % this.fireballs.length;
-    const s = this.started[k];
-    if (!Number.isNaN(s) && time - s < this.life) this.stats.reused++;
-    if (this.puffsDue[k]) this.stats.unpuffed++;
+    const fire: Fire = { start: time, size, c, ball: -1, order: this.stats.fired, puff: null };
+    if (this.box && touches(c, size / 2, this.box)) {
+      fire.puff = { c, radius: size / 2 };
+      this.stats.fired++;
+      this.stats.inGrid++;
+      this.remember(fire);
+      return -1;
+    }
+    // Fireballs it would overlap (burning, or waiting to start: their volumes are placed).
+    const over: number[] = [];
+    for (let k = 0; k < this.balls.length; k++) {
+      const b = this.balls[k];
+      if (b && time - b.start < this.life && b.start - time < this.life && dist(b.c, c) < (b.size + size) / 2) over.push(k);
+    }
+    let k: number;
+    if (over.length) {
+      k = over[0];
+      for (const j of over.slice(1)) this.endBall(j);
+      this.stats.merged += over.length;
+    } else {
+      k = this.next;
+      this.next = (k + 1) % this.fireballs.length;
+      const b = this.balls[k];
+      if (b && time - b.start < this.life) this.stats.reused++;
+    }
+    this.endBall(k);
     const f = this.fireballs[k];
     f.position.set(...c);
     f.scale.setScalar(size);
     f.customData = [time, 0, 0, 0];
-    this.started[k] = time;
-    this.sizes[k] = size;
-    this.centers[k] = c;
-    this.order[k] = this.stats.fired++;
-    this.puffsDue[k] = this.smoke ? { c, radius: 0.8 * rr + 0.3 } : null;
+    fire.ball = k;
+    this.balls[k] = fire;
+    this.stats.fired++;
+    this.remember(fire);
     return k;
   }
 
@@ -300,29 +379,28 @@ export class Explosions extends Group {
   }
 
   /**
-   * Once a frame (scene time): the puffs of fires that have started go into the grid (at most 16 a step, the rest at
-   * the next; dropped while the grid already holds 64 not yet sent, as when the pool is in no synced scene); each light is set from its fireball's age
-   * (the youngest burning fires have them); what has burnt out is parked. Time going back (a restart) ends every fire.
+   * Once a frame (scene time): the puffs of grid fires that have started go into the grid (at most 16 a step, the
+   * rest at the next; dropped while the grid already holds 64 not yet sent, as when the pool is in no synced scene);
+   * each light is set from its fire's age (the youngest burning fires have them); burnt-out fireballs are parked.
+   * Time going back (a restart) ends every fire.
    */
   step(time: number): void {
     within("Explosions.step: the time (the frame's f.time)", time, -MAX_TIME, MAX_TIME);
     if (this.disposed) return;
     if (time < this.now) {
-      for (let k = 0; k < this.fireballs.length; k++) {
-        if (this.puffsDue[k]) this.stats.unpuffed++;
-        this.puffsDue[k] = null;
-        this.park(k);
-      }
+      for (const f of this.fires) if (f.puff) this.stats.unpuffed++;
+      this.fires = [];
+      for (let k = 0; k < this.balls.length; k++) this.endBall(k);
     }
     this.now = time;
     if (this.smoke) {
       let sent = 0;
       const held = () => this.smoke!.grid!.pendingSources.reduce((m, a) => m + a.length / 12, 0);
-      for (let k = 0; k < this.fireballs.length; k++) {
-        const p = this.puffsDue[k];
-        if (!p || this.started[k] > time) continue;
+      for (const f of this.fires) {
+        if (!f.puff || f.start > time) continue;
         if (sent >= MAX_PUFFS) break; // the rest at the next step
-        this.puffsDue[k] = null;
+        const p = f.puff;
+        f.puff = null;
         if (held() < GRID_SOURCES) {
           sent++;
           this.smoke.puff(p.c, p.radius, this.puffOpts);
@@ -331,35 +409,39 @@ export class Explosions extends Group {
         }
       }
     }
-    const alive: number[] = [];
-    for (let k = 0; k < this.fireballs.length; k++) {
-      if (this.burning(k, time)) alive.push(k);
-      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.park(k);
+    for (let k = 0; k < this.balls.length; k++) {
+      const b = this.balls[k];
+      if (b && time - b.start >= this.life) this.endBall(k);
     }
+    // Fires that are over (and their puffs sent) are forgotten.
+    this.fires = this.fires.filter((f) => f.puff || time - f.start < this.lifeOf(f));
+    const alive = this.fires.filter((f) => time - f.start >= 0 && time - f.start < this.lifeOf(f));
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
     // Lights for the youngest that give light (a fire at age 0 gives none yet: it takes no light from an older one).
-    const glowing = alive.filter((k) => time > this.started[k]).sort((a, b) => this.order[b] - this.order[a]);
+    const glowing = alive.filter((f) => time > f.start).sort((a, b) => b.order - a.order);
     this.stats.unlit = Math.max(this.stats.unlit, glowing.length - this.lights.length);
     let lit = 0;
     for (let j = 0; j < this.lights.length; j++) {
       const l = this.lights[j];
-      const k = glowing[j];
-      const rgb = k === undefined ? [0, 0, 0] : fireLight((time - this.started[k]) / this.life, this.sizes[k]);
+      const f = glowing[j];
+      const rgb = f === undefined ? [0, 0, 0] : f.ball < 0 ? gridFireLight(time - f.start, f.size) : fireLight((time - f.start) / this.life, f.size);
       const peak = Math.max(...rgb);
-      if (k === undefined || !(peak > 0)) {
+      if (f === undefined || !(peak > 0)) {
         l.intensity = 0;
         l.distance = IDLE_REACH;
         l.position.set(...PARK);
         continue;
       }
+      // (Its change each frame also caps the live view's history, which keeps the fire from ghosting: a temporary way
+      // round relied on, docs/VOXEL.md "Temporary ways round on the engine's shared paths".)
       lit++;
-      l.position.set(...this.centers[k]);
+      l.position.set(...f.c);
       l.color.setRGB(rgb[0] / peak, rgb[1] / peak, rgb[2] / peak);
-      l.intensity = peak * this.sizes[k] * this.sizes[k] * this.intensity;
+      l.intensity = peak * f.size * f.size * this.intensity;
       // Its reach: 25 sizes (the light group's sphere; past it the fire's light is under a thousandth of its peak).
-      l.distance = 25 * this.sizes[k];
-      l.radius = 0.15 * this.sizes[k];
+      l.distance = 25 * f.size;
+      l.radius = 0.15 * f.size;
     }
     this.stats.lit = lit;
   }
@@ -368,18 +450,29 @@ export class Explosions extends Group {
   dispose(): void {
     this.disposed = true;
     for (const o of [...this.children]) this.remove(o);
-    this.puffsDue.fill(null);
+    this.fires = [];
     this.parent?.remove(this);
   }
 
-  /** Whether fireball `k` burns at `time`. */
-  private burning(k: number, time: number): boolean {
-    const s = this.started[k];
-    return !Number.isNaN(s) && time - s >= 0 && time - s < this.life;
+  /** How long a fire gives light: a fireball its life, a grid fire its table's. */
+  private lifeOf(f: Fire): number {
+    return f.ball < 0 ? FIRE_LIGHT_GRID[FIRE_LIGHT_GRID.length - 1][0] : this.life;
   }
 
-  private park(k: number): void {
-    this.started[k] = NaN;
+  private remember(f: Fire): void {
+    this.fires.push(f);
+    // The oldest past the cap go (their puffs with them: counted).
+    while (this.fires.length > MAX_FIRES) {
+      const old = this.fires.shift()!;
+      if (old.puff) this.stats.unpuffed++;
+    }
+  }
+
+  /** Fireball `k` parked; its fire forgotten. */
+  private endBall(k: number): void {
+    const b = this.balls[k];
+    if (b) this.fires = this.fires.filter((f) => f !== b);
+    this.balls[k] = null;
     this.fireballs[k].position.set(...PARK);
     this.fireballs[k].scale.setScalar(PARKED);
   }
@@ -394,4 +487,15 @@ export class Explosions extends Group {
       }
     }
   }
+}
+
+const dist = (a: readonly number[], b: readonly number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+/** Whether a sphere touches a box. */
+function touches(c: readonly number[], radius: number, box: { lo: readonly number[]; hi: readonly number[] }): boolean {
+  let d = 0;
+  for (let k = 0; k < 3; k++) {
+    const v = Math.max(box.lo[k] - c[k], 0, c[k] - box.hi[k]);
+    d += v * v;
+  }
+  return d < radius * radius;
 }

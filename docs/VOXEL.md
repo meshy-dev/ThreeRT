@@ -556,8 +556,15 @@ it too (the level itself stays `engineColliders`).
 
 An explosion's fireball and smoke, on the existing volume and particle paths (the user's scope, 2026-11-12: no fire
 spreading along burnable voxels, no smoke stopped by voxels). `Explosions` (`@threert/voxel`) is a group made once in
-setup: a pool of fireballs (`Fireball`), one smoke grid (`SimulatedSmoke`) over a box the game names, and a pool of
-point lights. It adds no engine call.
+setup: one smoke grid (`SimulatedSmoke`) over a box the game names, a pool of fireballs (`Fireball`) for fires away
+from it, and a pool of point lights. It adds no engine call.
+
+**Volumes must not overlap** (`core.ts`: the media are taken whole, in the order a ray enters them), so a fire never
+puts a volume inside another: a fire that touches the smoke box burns **in the grid** (hot smoke that flames,
+`SimulatedSmoke`'s `fire`: one medium with its smoke), and a fireball is placed only where it touches no other volume
+(a fire that would overlap a burning fireball takes it over; any other it would overlap ends). Before this the
+fireballs sat inside the smoke box and the puff hid them whole: at 0.2 and 0.5 s after the explosion the fire was not
+seen at all, offline or live (the review of #29).
 
 ```ts
 const boom = new Explosions({ smoke: { center: [x, y, z], size: [22, 14, 36], cells: [88, 56, 144] } });
@@ -570,11 +577,14 @@ boom.step(f.time);                       // once a frame: puffs sent, lights fol
 Positions are the world's: the group stays at the origin, unrotated, unscaled (a fire throws otherwise). `dispose()`
 takes the pool out of the scene for good.
 
-- **A fire** (`fire(at, r, time)`): the next fireball of the pool, full size 2.2 r (5 cm to 40 m), its centre 0.3 r
-  above the explosion's point, started at `time` (now or later); its puff of hot smoke (radius 0.8 r + 0.3 m) goes into
-  the grid at the first `step` at or after `time`; a light at its centre while it burns, from the first step after it
-  starts (at age 0 it gives none, and takes no light from an older fire). Time going back (a restart) ends every fire. The fireball's default peak is 30,000 nits (a flame's; `Fireball`'s own 40 is a stylised
-  night's and does not show by day). Every object of the pool is made in setup and `movable`: firing moves them in
+- **A fire** (`fire(at, r, time)`), 2.2 r across (5 cm to 40 m), its centre 0.3 r above the explosion's point, from
+  `time` (now or later). In the grid: a puff of the fire's size at temperature 1, sent at the first `step` at or after
+  `time`; above the ignition temperature (0.25) the smoke flames in the fireball's colours (dark red, orange,
+  white-yellow by temperature²), and as it cools (`cooling` 0.9 /s, and mixing) it turns to the smoke it is. Away from
+  the grid: a fireball of the pool. Either way a light at its centre while it burns, from the first step after it
+  starts (at age 0 it gives none, and takes no light from an older fire). Time going back (a restart) ends every fire.
+  The flame's default peak is 30,000 nits (a flame's; `Fireball`'s own 40 is a stylised night's and does not show by
+  day). Every object of the pool is made in setup and `movable`: firing moves them in
   place (a fixed object's first move rebuilds the live scene once: 281 ms on the benchmark level, and every pool
   member would do it once).
 - **Why a light**: live, GI, reflection and shadow rays do not see media (MATERIAL_FUNCTIONS.md, live media), so a
@@ -584,16 +594,21 @@ takes the pool out of the scene for good.
   and wall agree within about 10 %). It is not one curve scaled by size²: a larger fireball's hot core lies under more
   of its own smoke, so its light falls sooner (at half its life 0.0090 cd per m² of size² per nit at 2.2 m, 0.0020 at
   8.8 m). `voxel/fire-light` checks it in the renderer: the fire light alone gives a floor 0.987 of what the fireball's
-  own emission gives it. The light also caps the live view's history each frame it changes (below).
+  own emission gives it. A fire in the grid has its own table, `FIRE_LIGHT_GRID` (`--only calibrate-grid`, the same
+  way, by age in seconds): it is brightest at once (0.28-0.35 cd per m² per nit at 0.05 s for 2.2-8.8 m: the puff is
+  hot through its whole sphere from the first frame, where a fireball grows) and out by 0.6 s (1.1 m) to 1.3 s (8.8 m).
+  The light, the parking of idle objects and the rest are temporary ways round the shared live renderer (the table
+  below, "Temporary ways round on the engine's shared paths").
 
 Caps, and what happens past them (node tests in `packages/voxel/test/explosions.test.ts`):
 
 | what | cap | past it |
 | --- | --- | --- |
-| fireballs | `fireballs`, default 8, at most 32 (`MAX_FIREBALLS`), with the smoke grid 31: the kernel draws at most 32 volumes (`MAX_MEDIA`; a scene with more is refused by `scene::build`, no longer drawn without the last) | the oldest burning or waiting one is taken over: it ends early, the new one starts (`stats.reused`) |
+| fireballs (fires away from the grid) | `fireballs`, default 8, at most 32 (`MAX_FIREBALLS`), with the smoke grid 31: the kernel draws at most 32 volumes (`MAX_MEDIA`; a scene with more is refused by `scene::build`, no longer drawn without the last) | the oldest burning or waiting one is taken over: it ends early, the new one starts (`stats.reused`); one a new fire would overlap is taken over or ended (`stats.merged`) |
+| fires remembered | 64 (`MAX_FIRES`: their lights, their puffs until sent) | the oldest forgotten (its puff, if not yet sent, counted in `stats.unpuffed`) |
 | fire lights | `lights`, default min(fireballs, 8), at most 8 (`MAX_FIRE_LIGHTS`: the kernel evaluates up to 8 shadowed local lights exactly, `RIS_EXACT`) | the youngest fires have them; the rest burn without (`stats.unlit`: the most at once) |
 | smoke grid | at most 2^20 cells, 4 to 256 an axis (`MAX_SMOKE_CELLS`, `SMOKE_AXIS`) | the constructor throws (a setup error) |
-| puffs a step | 16 (`MAX_PUFFS`; the engine takes 64 a grid a frame and drops the rest) | the rest at the next step; dropped (`stats.unpuffed`) while the grid holds 64 unsent sources (a pool in no synced scene piles nothing up), or when their fire is taken over before it starts |
+| puffs a step | 16 (`MAX_PUFFS`; the engine takes 64 a grid a frame and drops the rest) | the rest at the next step; dropped (`stats.unpuffed`) while the grid holds 64 unsent sources (a pool in no synced scene piles nothing up) |
 | fireball size | 40 m (`MAX_FIREBALL`: r over about 18 m) | the largest; `voxelExplode` keeps its own limits |
 
 Arguments: every number is checked before anything changes, since the scene sync checks only grid sources and
@@ -602,19 +617,20 @@ finite numbers, a radius not finite or not above 0, a time outside ±1e9 s, or t
 throws a `RangeError` from `fire`, `explode` (before its voxel call) and `step`; a huge radius (1e30) gives the largest
 fireball, a tiny one (1e-46) the smallest; the constructor checks every option (ranges in the code; `center: [1, 2]`,
 NaN in `wind`, `intensity: 1e308`, a puff of density -5 are refused). 1,000 fires in one frame, at one time or 1 µs
-apart, make no object (the pool cycles; the last ones burn; 16 puffs a step). An idle light has a reach of 1 mm where
+apart, make no object (the last 64 are remembered; 16 puffs a step; fireballs: the pool cycles). 2,000 random fires
+around a smoke box leave no two volumes overlapping (a node test). An idle light has a reach of 1 mm where
 it is parked (a distance of 0 is unbounded reach: the sphere of its group of 16 lights held every pixel, 0.9 ms of GPU
 with nothing burning).
 
-**Offline, the fireball's light counts twice unless the game passes `lights: 0`**: an offline path reaches the
-fireball's emission, and the stand-in light is there as well. The bench's references are made with `lights: 0`
+**Offline, the fire's light counts twice unless the game passes `lights: 0`**: an offline path reaches the
+fire's emission, and the stand-in light is there as well. The bench's references are made with `lights: 0`
 (`fireShot({ light: false })`); `level-destruction-fire` rendered offline has both. Live, surfaces see only the light
 (their rays have no media code).
 
 #### Measured: fire and smoke on the benchmark level (2026-11-12)
 
 `tools/bench-voxel-fire.ts` (games/voxel-level/level-fire.game.ts): the 4 m explosion at the destruction game's
-`crater` spot, by day, the live frame at render scale 0.75 (never 1: at exactly 1 the live frame has no edge
+`crater` spot, by day, first without the smoke grid (the fire a fireball), the live frame at render scale 0.75 (never 1: at exactly 1 the live frame has no edge
 anti-aliasing), 1280 x 720, lockstep at 60 fps from the start, against our offline render of the same scene time
 (2,048 spp, no clamps, no denoiser; 1,024 against 2,048 spp: ΔE 0.40, SSIM 0.993), which has the fireball's own light
 and no fire light. Live in lockstep is bit-reproducible (A/A ΔE 0.00). Targets ΔE ≤ 3, SSIM ≥ 0.9.
@@ -638,24 +654,52 @@ Where it falls short, and why:
 - **The whole image** meets at 0.2 s, is 0.08 over in ΔE at 0.5 s (SSIM met), and misses at 1.0 s (the fireball's box now spans
   the image's height, its smoke over the top cells). The p99 of about 21 everywhere is the level's own at 0.75
   (foliage), not the fire's.
-- **The smoke** (the grid, live firing at 2 s after the level's load, offline at 0 s, the same age): 1 s, whole ΔE
-  4.78, SSIM 0.885 (the fireball's own late smoke, as above); 3 s, **3.36 / 0.946**, the smoke's region 3.64 / 0.942:
-  live smoke flatter and greyer on its sunlit side (in-scattering isotropic from the cache, the offline HG 0.2), the
-  worst cell 6.9 / 0.89 where it crosses the building. Without the grid's random push the numbers are the same
-  within 0.01. A live rebuild starts every simulated grid again from its data: the smoke vanishes (found here through
-  the pool's promotion rebuild; ROADMAP Open).
+- **The fire in its smoke** (the grid, the -fire setup's: 88 x 56 x 144 cells of 0.25 m; live firing at 2 s after the
+  level's load, offline at 0 s: an offline render gives a grid only the sources pending at its first step; the same
+  age; `out/voxel-fire/sheet-gridfire.jpg`). The fire is seen inside its smoke, offline and live; with the earlier
+  fireball inside the smoke box it was not seen at all at 0.2 and 0.5 s (its region read ΔE 19.9 and 9.4).
+
+  | after the fire starts | whole image ΔE / SSIM | the fire's region ΔE / p99 / SSIM / luminance |
+  | --- | --- | --- |
+  | 0.2 s | 4.91 / 0.926 | 6.91 / 52 / **0.946** / 0.96 |
+  | 0.5 s | 7.04 / 0.914 | 17.03 / 37 / 0.856 / 1.53 |
+  | 1.0 s | 8.00 / 0.870 | 10.78 / 45 / 0.831 / 1.56 |
+  | 3.0 s | 3.67 / 0.943 | 3.99 / 20 / 0.938 / 1.05 |
+
+  Where it falls short: from 0.5 s live is about 1.5 times as bright in the fire's region. Live smoke is lighter and
+  more see-through than offline (the 8-step march through dense smoke; in-scattering isotropic from the cache), so the
+  hot inside shows through live where offline the cooler smoke around it hides it (at 1 s: orange flecks live, dark
+  smoke offline). That is the shared live media path's (as the fireball's bias was). And the look: a fire in the grid
+  starts at its full size, hot throughout (a puff), so at 0.2 s it is a large bright ball where the fireball grew; its
+  light is brightest at once and gone by 1.3 s (8.8 m). Without the grid's random push the smoke reads the same within
+  0.01. A live rebuild starts every simulated grid again from its data: the smoke and the fire in it vanish (a
+  temporary way round below).
 
 Cost: `--only cost`, the destruction game's routes at 0.75, lockstep (frames as fast as the GPU goes), GPU ms p50 over
 2 s before and 4 s after the explosion; no rebuild in any run.
 
 | route | before | after | the explosion frame's CPU |
 | --- | --- | --- | --- |
-| the level (`level-destruction`) | 8.6 | 8.7 | 23.9 |
-| with the smoke grid (`-smoke`, 709,632 cells) | 9.2 | 10.1 | 25.3 |
-| with fire (`-fire`: the pool, the same grid, lights) | 9.5 | 10.5 (11.5 for the 1.75 s it burns) | 25.4 |
-| fire, `sustained` (7 a second for 10 s) | 9.8 | 13.3 (p95 13.6, max 13.9); at most 8 burning, 7 lit | |
-| fire, `peak` (20 within a second) | 9.9 | 12.5 (max 13.2) | |
-| fire, software traversal (loop guard on: no stop) | 14.3 | 16.0 (19.5 while it burns) | 26.7 |
+| the level (`level-destruction`) | 8.1 | 8.2 | 23.2 |
+| with the smoke grid (`-smoke`, 709,632 cells) | 9.1 | 10.0 | 22.3 |
+| with fire (`-fire`: the fire in the same grid, fireballs away from it, lights) | 9.5 | 10.8 (11.3 while it burns, then 10.7) | 21.9 |
+| fire, `sustained` (7 a second for 10 s) | 9.5 | 12.6 (p95 12.9, max 13.4); at most 11 burning, 8 lit | |
+| fire, `peak` (20 within a second) | 9.5 | 12.4 (max 12.9); at most 19 burning | |
+| fire, software traversal (loop guard on: no stop) | 14.4 | 16.2 (max 18.9) | 22.8 |
+
+### Temporary ways round on the engine's shared paths
+
+`Explosions` (step 10 b) works round five faults of the shared live renderer, in its own code, until they are fixed
+there (the user, 2026-11-12: these are temporary; the shared paths are fixed in their own PRs, then these go, in a PR
+of their own). Each place in `packages/voxel/src/explosions.ts` points here.
+
+| What | Now | The fault at its source | Known side effects | It can go when | How to tell |
+| --- | --- | --- | --- | --- | --- |
+| The stand-in light | a point light at each burning fire, its intensity and colour from `FIRE_LIGHT` (fireballs) or `FIRE_LIGHT_GRID` (fires in the grid), measured against offline | live secondary and shadow rays have no media code: `pathtrace.wgsl` `media_shadows()` is false live (line 796), GI and reflection rays never meet a medium | offline the fire's light counts twice unless the game passes `lights: 0` (`level-destruction-fire` rendered offline has both); live, `media_train` adds the light to the radiance cache's voxels (`point_direct`, `point_sphere`): the smoke and the fire are lit by it a second time; live the light is not hidden by the smoke, offline it is; the tables hold for the defaults (density, life scaled, 0.25 m cells, measured by day over a floor and a wall) | live rays see media: a medium's emission lights surfaces and shadows pass through it | `lights: 0`, then `tools/bench-voxel-fire.ts --only quality,smoke`: the street and the fire's regions at least as close to offline as with the light; `voxel/fire-light` replaced by a live test of the fire's own light |
+| Idle fireballs parked | at y = −10,000, scale 1e-3, instead of hidden | `World::set_visible` (`world.rs` line 750): hiding anything but particles rebuilds the live scene | parked fireballs keep their slots among the kernel's 32 volumes, and every pixel's march still tests their boxes | hiding a volume or a light is done in place | `visible = false` instead of parking; the bench's cost runs report no rebuild after an explosion |
+| Idle lights reach 1 mm | an idle light's `distance` is 1 mm where it is parked | `light_reach` (`lib.rs` line 211): a black light without a range reaches without limit, and the kernel does not skip black lights before the group test (`pathtrace.wgsl` line 1578) | parked lights 10 km away share a group of 16 with lit ones, and groups are not sorted again when lights move (`lib.rs` line 277): the group's sphere is about 5 km wide while any fire burns (the per-light range test still works) | black lights reach nothing (or are hidden in place) and moved lights are grouped again | distance 0 on idle lights; the fire route's GPU time before any explosion within 0.1 ms of the smoke route's |
+| The fire's history capped by its light | the light's change each frame caps the live view's history | `live.rs` line 1892: any light change caps the whole frame's history at 16; the temporal filter has no "this medium changes" signal (surfaces have `o.animated`) | without a light (`lights: 0`, more fires than lights, a fire at age 0) the fire ghosts: the fireball read ΔE about 10 and 1.4 times offline's luminance; with one, the whole frame's history is capped every frame a fire burns | media carry a "changes with time" signal the temporal pass uses per pixel | `lights: 0`, `--only quality`: the fire's region within its held (converged) value |
+| The smoke kept by never rebuilding | the pool's objects movable from the start; idle ones parked, not hidden | `LiveCore::rebuild` (`live.rs` line 3474) → `load_scene` → `Gpu::upload` makes new grid textures (`gpu.rs` line 1664): the simulated state is not carried over | any other structural change in the game (an object added, a texture, an edit's fallback) wipes the smoke and the fire burning in it | a rebuild carries every simulated grid's state over | the bench's smoke check with a rebuild forced at 1 s (an object added): the smoke at 3 s as without it |
 
 ### Where the engine works round its dependencies
 

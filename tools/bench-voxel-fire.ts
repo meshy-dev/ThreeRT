@@ -5,6 +5,7 @@
 //             floor before a grey wall, offline at ages through its life, against a 1,000 cd point light at its centre:
 //             per channel the floor's and the wall's radiance near it, fire over light x 1,000 cd, per m² of the
 //             fireball's size² and per nit of its intensity: the rows of `FIRE_LIGHT`.
+//  calibrate-grid  the same for a fire burning in the smoke grid (`fireRoom` with `grid`): `FIRE_LIGHT_GRID`.
 //  quality    `fireShot`: the benchmark level by day, a 4 m explosion's fire 0.2, 0.5 and 1.0 s after it starts (at 4 s),
 //             the live frame (lockstep at 60 fps from the start, render scale 0.75: never 1, where the live frame has
 //             no edge anti-aliasing) against our offline render at that scene time (no clamps, no denoiser), which has
@@ -29,7 +30,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fireRoomView, fireShotView } from "../games/voxel-level/level-fire.game.ts";
-import { FIRE_LIGHT, FIRE_LIGHT_SIZES, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
+import { FIRE_LIGHT, FIRE_LIGHT_GRID, FIRE_LIGHT_SIZES, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
 import { bundleGame } from "./bundle-game.ts";
 import { frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
 import { generate } from "./voxel-level/generate.ts";
@@ -160,6 +161,36 @@ function live(name: string, b: string, o: { env?: Record<string, string>; frameL
       if (exited && p.exitCode !== 0) console.log(`live ${name}: exit ${p.exitCode}`);
     },
   };
+}
+
+if (only.includes("calibrate-grid")) {
+  // The same for a fire burning in the smoke grid: ages in seconds (the grid's fire lasts by its cooling, not a life).
+  const ages = [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5], intensity = 30000, W = 640, H = 360;
+  const rows: Record<string, unknown>[] = [];
+  console.log(`\ncalibrate-grid: a fire in the smoke grid, its equivalent point light (cd per m² of size² per nit; floor | wall), offline ${SPP} spp`);
+  for (const d of FIRE_LIGHT_SIZES) {
+    const v = fireRoomView(d);
+    const proj = projector(v.pos, v.target, v.fov);
+    const floor = box(corners([1.2 * d, 0, -0.4 * d], [2.0 * d, 0, 0.4 * d]).map(proj));
+    const wall = box(corners([1.0 * d, 0.2 * d, v.wall], [1.8 * d, 1.0 * d, v.wall]).map(proj));
+    const lt = offline(`room-${d}-light`, await bundle(`room-${d}-light`, "games/voxel-level/level-fire.game.ts", "fireRoom", { size: d, light: true }), 0.5, SPP, [W, H]);
+    const ref = { floor: hdrMean(lt.hdr, floor, W, H), wall: hdrMean(lt.hdr, wall, W, H) };
+    const gb = await bundle(`room-${d}-grid`, "games/voxel-level/level-fire.game.ts", "fireRoom", { size: d, grid: true });
+    for (const a of ages) {
+      const t = offline(`room-${d}-grid`, gb, a, SPP, [W, H]);
+      const per = (region: number[], base: number[]) => hdrMean(t.hdr, region, W, H).map((x, c) => (x / Math.max(base[c], 1e-12)) * 1000 / (d * d * intensity));
+      const f = per(floor, ref.floor), w = per(wall, ref.wall);
+      rows.push({ size: d, age: a, floor: f.map((x) => +x.toPrecision(3)), wall: w.map((x) => +x.toPrecision(3)) });
+      console.log(`  ${String(d).padStart(4)} m  ${a.toFixed(2)} s  ${f.map((x) => x.toFixed(4)).join(" ")} | ${w.map((x) => x.toFixed(4)).join(" ")}`);
+    }
+  }
+  const table = ages.map((a) => [a, ...FIRE_LIGHT_SIZES.map((d) => {
+    const r = rows.find((x) => x.age === a && x.size === d)!;
+    return [0, 1, 2].map((c) => +(((r.floor as number[])[c] + (r.wall as number[])[c]) / 2).toPrecision(3));
+  })]);
+  result.calibrate_grid = { rows, table, current: FIRE_LIGHT_GRID };
+  console.log(`  measured table (age s, then rgb per size ${FIRE_LIGHT_SIZES.join(", ")} m):`);
+  for (const row of table) console.log(`    ${JSON.stringify(row)},`);
 }
 
 if (only.includes("calibrate")) {

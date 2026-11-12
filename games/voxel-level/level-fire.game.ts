@@ -97,6 +97,8 @@ export interface FireRoom {
   size: number;
   /** A point light of 1,000 cd at the centre instead of the fireball. */
   light?: boolean;
+  /** The fire in a smoke grid (cells of 0.25 m, `Explosions`'s smoke defaults) instead of a fireball. */
+  grid?: boolean;
 }
 
 /** The room's camera and the fireball's centre, by the fireball's size `d`. */
@@ -128,10 +130,17 @@ export function fireRoom(o: FireRoom) {
         l.position.set(...v.center);
         scene.add(l);
       } else {
-        // r such that the fireball's size is d; its centre 0.3 r above the explosion's point.
+        // r such that the fire's size is d; its centre 0.3 r above the explosion's point. With the grid: a box around
+        // it, 2.2 d wide and 3 d high from the floor (the fire rises), cells of 0.25 m; its puff sent by the first step,
+        // here in setup (an offline render takes the sources pending at its first step).
         const r = d / 2.2;
-        const boom = new Explosions({ fireballs: 1, lights: 0 });
+        const cell = 0.25, size: [number, number, number] = [2.2 * d, 3 * d, 2.2 * d];
+        const boom = new Explosions({
+          fireballs: 1, lights: 0,
+          smoke: o.grid ? { center: [v.center[0], 1.5 * d, v.center[2]], size, cells: size.map((s) => Math.max(4, Math.round(s / cell))) as [number, number, number] } : null,
+        });
         boom.fire([v.center[0], v.center[1] - 0.3 * r, v.center[2]], r, 0);
+        boom.step(0);
         scene.add(boom);
       }
       return { scene, camera, options: { name: `fire-room`, width: 640, height: 360, preset: "cinematic" as const } };
