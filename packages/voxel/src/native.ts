@@ -12,7 +12,7 @@
 // `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it. `physics: false` on the level turns
 // all of it off (no collider; loose parts fall straight down until they rest, as before); `collide: false` on an
 // object leaves that object without a collider.
-import { bindBody, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
+import { bindBody, engineColliders, Object3D, type ObjectEvent, type PhysicsDesc, physicsQuery, setEngineBodies, unbindBody, usePhysicsEngine, Vector3 as Vector3Ctor, type Vector3 } from "@threert/scene";
 
 export type Hardness = "soft" | "medium" | "hard" | "indestructible";
 
@@ -340,11 +340,30 @@ function refresh(): void {
   }
 }
 
+/** The body that stands for the voxel level in joints (the world's anchor: fixed, no collider; none before the level is
+ *  loaded); the epoch moves when it changes. */
+let level: number | undefined;
+let epoch = 0;
+function levelBody(): number | undefined {
+  const id = engine()?.voxelLevelBody?.();
+  const now = id !== undefined && id >= 0 ? id : undefined;
+  if (now !== level) {
+    level = now;
+    epoch++;
+  }
+  return level;
+}
+
 /** The registry, known to `@threert/scene` (hits, joints, the frame's events). */
 function register(): void {
   setEngineBodies({
     object: (body) => registry.get(body) ?? recentlyGone.get(body)?.o ?? (body >= 2 ** 30 ? (refresh(), registry.get(body) ?? recentlyGone.get(body)?.o) : undefined),
-    bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
+    // (The voxel level is `engineColliders`: in a joint, the world's anchor, once the level is loaded.)
+    bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : o === engineColliders ? levelBody() : undefined),
+    epoch: () => {
+      levelBody();
+      return epoch;
+    },
     frame: () => {
       // (Those that went before the last frame's events have had their contacts' ends delivered.)
       frameCount++;
@@ -372,6 +391,7 @@ interface NativeEngine {
   voxelBodyEdit?: (body: number, d: object) => string;
   voxelContacts?: (body: number, on: boolean) => void;
   voxelGone?: () => string;
+  voxelLevelBody?: () => number;
   physics?: (op: string, args: object) => string;
   physicsPoses?: () => Float32Array;
 }
@@ -404,9 +424,22 @@ function edit(d: object): VoxelEdit | { queued: true } {
  * share of the radius. What it cuts loose falls (`voxelFrame`). Called in setup, before the level is loaded, it is done
  * once it is (with the `voxelFrame` calls made in setup after it) and returns `{ queued: true }`: the live view and the
  * offline render start from the same world.
+ *
+ * Its blast pushes every dynamic body within 3 radii (voxel bodies, the parts it cuts loose, scene code's bodies) away
+ * from its centre, through each one's centre of mass: `push` N s / m² per m of radius at the blast (default 400: a 1 m
+ * blast throws a 100 kg crate 1 m away at about 3 m/s), falling off with the distance squared to 0 at the reach, times
+ * the body's area facing it; at most 30 m/s a body. `push: 0`: none. 0 to 10,000; otherwise refused (RangeError)
+ * before anything changes. Walls do not shield (docs/VOXEL.md, "The blast").
  */
-export function voxelExplode(x: number, y: number, z: number, radius: number): VoxelEdit | { queued: true } {
-  return edit({ op: "explode", sphere: [x, y, z, radius] });
+export function voxelExplode(x: number, y: number, z: number, radius: number, o: { push?: number } = {}): VoxelEdit | { queued: true } {
+  return edit({ op: "explode", sphere: [x, y, z, radius], ...(o.push === undefined ? {} : { push: checkPush(o.push) }) });
+}
+
+/** The largest push an explosion takes (renderer/src/voxel.rs `MAX_PUSH`). */
+export const MAX_PUSH = 10000;
+function checkPush(p: unknown): number {
+  if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > MAX_PUSH) throw new RangeError(`voxelExplode: push must be a number from 0 to ${MAX_PUSH}`);
+  return p;
 }
 
 /** A cut: every voxel inside the shape removed, whatever its hardness (but the indestructible). A saw is a `box`, a

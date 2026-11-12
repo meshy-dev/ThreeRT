@@ -160,12 +160,16 @@ export function usePhysicsEngine(e: PhysicsEngine): void {
 /**
  * @internal The engine's own bodies as objects (`@threert/voxel` registers its voxel bodies): the object of an engine
  * body id, the engine body an object stands for (joints take it), and a call once a frame when the binding delivers
- * the physics events, which says whether any of them listens for contacts.
+ * the physics events, which says whether any of them listens for contacts. `epoch`: a number that changes whenever
+ * what `bodyOf` answers may have (the level's anchor body made anew): the binding then looks at its joints again. (A
+ * joint the engine moves onto another body is not an epoch: the engine reports it, `joint_changes`, and the binding
+ * changes the joint's `bodyA` / `anchorA` or `bodyB` / `anchorB`.)
  */
 export interface EngineBodies {
   object(body: number): Object3D | undefined;
   bodyOf(o: Object3D): number | undefined;
   frame(): boolean;
+  epoch?(): number;
 }
 let engineBodies: EngineBodies | null = null;
 
@@ -801,7 +805,9 @@ export interface JointParameters {
  * A joint between two objects with bodies: an object itself, so it holds while it is in the scene (`scene.add(joint)`)
  * and both its objects are, and lets go when it is removed. It joins the objects as they are turned when it is made (a
  * door that stands open stays open; its anchors are pulled together if they are apart). After changing one that is in
- * the scene, set `needsUpdate`.
+ * the scene, set `needsUpdate`: its parameters (limits, motor, a rope's length) change where it is, the same joint (a
+ * motor set every frame is cheap and keeps the joint's frames); a change of its bodies, anchors or axis makes it anew,
+ * joined as the bodies are turned then.
  */
 export class Joint extends Object3D {
   readonly isJoint = true;
@@ -810,6 +816,14 @@ export class Joint extends Object3D {
   bodyB: Object3D | null;
   readonly anchorA = new Vector3();
   readonly anchorB = new Vector3();
+  /**
+   * True once the engine let go of it (a "broken" event too): a joint to a voxel body or to the voxel level belongs to
+   * the material at its anchor, and that material was carved away, or the voxel body went. It stays let go of until it
+   * is taken out of the scene (and may be added again, joined anew). When that material is cut off instead (a part
+   * that comes loose), the joint goes with it: the engine moves it, and `bodyA` (or `bodyB`) becomes that part's voxel
+   * body, `anchorA` (or `anchorB`) the same point in the part's frame. A rope drawn from `bodyA` and `anchorA` follows.
+   */
+  broken = false;
   constructor(bodyA?: Object3D, bodyB?: Object3D, params: JointParameters = {}) {
     super();
     this.bodyA = bodyA ?? null;

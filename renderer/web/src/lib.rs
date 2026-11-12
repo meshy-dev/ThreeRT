@@ -99,9 +99,16 @@ pub fn voxel_level(d: &str) -> Result<(), JsValue> {
     engine(|e| api::voxel_level(&mut e.voxels, &d)).map_err(thrown)
 }
 
+/// An explosion, its blast's push optional (step 10 c1: `api::voxel_explode`).
 #[wasm_bindgen(js_name = voxelExplode)]
-pub fn voxel_explode(x: f64, y: f64, z: f64, r: f64) -> Result<String, JsValue> {
-    engine(|e| api::voxel_explode(&mut e.voxels, &mut e.world, &mut e.physics, x, y, z, r)).map_err(thrown)
+pub fn voxel_explode(x: f64, y: f64, z: f64, r: f64, push: Option<f64>) -> Result<String, JsValue> {
+    engine(|e| api::voxel_explode(&mut e.voxels, &mut e.world, &mut e.physics, x, y, z, r, push)).map_err(thrown)
+}
+
+/// The world's anchor (a fixed body with no collider: joints to the level hold to it), -1 before a level that collides.
+#[wasm_bindgen(js_name = voxelLevelBody)]
+pub fn voxel_level_body() -> f64 {
+    engine(|e| e.voxels.level_body().map_or(-1.0, |b| b as f64))
 }
 
 #[wasm_bindgen(js_name = voxelEdit)]

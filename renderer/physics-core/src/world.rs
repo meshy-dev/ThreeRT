@@ -29,6 +29,10 @@ pub mod limits {
     pub const MAX_ANGVEL: f32 = 1e3;
     /// N s (and N m s for an angular one), N (and N m).
     pub const MAX_IMPULSE: f32 = 1e6;
+    /// An explosion's reach in radii, and the most it changes a body's velocity (m/s): what the solver and CCD follow
+    /// (`Physics::blast`).
+    pub const BLAST_REACH: f32 = 3.0;
+    pub const BLAST_MAX_DV: f32 = 30.0;
     pub const MAX_FORCE: f32 = 1e8;
     /// A collider's mass (kg) and density (kg/m³): 0 (it adds nothing to its body) or within these.
     pub const MASS: [f32; 2] = [1e-3, 1e7];
@@ -188,6 +192,28 @@ pub enum JointDesc {
     Rope { anchor1: [f32; 3], anchor2: [f32; 3], length: f32 },
 }
 
+/// What kind of joint a `JointDesc` makes (what `Physics::set_joint` may not change).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointKind {
+    Fixed,
+    Revolute,
+    Prismatic,
+    Spherical,
+    Rope,
+}
+
+impl JointKind {
+    pub fn of(d: &JointDesc) -> JointKind {
+        match d {
+            JointDesc::Fixed { .. } => JointKind::Fixed,
+            JointDesc::Revolute { .. } => JointKind::Revolute,
+            JointDesc::Prismatic { .. } => JointKind::Prismatic,
+            JointDesc::Spherical { .. } => JointKind::Spherical,
+            JointDesc::Rope { .. } => JointKind::Rope,
+        }
+    }
+}
+
 /// Two colliders began or stopped touching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Contact {
@@ -201,6 +227,8 @@ pub struct Contact {
 pub struct Fault {
     pub body: Option<BodyId>,
     pub colliders: Vec<ColliderId>,
+    /// The joints that went with the body.
+    pub joints: Vec<JointId>,
     /// The body left the world (past `WORLD_EDGE`: it fell off the level, an ordinary thing in a game); otherwise its
     /// state or a shape went non-finite (bad data or a blown-up simulation: an error the author should hear of).
     pub left_world: bool,
@@ -529,6 +557,9 @@ pub struct Physics {
     /// The voxel colliders there are: rays are cast at them here (`voxel_ray`), not by the broad phase's query.
     voxel_colliders: std::collections::BTreeSet<ColliderId>,
     joints: BTreeMap<JointId, ImpulseJointHandle>,
+    /// Per joint: its kind (what `set_joint` may change), and for a hinge the centre of its limits (rad) by which its
+    /// first frame is turned (`add_joint`).
+    joint_kinds: BTreeMap<JointId, (JointKind, f32)>,
     /// The kinematic bodies (`awake`: the islands hold dynamic ones only).
     kinematic: std::collections::BTreeSet<BodyId>,
     next: u32,
@@ -567,6 +598,7 @@ impl Physics {
             shape_data: 0,
             voxel_colliders: Default::default(),
             joints: BTreeMap::new(),
+            joint_kinds: BTreeMap::new(),
             kinematic: Default::default(),
             next: 0,
             ticks: 0,
@@ -629,12 +661,13 @@ impl Physics {
     }
 
     /// Removes a body with its colliders and joints. Returns the colliders that went with it.
-    pub fn remove_body(&mut self, id: BodyId) -> Vec<ColliderId> {
-        let Some(h) = self.bodies.remove(&id) else { return vec![] };
+    pub fn remove_body(&mut self, id: BodyId) -> (Vec<ColliderId>, Vec<JointId>) {
+        let Some(h) = self.bodies.remove(&id) else { return (vec![], vec![]) };
         self.kinematic.remove(&id);
         // (Its own colliders and joints only: removing a body costs what it holds, not what the world holds.)
         let gone: Vec<ColliderId> = self.world.bodies.get(h).map(|b| b.colliders().iter().filter_map(|&c| self.world.colliders.get(c).map(|c| c.user_data as u32)).collect()).unwrap_or_default();
-        let jointed = self.world.impulse_joints.attached_joints(h).next().is_some();
+        let mut joints: Vec<JointId> = self.world.impulse_joints.attached_joints(h).map(|(.., j)| j.data.user_data as JointId).collect();
+        joints.sort_unstable();
         self.world.remove_body_with_colliders(h, true);
         for c in &gone {
             self.fresh.remove(c);
@@ -643,11 +676,11 @@ impl Physics {
                 self.shape_data -= data;
             }
         }
-        if jointed {
-            let world = &self.world;
-            self.joints.retain(|_, j| world.impulse_joints.get(*j).is_some());
+        for j in &joints {
+            self.joints.remove(j);
+            self.joint_kinds.remove(j);
         }
-        gone
+        (gone, joints)
     }
 
     /// Adds a collider to `body` (None: a static collider in the world). Err (why) if the body is unknown, the shape
@@ -790,13 +823,142 @@ impl Physics {
             let (s, c) = libm::sincosf(centre * 0.5);
             joint.local_frame1.rotation = (joint.local_frame1.rotation * Rotation::from_xyzw(s, 0.0, 0.0, c)).normalize();
         }
-        let h = self.world.insert_impulse_joint(ha, hb, joint);
         let id = self.id();
+        // (Its id in the joint, as bodies and colliders hold theirs: a body's joints are read off it, `joints_of`.)
+        joint.user_data = id as u128;
+        let h = self.world.insert_impulse_joint(ha, hb, joint);
         self.joints.insert(id, h);
+        self.joint_kinds.insert(id, (JointKind::of(d), centre));
         Ok(id)
     }
 
+    /// A joint's parameters changed where it is (`joint_set`): a hinge's or a slider's limits and motor, a rope's
+    /// length. Its bodies, anchors, axis and frames stay as they were made (nothing is taken anew from the bodies'
+    /// poses, no warm-started impulse is lost); its bodies are woken. Err, the joint unchanged: no such joint, another
+    /// kind of joint than it was made as, a kind without parameters (fixed, ball), bad numbers.
+    pub fn set_joint(&mut self, id: JointId, d: &JointDesc) -> Result<(), String> {
+        let (&h, &(kind, old_centre)) = match (self.joints.get(&id), self.joint_kinds.get(&id)) {
+            (Some(h), Some(k)) => (h, k),
+            _ => return Err("physics: unknown joint".into()),
+        };
+        if JointKind::of(d) != kind {
+            return Err("physics: a joint's kind is not changed in place (make a new joint)".into());
+        }
+        let limits = |l: &Option<Limits>| -> Result<Option<[f32; 2]>, String> {
+            match l {
+                None => Ok(None),
+                Some(l) => {
+                    within(&[l.min, l.max], MAX_COORD, "a joint's limits")?;
+                    if l.min > l.max {
+                        return Err("physics: a joint's limits must be [min, max] with min <= max".into());
+                    }
+                    Ok(Some([l.min, l.max]))
+                }
+            }
+        };
+        let motor = |m: &Option<Motor>| -> Result<Option<Motor>, String> {
+            match m {
+                None => Ok(None),
+                Some(m) => {
+                    within(&[m.velocity], MAX_MOTOR_VELOCITY, "a motor's velocity")?;
+                    between(m.damping, 0.0, MAX_MOTOR_DAMPING, "a motor's damping")?;
+                    between(m.max_force, 0.0, f32::MAX, "a motor's maximum force")?;
+                    Ok(Some(*m))
+                }
+            }
+        };
+        // Everything checked before anything changes.
+        let (axis, l, m, length) = match d {
+            JointDesc::Revolute { limits: l, motor: m, .. } => (JointAxis::AngX, limits(l)?, motor(m)?, None),
+            JointDesc::Prismatic { limits: l, motor: m, .. } => (JointAxis::LinX, limits(l)?, motor(m)?, None),
+            JointDesc::Rope { length, .. } => {
+                between(*length, 0.0, MAX_COORD, "a rope's length")?;
+                (JointAxis::LinX, None, None, Some(*length))
+            }
+            JointDesc::Fixed { .. } | JointDesc::Spherical { .. } => return Err("physics: a fixed or ball joint has no parameters to change".into()),
+        };
+        let j = &mut self.world.impulse_joints.get_mut(h, true).ok_or("physics: unknown joint")?.data;
+        if let Some(length) = length {
+            j.set_limits(JointAxis::LinX, [0.0, length]);
+            return Ok(());
+        }
+        let mut centre = 0.0f32;
+        match (l, kind) {
+            // A hinge's limits centred as `add_joint` does: the first frame turned back by the old centre, on by the new.
+            (Some([min, max]), JointKind::Revolute) => {
+                centre = (min + max) * 0.5;
+                j.set_limits(axis, [-(max - min) * 0.5, (max - min) * 0.5]);
+            }
+            (Some(lim), _) => {
+                j.set_limits(axis, lim);
+            }
+            (None, _) => j.limit_axes.remove(axis.into()),
+        }
+        if kind == JointKind::Revolute && centre != old_centre {
+            let (s0, c0) = libm::sincosf(-old_centre * 0.5);
+            let (s1, c1) = libm::sincosf(centre * 0.5);
+            let back = j.local_frame1.rotation * Rotation::from_xyzw(s0, 0.0, 0.0, c0);
+            j.local_frame1.rotation = (back.normalize() * Rotation::from_xyzw(s1, 0.0, 0.0, c1)).normalize();
+        }
+        match m {
+            Some(m) => {
+                j.set_motor_velocity(axis, m.velocity, m.damping);
+                j.set_motor_max_force(axis, m.max_force);
+            }
+            None => j.motor_axes.remove(axis.into()),
+        }
+        self.joint_kinds.insert(id, (kind, centre));
+        Ok(())
+    }
+
+    /// The joints on a body: each one's id, whether the body is its first, and its anchor in the body's space.
+    /// In joint id order. (Read off the body's own joints, Rapier's joint graph: what the body holds, not what the
+    /// world does.)
+    pub fn joints_of(&self, body: BodyId) -> Vec<(JointId, bool, [f32; 3])> {
+        let Some(&h) = self.bodies.get(&body) else { return vec![] };
+        let mut out: Vec<(JointId, bool, [f32; 3])> = self
+            .world
+            .impulse_joints
+            .attached_joints(h)
+            .map(|(.., j)| {
+                let first = j.body1() == h;
+                (j.data.user_data as JointId, first, if first { j.data.local_frame1.translation } else { j.data.local_frame2.translation }.to_array())
+            })
+            .collect();
+        out.sort_unstable_by_key(|x| x.0);
+        out
+    }
+
+    /// Moves one end of a joint from body `from` to body `to`, the same joint (its id, kind and parameters): that
+    /// end's frame is where it was in the world, now in `to`'s space (a joint whose anchor's material went into
+    /// another body, step 10 c1). Returns that end's anchor in `to`'s space, and whether it is the joint's first end.
+    /// Err: no such joint or body, `from` not one of its bodies, `to` its other body.
+    pub fn rebind_joint(&mut self, id: JointId, from: BodyId, to: BodyId) -> Result<([f32; 3], bool), String> {
+        let jh = *self.joints.get(&id).ok_or("physics: unknown joint")?;
+        let (hf, ht) = (*self.bodies.get(&from).ok_or("physics: unknown body")?, *self.bodies.get(&to).ok_or("physics: unknown body")?);
+        let j = self.world.impulse_joints.get(jh).ok_or("physics: unknown joint")?;
+        let first = if j.body1() == hf { true } else if j.body2() == hf { false } else { return Err("physics: the joint is not on that body".into()) };
+        let other = if first { j.body2() } else { j.body1() };
+        if other == ht {
+            return Err("physics: a joint joins two different bodies".into());
+        }
+        let mut data = j.data;
+        let (pf, pt) = (*self.world.bodies[hf].position(), *self.world.bodies[ht].position());
+        let frame = if first { data.local_frame1 } else { data.local_frame2 };
+        let moved = pt.inverse() * (pf * frame);
+        if first {
+            data.local_frame1 = moved;
+        } else {
+            data.local_frame2 = moved;
+        }
+        self.world.remove_impulse_joint(jh);
+        let nh = if first { self.world.insert_impulse_joint(ht, other, data) } else { self.world.insert_impulse_joint(other, ht, data) };
+        self.joints.insert(id, nh);
+        Ok((moved.translation.to_array(), first))
+    }
+
     pub fn remove_joint(&mut self, id: JointId) {
+        self.joint_kinds.remove(&id);
         if let Some(h) = self.joints.remove(&id) {
             self.world.remove_impulse_joint(h);
         }
@@ -941,14 +1103,14 @@ impl Physics {
         for c in statics {
             if let Some(id) = self.world.colliders.get(c).map(|c| c.user_data as u32) {
                 self.remove_collider(id);
-                self.faults.push(Fault { body: None, colliders: vec![id], left_world: false, reason: "its shape went non-finite" });
+                self.faults.push(Fault { body: None, colliders: vec![id], joints: vec![], left_world: false, reason: "its shape went non-finite" });
             }
         }
         for (h, left_world, reason) in out {
             let Some(id) = self.world.bodies.get(h).map(|b| b.user_data as u32) else { continue };
             if self.bodies.contains_key(&id) {
-                let colliders = self.remove_body(id);
-                self.faults.push(Fault { body: Some(id), colliders, left_world, reason });
+                let (colliders, joints) = self.remove_body(id);
+                self.faults.push(Fault { body: Some(id), colliders, joints, left_world, reason });
             }
         }
     }
@@ -1097,6 +1259,71 @@ impl Physics {
             b.apply_torque_impulse(v(torque), true);
         }
         Ok(())
+    }
+
+    /// An explosion's push (step 10 c1, docs/VOXEL.md "The blast"): every dynamic body whose colliders' box comes within
+    /// `BLAST_REACH` x `radius` of `centre` takes an impulse away from the centre, through its centre of mass (no turn):
+    /// its area facing the blast (its box's cross-section across the direction) times
+    /// i(d) = push x radius x min(1, (radius / d)²) x (1 - (d / reach)²)² N s / m², d the distance from the centre to its
+    /// box (0 inside). The bodies in `kicked` (sorted: the debris the explosion itself cut loose) also take a change of
+    /// velocity of their own, whatever their mass: `kick` m/s x min(1, (radius / d)²) x (1 - (d / reach)²)², the same
+    /// way. A body's whole change of velocity is at most `BLAST_MAX_DV`. Only +, -, x, / and square roots (IEEE: the
+    /// same bits on every platform); bodies in id order. Returns how many were pushed (none for a radius of 0 or less).
+    /// Err: a centre past the world's edge or not finite, a push or kick below 0 or not finite (nothing changes).
+    pub fn blast(&mut self, centre: [f32; 3], radius: f32, push: f32, kick: f32, kicked: &[BodyId]) -> Result<usize, String> {
+        within(&centre, WORLD_EDGE, "a blast's centre")?;
+        between(push, 0.0, f32::MAX, "a blast's push")?;
+        between(kick, 0.0, BLAST_MAX_DV, "a blast's kick")?;
+        // (A radius of 0 or less, as an edit may have, pushes nothing; one past the world's sizes is held to them.)
+        if !(radius > 0.0) {
+            return Ok(0);
+        }
+        let radius = radius.min(MAX_SIZE);
+        let reach = BLAST_REACH * radius;
+        if !(reach > 0.0) || (push == 0.0 && (kick == 0.0 || kicked.is_empty())) {
+            return Ok(0);
+        }
+        let c = Vector::new(centre[0], centre[1], centre[2]);
+        let mut pushed = vec![];
+        for (&id, &h) in &self.bodies {
+            let Some(b) = self.world.bodies.get(h) else { continue };
+            if !b.is_dynamic() || !b.is_enabled() || !(b.mass() > 0.0) {
+                continue;
+            }
+            // Its colliders' box.
+            let mut boxed: Option<Aabb> = None;
+            for &ch in b.colliders() {
+                if let Some(col) = self.world.colliders.get(ch) {
+                    let a = col.compute_aabb();
+                    boxed = Some(boxed.map_or(a, |x| x.merged(&a)));
+                }
+            }
+            let Some(aabb) = boxed else { continue };
+            let nearest = c.clamp(aabb.mins, aabb.maxs);
+            let d = (nearest - c).length();
+            if d >= reach {
+                continue;
+            }
+            let towards = b.center_of_mass() - c;
+            let len = towards.length();
+            let n = if len > 1e-6 { towards / len } else { Vector::Y };
+            let e = aabb.maxs - aabb.mins;
+            let area = n.x.abs() * e.y * e.z + n.y.abs() * e.x * e.z + n.z.abs() * e.x * e.y;
+            let near = if d > radius { (radius / d) * (radius / d) } else { 1.0 };
+            let fall = 1.0 - (d / reach) * (d / reach);
+            let per_area = push * radius * near * fall * fall;
+            let own = if kicked.binary_search(&id).is_ok() { kick * near * fall * fall } else { 0.0 };
+            let j = (per_area * area + own * b.mass()).min(BLAST_MAX_DV * b.mass());
+            if j > 0.0 && j.is_finite() {
+                pushed.push((id, n * j));
+            }
+        }
+        for &(id, j) in &pushed {
+            if let Some(b) = self.body_mut(id) {
+                b.apply_impulse(j, true);
+            }
+        }
+        Ok(pushed.len())
     }
 
     /// An impulse (N s) at a point of the world (it turns the body as well, unless the point is its centre of mass), and
@@ -1480,6 +1707,165 @@ mod tests {
         }
     }
 
+    /// A body's joints are read off the body (`joints_of`, Rapier's joint graph), not found among the world's: with
+    /// 5,000 joints elsewhere, a body's two are its own, in id order, with its end and anchor; removing it returns them
+    /// and the world no longer has them; the others stay.
+    #[test]
+    fn a_bodys_joints_are_its_own() {
+        let mut p = Physics::default();
+        let post = fixed(&mut p, [0.0, 5.0, 0.0]);
+        let ball = |p: &mut Physics, at: [f32; 3]| {
+            let b = p.add_body(&BodyDesc { position: at, ..Default::default() }).unwrap();
+            p.add_collider(Some(b), &ColliderDesc::new(Shape::Sphere(0.1))).unwrap();
+            b
+        };
+        let (a, b) = (ball(&mut p, [1.0, 4.0, 0.0]), ball(&mut p, [2.0, 4.0, 0.0]));
+        let rope = |p: &mut Physics, x: BodyId, y: BodyId, anchor1: [f32; 3]| p.add_joint(x, y, &JointDesc::Rope { anchor1, anchor2: [0.0; 3], length: 3.0 }).unwrap();
+        let mut others = vec![];
+        for _ in 0..5000 {
+            others.push(rope(&mut p, post, b, [0.5, 0.0, 0.0]));
+        }
+        let j1 = rope(&mut p, post, a, [0.25, 0.0, 0.0]);
+        let j2 = rope(&mut p, a, b, [0.0, 0.1, 0.0]);
+        assert_eq!(p.joints_of(a), vec![(j1, false, [0.0; 3]), (j2, true, [0.0, 0.1, 0.0])]);
+        assert_eq!(p.joints_of(post).len(), 5001);
+        let (_, gone) = p.remove_body(a);
+        assert_eq!(gone, vec![j1, j2]);
+        assert!(!p.has_joint(j1) && !p.has_joint(j2) && others.iter().all(|&j| p.has_joint(j)));
+        assert_eq!(p.joints_of(b).len(), 5000);
+    }
+
+    /// An explosion's push (`blast`): a 1 m cube of 100 kg whose near face is 1 m from a 1 m blast takes
+    /// 400 x 1 x 1 x (1 - (1/3)²)² N s across its 1 m² face, away from the centre, through its centre of mass (no turn);
+    /// one at the reach (3 m) none; a fixed one none; a 1 kg one at most 30 m/s; one around the centre straight away
+    /// from it; a push of 0, or a radius of 0 or less, nothing; a centre or push not finite refused.
+    #[test]
+    fn a_blast_pushes_by_area_and_distance() {
+        let cube = |p: &mut Physics, at: [f32; 3], mass: f32, kind: BodyKind| {
+            let b = p.add_body(&BodyDesc { kind, position: at, can_sleep: false, gravity_scale: 0.0, ..Default::default() }).unwrap();
+            let mut d = ColliderDesc::new(Shape::Box([0.5; 3]));
+            d.mass = Some(mass);
+            p.add_collider(Some(b), &d).unwrap();
+            b
+        };
+        let mut p = Physics::default();
+        let near = cube(&mut p, [1.5, 0.0, 0.0], 100.0, BodyKind::Dynamic);
+        let edge = cube(&mut p, [0.0, 0.0, 3.5], 100.0, BodyKind::Dynamic);
+        let wall = cube(&mut p, [-1.5, 0.0, 0.0], 100.0, BodyKind::Fixed);
+        let light = cube(&mut p, [0.0, -1.5, 0.0], 1.0, BodyKind::Dynamic);
+        assert_eq!(p.blast([0.0; 3], 1.0, 400.0, 0.0, &[]).unwrap(), 2);
+        let fall = 1.0 - (1.0f32 / 3.0) * (1.0 / 3.0);
+        let want = 400.0 * fall * fall / 100.0;
+        let (lv, av) = p.velocity(near).unwrap();
+        assert!((lv[0] - want).abs() < 1e-5 && lv[1].abs() < 1e-6 && lv[2].abs() < 1e-6 && av.iter().all(|a| a.abs() < 1e-6), "{lv:?} {av:?}, want {want}");
+        assert_eq!(p.velocity(edge).unwrap().0, [0.0; 3], "at the reach: none");
+        assert_eq!(p.velocity(wall).unwrap().0, [0.0; 3], "fixed: none");
+        let lv = p.velocity(light).unwrap().0;
+        assert!((lv[1] + BLAST_MAX_DV).abs() < 1e-4 && lv[0].abs() < 1e-6, "capped: {lv:?}");
+        // Around the centre: away from it (up when they coincide).
+        let mut q = Physics::default();
+        let around = cube(&mut q, [0.0, 0.0, 0.0], 100.0, BodyKind::Dynamic);
+        assert_eq!(q.blast([0.0, 0.0, 0.0], 1.0, 400.0, 0.0, &[]).unwrap(), 1);
+        let lv = q.velocity(around).unwrap().0;
+        assert!(lv[1] > 0.0 && lv[0] == 0.0 && lv[2] == 0.0, "{lv:?}");
+        // Nothing, and refusals.
+        assert_eq!(q.blast([0.0; 3], 1.0, 0.0, 0.0, &[]).unwrap(), 0);
+        assert_eq!(q.blast([0.0; 3], -1.0, 400.0, 0.0, &[]).unwrap(), 0);
+        assert_eq!(q.blast([0.0; 3], 0.0, 400.0, 0.0, &[]).unwrap(), 0);
+        assert!(q.blast([f32::NAN, 0.0, 0.0], 1.0, 400.0, 0.0, &[]).is_err());
+        assert!(q.blast([0.0; 3], 1.0, f32::INFINITY, 0.0, &[]).is_err());
+        assert!(q.blast([0.0; 3], 1.0, -1.0, 0.0, &[]).is_err());
+        assert!(q.blast([0.0; 3], 1.0, 400.0, -1.0, &[around]).is_err() && q.blast([0.0; 3], 1.0, 400.0, 31.0, &[around]).is_err());
+        assert_eq!(q.velocity(around).unwrap().0, lv, "refused: nothing changed");
+    }
+
+    /// The kick of a blast (`blast`'s `kicked`, the debris an explosion cut loose): a change of velocity whatever the
+    /// mass, falling off as the push does: a 100 kg and a 10 t cube side by side 1 m from a 1 m blast with no push both
+    /// leave at 5 x (1 - (1/3)²)² m/s; one not in `kicked` stays; with the push as well the two add, at most 30 m/s.
+    #[test]
+    fn a_blast_kicks_its_debris_whatever_their_mass() {
+        let mut p = Physics::default();
+        let cube = |p: &mut Physics, at: [f32; 3], mass: f32| {
+            let b = p.add_body(&BodyDesc { position: at, can_sleep: false, gravity_scale: 0.0, ..Default::default() }).unwrap();
+            p.add_collider(Some(b), &ColliderDesc { mass: Some(mass), ..ColliderDesc::new(Shape::Box([0.5; 3])) }).unwrap();
+            b
+        };
+        let light = cube(&mut p, [1.5, 0.0, 0.0], 100.0);
+        let heavy = cube(&mut p, [-1.5, 0.0, 0.0], 1e4);
+        let other = cube(&mut p, [0.0, 1.5, 0.0], 100.0);
+        let mut kicked = vec![light, heavy];
+        kicked.sort_unstable();
+        assert_eq!(p.blast([0.0; 3], 1.0, 0.0, 5.0, &kicked).unwrap(), 2);
+        let fall = 1.0 - (1.0f32 / 3.0) * (1.0 / 3.0);
+        let want = 5.0 * fall * fall;
+        assert!((p.velocity(light).unwrap().0[0] - want).abs() < 1e-5, "{:?}", p.velocity(light));
+        assert!((p.velocity(heavy).unwrap().0[0] + want).abs() < 1e-5, "{:?}", p.velocity(heavy));
+        assert_eq!(p.velocity(other).unwrap().0, [0.0; 3], "not debris, no push: none");
+        let mut q = Physics::default();
+        let b = cube(&mut q, [1.5, 0.0, 0.0], 100.0);
+        q.blast([0.0; 3], 1.0, 400.0, 5.0, &[b]).unwrap();
+        assert!((q.velocity(b).unwrap().0[0] - (400.0 * fall * fall / 100.0 + want)).abs() < 1e-4, "push and kick add: {:?}", q.velocity(b));
+        let mut q = Physics::default();
+        let b = cube(&mut q, [1.5, 0.0, 0.0], 1.0);
+        q.blast([0.0; 3], 1.0, 400.0, 30.0, &[b]).unwrap();
+        assert!((q.velocity(b).unwrap().0[0] - BLAST_MAX_DV).abs() < 1e-4, "capped: {:?}", q.velocity(b));
+    }
+
+    /// A joint's parameters changed in place (`set_joint`): the same Rapier joint (no frame taken anew); a hinge whose
+    /// limits move from [-0.9, -0.2] to [0.2, 0.9] comes to rest at the new lower one, as a hinge made with those limits
+    /// does; a motor turned on drives it; a rope shortened holds its weight at the new length; another kind, a fixed
+    /// joint, an unknown id or bad numbers are refused and change nothing.
+    #[test]
+    fn joints_change_in_place() {
+        let mut p = Physics::default();
+        let post = fixed(&mut p, [0.0, 5.0, 0.0]);
+        let door = p.add_body(&BodyDesc { position: [0.5, 5.0, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+        p.add_collider(Some(door), &ColliderDesc::new(Shape::Box([0.5, 0.05, 0.4]))).unwrap();
+        let hinge = |limits: Option<Limits>, motor: Option<Motor>| JointDesc::Revolute { anchor1: [0.0; 3], anchor2: [-0.5, 0.0, 0.0], axis: [0.0, 0.0, 1.0], limits, motor };
+        let j = p.add_joint(post, door, &hinge(Some(Limits { min: -0.9, max: -0.2 }), None)).unwrap();
+        let h = p.joints[&j];
+        run(&mut p, 400);
+        let down = |p: &Physics| { let pos = p.pose(door).unwrap().0; (-(pos[1] - 5.0)).atan2(pos[0]) };
+        assert!((down(&p) - 0.9).abs() < 0.03, "rests at its limit: {}", down(&p));
+        let frame2 = p.world.impulse_joints.get(h).unwrap().data.local_frame2;
+        p.set_joint(j, &hinge(Some(Limits { min: 0.2, max: 0.9 }), None)).unwrap();
+        assert_eq!(p.joints[&j], h, "the same joint");
+        assert_eq!(p.world.impulse_joints.get(h).unwrap().data.local_frame2, frame2, "its frame on the door not taken anew");
+        run(&mut p, 400);
+        assert!((down(&p) + 0.2).abs() < 0.03, "rests at the new limit (0.2 rad up): {}", down(&p));
+        // A motor, no limits: it turns.
+        p.set_joint(j, &hinge(None, Some(Motor { velocity: 2.0, damping: 1e5, max_force: 1e5 }))).unwrap();
+        run(&mut p, 30);
+        assert!((p.velocity(door).unwrap().1[2] - 2.0).abs() < 0.1, "{:?}", p.velocity(door));
+        // Refused, nothing changed.
+        let before = p.world.impulse_joints.get(h).unwrap().data.clone();
+        for bad in [
+            JointDesc::Prismatic { anchor1: [0.0; 3], anchor2: [0.0; 3], axis: [1.0, 0.0, 0.0], limits: None, motor: None },
+            hinge(Some(Limits { min: 1.0, max: 0.0 }), None),
+            hinge(None, Some(Motor { velocity: f32::NAN, damping: 1.0, max_force: 1.0 })),
+            hinge(None, Some(Motor { velocity: 1.0, damping: -1.0, max_force: 1.0 })),
+        ] {
+            assert!(p.set_joint(j, &bad).is_err(), "{bad:?}");
+            assert_eq!(format!("{:?}", p.world.impulse_joints.get(h).unwrap().data), format!("{before:?}"));
+        }
+        assert!(p.set_joint(9999, &hinge(None, None)).is_err());
+        let weld = p.add_joint(post, door, &JointDesc::Fixed { anchor1: [0.0; 3], anchor2: [-0.5, 0.0, 0.0] }).unwrap();
+        assert!(p.set_joint(weld, &JointDesc::Fixed { anchor1: [0.0; 3], anchor2: [0.0; 3] }).is_err());
+        p.remove_joint(weld);
+        // A rope from 3 m to 1.5 m.
+        let mut q = Physics::default();
+        let top = fixed(&mut q, [0.0, 10.0, 0.0]);
+        let w = q.add_body(&BodyDesc { position: [0.0, 8.0, 0.0], can_sleep: false, ..Default::default() }).unwrap();
+        q.add_collider(Some(w), &ColliderDesc::new(Shape::Sphere(0.1))).unwrap();
+        let rope = q.add_joint(top, w, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: 3.0 }).unwrap();
+        run(&mut q, 200);
+        assert!((10.0 - q.pose(w).unwrap().0[1] - 3.0).abs() < 0.03);
+        q.set_joint(rope, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: 1.5 }).unwrap();
+        run(&mut q, 300);
+        assert!((10.0 - q.pose(w).unwrap().0[1] - 1.5).abs() < 0.03, "{:?}", q.pose(w));
+        assert!(q.set_joint(rope, &JointDesc::Rope { anchor1: [0.0; 3], anchor2: [0.0; 3], length: -1.0 }).is_err());
+    }
+
     /// A slider along x: gravity does not take it off its axis (within 2 mm); its motor brings it to 1.5 m/s; it stops at
     /// the limit, 2 m along.
     #[test]
@@ -1759,7 +2145,7 @@ mod tests {
         // Carved to nothing: the collider is gone, the body is the caller's to remove.
         assert_eq!(p.edit_voxels(c, &block([0, 0, 0], [4, 2, 4]), &[]).unwrap(), 0);
         assert!(!p.has_collider(c) && p.voxels(c).is_none());
-        assert!(p.remove_body(b).is_empty());
+        assert!(p.remove_body(b).0.is_empty());
         run(&mut p, 30);
         assert!(p.take_faults().is_empty());
     }

@@ -173,9 +173,35 @@ struct VoxelObject {
     flying: Option<Vec<MeshPart>>,
 }
 
+/// The cell a joint's anchor is held by (step 10 c1): the cell the point is in if it is solid, else the solid one of its
+/// 26 neighbours whose centre is nearest the point (first in x, y, z order on a tie); none if all are empty (the
+/// joint is then on the body, not on a cell, and follows the body).
+fn anchor_cell(a: [f32; 3], size: f32, mut solid: impl FnMut([i32; 3]) -> bool) -> Option<[i32; 3]> {
+    let c = a.map(|v| (v / size).floor() as i32);
+    if solid(c) {
+        return Some(c);
+    }
+    let mut best: Option<([i32; 3], f32)> = None;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let n = [c[0] + dx, c[1] + dy, c[2] + dz];
+                if (dx, dy, dz) == (0, 0, 0) || !solid(n) {
+                    continue;
+                }
+                let d = (0..3).map(|k| ((n[k] as f32 + 0.5) * size - a[k]).powi(2)).sum::<f32>();
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((n, d));
+                }
+            }
+        }
+    }
+    best.map(|b| b.0)
+}
+
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
-pub const EXPECTED_SCRIPT: u64 = 0x0235_ba72_5c92_2a63;
+pub const EXPECTED_SCRIPT: u64 = 0x3329_720d_f1b3_1ca3;
 
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
@@ -213,7 +239,22 @@ enum Queued {
 pub struct EditOp {
     pub shape: ShapeM,
     pub kind: EditKind,
+    /// An explosion's push (step 10 c1): the impulse per area at the blast, N s / m² per m of its radius, on every
+    /// dynamic body within 3 radii (`physics_core::Physics::blast`). None: no push (a carve).
+    pub blast: Option<f32>,
 }
+
+/// An explosion's push when scene code names none (N s / m² per m of radius): a 1 m blast gives a 1 m² face at 1 m
+/// 400 x (1 - (1/3)²)² = 316 N s (a 100 kg crate thrown at 3.16 m/s).
+pub const DEFAULT_PUSH: f32 = 400.0;
+/// The kick of the debris an explosion cuts loose (m/s at its radius per unit of push): the parts it makes leave at
+/// `push` x this, whatever their mass, falling off with distance as the push does (`physics_core::Physics::blast`).
+/// The default push's 400 gives 8 m/s next to the crater: the push alone, by area, throws a 1 m³ chunk of stone
+/// (2,400 kg) at 0.1 m/s and leaves it where it was cut; a charge throws the fragments it breaks off at their own
+/// speed whatever their size (docs/VOXEL.md "The blast").
+pub const KICK_PER_PUSH: f32 = 0.02;
+/// The largest push scene code may ask for.
+pub const MAX_PUSH: f32 = 10_000.0;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ShapeM {
@@ -250,6 +291,17 @@ impl EditOp {
             return Err(anyhow!("voxelEdit: a shape of finite numbers is needed: sphere [x, y, z, r], box [x0, y0, z0, x1, y1, z1] or capsule [x0, y0, z0, x1, y1, z1, r]"));
         };
         let material = || j["material"].as_u64().filter(|m| (1..256).contains(m)).map(|m| m as u8).ok_or_else(|| anyhow!("voxelEdit: material must be a palette index from 1 to 255"));
+        let explode = j["op"].as_str() == Some("explode");
+        let blast = match &j["push"] {
+            serde_json::Value::Null => explode.then_some(DEFAULT_PUSH),
+            v => {
+                let push = v.as_f64().filter(|p| p.is_finite() && (0.0..=MAX_PUSH as f64).contains(p)).ok_or_else(|| anyhow!("voxelEdit: push must be a number from 0 to {MAX_PUSH}"))? as f32;
+                if !explode {
+                    return Err(anyhow!("voxelEdit: push is an explosion's (op \"explode\")"));
+                }
+                Some(push)
+            }
+        };
         let kind = match j["op"].as_str() {
             Some("explode") => EditKind::Carve(RADII),
             Some("carve") => EditKind::Carve([256, 256, 256, 0]),
@@ -257,7 +309,7 @@ impl EditOp {
             Some("add") => EditKind::Add(material()?),
             other => return Err(anyhow!("voxelEdit: op {other:?} is none of explode, carve, paint, add")),
         };
-        Ok(EditOp { shape, kind })
+        Ok(EditOp { shape, kind, blast })
     }
 }
 
@@ -297,6 +349,8 @@ pub struct VoxelWorld {
     /// the loose parts that are bodies (by their index in `objects`), each palette entry's density, the cap on
     /// bodies, and how many it retired.
     physics: bool,
+    /// The world's anchor (ROADMAP § 6 step 10 c1): a fixed body with no collider that joints to the level hold to.
+    level_body: Option<u32>,
     colliders: Vec<Option<u32>>,
     bodies: BTreeMap<usize, VoxelBody>,
     density: Vec<f32>,
@@ -306,6 +360,8 @@ pub struct VoxelWorld {
     pub capped: u64,
     /// The bodies the edit being made has carved or made: none of them is retired for the cap while it runs.
     this_edit: std::collections::BTreeSet<usize>,
+    /// The engine bodies the edit being made has made (an explosion kicks them: `KICK_PER_PUSH`).
+    made: Vec<u32>,
     /// The bodies gone since scene code last asked (`take_gone`): engine body id and why ("cap", "carved", "fell").
     gone: Vec<(u32, &'static str)>,
     /// Under this height (m) a body has left the level: 100 m below its lowest cell.
@@ -339,6 +395,12 @@ impl VoxelWorld {
         Ok(())
     }
 
+    /// The body that stands for the level in joints (the world's anchor: fixed, with no collider; the level's colliders
+    /// are static), once a level that collides is loaded.
+    pub fn level_body(&self) -> Option<u32> {
+        self.level_body
+    }
+
     fn id(&mut self) -> u32 {
         if self.next_id == 0 {
             self.next_id = FIRST_ID;
@@ -361,6 +423,7 @@ impl VoxelWorld {
     fn live_ids(&self) -> std::collections::HashSet<u32> {
         let mut u: std::collections::HashSet<u32> = self.objects.iter().flatten().flat_map(|o| o.parts.iter().flat_map(|p| [p.1, p.2])).collect();
         u.extend(self.colliders.iter().flatten());
+        u.extend(self.level_body);
         u.extend(self.bodies.values().flat_map(|b| [b.body, b.collider]));
         u
     }
@@ -527,6 +590,11 @@ impl VoxelWorld {
         self.floor = self.level.as_ref().map_or(f32::MIN, |l| l.objects.iter().flatten().map(|o| o.lo[1]).min().map_or(f32::MIN, |y| y as f32 * size - 100.0));
         if self.physics {
             let p = ph.get_or_insert_with(Default::default);
+            // The world's anchor for joints to the level (a fixed body with no collider: the level's colliders are
+            // static, on no body).
+            let lb = self.id();
+            p.bridge().engine_anchor(lb).map_err(|e| anyhow!(e))?;
+            self.level_body = Some(lb);
             let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
             for k in 0..self.objects.len() {
                 if d.objects.get(k).is_some_and(|o| o.collide == Some(false)) {
@@ -677,8 +745,11 @@ impl VoxelWorld {
 
     /// Scene code's `voxelExplode`: an explosion at a world position (m) of a radius, each material within its
     /// hardness's share of it.
-    pub fn explode(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, center: Vec3, radius: f32) -> Result<serde_json::Value> {
-        self.edit(w, ph, &EditOp { shape: ShapeM::Sphere(center.to_array(), radius), kind: EditKind::Carve(RADII) })
+    pub fn explode(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, center: Vec3, radius: f32, push: f32) -> Result<serde_json::Value> {
+        if !(push.is_finite() && (0.0..=MAX_PUSH).contains(&push)) {
+            return Err(anyhow!("voxelExplode: push must be a number from 0 to {MAX_PUSH}"));
+        }
+        self.edit(w, ph, &EditOp { shape: ShapeM::Sphere(center.to_array(), radius), kind: EditKind::Carve(RADII), blast: Some(push) })
     }
 
     /// An edit (`voxelEdit`): the level's voxels changed (`voxel_core::Level`), the touched objects drawn again in place,
@@ -693,6 +764,7 @@ impl VoxelWorld {
         }
         self.ticks.0 += 1;
         self.this_edit.clear();
+        self.made.clear();
         let size = self.size as f64;
         let fp = |p: [f32; 3]| p.map(|v| to_fp(v as f64 / size));
         let shape = match op.shape {
@@ -714,6 +786,50 @@ impl VoxelWorld {
         let bounds = (Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32) * s, Vec3::new(hi[0] as f32 + 1.0, hi[1] as f32 + 1.0, hi[2] as f32 + 1.0) * s);
         let mut out = self.apply(w, ph, &e, vec![bounds])?;
         out["carve_ms"] = carve_ms.into();
+        // Scene code's joints on the level whose anchor's cell the carve took (step 10 c1): on the body its loose part
+        // became (they move onto it), or carved (they let go). A carve only takes cells: a joint whose anchor is in a
+        // cell still solid is held by it as before (one lookup); for the others the cells as they were are those solid
+        // now and those the edit cleared (`Edit::cleared`: carved, cut loose or debris).
+        // (A joint whose anchor is more than a cell from every cleared cell is not looked at at all.)
+        let joints = match (op.kind, self.level_body, ph.as_ref()) {
+            (EditKind::Carve(_), Some(lb), Some(p)) if e.cleared.values().any(|c| !c.is_empty()) => p.bridge_ref().engine_joints_of(lb),
+            _ => vec![],
+        };
+        if let (false, Some(lb), Some(p)) = (joints.is_empty(), self.level_body, ph.as_mut()) {
+            let size = self.size;
+            let lost: std::collections::HashSet<[i32; 3]> = e.cleared.values().flatten().copied().collect();
+            let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+            for c in &lost {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(c[k].saturating_sub(1));
+                    hi[k] = hi[k].max(c[k].saturating_add(1));
+                }
+            }
+            let mut taken = vec![];
+            let level = self.level.as_mut().unwrap();
+            for (j, _, a) in joints {
+                let c0 = a.map(|v| (v / size).floor() as i32);
+                if (0..3).any(|k| c0[k] < lo[k] || c0[k] > hi[k]) || level.solid(c0) {
+                    continue;
+                }
+                if let Some(c) = anchor_cell(a, size, |c| level.solid(c) || lost.contains(&c)).filter(|&c| !level.solid(c)) {
+                    taken.push((j, c));
+                }
+            }
+            for (j, c) in taken {
+                let at = Vec3::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) * self.size;
+                let holder = e.created.iter().filter_map(|&id| self.bodies.get(&(id as usize))).find_map(|x| {
+                    let (pos, rot, _) = p.bridge_ref().engine_pose(x.body)?;
+                    let local = Quat::from_array(rot).inverse() * (at - Vec3::from(pos)) / self.size;
+                    let g = [local.x.floor() as i32, local.y.floor() as i32, local.z.floor() as i32];
+                    (x.grid.get(g[0], g[1], g[2]) != 0).then_some(x.body)
+                });
+                match holder {
+                    Some(nb) if p.bridge().engine_rebind_joint(j, lb, nb).is_ok() => {}
+                    _ => p.bridge().engine_break_joint(j),
+                }
+            }
+        }
         // The bodies the shape reaches are carved too (a carve only: paint and added voxels are the level's).
         if let (EditKind::Carve(radii), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
             let t = Instant::now();
@@ -721,6 +837,15 @@ impl VoxelWorld {
             out["body_voxels"] = b.0.into();
             out["bodies_carved"] = b.1.into();
             out["bodies_ms"] = (t.elapsed().as_secs_f64() * 1e3).into();
+        }
+        // An explosion's push: on every dynamic body near it, the parts it just cut loose too, and those kicked as well
+        // (step 10 c1). Its radius is the one the carve took (held to `MAX_RADIUS` voxels).
+        if let (Some(push), Some(p)) = (op.blast, ph.as_mut()) {
+            let (centre, radius) = shape_reach(level_shape(op.shape, self.size));
+            let kick = (push * KICK_PER_PUSH).min(physics_core::limits::BLAST_MAX_DV);
+            let n = p.bridge().engine_blast(centre.to_array(), radius, push, kick, &self.made).map_err(|e| anyhow!(e))?;
+            out["pushed"] = n.into();
+            out["kicked"] = self.made.len().into();
         }
         // Paint reaches the bodies too; added voxels are the level's (`edit_body` adds to a body).
         if let (EditKind::Paint(m), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
@@ -1107,6 +1232,10 @@ impl VoxelWorld {
         }
         v.colliders = vec![None; blocks.len()];
         let p = ph.get_or_insert_with(Default::default);
+        // (The world's anchor, as a loaded level has.)
+        let lb = v.id();
+        p.bridge().engine_anchor(lb).unwrap();
+        v.level_body = Some(lb);
         let (mut full, mut shapes) = (HashMap::new(), HashMap::new());
         for k in 0..blocks.len() {
             v.collide(p, k, &mut full, &mut shapes);
@@ -1117,8 +1246,9 @@ impl VoxelWorld {
     /// The voxel bodies' determinism script (tools/physics-determinism.ts runs it natively and in wasm32, in the
     /// renderer's graph): a tower on two terrain tiles is undercut on one side, so what is above the cut is a body
     /// that lands on the stump off its balance and topples; an explosion where it lies carves it as it is turned (its
-    /// cells' centres through the body's pose) and cuts it in bodies; the ground under them is carved. The level's
-    /// hash and the physics world's, folded every 20 ticks and after every edit.
+    /// cells' centres through the body's pose) and cuts it in bodies; the ground under them is carved; an explosion
+    /// beside them pushes them (step 10 c1). The level's hash and the physics world's, folded every 20 ticks and after
+    /// every edit.
     pub fn check_script() -> u64 {
         let mut w = World::default();
         let mut ph: Option<PhysicsWorld> = None;
@@ -1139,7 +1269,7 @@ impl VoxelWorld {
             }
         };
         let edit = |h: &mut u64, v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, shape: ShapeM| {
-            v.edit(w, ph, &EditOp { shape, kind: EditKind::Carve([256; 4]) }).expect("an edit");
+            v.edit(w, ph, &EditOp { shape, kind: EditKind::Carve([256; 4]), blast: None }).expect("an edit");
             w.take_changes();
             fold(h, v, ph);
         };
@@ -1155,6 +1285,22 @@ impl VoxelWorld {
         run(&mut h, &mut v, &mut w, &mut ph, 120);
         edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([at[0], 0.8, at[2]], 0.9));
         run(&mut h, &mut v, &mut w, &mut ph, 240);
+        // Step 10 c1: an explosion beside the bodies, its push throwing them (and the parts it cuts loose).
+        v.explode(&mut w, &mut ph, Vec3::new(at[0] - 0.6, 0.9, at[2]), 0.5, DEFAULT_PUSH).expect("an explosion");
+        w.take_changes();
+        fold(&mut h, &v, &ph);
+        run(&mut h, &mut v, &mut w, &mut ph, 120);
+        // An explosion through the largest body's centre of mass: the parts it cuts the body into kicked away from it.
+        let mid = ph.as_ref().and_then(|p| {
+            let b = v.bodies.values().max_by_key(|b| b.grid.count())?;
+            let (at, rot, _) = p.bridge_ref().engine_pose(b.body)?;
+            let com = p.bridge_ref().engine_mass_properties(b.body)?.1;
+            Some(Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(Vec3::from(com)))
+        });
+        v.explode(&mut w, &mut ph, mid.unwrap_or(Vec3::new(5.5, 0.9, 3.1)), 0.5, DEFAULT_PUSH).expect("an explosion");
+        w.take_changes();
+        fold(&mut h, &v, &ph);
+        run(&mut h, &mut v, &mut w, &mut ph, 120);
         // Step 10 (a): the largest body painted dense on one side from the world, then grown by a block of its own on
         // that side (mass by cell: it settles another way).
         v.density.push(7800.0);
@@ -1170,11 +1316,11 @@ impl VoxelWorld {
                 Some((x.body, Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(mid).to_array()))
             })
             .unwrap_or((0, [5.5, 1.0, 3.1]));
-        v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([at[0] + 0.3, at[1], at[2]], 0.7), kind: EditKind::Paint(2) }).expect("a paint");
+        v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([at[0] + 0.3, at[1], at[2]], 0.7), kind: EditKind::Paint(2), blast: None }).expect("a paint");
         w.take_changes();
         fold(&mut h, &v, &ph);
         if v.bodies.values().any(|x| x.body == b) {
-            v.edit_body(&mut w, &mut ph, b, &EditOp { shape: ShapeM::Box([at[0] + 0.2, at[1] - 0.3, at[2] - 0.3], [at[0] + 0.8, at[1] + 0.3, at[2] + 0.3]), kind: EditKind::Add(2) }).expect("an add");
+            v.edit_body(&mut w, &mut ph, b, &EditOp { shape: ShapeM::Box([at[0] + 0.2, at[1] - 0.3, at[2] - 0.3], [at[0] + 0.8, at[1] + 0.3, at[2] + 0.3]), kind: EditKind::Add(2), blast: None }).expect("an add");
             w.take_changes();
         }
         fold(&mut h, &v, &ph);
@@ -1235,6 +1381,7 @@ impl VoxelWorld {
             eprintln!("voxels: a body's mass was not set ({e})");
         }
         self.this_edit.insert(k);
+        self.made.push(body);
         let parts = self.body_parts(w, k, &grid, position, rotation)?;
         if self.objects.len() <= k {
             self.objects.resize_with(k + 1, || None);
@@ -1380,6 +1527,9 @@ impl VoxelWorld {
             }
             voxels += gone.len();
             carved += 1;
+            // Scene code's joints on it, each by the cell its anchor is held by (before the carve takes cells).
+            let body_id = b.body;
+            let anchored: Vec<(physics_core::JointId, [i32; 3])> = p.bridge_ref().engine_joints_of(body_id).into_iter().filter_map(|(j, _, a)| anchor_cell(a, size, |c| b.grid.get(c[0], c[1], c[2]) != 0).map(|c| (j, c))).collect();
             // (What is left of it is not retired for the cap while this carve makes the parts it cut off.)
             self.this_edit.insert(k);
             self.keep(gone.iter().map(|&(g, mat)| (centre_of(g), mat)));
@@ -1398,6 +1548,21 @@ impl VoxelWorld {
                 cleared.extend(part);
                 loose.push(with);
             }
+            // Each anchored joint: its cell carved (broken), gone into a part cut off (it moves with that part), or still
+            // here. A joint is the material's at its anchor.
+            // (By cell: what the carve took, and which part each loose cell is in.)
+            let mut moves: Vec<(physics_core::JointId, usize)> = vec![];
+            if !anchored.is_empty() {
+                let carved: std::collections::HashSet<[i32; 3]> = gone.iter().map(|g| g.0).collect();
+                let part_of: HashMap<[i32; 3], usize> = loose.iter().enumerate().flat_map(|(i, part)| part.iter().map(move |&(g, _)| (g, i))).collect();
+                for &(j, c) in &anchored {
+                    if carved.contains(&c) {
+                        p.bridge().engine_break_joint(j);
+                    } else if let Some(&i) = part_of.get(&c) {
+                        moves.push((j, i));
+                    }
+                }
+            }
             let (collider, left) = (b.collider, b.grid.count());
             if left == 0 {
                 self.retire(w, p, k, false, "carved");
@@ -1405,8 +1570,12 @@ impl VoxelWorld {
                 let _ = collider;
                 self.redraw_body(w, p, k, &cleared, &[], Vec3::from(at), Quat::from_array(rot))?;
             }
-            for part in loose {
+            for (i, part) in loose.into_iter().enumerate() {
                 if part.len() < MIN_PIECE {
+                    // (Debris: a joint held by a cell of it lets go.)
+                    for &(j, _) in moves.iter().filter(|m| m.1 == i) {
+                        p.bridge().engine_break_joint(j);
+                    }
                     self.keep(part.iter().map(|&(g, mat)| (centre_of(g), mat)));
                     continue;
                 }
@@ -1423,6 +1592,14 @@ impl VoxelWorld {
                     l.objects.resize_with(n + 1, || None);
                 }
                 self.add_body(w, p, n, grid, corner, Quat::from_array(rot), velocity)?;
+                // The joints held by a cell of this part move onto its body (or let go if it was not made one).
+                let new_body = self.bodies.get(&n).map(|x| x.body);
+                for &(j, _) in moves.iter().filter(|m| m.1 == i) {
+                    match new_body {
+                        Some(nb) if p.bridge().engine_rebind_joint(j, body_id, nb).is_ok() => {}
+                        _ => p.bridge().engine_break_joint(j),
+                    }
+                }
             }
         }
         Ok((voxels, carved))
@@ -1611,6 +1788,7 @@ impl VoxelWorld {
         }
         self.ticks.0 += 1;
         self.this_edit.clear();
+        self.made.clear();
         let (voxels, n) = match op.kind {
             EditKind::Carve(radii) => self.carve_bodies(w, p, op.shape, radii, Some(k))?,
             EditKind::Paint(m) => self.paint_bodies(w, p, op.shape, m, Some(k))?,
@@ -2168,7 +2346,7 @@ mod tests {
             assert!(v.objects[part].as_ref().unwrap().flying.is_none());
             assert_eq!(v.frame(&mut w, 1.0 / 60.0).unwrap()["batches"], 0);
             // An explosion at the stump: the post is hard (0.4 of the radius), the slab soft (a crater 0.3 m deep under it).
-            let e = v.explode(&mut w, &mut None, Vec3::new(0.0, 0.6, 0.0), 0.5).unwrap();
+            let e = v.explode(&mut w, &mut None, Vec3::new(0.0, 0.6, 0.0), 0.5, DEFAULT_PUSH).unwrap();
             assert!(e["voxels"].as_u64().unwrap() > 100, "{e}");
             // (It took the stump's foot: what stood on it falls into the crater. Edits reach static voxels only: let it
             // land.)
@@ -2445,7 +2623,7 @@ mod tests {
         let mut v = VoxelWorld::of_blocks(&blocks, &mut w, &mut ph);
         v.max_bodies = 6;
         v.keep_debris = true;
-        let cut = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, lo: [f32; 3], hi: [f32; 3]| v.edit(w, ph, &EditOp { shape: ShapeM::Box(lo, hi), kind: EditKind::Carve([256; 4]) }).unwrap();
+        let cut = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, lo: [f32; 3], hi: [f32; 3]| v.edit(w, ph, &EditOp { shape: ShapeM::Box(lo, hi), kind: EditKind::Carve([256; 4]), blast: None }).unwrap();
         for k in 0..6 {
             let x = 0.8 + 0.8 * k as f32;
             cut(&mut v, &mut w, &mut ph, [x - 0.1, 0.5, 0.7], [x + 0.5, 0.7, 1.3]);
@@ -2622,6 +2800,192 @@ mod tests {
         assert!(!gone.is_empty() && gone.iter().all(|s| !s), "its contacts end: {gone:?}");
     }
 
+    /// Joints to the level hold to the world's anchor (step 10 c1), a fixed body with no collider: a scene body hangs
+    /// from the level by a rope (2 m, held within 2 cm); the level's colliders are static, on no body (`body` null to a
+    /// ray and to contacts: `engineColliders`); a body resting on it falls asleep; the anchor does not move (`pose`
+    /// refused); a fixed body of scene code's weighs what its colliders do.
+    #[test]
+    fn the_level_has_an_anchor_that_joints_hold_to() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true)], &mut w, &mut ph);
+        let level = v.level_body().expect("a level body");
+        assert!(level >= physics_core::bridge::ENGINE_IDS);
+        let p = ph.as_mut().unwrap();
+        assert_eq!(p.bridge().engine_anchor_body(), Some(level));
+        assert!(p.call(&mut w, "pose", &serde_json::json!({ "body": level, "position": [0, 50, 0] })).is_err());
+        p.call(&mut w, "body", &serde_json::json!({ "id": 7, "kind": "fixed", "position": [20, 20, 20] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 7, "body": 7, "shape": { "type": "sphere", "radius": 0.5 }, "mass": 12.0 })).unwrap();
+        assert_eq!(p.call(&mut w, "state", &serde_json::json!({ "body": 7 })).unwrap()["mass"], serde_json::json!(12.0));
+        // A ray down at the slab: the level, on no body.
+        let hit = p.call(&mut w, "ray", &serde_json::json!({ "origin": [3.0, 5.0, 3.0], "direction": [0, -1, 0] })).unwrap();
+        assert!(hit["collider"].as_u64().is_some() && hit["body"].is_null(), "{hit}");
+        // A box resting on it, listening: its contact's other end is on no body; it falls asleep.
+        p.call(&mut w, "body", &serde_json::json!({ "id": 1, "position": [1.0, 0.6, 1.0] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 1, "body": 1, "shape": { "type": "box", "halfExtents": [0.2, 0.2, 0.2] }, "events": true })).unwrap();
+        // A ball hanging from the level by a rope 2 m long, from a point 3 m above the slab's top.
+        p.call(&mut w, "body", &serde_json::json!({ "id": 2, "position": [4.0, 3.4, 4.0] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 2, "body": 2, "shape": { "type": "sphere", "radius": 0.1 } })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 3, "a": level, "b": 2, "type": "rope", "length": 2.0, "anchor1": [4.0, 3.4, 4.0] })).unwrap();
+        for _ in 0..240 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        let p = ph.as_mut().unwrap();
+        let ball = p.call(&mut w, "state", &serde_json::json!({ "body": 2 })).unwrap();
+        let y = ball["position"][1].as_f64().unwrap();
+        assert!((3.4 - y - 2.0).abs() < 0.02, "hangs 2 m below its anchor: {ball}");
+        let contacts = p.call(&mut w, "contacts", &serde_json::json!({})).unwrap();
+        let mine: Vec<_> = contacts.as_array().unwrap().iter().filter(|c| c["bodyA"].as_u64() == Some(1) || c["bodyB"].as_u64() == Some(1)).collect();
+        assert!(!mine.is_empty() && mine.iter().all(|c| c["bodyA"].is_null() || c["bodyB"].is_null()), "the level's end on no body: {contacts}");
+        let crate_ = p.call(&mut w, "state", &serde_json::json!({ "body": 1 })).unwrap();
+        assert_eq!(crate_["sleeping"], serde_json::json!(true), "{crate_}");
+    }
+
+    /// A joint belongs to the material at its anchor (step 10 c1). On a voxel body: cut so that its anchor's cell is in
+    /// the part cut off, the joint moves onto that part's body (the same joint to scene code, its anchor where it was);
+    /// its anchor's cell carved, it breaks (reported, gone from the world); its body carved away whole, it breaks. On the
+    /// level: its anchor in a part that comes loose, it moves onto that body; its anchor's cell carved, it breaks.
+    #[test]
+    fn joints_follow_the_cells_their_anchors_are_in() {
+        let ball = |p: &mut PhysicsWorld, w: &mut World, id: u32, at: [f32; 3]| {
+            p.call(w, "body", &serde_json::json!({ "id": id, "position": at })).unwrap();
+            p.call(w, "collider", &serde_json::json!({ "id": id, "body": id, "shape": { "type": "sphere", "radius": 0.05 } })).unwrap();
+        };
+        // (What the engine did to the joints: the moved ones' ids and bodies, the broken ones' ids.)
+        let changes = |p: &mut PhysicsWorld, w: &mut World| {
+            let c = p.call(w, "joint_changes", &serde_json::json!({})).unwrap();
+            let moved: Vec<(u64, u64)> = c["moved"].as_array().unwrap().iter().map(|m| (m["joint"].as_u64().unwrap(), m["body"].as_u64().unwrap())).collect();
+            (moved, c["broken"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect::<Vec<_>>())
+        };
+        let broken = |p: &mut PhysicsWorld, w: &mut World| changes(p, w).1;
+        let on = |p: &PhysicsWorld, body: u32| p.bridge_ref().engine_joints_of(body).len();
+        // The bar cut loose (4 x 21 x 4 cells from (2.8, 0.7, 2.8)); a rope from a ball to its lowest layer, one to its top.
+        let (mut w, mut ph, mut v) = one_body();
+        let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        let p = ph.as_mut().unwrap();
+        ball(p, &mut w, 1, [5.0, 1.0, 3.0]);
+        ball(p, &mut w, 2, [5.0, 3.0, 3.0]);
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 10, "a": b, "b": 1, "type": "rope", "length": 2.5, "anchor1": [0.2, 0.05, 0.2] })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 11, "a": b, "b": 2, "type": "rope", "length": 2.5, "anchor1": [0.2, 1.95, 0.2] })).unwrap();
+        assert_eq!(on(p, b), 2);
+        // Cut across its layers 9 and 10: the lower part (144 cells) is cut off, the upper (160) keeps the body.
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "box": [2.7, 1.6, 2.7, 3.3, 1.8, 3.3] }))).unwrap();
+        assert_eq!(v.bodies(), 2);
+        let low = *v.bodies.values().map(|x| &x.body).find(|&&x| x != b).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!((on(p, b), on(p, low)), (1, 1), "the lower rope moved with the lower part");
+        let (_, _, anchor) = p.bridge_ref().engine_joints_of(low)[0];
+        let (at, _, _) = p.bridge_ref().engine_pose(low).unwrap();
+        let world = [at[0] + anchor[0], at[1] + anchor[1], at[2] + anchor[2]];
+        assert!((world[0] - 3.0).abs() < 1e-4 && (world[1] - 0.75).abs() < 1e-4 && (world[2] - 3.0).abs() < 1e-4, "its anchor where it was: {world:?}");
+        assert_eq!(changes(p, &mut w), (vec![(10, low as u64)], vec![]), "reported as moved onto the lower part");
+        // The top rope's anchor cell carved: it breaks.
+        v.edit_body(&mut w, &mut ph, b, &op(serde_json::json!({ "op": "carve", "sphere": [3.0, 2.65, 3.0, 0.08] }))).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!(broken(p, &mut w), vec![11]);
+        assert_eq!(on(p, b), 0);
+        assert!(p.call(&mut w, "joint_set", &serde_json::json!({ "id": 11, "type": "rope", "length": 1.0 })).is_err(), "gone from the world");
+        // The lower part carved away whole: its rope breaks.
+        v.edit_body(&mut w, &mut ph, low, &op(serde_json::json!({ "op": "carve", "box": [2.0, 0.0, 2.0, 4.0, 1.7, 4.0] }))).unwrap();
+        assert_eq!(broken(ph.as_mut().unwrap(), &mut w), vec![10]);
+
+        // The level: a rope to the bar's top while it still stands, another to the slab's top.
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut w, &mut ph);
+        let lb = v.level_body().unwrap();
+        let p = ph.as_mut().unwrap();
+        ball(p, &mut w, 1, [3.0, 3.5, 3.0]);
+        ball(p, &mut w, 2, [1.0, 1.0, 1.0]);
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 20, "a": lb, "b": 1, "type": "rope", "length": 1.0, "anchor1": [3.0, 2.75, 3.0] })).unwrap();
+        p.call(&mut w, "joint", &serde_json::json!({ "id": 21, "a": lb, "b": 2, "type": "rope", "length": 1.0, "anchor1": [1.05, 0.35, 1.05] })).unwrap();
+        // The bar cut at its foot: it is a body now, and the rope to its top is on it.
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [2.7, 0.5, 2.7, 3.3, 0.7, 3.3] }))).unwrap();
+        assert_eq!(v.bodies(), 1);
+        let bar = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!((on(p, lb), on(p, bar)), (1, 1), "the rope to the bar's top moved onto its body");
+        assert_eq!(changes(p, &mut w), (vec![(20, bar as u64)], vec![]));
+        // The slab's anchor cell carved: that rope breaks.
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "sphere": [1.05, 0.35, 1.05, 0.1] }))).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!(broken(p, &mut w), vec![21]);
+        assert_eq!(on(p, lb), 0);
+    }
+
+    /// An explosion pushes the bodies near it (step 10 c1): the bar standing 0.4 m from a 0.3 m blast it does not reach
+    /// is thrown away from it, along the line from the blast's centre to its centre of mass; with `push` 0 it is not; a push out of range or of the wrong kind is refused before
+    /// anything changes (the level's hash the same).
+    #[test]
+    fn an_explosion_pushes_the_bodies_near_it() {
+        for (push, moves) in [(None, true), (Some(0.0), false)] {
+            let (mut w, mut ph, mut v) = one_body();
+            let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+            let mut j = serde_json::json!({ "op": "explode", "sphere": [3.6, 1.5, 3.0, 0.3] });
+            if let Some(p) = push {
+                j["push"] = p.into();
+            }
+            let e = v.edit(&mut w, &mut ph, &op(j)).unwrap();
+            let (lv, _) = ph.as_ref().unwrap().bridge_ref().engine_velocity_of(b).unwrap();
+            if moves {
+                // Along the line from the blast's centre to the bar's centre of mass (above the blast: up as well).
+                let com = ph.as_ref().unwrap().bridge_ref().engine_mass_properties(b).unwrap().1;
+                let (at, rot, _) = ph.as_ref().unwrap().bridge_ref().engine_pose(b).unwrap();
+                let c = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(Vec3::from(com));
+                let along = (c - Vec3::new(3.6, 1.5, 3.0)).normalize();
+                let got = Vec3::from(lv);
+                assert!(e["pushed"].as_u64().unwrap() >= 1 && got.length() > 0.05 && got.normalize().dot(along) > 0.999, "{e} {lv:?} along {along:?}");
+            } else {
+                assert!(e["pushed"].is_null() || e["pushed"] == 0, "{e}");
+                assert!(lv[0].abs() < 1e-6, "{lv:?}");
+            }
+        }
+        let (mut w, mut ph, mut v) = one_body();
+        let before = v.hash();
+        for bad in [serde_json::json!(-1.0), serde_json::json!(1e9), serde_json::json!("a")] {
+            assert!(EditOp::parse(&serde_json::json!({ "op": "explode", "sphere": [3.0, 0.3, 3.0, 0.5], "push": bad })).is_err(), "{bad}");
+        }
+        assert!(EditOp::parse(&serde_json::json!({ "op": "carve", "sphere": [3.0, 0.3, 3.0, 0.5], "push": 10 })).is_err(), "push is an explosion's");
+        assert!(v.explode(&mut w, &mut ph, Vec3::new(3.0, 0.3, 3.0), 0.5, f32::NAN).is_err());
+        assert!(v.explode(&mut w, &mut ph, Vec3::new(3.0, 0.3, 3.0), 0.5, -1.0).is_err());
+        assert_eq!(v.hash(), before, "refused before anything changed");
+    }
+
+    /// An explosion kicks the debris it cuts loose and reaches no further than it carves (step 10 c1). The bar cut off
+    /// at its foot by a 0.25 m blast leaves at more than 5 m/s (the push alone, by its area, gives it under 1 m/s), away
+    /// from the blast; with `push` 0 it is cut loose and not thrown. A 600 m blast is a 12.8 m one (`MAX_RADIUS`
+    /// voxels), as its carve is: a ball 580 m off, within 3 x 600 m, is not pushed.
+    #[test]
+    fn an_explosion_kicks_its_debris_and_reaches_what_it_carves() {
+        for (push, thrown) in [(None, true), (Some(0.0), false)] {
+            let mut w = World::default();
+            let mut ph: Option<PhysicsWorld> = None;
+            let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([28, 4, 28], [4, 24, 4], None, false)], &mut w, &mut ph);
+            let mut j = serde_json::json!({ "op": "explode", "sphere": [3.0, 0.6, 3.0, 0.25] });
+            if let Some(p) = push {
+                j["push"] = p.into();
+            }
+            let e = v.edit(&mut w, &mut ph, &op(j)).unwrap();
+            assert_eq!((v.bodies(), e["kicked"].as_u64()), (1, Some(1)), "{e}");
+            let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+            let (lv, _) = ph.as_ref().unwrap().bridge_ref().engine_velocity_of(b).unwrap();
+            let speed = Vec3::from(lv).length();
+            if thrown {
+                assert!(speed > 5.0 && lv[1] > 0.0, "kicked up and away: {lv:?} {e}");
+            } else {
+                assert!(speed < 1e-6, "{lv:?}");
+            }
+        }
+        let (mut w, mut ph, mut v) = one_body();
+        let p = ph.as_mut().unwrap();
+        p.call(&mut w, "gravity", &serde_json::json!({ "gravity": [0, 0, 0] })).unwrap();
+        p.call(&mut w, "body", &serde_json::json!({ "id": 1, "position": [-80.0, 0.0, 0.0] })).unwrap();
+        p.call(&mut w, "collider", &serde_json::json!({ "id": 1, "body": 1, "shape": { "type": "sphere", "radius": 0.5 } })).unwrap();
+        let e = v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "explode", "sphere": [500.0, 300.0, 0.0, 600.0] }))).unwrap();
+        assert_eq!((e["voxels"].as_u64(), e["pushed"].as_u64()), (Some(0), Some(0)), "{e}");
+        assert_eq!(ph.as_mut().unwrap().call(&mut w, "state", &serde_json::json!({ "body": 1 })).unwrap()["linvel"], serde_json::json!([0.0, 0.0, 0.0]));
+    }
+
     /// The same body as one more check: a slab and a bar cut loose (336 voxels of 1,000 kg/m³).
     fn one_body() -> (World, Option<PhysicsWorld>, VoxelWorld) {
         let mut w = World::default();
@@ -2699,18 +3063,18 @@ mod tests {
         let body_voxels = |v: &VoxelWorld| v.bodies.values().map(|b| b.grid.count()).sum::<usize>();
         // A sphere of 600 m centred 500 m away: 12.8 m as the level takes it, which does not reach.
         let (mut w, mut ph, mut v) = one();
-        if let Ok(e) = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([500.0, 0.0, 0.0], 600.0), kind: EditKind::Carve([256; 4]) }) {
+        if let Ok(e) = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([500.0, 0.0, 0.0], 600.0), kind: EditKind::Carve([256; 4]), blast: None }) {
             assert_eq!((e["voxels"].as_u64(), e["body_voxels"].as_u64().unwrap_or(0)), (Some(0), 0), "{e}");
         }
         assert_eq!(body_voxels(&v), 336);
         // A negative radius at the body: nothing, as in the level.
         let (mut w, mut ph, mut v) = one();
-        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([3.0, 1.5, 3.0], -2.0), kind: EditKind::Carve([256; 4]) }).unwrap();
+        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([3.0, 1.5, 3.0], -2.0), kind: EditKind::Carve([256; 4]), blast: None }).unwrap();
         assert_eq!(e["body_voxels"].as_u64().unwrap_or(0), 0, "{e}");
         assert_eq!(body_voxels(&v), 336);
         // A box over the body's upper half with every class at half its share: the half, whole.
         let (mut w, mut ph, mut v) = one();
-        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([2.5, 1.75, 2.5], [3.5, 3.0, 3.5]), kind: EditKind::Carve([128; 4]) }).unwrap();
+        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([2.5, 1.75, 2.5], [3.5, 3.0, 3.5]), kind: EditKind::Carve([128; 4]), blast: None }).unwrap();
         assert_eq!(e["body_voxels"].as_u64(), Some(16 * 11), "{e}");
     }
 
@@ -2872,7 +3236,7 @@ mod tests {
         for (n, r) in [0.5f32, 1.0, 2.0, 4.0].into_iter().enumerate() {
             let at = foot + Vec3::new(0.0, 0.0, (n as f32 - 1.5) * (hi.z - lo.z) * 0.2);
             let t = Instant::now();
-            let e = v.explode(&mut w, &mut ph, at, r).unwrap();
+            let e = v.explode(&mut w, &mut ph, at, r, DEFAULT_PUSH).unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3;
             println!("explosion of {r} m: {ms:.2} ms in all: carve {:.2}, colliders {:.2}, meshes {:.2}, parts {:.2} (meshes and bodies {:.2}), bodies carved {:.2}; {} voxels, {} objects touched, {} parts of {} voxels; bodies now {}", e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["rebuild_ms"].as_f64().unwrap(), e["pieces_ms"].as_f64().unwrap(), e["piece_mesh_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["voxels"], e["touched"], e["pieces"], e["piece_voxels"], e["bodies"]);
             w.take_changes();
@@ -2894,7 +3258,7 @@ mod tests {
         frames(&mut v, &mut w, &mut ph, 300, "the next five");
         // An explosion into what fell.
         let t = Instant::now();
-        let e = v.explode(&mut w, &mut ph, Vec3::new((lo.x + hi.x) * 0.5, lo.y + 2.0, (lo.z + hi.z) * 0.5), 3.0).unwrap();
+        let e = v.explode(&mut w, &mut ph, Vec3::new((lo.x + hi.x) * 0.5, lo.y + 2.0, (lo.z + hi.z) * 0.5), 3.0, DEFAULT_PUSH).unwrap();
         println!("an explosion of 3 m into it: {:.2} ms in all: carve {:.2}, colliders {:.2}, bodies carved {:.2} ({} bodies, {} voxels); bodies now {}", t.elapsed().as_secs_f64() * 1e3, e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["bodies_carved"], e["body_voxels"], e["bodies"]);
         w.take_changes();
         frames(&mut v, &mut w, &mut ph, 300, "five seconds after");
@@ -2917,7 +3281,7 @@ mod tests {
         let trunks = [[-100.6f32, 9.3, -92.0], [-103.9, 9.1, -93.0], [-86.7, 9.8, -91.1], [-105.9, 9.2, -88.8], [-89.3, 10.0, -88.1], [-105.8, 9.2, -86.5], [-88.1, 10.1, -87.0], [-83.9, 10.0, -90.7]];
         for t in trunks {
             let at = Vec3::new(t[0], t[1] + 0.8, t[2]);
-            let e = v.explode(&mut w, &mut ph, at, 0.6).unwrap();
+            let e = v.explode(&mut w, &mut ph, at, 0.6, DEFAULT_PUSH).unwrap();
             println!("a trunk cut at {at:?}: {} voxels carved, {} parts of {} voxels", e["voxels"], e["pieces"], e["piece_voxels"]);
             w.take_changes();
             for _ in 0..30 {
