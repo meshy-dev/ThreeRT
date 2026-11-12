@@ -824,6 +824,9 @@ export class SceneBinding {
     }
     // A joint holds while it and both its objects' bodies are in the scene; whatever it was made from changing (a body
     // made anew included) makes it anew. (The engine's bodies changing what stands for what: looked at again too.)
+    // (The joints the engine let go of since the last look, during the frame script too, first: one let go of is not
+    // to be changed or remade here; one whose voxel body went is broken, not merely without a body.)
+    if (this.engineJoints.size) this.takeBroken();
     const engine = getEngineBodies();
     const epoch = engine?.epoch?.() ?? 0;
     if (epoch !== this.engineEpoch) {

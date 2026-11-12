@@ -181,7 +181,7 @@ test("a rope to the level (`engineColliders`): made on the level's fixed body on
     rope.needsUpdate = true;
     engine.calls.length = 0;
     binding.sync();
-    assert.deepEqual(engine.physicsCalls().map((c) => [c[0], c[1].length]), [["joint_set", 1.5]]);
+    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0])).map((c) => [c[0], c[1].length]), [["joint_set", 1.5]]);
   } finally {
     g.__engine = before;
   }
@@ -383,3 +383,37 @@ test("a joint the engine let go of: broken, a \"broken\" event, not made again u
     g.__engine = before;
   }
 });
+
+test("a joint let go of during the frame script: the next sync knows it before a change to it (no joint_set on a gone joint)", async () => {
+  const { voxelLevel } = await import("../src/native.ts");
+  const { engineColliders, Mesh, BoxGeometry, PerspectiveCamera, RopeJoint, Scene, SceneBinding, Vector3 } = await import("@threert/scene");
+  const engine = await voxelEngine();
+  (engine as unknown as { voxelLevelBody: () => number }).voxelLevelBody = () => 2 ** 30 + 1;
+  const g = globalThis as { __engine?: object };
+  const before = g.__engine;
+  g.__engine = engine;
+  try {
+    voxelLevel({ route: "mesh", palette: [], objects: [] });
+    const scene = new Scene(), camera = new PerspectiveCamera();
+    const binding = new SceneBinding(engine, scene, camera);
+    const lamp = new Mesh(new BoxGeometry(0.3, 0.3, 0.3));
+    lamp.physics = "dynamic";
+    const rope = new RopeJoint(engineColliders, lamp, { length: 2, anchorA: new Vector3(4, 6, 1) });
+    scene.add(camera, lamp, rope);
+    binding.sync();
+    const id = engine.physicsCalls().find((c) => c[0] === "joint")![1].id as number;
+    const events: string[] = [];
+    rope.addEventListener("broken", (e) => events.push(e.type));
+    // The frame script carves the anchor (the engine lets go) and sets the rope's length in the same frame.
+    engine.answers.broken = [id];
+    rope.length = 1;
+    rope.needsUpdate = true;
+    engine.calls.length = 0;
+    binding.sync();
+    assert.deepEqual(engine.physicsCalls().filter((c) => /joint/.test(c[0])), [], "no joint_set on the gone joint");
+    assert.deepEqual([rope.broken, events], [true, ["broken"]]);
+  } finally {
+    g.__engine = before;
+  }
+});
+
