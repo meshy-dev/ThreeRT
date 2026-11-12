@@ -21,6 +21,7 @@
     "playwright-core": "^1.65.0",
     "pngjs": "^7.0.0",
     "polygon-clipping": "^0.15.7",
+    "qrcode-generator": "^2.0.4",
     "sharp": "^0.35.5",
     "three": "^0.187.0",
     "typescript": "^5.9.3"

@@ -1,0 +1,30 @@
+{
+  "id": "refraction",
+  "industry": "Education",
+  "title": "Refraction Bench",
+  "caption": "A straw breaks in water; a glass ball flips the arrows",
+  "blurb": "A straw in a glass of water, a glass block in front of stripes and a glass ball in front of a card of arrows, set out like the optics page of a school book. Every ray bends at each surface it crosses, so the straw breaks at the water line and the ball shows the arrows upside down; set the index to 1.0 and the glass disappears.",
+  "controls": [
+    {
+      "input": "Click a piece",
+      "does": "moves the camera in on it; again to step back"
+    },
+    {
+      "input": "M",
+      "does": "makes the block and the ball glass, diamond, air or water"
+    },
+    {
+      "input": "T",
+      "does": "swings the block and moves the straw round the glass"
+    },
+    {
+      "input": "V",
+      "does": "steps the camera through the pieces"
+    },
+    {
+      "input": "R",
+      "does": "back to the start"
+    }
+  ],
+  "credits": []
+}

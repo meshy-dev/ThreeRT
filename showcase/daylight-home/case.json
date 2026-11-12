@@ -1,0 +1,91 @@
+{
+  "id": "daylight-home",
+  "industry": "Architecture & real estate",
+  "title": "Daylight Home",
+  "caption": "One living room, from morning sun to lamplight",
+  "blurb": "A living room with a window wall, lit only by a physical sun and sky and, at night, by its two lamps. Step through the day and the patch of sun crosses the parquet, bounces onto the ceiling and takes the colour of whatever paint you choose: what a buyer wants to know, and what engines normally bake once.",
+  "controls": [
+    {
+      "input": "T, or click the floor",
+      "does": "morning, noon, golden hour, night"
+    },
+    {
+      "input": "P, or click a wall",
+      "does": "repaints the walls"
+    },
+    {
+      "input": "F, or click the sofa",
+      "does": "changes the sofa’s fabric"
+    },
+    {
+      "input": "V",
+      "does": "moves to another viewpoint"
+    },
+    {
+      "input": "L, or click a lamp",
+      "does": "switches the lamps"
+    }
+  ],
+  "credits": [
+    {
+      "what": "Sofa 01",
+      "by": "Kirill Sannikov",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/Sofa_01"
+    },
+    {
+      "what": "Mid Century Lounge Chair",
+      "by": "Kuutti Siitonen",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/mid_century_lounge_chair"
+    },
+    {
+      "what": "Modern Coffee Table 01",
+      "by": "Amin",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/modern_coffee_table_01"
+    },
+    {
+      "what": "Potted Plant 02",
+      "by": "Rico Cilliers",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/potted_plant_02"
+    },
+    {
+      "what": "Wooden Display Shelves 01",
+      "by": "James Ray Cock",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/wooden_display_shelves_01"
+    },
+    {
+      "what": "Side Table 01",
+      "by": "James Ray Cock",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/side_table_01"
+    },
+    {
+      "what": "Ceramic Vase 01",
+      "by": "James Ray Cock",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/ceramic_vase_01"
+    },
+    {
+      "what": "Painting (artwork of Hanging Picture Frame 02, cropped)",
+      "by": "James Ray Cock",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/hanging_picture_frame_02"
+    },
+    {
+      "what": "Herringbone Parquet (floor textures)",
+      "by": "Sergej Majboroda, Jenelle van Heerden",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/herringbone_parquet"
+    },
+    {
+      "what": "Poly Wool Herringbone (rug weave)",
+      "by": "colormass, Rico Cilliers",
+      "licence": "CC0 1.0",
+      "url": "https://polyhaven.com/a/poly_wool_herringbone"
+    }
+  ]
+}

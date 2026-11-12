@@ -11,5 +11,10 @@ target/
 /assets
 playground/vendor/
 
+# The site's generated directories: the client release (a closed-source binary) and the example packages, written by
+# the client repository's release script (site/README.md).
+/site/releases/
+/site/play/
+
 # Claude Code harness state (skills under .claude/skills are committed)
 .claude/*.lock

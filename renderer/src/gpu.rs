@@ -85,7 +85,7 @@ pub struct Params {
     pub fog_color: [f32; 4], // ambient inscattering radiance rgb, max opacity
     pub vol: [f32; 4],       // volumetric scattering albedo (0 = off), phase anisotropy, extinction scale in range, -
     pub vol2: [f32; 4],      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    pub raster: [f32; 4],    // live primary visibility from the raster pass (1 = on), sub-pixel jitter x, y, -
+    pub raster: [f32; 4],    // live primary visibility from the raster pass (1 = on), sub-pixel jitter x, y; ray tracing off (1)
     pub cache: [f32; 4],     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     pub motion: [f32; 4],    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1][0])
     pub prev_pos: [f32; 4],  // live: the previous frame's camera (emitter reservoir reprojection), as cam_*
@@ -1251,8 +1251,10 @@ impl Gpu {
             .await
             .map_err(|e| anyhow!("no GPU adapter: {e}"))?;
         let adapter_info = adapter.get_info();
-        let mut limits = wgpu::Limits::default();
         let al = adapter.limits();
+        // The defaults, lowered where the adapter cannot meet them (the iOS Simulator's GPU allows 15 inter-stage
+        // variables, not 16); on desktop GPUs this changes nothing.
+        let mut limits = wgpu::Limits::default().or_worse_values_from(&al);
         limits.max_storage_buffer_binding_size = al.max_storage_buffer_binding_size;
         limits.max_buffer_size = al.max_buffer_size;
         limits.max_texture_array_layers = al.max_texture_array_layers;

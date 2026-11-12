@@ -321,6 +321,12 @@ const EDIT_DEBRIS: usize = 4096;
 const MAX_OCCUPANCY_WORDS: usize = 1 << 24;
 
 impl VoxelWorld {
+    /// Files the requested level reads from the asset root (its objects' uris), before `realize` loads them: a client
+    /// that fetches the session's files first (`GameSession::files`) must fetch these too.
+    pub fn files(&self) -> Vec<String> {
+        self.pending.iter().flat_map(|d| d.objects.iter().map(|o| o.uri.clone())).collect()
+    }
+
     /// Scene code's `voxelLevel`: kept until the session knows the asset root (`realize`).
     pub fn request(&mut self, d: LevelDesc) -> Result<()> {
         if d.route != "mesh" && d.route != "boxes" {

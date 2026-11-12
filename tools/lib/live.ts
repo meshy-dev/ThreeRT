@@ -80,8 +80,9 @@ export interface Live {
   quit(): Promise<void>;
 }
 
-export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string } = {}): Live {
-  const args = ["live", bundle, "--assets", b.assets, "--presets", b.presets, "--width", "1280", "--height", "720", "--scale", o.scale ?? "0.5"];
+export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string; width?: number; height?: number; bounces?: number } = {}): Live {
+  const args = ["live", bundle, "--assets", b.assets, "--presets", b.presets, "--width", String(o.width ?? 1280), "--height", String(o.height ?? 720), "--scale", o.scale ?? "0.5"];
+  if (o.bounces) args.push("--bounces", String(o.bounces));
   if (o.room) args.push("--room", o.room);
   if (o.frameLog) {
     rmSync(o.frameLog, { force: true });
