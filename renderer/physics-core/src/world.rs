@@ -639,14 +639,21 @@ impl Physics {
         self.colliders.insert(id, (h, data));
         self.shape_data += data;
         self.fresh.insert(id);
+        if let Some(b) = body {
+            self.vehicle_colliders_changed(b);
+        }
         Ok(id)
     }
 
     pub fn remove_collider(&mut self, id: ColliderId) {
         if let Some((h, data)) = self.colliders.remove(&id) {
+            let body = self.world.colliders.get(h).and_then(|c| c.parent()).and_then(|p| self.world.bodies.get(p)).map(|b| b.user_data as BodyId);
             self.world.remove_collider(h);
             self.shape_data -= data;
             self.fresh.remove(&id);
+            if let Some(b) = body {
+                self.vehicle_colliders_changed(b);
+            }
         }
     }
 
@@ -881,6 +888,14 @@ impl Physics {
         }
     }
 
+    /// A body's colliders, in id order.
+    pub fn colliders_of(&self, body: BodyId) -> Vec<ColliderId> {
+        let Some(b) = self.body(body) else { return vec![] };
+        let mut out: Vec<ColliderId> = b.colliders().iter().filter_map(|&c| self.world.colliders.get(c).map(|c| c.user_data as ColliderId)).collect();
+        out.sort_unstable();
+        out
+    }
+
     pub fn has_collider(&self, id: ColliderId) -> bool {
         self.colliders.contains_key(&id)
     }
@@ -1102,7 +1117,7 @@ impl Physics {
         let b = &mut world.bodies[h];
         b.set_additional_mass_properties(props, true);
         b.recompute_mass_properties_from_colliders(&world.colliders);
-        self.vehicle_mass_changed(id);
+        self.vehicle_mass_set(id, props);
         Ok(())
     }
 

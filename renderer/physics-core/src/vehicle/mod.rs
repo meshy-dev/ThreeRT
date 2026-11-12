@@ -17,7 +17,7 @@ pub mod sweep;
 
 use super::{between, unit, v, within, BodyId, ColliderDesc, ColliderId, Physics, Shape};
 use controller::{DynamicRayCastVehicleController, WheelTuning};
-use rapier3d::math::{Real, Vector};
+use rapier3d::math::{Pose, Real, Vector};
 use rapier3d::prelude::*;
 use std::collections::HashMap;
 
@@ -131,11 +131,17 @@ pub struct VehicleState {
 pub(super) struct Vehicle {
     chassis: BodyId,
     ctl: DynamicRayCastVehicleController,
-    /// Per wheel: its stop collider.
+    /// Per wheel: its stop collider, where the stop sits on the chassis and the suspension's up (chassis frame: the
+    /// stop turns about it with the steering), and the steering the stop is turned to.
     stops: Vec<ColliderId>,
+    stop_frames: Vec<(Vector, Vector)>,
+    stop_steering: Vec<f32>,
+    /// The centre of mass override, and what it is made of: the chassis's own additional mass properties (those of
+    /// `set_mass_properties`), and its colliders' own, which the override holds (the colliders are made massless while
+    /// it does). Both put back when the vehicle goes.
     center_of_mass: Option<Vector>,
-    /// The chassis's own mass properties before the override (put back on removal).
-    own_mass: Option<MassProperties>,
+    own_additional: MassProperties,
+    held: Vec<(ColliderId, MassProperties)>,
 }
 
 /// A stop collider's state for the hook: the wheel's axle and forward (world), and the speed of its surface along the
@@ -245,16 +251,12 @@ impl Physics {
             }
             None => None,
         };
-        let own_mass = match com {
-            Some(c) => Some(self.override_center_of_mass(hb, c)?),
-            None => None,
-        };
         let mut ctl = DynamicRayCastVehicleController::new(hb);
         ctl.index_forward_axis = d.forward_axis;
         ctl.index_up_axis = d.up_axis;
         let g = self.world.gravity;
         ctl.up = if g.length() > 0.0 { -g.normalize() } else { Vector::Y };
-        let mut stops = vec![];
+        let (mut stops, mut stop_frames) = (vec![], vec![]);
         for (w, dir, axle) in wheels {
             let t = WheelTuning {
                 suspension_stiffness: w.stiffness,
@@ -280,62 +282,111 @@ impl Physics {
             let h = self.colliders[&id].0;
             self.world.colliders[h].set_active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS);
             stops.push(id);
+            stop_frames.push((at, -dir));
         }
+        let own_additional = self.own_additional(hb);
+        let n = stops.len();
         let id = self.id();
-        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, center_of_mass: com, own_mass });
+        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, stop_frames, stop_steering: vec![0.0; n], center_of_mass: com, own_additional, held: vec![] });
+        self.apply_center_of_mass(id);
         Ok(id)
     }
 
-    /// The chassis's mass properties with the centre of mass at `com` (body frame), its mass and inertia (about the
-    /// centre of mass) kept: Rapier sums the colliders' and the body's additional mass properties, so the additional
-    /// ones are set to what is needed on top of the colliders'. That needs mass in the additional ones (a voxel body's,
-    /// `set_mass_properties`): a centre of mass cannot move by adding no mass. Returns the body's own properties
-    /// before.
-    fn override_center_of_mass(&mut self, hb: RigidBodyHandle, com: Vector) -> Result<MassProperties, String> {
-        let world = &mut self.world;
-        let b = &world.bodies[hb];
+    /// A body's additional mass properties: its whole less its colliders'.
+    fn own_additional(&self, hb: RigidBodyHandle) -> MassProperties {
+        let b = &self.world.bodies[hb];
         let total = b.mass_properties().local_mprops;
         let mut shapes = MassProperties::default();
         for &c in b.colliders() {
-            if let Some(co) = world.colliders.get(c) {
-                if let Some(at) = co.position_wrt_parent() {
-                    shapes += co.mass_properties().transform_by(at);
+            if let Some((co, at)) = self.world.colliders.get(c).and_then(|co| Some((co, co.position_wrt_parent()?))) {
+                shapes += co.mass_properties().transform_by(at);
+            }
+        }
+        // (None, or nearly none: exactly none, not the rounding of a subtraction.)
+        if total.mass() - shapes.mass() <= 1e-6 * total.mass() {
+            MassProperties::default()
+        } else {
+            total - shapes
+        }
+    }
+
+    /// A vehicle's centre of mass override, made anew from what the chassis holds: its own additional mass properties,
+    /// the colliders the override already holds, and any collider with a mass of its own, which it takes over (the
+    /// collider made massless, its mass properties kept): the body's mass and inertia (about the centre of mass) as
+    /// all of them sum, the centre of mass where the vehicle puts it. Rapier sums a body's colliders' and its
+    /// additional mass properties, and a centre of mass cannot move by adding a massless part, so the override is all of
+    /// the body's mass in its additional properties. Run again when the chassis's mass changes (`set_mass_properties`,
+    /// a collider added or removed).
+    pub(super) fn apply_center_of_mass(&mut self, id: VehicleId) {
+        let Some(veh) = self.vehicles.get_mut(&id) else { return };
+        let (Some(com), Some(&hb)) = (veh.center_of_mass, self.bodies.get(&veh.chassis)) else { return };
+        // (A held collider that is gone is forgotten: its mass went with it.)
+        veh.held.retain(|(c, _)| self.colliders.contains_key(c));
+        let world = &mut self.world;
+        let mut total = veh.own_additional;
+        for &c in world.bodies[hb].colliders() {
+            let Some(co) = world.colliders.get_mut(c) else { continue };
+            let Some(&at) = co.position_wrt_parent() else { continue };
+            let cid = co.user_data as ColliderId;
+            if let Some((_, own)) = veh.held.iter().find(|(h, _)| *h == cid) {
+                total += own.transform_by(&at);
+            } else {
+                let own = co.mass_properties();
+                if own.mass() > 0.0 {
+                    total += own.transform_by(&at);
+                    veh.held.push((cid, own));
+                    co.set_mass_properties(MassProperties::default());
                 }
             }
         }
-        if !(total.mass() - shapes.mass() > 1e-3 * total.mass().max(1e-6)) {
-            return Err("physics: a vehicle's centre of mass needs the chassis's mass given by `set_mass_properties` (its colliders without density)".into());
+        if !(total.mass() > 0.0) {
+            return;
         }
         let target = MassProperties::with_inertia_matrix(com, total.mass(), total.reconstruct_inertia_matrix());
         let b = &mut world.bodies[hb];
-        b.set_additional_mass_properties(target - shapes, true);
+        b.set_additional_mass_properties(target, true);
         b.recompute_mass_properties_from_colliders(&world.colliders);
-        Ok(total - shapes)
     }
 
-    /// Removes a vehicle with its stops, and puts the chassis's own centre of mass back.
+    /// Removes a vehicle with its stops, and puts the chassis's own mass properties back (its colliders' and its
+    /// additional ones).
     pub fn remove_vehicle(&mut self, id: VehicleId) {
         let Some(veh) = self.vehicles.remove(&id) else { return };
         for s in veh.stops {
             self.remove_collider(s);
         }
-        if let (Some(own), Some(&hb)) = (veh.own_mass, self.bodies.get(&veh.chassis)) {
+        let Some(&hb) = self.bodies.get(&veh.chassis) else { return };
+        if veh.center_of_mass.is_some() {
+            for (c, own) in veh.held {
+                if let Some(&(h, _)) = self.colliders.get(&c) {
+                    self.world.colliders[h].set_mass_properties(own);
+                }
+            }
             let world = &mut self.world;
             let b = &mut world.bodies[hb];
-            b.set_additional_mass_properties(own, true);
+            b.set_additional_mass_properties(veh.own_additional, true);
             b.recompute_mass_properties_from_colliders(&world.colliders);
         }
     }
 
-    /// After `set_mass_properties` on a chassis: its vehicles' centre of mass again on top of the new properties.
-    pub(super) fn vehicle_mass_changed(&mut self, body: BodyId) {
-        let Some(&hb) = self.bodies.get(&body) else { return };
-        let ids: Vec<VehicleId> = self.vehicles.iter().filter(|(_, v)| v.chassis == body && v.center_of_mass.is_some()).map(|(&i, _)| i).collect();
-        for id in ids {
-            let com = self.vehicles[&id].center_of_mass.unwrap();
-            if let Ok(own) = self.override_center_of_mass(hb, com) {
-                self.vehicles.get_mut(&id).unwrap().own_mass = Some(own);
-            }
+    /// The vehicles on a body that override its centre of mass.
+    fn overriding(&self, body: BodyId) -> Vec<VehicleId> {
+        self.vehicles.iter().filter(|(_, v)| v.chassis == body && v.center_of_mass.is_some()).map(|(&i, _)| i).collect()
+    }
+
+    /// After `set_mass_properties` on a chassis (`props`, its new additional mass properties): its vehicles' centre of
+    /// mass again, on top of them.
+    pub(super) fn vehicle_mass_set(&mut self, body: BodyId, props: MassProperties) {
+        for id in self.overriding(body) {
+            self.vehicles.get_mut(&id).unwrap().own_additional = props;
+            self.apply_center_of_mass(id);
+        }
+    }
+
+    /// After a collider was added to or removed from a body: its vehicles' centre of mass again.
+    pub(super) fn vehicle_colliders_changed(&mut self, body: BodyId) {
+        for id in self.overriding(body) {
+            self.apply_center_of_mass(id);
         }
     }
 
@@ -391,7 +442,9 @@ impl Physics {
     }
 
     /// Every vehicle (in id order) probes and pushes its chassis; the stops' state for this step's hook. A vehicle
-    /// whose chassis is gone is removed (`take_vehicles_gone`).
+    /// whose chassis is gone is removed (`take_vehicles_gone`). The probes see the world as the calls left it, as the
+    /// queries do (`fresh`). A chassis asleep is not pushed, but its wheels are probed: ground changed under it (carved,
+    /// filled, moved) wakes it, and it is updated at once.
     pub(super) fn update_vehicles(&mut self) -> StopHooks {
         let mut hooks = StopHooks::default();
         if self.vehicles.is_empty() {
@@ -403,15 +456,53 @@ impl Physics {
             self.remove_vehicle(id);
             self.vehicles_gone.push(id);
         }
+        // The stops turned with the steering (as the last controls left it).
+        let mut turned = vec![];
+        for veh in self.vehicles.values_mut() {
+            for (i, w) in veh.ctl.wheels().iter().enumerate() {
+                if w.steering != veh.stop_steering[i] {
+                    veh.stop_steering[i] = w.steering;
+                    let (at, up) = veh.stop_frames[i];
+                    let h = self.colliders[&veh.stops[i]].0;
+                    self.world.colliders[h].set_position_wrt_parent(Pose::from_parts(at, rapier3d::math::rotation_from_angle(up * w.steering)));
+                    turned.push(veh.stops[i]);
+                }
+            }
+        }
+        self.fresh.extend(turned);
+        // The fresh colliders, where they are now (`fresh` in world.rs).
+        let fresh: Vec<(ColliderHandle, Pose, Option<RigidBodyHandle>)> = self
+            .fresh
+            .iter()
+            .filter_map(|id| {
+                let h = self.colliders.get(id)?.0;
+                let c = self.world.colliders.get(h)?;
+                if !c.is_enabled() {
+                    return None;
+                }
+                let at = match (c.parent().and_then(|p| self.world.bodies.get(p)), c.position_wrt_parent()) {
+                    (Some(b), Some(local)) => *b.position() * *local,
+                    _ => *c.position(),
+                };
+                Some((h, at, c.parent()))
+            })
+            .collect();
+        let fresh_ids = &self.fresh;
+        let settled = |_: ColliderHandle, c: &Collider| !fresh_ids.contains(&(c.user_data as u32));
         let world = &mut self.world;
         for veh in self.vehicles.values_mut() {
             let hb = self.bodies[&veh.chassis];
+            let mine: Vec<(ColliderHandle, Pose)> = fresh.iter().filter(|f| f.2 != Some(hb)).map(|f| (f.0, f.1)).collect();
+            let filter = QueryFilter::default().exclude_rigid_body(hb).predicate(&settled);
             if world.bodies[hb].is_sleeping() {
-                continue;
+                let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
+                if !veh.ctl.ground_changed(q, &mine) {
+                    continue;
+                }
+                world.bodies[hb].wake_up(true);
             }
-            let filter = QueryFilter::default().exclude_rigid_body(hb);
             let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
-            veh.ctl.update_vehicle(dt, q);
+            veh.ctl.update_vehicle(dt, q, &mine);
             // The stops roll at the hub's speed.
             let b = &world.bodies[hb];
             for (w, s) in veh.ctl.wheels().iter().zip(&veh.stops) {
@@ -429,5 +520,178 @@ impl Physics {
     /// The vehicles removed since the last call because their chassis went (removed, or taken out by the world).
     pub fn take_vehicles_gone(&mut self) -> Vec<VehicleId> {
         std::mem::take(&mut self.vehicles_gone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scenarios::{CELL, SEDAN};
+    use super::*;
+    use crate::BodyDesc;
+
+    fn flat(p: &mut Physics) -> ColliderId {
+        let cells: Vec<[i32; 3]> = (-40..40).flat_map(|x| (-60..60).flat_map(move |z| (-3..0).map(move |y| [x, y, z]))).collect();
+        p.add_collider(None, &ColliderDesc { friction: 1.0, ..ColliderDesc::new(Shape::Voxels { size: CELL, cells }) }).unwrap()
+    }
+
+    fn wheels() -> Vec<WheelDesc> {
+        [(-0.7, 1.4), (0.7, 1.4), (-0.7, -1.4), (0.7, -1.4)].iter().map(|&(x, z)| WheelDesc { anchor: [x, 0.0, z], rest: 0.4, travel: 0.25, radius: 0.35, stiffness: 30.0, ..Default::default() }).collect()
+    }
+
+    /// A plain box chassis, its mass its collider's density: the vehicle's centre of mass takes over (mass and inertia
+    /// kept); a collider added later adds its mass with the centre of mass staying where the vehicle put it; one taken
+    /// off takes its mass with it; the vehicle removed, the body's own mass properties are back.
+    #[test]
+    fn a_box_chassis_takes_the_vehicle_centre_of_mass() {
+        let mut p = Physics::default();
+        let b = p.add_body(&BodyDesc { position: [0.0, 1.0, 0.0], ..Default::default() }).unwrap();
+        p.add_collider(Some(b), &ColliderDesc { density: 300.0, ..ColliderDesc::new(Shape::Box([0.8, 0.3, 2.0])) }).unwrap();
+        let sorted = |mut i: [f32; 3]| {
+            i.sort_by(f32::total_cmp);
+            i
+        };
+        let (mass, com, inertia) = p.mass_properties(b).unwrap();
+        let inertia = sorted(inertia);
+        let v = p.add_vehicle(&VehicleDesc { chassis: b, wheels: wheels(), forward_axis: 2, up_axis: 1, center_of_mass: Some([0.0, -0.2, 0.3]) }).unwrap();
+        let (m, c, i) = p.mass_properties(b).unwrap();
+        assert!((m - mass).abs() < 1e-3 * mass && (c[1] + 0.2).abs() < 1e-5 && (c[2] - 0.3).abs() < 1e-5, "{m} {c:?}");
+        assert!(sorted(i).iter().zip(inertia).all(|(a, b)| (a - b).abs() < 1e-3 * b), "{i:?} against {inertia:?}");
+        let extra = p.add_collider(Some(b), &ColliderDesc { mass: Some(100.0), position: [0.0, 0.5, -1.0], ..ColliderDesc::new(Shape::Box([0.2, 0.2, 0.2])) }).unwrap();
+        let (m2, c2, _) = p.mass_properties(b).unwrap();
+        assert!((m2 - mass - 100.0).abs() < 1e-2 && (c2[2] - 0.3).abs() < 1e-5, "{m2} {c2:?}");
+        p.remove_collider(extra);
+        assert!((p.mass_properties(b).unwrap().0 - mass).abs() < 1e-2);
+        p.remove_vehicle(v);
+        let (m3, c3, i3) = p.mass_properties(b).unwrap();
+        assert!((m3 - mass).abs() < 1e-3 * mass && c3.iter().zip(com).all(|(a, b)| (a - b).abs() < 1e-5) && sorted(i3).iter().zip(inertia).all(|(a, b)| (a - b).abs() < 1e-3 * b), "{m3} {c3:?} {i3:?}");
+    }
+
+    /// The stops turn with the steering, about the suspension's axis, as the wheels do.
+    #[test]
+    fn the_stops_turn_with_the_steering() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (_, v) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], false);
+        let c: Vec<WheelControl> = (0..4).map(|i| WheelControl { steering: if i < 2 { 0.5 } else { 0.0 }, ..Default::default() }).collect();
+        p.set_vehicle_controls(v, &c).unwrap();
+        p.step();
+        let (_, stops) = p.vehicle_parts(v).unwrap();
+        let turn = |s: ColliderId| {
+            let h = p.colliders[&s].0;
+            let r = p.world.colliders[h].position_wrt_parent().unwrap().rotation;
+            r.to_scaled_axis()
+        };
+        assert!((turn(stops[0]) - Vector::new(0.0, 0.5, 0.0)).length() < 1e-5, "{:?}", turn(stops[0]));
+        assert!(turn(stops[2]).length() < 1e-6);
+    }
+
+    /// A car at rest, its ground carved away under it: the probes see the carve at once (no tick late), and the car
+    /// falls; awake, and asleep (a car at rest goes to sleep: the ground changed under it wakes it).
+    #[test]
+    fn a_car_falls_when_its_ground_is_carved() {
+        for sleep in [false, true] {
+            let mut p = Physics::default();
+            let ground = flat(&mut p);
+            let (b, v) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], sleep);
+            for _ in 0..300 {
+                p.step();
+            }
+            assert_eq!(p.sleeping(b), sleep, "asleep after 5 s: {}", p.sleeping(b));
+            let clear: Vec<[i32; 3]> = (-15..15).flat_map(|x| (-30..30).flat_map(move |z| (-3..0).map(move |y| [x, y, z]))).collect();
+            p.edit_voxels(ground, &clear, &[]).unwrap();
+            p.step();
+            assert!(p.vehicle_state(v).unwrap().wheels.iter().all(|w| !w.contact), "sleep {sleep}: a wheel still on the carved ground");
+            for _ in 0..30 {
+                p.step();
+            }
+            assert!(p.pose(b).unwrap().0[1] < -0.5, "sleep {sleep}: the car did not fall: {:?}", p.pose(b));
+        }
+    }
+
+    /// Ground added under a wheel that hangs over a hole: the probe sees the new collider in the very tick it is added
+    /// (the broad phase does not have it until that tick's step).
+    #[test]
+    fn a_wheel_finds_ground_added_this_tick() {
+        let mut p = Physics::default();
+        let cells: Vec<[i32; 3]> = (-40..40).flat_map(|x| (-60..60).flat_map(move |z| (-3..0).map(move |y| [x, y, z]))).filter(|c| !(c[0] >= -12 && c[0] < -4 && c[2] >= 10 && c[2] < 18)).collect();
+        p.add_collider(None, &ColliderDesc { friction: 1.0, ..ColliderDesc::new(Shape::Voxels { size: CELL, cells }) }).unwrap();
+        let (_, v) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], false);
+        for _ in 0..120 {
+            p.step();
+        }
+        assert!(!p.vehicle_state(v).unwrap().wheels[0].contact, "the front left wheel hangs over the hole");
+        let fill = ColliderDesc { position: [-0.8, -0.15, 1.4], ..ColliderDesc::new(Shape::Box([0.4, 0.15, 0.4])) };
+        p.add_collider(None, &fill).unwrap();
+        p.step();
+        assert!(p.vehicle_state(v).unwrap().wheels[0].contact, "the wheel did not find the ground added this tick");
+    }
+
+    /// A car asleep, pushed by a blast: it wakes and moves.
+    #[test]
+    fn a_blast_wakes_a_car_at_rest() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (b, _) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], true);
+        for _ in 0..300 {
+            p.step();
+        }
+        assert!(p.sleeping(b));
+        let before = p.pose(b).unwrap().0;
+        assert!(p.blast([3.0, 0.5, 0.0], 3.0, 3000.0, 0.0, &[]).unwrap() > 0);
+        for _ in 0..30 {
+            p.step();
+        }
+        let after = p.pose(b).unwrap().0;
+        assert!(!p.sleeping(b) || (after[0] - before[0]).abs() > 0.05, "{before:?} -> {after:?}");
+        assert!((after[0] - before[0]).abs() > 0.05, "the blast did not move it: {before:?} -> {after:?}");
+    }
+
+    /// A chassis removed takes its vehicle with it, reported once.
+    #[test]
+    fn a_vehicle_goes_with_its_chassis() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (b, v) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], false);
+        p.step();
+        p.remove_body(b);
+        p.step();
+        assert!(!p.has_vehicle(v));
+        assert_eq!(p.take_vehicles_gone(), vec![v]);
+        assert!(p.take_vehicles_gone().is_empty());
+        assert!(p.set_vehicle_controls(v, &[]).is_err() && p.vehicle_state(v).is_none());
+    }
+
+    /// Numbers out of bounds are refused before anything is made: NaN, infinities, 0 and huge radii, travel, nine
+    /// wheels, an axle along the suspension, a fixed chassis, wild controls.
+    #[test]
+    fn a_vehicle_out_of_bounds_is_refused() {
+        let mut p = Physics::default();
+        let b = p.add_body(&BodyDesc::default()).unwrap();
+        p.add_collider(Some(b), &ColliderDesc::new(Shape::Box([1.0, 0.3, 2.0]))).unwrap();
+        let fixed = p.add_body(&BodyDesc { kind: crate::BodyKind::Fixed, ..Default::default() }).unwrap();
+        let ok = VehicleDesc { chassis: b, wheels: wheels(), forward_axis: 2, up_axis: 1, center_of_mass: None };
+        let colliders = p.colliders_of(b).len();
+        let bad: Vec<VehicleDesc> = vec![
+            VehicleDesc { wheels: vec![WheelDesc { radius: f32::NAN, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc { radius: 0.0, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc { radius: 1e9, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc { travel: f32::INFINITY, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc { axle: [0.0, -1.0, 0.0], ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc { stiffness: -1.0, ..Default::default() }], ..ok.clone() },
+            VehicleDesc { wheels: vec![WheelDesc::default(); 9], ..ok.clone() },
+            VehicleDesc { wheels: vec![], ..ok.clone() },
+            VehicleDesc { forward_axis: 1, ..ok.clone() },
+            VehicleDesc { center_of_mass: Some([f32::NAN, 0.0, 0.0]), ..ok.clone() },
+            VehicleDesc { chassis: fixed, ..ok.clone() },
+            VehicleDesc { chassis: 999, ..ok.clone() },
+        ];
+        for d in &bad {
+            assert!(p.add_vehicle(d).is_err(), "{d:?}");
+        }
+        assert_eq!(p.colliders_of(b).len(), colliders, "a refused vehicle left a stop behind");
+        let v = p.add_vehicle(&ok).unwrap();
+        for c in [WheelControl { engine: f32::NAN, ..Default::default() }, WheelControl { brake: -1.0, ..Default::default() }, WheelControl { steering: 2.0, ..Default::default() }, WheelControl { engine: f32::INFINITY, ..Default::default() }] {
+            assert!(p.set_vehicle_controls(v, &[c]).is_err(), "{c:?}");
+        }
     }
 }

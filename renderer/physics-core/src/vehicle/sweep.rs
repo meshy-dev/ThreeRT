@@ -9,7 +9,7 @@
 use rapier3d::math::{Pose, Real, Vector};
 use rapier3d::parry::bounding_volume::{Aabb, BoundingVolume};
 use rapier3d::parry::query::{cast_shapes, ShapeCastOptions};
-use rapier3d::parry::shape::{AxisMask, Ball};
+use rapier3d::parry::shape::{AxisMask, Ball, Shape};
 use rapier3d::prelude::{ColliderHandle, QueryPipeline};
 
 /// What a probe met.
@@ -117,10 +117,11 @@ fn ball_box_inv(o: Vector, d: Vector, inv: Vector, h: Vector, r: Real, max: Real
 }
 
 /// The probe: a ball of radius `r` from each of `starts` along `dir` (unit) for at most `max`, against every collider
-/// the pipeline's filter lets through; the nearest acceptable hit of them all (above). The sweeps from the starts
-/// share one walk over the cells (a wheel's two, now and a tick ahead, cover nearly the same cells); every cell is
-/// tested against each.
-pub fn sweep_ball(queries: &QueryPipeline, starts: &[Vector], dir: Vector, r: Real, max: Real, up: Vector, cos_max: Real) -> Option<Hit> {
+/// the pipeline's filter lets through and the `fresh` ones (those the broad phase does not have right until the next
+/// step: added, edited or moved since the last one; the filter leaves them out, and each is given where it is now);
+/// the nearest acceptable hit of them all (above). The sweeps from the starts share one walk over the cells (a wheel's
+/// two, now and a tick ahead, cover nearly the same cells); every cell is tested against each.
+pub fn sweep_ball(queries: &QueryPipeline, fresh: &[(ColliderHandle, Pose)], starts: &[Vector], dir: Vector, r: Real, max: Real, up: Vector, cos_max: Real) -> Option<Hit> {
     let mut swept: Option<Aabb> = None;
     for &start in starts {
         let end = start + dir * max;
@@ -129,63 +130,75 @@ pub fn sweep_ball(queries: &QueryPipeline, starts: &[Vector], dir: Vector, r: Re
     }
     let swept = swept?;
     let mut best: Option<Hit> = None;
+    for (h, co) in queries.intersect_aabb_conservative(swept) {
+        sweep_collider(h, co.shape(), co.position(), swept, starts, dir, r, max, up, cos_max, &mut best);
+    }
+    for &(h, pose) in fresh {
+        if let Some(co) = queries.colliders.get(h) {
+            if co.shape().compute_aabb(&pose).intersects(&swept) {
+                sweep_collider(h, co.shape(), &pose, swept, starts, dir, r, max, up, cos_max, &mut best);
+            }
+        }
+    }
+    best
+}
+
+/// One collider's part of `sweep_ball`, the collider at `pose`.
+#[allow(clippy::too_many_arguments)]
+fn sweep_collider(h: ColliderHandle, shape: &dyn Shape, pose: &Pose, swept: Aabb, starts: &[Vector], dir: Vector, r: Real, max: Real, up: Vector, cos_max: Real, best: &mut Option<Hit>) {
     let keep = |hit: Hit, best: &mut Option<Hit>| {
         let ok = hit.inside || hit.normal.dot(up) > cos_max;
         if ok && best.is_none_or(|b| hit.distance < b.distance) {
             *best = Some(hit);
         }
     };
-    for (h, co) in queries.intersect_aabb_conservative(swept) {
-        let pose = co.position();
-        match co.shape().as_voxels() {
-            Some(v) => {
-                let half = v.voxel_size() / 2.0;
-                let d = pose.rotation.inverse() * dir;
-                let inv = inverse(d);
-                let local_starts: Vec<Vector> = starts.iter().map(|&s| pose.inverse_transform_point(s)).collect();
-                let local = swept.transform_by(&pose.inverse());
-                // Only cells with a free face turned up (its normal against `up` above 0) can hold an acceptable hit:
-                // a point of the cells' surface whose normal is within the slope of `up` lies on such a face or on its
-                // edge, and that face's cell meets the ball there first. A cell covered on every upward side would
-                // only give hits on faces inside the ground.
-                let u = pose.rotation.inverse() * up;
-                let mut upward = AxisMask::empty();
-                for (c, pos, neg) in [(u.x, AxisMask::X_POS, AxisMask::X_NEG), (u.y, AxisMask::Y_POS, AxisMask::Y_NEG), (u.z, AxisMask::Z_POS, AxisMask::Z_NEG)] {
-                    if c > 0.0 {
-                        upward |= pos;
-                    } else if c < 0.0 {
-                        upward |= neg;
-                    }
-                }
-                for cell in v.voxels_intersecting_local_aabb(&local) {
-                    if cell.state.is_empty() || !cell.state.free_faces().intersects(upward) {
-                        continue;
-                    }
-                    let c = v.voxel_center(cell.grid_coords);
-                    for (k, &o) in local_starts.iter().enumerate() {
-                        let limit = best.map_or(max, |b| b.distance);
-                        if let Some((t, n)) = ball_box_inv(o - c, d, inv, half, r, limit) {
-                            let normal = pose.rotation * n;
-                            let centre = starts[k] + dir * t;
-                            keep(Hit { collider: h, distance: t, normal, point: centre - normal * r, inside: t == 0.0 }, &mut best);
-                        }
-                    }
+    match shape.as_voxels() {
+        Some(v) => {
+            let half = v.voxel_size() / 2.0;
+            let d = pose.rotation.inverse() * dir;
+            let inv = inverse(d);
+            let local_starts: Vec<Vector> = starts.iter().map(|&s| pose.inverse_transform_point(s)).collect();
+            let local = swept.transform_by(&pose.inverse());
+            // Only cells with a free face turned up (its normal against `up` above 0) can hold an acceptable hit: a
+            // point of the cells' surface whose normal is within the slope of `up` lies on such a face or on its edge,
+            // and that face's cell meets the ball there first. A cell covered on every upward side would only give
+            // hits on faces inside the ground.
+            let u = pose.rotation.inverse() * up;
+            let mut upward = AxisMask::empty();
+            for (c, pos, neg) in [(u.x, AxisMask::X_POS, AxisMask::X_NEG), (u.y, AxisMask::Y_POS, AxisMask::Y_NEG), (u.z, AxisMask::Z_POS, AxisMask::Z_NEG)] {
+                if c > 0.0 {
+                    upward |= pos;
+                } else if c < 0.0 {
+                    upward |= neg;
                 }
             }
-            None => {
-                for &start in starts {
+            for cell in v.voxels_intersecting_local_aabb(&local) {
+                if cell.state.is_empty() || !cell.state.free_faces().intersects(upward) {
+                    continue;
+                }
+                let c = v.voxel_center(cell.grid_coords);
+                for (k, &o) in local_starts.iter().enumerate() {
                     let limit = best.map_or(max, |b| b.distance);
-                    let options = ShapeCastOptions { max_time_of_impact: limit, target_distance: 0.0, stop_at_penetration: true, compute_impact_geometry_on_penetration: true };
-                    if let Ok(Some(hit)) = cast_shapes(pose, Vector::ZERO, co.shape(), &Pose::from_translation(start), dir, &Ball::new(r), options) {
-                        let normal = pose.rotation * hit.normal1;
-                        let inside = hit.time_of_impact == 0.0;
-                        keep(Hit { collider: h, distance: hit.time_of_impact, normal, point: pose * hit.witness1, inside }, &mut best);
+                    if let Some((t, n)) = ball_box_inv(o - c, d, inv, half, r, limit) {
+                        let normal = pose.rotation * n;
+                        let centre = starts[k] + dir * t;
+                        keep(Hit { collider: h, distance: t, normal, point: centre - normal * r, inside: t == 0.0 }, best);
                     }
                 }
             }
         }
+        None => {
+            for &start in starts {
+                let limit = best.map_or(max, |b| b.distance);
+                let options = ShapeCastOptions { max_time_of_impact: limit, target_distance: 0.0, stop_at_penetration: true, compute_impact_geometry_on_penetration: true };
+                if let Ok(Some(hit)) = cast_shapes(pose, Vector::ZERO, shape, &Pose::from_translation(start), dir, &Ball::new(r), options) {
+                    let normal = pose.rotation * hit.normal1;
+                    let inside = hit.time_of_impact == 0.0;
+                    keep(Hit { collider: h, distance: hit.time_of_impact, normal, point: pose * hit.witness1, inside }, best);
+                }
+            }
+        }
     }
-    best
 }
 
 #[cfg(test)]

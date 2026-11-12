@@ -16,11 +16,13 @@
 //!   not at the contact point;
 //! - a bump stop spring in the suspension's last centimetres, its stiffness rising with the square of the compression
 //!   into it; the stop collider behind it (`mod.rs`);
-//! - the tyre's grip held to the share of the load gravity holds against the ground (`max(0, n · up)`).
+//! - the tyre's grip held to the share of the load gravity holds against the ground (`max(0, n · up)`);
+//! - `update_vehicle` takes the colliders the broad phase does not have yet (`fresh`), which the probe tests where they
+//!   are; `ground_changed` probes a chassis asleep without pushing it, for the caller to wake it when its ground moved.
 
 use rapier3d::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet};
 use rapier3d::geometry::{ColliderHandle, ColliderSet};
-use rapier3d::math::{Real, Vector, VectorExt, rotation_from_angle};
+use rapier3d::math::{Pose, Real, Vector, VectorExt, rotation_from_angle};
 use rapier3d::pipeline::QueryPipeline;
 use rapier3d::prelude::QueryPipelineMut;
 use rapier3d::utils::{CrossProduct, DotProduct};
@@ -360,14 +362,14 @@ impl DynamicRayCastVehicleController {
     /// after this tick (a face the wheel reaches this tick met now); the nearer kept. The swept distance is the
     /// suspension's length; the contact point and normal are where the ball touches. Started in the ground: the
     /// suspension fully compressed against ground whose normal is the suspension's "up".
-    fn probe(&mut self, queries: &QueryPipeline, chassis: &RigidBody, wheel_id: usize) {
+    fn probe(&mut self, queries: &QueryPipeline, fresh: &[(ColliderHandle, Pose)], chassis: &RigidBody, wheel_id: usize) {
         let (up, cos_max, dt) = (self.up, self.cos_max_slope, self.last_dt);
         let wheel = &mut self.wheels[wheel_id];
         let dir = wheel.wheel_direction_ws;
         let source = wheel.raycast_info.hard_point_ws;
         let reach = wheel.suspension_rest_length;
         let ahead = source + chassis.velocity_at_point(source) * dt;
-        let hit = super::sweep::sweep_ball(queries, &[source, ahead], dir, wheel.radius, reach, up, cos_max);
+        let hit = super::sweep::sweep_ball(queries, fresh, &[source, ahead], dir, wheel.radius, reach, up, cos_max);
         wheel.raycast_info.ground_object = None;
         let Some(hit) = hit else {
             // No contact, put wheel info as in rest position
@@ -405,7 +407,9 @@ impl DynamicRayCastVehicleController {
     }
 
     /// Updates the vehicle’s velocity based on its suspension, engine force, and brake.
-    pub fn update_vehicle(&mut self, dt: Real, queries: QueryPipelineMut) {
+    /// (ThreeRT) `fresh`: the colliders the broad phase does not have right until the next step, each where it is now
+    /// (`sweep::sweep_ball`).
+    pub fn update_vehicle(&mut self, dt: Real, queries: QueryPipelineMut, fresh: &[(ColliderHandle, Pose)]) {
         self.last_dt = dt;
         let num_wheels = self.wheels.len();
         let chassis = &queries.bodies[self.chassis];
@@ -427,7 +431,7 @@ impl DynamicRayCastVehicleController {
         //
 
         for wheel_id in 0..self.wheels.len() {
-            self.probe(&queries.as_ref(), chassis, wheel_id);
+            self.probe(&queries.as_ref(), fresh, chassis, wheel_id);
         }
 
         let chassis_mass = chassis.mass();
@@ -485,6 +489,19 @@ impl DynamicRayCastVehicleController {
 
             wheel.delta_rotation *= 0.99; //damping of rotation when not in contact
         }
+    }
+
+    /// (ThreeRT) For a chassis asleep: the wheels probed where they are, nothing pushed; whether the ground under any of
+    /// them changed since they were last probed (a wheel's contact came or went, or its suspension's length moved by
+    /// more than 1 mm): the ground was carved, filled or moved under a car at rest, and it must wake.
+    pub fn ground_changed(&mut self, queries: QueryPipelineMut, fresh: &[(ColliderHandle, Pose)]) -> bool {
+        let before: Vec<(bool, Real)> = self.wheels.iter().map(|w| (w.raycast_info.is_in_contact, w.raycast_info.suspension_length)).collect();
+        let chassis = &queries.bodies[self.chassis];
+        for i in 0..self.wheels.len() {
+            self.update_wheel_transform(chassis, i);
+            self.probe(&queries.as_ref(), fresh, chassis, i);
+        }
+        self.wheels.iter().zip(before).any(|(w, (c, l))| w.raycast_info.is_in_contact != c || (w.raycast_info.suspension_length - l).abs() > 1e-3)
     }
 
     /// Reference to all the wheels attached to this vehicle.
