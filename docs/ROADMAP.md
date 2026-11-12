@@ -1777,8 +1777,37 @@ Measured on the M5 Pro (`out/liveq/gpu-runs-std.md`; single runs unless said):
   set again from this build's readings with the margins the old ones had (tools/bench-ghosting.ts); the trails'
   limits and the other shots' stand.
 
-Not done here: the whole-frame history caps of the traced grid's accumulations (48 frames while the camera moves, 16
-after a lighting change, 4 after a geometry edit, 24 with spark lights) and filters sized by hit distance; the
+**History lengths (2026-11-12, after it).** The whole frame's history was cut by what happened in the scene: held to
+48 frames while the camera moved, every pixel cut to 16 at a lighting edit and to 4 at a geometry edit, 24 for good in
+a scene with spark lights. Now one bound while the scene's lighting changes (32 frames, a real-time denoiser's: NRD's
+default is 30; `HISTORY_LIVE`), the long history once it has settled, and within it each pixel's own: 48 where it
+moves a pixel a frame, and an anti-lag that cuts the irradiance history by how far its fast mean left the slow one
+beyond their noise (ReBLUR's form; it was on / off). No edit cuts anything.
+
+| dE against the offline render or the converged frame | main | this |
+|---|---|---|
+| the Bistro slice half a second after its explosion (2560 × 1440, scale 0.375) | 6.58 | 6.03 |
+| the Bistro slice at rest, 5 s in | 2.79 | 2.82 |
+| Kabukichō 2 s / 4 s after its signs close (bench-temporal at 0.5, real time) | 6.56, 6.61 / 2.82, 2.86 | 6.58, 6.70, 7.73 / 2.91, 2.92, 2.95 |
+| bench-ghosting excess, Bistro (turn-mid, strafe-mid ground; the two returns; stop + 0.1 s) | 1.17, 1.85, 1.38, 1.47, 1.59 | 1.08, 1.76, 1.25, 1.34, 1.50 |
+| the same, Kabukichō | 2.46, 3.31, 1.25, 1.29, 2.52 | 2.42, 3.26, 1.14, 1.20, 2.47 |
+
+- What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, H1–H31):
+  - no bound at all: a long history lags behind what moves (the explosion 5.94 with SSIM 0.809 for 0.832);
+  - 64 frames: the explosion reads better (5.72) but a lighting edit is followed a second late (the signs 7.82 / 3.37);
+  - the cuts at edits kept beside the new bound: as main (the explosion 6.69): a cut is the whole frame's for a
+    change in one corner;
+  - an anti-lag on the specular (its fast mean kept with the moments): at one sample a pixel that mean is noise, and
+    cutting by it cost more than the lag (the slice at rest 2.98 for 2.82);
+  - the anti-lag in a settled scene: it finds noise (a still Bistro 2.43 for 2.23). It runs while the lighting
+    changes, as before.
+- A lighting edit is followed a little later than under main's cut, sometimes (the table's third row; the bench runs
+  in real time and its 2 s reading was already too run-dependent to gate on).
+- By day none of this shows (Thames through fifteen explosions: frame to frame the same as main to 0.02): the sun's
+  direct light and the upscaler's own history carry the frame. A geometry edit by night was not measured.
+- Cost: none that shows (Bistro's passes 6.64–6.66 ms a frame in both builds).
+
+Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
 
