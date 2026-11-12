@@ -188,6 +188,7 @@ pub fn object(w: &mut World, id: u32, j: &Value) -> Result<()> {
             majorant: j["majorant"].as_f64().unwrap_or(0.0) as f32,
             g: j["g"].as_f64().unwrap_or(0.0) as f32,
             homogeneous: j["homogeneous"].as_bool().unwrap_or(false),
+            animated: j["animated"].as_bool().unwrap_or(false),
             grid: num("grid"),
         },
         "instanced" => Kind::Instanced {

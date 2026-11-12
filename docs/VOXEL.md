@@ -576,7 +576,7 @@ takes the pool out of the scene for good.
 - **A fire** (`fire(at, r, time)`): the next fireball of the pool, 2.2 r across (5 cm to 40 m), its centre 0.3 r above
   the explosion's point, from `time` (now or later); a light at its centre while it burns, from the first step after
   it starts (at age 0 it gives none, and takes no light from an older fire). Time going back (a restart) ends every
-  fire. Two fires close together make two fireballs that overlap: the engine cannot draw that rightly yet (the sixth
+  fire. Two fires close together make two fireballs that overlap: the engine cannot draw that rightly yet (the last
   temporary way round below; nothing in `Explosions` keeps them apart). The fireball's default peak is 30,000 nits (a
   flame's; `Fireball`'s own 40 is a stylised night's and does not show by day). Every object of the pool is made in
   setup and `movable`: firing moves them in place (a fixed object's first move rebuilds the live scene once: 281 ms on
@@ -620,32 +620,41 @@ fire's emission, and the stand-in light is there as well. The bench's references
 `crater` spot, by day (fireballs, no grid), the live frame at render scale 0.75 (never 1: at exactly 1 the live frame has no edge
 anti-aliasing), 1280 x 720, lockstep at 60 fps from the start, against our offline render of the same scene time
 (2,048 spp, no clamps, no denoiser; 1,024 against 2,048 spp: ΔE 0.40, SSIM 0.993), which has the fireball's own light
-and no fire light. Live in lockstep is bit-reproducible (A/A ΔE 0.00). Targets ΔE ≤ 3, SSIM ≥ 0.9. Measured on main
-`0a89089` (after #33, `f2dfb0b`, which bounds each pixel's history at 32 frames while the lighting changes instead of
-capping the whole frame's at 16), with the numbers from before #33 beside them:
+and no fire light. Live in lockstep is bit-reproducible (A/A ΔE 0.00). Targets ΔE ≤ 3, SSIM ≥ 0.9. Measured with the
+live view telling media that change with time from the surfaces behind them (below), on main `230b0f3`; beside them
+main before that (`0a89089`):
 
-| after the fire starts | whole image ΔE / SSIM | the fireball (its box) ΔE / p99 / SSIM / luminance | the street below it ΔE / SSIM / luminance | before #33: whole / fireball / street |
+| after the fire starts | whole image ΔE / SSIM | the fireball (its box) ΔE / p99 / SSIM / luminance | the street below it ΔE / SSIM / luminance | main before: whole / fireball / street |
 | --- | --- | --- | --- | --- |
-| 0.2 s | **1.86 / 0.963** | 7.32 / 36 / 0.822 / 1.04 | **1.34 / 0.972** / 0.99 | 2.11 / 0.949; 6.90 / 31 / 0.846 / 1.02; 1.38 / 0.960 / 1.00 |
-| 0.5 s | 3.21 / 0.930 | 7.81 / 39 / 0.815 / 1.27 | **0.99 / 0.981** / 1.03 | 3.08 / 0.930; 6.61 / 31 / 0.850 / 1.22; 1.00 / 0.978 / 1.03 |
-| 1.0 s | 4.39 / 0.851 | 5.71 / 41 / 0.796 / 1.16 | (the fireball's box reaches the image's foot) | 3.53 / 0.876; 4.36 / 28 / 0.839 / 1.09 |
+| 0.2 s | **1.77 / 0.964** | 6.28 / 30 / 0.832 / 1.01 | **1.34 / 0.972** / 0.99 | 1.86 / 0.963; 7.32 / 36 / 0.822 / 1.04; 1.34 / 0.972 / 0.99 |
+| 0.5 s | **2.54 / 0.942** | 5.56 / 30 / 0.855 / 1.18 | **0.98 / 0.981** / 1.03 | 3.21 / 0.930; 7.81 / 39 / 0.815 / 1.27; 0.99 / 0.981 / 1.03 |
+| 1.0 s | 2.99 / 0.895 | 3.69 / 26 / 0.861 / 1.08 | (the fireball's box reaches the image's foot) | 4.39 / 0.851; 5.71 / 41 / 0.796 / 1.16 |
 
 Where it falls short, and why:
-- **The fireball** misses at every age, and since #33 by more at 0.5 and 1 s (ΔE 6.61 → 7.81, 4.36 → 5.71). Part of
-  it is the live media's own picture, unchanged by #33: the same moment held (time all but stopped, 120 frames)
-  against offline reads ΔE 3.63 / 4.34 / 2.73 (3.78 / 4.28 / 2.80 before), SSIM 0.920 / 0.895 / 0.905: the live view
+- **The fireball** misses at every age. Most of it is the live media's own picture: the same moment held (time all
+  but stopped, 120 frames) against offline reads ΔE 3.64 / 4.32 / 2.70, SSIM 0.903 / 0.881 / 0.903: the live view
   marches 8 steps through a fireball whose noise is finer than that, and lights it from the radiance cache's voxels
-  (isotropic); its cooled smoke reads lighter and more see-through than offline. The rest is the temporal filter:
-  the real-time frame against the held one, ΔE 5.74 / 4.65 / 3.51 (5.92 / 3.96 / 2.45 before). The filter does not
-  know a procedural medium changes with time, so it keeps the hotter fireball of the frames before (luminance 1.27
-  of offline at 0.5 s). Before #33 the fire light's change each frame cut the whole frame's history to 16 frames,
-  which held this down; since #33 a lighting change bounds each pixel's history at 32 frames, and the light makes
-  little difference to the fireball: without it ΔE 7.51 / 8.47 / 7.55 (11.2 / 9.9 / 9.5 before #33), with it 7.32 /
-  7.81 / 5.71. Nothing mitigates the ghosting now (the temporary ways round below). The light still lights the street
-  (the street's numbers as before #33).
-- **The whole image** meets at 0.2 s, is 0.21 over in ΔE at 0.5 s (SSIM met), and misses at 1.0 s (the fireball's box
-  now spans the image's height, its smoke over the top cells). Its p99 (19 / 29 / 37) grows with the fireball's box;
-  away from the fire the cells' p99 is the level's own at 0.75 (foliage, about 10).
+  (isotropic); its cooled smoke reads lighter and more see-through than offline. The rest is the temporal filter,
+  the real-time frame against the held one: ΔE 5.33 / 2.71 / 1.57 (5.74 / 4.65 / 3.51 on main before). At 0.2 s the
+  fireball is 12 frames old and grows fastest; a pixel there holds four samples of history.
+- **What the temporal filter does with a medium** (the shared live path; `pathtrace.wgsl` `media_composite`,
+  `live.wgsl` `compose`). Two faults were in it, both measured here:
+  - The medium's transmittance was multiplied into each frame's diffuse and specular lighting before those were
+    accumulated, so the surface behind kept the fireball's shadow of the frames before. It now goes with the sample
+    and is applied to the denoised lighting where the frame is composed (alone: the fireball 6.78 / 6.35 / 4.59).
+    `volume/animated-clears-live`: 16 frames after a medium ends, the wall behind it read 0.88 of 2 nits; now 2.00.
+  - Nothing told the filter that a medium changes. A volume function is `animated` when its code reads `i.time` (or
+    says so), a simulated grid always; the march gives the share of each pixel such media take, and the upscaler
+    holds four samples of history there, as it does for a surface with animated shading (alone: 7.02 / 7.24 / 4.91).
+  The fire light no longer matters to the fireball: without it ΔE 6.36 / 5.62 / 4.19. It lights the street.
+- **How the numbers moved** (the fireball's box at 0.2 / 0.5 / 1 s): 6.90 / 6.61 / 4.36 when step 10 b merged, with
+  the fire light's change cutting the whole frame's history to 16 frames (without the light 11.2 / 9.9 / 9.5); 7.18 /
+  7.53 / 5.25 after #30 (the frame at render resolution and its upscaler, which holds 16 samples of its own;
+  without the light 7.51 / 8.47 / 7.56); 7.32 / 7.81 / 5.71 after #33 (the cut gone, each pixel bounded at 32 frames
+  while the lighting changes); 6.28 / 5.56 / 3.69 now.
+- **The whole image** meets at 0.2 and 0.5 s; at 1.0 s its ΔE meets and its SSIM is 0.005 short (the fireball's box
+  spans the image's height, its smoke over the top cells). Its p99 (16 / 21 / 24) grows with the fireball's box; away
+  from the fire the cells' p99 is the level's own at 0.75 (foliage, about 10).
 
 
 #### Why volumes must not overlap (measured 2026-11-12, kept as the evidence)
@@ -667,7 +676,7 @@ detail, at 0.5 and 1 s its region ΔE 17.0 and 10.8 with live 1.5 times offline'
 live light flecks), against the fireball's 6.9 / 6.6 / 4.4 with a flame's shape; and a grid covers its box only (16 of
 the level's 160 wall spots), a small fire is one to four cells, every cell is simulated every frame, and offline has
 no reference for a fire that does not start at 0 s (`out/web-probe/step10/b-structure-data.md`). Until the engine
-draws overlapping media together (the sixth temporary way round below), the fire stays out of the grid.
+draws overlapping media together (the last temporary way round below), the fire stays out of the grid.
 
 Cost: `--only cost`, the destruction game's routes at 0.75, lockstep (frames as fast as the GPU goes), GPU ms p50 over
 2 s before and 4 s after the explosion; no rebuild in any run.
@@ -906,16 +915,17 @@ above; parry's cell iterator is half the probe's cost (a walk over the chunk's c
 
 ### Temporary ways round on the engine's shared paths
 
-`Explosions` (step 10 b) works round six faults of the shared renderer, in its own code, until they are fixed
+`Explosions` (step 10 b) works round five faults of the shared renderer, in its own code, until they are fixed
 there (the user, 2026-11-12: these are temporary; the shared paths are fixed in their own PRs, then these go, in a PR
-of their own). Each place in `packages/voxel/src/explosions.ts` points here.
+of their own). Each place in `packages/voxel/src/explosions.ts` points here. (A sixth is closed at its source: the
+fireball's ghosting, once held down by its light's change cutting the whole frame's history; "Where it falls short"
+above.)
 
 | What | Now | The fault at its source | Known side effects | It can go when | How to tell |
 | --- | --- | --- | --- | --- | --- |
 | The stand-in light | a point light at each burning fire, its intensity and colour from `FIRE_LIGHT`, measured against offline | live secondary and shadow rays have no media code: `pathtrace.wgsl` `media_shadows()` is false live (line 796), GI and reflection rays never meet a medium | offline the fire's light counts twice unless the game passes `lights: 0` (`level-destruction-fire` rendered offline has both); live, `media_train` adds the light to the radiance cache's voxels (`point_direct`, `point_sphere`): the fireball (and its smoke) is lit by it a second time; the table holds for the defaults (density, life scaled; measured by day over a floor and a wall, the fireball 0.6 of its size above it; past 8.8 m the 8.8 m values) | live rays see media: a medium's emission lights surfaces and shadows pass through it | `lights: 0`, then `tools/bench-voxel-fire.ts --only quality`: the street and the fireball's regions at least as close to offline as with the light; `voxel/fire-light` replaced by a live test of the fire's own light |
 | Idle fireballs parked | at y = −10,000, scale 1e-3, instead of hidden | `World::set_visible` (`world.rs` line 750): hiding anything but particles rebuilds the live scene | parked fireballs keep their slots among the kernel's 32 volumes, and every pixel's march still tests their boxes | hiding a volume or a light is done in place | `visible = false` instead of parking; the bench's cost runs report no rebuild after an explosion |
 | Idle lights reach 1 mm | an idle light's `distance` is 1 mm where it is parked | `light_reach` (`lib.rs` line 211): a black light without a range reaches without limit, and the kernel does not skip black lights before the group test (`pathtrace.wgsl` line 1578) | parked lights 10 km away share a group of 16 with lit ones, and groups are not sorted again when lights move (`lib.rs` line 277): the group's sphere is about 5 km wide while any fire burns (the per-light range test still works) | black lights reach nothing (or are hidden in place) and moved lights are grouped again | distance 0 on idle lights; the fire route's GPU time before any explosion within 0.1 ms of the smoke route's |
-| The fire's ghosting: no way round left | nothing: since #33 (`f2dfb0b`) the light's change no longer limits the fireball's history (before, any lighting change cut the whole frame's history to 16 frames, which held the ghosting down; now it bounds each pixel's at 32, `HISTORY_LIVE`). With the light and without, the fireball reads about the same (ΔE 7.32 / 7.81 / 5.71 against 7.51 / 8.47 / 7.55 at 0.2 / 0.5 / 1 s); the light is there for the street, not for this | the temporal filter has no "this medium changes" signal (surfaces have `o.animated`; a procedural medium has nothing) | the fireball ghosts: worse at 0.5 and 1 s than before #33 (ΔE 6.61 → 7.81, 4.36 → 5.71; real-time against held 3.96 → 4.65, 2.45 → 3.51) | the shared path gives media a per-medium "changes with time" signal the temporal pass uses per pixel; then measure again | `--only quality`, with `lights: 0` too: the fire's region within its held (converged) value |
 | The smoke kept by never rebuilding | the pool's objects movable from the start; idle ones parked, not hidden (`Explosions` has no grid now: this keeps a game's own `SimulatedSmoke`) | `LiveCore::rebuild` (`live.rs` line 3474) → `load_scene` → `Gpu::upload` makes new grid textures (`gpu.rs` line 1664): the simulated state is not carried over | any other structural change in the game (an object added, a texture, an edit's fallback) wipes the smoke and the fire burning in it | a rebuild carries every simulated grid's state over | the bench's smoke check with a rebuild forced at 1 s (an object added): the smoke at 3 s as without it |
 | Volumes must not overlap | `Explosions` has no smoke grid (it refuses one); the smoke is each fireball's own. Two fires close together still make two fireballs that overlap: nothing keeps them apart (no distance rule) | `media_track` (offline) and `media_march` (live) in `pathtrace.wgsl` take the media whole, in the order a ray enters them (at most 32, a 32-bit mask), not their coefficients summed along the ray; hence the rule (`core.ts` `VolumeMesh`, MATERIAL_FUNCTIONS.md) | a fire inside smoke is drawn behind all of it (measured: not seen at all at 0.2 and 0.5 s, "Why volumes must not overlap"); neighbouring fireballs hide each other in the same way; no smoke grid around explosions | overlapping media are drawn together: one march summing every medium's coefficients per step along the ray (or a froxel volume), offline and live | puff a `SimulatedSmoke` around fireballs again (`Explosions` taking a grid) and run the comparison that found it (`bench-voxel-fire` at d7b4e4a, `--only smoke --ages 0.2,0.5`): the fire seen in its smoke offline and live; two overlapping fireballs both seen |
 

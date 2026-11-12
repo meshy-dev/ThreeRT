@@ -272,9 +272,6 @@ export class Explosions extends Group {
         l.position.set(...PARK);
         continue;
       }
-      // (Its change each frame no longer limits the fireball's history: since #33 each pixel's history is bounded on
-      // its own, and the fire ghosts with or without the light. docs/VOXEL.md "Temporary ways round on the engine's
-      // shared paths", "The fire's ghosting: no way round left".)
       lit++;
       const { k, rgb } = g;
       const peak = Math.max(...rgb);

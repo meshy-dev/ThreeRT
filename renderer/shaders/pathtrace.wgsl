@@ -98,7 +98,8 @@ struct Material {
 struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>, x: vec4<f32> };
 // Live: color = diffuse lighting at the first hit (+ first-hit distance), emit = what the camera ray sees directly
 // (emission, sky; kept out of the denoiser) + first-hit roughness, spec = specular lighting at the first hit +
-// distance to what the first specular bounce hit (reprojection of reflections). Offline: color / albedo / normal sums.
+// distance to what the first specular bounce hit (reprojection of reflections), normal.w = the media before the first
+// hit (`media_composite`: 0.5 = none). Offline: color / albedo / normal sums.
 struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec4<f32>, spec: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -128,7 +129,8 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
 @group(0) @binding(17) var<storage, read> instances: array<Instance>;
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
-// (volume function, shape: 0 box / 1 sphere, -, -), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
+// (volume function, shape: 0 box / 1 sphere, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
+// simulated grid), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
 struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: vec4<f32>, c: vec4<f32>, p: array<vec4<f32>, 8> };
 @group(0) @binding(18) var<storage, read> media: array<Medium>;
 
@@ -759,7 +761,7 @@ fn occluded_sky(o: vec3<f32>, d: vec3<f32>) -> bool {
 // only media code: water and other constant media attenuate reflection, refraction and shadow rays; other media are
 // the camera rays' alone (media_composite).
 fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> March {
-    var r = March(1.0, vec3<f32>(0.0));
+    var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
     for (var k = 0u; k < n; k++) {
         let m = media[k];
@@ -2080,10 +2082,12 @@ fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> f32 {
 const MEDIA_STEPS: u32 = 8u;
 const MEDIA_STEPS_INDIRECT: u32 = 4u; // later segments: transmittance only
 const MEDIA_TRAIN_POINTS: u32 = 4096u;
-struct March { tr: f32, light: vec3<f32> };
+// tr, light: the transmittance and the light of every medium on the ray; moving: those of the media that change with
+// time alone (their transmittance, their light's luminance).
+struct March { tr: f32, light: vec3<f32>, moving: vec2<f32> };
 
 fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
-    var r = March(1.0, vec3<f32>(0.0));
+    var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
     let u = rnd();
     var done = 0u;
@@ -2122,8 +2126,10 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
                 lin = jv.rgb;
                 if (jv.w < CACHE_WARM) { lin = cache_point(x).rgb; }
             }
-            r.light += r.tr * (v.albedo * st * lin + v.emission) * w;
+            let seen = r.tr * (v.albedo * st * lin + v.emission) * w;
+            r.light += seen;
             r.tr *= ti;
+            if (media[best].a.w != 0u) { r.moving = vec2<f32>(r.moving.x * ti, r.moving.y + dot(seen, vec3<f32>(0.2126, 0.7152, 0.0722))); }
         }
     }
     return r;
@@ -2845,10 +2851,15 @@ fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // Live participating media, a pass of its own after the frame's last trace sample. Per traced pixel the camera ray
-// of its first sample (the jitter stored with it) is marched up to the pixel's first hit (media_march): the
-// transmittance scales every signal behind the medium (diffuse, specular, direct light, the reflection resolve's
-// rays) and the medium's light joins what the camera sees directly (the emission signal, once per sample). Reflection,
-// GI and shadow rays do not see media live (offline paths do).
+// of its samples (the frame's jitter) is marched up to the pixel's first hit (media_march). The medium's light joins
+// what the camera sees directly (the emission signal, once per sample), and the transmittance scales that signal and
+// the deterministic direct light, which no history holds. The diffuse and specular lighting and the reflection
+// resolve's rays are accumulated over frames (live.wgsl): they stay the surface's own, and the transmittance goes with
+// the sample for `compose` to apply after the denoisers, as volumetrics are composed over a denoised surface
+// elsewhere. Scaled before, a surface's history kept the shadow of the smoke of the frames before. With it goes how
+// much of the pixel is a medium that changes with time (what it hides, or its light's share of the pixel): the
+// upscaler's reactive mask there. normal.w = that share in 8 bits, plus half the transmittance. Reflection, GI and
+// shadow rays do not see media live (offline paths do).
 @compute @workgroup_size(8, 8, 1)
 fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = P.size.x;
@@ -2858,19 +2869,19 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     rng_state = pcg(pix ^ pcg(P.size.z * 9781u + P.size.w * 6271u + 0x51ed27u));
     mirror_path = false;
     var px = accum[pix];
-    let jit = u32(px.normal.w);
-    let ndc = vec2<f32>((f32(gid.x) + f32(jit / 4096u) / 4095.0) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + f32(jit % 4096u) / 4095.0) / f32(h) * 2.0);
+    let ndc = vec2<f32>((f32(gid.x) + P.raster.y) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.raster.z) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let ft = px.color.w;
     let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true);
     if (mm.tr >= 1.0 && all(mm.light == vec3<f32>(0.0))) { return; }
     let samples = P.misc.w + 1.0; // this dispatch runs with the frame's last sample's parameters
-    px.color = vec4<f32>(px.color.rgb * mm.tr, px.color.w);
-    px.spec = vec4<f32>(px.spec.rgb * mm.tr, px.spec.w);
+    let lw = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let rest = dot(mm.light, lw) - mm.moving.y + dot(px.color.rgb + px.spec.rgb + px.emit.rgb, lw) / samples * mm.tr;
+    let share = max(1.0 - mm.moving.x, mm.moving.y / max(mm.moving.y + max(rest, 0.0), 1e-9));
+    px.normal = vec4<f32>(px.normal.xyz, floor(clamp(share, 0.0, 1.0) * 255.0) + 0.5 * clamp(mm.tr, 0.0, 1.0));
     px.emit = vec4<f32>(px.emit.rgb * mm.tr + mm.light * samples, px.emit.w);
     accum[pix] = px;
     if (arrayLength(&direct_out) >= w * h) { direct_out[pix] = vec4<f32>(direct_out[pix].rgb * mm.tr, direct_out[pix].w); }
-    if (resolve_bound()) { refl[pix * 2u] = vec4<f32>(refl[pix * 2u].xyz * mm.tr, refl[pix * 2u].w); }
 }
 
 // Once per frame after the trace: folds the frame's training sums into each entry (history capped at P.cache.y
@@ -3291,8 +3302,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // misc.w = index of this sample within the frame: the first one also writes the g-buffer.
         if (P.misc.w < 0.5) {
-            // normal.w = this sample's sub-pixel jitter (12 bits each), for the upsampling reconstruction.
-            let jit = round(jx * 4095.0) * 4096.0 + round(jy * 4095.0);
+            // normal.w: no medium before the hit (`media_composite` writes it where there is one).
+            let jit = 0.5;
             accum[pix] = Pixel(vec4<f32>(diff, first_t), vec4<f32>(albedo, select(1.0, 2.0, anim)), vec4<f32>(normal, jit), vec4<f32>(e0, rough0), vec4<f32>(spec, spec_t));
         } else {
             var px = accum[pix];

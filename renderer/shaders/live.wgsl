@@ -33,7 +33,7 @@ struct LiveParams {
     jit: vec4<f32>,    // this frame's sub-pixel jitter (every traced sample's: x, y in 0 .. 1 of a traced pixel), -, -
 };
 // color = diffuse lighting + first-hit distance, emit = directly seen emission / sky + roughness, spec = specular lighting
-// + reflection hit distance (see pathtrace.wgsl).
+// + reflection hit distance, normal.w = the media before the first hit (`medium_tr`, `medium_share`; see pathtrace.wgsl).
 struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec4<f32>, spec: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> L: LiveParams;
@@ -286,9 +286,19 @@ fn sample_clamp() -> f32 {
     return L.misc2.y / max(exposure_scale(), 1e-8);
 }
 
+// The media between the camera and traced sample q's first hit (pathtrace.wgsl `media_composite`): their
+// transmittance, which the sample's diffuse and specular lighting do not carry (it is applied where they are composed,
+// after their histories and filters), and how much of the pixel is a medium that changes with time.
+fn medium_tr(q: u32) -> f32 {
+    return clamp(fract(sample_px[q].normal.w) * 2.0, 0.0, 1.0);
+}
+fn medium_share(q: u32) -> f32 {
+    return floor(sample_px[q].normal.w) / 255.0;
+}
+
 fn sample_color(q: u32) -> vec3<f32> {
     let s = sample_parts(q);
-    return s[0] + s[1] + s[2];
+    return (s[0] + s[1]) * medium_tr(q) + s[2];
 }
 
 // The traced sample under an output pixel (nearest by the pixels' centres).
@@ -765,10 +775,11 @@ fn spec_filter_traced(gid: vec3<u32>, step: i32, from_a: bool) {
 @compute @workgroup_size(8, 8, 1) fn sfilt2(@builtin(global_invocation_id) gid: vec3<u32>) { spec_filter_traced(gid, 4, true); }
 
 // The frame at render resolution: each traced sample's colour (its own albedo times the denoised irradiance, the
-// denoised specular, what the camera ray saw directly and the deterministic direct light) into fb (w: first-hit
-// distance), and its motion into `xhist_out`: screen velocity (output pixels this frame; camera and object), view depth,
-// and whether its shading is animated (signs, screens: the upscaler's reactive mask, as FSR 2 and UE's responsive AA
-// take one: what changes there has no motion vector).
+// denoised specular, both through the media before the surface, what the camera ray saw directly and the deterministic
+// direct light) into fb (w: first-hit distance), and its motion into `xhist_out`: screen velocity (output pixels this
+// frame; camera and object), view depth, and the upscaler's reactive mask, as FSR 2 and UE's responsive AA take one
+// (what changes there has no motion vector): 1 where the surface's shading is animated (signs, screens), and up to 1
+// with the share of the pixel that is a medium changing with time (fire, simulated smoke).
 @compute @workgroup_size(8, 8, 1)
 fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iw = L.isz.x;
@@ -777,7 +788,7 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let q = gid.y * iw + gid.x;
     let px = sample_px[q];
     let t = px.color.w;
-    let c = fa[q].rgb * max(px.albedo.rgb, vec3<f32>(0.02)) + spec_load(1u, q).rgb + sample_parts(q)[2] + direct_in[q].rgb;
+    let c = (fa[q].rgb * max(px.albedo.rgb, vec3<f32>(0.02)) + spec_load(1u, q).rgb) * medium_tr(q) + sample_parts(q)[2] + direct_in[q].rgb;
     let sp = sample_pos(i32(gid.x), i32(gid.y));
     let dir = ray_dir(L.cur, sp.x, sp.y);
     var p = L.cur.pos.xyz + dir * 1.0e6;
@@ -797,7 +808,8 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (pv.z > 0.0) { vel = clamp(sp - 0.5 - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0)); }
     }
     fb[q] = vec4<f32>(finite_or_zero(max(c, vec3<f32>(0.0))), t);
-    xhist_out[q] = vec4<f32>(vel, depth, select(0.0, 1.0, px.albedo.w > 1.5));
+    let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
+    xhist_out[q] = vec4<f32>(vel, depth, reactive);
 }
 
 // The upscaler works on linear radiance and its means are plain ones. (Weighted by 1 / (1 + luminance x exposure), so
@@ -815,6 +827,8 @@ const UP_SHARP: f32 = 3.5;
 const UP_REJECT: f32 = 0.25;
 // The same on animated shading (`compose`'s reactive mask): it shows this frame's picture, not a mean of the last ones.
 const UP_REACTIVE: f32 = 4.0;
+// The share of a pixel a medium that changes with time takes (`medium_share`) from which the pixel is as reactive.
+const UP_MEDIUM: f32 = 0.25;
 // How far outside the range of the history's pixels around it a point sample may lie, in that range's widths (`judge`).
 const UP_POINT: f32 = 0.5;
 // A surface counts as gone from in front when what is nearest now lies behind what was nearest by this share of its
@@ -1098,7 +1112,7 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (kept > 0.0) {
         var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
         hc = mix(hc, clamp(hc, xlo, xhi), moving);
-        let most = min(mix(UP_SAMPLES, UP_MOVING, moving), select(UP_SAMPLES, UP_REACTIVE, xhist_out[u32(bc.y * iw + bc.x)].w > 0.5));
+        let most = min(mix(UP_SAMPLES, UP_MOVING, moving), mix(UP_SAMPLES, UP_REACTIVE, clamp(xhist_out[u32(bc.y * iw + bc.x)].w, 0.0, 1.0)));
         count = min(kept + conf, most);
         let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);
         outc = mix(hc, cur, a);
@@ -1552,11 +1566,11 @@ fn post(@builtin(global_invocation_id) gid: vec3<u32>) {
     // denoised signals apart: diffuse (6: the composed colour less the rest), specular (7), deterministic direct light (8).
     // (6 does not hold with depth of field and motion blur both on: the composed colour's buffer is theirs then.)
     let tq = sample_under(gid.x, gid.y);
-    if (mode == 3u) { src = hist_out[tq].rgb * max(sample_px[tq].albedo.rgb, vec3<f32>(0.02)) + shist_out[tq].rgb + sample_parts(tq)[2] + direct_in[tq].rgb; }
+    if (mode == 3u) { src = (hist_out[tq].rgb * max(sample_px[tq].albedo.rgb, vec3<f32>(0.02)) + shist_out[tq].rgb) * medium_tr(tq) + sample_parts(tq)[2] + direct_in[tq].rgb; }
     if (mode == 4u) { src = sample_color(tq); }
-    if (mode == 6u) { src = max(fb[tq].rgb - spec_load(1u, tq).rgb - sample_parts(tq)[2] - direct_in[tq].rgb, vec3<f32>(0.0)); }
+    if (mode == 6u) { src = max(fb[tq].rgb - spec_load(1u, tq).rgb * medium_tr(tq) - sample_parts(tq)[2] - direct_in[tq].rgb, vec3<f32>(0.0)); }
     if (mode == 8u) { src = direct_in[tq].rgb; }
-    if (mode == 7u) { src = spec_load(1u, tq).rgb; }
+    if (mode == 7u) { src = spec_load(1u, tq).rgb * medium_tr(tq); }
     if (L.post.x > 0.0 && mode == 0u) {
         // Scene fringe: red sampled radially outward, blue inward (nearest texel).
         let k = L.post.x * 0.0025;
