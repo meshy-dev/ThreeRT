@@ -702,13 +702,6 @@ pub fn kernel_source(src: &str, features: u32) -> String {
             "// The node's density grid at `lp` (the volume's own space, the box [-0.5, 0.5]^3): field A's four numbers, trilinear\n// between cell centres, the border cells' beyond them; zeros for a node without a grid.\nfn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32> {\n    if (i.grid.y == 0u) { return vec4<f32>(0.0); }\n    let n = vec3<f32>(vec3<u32>(i.grid.y & 1023u, (i.grid.y >> 10u) & 1023u, (i.grid.y >> 20u) & 1023u));\n    let c = clamp((lp + 0.5) * n, vec3<f32>(0.5), n - 0.5) + vec3<f32>(0.0, 0.0, f32(i.grid.x));\n    return textureSampleLevel(grid_tex, samp, c / vec3<f32>(textureDimensions(grid_tex)), 0.0);\n}\n\n// @volume-functions-begin\n",
         );
         patch("    i.custom = m.c;\n    var r = volume_function(m.a.x, i, m.p);\n", "    i.custom = m.c;\n    i.grid = vec2<u32>(bitcast<u32>(m.b.z), bitcast<u32>(m.b.w));\n    var r = volume_function(m.a.x, i, m.p);\n");
-        // A grid has detail a medium's 8 live steps would miss: eight times as many through a medium with one, and no
-        // voxel lookup where a step finds nothing (most of a grid is empty air).
-        patch(
-            "        let steps = select(MEDIA_STEPS_INDIRECT, MEDIA_STEPS, camera);\n",
-            "        let steps = select(MEDIA_STEPS_INDIRECT, MEDIA_STEPS, camera) * select(1u, 8u, bitcast<u32>(media[best].b.w) != 0u);\n",
-        );
-        patch("            if (camera && cache_on()) {\n", "            if (camera && cache_on() && (st > 0.0 || bitcast<u32>(media[best].b.w) == 0u)) {\n");
     }
     if features & F_TINT != 0 {
         patch(

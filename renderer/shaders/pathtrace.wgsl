@@ -763,30 +763,63 @@ fn occluded_sky(o: vec3<f32>, d: vec3<f32>) -> bool {
 fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> March {
     var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
-    for (var k = 0u; k < n; k++) {
-        let m = media[k];
-        if (m.a.z == 0u) { continue; }
-        let sp = medium_span(m, o, d);
-        let a = max(sp.x, 0.0);
-        let b = min(sp.y, tmax);
-        if (a >= b) { continue; }
-        let st = m.p[0].w;
-        let tr = exp(-st * (b - a));
-        if (light) {
+    if (!light) {
+        // Transmittance alone: the media's product, in any order.
+        for (var k = 0u; k < n; k++) {
+            let m = media[k];
+            if (m.a.z == 0u) { continue; }
+            let sp = medium_span(m, o, d);
+            let a = max(sp.x, 0.0);
+            let b = min(sp.y, tmax);
+            if (a < b) { r.tr *= exp(-m.p[0].w * (b - a)); }
+        }
+        return r;
+    }
+    // With their light: along the ray, a stretch at a time between the points where it enters or leaves a medium, the
+    // coefficients of the media it is in there summed (media may overlap, and the table's order is not the ray's).
+    var t = 0.0;
+    for (var s = 0u; s <= 2u * n; s++) {
+        var st = 0.0;
+        var sc = vec3<f32>(0.0);
+        var em = vec3<f32>(0.0);
+        var end = tmax;
+        var inside = false;
+        for (var k = 0u; k < n; k++) {
+            let m = media[k];
+            if (m.a.z == 0u) { continue; }
+            let sp = medium_span(m, o, d);
+            let a = max(sp.x, 0.0);
+            let b = min(sp.y, tmax);
+            if (a >= b) { continue; }
+            if (a > t) {
+                end = min(end, a);
+            } else if (b > t) {
+                inside = true;
+                end = min(end, b);
+                st += m.p[0].w;
+                sc += m.p[0].rgb * m.p[0].w;
+                em += m.p[1].rgb;
+            }
+        }
+        if (inside) {
+            let len = end - t;
+            let tr = exp(-st * len);
             // In-scattering at two points stratified by transmittance (half of what scatters toward o happens before
             // the first, ...): one lookup in the middle lit a deep crossing with its dimmer depth.
             var lin = vec3<f32>(0.0);
             if (cache_on()) {
                 for (var j = 0u; j < 2u; j++) {
                     let q = (f32(j) + rnd()) * 0.5 * (1.0 - tr);
-                    let t = select(-log(1.0 - q) / st, (f32(j) + 0.5) * 0.5 * (b - a), st <= 1e-6);
-                    lin += 0.5 * cache_point(o + d * (a + t)).rgb;
+                    let tt = select(-log(1.0 - q) / st, (f32(j) + 0.5) * 0.5 * len, st <= 1e-6);
+                    lin += 0.5 * cache_point(o + d * (t + tt)).rgb;
                 }
             }
-            let w = select(b - a, (1.0 - tr) / st, st > 1e-6);
-            r.light += r.tr * (m.p[0].rgb * st * lin + m.p[1].rgb) * w;
+            let w = select(len, (1.0 - tr) / st, st > 1e-6);
+            r.light += r.tr * (sc * lin + em) * w;
+            r.tr *= tr;
         }
-        r.tr *= tr;
+        if (end >= tmax) { break; }
+        t = end;
     }
     return r;
 }
@@ -2014,43 +2047,61 @@ fn medium_eval(k: u32, x: vec3<f32>) -> VOut {
 struct Track { t: f32, albedo: vec3<f32>, g: f32, emission: vec3<f32> };
 
 // Delta tracking along o + d t, t < tmax: the first real collision (t < 0: none) with its albedo and HG anisotropy,
-// and the emission met on the way (emission / majorant at every tentative collision). The media are taken in the
-// order the ray enters them (they do not overlap).
+// and the emission met on the way (emission / majorant at every tentative collision). The ray is taken a stretch at
+// a time, between the points where it enters or leaves a medium: in each the media it is in are one medium, their
+// majorants and their coefficients summed (media may overlap). A collision is one of theirs, by extinction.
+// (Until 2026-11-13 each medium was tracked whole, in the order the ray entered them: a collision in the first hid
+// what a medium inside it emitted or scattered before that point: a fire inside smoke was drawn behind the smoke.)
 fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
     var r = Track(-1.0, vec3<f32>(1.0), 0.0, vec3<f32>(0.0));
     let n = min(u32(P.time.w), 32u);
-    var done = 0u;
-    for (var it = 0u; it < n; it++) {
-        var best = 0xffffffffu;
-        var span = vec2<f32>(0.0);
+    var t = 0.0;
+    for (var s = 0u; s <= 2u * n; s++) {
+        var mask = 0u;
+        var mj = 0.0;
+        var end = tmax;
         for (var k = 0u; k < n; k++) {
-            if (((done >> k) & 1u) != 0u) { continue; }
             let sp = medium_span(media[k], o, d);
             let a = max(sp.x, 0.0);
             let b = min(sp.y, tmax);
-            if (a < b && (best == 0xffffffffu || a < span.x)) {
-                best = k;
-                span = vec2<f32>(a, b);
+            if (a >= b) { continue; }
+            if (a > t) {
+                end = min(end, a);
+            } else if (b > t) {
+                mask |= 1u << k;
+                mj += media[k].b.x;
+                end = min(end, b);
             }
         }
-        if (best == 0xffffffffu) { break; }
-        done |= 1u << best;
-        let mj = media[best].b.x;
-        if (mj <= 0.0) { continue; }
-        var t = span.x;
-        loop {
-            t -= log(1.0 - rnd()) / mj;
-            if (t >= span.y) { break; }
-            let v = medium_eval(best, o + d * t);
-            r.emission += v.emission / mj;
-            if (rnd() * mj < v.extinction) {
-                r.t = t;
-                r.albedo = v.albedo;
-                r.g = media[best].b.y;
-                return r;
+        if (mask != 0u && mj > 0.0) {
+            loop {
+                t -= log(1.0 - rnd()) / mj;
+                if (t >= end) { break; }
+                var st = 0.0;
+                var em = vec3<f32>(0.0);
+                for (var k = 0u; k < n; k++) {
+                    if (((mask >> k) & 1u) == 0u) { continue; }
+                    let v = medium_eval(k, o + d * t);
+                    st += v.extinction;
+                    em += v.emission;
+                    // The medium a collision here is in: each by its extinction (the first without a draw).
+                    if (v.extinction > 0.0 && (st <= v.extinction || rnd() * st < v.extinction)) {
+                        r.albedo = v.albedo;
+                        r.g = media[k].b.y;
+                    }
+                }
+                r.emission += em / mj;
+                if (rnd() * mj < st) {
+                    r.t = t;
+                    return r;
+                }
             }
         }
+        if (end >= tmax) { break; }
+        t = end;
     }
+    r.albedo = vec3<f32>(1.0);
+    r.g = 0.0;
     return r;
 }
 
@@ -2090,47 +2141,78 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
     var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
     let u = rnd();
-    var done = 0u;
-    for (var it = 0u; it < n; it++) {
-        var best = 0xffffffffu;
-        var span = vec2<f32>(0.0);
+    let per = f32(select(MEDIA_STEPS_INDIRECT, MEDIA_STEPS, camera));
+    let lw = vec3<f32>(0.2126, 0.7152, 0.0722);
+    // A stretch at a time, between the points where the ray enters or leaves a medium (as `media_track`): the media
+    // it is in there are marched together, their coefficients summed, at the finest of their steps: a medium's is its
+    // crossing over `per`, and an eighth of that with a density grid (b.w: its cells; a grid has detail 8 steps miss).
+    var t = 0.0;
+    for (var s = 0u; s <= 2u * n; s++) {
+        var mask = 0u;
+        var end = tmax;
+        var dt = 1.0e30;
+        var gridded = false;
         for (var k = 0u; k < n; k++) {
-            if (((done >> k) & 1u) != 0u) { continue; }
             let sp = medium_span(media[k], o, d);
             let a = max(sp.x, 0.0);
             let b = min(sp.y, tmax);
-            if (a < b && (best == 0xffffffffu || a < span.x)) {
-                best = k;
-                span = vec2<f32>(a, b);
+            if (a >= b) { continue; }
+            if (a > t) {
+                end = min(end, a);
+            } else if (b > t) {
+                mask |= 1u << k;
+                end = min(end, b);
+                let grid = bitcast<u32>(media[k].b.w) != 0u;
+                gridded = gridded || grid;
+                dt = min(dt, (b - a) / (per * select(1.0, 8.0, grid)));
             }
         }
-        if (best == 0xffffffffu) { break; }
-        done |= 1u << best;
-        let steps = select(MEDIA_STEPS_INDIRECT, MEDIA_STEPS, camera);
-        let dt = (span.y - span.x) / f32(steps);
-        for (var k = 0u; k < steps; k++) {
-            let x = o + d * (span.x + (f32(k) + u) * dt);
-            let v = medium_eval(best, x);
-            let st = v.extinction;
-            let ti = exp(-st * dt);
-            // Over the step (constant medium): emitted + scattered radiance x (1 - e^-st dt) / st.
-            let w = select(dt, (1.0 - ti) / st, st > 1e-6);
-            var lin = vec3<f32>(0.0);
-            if (camera && cache_on()) {
-                // Looked up at a point jittered within a voxel: the accumulation filters the voxels instead of
-                // showing them as blocks. A jitter out of the medium finds a voxel no training point reached (dark):
-                // then the voxel of the point itself. Near the boundary that lost light, at every scattering order
-                // through the training's feedback (volume/furnace-live 0.931 of 1 without the emission clamp).
-                let vs = exp2(floor(log2(max(length(x - P.cam_pos.xyz) * CACHE_ANGLE, CACHE_MIN_VOXEL))) + VOLUME_FINE);
-                let jv = cache_point(x + (vec3<f32>(rnd(), rnd(), rnd()) - 0.5) * vs);
-                lin = jv.rgb;
-                if (jv.w < CACHE_WARM) { lin = cache_point(x).rgb; }
+        if (mask != 0u) {
+            let steps = max(u32(ceil((end - t) / dt - 1e-3)), 1u);
+            let ds = (end - t) / f32(steps);
+            for (var j = 0u; j < steps; j++) {
+                let x = o + d * (t + (f32(j) + u) * ds);
+                // All the media here, and those of them that change with time (`March::moving`).
+                var st = 0.0;
+                var sc = vec3<f32>(0.0);
+                var em = vec3<f32>(0.0);
+                var st_m = 0.0;
+                var sc_m = vec3<f32>(0.0);
+                var em_m = vec3<f32>(0.0);
+                for (var k = 0u; k < n; k++) {
+                    if (((mask >> k) & 1u) == 0u) { continue; }
+                    let v = medium_eval(k, x);
+                    st += v.extinction;
+                    sc += v.albedo * v.extinction;
+                    em += v.emission;
+                    if (media[k].a.w != 0u) {
+                        st_m += v.extinction;
+                        sc_m += v.albedo * v.extinction;
+                        em_m += v.emission;
+                    }
+                }
+                let ti = exp(-st * ds);
+                // Over the step (constant medium): emitted + scattered radiance x (1 - e^-st dt) / st.
+                let w = select(ds, (1.0 - ti) / st, st > 1e-6);
+                var lin = vec3<f32>(0.0);
+                // (No lookup where a step through a grid finds nothing: most of a grid is empty air.)
+                if (camera && cache_on() && (st > 0.0 || !gridded)) {
+                    // Looked up at a point jittered within a voxel: the accumulation filters the voxels instead of
+                    // showing them as blocks. A jitter out of the medium finds a voxel no training point reached (dark):
+                    // then the voxel of the point itself. Near the boundary that lost light, at every scattering order
+                    // through the training's feedback (volume/furnace-live 0.931 of 1 without the emission clamp).
+                    let vs = exp2(floor(log2(max(length(x - P.cam_pos.xyz) * CACHE_ANGLE, CACHE_MIN_VOXEL))) + VOLUME_FINE);
+                    let jv = cache_point(x + (vec3<f32>(rnd(), rnd(), rnd()) - 0.5) * vs);
+                    lin = jv.rgb;
+                    if (jv.w < CACHE_WARM) { lin = cache_point(x).rgb; }
+                }
+                r.light += r.tr * (sc * lin + em) * w;
+                r.moving = vec2<f32>(r.moving.x * exp(-st_m * ds), r.moving.y + dot(r.tr * (sc_m * lin + em_m) * w, lw));
+                r.tr *= ti;
             }
-            let seen = r.tr * (v.albedo * st * lin + v.emission) * w;
-            r.light += seen;
-            r.tr *= ti;
-            if (media[best].a.w != 0u) { r.moving = vec2<f32>(r.moving.x * ti, r.moving.y + dot(seen, vec3<f32>(0.2126, 0.7152, 0.0722))); }
         }
+        if (end >= tmax) { break; }
+        t = end;
     }
     return r;
 }
