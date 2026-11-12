@@ -37,8 +37,9 @@ site/releases/<file> --local --config site/wrangler.jsonc`, then `bunx wrangler@
 
 ## Pages
 
-Every page has the same nav, top right: **Showcase / Download / Docs / GitHub** (github.com/taichi-dev/ThreeRT), and
-the same footer links. The markup is repeated in each page; change it in all four.
+Every page has the same nav, top right: **Showcase / Download / Docs / GitHub** (github.com/taichi-dev/ThreeRT), then
+Discord (discord.gg/n7vsVmAKCK) and X (x.com/ThreeRT3D) as their marks, and the same links in the footer. On a phone
+GitHub is its mark too, so the row fits down to 320 px. The markup is repeated in each page; change it in all four.
 
 | Page | What is on it |
 |---|---|
