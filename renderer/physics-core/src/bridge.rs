@@ -595,6 +595,11 @@ impl Bridge {
         self.broken.push(id);
     }
 
+    /// An explosion's push on every dynamic body near it (`Physics::blast`): how many were pushed.
+    pub fn engine_blast(&mut self, centre: [f32; 3], radius: f32, push: f32) -> Result<usize, String> {
+        self.core.blast(centre, radius, push)
+    }
+
     /// The level's fixed body, if a level with colliders is loaded.
     pub fn engine_level(&self) -> Option<u32> {
         self.level_body

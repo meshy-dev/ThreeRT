@@ -5,10 +5,11 @@ use crate::world::*;
 
 /// The hash `script(600)` leaves with `enhanced-determinism` (recorded: a change of behaviour, or of Rapier, shows
 /// here). Natively and in wasm32 alike.
-pub const EXPECTED: u64 = 0x113d_50eb_06a4_7636;
+pub const EXPECTED: u64 = 0x7c06_99cb_79f4_ac66;
 
 /// A tower of boxes hit by a ball, a hinged door pushed by another, a rope pendulum and a slider: contacts, friction,
-/// stacking and four kinds of joints, for `ticks` ticks. Returns the world's hash.
+/// stacking and four kinds of joints, for `ticks` ticks; an explosion's push and a joint changed in place (step 10 c1).
+/// Returns the world's hash.
 pub fn script(ticks: u32) -> u64 {
     let mut p = Physics::default();
     p.add_collider(None, &ColliderDesc::new(Shape::Box([50.0, 0.5, 50.0]))).unwrap();
@@ -40,13 +41,21 @@ pub fn script(ticks: u32) -> u64 {
     p.add_joint(post, hull, &JointDesc::Spherical { anchor1: [3.0, 1.5, -3.0], anchor2: [0.0, 0.5, 0.0] }).unwrap();
     let slider = p.add_body(&dynamic([0.0, 3.0, -6.0])).unwrap();
     p.add_collider(Some(slider), &ColliderDesc::new(Shape::Box([0.3; 3]))).unwrap();
-    p.add_joint(post, slider, &JointDesc::Prismatic { anchor1: [-5.0, 1.5, -6.0], anchor2: [0.0; 3], axis: [1.0, 0.0, 0.0], limits: Some(Limits { min: -2.0, max: 2.0 }), motor: Some(Motor { velocity: 1.5, damping: 400.0, max_force: 500.0 }) }).unwrap();
+    let rail = p.add_joint(post, slider, &JointDesc::Prismatic { anchor1: [-5.0, 1.5, -6.0], anchor2: [0.0; 3], axis: [1.0, 0.0, 0.0], limits: Some(Limits { min: -2.0, max: 2.0 }), motor: Some(Motor { velocity: 1.5, damping: 400.0, max_force: 500.0 }) }).unwrap();
     let mut h = 0u64;
     for t in 0..ticks {
         p.step();
         // A kick halfway, and the hash folded in every 30 ticks (so a divergence anywhere on the way shows).
         if t == ticks / 2 {
             p.apply_impulse(ball, [0.0, 80.0, 30.0], [0.0; 3]).unwrap();
+        }
+        // Step 10 c1: an explosion's push among the boxes a quarter in; the slider's motor turned round in place (its
+        // limits moved) three quarters in.
+        if t == ticks / 4 {
+            p.blast([1.0, 0.6, 0.5], 1.5, 400.0).unwrap();
+        }
+        if t == 3 * ticks / 4 {
+            p.set_joint(rail, &JointDesc::Prismatic { anchor1: [-5.0, 1.5, -6.0], anchor2: [0.0; 3], axis: [1.0, 0.0, 0.0], limits: Some(Limits { min: -1.0, max: 2.5 }), motor: Some(Motor { velocity: -2.0, damping: 400.0, max_force: 600.0 }) }).unwrap();
         }
         if t % 30 == 29 {
             h = (h ^ p.hash()).wrapping_mul(0x0000_0100_0000_01b3);

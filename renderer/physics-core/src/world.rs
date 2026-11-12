@@ -29,6 +29,10 @@ pub mod limits {
     pub const MAX_ANGVEL: f32 = 1e3;
     /// N s (and N m s for an angular one), N (and N m).
     pub const MAX_IMPULSE: f32 = 1e6;
+    /// An explosion's reach in radii, and the most it changes a body's velocity (m/s): what the solver and CCD follow
+    /// (`Physics::blast`).
+    pub const BLAST_REACH: f32 = 3.0;
+    pub const BLAST_MAX_DV: f32 = 30.0;
     pub const MAX_FORCE: f32 = 1e8;
     /// A collider's mass (kg) and density (kg/m³): 0 (it adds nothing to its body) or within these.
     pub const MASS: [f32; 2] = [1e-3, 1e7];
@@ -1254,6 +1258,67 @@ impl Physics {
         Ok(())
     }
 
+    /// An explosion's push (step 10 c1, docs/VOXEL.md "The blast"): every dynamic body whose colliders' box comes within
+    /// `BLAST_REACH` x `radius` of `centre` takes an impulse away from the centre, through its centre of mass (no turn):
+    /// its area facing the blast (its box's cross-section across the direction) times
+    /// i(d) = push x radius x min(1, (radius / d)²) x (1 - (d / reach)²)² N s / m², d the distance from the centre to its
+    /// box (0 inside); its change of velocity at most `BLAST_MAX_DV`. Only +, -, x, / and square roots (IEEE: the same
+    /// bits on every platform); bodies in id order. Returns how many were pushed (none for a radius of 0 or less). Err:
+    /// a centre past the world's edge or not finite, a push below 0 or not finite (nothing changes).
+    pub fn blast(&mut self, centre: [f32; 3], radius: f32, push: f32) -> Result<usize, String> {
+        within(&centre, WORLD_EDGE, "a blast's centre")?;
+        between(push, 0.0, f32::MAX, "a blast's push")?;
+        // (A radius of 0 or less, as an edit may have, pushes nothing; one past the world's sizes is held to them.)
+        if !(radius > 0.0) {
+            return Ok(0);
+        }
+        let radius = radius.min(MAX_SIZE);
+        let reach = BLAST_REACH * radius;
+        if !(reach > 0.0) || push == 0.0 {
+            return Ok(0);
+        }
+        let c = Vector::new(centre[0], centre[1], centre[2]);
+        let mut pushed = vec![];
+        for (&id, &h) in &self.bodies {
+            let Some(b) = self.world.bodies.get(h) else { continue };
+            if !b.is_dynamic() || !b.is_enabled() || !(b.mass() > 0.0) {
+                continue;
+            }
+            // Its colliders' box.
+            let mut boxed: Option<Aabb> = None;
+            for &ch in b.colliders() {
+                if let Some(col) = self.world.colliders.get(ch) {
+                    let a = col.compute_aabb();
+                    boxed = Some(boxed.map_or(a, |x| x.merged(&a)));
+                }
+            }
+            let Some(aabb) = boxed else { continue };
+            let nearest = c.clamp(aabb.mins, aabb.maxs);
+            let d = (nearest - c).length();
+            if d >= reach {
+                continue;
+            }
+            let towards = b.center_of_mass() - c;
+            let len = towards.length();
+            let n = if len > 1e-6 { towards / len } else { Vector::Y };
+            let e = aabb.maxs - aabb.mins;
+            let area = n.x.abs() * e.y * e.z + n.y.abs() * e.x * e.z + n.z.abs() * e.x * e.y;
+            let near = if d > radius { (radius / d) * (radius / d) } else { 1.0 };
+            let fall = 1.0 - (d / reach) * (d / reach);
+            let per_area = push * radius * near * fall * fall;
+            let j = (per_area * area).min(BLAST_MAX_DV * b.mass());
+            if j > 0.0 && j.is_finite() {
+                pushed.push((id, n * j));
+            }
+        }
+        for &(id, j) in &pushed {
+            if let Some(b) = self.body_mut(id) {
+                b.apply_impulse(j, true);
+            }
+        }
+        Ok(pushed.len())
+    }
+
     /// An impulse (N s) at a point of the world (it turns the body as well, unless the point is its centre of mass), and
     /// an angular one (N m s). All of it is checked before any of it acts: a call that is refused changes nothing.
     pub fn apply_impulse_at(&mut self, id: BodyId, impulse: [f32; 3], point: [f32; 3], torque: [f32; 3]) -> Result<(), String> {
@@ -1633,6 +1698,49 @@ mod tests {
             let down = (-(pos[1] - 5.0)).atan2(pos[0]);
             assert!((down - rests).abs() < 0.03, "limits [{min}, {max}]: rests {down} rad down, expected {rests}");
         }
+    }
+
+    /// An explosion's push (`blast`): a 1 m cube of 100 kg whose near face is 1 m from a 1 m blast takes
+    /// 400 x 1 x 1 x (1 - (1/3)²)² N s across its 1 m² face, away from the centre, through its centre of mass (no turn);
+    /// one at the reach (3 m) none; a fixed one none; a 1 kg one at most 30 m/s; one around the centre straight away
+    /// from it; a push of 0, or a radius of 0 or less, nothing; a centre or push not finite refused.
+    #[test]
+    fn a_blast_pushes_by_area_and_distance() {
+        let cube = |p: &mut Physics, at: [f32; 3], mass: f32, kind: BodyKind| {
+            let b = p.add_body(&BodyDesc { kind, position: at, can_sleep: false, gravity_scale: 0.0, ..Default::default() }).unwrap();
+            let mut d = ColliderDesc::new(Shape::Box([0.5; 3]));
+            d.mass = Some(mass);
+            p.add_collider(Some(b), &d).unwrap();
+            b
+        };
+        let mut p = Physics::default();
+        let near = cube(&mut p, [1.5, 0.0, 0.0], 100.0, BodyKind::Dynamic);
+        let edge = cube(&mut p, [0.0, 0.0, 3.5], 100.0, BodyKind::Dynamic);
+        let wall = cube(&mut p, [-1.5, 0.0, 0.0], 100.0, BodyKind::Fixed);
+        let light = cube(&mut p, [0.0, -1.5, 0.0], 1.0, BodyKind::Dynamic);
+        assert_eq!(p.blast([0.0; 3], 1.0, 400.0).unwrap(), 2);
+        let fall = 1.0 - (1.0f32 / 3.0) * (1.0 / 3.0);
+        let want = 400.0 * fall * fall / 100.0;
+        let (lv, av) = p.velocity(near).unwrap();
+        assert!((lv[0] - want).abs() < 1e-5 && lv[1].abs() < 1e-6 && lv[2].abs() < 1e-6 && av.iter().all(|a| a.abs() < 1e-6), "{lv:?} {av:?}, want {want}");
+        assert_eq!(p.velocity(edge).unwrap().0, [0.0; 3], "at the reach: none");
+        assert_eq!(p.velocity(wall).unwrap().0, [0.0; 3], "fixed: none");
+        let lv = p.velocity(light).unwrap().0;
+        assert!((lv[1] + BLAST_MAX_DV).abs() < 1e-4 && lv[0].abs() < 1e-6, "capped: {lv:?}");
+        // Around the centre: away from it (up when they coincide).
+        let mut q = Physics::default();
+        let around = cube(&mut q, [0.0, 0.0, 0.0], 100.0, BodyKind::Dynamic);
+        assert_eq!(q.blast([0.0, 0.0, 0.0], 1.0, 400.0).unwrap(), 1);
+        let lv = q.velocity(around).unwrap().0;
+        assert!(lv[1] > 0.0 && lv[0] == 0.0 && lv[2] == 0.0, "{lv:?}");
+        // Nothing, and refusals.
+        assert_eq!(q.blast([0.0; 3], 1.0, 0.0).unwrap(), 0);
+        assert_eq!(q.blast([0.0; 3], -1.0, 400.0).unwrap(), 0);
+        assert_eq!(q.blast([0.0; 3], 0.0, 400.0).unwrap(), 0);
+        assert!(q.blast([f32::NAN, 0.0, 0.0], 1.0, 400.0).is_err());
+        assert!(q.blast([0.0; 3], 1.0, f32::INFINITY).is_err());
+        assert!(q.blast([0.0; 3], 1.0, -1.0).is_err());
+        assert_eq!(q.velocity(around).unwrap().0, lv, "refused: nothing changed");
     }
 
     /// A joint's parameters changed in place (`set_joint`): the same Rapier joint (no frame taken anew); a hinge whose

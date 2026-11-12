@@ -423,9 +423,22 @@ function edit(d: object): VoxelEdit | { queued: true } {
  * share of the radius. What it cuts loose falls (`voxelFrame`). Called in setup, before the level is loaded, it is done
  * once it is (with the `voxelFrame` calls made in setup after it) and returns `{ queued: true }`: the live view and the
  * offline render start from the same world.
+ *
+ * Its blast pushes every dynamic body within 3 radii (voxel bodies, the parts it cuts loose, scene code's bodies) away
+ * from its centre, through each one's centre of mass: `push` N s / m² per m of radius at the blast (default 400: a 1 m
+ * blast throws a 100 kg crate 1 m away at about 3 m/s), falling off with the distance squared to 0 at the reach, times
+ * the body's area facing it; at most 30 m/s a body. `push: 0`: none. 0 to 10,000; otherwise refused (RangeError)
+ * before anything changes. Walls do not shield (docs/VOXEL.md, "The blast").
  */
-export function voxelExplode(x: number, y: number, z: number, radius: number): VoxelEdit | { queued: true } {
-  return edit({ op: "explode", sphere: [x, y, z, radius] });
+export function voxelExplode(x: number, y: number, z: number, radius: number, o: { push?: number } = {}): VoxelEdit | { queued: true } {
+  return edit({ op: "explode", sphere: [x, y, z, radius], ...(o.push === undefined ? {} : { push: checkPush(o.push) }) });
+}
+
+/** The largest push an explosion takes (renderer/src/voxel.rs `MAX_PUSH`). */
+export const MAX_PUSH = 10000;
+function checkPush(p: unknown): number {
+  if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > MAX_PUSH) throw new RangeError(`voxelExplode: push must be a number from 0 to ${MAX_PUSH}`);
+  return p;
 }
 
 /** A cut: every voxel inside the shape removed, whatever its hardness (but the indestructible). A saw is a `box`, a

@@ -201,7 +201,7 @@ fn anchor_cell(a: [f32; 3], size: f32, mut solid: impl FnMut([i32; 3]) -> bool) 
 
 /// What `VoxelWorld::check_script` ends in, natively and in wasm32 alike (recorded: a change of the voxel bodies'
 /// behaviour, of the physics or of a platform's arithmetic shows here).
-pub const EXPECTED_SCRIPT: u64 = 0x2b38_c79e_27e8_9063;
+pub const EXPECTED_SCRIPT: u64 = 0xe91c_ec99_f6e4_e026;
 
 /// A brick as a collider's shell reads it (`VoxelWorld::brick_at`).
 #[derive(Clone, Copy)]
@@ -239,7 +239,16 @@ enum Queued {
 pub struct EditOp {
     pub shape: ShapeM,
     pub kind: EditKind,
+    /// An explosion's push (step 10 c1): the impulse per area at the blast, N s / m² per m of its radius, on every
+    /// dynamic body within 3 radii (`physics_core::Physics::blast`). None: no push (a carve).
+    pub blast: Option<f32>,
 }
+
+/// An explosion's push when scene code names none (N s / m² per m of radius): a 1 m blast gives a 1 m² face at 1 m
+/// 400 N s (a 100 kg crate thrown at 4 m/s).
+pub const DEFAULT_PUSH: f32 = 400.0;
+/// The largest push scene code may ask for.
+pub const MAX_PUSH: f32 = 10_000.0;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ShapeM {
@@ -276,6 +285,17 @@ impl EditOp {
             return Err(anyhow!("voxelEdit: a shape of finite numbers is needed: sphere [x, y, z, r], box [x0, y0, z0, x1, y1, z1] or capsule [x0, y0, z0, x1, y1, z1, r]"));
         };
         let material = || j["material"].as_u64().filter(|m| (1..256).contains(m)).map(|m| m as u8).ok_or_else(|| anyhow!("voxelEdit: material must be a palette index from 1 to 255"));
+        let explode = j["op"].as_str() == Some("explode");
+        let blast = match &j["push"] {
+            serde_json::Value::Null => explode.then_some(DEFAULT_PUSH),
+            v => {
+                let push = v.as_f64().filter(|p| p.is_finite() && (0.0..=MAX_PUSH as f64).contains(p)).ok_or_else(|| anyhow!("voxelEdit: push must be a number from 0 to {MAX_PUSH}"))? as f32;
+                if !explode {
+                    return Err(anyhow!("voxelEdit: push is an explosion's (op \"explode\")"));
+                }
+                Some(push)
+            }
+        };
         let kind = match j["op"].as_str() {
             Some("explode") => EditKind::Carve(RADII),
             Some("carve") => EditKind::Carve([256, 256, 256, 0]),
@@ -283,7 +303,7 @@ impl EditOp {
             Some("add") => EditKind::Add(material()?),
             other => return Err(anyhow!("voxelEdit: op {other:?} is none of explode, carve, paint, add")),
         };
-        Ok(EditOp { shape, kind })
+        Ok(EditOp { shape, kind, blast })
     }
 }
 
@@ -716,8 +736,11 @@ impl VoxelWorld {
 
     /// Scene code's `voxelExplode`: an explosion at a world position (m) of a radius, each material within its
     /// hardness's share of it.
-    pub fn explode(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, center: Vec3, radius: f32) -> Result<serde_json::Value> {
-        self.edit(w, ph, &EditOp { shape: ShapeM::Sphere(center.to_array(), radius), kind: EditKind::Carve(RADII) })
+    pub fn explode(&mut self, w: &mut World, ph: &mut Option<PhysicsWorld>, center: Vec3, radius: f32, push: f32) -> Result<serde_json::Value> {
+        if !(push.is_finite() && (0.0..=MAX_PUSH).contains(&push)) {
+            return Err(anyhow!("voxelExplode: push must be a number from 0 to {MAX_PUSH}"));
+        }
+        self.edit(w, ph, &EditOp { shape: ShapeM::Sphere(center.to_array(), radius), kind: EditKind::Carve(RADII), blast: Some(push) })
     }
 
     /// An edit (`voxelEdit`): the level's voxels changed (`voxel_core::Level`), the touched objects drawn again in place,
@@ -789,6 +812,12 @@ impl VoxelWorld {
             out["body_voxels"] = b.0.into();
             out["bodies_carved"] = b.1.into();
             out["bodies_ms"] = (t.elapsed().as_secs_f64() * 1e3).into();
+        }
+        // An explosion's push: on every dynamic body near it, the parts it just cut loose too (step 10 c1).
+        if let (Some(push), Some(p)) = (op.blast, ph.as_mut()) {
+            let (centre, reach) = shape_reach(level_shape(op.shape, self.size));
+            let n = p.bridge().engine_blast(centre.to_array(), match op.shape { ShapeM::Sphere(_, r) => r, _ => reach }, push).map_err(|e| anyhow!(e))?;
+            out["pushed"] = n.into();
         }
         // Paint reaches the bodies too; added voxels are the level's (`edit_body` adds to a body).
         if let (EditKind::Paint(m), Some(p)) = (op.kind, ph.as_mut().filter(|_| !self.bodies.is_empty())) {
@@ -1189,8 +1218,9 @@ impl VoxelWorld {
     /// The voxel bodies' determinism script (tools/physics-determinism.ts runs it natively and in wasm32, in the
     /// renderer's graph): a tower on two terrain tiles is undercut on one side, so what is above the cut is a body
     /// that lands on the stump off its balance and topples; an explosion where it lies carves it as it is turned (its
-    /// cells' centres through the body's pose) and cuts it in bodies; the ground under them is carved. The level's
-    /// hash and the physics world's, folded every 20 ticks and after every edit.
+    /// cells' centres through the body's pose) and cuts it in bodies; the ground under them is carved; an explosion
+    /// beside them pushes them (step 10 c1). The level's hash and the physics world's, folded every 20 ticks and after
+    /// every edit.
     pub fn check_script() -> u64 {
         let mut w = World::default();
         let mut ph: Option<PhysicsWorld> = None;
@@ -1211,7 +1241,7 @@ impl VoxelWorld {
             }
         };
         let edit = |h: &mut u64, v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, shape: ShapeM| {
-            v.edit(w, ph, &EditOp { shape, kind: EditKind::Carve([256; 4]) }).expect("an edit");
+            v.edit(w, ph, &EditOp { shape, kind: EditKind::Carve([256; 4]), blast: None }).expect("an edit");
             w.take_changes();
             fold(h, v, ph);
         };
@@ -1227,6 +1257,11 @@ impl VoxelWorld {
         run(&mut h, &mut v, &mut w, &mut ph, 120);
         edit(&mut h, &mut v, &mut w, &mut ph, ShapeM::Sphere([at[0], 0.8, at[2]], 0.9));
         run(&mut h, &mut v, &mut w, &mut ph, 240);
+        // Step 10 c1: an explosion beside the bodies, its push throwing them (and the parts it cuts loose).
+        v.explode(&mut w, &mut ph, Vec3::new(at[0] - 0.6, 0.9, at[2]), 0.5, DEFAULT_PUSH).expect("an explosion");
+        w.take_changes();
+        fold(&mut h, &v, &ph);
+        run(&mut h, &mut v, &mut w, &mut ph, 120);
         // Step 10 (a): the largest body painted dense on one side from the world, then grown by a block of its own on
         // that side (mass by cell: it settles another way).
         v.density.push(7800.0);
@@ -1242,11 +1277,11 @@ impl VoxelWorld {
                 Some((x.body, Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(mid).to_array()))
             })
             .unwrap_or((0, [5.5, 1.0, 3.1]));
-        v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([at[0] + 0.3, at[1], at[2]], 0.7), kind: EditKind::Paint(2) }).expect("a paint");
+        v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([at[0] + 0.3, at[1], at[2]], 0.7), kind: EditKind::Paint(2), blast: None }).expect("a paint");
         w.take_changes();
         fold(&mut h, &v, &ph);
         if v.bodies.values().any(|x| x.body == b) {
-            v.edit_body(&mut w, &mut ph, b, &EditOp { shape: ShapeM::Box([at[0] + 0.2, at[1] - 0.3, at[2] - 0.3], [at[0] + 0.8, at[1] + 0.3, at[2] + 0.3]), kind: EditKind::Add(2) }).expect("an add");
+            v.edit_body(&mut w, &mut ph, b, &EditOp { shape: ShapeM::Box([at[0] + 0.2, at[1] - 0.3, at[2] - 0.3], [at[0] + 0.8, at[1] + 0.3, at[2] + 0.3]), kind: EditKind::Add(2), blast: None }).expect("an add");
             w.take_changes();
         }
         fold(&mut h, &v, &ph);
@@ -2265,7 +2300,7 @@ mod tests {
             assert!(v.objects[part].as_ref().unwrap().flying.is_none());
             assert_eq!(v.frame(&mut w, 1.0 / 60.0).unwrap()["batches"], 0);
             // An explosion at the stump: the post is hard (0.4 of the radius), the slab soft (a crater 0.3 m deep under it).
-            let e = v.explode(&mut w, &mut None, Vec3::new(0.0, 0.6, 0.0), 0.5).unwrap();
+            let e = v.explode(&mut w, &mut None, Vec3::new(0.0, 0.6, 0.0), 0.5, DEFAULT_PUSH).unwrap();
             assert!(e["voxels"].as_u64().unwrap() > 100, "{e}");
             // (It took the stump's foot: what stood on it falls into the crater. Edits reach static voxels only: let it
             // land.)
@@ -2542,7 +2577,7 @@ mod tests {
         let mut v = VoxelWorld::of_blocks(&blocks, &mut w, &mut ph);
         v.max_bodies = 6;
         v.keep_debris = true;
-        let cut = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, lo: [f32; 3], hi: [f32; 3]| v.edit(w, ph, &EditOp { shape: ShapeM::Box(lo, hi), kind: EditKind::Carve([256; 4]) }).unwrap();
+        let cut = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>, lo: [f32; 3], hi: [f32; 3]| v.edit(w, ph, &EditOp { shape: ShapeM::Box(lo, hi), kind: EditKind::Carve([256; 4]), blast: None }).unwrap();
         for k in 0..6 {
             let x = 0.8 + 0.8 * k as f32;
             cut(&mut v, &mut w, &mut ph, [x - 0.1, 0.5, 0.7], [x + 0.5, 0.7, 1.3]);
@@ -2821,6 +2856,44 @@ mod tests {
         assert_eq!(on(p, lb), 0);
     }
 
+    /// An explosion pushes the bodies near it (step 10 c1): the bar standing 0.4 m from a 0.3 m blast it does not reach
+    /// is thrown away from it, along the line from the blast's centre to its centre of mass; with `push` 0 it is not; a push out of range or of the wrong kind is refused before
+    /// anything changes (the level's hash the same).
+    #[test]
+    fn an_explosion_pushes_the_bodies_near_it() {
+        for (push, moves) in [(None, true), (Some(0.0), false)] {
+            let (mut w, mut ph, mut v) = one_body();
+            let b = *v.bodies.values().map(|x| &x.body).next().unwrap();
+            let mut j = serde_json::json!({ "op": "explode", "sphere": [3.6, 1.5, 3.0, 0.3] });
+            if let Some(p) = push {
+                j["push"] = p.into();
+            }
+            let e = v.edit(&mut w, &mut ph, &op(j)).unwrap();
+            let (lv, _) = ph.as_ref().unwrap().bridge_ref().engine_velocity_of(b).unwrap();
+            if moves {
+                // Along the line from the blast's centre to the bar's centre of mass (above the blast: up as well).
+                let com = ph.as_ref().unwrap().bridge_ref().engine_mass_properties(b).unwrap().1;
+                let (at, rot, _) = ph.as_ref().unwrap().bridge_ref().engine_pose(b).unwrap();
+                let c = Mat4::from_rotation_translation(Quat::from_array(rot), Vec3::from(at)).transform_point3(Vec3::from(com));
+                let along = (c - Vec3::new(3.6, 1.5, 3.0)).normalize();
+                let got = Vec3::from(lv);
+                assert!(e["pushed"].as_u64().unwrap() >= 1 && got.length() > 0.05 && got.normalize().dot(along) > 0.999, "{e} {lv:?} along {along:?}");
+            } else {
+                assert!(e["pushed"].is_null() || e["pushed"] == 0, "{e}");
+                assert!(lv[0].abs() < 1e-6, "{lv:?}");
+            }
+        }
+        let (mut w, mut ph, mut v) = one_body();
+        let before = v.hash();
+        for bad in [serde_json::json!(-1.0), serde_json::json!(1e9), serde_json::json!("a")] {
+            assert!(EditOp::parse(&serde_json::json!({ "op": "explode", "sphere": [3.0, 0.3, 3.0, 0.5], "push": bad })).is_err(), "{bad}");
+        }
+        assert!(EditOp::parse(&serde_json::json!({ "op": "carve", "sphere": [3.0, 0.3, 3.0, 0.5], "push": 10 })).is_err(), "push is an explosion's");
+        assert!(v.explode(&mut w, &mut ph, Vec3::new(3.0, 0.3, 3.0), 0.5, f32::NAN).is_err());
+        assert!(v.explode(&mut w, &mut ph, Vec3::new(3.0, 0.3, 3.0), 0.5, -1.0).is_err());
+        assert_eq!(v.hash(), before, "refused before anything changed");
+    }
+
     /// The same body as one more check: a slab and a bar cut loose (336 voxels of 1,000 kg/m³).
     fn one_body() -> (World, Option<PhysicsWorld>, VoxelWorld) {
         let mut w = World::default();
@@ -2898,18 +2971,18 @@ mod tests {
         let body_voxels = |v: &VoxelWorld| v.bodies.values().map(|b| b.grid.count()).sum::<usize>();
         // A sphere of 600 m centred 500 m away: 12.8 m as the level takes it, which does not reach.
         let (mut w, mut ph, mut v) = one();
-        if let Ok(e) = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([500.0, 0.0, 0.0], 600.0), kind: EditKind::Carve([256; 4]) }) {
+        if let Ok(e) = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([500.0, 0.0, 0.0], 600.0), kind: EditKind::Carve([256; 4]), blast: None }) {
             assert_eq!((e["voxels"].as_u64(), e["body_voxels"].as_u64().unwrap_or(0)), (Some(0), 0), "{e}");
         }
         assert_eq!(body_voxels(&v), 336);
         // A negative radius at the body: nothing, as in the level.
         let (mut w, mut ph, mut v) = one();
-        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([3.0, 1.5, 3.0], -2.0), kind: EditKind::Carve([256; 4]) }).unwrap();
+        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Sphere([3.0, 1.5, 3.0], -2.0), kind: EditKind::Carve([256; 4]), blast: None }).unwrap();
         assert_eq!(e["body_voxels"].as_u64().unwrap_or(0), 0, "{e}");
         assert_eq!(body_voxels(&v), 336);
         // A box over the body's upper half with every class at half its share: the half, whole.
         let (mut w, mut ph, mut v) = one();
-        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([2.5, 1.75, 2.5], [3.5, 3.0, 3.5]), kind: EditKind::Carve([128; 4]) }).unwrap();
+        let e = v.edit(&mut w, &mut ph, &EditOp { shape: ShapeM::Box([2.5, 1.75, 2.5], [3.5, 3.0, 3.5]), kind: EditKind::Carve([128; 4]), blast: None }).unwrap();
         assert_eq!(e["body_voxels"].as_u64(), Some(16 * 11), "{e}");
     }
 
@@ -3071,7 +3144,7 @@ mod tests {
         for (n, r) in [0.5f32, 1.0, 2.0, 4.0].into_iter().enumerate() {
             let at = foot + Vec3::new(0.0, 0.0, (n as f32 - 1.5) * (hi.z - lo.z) * 0.2);
             let t = Instant::now();
-            let e = v.explode(&mut w, &mut ph, at, r).unwrap();
+            let e = v.explode(&mut w, &mut ph, at, r, DEFAULT_PUSH).unwrap();
             let ms = t.elapsed().as_secs_f64() * 1e3;
             println!("explosion of {r} m: {ms:.2} ms in all: carve {:.2}, colliders {:.2}, meshes {:.2}, parts {:.2} (meshes and bodies {:.2}), bodies carved {:.2}; {} voxels, {} objects touched, {} parts of {} voxels; bodies now {}", e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["rebuild_ms"].as_f64().unwrap(), e["pieces_ms"].as_f64().unwrap(), e["piece_mesh_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["voxels"], e["touched"], e["pieces"], e["piece_voxels"], e["bodies"]);
             w.take_changes();
@@ -3093,7 +3166,7 @@ mod tests {
         frames(&mut v, &mut w, &mut ph, 300, "the next five");
         // An explosion into what fell.
         let t = Instant::now();
-        let e = v.explode(&mut w, &mut ph, Vec3::new((lo.x + hi.x) * 0.5, lo.y + 2.0, (lo.z + hi.z) * 0.5), 3.0).unwrap();
+        let e = v.explode(&mut w, &mut ph, Vec3::new((lo.x + hi.x) * 0.5, lo.y + 2.0, (lo.z + hi.z) * 0.5), 3.0, DEFAULT_PUSH).unwrap();
         println!("an explosion of 3 m into it: {:.2} ms in all: carve {:.2}, colliders {:.2}, bodies carved {:.2} ({} bodies, {} voxels); bodies now {}", t.elapsed().as_secs_f64() * 1e3, e["carve_ms"].as_f64().unwrap(), e["colliders_ms"].as_f64().unwrap(), e["bodies_ms"].as_f64().unwrap_or(0.0), e["bodies_carved"], e["body_voxels"], e["bodies"]);
         w.take_changes();
         frames(&mut v, &mut w, &mut ph, 300, "five seconds after");
@@ -3116,7 +3189,7 @@ mod tests {
         let trunks = [[-100.6f32, 9.3, -92.0], [-103.9, 9.1, -93.0], [-86.7, 9.8, -91.1], [-105.9, 9.2, -88.8], [-89.3, 10.0, -88.1], [-105.8, 9.2, -86.5], [-88.1, 10.1, -87.0], [-83.9, 10.0, -90.7]];
         for t in trunks {
             let at = Vec3::new(t[0], t[1] + 0.8, t[2]);
-            let e = v.explode(&mut w, &mut ph, at, 0.6).unwrap();
+            let e = v.explode(&mut w, &mut ph, at, 0.6, DEFAULT_PUSH).unwrap();
             println!("a trunk cut at {at:?}: {} voxels carved, {} parts of {} voxels", e["voxels"], e["pieces"], e["piece_voxels"]);
             w.take_changes();
             for _ in 0..30 {

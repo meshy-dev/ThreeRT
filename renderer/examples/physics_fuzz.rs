@@ -164,7 +164,9 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
             }
             5 => {
                 let radius = if wild && r.chance(0.3) { [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e300, -3.0][r.below(5) as usize] } else { r.range(0.2, 2.0) };
-                let _ = api::voxel_explode(&mut v, &mut w, &mut ph, pos(&mut r, wild), r.range(0.0, 3.0), pos(&mut r, wild) * 0.5, radius);
+                // (Its push too, step 10 c1: none, sane, or wild.)
+                let push = match r.below(4) { 0 => None, 1 => Some(r.range(0.0, 2000.0)), 2 => Some([f64::NAN, f64::INFINITY, -1.0, 1e9, 1e300][r.below(5) as usize]), _ => Some(10_000.0) };
+                let _ = api::voxel_explode(&mut v, &mut w, &mut ph, pos(&mut r, wild), r.range(0.0, 3.0), pos(&mut r, wild) * 0.5, radius, push);
             }
             _ => {
                 // Scene code's physics calls, on the voxel bodies too.
