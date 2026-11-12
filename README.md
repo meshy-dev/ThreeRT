@@ -11,8 +11,6 @@ A real-time GPU path tracer for games and scenes written in a Three-like TypeScr
 - The PR numbers in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the other docs (#1–#139) are that repository's.
 - So is the serverless gameplay platform built around the engine: the Cloudflare gateway, the rooms and the render pool (`cloud/`), and the GPU render nodes (`render-node/`, `render-container/`). The docs that describe it ([`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/REPORT.md`](docs/REPORT.md), [`docs/RUNTIME.md`](docs/RUNTIME.md)) refer to those directories there.
 
-Mirror: [`doodlewind/ThreeRT`](https://github.com/doodlewind/ThreeRT).
-
 ## Layout
 
 | Dir | What |

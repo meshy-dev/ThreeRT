@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — ThreeRT</title>
+<meta name="description" content="What ThreeRT for macOS, ThreeRT for iPhone and iPad, and threert.dev do with your data: no accounts, no analytics, nothing collected.">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../css/threert.css">
+<style>
+  .prose { max-width: 760px; padding-bottom: 112px; }
+  .prose h2 { font: 620 clamp(24px, 2.6vw, 30px)/1.12 var(--font-sans); letter-spacing: -0.035em; margin-top: 56px; }
+  .prose p { margin-top: 16px; color: var(--bone-2); font-size: 16px; line-height: 1.62; max-width: 70ch; }
+  .prose ul { margin: 16px 0 0; padding-left: 20px; color: var(--bone-2); display: grid; gap: 10px; max-width: 70ch; line-height: 1.55; }
+  .prose a { color: var(--bone); }
+  .prose .date { font: 500 12.5px/1 var(--font-mono); color: var(--mute); }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a></div>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Privacy</span>
+    <h1 class="h-1">Nothing to sign up for.<br><span class="mute">Nothing collected.</span></h1>
+    <p class="lede">ThreeRT for macOS, ThreeRT for iPhone and iPad, and this site have no accounts, no analytics and no advertising. This page says what they do touch.</p>
+  </div>
+</header>
+
+<main class="wrap"><div class="prose">
+  <p class="date">Last updated 2026-11-12</p>
+
+  <h2>What the apps send, and where</h2>
+  <ul>
+    <li><b>Games you open.</b> The apps download a game from the address you give them: a <code>threert dev</code> server on your own network, threert.dev, or a link you open. That server sees the request, as any web server does.</li>
+    <li><b>Logs back to your dev server.</b> A game opened from a <code>threert dev</code> server sends its console output back to that server, so it shows in your terminal. Nothing else receives it.</li>
+    <li><b>Showcase.</b> ThreeRT for macOS reads the list of games and their pictures from threert.dev.</li>
+    <li><b>Sharing a Mac's GPU</b> (ThreeRT for macOS, only when you turn it on): the frames and input go through the relay you set in Settings, by default one on your own machine.</li>
+  </ul>
+  <p>There is no ThreeRT account, no tracking identifier, no crash or usage reporting, and no third-party SDK in either app.</p>
+
+  <h2>What stays on your device</h2>
+  <ul>
+    <li>The games you opened recently, and downloaded game files kept as a cache.</li>
+    <li>ThreeRT for macOS: your settings and Studio projects, in your home folder.</li>
+  </ul>
+
+  <h2>Camera and local network (iPhone and iPad)</h2>
+  <p>The camera is used only to read the QR code a <code>threert dev</code> server or ThreeRT for Mac shows; the picture is not stored or sent anywhere. Local network access is used only to load games from dev servers on your network. You can turn either off in iOS Settings.</p>
+
+  <h2>This site</h2>
+  <p>threert.dev is served by Cloudflare, which processes requests to deliver the pages and downloads. The site sets no cookies and runs no analytics.</p>
+
+  <h2>TestFlight</h2>
+  <p>If you test ThreeRT for iPhone through TestFlight, Apple shares the information described in <a href="https://www.apple.com/legal/privacy/" rel="noopener">Apple's privacy policy</a> for TestFlight (such as crash reports and feedback you choose to send) with the developer.</p>
+
+  <h2>Questions</h2>
+  <p>Open an issue on <a href="https://github.com/meshy-dev/ThreeRT/issues" rel="noopener">github.com/meshy-dev/ThreeRT</a>.</p>
+</div></main>
+
+</body>
+</html>
