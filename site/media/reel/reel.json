@@ -1,0 +1,268 @@
+{
+ "at": "2026-11-12T00:02:46.765Z",
+ "wide": {
+  "width": 1920,
+  "height": 1080,
+  "cols": 4,
+  "rows": 3,
+  "fps": 60,
+  "seconds": 8,
+  "clips": [
+   {
+    "id": "crowd",
+    "what": "Bistro night with a crowd and traffic: 150 walkers, 60 vans with their lights on",
+    "width": 960,
+    "height": 540,
+    "scale": 0.7,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 7.35,
+     "p95": 7.81
+    }
+   },
+   {
+    "id": "os-assault",
+    "what": "OpenStrike, path traced: a bot's match on cs_assault (frames 2170 to 2679 of a 75 s recording)",
+    "width": 960,
+    "height": 540,
+    "scale": 0.8,
+    "machine": null,
+    "commit": null,
+    "gpu_ms": null
+   },
+   {
+    "id": "tokyo",
+    "what": "Tokyo (PLATEAU city model) around Tokyo Tower from afternoon into night, the lamps coming on",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 8.69,
+     "p95": 11.05
+    }
+   },
+   {
+    "id": "kabukicho",
+    "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
+    "width": 960,
+    "height": 540,
+    "scale": 0.7,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 9.14,
+     "p95": 9.69
+    }
+   },
+   {
+    "id": "home",
+    "what": "Daylight Home: golden hour, night with the lamps on, then the morning sun",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 8.98,
+     "p95": 11.21
+    }
+   },
+   {
+    "id": "jewellery",
+    "what": "Jeweller's Window: the display turning under the soft boxes",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 8.61,
+     "p95": 9.05
+    }
+   },
+   {
+    "id": "os-inferno",
+    "what": "OpenStrike, path traced: a bot's match on de_inferno (frames 2485 to 2994 of a 75 s recording)",
+    "width": 960,
+    "height": 540,
+    "scale": 0.8,
+    "machine": null,
+    "commit": null,
+    "gpu_ms": null
+   },
+   {
+    "id": "museum",
+    "what": "Sculpture Gallery: walking up to the marble bust and the bronze lion",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 6.01,
+     "p95": 7.12
+    }
+   },
+   {
+    "id": "voxels",
+    "what": "The voxel level under explosions: what is cut loose falls",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 6.97,
+     "p95": 7.97
+    }
+   },
+   {
+    "id": "colour",
+    "what": "Colour Lab: the three lamps switched one by one",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 9.24,
+     "p95": 9.57
+    }
+   },
+   {
+    "id": "showroom",
+    "what": "Boutique Showroom in the evening: walking to the sneaker, then the sunglasses",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 9.78,
+     "p95": 10.77
+    }
+   },
+   {
+    "id": "os-dust2",
+    "what": "OpenStrike, path traced: a bot's match on de_dust2 (frames 60 to 569 of a 75 s recording)",
+    "width": 960,
+    "height": 540,
+    "scale": 0.8,
+    "machine": null,
+    "commit": null,
+    "gpu_ms": null
+   }
+  ]
+ },
+ "tall": {
+  "width": 720,
+  "height": 1440,
+  "cols": 2,
+  "rows": 4,
+  "fps": 60,
+  "seconds": 8,
+  "clips": [
+   {
+    "id": "kabukicho",
+    "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
+    "width": 960,
+    "height": 540,
+    "scale": 0.7,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 9.14,
+     "p95": 9.69
+    }
+   },
+   {
+    "id": "os-assault",
+    "what": "OpenStrike, path traced: a bot's match on cs_assault (frames 2170 to 2679 of a 75 s recording)",
+    "width": 960,
+    "height": 540,
+    "scale": 0.8,
+    "machine": null,
+    "commit": null,
+    "gpu_ms": null
+   },
+   {
+    "id": "home",
+    "what": "Daylight Home: golden hour, night with the lamps on, then the morning sun",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 8.98,
+     "p95": 11.21
+    }
+   },
+   {
+    "id": "jewellery",
+    "what": "Jeweller's Window: the display turning under the soft boxes",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 8.61,
+     "p95": 9.05
+    }
+   },
+   {
+    "id": "crowd",
+    "what": "Bistro night with a crowd and traffic: 150 walkers, 60 vans with their lights on",
+    "width": 960,
+    "height": 540,
+    "scale": 0.7,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 7.35,
+     "p95": 7.81
+    }
+   },
+   {
+    "id": "os-inferno",
+    "what": "OpenStrike, path traced: a bot's match on de_inferno (frames 2485 to 2994 of a 75 s recording)",
+    "width": 960,
+    "height": 540,
+    "scale": 0.8,
+    "machine": null,
+    "commit": null,
+    "gpu_ms": null
+   },
+   {
+    "id": "museum",
+    "what": "Sculpture Gallery: walking up to the marble bust and the bronze lion",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 6.01,
+     "p95": 7.12
+    }
+   },
+   {
+    "id": "colour",
+    "what": "Colour Lab: the three lamps switched one by one",
+    "width": 960,
+    "height": 540,
+    "scale": 1,
+    "machine": "Apple M3 Max",
+    "commit": "b646a20",
+    "gpu_ms": {
+     "p50": 9.24,
+     "p95": 9.57
+    }
+   }
+  ]
+ }
+}

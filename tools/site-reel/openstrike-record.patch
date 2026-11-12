@@ -1,0 +1,60 @@
+diff --git a/playground/openstrike/host/src/lib.rs b/playground/openstrike/host/src/lib.rs
+index bb9fa47..79125ef 100644
+--- a/playground/openstrike/host/src/lib.rs
++++ b/playground/openstrike/host/src/lib.rs
+@@ -909,11 +909,13 @@ impl State {
+     fn frame(&mut self) -> Result<()> {
+         let t_frame = Instant::now();
+         let period = Duration::from_secs_f64(1.0 / FPS as f64);
+-        if t_frame + Duration::from_millis(2) < self.next_frame {
++        // OPENSTRIKE_RECORD (run_headless): every call is a frame, a content frame apart, however long it took.
++        let record = std::env::var_os("OPENSTRIKE_RECORD").is_some();
++        if !record && t_frame + Duration::from_millis(2) < self.next_frame {
+             return Ok(());
+         }
+         self.next_frame = if t_frame > self.next_frame + period { t_frame + period } else { self.next_frame + period };
+-        let dt = self.last.elapsed().as_secs_f32().min(0.1);
++        let dt = if record { 1.0 / FPS as f32 } else { self.last.elapsed().as_secs_f32().min(0.1) };
+         self.last = t_frame;
+ 
+         // A pending load: show the loading card for a couple of frames, then block on the load.
+@@ -1405,14 +1407,39 @@ fn run_headless(args: &[String]) {
+     let mut t0 = Instant::now();
+     let mut next = 0;
+     let mut paused = false;
++    // OPENSTRIKE_RECORD=<dir>: a clip. Once the map is loaded the game runs in lockstep (a content frame a call, see
++    // `frame`), and after OPENSTRIKE_RECORD_AFTER seconds of it every frame is saved, OPENSTRIKE_RECORD_FRAMES of them
++    // (<dir>/0000.png ...). With `--play --autopilot` that is a bot's match as a player sees it, frame for frame.
++    let record = std::env::var_os("OPENSTRIKE_RECORD").map(std::path::PathBuf::from);
++    let env_num = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(d);
++    let (rec_after, rec_frames) = ((env_num("OPENSTRIKE_RECORD_AFTER", 4.0) * FPS as f32) as usize, env_num("OPENSTRIKE_RECORD_FRAMES", 510.0) as usize);
++    let (mut played, mut written) = (0usize, 0usize);
+     loop {
+         // (The seconds run from the end of the load.)
+         if s.loading.is_some() {
+             t0 = Instant::now();
+         }
++        if let Some(dir) = &record {
++            if s.loading.is_none() {
++                if played >= rec_after {
++                    if written >= rec_frames {
++                        break;
++                    }
++                    s.screenshot = Some(dir.join(format!("{written:04}.png")));
++                    written += 1;
++                }
++                played += 1;
++            }
++        }
+         if let Err(e) = s.frame() {
+             eprintln!("openstrike-rt: frame: {e:#}");
+         }
++        if record.is_some() {
++            if s.quit {
++                break;
++            }
++            continue;
++        }
+         if s.quit && s.screenshot.is_none() {
+             break;
+         }

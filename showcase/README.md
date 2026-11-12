@@ -15,7 +15,7 @@ culture. The site's Showcase hosts them as packages (the client repository's rel
 | `hello/` | The smallest case that works with `tools/showcase.ts` |
 
 Measured alone on an Apple M3 Max at 1280 x 720 and render scale 1 (2026-11-12, GPU ms a frame, p50): museum 9.7,
-refraction 11.5, jewellery 12.3, daylight-home 13.2, showroom 15.0, colour-lab 15.4; moon-phases 8.0 with spikes to
+refraction 11.5, jewellery 12.3, daylight-home 13.2, showroom 14.7 (in the evening, as it opens), colour-lab 15.4; moon-phases 8.0 with spikes to
 20 while its bodies move. All under the 16.7 ms that 60 fps takes.
 
 The rest of this file is the brief each case was written to; a new case follows it.

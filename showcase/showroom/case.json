@@ -2,8 +2,8 @@
   "id": "showroom",
   "industry": "Commerce",
   "title": "Boutique Showroom",
-  "caption": "A shop to walk through, lit by its window and its spots",
-  "blurb": "A small boutique with six real products on plinths and shelves: click one and the camera walks over for a close look. The only lights are the sun through the shop window and the shop’s own lamps, so the warm bounce off the terrazzo, the soft shadow under each product and the reflections in the floor are traced as you watch, by day and in the evening.",
+  "caption": "A shop to walk through, lit by its own spots",
+  "blurb": "A small boutique in the evening with six real products on plinths and shelves: click one and the camera walks over for a close look. The only lights are the shop’s own track spots, shelf strips and table lamp, so the pool under each product, its soft shadow and the reflections in the polished floor are traced as you watch; switch to day and the sun through the window takes over.",
   "controls": [
     {
       "input": "Click a product",
@@ -19,7 +19,7 @@
     },
     {
       "input": "M",
-      "does": "day to evening and back"
+      "does": "evening to day and back"
     },
     {
       "input": "O or Space",
