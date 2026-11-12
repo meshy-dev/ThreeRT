@@ -252,7 +252,8 @@ if (only.includes("quality")) {
   for (let k = 0; k < ages.length; k++) {
     const s = live(`held-${ages[k]}`, litB);
     const png = join(dir, `shot-held-${ages[k]}.png`);
-    await s.frames(Math.round((at + ages[k]) * 60) - 1);
+    // To the real-time snapshot's own frame (its age), then held there.
+    await s.frames(Math.round((at + ages[k]) * 60));
     s.step(1e-5);
     await s.frames(120, png);
     await s.quit();

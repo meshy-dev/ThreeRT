@@ -4320,9 +4320,9 @@ benchmark level. The order follows the dependencies; a step that meets a further
       media): `FIRE_LIGHT`, measured against the offline renderer per size and age (`tools/bench-voxel-fire.ts`);
       `voxel/fire-light` 0.987 for 1. The destruction game has a `-fire` variant.
       - Measured on the benchmark level at render scale 0.75 against offline (docs/VOXEL.md): the whole image meets ΔE
-        ≤ 3 / SSIM ≥ 0.9 0.2 s into the fire (2.14 / 0.948), not at 1.0 s (3.48 / 0.877); the street around it meets at
-        every age; the fireball itself does not (ΔE 4.3-7.2, SSIM 0.83-0.85): half the live march's own picture of it
-        (held: ΔE 3.0-4.6), half the temporal filter keeping the hotter fireball of earlier frames. Smoke 3 s on: 3.36 /
+        ≤ 3 / SSIM ≥ 0.9 0.2 s into the fire (2.11 / 0.949), not at 1.0 s (3.53 / 0.876); the street around it meets at
+        every age; the fireball itself does not (ΔE 4.4-6.9, SSIM 0.84-0.85): half the live march's own picture of it
+        (held: ΔE 2.8-4.3), half the temporal filter keeping the hotter fireball of earlier frames. Smoke 3 s on: 3.36 /
         0.946. GPU: 9.5 → 11.5 ms while a 4 m fire burns (smoke grid alone 9.2 → 10.1), 13.3 with 8 burning.
       - Found on the way and fixed: each pool object's first move promoted it to movable with a rebuild (281 ms, and
         it wiped the live smoke); idle lights had unbounded reach (0.9 ms of GPU with nothing burning).

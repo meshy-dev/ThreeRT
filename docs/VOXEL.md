@@ -608,21 +608,21 @@ and no fire light. Live in lockstep is bit-reproducible (A/A ΔE 0.00). Targets 
 
 | after the fire starts | whole image ΔE / SSIM | the fireball (its box) ΔE / p99 / SSIM / luminance | the street below it ΔE / SSIM / luminance |
 | --- | --- | --- | --- |
-| 0.2 s | **2.14 / 0.948** | 7.22 / 32 / 0.834 / 0.99 | **1.38 / 0.960** / 1.00 |
-| 0.5 s | 3.01 / 0.929 | 6.40 / 31 / 0.847 / 1.20 | **1.00 / 0.978** / 1.03 |
-| 1.0 s | 3.48 / 0.877 | 4.29 / 28 / 0.840 / 1.09 | (the fireball's box reaches the image's foot) |
+| 0.2 s | **2.11 / 0.949** | 6.90 / 31 / 0.846 / 1.02 | **1.38 / 0.960** / 1.00 |
+| 0.5 s | 3.08 / 0.930 | 6.61 / 31 / 0.850 / 1.22 | **1.00 / 0.978** / 1.03 |
+| 1.0 s | 3.53 / 0.876 | 4.36 / 28 / 0.839 / 1.09 | (the fireball's box reaches the image's foot) |
 
 Where it falls short, and why:
 - **The fireball** misses at every age. Half of it is the live media's own picture: the same moment held (time all
-  but stopped, 120 frames) against offline reads ΔE 4.46 / 4.63 / 3.01, SSIM 0.900 / 0.891 / 0.904: the live view
+  but stopped, 120 frames) against offline reads ΔE 3.78 / 4.28 / 2.80, SSIM 0.908 / 0.894 / 0.911: the live view
   marches 8 steps through a fireball whose noise is finer than that, and lights it from the radiance cache's voxels
   (isotropic); its cooled smoke reads lighter and more see-through than offline. The other half is the temporal
-  filter: the real-time frame against the held one, ΔE 5.22 / 3.37 / 2.17. The filter does not know a procedural
-  medium changes with time, so it keeps the hotter fireball of the frames before (luminance 1.20 of offline at 0.5 s).
+  filter: the real-time frame against the held one, ΔE 5.92 / 3.96 / 2.45. The filter does not know a procedural
+  medium changes with time, so it keeps the hotter fireball of the frames before (luminance 1.22 of offline at 0.5 s).
   The fire light's change each frame caps the history (live.rs `lit_changed`): without the light the fireball reads
   ΔE 11.2 / 9.9 / 9.5 and luminance 0.95 / 1.40 / 1.46. By day the light changes the street little (its luminance
   0.98 → 1.00 of offline at 0.2 s).
-- **The whole image** meets at 0.2 s, is 0.01 over in ΔE at 0.5 s, and misses at 1.0 s (the fireball's box now spans
+- **The whole image** meets at 0.2 s, is 0.08 over in ΔE at 0.5 s (SSIM met), and misses at 1.0 s (the fireball's box now spans
   the image's height, its smoke over the top cells). The p99 of about 21 everywhere is the level's own at 0.75
   (foliage), not the fire's.
 - **The smoke** (the grid, live firing at 2 s after the level's load, offline at 0 s, the same age): 1 s, whole ΔE
