@@ -923,7 +923,7 @@ the sedan on the wheel tracks; a watchdog of 60 s a run, about 1 s in all), `the
 `the_stop_rolls_with_the_hub`, `a_box_chassis_takes_the_vehicle_centre_of_mass`, `the_stops_turn_with_the_steering`,
 `a_car_falls_when_its_ground_is_carved`, `a_wheel_finds_ground_added_this_tick`, `a_blast_wakes_a_car_at_rest`,
 `a_vehicle_goes_with_its_chassis`, `a_vehicle_out_of_bounds_is_refused`, `a_wall_beside_the_wheels_is_not_ground`,
-`a_wheels_reported_centre_moves_with_the_chassis`, the bridge's `vehicles_through_the_bridge`; the
+`a_wheels_reported_centre_moves_with_the_chassis`, `a_lost_wheel_is_where_it_was`, the bridge's `vehicles_through_the_bridge`; the
 renderer's `wheels_belong_to_the_cells_their_anchors_are_in`; the binding's vehicle tests (the engine faked) and
 test-render's `physics/vehicle-rests-live` and `physics/vehicle-wheel-live` (the real engine); the recorded vehicles'
 script (`check::vehicles`: two voxel-chassis cars and a box car over carved ground, steered, braked, the ground carved

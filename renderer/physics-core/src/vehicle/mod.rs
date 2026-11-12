@@ -461,13 +461,20 @@ impl Physics {
                     // and the centre from the chassis's pose now, after the step: the controller's own centre is of the
                     // pose before it, a tick behind.)
                     let q = rot * rapier3d::math::rotation_from_angle(-dir * w.steering) * rapier3d::math::rotation_from_angle(axle * -w.rotation);
-                    let center = *b.position() * w.chassis_connection_point_cs + rot * dir * r.suspension_length;
+                    let center = Self::wheel_center(b, w, dir);
                     WheelState { center: center.to_array(), orientation: q.to_array(), spin: w.rotation, steering: w.steering, contact: r.is_in_contact, suspension: r.suspension_length, point: r.contact_point_ws.to_array(), normal: r.contact_normal_ws.to_array(), lost: false }
                 }
                 None => WheelState { center: veh.lost_at[k].unwrap_or([0.0; 3]), orientation: [0.0, 0.0, 0.0, 1.0], spin: 0.0, steering: 0.0, contact: false, suspension: 0.0, point: [0.0; 3], normal: [0.0; 3], lost: true },
             })
             .collect();
         Some(VehicleState { speed: b.linvel().dot(forward), wheels })
+    }
+
+    /// A wheel's centre where it is on the chassis now: its anchor plus the suspension's length down, in the chassis's
+    /// pose after the step (a wheel not yet probed at its rest length).
+    fn wheel_center(chassis: &RigidBody, w: &controller::Wheel, dir: Vector) -> Vector {
+        let len = if w.raycast_info().suspension_length > 0.0 { w.raycast_info().suspension_length } else { w.suspension_rest_length };
+        *chassis.position() * w.chassis_connection_point_cs + chassis.position().rotation * dir * len
     }
 
     /// A vehicle's wheels that are not lost: each one's index as described and its anchor (the hard point, in the
@@ -487,7 +494,8 @@ impl Physics {
     pub fn remove_wheel(&mut self, id: VehicleId, wheel: usize) -> Option<[f32; 3]> {
         let veh = self.vehicles.get_mut(&id)?;
         let i = (*veh.slots.get(wheel)?)?;
-        let at = veh.ctl.wheels()[i].center().to_array();
+        let b = self.world.bodies.get(*self.bodies.get(&veh.chassis)?)?;
+        let at = Self::wheel_center(b, &veh.ctl.wheels()[i], veh.frames[wheel].0).to_array();
         veh.ctl.remove_wheel(i);
         let stop = veh.stops.remove(i);
         veh.stop_frames.remove(i);
@@ -762,6 +770,28 @@ mod tests {
         let after = p.pose(b).unwrap().0;
         assert!(!p.sleeping(b) || (after[0] - before[0]).abs() > 0.05, "{before:?} -> {after:?}");
         assert!((after[0] - before[0]).abs() > 0.05, "the blast did not move it: {before:?} -> {after:?}");
+    }
+
+    /// A wheel lost is where it was on the chassis then (the chassis's pose now; a vehicle never stepped: at its rest
+    /// length), not where the controller last put it.
+    #[test]
+    fn a_lost_wheel_is_where_it_was() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (b, v) = SEDAN.add(&mut p, [3.0, 0.0, 5.0], false);
+        let d = &SEDAN.wheels()[0];
+        let at = p.remove_wheel(v, 0).unwrap();
+        let want = [3.0 + d.anchor[0], d.anchor[1] - d.rest, 5.0 + d.anchor[2]];
+        assert!(at.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4), "{at:?} against {want:?}");
+        p.set_velocity(b, Some([0.0, 0.0, 8.0]), None).unwrap();
+        for _ in 0..30 {
+            p.step();
+        }
+        let (pos, _) = p.pose(b).unwrap();
+        let at = p.remove_wheel(v, 1).unwrap();
+        let st = p.vehicle_state(v).unwrap();
+        assert!((at[2] - (pos[2] + SEDAN.wheels()[1].anchor[2])).abs() < 0.05 && st.wheels[1].lost && st.wheels[1].center == at, "{at:?}, the chassis at {pos:?}");
+        assert!(p.remove_wheel(v, 1).is_none());
     }
 
     /// A chassis removed takes its vehicle with it, reported once.
