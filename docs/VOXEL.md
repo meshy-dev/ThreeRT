@@ -558,8 +558,9 @@ An explosion's fireball and smoke, on the existing volume and particle paths (th
 spreading along burnable voxels, no smoke stopped by voxels). `Explosions` (`@threert/voxel`) is a group made once in
 setup: a pool of fireballs (`Fireball`) and a pool of point lights. It adds no engine call. **The smoke is each
 fireball's own**: it cools to dark smoke over its life. `Explosions` takes no smoke grid (it throws if given one): the
-grid's box is a volume, a fireball in it would overlap it, and volumes must not overlap (the media are taken whole,
-in the order a ray enters them; why, below, "Why volumes must not overlap"). A game may keep its own `SimulatedSmoke`
+grid's box is a volume, a fireball in it would overlap it, and when this was built volumes could not overlap (the
+media were taken whole, in the order a ray enters them: below, "Why volumes must not overlap"; the engine draws
+overlapping media together since 2026-11-13, and `Explosions` has not been changed for it yet). A game may keep its own `SimulatedSmoke`
 where nothing blows up.
 
 ```ts
@@ -658,6 +659,9 @@ Where it falls short, and why:
 
 
 #### Why volumes must not overlap (measured 2026-11-12, kept as the evidence)
+
+(Since 2026-11-13 the kernel draws overlapping media together, offline and live: ROADMAP § 1a "Overlapping media".
+What follows is of the kernel before, and is why `Explosions` was built without a grid.)
 
 The first `-fire` had the fireballs inside the smoke grid's box and puffed hot smoke at each fireball's centre. Live
 and offline both take the media whole in the order a ray enters them: the smoke box first, so each fireball was drawn
@@ -770,7 +774,7 @@ above.)
 | Idle fireballs parked | at y = −10,000, scale 1e-3, instead of hidden | `World::set_visible` (`world.rs` line 750): hiding anything but particles rebuilds the live scene | parked fireballs keep their slots among the kernel's 32 volumes, and every pixel's march still tests their boxes | hiding a volume or a light is done in place | `visible = false` instead of parking; the bench's cost runs report no rebuild after an explosion |
 | Idle lights reach 1 mm | an idle light's `distance` is 1 mm where it is parked | `light_reach` (`lib.rs` line 211): a black light without a range reaches without limit, and the kernel does not skip black lights before the group test (`pathtrace.wgsl` line 1578) | parked lights 10 km away share a group of 16 with lit ones, and groups are not sorted again when lights move (`lib.rs` line 277): the group's sphere is about 5 km wide while any fire burns (the per-light range test still works) | black lights reach nothing (or are hidden in place) and moved lights are grouped again | distance 0 on idle lights; the fire route's GPU time before any explosion within 0.1 ms of the smoke route's |
 | The smoke kept by never rebuilding | the pool's objects movable from the start; idle ones parked, not hidden (`Explosions` has no grid now: this keeps a game's own `SimulatedSmoke`) | `LiveCore::rebuild` (`live.rs` line 3474) → `load_scene` → `Gpu::upload` makes new grid textures (`gpu.rs` line 1664): the simulated state is not carried over | any other structural change in the game (an object added, a texture, an edit's fallback) wipes the smoke and the fire burning in it | a rebuild carries every simulated grid's state over | the bench's smoke check with a rebuild forced at 1 s (an object added): the smoke at 3 s as without it |
-| Volumes must not overlap | `Explosions` has no smoke grid (it refuses one); the smoke is each fireball's own. Two fires close together still make two fireballs that overlap: nothing keeps them apart (no distance rule) | `media_track` (offline) and `media_march` (live) in `pathtrace.wgsl` take the media whole, in the order a ray enters them (at most 32, a 32-bit mask), not their coefficients summed along the ray; hence the rule (`core.ts` `VolumeMesh`, MATERIAL_FUNCTIONS.md) | a fire inside smoke is drawn behind all of it (measured: not seen at all at 0.2 and 0.5 s, "Why volumes must not overlap"); neighbouring fireballs hide each other in the same way; no smoke grid around explosions | overlapping media are drawn together: one march summing every medium's coefficients per step along the ray (or a froxel volume), offline and live | puff a `SimulatedSmoke` around fireballs again (`Explosions` taking a grid) and run the comparison that found it (`bench-voxel-fire` at d7b4e4a, `--only smoke --ages 0.2,0.5`): the fire seen in its smoke offline and live; two overlapping fireballs both seen |
+| Volumes must not overlap | `Explosions` has no smoke grid (it refuses one); the smoke is each fireball's own. Two fires close together still make two fireballs that overlap: nothing keeps them apart (no distance rule) | `media_track` (offline) and `media_march` (live) in `pathtrace.wgsl` take the media whole, in the order a ray enters them (at most 32, a 32-bit mask), not their coefficients summed along the ray; hence the rule (`core.ts` `VolumeMesh`, MATERIAL_FUNCTIONS.md) | a fire inside smoke is drawn behind all of it (measured: not seen at all at 0.2 and 0.5 s, "Why volumes must not overlap"); neighbouring fireballs hide each other in the same way; no smoke grid around explosions | **now** (2026-11-13: the kernel takes the ray a stretch at a time and sums the coefficients of the media it is in, offline and live; `volume/overlap-emission`, `-live`). What is left is `Explosions`' own: taking a grid again, in a PR of the voxel line's | puff a `SimulatedSmoke` around fireballs again (`Explosions` taking a grid) and run the comparison that found it (`bench-voxel-fire` at d7b4e4a, `--only smoke --ages 0.2,0.5`): the fire seen in its smoke offline and live; two overlapping fireballs both seen |
 
 ### Where the engine works round its dependencies
 

@@ -1836,8 +1836,8 @@ hid two faults of the live path's own:
 - Elsewhere: bench-ghosting passes with the numbers of the table above for Bistro and 2.42, 3.27, 1.17, 1.22, 2.48 for
   Kabukichō; the Bistro slice half a second after its explosion 6.03 / SSIM 0.832 in both builds (its fireball is a
   small part of that view). test-render 179 pass.
-- Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), overlapping media are
-  still taken whole in entry order, and a medium has no motion vector (smoke that drifts is reactive, not followed).
+- Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), and a medium has no
+  motion vector (smoke that drifts is reactive, not followed). (Overlapping media: below.)
 
 **The specular history per pixel (2026-11-13, after it).** `stemporal` still set every pixel's history by what the
 camera did: 2 .. 12 frames by roughness whenever it moved or turned at all, 4 for the 8 frames after it translated
@@ -1876,6 +1876,31 @@ specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumula
   explosion, and all of test-render passes; what the 4 frames buy is how fast indirect light follows an edit, which
   no bench here counts in frames. It waits for a lockstep lighting-edit measure.
 - Gone with it: the frames-since-translation counter, temporal flag 16384 and the Playground's H switch.
+
+**Overlapping media (2026-11-13, after it).** The kernel took each medium on a ray whole: `media_track` (offline) and
+`media_march` (live camera rays, the cache's gather) in the order the ray enters them, `media_homogeneous` with its
+light (live paths through water) in the table's order. A medium inside another was drawn behind all of it: an
+emitter (2 nits a metre, 1 m) inside an absorber (1/m, 2 m) read 2 e⁻² = 0.27 nits for 2 (e⁻⁰·⁵ − e⁻¹·⁵) = 0.77, offline
+and live; hence the rule that volumes must not overlap, and no smoke grid around explosions (§ 6 step 10 b). Now the
+ray is taken a stretch at a time, between the points where it enters or leaves a medium, and the media it is in
+there are one medium:
+- offline, delta tracking at the sum of their majorants; a tentative collision evaluates each, sums extinction and
+  emission, and a real one is one of theirs by its extinction (its albedo, its phase function);
+- live, the march sums their coefficients a step, at the finest of their steps (a medium's crossing over 8, over 64
+  with a density grid: the grid's two source patches are in the kernel's source now); the share of the pixel that
+  media changing with time take is summed the same way;
+- homogeneous media with their light the same way, analytically a stretch; their transmittance alone stays a product.
+Shadow rays' ratio tracking was right already (a product). One medium on a ray draws the random numbers it drew: the
+fire shot reads 6.28 / 5.56 / 3.69 as before, to the digit.
+
+- `volume/overlap-emission` and `-live`: 0.7674 (8,192 spp) and 0.7668 of 0.7668; main's kernel 0.2708 and 0.2705.
+- A fireball inside a smoke column (a scratch scene, 0.6 s after it starts): drawn dim behind the smoke before,
+  offline and live; in it now. Live against its own offline dE 1.63 / SSIM 0.972 (1.59 / 0.972 before: what is left
+  is the smoke's shadow on the floor, which live shadow rays do not cast).
+- Cost: none that shows. Thames (the river is a homogeneous medium on every path) at 0.5, this build and main's
+  alternated on a machine under load, GPU p50: 22.6, 20.6, 19.7, 18.6 ms (main, this, main, this).
+- test-render 181 pass. Not done: `Explosions` still refuses a smoke grid and says why in the old words (the voxel
+  line's to change, with the comparison that found it); at most 32 media a scene, as before.
 
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
