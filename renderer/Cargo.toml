@@ -71,3 +71,4 @@ opt-level = 2
 # (src/physics.rs `the_renderers_physics_steps_to_the_recorded_bits` fails without it).
 [patch.crates-io]
 glamx = { path = "third_party/glamx" }
+parry3d = { path = "third_party/parry3d" }

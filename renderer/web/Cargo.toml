@@ -31,3 +31,4 @@ lto = "thin"
 # depend on the platform's math functions (../third_party/glamx/PATCH.md).
 [patch.crates-io]
 glamx = { path = "../third_party/glamx" }
+parry3d = { path = "../third_party/parry3d" }

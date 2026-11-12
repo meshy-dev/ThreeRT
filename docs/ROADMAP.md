@@ -4457,9 +4457,11 @@ benchmark level. The order follows the dependencies; a step that meets a further
         a face between two cells is held by the cell the point falls in, else the nearest solid neighbour.
     - (c2) Vehicles and ropes: the ray-cast vehicle (Rapier's `DynamicRayCastVehicleController`; the comparison in
       `out/web-probe/step10/c-vehicle-compare.md`: steady, 250-300 times cheaper than a car of wheel joints, as
-      deterministic); ropes as `RopeJoint` and a drawn curve (they do not collide: they pass through walls). Waits on
-      the user's decision on parry's voxel ray, which misses 8-22 % of rays starting on a lattice plane (the wheels'
-      rays go through it).
+      deterministic); ropes as `RopeJoint` and a drawn curve (they do not collide: they pass through walls). Before it:
+      parry's voxel ray, which missed 8-22 % of rays starting on a lattice plane (the wheels' rays go through it), is
+      fixed at the source (the user's decision, 2026-11-12: `renderer/third_party/parry3d`, its chunk walk only; the
+      world's own walk removed, every ray through Rapier's query; branch `parry-voxel-ray`); and a CPU comparison of
+      single-ray wheels against shape-cast wheels on debris and narrow gaps (to be scoped).
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
 ## Known issues
