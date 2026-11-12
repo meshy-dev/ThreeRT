@@ -994,7 +994,9 @@ export interface VehicleParameters {
  * A vehicle (ROADMAP § 6 step 10 c2): a chassis, any object with a dynamic body (a voxel body included), and wheels that
  * are not bodies. An object itself, like `Joint`: it drives while it and its chassis are in the scene. Set each wheel's
  * `engine`, `brake` and `steering` every frame (sent when they change); `speed` and each wheel's `contact`,
- * `suspension` and `lost` are read back after each frame's ticks, and a wheel's `object` is placed where the wheel is.
+ * `suspension` and `lost` are read back after each frame's ticks, and a wheel's `object` is placed where the wheel is
+ * (in a game: its host reads the vehicles back before each frame script; a scene without one drives the chassis but
+ * places no wheel objects).
  * After changing its description (wheels, centre of mass, axes) set `needsUpdate`: it is made anew.
  *
  * Destruction: a wheel belongs to the material at its anchor. That material carved away or cut off, the wheel is lost

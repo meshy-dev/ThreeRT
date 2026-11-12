@@ -162,6 +162,8 @@ struct StopState {
     axle: Vector,
     forward: Vector,
     surface: Real,
+    /// The tyre's friction (the wheel's `friction_slip`).
+    friction: Real,
 }
 
 /// The contact hook on the stops (`ActiveHooks::MODIFY_SOLVER_CONTACTS`): the tyre's friction, and a surface moving as
@@ -179,7 +181,7 @@ impl PhysicsHooks for StopHooks {
             _ => return,
         };
         let Some(m) = ctx.rigid_mut() else { return };
-        *m.friction = 1.0;
+        *m.friction = stop.friction;
         let n = *m.normal;
         let t = n.cross(stop.axle);
         let len = t.length();
@@ -565,7 +567,7 @@ impl Physics {
                 let axle = w.axle();
                 let forward = w.suspension().cross(axle).normalize_or_zero() * -1.0;
                 let hub = b.velocity_at_point(at).dot(forward);
-                hooks.stops.insert(h, StopState { axle, forward, surface: hub });
+                hooks.stops.insert(h, StopState { axle, forward, surface: hub, friction: w.friction_slip });
             }
         }
         hooks

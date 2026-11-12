@@ -2,8 +2,10 @@
 // front right wheel's object (`VehicleWheel.object`), put 10 m under the ground. The binding places it where the
 // wheel is every frame: at rest, the wheel's centre is its radius up, (0.9, 0.3, 1.2), the box (x 0.8 .. 1.0) clear of
 // the chassis's side (x 0.8). Seen from the side after 150 frames, the box's middle reads its 5 nits; a wheel the binding
-// does not place stays under the ground (dark there).
+// does not place stays under the ground (dark there). A game (the binding reads the vehicles back before each frame
+// script: a scene without one is drawn, its chassis driven, but its wheels' objects are not placed).
 import { BoxGeometry, Mesh, MeshStandardMaterial } from "@threert/scene";
+import { defineGame } from "@threert/gameplay";
 import { camera, result, sceneWithSky, type TestMeta } from "./lib.ts";
 import { ground, glow } from "./physics-box-rest.ts";
 import { car } from "./physics-vehicle-rests-live.ts";
@@ -16,11 +18,16 @@ export const test: TestMeta = {
   note: "the wheel's object placed at the wheel's centre, (0.9, 0.3, 1.2)",
 };
 
-export default function () {
-  const scene = sceneWithSky(0);
-  const { chassis, vehicle } = car(new MeshStandardMaterial({ name: "black", color: 0x000000 }));
-  const tyre = new Mesh(new BoxGeometry(0.2, 0.2, 0.2), glow());
-  tyre.position.set(0, -10, 0);
-  vehicle.wheels[1].object = tyre;
-  return result(scene, camera(scene, [6, 0.5, 0], [0, 0.5, 0]), [chassis, vehicle, tyre, ground()]);
-}
+export default defineGame<Record<string, never>>({
+  state: {},
+  setup: () => {
+    const scene = sceneWithSky(0);
+    const { chassis, vehicle } = car(new MeshStandardMaterial({ name: "black", color: 0x000000 }));
+    const tyre = new Mesh(new BoxGeometry(0.2, 0.2, 0.2), glow());
+    tyre.position.set(0, -10, 0);
+    vehicle.wheels[1].object = tyre;
+    return result(scene, camera(scene, [6, 0.5, 0], [0, 0.5, 0]), [chassis, vehicle, tyre, ground()]);
+  },
+  frame() {},
+  handlers: {},
+});
