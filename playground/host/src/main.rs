@@ -20,7 +20,7 @@ mod ui;
 mod viewport;
 
 use threert_render::gpu;
-use threert_render::live::{next_spp, Camera, LiveCore, MIN_SCALE};
+use threert_render::live::{next_spp, Camera, LiveCore};
 use threert_render::script::GameSession;
 use anyhow::{Context, Result, anyhow};
 use glam::Vec3;
@@ -1009,7 +1009,7 @@ impl State {
             self.spp = if core.render_scale < 1.0 { 1 } else { next_spp(self.spp, core.gpu_ms, FPS).min(self.spp_cap) };
             if self.auto_bounces && core.frame % 30 == 1 {
                 let budget = 1000.0 / FPS as f32;
-                if self.spp == 1 && core.render_scale <= MIN_SCALE && core.gpu_ms > budget * 0.92 && core.bounces > 2 {
+                if self.spp == 1 && core.render_scale <= core.min_scale && core.gpu_ms > budget * 0.92 && core.bounces > 2 {
                     core.bounces -= 1;
                 } else if core.gpu_ms < budget * 0.55 && core.bounces < self.max_bounces {
                     core.bounces += 1;

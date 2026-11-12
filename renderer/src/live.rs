@@ -4,10 +4,12 @@
 //! (`view`) and the playground client; `live` runs it headless at a fixed frame rate for benchmarks:
 //!
 //!   threert-render live <game bundle.js> [--assets DIR] [--room id] [--width 1280 --height 720 --fps 60 --bounces 4
-//!                       --scale 1|0.6|auto] [--frame-log frames.jsonl]
+//!                       --scale 1|0.6|auto --display-scale 1|2|3] [--frame-log frames.jsonl]
 //!
-//! `--scale` is the render scale (UE screen percentage): samples are traced at that fraction of the output
-//! resolution and the temporal pass reconstructs the output (TSR-style upsampling); `auto` = dynamic resolution.
+//! `--scale` is the render scale (UE screen percentage): the frame is traced, denoised and composed at that fraction
+//! of the output resolution and the temporal upscaler takes it to the output; `auto` = dynamic resolution.
+//! `--display-scale`: the output is a display's physical pixels, that many a point (a Retina window: 2), as the
+//! window host's is; dynamic resolution then starts from the points' resolution and goes down to half of it.
 //!
 //! stdin (JSON lines): {"cmd":"camera","pos":[x,y,z],"target":[x,y,z]} | {"cmd":"event","type":t,"payload":{..}}
 //!                     | {"cmd":"click","u":u,"v":v} | {"cmd":"reset"} | {"cmd":"time","t":s} (set the scene time)
@@ -54,10 +56,16 @@ pub struct LiveOpts {
     /// `interval` runs from the end of one frame's work to the next's, so it carries the variation of the work itself;
     /// `start` runs from one frame's start to the next's, which the pacer sets: the frame rate a player sees.
     pub frame_log: Option<PathBuf>,
+    /// The output's pixels a point of its display (1: the output is in points).
+    pub display_scale: f32,
 }
 
-/// Lowest dynamic-resolution scale (UE r.DynamicRes.MinScreenPercentage default).
+/// Lowest dynamic-resolution scale (UE r.DynamicRes.MinScreenPercentage default) of a view whose pixels are the
+/// display's points; a host whose view is in the display's physical pixels divides it by the display's scale factor
+/// (`LiveCore::min_scale`), so the fewest rays a window traces do not depend on the display's density.
 pub const MIN_SCALE: f32 = 0.5;
+/// The lowest render scale any view takes (a view of 3 pixels a point at `MIN_SCALE`, rounded down).
+pub const SCALE_FLOOR: f32 = 0.125;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -95,6 +103,8 @@ struct LiveParams {
     bt2: [f32; 4],
     /// Depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -.
     dof: [f32; 4],
+    /// This frame's sub-pixel jitter (every camera ray's: x, y in 0 .. 1 of a traced pixel), -, -.
+    jit: [f32; 4],
 }
 
 /// Bloom pyramid level j (0..4: 1/4 .. 1/64 resolution) size; stage k (0..5) runs on level max(k - 1, 0).
@@ -245,7 +255,7 @@ impl Passes {
         }
         let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live"), entries: &entries });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipes = ["refl", "dtemporal", "atrous0", "atrous1", "atrous2", "atrous3", "atrous4", "temporal", "spec0", "spec1", "spec2", "dof_tiles", "dof", "mblur", "lum_down", "exposure", "lum_blur", "bloom_down", "bloom_dn1", "bloom_dn2", "bloom_dn3", "bloom_dn4",
+        let pipes = ["refl", "dtemporal", "atrous0", "atrous1", "atrous2", "atrous3", "atrous4", "stemporal", "sfilt0", "sfilt1", "sfilt2", "compose", "judge", "reject", "upscale", "dof_tiles", "dof", "mblur", "lum_down", "exposure", "lum_blur", "bloom_down", "bloom_dn1", "bloom_dn2", "bloom_dn3", "bloom_dn4",
                      "bloom_h5", "bloom_v5", "bloom_h4", "bloom_v4", "bloom_h3", "bloom_v3", "bloom_h2", "bloom_v2", "bloom_h1", "bloom_v1", "bloom_h0", "bloom_v0", "post"]
             .into_iter()
             .map(|name| {
@@ -259,12 +269,14 @@ impl Passes {
 /// Screen-size targets shared across scene reloads.
 pub struct Targets {
     params: wgpu::Buffer,
+    /// The diffuse irradiance history of the traced grid, then the output grid's colour history (ping-pong).
     hist: [Buf; 2],
+    /// The traced grid's g-buffer (ping-pong: this frame's, the previous frame's).
     gb: [Buf; 2],
-    /// Accumulated base color (the denoiser's demodulation albedo) + directly seen emission (kept out of the
-    /// denoiser), output resolution, f16.
+    /// What `judge` finds of the colour history per traced sample (live.wgsl `Judged`); the second is not read.
     alb: [Buf; 2],
-    /// Specular history, diffuse luminance moments (ping-pong), specular denoiser scratch.
+    /// Specular history, diffuse luminance moments (ping-pong, traced grid), the specular filter's two slots, and the
+    /// scratch `dtemporal` and the upscaled image share.
     shist: [Buf; 2],
     mom: [Buf; 2],
     sa: Buf,
@@ -272,7 +284,8 @@ pub struct Targets {
     /// Reflection resolve: the resolved specular reflection per traced pixel (live.wgsl `refl`), from the trace
     /// kernel's specular-lobe rays (2 vec4 per traced pixel, pathtrace.wgsl `refl`: `kernel.refl`).
     refl_res: Buf,
-    /// The history of the deterministic direct light (`kernel.direct`), ping-pong.
+    /// Per traced sample: screen velocity, view depth, animated shading (live.wgsl `compose`); the frame's parity
+    /// picks which of the two is written, the other is not read.
     xhist: [Buf; 2],
     fa: Buf,
     fb: Buf,
@@ -1167,6 +1180,10 @@ pub struct LiveCore {
     pub render_scale: f32,
     /// Adjust `render_scale` to the frame budget (`govern_resolution`).
     pub dynamic_res: bool,
+    /// Dynamic resolution's lowest scale: `MIN_SCALE` over the display's scale factor.
+    pub min_scale: f32,
+    /// The view's pixels a point of its display (`set_display_scale`): dynamic resolution's steps are a point's.
+    display_scale: f32,
     /// Dynamic resolution: consecutive measured frames well over the frame time, and the first frame at the current
     /// scale.
     over_budget: (u32, u32),
@@ -1208,6 +1225,8 @@ pub struct LiveCore {
     lit_changed: u32,
     /// The scene has light-sampled particles (emitter table entries with a nominal area).
     spark_lights: bool,
+    /// Samples per pixel of the last frame rendered (the kernel's sample buffer holds their sums).
+    shown_spp: u32,
     /// CPU time of the last commit (ms): skinning and re-transforming moving objects (`reskin`, rigid instance poses), and
     /// uploading them with the dynamic BLAS / TLAS rebuild submitted (frame log `skin`, `upload`).
     pub cpu_skin_ms: f32,
@@ -1452,7 +1471,7 @@ fn dof_params(dof: Option<&crate::desc::Dof>, tan_half_fov: f32, w: u32, h: u32)
 
 /// Live passes that run on the traced grid (the rest on the output grid).
 fn traced_pass(name: &str) -> bool {
-    name == "refl" || name == "dtemporal" || name.starts_with("atrous")
+    name == "refl" || name == "dtemporal" || name.starts_with("atrous") || name == "stemporal" || name.starts_with("sfilt") || name == "compose" || name == "judge" || name == "reject"
 }
 
 /// Per-object motion vectors (THREERT_NO_MV=1: off, moving objects keep a short history instead).
@@ -1606,7 +1625,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -3539,11 +3558,21 @@ impl LiveCore {
         Ok(())
     }
 
-    /// Fixed render scale (`s` in 0.25 ..= 1), or dynamic resolution (`s` = 0).
+    /// The view is a display's physical pixels, `k` a point: dynamic resolution, from the points' resolution (the rays
+    /// a view in points starts with) down to `MIN_SCALE` of it. A fixed scale is set after it (`set_scale`).
+    pub fn set_display_scale(&mut self, k: f32) {
+        let k = k.max(1.0);
+        self.display_scale = k;
+        self.min_scale = (MIN_SCALE / k).max(SCALE_FLOOR);
+        self.render_scale = 1.0 / k;
+        self.dynamic_res = true;
+    }
+
+    /// Fixed render scale (`s` in SCALE_FLOOR ..= 1), or dynamic resolution (`s` = 0).
     pub fn set_scale(&mut self, s: f32) {
         self.dynamic_res = s <= 0.0;
         if s > 0.0 {
-            self.render_scale = s.clamp(0.25, 1.0);
+            self.render_scale = s.clamp(SCALE_FLOOR, 1.0);
         }
     }
 
@@ -3574,12 +3603,12 @@ impl LiveCore {
     /// Path-trace dispatches are submitted inside (each needs its own uniform contents).
     /// Traced resolution at the current render scale.
     pub fn internal_size(&self) -> (u32, u32) {
-        let s = self.render_scale.clamp(0.25, 1.0);
+        let s = self.render_scale.clamp(SCALE_FLOOR, 1.0);
         (((self.w as f32 * s).round() as u32).clamp(8, self.w), ((self.h as f32 * s).round() as u32).clamp(8, self.h))
     }
 
     /// Dynamic resolution (UE r.DynamicRes): twice a second, move the render scale toward the frame budget (traced
-    /// pixels ~ GPU time), within [MIN_SCALE, 1], in damped steps with hysteresis so it does not oscillate.
+    /// pixels ~ GPU time), within [`min_scale`, 1], in damped steps with hysteresis so it does not oscillate.
     /// Two frames in a row well over the frame time (x 1.25) act at once (UE
     /// r.DynamicRes.MaxConsecutiveOverbudgetGPUFrameCount = 2): turning from a light view at a raised scale toward a
     /// heavy one otherwise cost up to 30 frames at 35-48 ms (the 3 x 3 district's drive, its far end). Just over the
@@ -3594,7 +3623,7 @@ impl LiveCore {
         }
         // Not in the first 2 s: those frames run while caches fill (Kabukichō's first frames at 0.7 take ~47 ms), and
         // the regular check settles the start as before.
-        self.over_budget.0 = if self.frame >= 120 && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > MIN_SCALE { self.over_budget.0 + 1 } else { 0 };
+        self.over_budget.0 = if self.frame >= 120 && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
         let urgent = self.over_budget.0 >= 2;
         if self.frame % 30 != 1 && !urgent {
             return;
@@ -3602,14 +3631,18 @@ impl LiveCore {
         self.over_budget.0 = 0;
         let before = self.render_scale;
         let budget = 1000.0 / fps as f32 * 0.9;
-        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(MIN_SCALE, 1.0);
+        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(self.min_scale, 1.0);
         // The hysteresis (0.03) does not hold the scale just short of either end: 0.525 with the floor as the target
         // kept the district's return drive at 21-22 ms.
-        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == MIN_SCALE && self.render_scale > MIN_SCALE);
-        if (target - self.render_scale).abs() > 0.03 || to_end {
+        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > MIN_SCALE);
+        // (The hysteresis, the steps and the grid of scales are a view in points'; on a display of k pixels a point the
+        // same share of the rays is 1 / k of the scale. Left absolute, a Retina view held 0.325 at 17.3 ms: its target,
+        // 0.30, was inside the hysteresis.)
+        let k = self.display_scale;
+        if (target - self.render_scale).abs() > 0.03 / k || to_end {
             // Down fast when far over budget (a heavy scene just opened), up slowly; straight to the target when urgent.
-            let step = if urgent { target - self.render_scale } else { (target - self.render_scale).clamp(if self.gpu_ms > budget * 1.5 { -0.3 } else { -0.15 }, 0.1) };
-            self.render_scale = ((self.render_scale + step) * 40.0).round() / 40.0;
+            let step = if urgent { target - self.render_scale } else { (target - self.render_scale).clamp(if self.gpu_ms > budget * 1.5 { -0.3 } else { -0.15 } / k, 0.1 / k) };
+            self.render_scale = ((self.render_scale + step) * 40.0 * k).round() / (40.0 * k);
         }
         if self.render_scale != before {
             // `frame` is already the next frame's index (render advanced it): the first one at the new scale.
@@ -3750,17 +3783,19 @@ impl LiveCore {
         let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0;
         let media_train = (media && self.cache.is_some()).then(|| g.media_pipeline(&self.sc.up.kernel, "media_train"));
         let media_composite = media.then(|| g.media_pipeline(&self.sc.up.kernel, "media_composite"));
-        // Raster primary: this frame's jitter (Halton 2, 3) for the visibility pass and every camera ray.
-        let jitter = (halton(self.frame % 16 + 1, 2), halton(self.frame % 16 + 1, 3));
+        // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
+        // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
+        // output pixel visited), in the 12 bits a side the samples carry it in.
+        let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
+        let quant = |v: f32| (v * 4095.0).round() / 4095.0;
+        let jitter = (quant(halton(self.frame % phases + 1, 2)), quant(halton(self.frame % phases + 1, 3)));
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
             // Software traversal's units as edits left them: the top tree's root and how many it holds (trace_units.wgsl).
             if let Some(u) = &self.sc.up.units {
                 (p.motion[2], p.motion[3]) = (f32::from_bits(u.layout.top_first), f32::from_bits(u.count));
             }
-            if self.raster.is_some() && !self.sc.instanced {
-                p.raster = [1.0, jitter.0, jitter.1, 0.0];
-            }
+            p.raster = [(self.raster.is_some() && !self.sc.instanced) as u32 as f32, jitter.0, jitter.1, 0.0];
             p.raster[3] = if self.rays { 0.0 } else { 1.0 };
             if self.restir {
                 let pc = self.prev_cam;
@@ -3918,15 +3953,17 @@ impl LiveCore {
             bt: [t[0], t[1], t[2], t[3]],
             bt2: [t[4], t[5], 0.0, 0.0],
             dof: dof_params(self.sc.dof.as_ref(), cam.tan_half_fov, w, h),
+            jit: [jitter.0, jitter.1, 0.0, 0.0],
         };
         g.queue.write_buffer(&self.targets.params, 0, bytemuck::bytes_of(&lp));
         let bg = &self.sc.bgs[(self.frame % 2) as usize];
-        // Translucent particles: drawn over the composed image right after the specular filter composes it (into fb when
-        // depth of field / motion blur follow, else fa; live.wgsl spec_filter), then their volume voxels trained.
+        // Translucent particles: drawn over the upscaled image right after `upscale` (in sb when depth of field / motion
+        // blur follow, else fa: they have no motion vectors, so they are no part of the colour history; UE draws its
+        // translucency after the upscaler the same way), then their volume voxels trained.
         // (Nothing to draw while every translucent particle system is hidden in place.)
         let tl = self.sc.up.translucent.as_ref().filter(|_| g.translucent_particles_live(&self.sc.up)).map(|t| {
             let pipes = g.translucent_pipelines(&self.sc.up.kernel, true);
-            let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.fb.buffer } else { &self.targets.fa.buffer };
+            let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.sb.buffer } else { &self.targets.fa.buffer };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
             let low = (iw, ih) != (w, h);
             let tp = gpu::TranslucentParams { size: [w, h, t.first, 1], view: [iw, ih, gpu::VOLUME_TRAIN_CAP, low as u32], misc: [VOLUME_TRAIN_SHARE, translucent_hidden(self.frame) as u32 as f32, 0.0, 0.0] };
@@ -3976,7 +4013,7 @@ impl LiveCore {
                 let (gw, gh) = if *name == "exposure" { (8, 8) } else if *name == "dof_tiles" { (w.div_ceil(16), h.div_ceil(16)) } else if traced_pass(name) { (iw, ih) } else if name.starts_with("bloom") || name.starts_with("lum_") { (w.div_ceil(4), h.div_ceil(4)) } else { (w, h) };
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 drop(pass);
-                if *name == "spec2" && tl.is_some() {
+                if *name == "upscale" && tl.is_some() {
                     for (j, train) in [(0u32, false), (1, true)] {
                         let q = (self.passes.pipes.len() as u32 + 4 + j) * 2;
                         let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(if train { "vtrain" } else { "translucent" }), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
@@ -3999,7 +4036,7 @@ impl LiveCore {
                 }
                 let (gw, gh) = if *name == "dof_tiles" { (w.div_ceil(16), h.div_ceil(16)) } else if traced_pass(name) { (iw, ih) } else if name.starts_with("bloom") || name.starts_with("lum_") { (w.div_ceil(4), h.div_ceil(4)) } else { (w, h) };
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
-                if *name == "spec2" {
+                if *name == "upscale" {
                     tl_dispatch(&mut pass, false);
                     tl_dispatch(&mut pass, true);
                 }
@@ -4075,6 +4112,7 @@ impl LiveCore {
             }
         }
         self.prev_cam = cam;
+        self.shown_spp = spp.max(1);
         self.restir_prev = Some((iw, ih));
         self.prev_isz = (iw, ih);
         self.reset = false;
@@ -4097,20 +4135,21 @@ impl LiveCore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    /// The last frame's signals apart, linear RGB f32 per output pixel: diffuse (the composed image less the rest, so
+    /// The last frame's signals apart, linear RGB f32 per output pixel: diffuse (the composed colour less the rest, so
     /// with the sun's direct light, which view mode 6 leaves out), specular (the specular denoiser's output: mode 7) and
-    /// emission (what the camera saw directly). Without motion blur or depth of field they add up to
-    /// `read_hdr`. Waits for the GPU.
+    /// emission (what the camera ray saw directly). They are the render resolution's (the frame as `compose` hands it to
+    /// the upscaler), each output pixel taking the traced sample under it; not with depth of field and motion blur both
+    /// on (the composed colour's buffer is theirs then). Waits for the GPU.
     pub fn read_signals(&self) -> Result<[Vec<f32>; 3]> {
         let d = &self.g.device;
-        let n = self.w as u64 * self.h as u64;
-        // The frame just rendered wrote the ping-pong histories at index frame % 2 (`bind_groups`: frame f writes 1 - f % 2).
-        let k = (self.frame % 2) as usize;
+        let (w, h) = (self.w as usize, self.h as usize);
+        let (iw, ih) = (self.prev_isz.0 as usize, self.prev_isz.1 as usize);
+        let (n, tn) = ((w * h) as u64, (iw * ih) as u64);
         let t = &self.targets;
-        let read = |buf: &Buf, offset: u64, size: u64| -> Result<Vec<u8>> {
+        let read = |buffer: &wgpu::Buffer, offset: u64, size: u64| -> Result<Vec<u8>> {
             let r = d.create_buffer(&wgpu::BufferDescriptor { label: Some("signals read"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             let mut e = d.create_command_encoder(&Default::default());
-            e.copy_buffer_to_buffer(&buf.buffer, buf.offset + offset, &r, 0, size);
+            e.copy_buffer_to_buffer(buffer, offset, &r, 0, size);
             self.g.queue.submit([e.finish()]);
             r.slice(..).map_async(wgpu::MapMode::Read, |_| {});
             d.poll(wgpu::PollType::wait_indefinitely())?;
@@ -4118,18 +4157,23 @@ impl LiveCore {
             Ok(v)
         };
         let half = |b: u32, hi: bool| half::f16::from_bits(if hi { (b >> 16) as u16 } else { b as u16 }).to_f32();
-        let fa = read(&t.fa, 0, n * 16)?;
-        let spec = read(&t.sa, n * 8, n * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
-        let ae = read(&t.alb[k], 0, n * 16)?; // albedo, frames, emission, roughness (f16): emission in z, w.lo
-        let (fa, spec, ae): (&[[f32; 4]], &[[u32; 2]], &[[u32; 4]]) = (bytemuck::cast_slice(&fa), bytemuck::cast_slice(&spec), bytemuck::cast_slice(&ae));
-        let (mut dif, mut spe, mut emi) = (Vec::with_capacity(n as usize * 3), Vec::with_capacity(n as usize * 3), Vec::with_capacity(n as usize * 3));
-        for i in 0..n as usize {
-            let s = [half(spec[i][0], false), half(spec[i][0], true), half(spec[i][1], false)];
-            let e = [half(ae[i][2], false), half(ae[i][2], true), half(ae[i][3], false)];
-            for c in 0..3 {
-                spe.push(s[c]);
-                emi.push(e[c]);
-                dif.push((fa[i][c] - s[c] - e[c]).max(0.0));
+        let composed = read(&t.fb.buffer, t.fb.offset, tn * 16)?;
+        let spec = read(&t.sa.buffer, t.sa.offset + n * 8, tn * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
+        let samples = read(&self.sc.up.accum, 0, tn * 80)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
+        let (composed, spec, samples): (&[[f32; 4]], &[[u32; 2]], &[[f32; 20]]) = (bytemuck::cast_slice(&composed), bytemuck::cast_slice(&spec), bytemuck::cast_slice(&samples));
+        let (mut dif, mut spe, mut emi) = (Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3));
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+        for y in 0..h {
+            for x in 0..w {
+                // live.wgsl `sample_under`.
+                let q = (((y as f32 + 0.5) * ih as f32 / h as f32) as usize).min(ih - 1) * iw + (((x as f32 + 0.5) * iw as f32 / w as f32) as usize).min(iw - 1);
+                let s = [half(spec[q][0], false), half(spec[q][0], true), half(spec[q][1], false)];
+                for c in 0..3 {
+                    let e = finite(samples[q][12 + c] / self.shown_spp as f32);
+                    spe.push(s[c]);
+                    emi.push(e);
+                    dif.push((composed[q][c] - s[c] - e).max(0.0));
+                }
             }
         }
         Ok([dif, spe, emi])
@@ -4306,8 +4350,10 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     // Frame-script cost (script + commit), reported every 2 s.
     let (mut fs_sum, mut fs_max, mut fs_n) = (0.0f32, 0.0f32, 0u32);
     core.bounces = opts.bounces;
-    core.render_scale = opts.scale.unwrap_or(1.0);
-    core.dynamic_res = opts.scale.is_none();
+    core.set_display_scale(opts.display_scale);
+    if let Some(s) = opts.scale {
+        core.set_scale(s);
+    }
     eprintln!("live: load {}", serde_json::Value::Object(core.load_timings().iter().map(|(k, v)| (k.clone(), (*v).into())).collect()));
     eprintln!("live: {}x{} @{} fps on {} ({})", w, h, opts.fps, core.g.adapter_info.name, if core.g.hwrt { "HW RT" } else { "BVH" });
     let staging = core.g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("snapshot"), size: (w * h * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -4564,6 +4610,7 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
         assets: PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())),
         room: flag("--room").unwrap_or_else(|| "local".into()),
         frame_log: flag("--frame-log").map(PathBuf::from),
+        display_scale: flag("--display-scale").map(|v| v.parse::<f32>()).transpose()?.unwrap_or(1.0),
     })
 }
 

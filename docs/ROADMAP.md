@@ -1729,6 +1729,57 @@ pipeline. The real-time pipeline moves toward Lumen's structure — split signal
       checked against UE.
   - Since then the merge gate reports what pathtrace.wgsl additions cost compiled in but off (docs/WORKFLOW.md).
 
+### 1a. The frame at render resolution, one upscaler (2026-11-12)
+
+Why: every host held the view at 1280 × 720 and stretched it over the window (a Retina window is 2560 × 1440), and
+every quality bench compared on the 720p grid, so none saw it. At the window's pixels against our offline render of
+that size, a still live frame kept 0.32–0.42 of the detail (the regression of its luma gradients on the offline
+render's; an offline 720p frame stretched keeps 0.48–0.57). Making the view the window's size did not pay as the
+pipeline stood: upscaling was done per signal on the output grid (nine 80-byte samples gathered a pixel, five
+output-size histories, the specular filter's three passes), 2.75 ms of Bistro's frame at 720p and 9.9 ms at 1440p.
+
+Now, the structure of UE's TSR after Lumen and of the vendor upscalers after a denoiser (live.wgsl):
+
+- **One sub-pixel jitter a frame** for every camera ray (Halton 2, 3; 8 phases at full resolution, 8 / scale² below).
+- **Everything noisy at the render resolution**: the specular history and its filter moved to the traced grid beside
+  the diffuse irradiance (`stemporal`, `sfilt*`); `compose` makes one colour a traced sample, with its velocity, depth
+  and whether its shading is animated.
+- **One temporal upscaler** (`judge`, `reject`, `upscale`) with one colour history on the output grid:
+  - holding still, the history is not clamped into the frame's range (a full-resolution TAA's rule cut the detail
+    finer than a traced pixel every frame: Thames kept 0.53–0.67); each sample is held against the range of the
+    history around its own point instead, a 3 × 3 mean of what lies outside is the correction, and a disocclusion is
+    found by depth (this frame's nearest among nine against the previous frame's), confirmed by colour;
+  - in motion, as the pixel's speed nears a pixel a frame, the history goes from 16 samples to 4 and is clamped into
+    the nine samples' range (TSR's velocity weight clamping, TAA's clamp). An orbit of Thames at 9 pixels a frame
+    against the offline render of the pose (detail / trail px): neither 0.48 / 49, both 0.52 / 31; main stretched
+    0.31 / 45;
+  - animated shading holds 4 samples (a reactive mask, as FSR 2 and UE's responsive AA take one);
+  - translucent particles are drawn after it (they have no motion vectors), then depth of field and motion blur.
+- **The view is the window's physical pixels** (`play`; `live --display-scale k` headless): dynamic resolution starts
+  from the points' resolution and goes down to half of it, its steps a point's (`LiveCore::set_display_scale`).
+
+Measured on the M5 Pro (`out/liveq/gpu-runs-std.md`; single runs unless said):
+
+| as the window runs it, 60 fps both | main: 1280 × 720 output, stretched | this: 2560 × 1440 output |
+|---|---|---|
+| Bistro | 1056 × 594 rays, GPU 15.1 ms, detail 0.32 | 960 × 540 rays, 14.4 ms, 0.55 |
+| Thames (a voxel level) | 1280 × 720 rays, 15.3 ms, 0.39 | 1152 × 648 rays, 14.8 ms, 0.88 |
+| Kabukichō | 832 × 468 rays, 15.8 ms, 0.42 | 736 × 414 rays, 14.4 ms, 0.72 |
+
+- Bistro's output-grid passes at 1440p: 2.8 ms (the old path 9.9).
+- At 1280 × 720 and the 0.5 floor (the perf smoke's drive, builds alternated on a quiet GPU): GPU p50 / p95 7.07 /
+  7.38 ms against main's 8.33–8.36 / 8.63–9.19.
+- Layer B, Bistro against the unbiased offline render: ΔE 2.98 / SSIM 0.859 (main 3.62 / 0.812 when its limits were
+  set), luminance 0.994.
+- bench-ghosting: Bistro passes. Kabukichō fails two of its five limits as they stand, the p95 excess 0.5 s after the
+  turn and the strafe return (5.1 for limits of 4.2 and 4.5): the excess is taken over the settled frame, whose own
+  p95 fell from 7.9 to 4.2; the shots' raw p95 are 9.3 for main's 10.8 and 11.3. The limits are to be set again.
+
+Not done here: the whole-frame history caps of the traced grid's accumulations (48 frames while the camera moves, 16
+after a lighting change, 4 after a geometry edit, 24 with spark lights) and filters sized by hit distance; the
+Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
+2560 × 1440), though the traced grid rarely fills it.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
