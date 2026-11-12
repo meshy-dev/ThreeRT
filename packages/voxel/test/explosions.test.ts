@@ -67,9 +67,15 @@ test("firing changes objects in place: after setup no object is made or removed,
   const e = new RecordingEngine();
   const binding = new SceneBinding(e, scene, new PerspectiveCamera());
   binding.sync();
-  const made = e.take().filter((c) => c[0] === "object").map((c) => (c[2] as { kind: string }).kind);
+  const objects = e.take().filter((c) => c[0] === "object").map((c) => c[2] as { kind: string; name: string; movable?: boolean });
+  const made = objects.map((o) => o.kind);
   assert.equal(made.filter((k) => k === "volume").length, 8 + 1, "8 fireballs and the smoke");
   assert.equal(made.filter((k) => k === "light").length, 8);
+  // Movable from the start: a fixed object's first move would rebuild the live scene once (280 ms on the benchmark
+  // level), at each pool member's first fire.
+  const pool = objects.filter((o) => /^(fireball|fire-light)-/.test(o.name));
+  assert.equal(pool.length, 16);
+  assert.ok(pool.every((o) => o.movable === true), "every fireball and light movable");
   for (let k = 0; k < 20; k++) {
     x.fire([k, 0, 0], 1 + (k % 3), k * 0.1);
     x.step(k * 0.1 + 0.05);

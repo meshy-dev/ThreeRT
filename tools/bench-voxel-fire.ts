@@ -10,9 +10,10 @@
 //             no edge anti-aliasing) against our offline render at that scene time (no clamps, no denoiser), which has
 //             the fireball's own light and no fire light. Live with the fire light and without (what it buys). ΔE (mean,
 //             p99) and SSIM over the image, the fireball, the street before it, and 3 x 3 regions.
-//  smoke      the same with the smoke grid, the fire at 0 s (its puff at the grid's first step, live and offline): 1.0 s
-//             and 3.0 s after; with the grid's turbulence (a random push, so live and offline draw different smoke) and
-//             without (the same flow: what is left is the rendering).
+//  smoke      the same with the smoke grid, 1.0 s and 3.0 s after the fire: live fires at 2 s (after the level's load),
+//             offline at 0 s (an offline render gives a grid the sources pending at it at its first step), so both are
+//             the same age (`--turbulence0`: also without the grid's random push). First: does a puff made in setup
+//             survive the live view's first frames (its rebuilds)?
 //  cost       games/voxel-level/level-destruction{,-smoke,-fire}.game.ts at 0.75, lockstep (frames as fast as the GPU
 //             goes): the frame's CPU and GPU ms for 2 s before and 4 s after the 4 m explosion (`crater`); with fire,
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
@@ -148,6 +149,8 @@ function live(name: string, b: string, o: { env?: Record<string, string>; frameL
       frame += n;
     },
     event(type: string) { send({ cmd: "event", type }); },
+    /** From now on each frame steps `dt` s (the frame script, the grids and the shaders). */
+    step(dt: number) { send({ cmd: "lockstep", dt }); },
     get frame() { return frame; },
     async quit() {
       send({ cmd: "quit" });
@@ -243,6 +246,21 @@ if (only.includes("quality")) {
     console.log(`  (${fireLine ?? "no fire line"})`);
     lives.push(shots);
   }
+  // Held: the same frame with time all but stopped (1e-5 s a frame) for 120 frames: the live view's own converged
+  // picture of that moment. Against offline it is the live media's bias; against the real-time frame, the lag of the
+  // temporal filter behind a fireball that changes every frame.
+  for (let k = 0; k < ages.length; k++) {
+    const s = live(`held-${ages[k]}`, litB);
+    const png = join(dir, `shot-held-${ages[k]}.png`);
+    await s.frames(Math.round((at + ages[k]) * 60) - 1);
+    s.step(1e-5);
+    await s.frames(120, png);
+    await s.quit();
+    const j = judge(truths[k].png, png, ages[k]), lag = judge(png, lives[0][k], ages[k]);
+    rows.push({ tag: "held", age: ages[k], j }, { tag: "real-time vs held", age: ages[k], j: lag });
+    report(`held, ${ages[k]} s`, j);
+    report(`real-time vs held, ${ages[k]} s`, lag);
+  }
   for (let k = 0; k < ages.length; k++) {
     const j = judge(lives[0][k], lives[1][k], ages[k]);
     rows.push({ tag: "live A/A", age: ages[k], j });
@@ -257,27 +275,44 @@ if (only.includes("quality")) {
 
 if (only.includes("smoke")) {
   generate(1, "object");
-  const times = [1.0, 3.0];
+  const ages = [1.0, 3.0], T0 = 2;
   const rows: Record<string, unknown>[] = [];
-  console.log(`\nsmoke: the fire and its smoke from 0 s, live (scale ${SCALE}) against offline (${SPP} spp)`);
-  for (const turbulence of [undefined, 0]) {
+  // Offline a grid takes the sources pending at the render at its first step (time 0): the reference fires at 0 and is
+  // rendered at the age. Live fires at 2 s, after the level's load (whether a puff made before that survives is
+  // checked first: the frame log's rebuilds, and the smoke of a fire at 0 at 3 s).
+  console.log(`\nsmoke: the fire and its smoke, live (scale ${SCALE}, fire at ${T0} s) against offline (${SPP} spp, fire at 0 s), at the same age`);
+  {
+    const b = await bundle("smoke-at0", "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, smoke: true, at: 0 });
+    const log = join(dir, "smoke-at0.jsonl");
+    const s = live("smoke-at0", b, { frameLog: log });
+    const png = join(dir, "smoke-at0-3.png");
+    await s.frames(179);
+    await s.frames(1, png);
+    await s.quit();
+    const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { rebuild: number; fallback: string | null });
+    const rebuilds = F.flatMap((f, k) => (f.rebuild > 0 ? [`frame ${k}: ${f.rebuild.toFixed(0)} ms${f.fallback ? ` (${f.fallback})` : ""}`] : []));
+    console.log(`  a fire at 0 s, live: rebuilds ${rebuilds.length ? rebuilds.join(", ") : "none"}; its picture at 3 s: ${png}`);
+    result.smoke_at0 = { rebuilds, png };
+  }
+  for (const turbulence of args.includes("--turbulence0") ? [undefined, 0] : [undefined]) {
     const t = turbulence === undefined ? "turbulence 15" : "turbulence 0";
-    const refB = await bundle(`smoke-ref-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: false, smoke: true, at: 0, ...(turbulence === undefined ? {} : { turbulence }) });
-    const litB = await bundle(`smoke-lit-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, smoke: true, at: 0, ...(turbulence === undefined ? {} : { turbulence }) });
-    const truths = times.map((x) => offline(`smoke-${t.replace(" ", "")}-${x}`, refB, x));
+    const tb = turbulence === undefined ? {} : { turbulence };
+    const refB = await bundle(`smoke-ref-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: false, smoke: true, at: 0, ...tb });
+    const litB = await bundle(`smoke-lit-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, smoke: true, at: T0, ...tb });
+    const truths = ages.map((x) => offline(`smoke-${t.replace(" ", "")}-${x}`, refB, x));
     const s = live(`smoke-${t}`, litB);
     const shots: string[] = [];
-    for (const x of times) {
+    for (const x of ages) {
       const png = join(dir, `smoke-${t.replace(" ", "")}-${x}.png`);
-      await s.frames(Math.round(x * 60) - s.frame - 1);
+      await s.frames(Math.round((T0 + x) * 60) - s.frame - 1);
       await s.frames(1, png);
       shots.push(png);
     }
     await s.quit();
-    for (let k = 0; k < times.length; k++) {
-      const j = judge(truths[k].png, shots[k], times[k]);
-      rows.push({ turbulence: t, time: times[k], j });
-      report(`${t}, ${times[k]} s`, j);
+    for (let k = 0; k < ages.length; k++) {
+      const j = judge(truths[k].png, shots[k], ages[k]);
+      rows.push({ turbulence: t, age: ages[k], j });
+      report(`${t}, ${ages[k]} s`, j);
     }
   }
   result.smoke = rows;
@@ -285,7 +320,7 @@ if (only.includes("smoke")) {
 
 if (only.includes("cost")) {
   generate(1, "object");
-  type Frame = { interval: number; cpu: number; gpu: number; voxel?: [number, number]; guard?: number | null };
+  type Frame = { interval: number; cpu: number; gpu: number; voxel?: [number, number]; guard?: number | null; rebuild: number; fallback: string | null };
   const routes: [string, string, Record<string, string>][] = [["mesh", "level-destruction.game.ts", {}], ["smoke", "level-destruction-smoke.game.ts", {}], ["fire", "level-destruction-fire.game.ts", {}]];
   if (args.includes("--software")) routes.splice(0, routes.length, ["fire, software", "level-destruction-fire.game.ts", { THREERT_HWRT: "0", THREERT_LOOP_GUARD: "8192" }]);
   const rows: Record<string, unknown>[] = [];
@@ -313,11 +348,12 @@ if (only.includes("cost")) {
         before: { cpu: frameStats(before.map((f) => f.cpu)), gpu: frameStats(before.map((f) => f.gpu)) }, after: { cpu: frameStats(after.map((f) => f.cpu)), gpu: frameStats(after.map((f) => f.gpu)), gpu_max: r2(Math.max(...after.map((f) => f.gpu))) },
         burning_max: Math.max(0, ...explosions.map((e) => e.burning ?? 0)), lit_max: Math.max(0, ...explosions.map((e) => e.lit ?? 0)), explosions: explosions.length,
         guard: Math.max(0, ...F.map((f) => f.guard ?? 0)),
+        rebuilds_after: after.filter((f) => f.rebuild > 0).map((f) => `${r2(f.rebuild)} ms${f.fallback ? ` (${f.fallback})` : ""}`),
         // The GPU ms per frame over the 4 s after, in 0.25 s bins (the fire burns 1.6 s; the smoke after).
         gpu_bins: Array.from({ length: Math.ceil(after.length / 15) }, (_, k) => r2(frameStats(after.slice(k * 15, k * 15 + 15).map((f) => f.gpu)).p50)),
       };
       rows.push(row);
-      console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} before: CPU ${st(before.map((f) => f.cpu))}, GPU ${st(before.map((f) => f.gpu))};  explosion frame CPU ${row.explosion_frame.cpu}, GPU ${row.explosion_frame.gpu};  after: CPU ${st(after.map((f) => f.cpu))}, GPU ${st(after.map((f) => f.gpu))}${tag.startsWith("fire") ? `; burning at most ${row.burning_max}, lit ${row.lit_max}` : ""}${row.guard ? `; guard ${row.guard}` : ""}`);
+      console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} before: CPU ${st(before.map((f) => f.cpu))}, GPU ${st(before.map((f) => f.gpu))};  explosion frame CPU ${row.explosion_frame.cpu}, GPU ${row.explosion_frame.gpu};  after: CPU ${st(after.map((f) => f.cpu))}, GPU ${st(after.map((f) => f.gpu))}${tag.startsWith("fire") ? `; burning at most ${row.burning_max}, lit ${row.lit_max}` : ""}${row.guard ? `; guard ${row.guard}` : ""}; rebuilds after: ${row.rebuilds_after.length ? row.rebuilds_after.join(", ") : "none"}`);
       console.log(`  ${"".padEnd(25)} GPU p50 per 0.25 s after: ${row.gpu_bins.join(" ")}`);
     }
   }

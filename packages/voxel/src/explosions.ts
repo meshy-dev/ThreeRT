@@ -167,6 +167,8 @@ export class Explosions extends Group {
     for (let k = 0; k < n; k++) {
       const f = new Fireball({ life: this.life, intensity: this.intensity, density });
       f.name = `fireball-${k}`;
+      // Moved at every fire: movable from the start (a fixed object's first move rebuilds the live scene once).
+      f.movable = true;
       f.position.set(...PARK);
       f.scale.setScalar(PARKED);
       f.customData = [-1e6, 0, 0, 0];
@@ -180,6 +182,7 @@ export class Explosions extends Group {
     for (let k = 0; k < nl; k++) {
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
+      l.movable = true;
       l.position.set(...PARK);
       this.add(l);
       this.lights.push(l);
