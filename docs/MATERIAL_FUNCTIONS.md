@@ -329,7 +329,8 @@ A `VolumeMesh` has these settings:
 - `anisotropy`: the Henyey-Greenstein g.
 
 The path tracer samples collisions at the majorant's rate. A loose bound is slower, never wrong; a function above it is
-clamped. Volumes must not overlap. They are lit by every light, cast shadows on what is behind them and scatter light
+clamped. Volumes may overlap (a fire inside smoke): where they do they are one medium, their coefficients summed, and a
+collision there is one of theirs by its extinction. They are lit by every light, cast shadows on what is behind them and scatter light
 any number of times:
 - delta tracking for paths;
 - ratio tracking for shadow rays (Novák et al. 2018);

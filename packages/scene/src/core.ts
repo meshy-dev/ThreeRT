@@ -1537,7 +1537,8 @@ export class DensityGrid {
  * A bounded participating medium (smoke, local fog, a fireball): the unit box or sphere (diameter 1) under the node's
  * transform (scale = size), filled by `volume`. `majorant` (1/m) must bound the function's extinction everywhere (the
  * path tracer samples collisions at that rate; larger is slower, never wrong); `anisotropy` is the Henyey-Greenstein g
- * (0 = isotropic). Volumes must not overlap. Rendered by the path tracer: they shadow, scatter and emit.
+ * (0 = isotropic). Volumes may overlap: where they do they are one medium, their coefficients summed. Rendered by the
+ * path tracer: they shadow, scatter and emit.
  */
 export class VolumeMesh extends Object3D {
   override type = "VolumeMesh";
