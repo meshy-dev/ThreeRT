@@ -1,7 +1,7 @@
-use crate::math::{IVectorExt, Real, Vector, VectorExt};
+use crate::math::{IVectorExt, Int, Real, Vector, VectorExt};
 use crate::partitioning::BvhNode;
 use crate::query::{Ray, RayCast, RayIntersection};
-use crate::shape::{Voxels, VoxelsChunkRef};
+use crate::shape::{FeatureId, Voxels, VoxelsChunkRef};
 
 impl RayCast for Voxels {
     #[inline]
@@ -25,6 +25,15 @@ impl RayCast for Voxels {
 }
 
 impl<'a> RayCast for VoxelsChunkRef<'a> {
+    /// The cells of the chunk walked one by one along the ray (Amanatides and Woo), each one's bounds the lattice
+    /// planes `key * voxel_size`: the first solid cell is hit where the ray entered it, on the face it crossed.
+    ///
+    /// ThreeRT's patch (see `PATCH.md`): the walk used to ask a solid cell's box for the hit again, and a ray lying in
+    /// one of the box's face planes (a ray straight down at x = 1.5 over cells of 0.1 m) grazes that box, which
+    /// answered none: the walk went on and the ray missed every cell. Here a ray along the planes of an axis belongs
+    /// to the cells its coordinate floors into (on a plane between two cells or chunks, the upper one), and a cell
+    /// that is solid is a hit. Only a ray that starts inside a cell still asks the cell's box (inside a solid shape: a
+    /// hit at 0 with no normal, as every shape answers).
     #[inline]
     fn cast_local_ray_and_get_normal(
         &self,
@@ -32,95 +41,115 @@ impl<'a> RayCast for VoxelsChunkRef<'a> {
         max_time_of_impact: Real,
         solid: bool,
     ) -> Option<RayIntersection> {
-        use num_traits::Bounded;
-
-        let aabb = self.local_aabb();
-        let (min_t, mut max_t) = aabb.clip_ray_parameters(ray)?;
-
         #[cfg(feature = "dim2")]
         let ii = [0, 1];
         #[cfg(feature = "dim3")]
         let ii = [0, 1, 2];
 
-        if min_t > max_time_of_impact {
+        let size = self.parent.voxel_size();
+        let [domain_mins, domain_maxs] = self.domain();
+        let origin_key = self.voxel_at_point_unchecked(ray.origin);
+
+        // The stretch of the ray inside the chunk's box, and the axis it enters by.
+        let mut t0: Real = 0.0;
+        let mut t1 = max_time_of_impact;
+        let mut entered: Option<usize> = None;
+        for i in ii {
+            let d = ray.dir.vget(i);
+            if d == 0.0 {
+                // (By the cell its coordinate floors into, as the walk takes cells: the same answer in both chunks
+                // on either side of a plane.)
+                let k = origin_key.ivget(i);
+                if k < domain_mins.ivget(i) || k >= domain_maxs.ivget(i) {
+                    return None;
+                }
+                continue;
+            }
+            let o = ray.origin.vget(i);
+            let lo = (domain_mins.ivget(i) as Real * size.vget(i) - o) / d;
+            let hi = (domain_maxs.ivget(i) as Real * size.vget(i) - o) / d;
+            let (near, far) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            if near > t0 {
+                t0 = near;
+                entered = Some(i);
+            }
+            if far < t1 {
+                t1 = far;
+            }
+        }
+        if !(t0 <= t1) {
             return None;
         }
 
-        max_t = max_t.min(max_time_of_impact);
-        let clip_ray_a = ray.point_at(min_t);
-        let voxel_key_signed = self.voxel_at_point_unchecked(clip_ray_a);
-        let mut voxel_key = self.clamp_voxel(voxel_key_signed);
-        let [domain_mins, domain_maxs] = self.domain();
+        // The cell the ray is in there, held inside the chunk (it enters on a face, to rounding).
+        let mut key = if entered.is_some() {
+            self.voxel_at_point_unchecked(ray.point_at(t0))
+        } else {
+            origin_key
+        };
+        for i in ii {
+            key.ivset(
+                i,
+                key.ivget(i)
+                    .clamp(domain_mins.ivget(i), domain_maxs.ivget(i) - 1),
+            );
+        }
+        let mut t = t0;
+        let mut axis = entered;
 
         loop {
-            let aabb = self.voxel_aabb_unchecked(voxel_key);
-
-            if let Some(voxel) = self.voxel_state(voxel_key) {
+            if let Some(voxel) = self.voxel_state(key) {
                 if !voxel.is_empty() {
                     // We hit a voxel!
-                    // TODO: if `solid` is false, and we started hitting from the first iteration,
-                    //       then we should continue the ray propagation until we reach empty space again.
-                    let hit = aabb.cast_local_ray_and_get_normal(ray, max_t, solid);
-
-                    if let Some(mut hit) = hit {
-                        // The feature stays the one the voxel's Aabb reported; `subshape` says
-                        // which voxel it belongs to.
-                        hit.subshape = self.flat_id(voxel_key).unwrap_or_else(|| unreachable!());
-                        return Some(hit);
-                    }
+                    let mut hit = match axis {
+                        // Entered across a face: that face, when it was crossed.
+                        Some(i) => {
+                            let mut normal = Vector::ZERO;
+                            let up = ray.dir.vget(i) > 0.0;
+                            normal.vset(i, if up { -1.0 } else { 1.0 });
+                            let face = if up { i as u32 } else { i as u32 + 3 };
+                            RayIntersection::new(t, normal, FeatureId::Face(face))
+                        }
+                        // The ray starts in this cell: the cell's box answers.
+                        // TODO: if `solid` is false, the ray should go on until it reaches empty space again.
+                        None => self
+                            .voxel_aabb_unchecked(key)
+                            .cast_local_ray_and_get_normal(ray, t1, solid)?,
+                    };
+                    // `subshape` says which voxel it belongs to.
+                    hit.subshape = self.flat_id(key).unwrap_or_else(|| unreachable!());
+                    return Some(hit);
                 }
             }
 
             /*
-             * Find the next voxel to cast the ray on.
+             * The next cell: across the nearest lattice plane ahead (the lower axis first on a tie), never behind
+             * where the ray is.
              */
-            let toi = ii.map(|i| {
-                if ray.dir.vget(i) > 0.0 {
-                    let t = (aabb.maxs.vget(i) - ray.origin.vget(i)) / ray.dir.vget(i);
-                    if t < 0.0 {
-                        (Real::max_value(), true)
-                    } else {
-                        (t, true)
+            let mut next: Option<(Real, usize)> = None;
+            for i in ii {
+                let d = ray.dir.vget(i);
+                if d != 0.0 {
+                    let plane = (key.ivget(i) + (d > 0.0) as Int) as Real * size.vget(i);
+                    let ti = ((plane - ray.origin.vget(i)) / d).max(t);
+                    if next.map_or(true, |(tn, _)| ti < tn) {
+                        next = Some((ti, i));
                     }
-                } else if ray.dir.vget(i) < 0.0 {
-                    let t = (aabb.mins.vget(i) - ray.origin.vget(i)) / ray.dir.vget(i);
-                    if t < 0.0 {
-                        (Real::max_value(), false)
-                    } else {
-                        (t, false)
-                    }
-                } else {
-                    (Real::max_value(), false)
                 }
-            });
-
-            #[cfg(feature = "dim2")]
-            if toi[0].0 > max_t && toi[1].0 > max_t {
-                break;
             }
-
-            #[cfg(feature = "dim3")]
-            if toi[0].0 > max_t && toi[1].0 > max_t && toi[2].0 > max_t {
-                break;
+            // (A ray with no direction stays in its cell.)
+            let (tn, i) = next?;
+            if tn > t1 {
+                return None;
             }
-
-            let imin = Vector::from(toi.map(|t| t.0)).min_position();
-
-            if toi[imin].1 {
-                if voxel_key.ivget(imin) < domain_maxs.ivget(imin) - 1 {
-                    voxel_key.ivset(imin, voxel_key.ivget(imin) + 1);
-                } else {
-                    // Leaving the shape's bounds.
-                    break;
-                }
-            } else if voxel_key.ivget(imin) > domain_mins.ivget(imin) {
-                voxel_key.ivset(imin, voxel_key.ivget(imin) - 1);
-            } else {
-                // Leaving the shape’s bounds.
-                break;
+            t = tn;
+            axis = Some(i);
+            let k = key.ivget(i) + if ray.dir.vget(i) > 0.0 { 1 } else { -1 };
+            if k < domain_mins.ivget(i) || k >= domain_maxs.ivget(i) {
+                // Leaving the chunk's bounds.
+                return None;
             }
+            key.ivset(i, k);
         }
-
-        None
     }
 }

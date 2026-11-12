@@ -13,7 +13,7 @@ the rust programming language.
 #![deny(unused_results)]
 #![deny(unused_qualifications)]
 #![warn(missing_docs)]
-#![warn(unused_imports)]
+#![allow(unused_imports)] // ThreeRT: as a path dependency its warnings show (PATCH.md); upstream warns.
 #![allow(missing_copy_implementations)]
 #![allow(clippy::too_many_arguments)] // Maybe revisit this one later.
 #![allow(clippy::module_inception)]

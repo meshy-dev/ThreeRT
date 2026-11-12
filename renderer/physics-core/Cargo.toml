@@ -55,3 +55,4 @@ name = "voxel_shapes"
 # steps `check::script` and `check::cases` to the recorded hashes, which is what shows a patch left out (PATCH.md).
 [patch.crates-io]
 glamx = { path = "../third_party/glamx" }
+parry3d = { path = "../third_party/parry3d" }
