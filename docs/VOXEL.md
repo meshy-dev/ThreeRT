@@ -676,6 +676,47 @@ Cost: `--only cost`, the destruction game's routes at 0.75, lockstep (frames as 
 | fire, `peak` (20 within a second) | 8.8 | 11.3 (max 12.7); 8 burning (the pool) | |
 | fire, software traversal (loop guard on: no stop) | 13.0 | 13.7 (max 18.0 while it burns) | 28.9 |
 
+### Joints, the level's body and the blast (ROADMAP § 6 step 10 c1; design: `out/web-probe/step10/c-design.md`)
+
+Engine-side physics the vehicles and ropes of (c2) stand on, each the standard structure where the engine's code did
+otherwise (the user's decisions 1-4, 2026-11-12).
+
+- **A joint's parameters change in place.** A hinge's or a slider's limits and motor, a rope's length: `needsUpdate`
+  sends `joint_set` (physics-core `Physics::set_joint`), the same Rapier joint; its frames are not taken anew from the
+  bodies' poses, its warm-started impulses are kept. Before, every change removed the joint and made it again (a motor
+  set each frame remade it each frame). A change of its bodies, anchors or axis still makes it anew. A hinge's limits
+  are re-centred through its first frame with libm (as when it is made: the platform's `sin_cos` of a non-zero centre
+  is not on our path).
+- **The level has a fixed body.** Its colliders hang on one fixed engine body (made at load, at the origin, unturned),
+  as Rapier hangs static colliders on a fixed body; a joint whose object is `engineColliders` holds to it (a rope tied
+  to a wall). To queries and contacts the level is still on no body (`hit.object` is `engineColliders`, `hit.body`
+  undefined, a contact's other end `engineColliders`), and bodies resting on it sleep as before. The voxel bodies'
+  script moves bit for bit as before with it (end poses and cell counts compared); its recorded hash changed only
+  because the world lists one more body and later ids shift by one.
+- **A joint belongs to the material at its anchor.** Each joint on a voxel body or on the level is held by the cell its
+  anchor is in (or the nearest solid of its 26 neighbours), read before an edit: cut so that the cell is in a part cut
+  off, the joint moves onto that part's body (the same joint, its anchor where it was in the world); the cell carved, in
+  debris, or its body carved away whole, retired or fallen, the joint breaks: `joint.broken` is true, the joint gets a
+  "broken" event, and it is not made again until it leaves the scene (added back, it is joined anew). Before, a cut
+  body's joints all stayed on its largest part, and a joint in a carved cell held empty space.
+- **The blast.** An explosion (`voxelExplode`, `voxelEdit` "explode", `Explosions.explode`) pushes every dynamic body
+  within 3 radii (voxel bodies, the parts it just cut loose, scene code's bodies) away from its centre, through each
+  one's centre of mass (no turn, as the industry's radial impulse by default):
+  J = push x r x min(1, (r / d)²) x (1 - (d / 3r)²)² x A, with d the distance from the centre to the body's box (0
+  inside) and A its box's cross-section across the direction; at most 30 m/s of change a body (what the solver and CCD
+  follow). `push` defaults to 400 N s / m² per m of radius (a 1 m blast throws a 100 kg, 1 m crate whose face is 1 m
+  away at 3.2 m/s), 0 to 10,000, 0 none; out of range refused before anything changes. A light, broad body flies
+  faster than a heavy compact one (the impulse goes with area, not mass). Only +, -, x, / and square roots: the same
+  bits natively, in parallel and in wasm32. **Not shielded** (decision 4): a body behind a wall is pushed too; one
+  voxel ray per body would shield (ROADMAP Open).
+
+Checks: physics-core `joints_change_in_place`, `a_blast_pushes_by_area_and_distance`; the renderer's
+`the_level_has_a_fixed_body_that_joints_hold_to`, `joints_follow_the_cells_their_anchors_are_in`,
+`an_explosion_pushes_the_bodies_near_it`; the binding's joint and broken-joint tests; recorded hashes with a blast and
+an in-place joint change (physics-core's script) and with the level's body and a pushing explosion (the voxel bodies'
+script): native = parallel = wasm32 = recorded; `physics_fuzz` with `joint_set`, joints to the level, the broken report
+and pushes (sane and wild).
+
 ### Temporary ways round on the engine's shared paths
 
 `Explosions` (step 10 b) works round six faults of the shared renderer, in its own code, until they are fixed

@@ -705,8 +705,12 @@ impl Physics {
             return Err(format!("physics: the world's colliders would hold more than {MAX_SHAPE_DATA} points and triangles"));
         }
         let shape = d.shape.shared()?;
-        let mut c = ColliderBuilder::new(shape).position(pose(d.position, d.rotation)?).density(d.density).friction(d.friction).restitution(d.restitution).sensor(d.sensor);
-        if let Some(m) = d.mass {
+        // On a fixed body a collider carries no mass (a fixed body's is never used): Rapier sums its colliders' mass
+        // properties whenever one of them changes, and a collider with a density integrates its shape each time, which
+        // for the voxel level's thousands of shapes on its one body took seconds an edit (step 10 c1).
+        let on_fixed = parent.is_some_and(|h| self.world.bodies.get(h).is_some_and(|b| b.is_fixed()));
+        let mut c = ColliderBuilder::new(shape).position(pose(d.position, d.rotation)?).density(if on_fixed { 0.0 } else { d.density }).friction(d.friction).restitution(d.restitution).sensor(d.sensor);
+        if let (Some(m), false) = (d.mass, on_fixed) {
             c = c.mass(m);
         }
         if d.events {
@@ -1023,9 +1027,10 @@ impl Physics {
             return if left == 0 { Ok(0) } else { Err(format!("physics: a voxel shape holds at most {MAX_VOXELS} cells (the collider is gone)")) };
         }
         let h = self.world.insert_collider(c, parent);
-        if let Some(p) = parent {
+        if let Some(p) = parent.filter(|&p| !self.world.bodies[p].is_fixed()) {
             // (Its mass now, not at the next step: a collider put on a body adds its mass to what the body had, and
-            // the one taken out is taken off only when the world is stepped.)
+            // the one taken out is taken off only when the world is stepped. A fixed body's mass is never used: the
+            // voxel level's body has thousands of colliders, summed again for each one an edit touched.)
             let world = &mut self.world;
             world.bodies[p].recompute_mass_properties_from_colliders(&world.colliders);
         }
@@ -1698,6 +1703,23 @@ mod tests {
             let down = (-(pos[1] - 5.0)).atan2(pos[0]);
             assert!((down - rests).abs() < 0.03, "limits [{min}, {max}]: rests {down} rad down, expected {rests}");
         }
+    }
+
+    /// A collider on a fixed body carries no mass (its density is not used: Rapier would integrate its shape each time
+    /// the body's colliders change, seconds an edit for the voxel level's thousands); on a moving body it keeps its own.
+    #[test]
+    fn colliders_on_a_fixed_body_carry_no_mass() {
+        let mut p = Physics::default();
+        let wall = p.add_body(&BodyDesc { kind: BodyKind::Fixed, ..Default::default() }).unwrap();
+        let cells: Vec<[i32; 3]> = (0..1000).map(|k| [k % 10, (k / 10) % 10, k / 100]).collect();
+        let c = p.add_collider(Some(wall), &ColliderDesc::new(Shape::Voxels { size: 0.1, cells: cells.clone() })).unwrap();
+        let mass = |p: &Physics, id: ColliderId| p.world.colliders.get(p.colliders[&id].0).unwrap().mass();
+        assert_eq!(mass(&p, c), 0.0);
+        p.edit_voxels(c, &[[0, 0, 0]], &[]).unwrap();
+        assert_eq!(mass(&p, c), 0.0, "edited: still none");
+        let crate_ = p.add_body(&BodyDesc::default()).unwrap();
+        let d = p.add_collider(Some(crate_), &ColliderDesc::new(Shape::Voxels { size: 0.1, cells })).unwrap();
+        assert!((mass(&p, d) - 1000.0).abs() < 0.01, "1,000 cells of 1 l at 1,000 kg/m³: {}", mass(&p, d));
     }
 
     /// An explosion's push (`blast`): a 1 m cube of 100 kg whose near face is 1 m from a 1 m blast takes

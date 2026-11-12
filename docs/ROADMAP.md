@@ -4349,7 +4349,22 @@ benchmark level. The order follows the dependencies; a step that meets a further
         voxels**, are not done.
       - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
         from the cache): the fireball reads lighter than offline.
-    - (c) Vehicles and ropes on step 7's joints.
+    - **(c1) Joints and the blast** (branch `vehicles-ropes`; design `out/web-probe/step10/c-design.md`; docs/VOXEL.md
+      "Joints, the level's body and the blast"). (c) split in two (the supervisor, 2026-11-12: engine structure first,
+      features after). The user's decisions 1-4 (2026-11-12), each the standard structure where the engine did
+      otherwise: a joint's parameters change in place (`joint_set`; before, removed and made again); the level's
+      colliders on one fixed engine body, so a joint can hold to the level (hits and contacts on the level unchanged:
+      no body); a joint belongs to the material at its anchor (it moves with a part cut off, breaks when its cell is
+      carved or its body goes: `Joint.broken`, a "broken" event); an explosion's blast pushes the bodies within 3 radii
+      (impulse by area and distance, through the centre of mass, at most 30 m/s; `push`). Recorded hashes changed once:
+      physics-core's script 7c0699cb79f4ac66, the voxel bodies' e91cec99f6e4e026; native = parallel = wasm32.
+      - Open: the blast is not shielded by walls (decision 4: one voxel ray per body would do it); a joint's anchor on
+        a face between two cells is held by the cell the point falls in, else the nearest solid neighbour.
+    - (c2) Vehicles and ropes: the ray-cast vehicle (Rapier's `DynamicRayCastVehicleController`; the comparison in
+      `out/web-probe/step10/c-vehicle-compare.md`: steady, 250-300 times cheaper than a car of wheel joints, as
+      deterministic); ropes as `RopeJoint` and a drawn curve (they do not collide: they pass through walls). Waits on
+      the user's decision on parry's voxel ray, which misses 8-22 % of rays starting on a lattice plane (the wheels'
+      rays go through it).
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
 ## Known issues

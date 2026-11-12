@@ -244,7 +244,9 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
     const e = boom ? boom.explode(x, y, z, r, now) : voxelExplode(x, y, z, r);
     const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
-    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}) })}`);
+    // (With physics: the voxel bodies' top speed just after it, its blast's push included: step 10 c1.)
+    const fastest = physics ? +voxelBodies().reduce((n, x) => Math.max(n, x.getLinearVelocity().length()), 0).toFixed(2) : undefined;
+    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...(fastest !== undefined ? { fastest } : {}) })}`);
   };
   return defineGame<State>({
     state: { scenario: null, started: 0 },
@@ -288,7 +290,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       if (b.batches > 0 || (b.settled ?? 0) > 0) console.log(`batch ${JSON.stringify(b)}`);
       if (physics && frames % 30 === 0) {
         const bodies = voxelBodies();
-        if (bodies.length > 0 || hadBodies) console.log(`bodies ${JSON.stringify({ frame: frames, n: bodies.length, asleep: bodies.filter((x) => x.asleep).length, voxels: bodies.reduce((n, x) => n + x.voxels, 0), largest: bodies.reduce((n, x) => Math.max(n, x.voxels), 0) })}`);
+        if (bodies.length > 0 || hadBodies) console.log(`bodies ${JSON.stringify({ frame: frames, n: bodies.length, asleep: bodies.filter((x) => x.asleep).length, voxels: bodies.reduce((n, x) => n + x.voxels, 0), largest: bodies.reduce((n, x) => Math.max(n, x.voxels), 0), fastest: +bodies.reduce((n, x) => Math.max(n, x.getLinearVelocity().length()), 0).toFixed(2) })}`);
         hadBodies = bodies.length > 0;
       }
       const s = f.state.scenario;
