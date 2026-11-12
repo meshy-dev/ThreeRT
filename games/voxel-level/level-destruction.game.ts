@@ -27,9 +27,9 @@
 // thrown out from the explosion, collided with the ground and the level's voxels (its occupancy grid), no CPU work
 // per particle. With `smoke` (level-destruction-smoke.game.ts; ROADMAP § 6 step 5b), every explosion leaves a puff of
 // simulated smoke (`SimulatedSmoke`: a density grid over the streets ahead of the camera, advected, diffused and lifted
-// on the GPU every frame), which rises and drifts with the wind. With `fire` as well (level-destruction-fire.game.ts;
-// ROADMAP § 6 step 10 b), every explosion is `Explosions.explode`: the voxel explosion, a fireball from a pool of 8, a
-// puff of hot smoke into the same grid, and a light following the fireball. Spots alternate between the ground ahead
+// on the GPU every frame), which rises and drifts with the wind. With `flames` instead (level-destruction-fire.game.ts;
+// ROADMAP § 6 step 10 b), every explosion is `Explosions.explode`: the voxel explosion, a fireball from a pool of 8
+// (cooling to its own dark smoke), and a light following it. Spots alternate between the ground ahead
 // of the camera and the walls of the buildings nearest to it. Each explosion
 // logs what it did (`explosion {...}`, renderer timings included) for the bench. Sun and sky; the lamps do not glow (at
 // night they do, and their pieces fly: level-night.game.ts).
@@ -217,7 +217,7 @@ class Dust {
  *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
  *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
  *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (300 unless given). `flames` (ROADMAP § 6
- *  step 10 b): every explosion through `Explosions` (fireball, light, and its puffs into the `smoke` grid). */
+ *  step 10 b): every explosion through `Explosions` (fireball and light); not with `smoke` (volumes must not overlap). */
 export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number, flames = false) {
   const keys = cameraPath(seed);
   const at = spots(seed);
@@ -230,8 +230,11 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
   // across it, a light wind across the road.
   const [cx, cy, cz] = keys[0].pos;
-  const boom = flames ? new Explosions({ smoke: smoke ? { center: [cx, cy + 5, cz + 21], size: [22, 14, 36], cells: smoke } : null }) : null;
-  const cloud = smoke && !boom ? new SimulatedSmoke({ size: smoke, density: 2.5, wind: [0.8, 0, 0.3], buoyancy: 3.5, dissipation: 0.2, cooling: 0.9 }) : null;
+  // Fireballs and the smoke grid are not both on: the grid's box is a volume, and the fireballs would be in it (volumes
+  // must not overlap; docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
+  if (flames && smoke) throw new Error("destructionGame: fire and the smoke grid are not both on (volumes must not overlap)");
+  const boom = flames ? new Explosions() : null;
+  const cloud = smoke ? new SimulatedSmoke({ size: smoke, density: 2.5, wind: [0.8, 0, 0.3], buoyancy: 3.5, dissipation: 0.2, cooling: 0.9 }) : null;
   if (cloud) {
     cloud.position.set(cx, cy + 5, cz + 21);
     cloud.scale.set(22, 14, 36);

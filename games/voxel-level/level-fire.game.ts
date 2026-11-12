@@ -4,7 +4,7 @@
 //
 // fireShot: the level by day from the destruction game's first camera, a 4 m explosion at its `crater` spot (9 m ahead
 // on the road; done in setup, so the crater is there from the start in both renders), its fire (`Explosions`) starting
-// at scene time `at`: with the fire light or without, with the smoke grid or without. Offline, the fire light is left
+// at scene time `at`: with the fire light or without. Offline, the fire light is left
 // out: the fireball's own emission lights the street there (paths reach the medium), which is what the light stands in
 // for live.
 //
@@ -21,10 +21,6 @@ import { EDGE, PALETTE, SIZE, VOXEL, cameraPath } from "./plan.ts";
 export interface FireShot {
   /** The fire light (live); off for the offline reference. Default on. */
   light?: boolean;
-  /** The smoke grid (the destruction game's: 88 x 56 x 144 cells over the streets ahead). Default off. */
-  smoke?: boolean;
-  /** The smoke's turbulence (its random push; `SimulatedSmoke`'s default 15). */
-  turbulence?: number;
   /** When the fire starts (scene time, s; default 4). */
   at?: number;
   /** The explosion's radius (m; default 4). */
@@ -67,13 +63,9 @@ export function fireShot(o: FireShot = {}) {
       }
       voxelLevel({ route: "mesh", palette: nativePalette(false), objects: nativeObjects(seed), physics: false });
       voxelExplode(...view.spot, r);
-      const [cx, cy, cz] = view.pos;
-      boom = new Explosions({
-        fireballs: 1, lights: o.light === false ? 0 : 1,
-        smoke: o.smoke ? { center: [cx, cy + 5, cz + 21], size: [22, 14, 36], cells: [88, 56, 144], turbulence: o.turbulence } : null,
-      });
+      boom = new Explosions({ fireballs: 1, lights: o.light === false ? 0 : 1 });
       scene.add(boom);
-      // A fire at scene time 0 is started in setup: its puff then reaches the grid at the first step, live and offline.
+      // A fire at scene time 0 is started in setup.
       if (at <= 0) {
         boom.fire(view.spot, r, at);
         fired = true;
@@ -97,8 +89,6 @@ export interface FireRoom {
   size: number;
   /** A point light of 1,000 cd at the centre instead of the fireball. */
   light?: boolean;
-  /** The fire in a smoke grid (cells of 0.25 m, `Explosions`'s smoke defaults) instead of a fireball. */
-  grid?: boolean;
 }
 
 /** The room's camera and the fireball's centre, by the fireball's size `d`. */
@@ -130,17 +120,10 @@ export function fireRoom(o: FireRoom) {
         l.position.set(...v.center);
         scene.add(l);
       } else {
-        // r such that the fire's size is d; its centre 0.3 r above the explosion's point. With the grid: a box around
-        // it, 2.2 d wide and 3 d high from the floor (the fire rises), cells of 0.25 m; its puff sent by the first step,
-        // here in setup (an offline render takes the sources pending at its first step).
+        // r such that the fireball's size is d; its centre 0.3 r above the explosion's point.
         const r = d / 2.2;
-        const cell = 0.25, size: [number, number, number] = [2.2 * d, 3 * d, 2.2 * d];
-        const boom = new Explosions({
-          fireballs: 1, lights: 0,
-          smoke: o.grid ? { center: [v.center[0], 1.5 * d, v.center[2]], size, cells: size.map((s) => Math.max(4, Math.round(s / cell))) as [number, number, number] } : null,
-        });
+        const boom = new Explosions({ fireballs: 1, lights: 0 });
         boom.fire([v.center[0], v.center[1] - 0.3 * r, v.center[2]], r, 0);
-        boom.step(0);
         scene.add(boom);
       }
       return { scene, camera, options: { name: `fire-room`, width: 640, height: 360, preset: "cinematic" as const } };

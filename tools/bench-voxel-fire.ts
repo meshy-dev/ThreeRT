@@ -5,22 +5,17 @@
 //             floor before a grey wall, offline at ages through its life, against a 1,000 cd point light at its centre:
 //             per channel the floor's and the wall's radiance near it, fire over light x 1,000 cd, per m² of the
 //             fireball's size² and per nit of its intensity: the rows of `FIRE_LIGHT`.
-//  calibrate-grid  the same for a fire burning in the smoke grid (`fireRoom` with `grid`): `FIRE_LIGHT_GRID`.
 //  quality    `fireShot`: the benchmark level by day, a 4 m explosion's fire 0.2, 0.5 and 1.0 s after it starts (at 4 s),
 //             the live frame (lockstep at 60 fps from the start, render scale 0.75: never 1, where the live frame has
 //             no edge anti-aliasing) against our offline render at that scene time (no clamps, no denoiser), which has
 //             the fireball's own light and no fire light. Live with the fire light and without (what it buys). ΔE (mean,
 //             p99) and SSIM over the image, the fireball, the street before it, and 3 x 3 regions.
-//  smoke      the same with the smoke grid, 1.0 s and 3.0 s after the fire: live fires at 2 s (after the level's load),
-//             offline at 0 s (an offline render gives a grid the sources pending at it at its first step), so both are
-//             the same age (`--turbulence0`: also without the grid's random push). First a check: a fire made in setup,
-//             live, has its smoke at 3 s and no rebuild (a live rebuild resets every simulated grid).
 //  cost       games/voxel-level/level-destruction{,-smoke,-fire}.game.ts at 0.75, lockstep (frames as fast as the GPU
 //             goes): the frame's CPU and GPU ms for 2 s before and 4 s after the 4 m explosion (`crater`); with fire,
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
 //             `--software`: instead, the fire route's crater under software traversal (THREERT_HWRT=0, loop guard 8,192).
 //
-//   node tools/bench-voxel-fire.ts [--only calibrate,quality,smoke,cost] [--spp 2048] [--software] [--ages 1,3 (smoke)]
+//   node tools/bench-voxel-fire.ts [--only calibrate,quality,cost] [--spp 2048] [--software]
 //
 // One renderer at a time. A step that gives no answer in its time ends this script with exit 3 and leaves the renderer
 // alone (never killed). Result: out/bench/voxel-fire/<time>.json and tables on stdout.
@@ -30,14 +25,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fireRoomView, fireShotView } from "../games/voxel-level/level-fire.game.ts";
-import { FIRE_LIGHT, FIRE_LIGHT_GRID, FIRE_LIGHT_SIZES, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
+import { FIRE_LIGHT, FIRE_LIGHT_SIZES, FIREBALL_SIZE } from "../packages/voxel/src/explosions.ts";
 import { bundleGame } from "./bundle-game.ts";
 import { frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
 import { generate } from "./voxel-level/generate.ts";
 
 const args = process.argv.slice(2);
 const opt = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const only = opt("--only", "calibrate,quality,smoke,cost").split(",");
+const only = opt("--only", "calibrate,quality,cost").split(",");
 const SPP = Number(opt("--spp", "2048"));
 const SCALE = opt("--scale", "0.75");
 const dir = join(repoRoot, "out/voxel-fire");
@@ -163,36 +158,6 @@ function live(name: string, b: string, o: { env?: Record<string, string>; frameL
   };
 }
 
-if (only.includes("calibrate-grid")) {
-  // The same for a fire burning in the smoke grid: ages in seconds (the grid's fire lasts by its cooling, not a life).
-  const ages = [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0, 2.5], intensity = 30000, W = 640, H = 360;
-  const rows: Record<string, unknown>[] = [];
-  console.log(`\ncalibrate-grid: a fire in the smoke grid, its equivalent point light (cd per m² of size² per nit; floor | wall), offline ${SPP} spp`);
-  for (const d of FIRE_LIGHT_SIZES) {
-    const v = fireRoomView(d);
-    const proj = projector(v.pos, v.target, v.fov);
-    const floor = box(corners([1.2 * d, 0, -0.4 * d], [2.0 * d, 0, 0.4 * d]).map(proj));
-    const wall = box(corners([1.0 * d, 0.2 * d, v.wall], [1.8 * d, 1.0 * d, v.wall]).map(proj));
-    const lt = offline(`room-${d}-light`, await bundle(`room-${d}-light`, "games/voxel-level/level-fire.game.ts", "fireRoom", { size: d, light: true }), 0.5, SPP, [W, H]);
-    const ref = { floor: hdrMean(lt.hdr, floor, W, H), wall: hdrMean(lt.hdr, wall, W, H) };
-    const gb = await bundle(`room-${d}-grid`, "games/voxel-level/level-fire.game.ts", "fireRoom", { size: d, grid: true });
-    for (const a of ages) {
-      const t = offline(`room-${d}-grid`, gb, a, SPP, [W, H]);
-      const per = (region: number[], base: number[]) => hdrMean(t.hdr, region, W, H).map((x, c) => (x / Math.max(base[c], 1e-12)) * 1000 / (d * d * intensity));
-      const f = per(floor, ref.floor), w = per(wall, ref.wall);
-      rows.push({ size: d, age: a, floor: f.map((x) => +x.toPrecision(3)), wall: w.map((x) => +x.toPrecision(3)) });
-      console.log(`  ${String(d).padStart(4)} m  ${a.toFixed(2)} s  ${f.map((x) => x.toFixed(4)).join(" ")} | ${w.map((x) => x.toFixed(4)).join(" ")}`);
-    }
-  }
-  const table = ages.map((a) => [a, ...FIRE_LIGHT_SIZES.map((d) => {
-    const r = rows.find((x) => x.age === a && x.size === d)!;
-    return [0, 1, 2].map((c) => +(((r.floor as number[])[c] + (r.wall as number[])[c]) / 2).toPrecision(3));
-  })]);
-  result.calibrate_grid = { rows, table, current: FIRE_LIGHT_GRID };
-  console.log(`  measured table (age s, then rgb per size ${FIRE_LIGHT_SIZES.join(", ")} m):`);
-  for (const row of table) console.log(`    ${JSON.stringify(row)},`);
-}
-
 if (only.includes("calibrate")) {
   const ages = [0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9], life = 1.6, intensity = 30000, W = 640, H = 360;
   const rows: Record<string, unknown>[] = [];
@@ -303,51 +268,6 @@ if (only.includes("quality")) {
   const own = judge(truths[1].png, half.png, 0.5);
   report(`offline ${SPP / 2} vs ${SPP} spp, 0.5 s`, own);
   result.quality = { rows, own };
-}
-
-if (only.includes("smoke")) {
-  generate(1, "object");
-  const ages = opt("--ages", "1,3").split(",").map(Number), T0 = 2;
-  const rows: Record<string, unknown>[] = [];
-  // Offline a grid takes the sources pending at the render at its first step (time 0): the reference fires at 0 and is
-  // rendered at the age. Live fires at 2 s, after the level's load (whether a puff made before that survives is
-  // checked first: the frame log's rebuilds, and the smoke of a fire at 0 at 3 s).
-  console.log(`\nsmoke: the fire and its smoke, live (scale ${SCALE}, fire at ${T0} s) against offline (${SPP} spp, fire at 0 s), at the same age`);
-  {
-    const b = await bundle("smoke-at0", "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, smoke: true, at: 0 });
-    const log = join(dir, "smoke-at0.jsonl");
-    const s = live("smoke-at0", b, { frameLog: log });
-    const png = join(dir, "smoke-at0-3.png");
-    await s.frames(179);
-    await s.frames(1, png);
-    await s.quit();
-    const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { rebuild: number; fallback: string | null });
-    const rebuilds = F.flatMap((f, k) => (f.rebuild > 0 ? [`frame ${k}: ${f.rebuild.toFixed(0)} ms${f.fallback ? ` (${f.fallback})` : ""}`] : []));
-    console.log(`  a fire at 0 s, live: rebuilds ${rebuilds.length ? rebuilds.join(", ") : "none"}; its picture at 3 s: ${png}`);
-    result.smoke_at0 = { rebuilds, png };
-  }
-  for (const turbulence of args.includes("--turbulence0") ? [undefined, 0] : [undefined]) {
-    const t = turbulence === undefined ? "turbulence 15" : "turbulence 0";
-    const tb = turbulence === undefined ? {} : { turbulence };
-    const refB = await bundle(`smoke-ref-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: false, smoke: true, at: 0, ...tb });
-    const litB = await bundle(`smoke-lit-${t}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, smoke: true, at: T0, ...tb });
-    const truths = ages.map((x) => offline(`smoke-${t.replace(" ", "")}-${x}`, refB, x));
-    const s = live(`smoke-${t}`, litB);
-    const shots: string[] = [];
-    for (const x of ages) {
-      const png = join(dir, `smoke-${t.replace(" ", "")}-${x}.png`);
-      await s.frames(Math.round((T0 + x) * 60) - s.frame - 1);
-      await s.frames(1, png);
-      shots.push(png);
-    }
-    await s.quit();
-    for (let k = 0; k < ages.length; k++) {
-      const j = judge(truths[k].png, shots[k], ages[k]);
-      rows.push({ turbulence: t, age: ages[k], j });
-      report(`${t}, ${ages[k]} s`, j);
-    }
-  }
-  result.smoke = rows;
 }
 
 if (only.includes("cost")) {

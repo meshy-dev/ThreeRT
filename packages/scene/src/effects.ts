@@ -474,26 +474,14 @@ const GRID_SMOKE = new GridProgram("grid_smoke", {
     s.b = vec4<f32>(v, pr);`,
 });
 
-/**
- * The simulated smoke as a medium: extinction from the density, a glow from hot smoke, and fire: where the smoke is
- * hotter than `Fire.y` (the ignition temperature, 0..1), flame by its temperature (dark red, orange, white-yellow, the
- * `Fireball`'s colours), `Fire.x` nits at the hottest (0: none). Fire and smoke are one medium: the flame is inside its
- * smoke, hidden where the smoke around it is dense, as a fireball volume inside a smoke volume cannot be (volumes must
- * not overlap).
- */
+/** The simulated smoke as a medium: extinction from the density, a glow from hot smoke. */
 const GRID_SMOKE_MEDIUM = new VolumeFunction("grid_smoke_medium", {
-  params: { Albedo: [0.6, 0.6, 0.62, 0], Glow: [0, 0, 0, 0], Density: 4, Fire: [0, 0.5, 0, 0] },
+  params: { Albedo: [0.6, 0.6, 0.62, 0], Glow: [0, 0, 0, 0], Density: 4 },
   code: `
     let g = vgrid(i, i.lp);
     o.extinction = $Density * g.x;
     o.albedo = $Albedo.rgb;
-    o.emission = $Glow.rgb * g.y * o.extinction;
-    if ($Fire.x > 0.0) {
-      let t = clamp((g.y - $Fire.y) / max(1.0 - $Fire.y, 1e-3), 0.0, 1.0);
-      var c = mix(vec3<f32>(0.6, 0.06, 0.01), vec3<f32>(1.0, 0.45, 0.08), smoothstep(0.1, 0.5, t));
-      c = mix(c, vec3<f32>(1.0, 0.9, 0.6), smoothstep(0.5, 0.95, t));
-      o.emission += c * $Fire.x * t * t * o.extinction;
-    }`,
+    o.emission = $Glow.rgb * g.y * o.extinction;`,
 });
 
 export interface SimulatedSmokeOptions {
@@ -504,9 +492,6 @@ export interface SimulatedSmokeOptions {
   density?: number;
   albedo?: [number, number, number];
   glow?: [number, number, number];
-  /** Fire in the smoke: flame where it is hotter than `ignition` (0..1; default 0.5), `intensity` nits at the hottest
-   *  (the `Fireball`'s colours). Hot puffs then burn and cool to smoke, in one medium. */
-  fire?: { intensity: number; ignition?: number };
   /** Wind (m/s; `customData.xyz` adds to it live), and how fast the air takes it up (1/s). */
   wind?: [number, number, number];
   drag?: number;
@@ -525,8 +510,7 @@ export interface SimulatedSmokeOptions {
 
 /**
  * `scene.add(new SimulatedSmoke())`, sized by its scale (the unit box): smoke that lives on a grid, simulated on the GPU
- * every frame. `puff` adds smoke; it then rises, drifts with the wind and thins out. Fire: `fire` (flame above an
- * ignition temperature), or a plain `glow`.
+ * every frame. `puff` adds smoke; it then rises, drifts with the wind and thins out. Fire: a `glow`.
  */
 export class SimulatedSmoke extends VolumeMesh {
   constructor(o: SimulatedSmokeOptions = {}) {
@@ -537,7 +521,7 @@ export class SimulatedSmoke extends VolumeMesh {
     });
     super({
       shape: "box",
-      volume: GRID_SMOKE_MEDIUM.with({ Albedo: [...(o.albedo ?? [0.6, 0.6, 0.62]), 0], Glow: [...(o.glow ?? [0, 0, 0]), 0], Density: density, Fire: [o.fire?.intensity ?? 0, o.fire?.ignition ?? 0.5, 0, 0] }),
+      volume: GRID_SMOKE_MEDIUM.with({ Albedo: [...(o.albedo ?? [0.6, 0.6, 0.62]), 0], Glow: [...(o.glow ?? [0, 0, 0]), 0], Density: density }),
       // Sources set a density of at most their own (`puff`: 1 by default); diffusion and advection never raise it.
       majorant: density,
       anisotropy: o.anisotropy ?? 0.2,
