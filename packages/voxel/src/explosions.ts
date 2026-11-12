@@ -27,6 +27,8 @@ export const MAX_FIREBALL = 40;
  *  promised to be). */
 const PARK: [number, number, number] = [0, -10000, 0];
 const PARKED = 1e-3;
+/** An idle light's reach (m): its light group's sphere, parked with it, then holds no pixel. */
+const IDLE_REACH = 1e-3;
 
 /** The fireball sizes (full size, m) the fire light was measured at. */
 export const FIRE_LIGHT_SIZES = [1.1, 2.2, 4.4, 8.8] as const;
@@ -182,6 +184,8 @@ export class Explosions extends Group {
     for (let k = 0; k < nl; k++) {
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
+      // Off: no reach (a distance of 0 would be unbounded: every pixel would test it, shadow ray and all).
+      l.distance = IDLE_REACH;
       l.movable = true;
       l.position.set(...PARK);
       this.add(l);
@@ -280,6 +284,7 @@ export class Explosions extends Group {
       const peak = Math.max(...rgb);
       if (k === undefined || !(peak > 0)) {
         l.intensity = 0;
+        l.distance = IDLE_REACH;
         l.position.set(...PARK);
         continue;
       }

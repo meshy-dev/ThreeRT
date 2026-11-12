@@ -12,8 +12,8 @@
 //             p99) and SSIM over the image, the fireball, the street before it, and 3 x 3 regions.
 //  smoke      the same with the smoke grid, 1.0 s and 3.0 s after the fire: live fires at 2 s (after the level's load),
 //             offline at 0 s (an offline render gives a grid the sources pending at it at its first step), so both are
-//             the same age (`--turbulence0`: also without the grid's random push). First: does a puff made in setup
-//             survive the live view's first frames (its rebuilds)?
+//             the same age (`--turbulence0`: also without the grid's random push). First a check: a fire made in setup,
+//             live, has its smoke at 3 s and no rebuild (a live rebuild resets every simulated grid).
 //  cost       games/voxel-level/level-destruction{,-smoke,-fire}.game.ts at 0.75, lockstep (frames as fast as the GPU
 //             goes): the frame's CPU and GPU ms for 2 s before and 4 s after the 4 m explosion (`crater`); with fire,
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
@@ -334,7 +334,7 @@ if (only.includes("cost")) {
       await s.frames(240); // warm: the level loaded, the radiance cache trained
       s.event(scenario);
       await s.frames(scenario === "sustained" ? 11 * 60 : scenario === "peak" ? 4 * 60 : 5 * 60);
-      const explosions = s.lines.filter((l) => l.startsWith("explosion ")).map((l) => JSON.parse(l.slice(10)) as { burning?: number; lit?: number });
+      const explosions = s.lines.filter((l) => /^(\[game\] )?explosion \{/.test(l)).map((l) => JSON.parse(l.slice(l.indexOf("{"))) as { burning?: number; lit?: number });
       await s.quit();
       const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Frame);
       const ex = F.findIndex((f, k) => k > 200 && (f.voxel?.[0] ?? 0) > 0);

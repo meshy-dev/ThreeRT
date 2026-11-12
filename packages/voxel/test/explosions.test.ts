@@ -55,7 +55,7 @@ test("the pool: the next fireball each fire, the oldest taken over when every on
   x.step(20);
   assert.equal(x.stats.burning, 0);
   assert.equal(x.stats.lit, 0);
-  assert.ok(x.lights.every((q) => q.intensity === 0));
+  assert.ok(x.lights.every((q) => q.intensity === 0 && q.distance > 0 && q.distance < 0.01), "off, and reaching nothing (distance 0 would be unbounded)");
   assert.ok(x.fireballs.every((f) => f.position.y < -1000 && f.scale.x < 0.01));
   assert.equal(x.stats.most, 3);
 });
