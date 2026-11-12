@@ -1,0 +1,53 @@
+name: Showcase entry
+description: Register something you made or remixed with ThreeRT, so it shows in the Showcase's Community section.
+title: "Showcase: "
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An entry is a GitHub repository with the project at its root (what `threert create` or `threert remix` made),
+        a line about it and a picture. ThreeRT for macOS fills this form from Studio → ⋯ → Submit to the Showcase.
+        Accepted entries go into `site/showcase/community.json`; people open them from the app and remix them.
+  - type: input
+    id: name
+    attributes:
+      label: Title
+      description: What the card says.
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: GitHub repository
+      description: Public, with `threert.config.json` at its root.
+      placeholder: https://github.com/you/your-project
+    validations:
+      required: true
+  - type: input
+    id: about
+    attributes:
+      label: One line about it
+      description: What it is, and what it started from if it is a remix.
+    validations:
+      required: true
+  - type: textarea
+    id: picture
+    attributes:
+      label: Picture
+      description: Drag a 16:9 still in here (⌘S in ThreeRT saves one to the Desktop). A short clip is welcome too.
+    validations:
+      required: true
+  - type: input
+    id: package
+    attributes:
+      label: Hosted package (optional)
+      description: The URL of a `threert pack` output (GitHub Pages works), so the entry plays without cloning.
+      placeholder: https://you.github.io/your-project/
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Rights
+      options:
+        - label: The code, models and textures in the repository are mine to publish, or their licences allow it and are named there.
+          required: true
