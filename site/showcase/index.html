@@ -80,13 +80,13 @@
 <section class="sec">
   <div class="wrap">
     <div class="feat rv">
-      <div class="seqp" data-scene="../media/bistro" data-la="three.js · 54 fps" data-lb="ThreeRT · 60 fps"></div>
+      <div class="cmp" data-a="../media/bistro/hero-three.webp" data-b="../media/bistro/hero-rt.webp" data-video="../media/bistro/hero.mp4" data-video-sm="../media/bistro/hero-720.mp4" data-la="three.js" data-lb="ThreeRT · 60 fps" data-x="50"></div>
       <div class="txt">
         <h2>Bistro night</h2>
         <span class="by">Amazon Lumberyard Bistro · ORCA</span>
         <p class="d">A street corner after dark. The string lights, the shop signs and the lamps are the light sources: each one lights the square in its own colour.</p>
         <ul class="ticks"><li>Every emitter is a light</li><li>Warm light from the shop window and the wall lamp spills across the facade and the pavement</li></ul>
-        <p class="more">Drag the divider: three.js on the left, ThreeRT on the right, the same camera path.<sup>1</sup></p>
+        <p class="more">Drag the divider: three.js on the left, ThreeRT on the right, the same camera path, recorded at 60 fps.<sup>1</sup></p>
       </div>
     </div>
     <div class="feat flip rv">
@@ -135,7 +135,7 @@
       <div class="site"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a><a href="https://github.com/taichi-dev/ThreeRT" rel="noopener">GitHub</a></div>
     </div>
     <div class="note">
-      <p><sup>1</sup> 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine.</p>
+      <p><sup>1</sup> 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine. The Bistro clip is ThreeRT live on an Apple M3 Max at 1600 × 900 (render scale 0.5), every frame as it drew it: 12.8 ms of GPU time a frame at the median, 14.8 ms at the 95th percentile, none over 16.7 ms.</p>
       <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
       <p id="caseCredits" hidden></p>
     </div>
@@ -143,11 +143,11 @@
 </footer>
 
 <script type="module">
-  import { $, $$, sequence, reveal } from "../js/threert.js";
+  import { $, $$, compare, sequence, reveal } from "../js/threert.js";
   import { guard, packages, packageLinks, qrSvg, reachable } from "../js/site.js";
 
   reveal();
-  guard("camera moves", () => { for (const el of $$(".seqp")) sequence(el); });
+  guard("camera moves", () => { for (const el of $$(".feat .cmp")) compare(el); for (const el of $$(".seqp")) sequence(el); });
 
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 

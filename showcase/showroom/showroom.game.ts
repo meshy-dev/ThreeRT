@@ -2,9 +2,10 @@
 //
 // A 6 x 7.2 m shop with a terrazzo floor, plaster walls and a steel shop window in the left wall. Six products stand in
 // it at their real sizes: a sneaker, sunglasses, a glass table lamp and a boom box on plinths, a velvet chair on a round
-// platform in front of a painted arch, water bottles on the oak shelf wall. By day the sun comes through the window and
-// most of what lights the room is its patch on the floor, bounced; the track spots pick the products out. In the
-// evening the window goes dark and the same spots, the shelf strips and the table lamp carry the room. Nothing is baked
+// platform in front of a painted arch, water bottles on the oak shelf wall. It opens in the evening: the window is
+// dark and the shop's own lights carry the room, the track spots on the products, the strips under the shelves and
+// the table lamp. By day (`mood`) the sun comes through the window and most of what lights the room is its patch on
+// the floor, bounced, with the spots picking the products out. Nothing is baked
 // and there is no fill light: the pools, the soft shadows under the products, the plinths in the polished floor and
 // the room in the lamp's glass and the sunglasses are all traced.
 //
@@ -13,8 +14,8 @@
 //                                                       lens; click it again, or anywhere else, to step back
 //   next (N, Right) / prev (P, Left)                    step through the six products
 //   overview (O, Space)                                 back to the view from the door
-//   mood (M)                                            day <-> evening: the sun sets in two seconds, the exposure
-//                                                       follows it, the table lamp comes on
+//   mood (M)                                            evening <-> day: the sun rises in two seconds, the exposure
+//                                                       follows it, the table lamp goes off
 //   colour (C)                                          the next colourway of the product in view: the sneaker has
 //                                                       three, the chair two (from the door it changes the sneaker)
 //
@@ -219,7 +220,7 @@ function daylight(elevation: number): number {
 const eye: Vec3 = [...OVERVIEW.eye], look: Vec3 = [...OVERVIEW.target];
 let zoom = FOV.overview, shown = -2, still = false;
 let walk = { fromEye: eye.slice() as Vec3, fromLook: look.slice() as Vec3, fromZoom: zoom, t0: 0, seconds: 1, rise: 0 };
-let sunElevation = SUN.day;
+let sunElevation = SUN.dusk;
 const colours: Record<string, number> = {};
 const tmp = new Vector3();
 const mix = (a: number, b: number, k: number) => a + (b - a) * k;
@@ -271,7 +272,7 @@ function frame(f: FrameContext<State>) {
 
 // ------------------------------------------------------------------------------------------------ the game
 export default defineGame<State>({
-  state: { focus: -1, evening: false, colour: { shoe: 0, chair: 0 } },
+  state: { focus: -1, evening: true, colour: { shoe: 0, chair: 0 } },
 
   setup() {
     const scene = new Scene();
@@ -461,7 +462,7 @@ export default defineGame<State>({
     camera.id = "camera";
     camera.position.set(...OVERVIEW.eye);
     camera.lookAt(...OVERVIEW.target);
-    camera.setManualExposure(SUN.evDay);
+    camera.setManualExposure(SUN.evDusk);
     scene.add(camera);
     return { scene, camera, options: { name: "showroom", preset: "preview" as const, width: 1280, height: 720, overrides: { native: { maxBounces: 8 } } } };
   },
