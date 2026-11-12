@@ -1119,8 +1119,6 @@ pub struct LiveCore {
     pub frame: u32,
     pub history_len: f32,
     reset: bool,
-    /// Max history for the next frame after a scene update (keeps geometry history, fades stale lighting fast).
-    cap_next: Option<f32>,
     /// Bloom stage radii / tints (`bloom_stages`).
     bloom: ([f32; 6], [f32; 6]),
     vignette: f32,
@@ -1543,8 +1541,15 @@ const CACHE_FRAMES_LIT: f32 = 4.0;
 const VOLUME_TRAIN_SHARE: f32 = 1.0 / 8.0;
 /// Media voxel training points per frame (pathtrace.wgsl MEDIA_TRAIN_POINTS).
 const MEDIA_TRAIN_POINTS: u32 = 4096;
-/// Diffuse history cap (frames) in scenes with light-sampled particles.
-const SPARK_HISTORY: f32 = 24.0;
+/// The most frames a pixel's history holds while the scene's lighting changes: short enough to follow the change by
+/// itself (a real-time denoiser's bound: NRD's default is 30), so no edit has to cut it. Against main's rules (24
+/// frames for good in a scene with spark lights, every pixel cut to 16 at a lighting edit, an on / off anti-lag), dE
+/// against the offline render or the converged frame: the Bistro slice half a second after its explosion 6.04 for
+/// 6.58, at rest 2.82 for 2.79; Kabukichō 2 s and 4 s after its signs close 6.70 and 2.92 for 6.56 and 2.82. At 64
+/// frames the explosion read 5.72 and the signs 7.82 and 3.37.
+const HISTORY_LIVE: f32 = 32.0;
+/// The most once the scene has settled: holding still, the frame converges on the offline render.
+const HISTORY_FRAMES: f32 = 4096.0;
 
 /// THREERT_TL_HIDE (diagnostics): the translucency pass trains the volume voxels but draws nothing, so frames show what is
 /// behind translucent particles; `odd` hides them on odd frames only (rain on / off pairs from one run).
@@ -1625,7 +1630,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, cap_next: None, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), still: 0, inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, ghost_fix_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -1723,7 +1728,6 @@ impl LiveCore {
                     self.edit_ms += t.elapsed().as_secs_f32() * 1e3;
                     // As after a rebuild: history validated per pixel, the reservoirs' triangle indices dropped.
                     self.restir_prev = None;
-                    self.cap_next = Some(4.0);
                     self.lit_changed = self.frame.max(1);
                 }
                 Err(why) => {
@@ -1906,10 +1910,9 @@ impl LiveCore {
             self.sc.dof = c.dof.clone();
             self.cam = self.sc.scene_camera;
         }
-        // Lighting changed: a mild global history cap for one frame (indirect light follows within ~0.25 s); where the
-        // change is strong the temporal pass restarts the history locally (anti-lag).
+        // Lighting changed: for 45 frames the histories hold HISTORY_LIVE frames at most (`live_lighting`), and where the
+        // change is strong the temporal pass cuts the history locally (anti-lag).
         if d.materials || d.lights || d.objects || d.environment {
-            self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
             self.lit_changed = self.frame.max(1);
         }
         // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
@@ -1953,7 +1956,6 @@ impl LiveCore {
                 self.put_sky(b);
             }
         }
-        self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
         self.lit_changed = self.frame.max(1);
     }
 
@@ -2284,7 +2286,6 @@ impl LiveCore {
         enc.copy_buffer_to_buffer(&r.staging, 0, &self.sc.up.emitters, 0, r.bytes.min(self.sc.up.emitters.size()));
         self.g.queue.submit([enc.finish()]);
         self.emitter_params(r.entries, r.total, r.power);
-        self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
         self.lit_changed = self.frame.max(1);
     }
 
@@ -2302,8 +2303,7 @@ impl LiveCore {
         if !powers.is_empty() {
             e.put_powers(&powers);
             self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
-            // The lighting changed (as when a result lands): the history cap and the anti-lag restart.
-            self.cap_next = Some(self.cap_next.map_or(16.0, |c| c.min(16.0)));
+            // The lighting changed (as when a result lands): `live_lighting` for the next 45 frames.
             self.lit_changed = self.frame.max(1);
         }
     }
@@ -3507,7 +3507,6 @@ impl LiveCore {
         self.prev_span = None;
         self.pose_span = None;
         self.emitters_moved = false;
-        self.cap_next = Some(4.0);
         self.lit_changed = self.frame.max(1);
         Ok(())
     }
@@ -3566,6 +3565,12 @@ impl LiveCore {
         self.min_scale = (MIN_SCALE / k).max(SCALE_FLOOR);
         self.render_scale = 1.0 / k;
         self.dynamic_res = true;
+    }
+
+    /// The scene's lighting is changing: something moved or was edited in the last 45 frames, or the scene has spark
+    /// lights (light-sampled particles: they move every frame, and no edit says so).
+    fn live_lighting(&self) -> bool {
+        self.spark_lights || (self.lit_changed > 0 && self.frame.wrapping_sub(self.lit_changed) < 45)
     }
 
     /// Fixed render scale (`s` in SCALE_FLOOR ..= 1), or dynamic resolution (`s` = 0).
@@ -3704,12 +3709,11 @@ impl LiveCore {
         // Camera motion is reprojected exactly (disocclusions are rejected per pixel), so history survives motion;
         // the cap only bounds smearing of view-dependent shading (glossy reflections).
         // Diffuse lighting reprojects exactly with the camera; view-dependent specular is handled per pixel (temporal pass).
-        let mut cap = if self.reset { 1.0 } else if let Some(c) = self.cap_next.take() { c } else if moved { 48.0 } else { 4096.0 };
-        // Light-sampled particles (sparks) light surfaces for a moment and fade gradually, which anti-lag (a sudden
-        // change) does not catch: a short history lets the lit surfaces follow them.
-        if self.spark_lights {
-            cap = cap.min(SPARK_HISTORY);
-        }
+        // The most frames a pixel's history holds: HISTORY_LIVE while the scene's lighting changes, HISTORY_FRAMES once
+        // it has settled. Within it the length is each pixel's own (live.wgsl `dtemporal`: less where it moves, anti-lag
+        // where its lighting changes, restarted where its surface is new). No edit cuts it: until 2026-11-12 a
+        // lighting edit left every pixel 16 frames and a geometry edit 4, the whole frame for a change in one corner.
+        let cap = if self.reset { 1.0 } else if self.live_lighting() { HISTORY_LIVE } else { HISTORY_FRAMES };
         self.history_len = if self.reset { 1.0 } else { (self.history_len + 1.0).min(cap) };
         let cam = self.cam;
         let g = &self.g;
@@ -3816,10 +3820,7 @@ impl LiveCore {
             if self.cache.is_some() {
                 // Light-sampled particles (sparks: Particles emitterArea) move their light every frame: the cache and
                 // the temporal pass keep the short history of a lighting edit while the scene has them.
-                if self.spark_lights {
-                    self.lit_changed = self.frame.max(1);
-                }
-                let lit = self.lit_changed > 0 && self.frame.wrapping_sub(self.lit_changed) < 45;
+                let lit = self.live_lighting();
                 let cold = if self.cold_frames >= COLD_FALLBACK_FRAMES { 1 } else { 0 };
                 p.cache = [1.0, CACHE_SAMPLES, if lit { CACHE_FRAMES_LIT } else { CACHE_FRAMES }, (cache_flags() | cold) as f32];
             }
@@ -3941,7 +3942,7 @@ impl LiveCore {
             // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
             // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
             misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
-            mode: [self.view_mode, self.still, (self.lit_changed > 0 && self.frame.wrapping_sub(self.lit_changed) < 45) as u32, temporal_flags() | if self.ghost_fix_off { 16384 } else { 0 }],
+            mode: [self.view_mode, self.still, self.live_lighting() as u32, temporal_flags() | if self.ghost_fix_off { 16384 } else { 0 }],
             post: self.post,
             ae: self.sc.exposure_settings.ae,
             ae2: self.sc.exposure_settings.ae2,

@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), frames since the view translated, lighting edited in the last 45 frames, experiment flags
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), frames since the view translated, the scene's lighting is changing (live.rs `live_lighting`), experiment flags
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
@@ -334,6 +334,11 @@ fn same_surface_n(tx: i32, ty: i32, z: f32, n: vec3<f32>, t: f32, ncos: f32) -> 
 
 // History length (frames) from which `dtemporal` reprojects the pixel's centre instead of its jittered sample.
 const HIST_CENTRE: f32 = 16.0;
+// The most frames the irradiance history holds where the pixel moves a pixel a frame or more (it is resampled every
+// frame, each time a little blurrier), and the relative difference of its fast mean from its slow one, beyond their
+// noise, at which anti-lag leaves it two frames (`dtemporal`).
+const HIST_MOVING: f32 = 48.0;
+const ANTILAG: f32 = 0.15;
 // Diffuse history length from which the firefly cut stops (dtemporal).
 const FIREFLY_FRAMES: f32 = 16.0;
 
@@ -361,6 +366,7 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     var hd = vec4<f32>(0.0);
     var hm = vec4<f32>(0.0);
     var around = vec2<f32>(-1.0);
+    var speed = 0.0; // output pixels this frame
     let ps = vec2<i32>(L.isz.zw);
     if (L.size.w == 0u && ps.x > 0) {
         let mv = motion_in[q];
@@ -406,6 +412,7 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
                 hd = vec4<f32>(0.0);
                 hm = vec4<f32>(0.0);
             }
+            speed = length(sp - 0.5 - pp.xy);
             // Slow / fast means over the 3x3 around it on the same surface (anti-lag compares them).
             if (t > 0.0 && L.mode.z != 0u) {
                 var acc = vec2<f32>(0.0);
@@ -423,14 +430,17 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    let cap = select(L.misc.y, min(L.misc.y, 4.0), anim);
+    // How long the history may be at most is the frame's (`misc.y`: live.rs HISTORY_LIVE while the scene's lighting
+    // changes, far longer once it has settled); within it, each pixel's own: less where it moves (until 2026-11-12 the
+    // whole frame's was held to 48 while the camera moved), a few frames on animated shading, and anti-lag below.
+    let cap = mix(select(L.misc.y, min(L.misc.y, 4.0), anim), min(L.misc.y, select(HIST_MOVING, 4.0, anim)), clamp(speed, 0.0, 1.0));
     var m1 = hm.x;
     var m2 = hm.y;
     let sd = sqrt(max(m2 - m1 * m1, 0.0));
     if (hd.w >= 4.0 && hd.w < FIREFLY_FRAMES) {
         // Firefly, while the history is young (after a disocclusion or a lighting change): a sample moves the pixel by
         // (l - mean) / frames; cut only what would show as a sparkle (more than half the mean above it). Not from
-        // FIREFLY_FRAMES on: histories are capped (48 frames moving, 24 with sparks), so a cut tied to the frame count
+        // FIREFLY_FRAMES on: histories are capped (48 frames moving, 32 while the scene's lighting changes), so a cut tied to the frame count
         // kept clipping the rare bright samples of small strong lights for good. Bistro crowd at 10 s, held: diffuse
         // 0.70 of our offline render with it, 0.82 without; moving ΔE 15.3 -> 12.9.
         let hi = m1 + 4.0 * sd + 0.5 * m1 * hd.w + 1e-4;
@@ -438,14 +448,20 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let fast = select(l, mix(hm.z, l, 0.25), hd.w > 0.0);
     var count = min(hd.w + 1.0, cap);
-    // Anti-lag: around this point the fast average left the slow one by more than its (neighbourhood-averaged)
-    // noise allows: the lighting changed here (a sign switched off, a door opened). Restart the history locally
-    // instead of capping it everywhere.
+    // Anti-lag (as ReBLUR's): around this point the fast average left the slow one by more than its
+    // (neighbourhood-averaged) noise allows: the lighting changed here (a sign switched off, a door opened, a wall
+    // gone, a spark passing). The history is cut by how far, down to two frames at ANTILAG of the mean: a slow change
+    // shortens it a little every frame until it follows, a sudden one restarts it. While the scene's lighting changes
+    // (`mode.z`): once it has settled there is nothing to find, and what the test then finds is noise (a still Bistro
+    // read dE 2.43 against offline with it always on, 2.23 without).
+    // (The specular has none: at one sample a pixel its fast mean is noise, and cutting by it cost more than the lag:
+    // the Bistro slice at 5 s read dE 2.98 with it for 2.82.)
     if (L.mode.z != 0u && hd.w >= 6.0 && around.x >= 0.0) {
-        let dev = abs(around.y - around.x);
-        if (dev > 3.0 * 0.38 * sd / 3.0 + 0.15 * max(around.x, around.y) + 1e-4) {
-            count = min(count, 2.0);
-            m1 = around.y;
+        let over = abs(around.y - around.x) - 3.0 * 0.38 * sd / 3.0 - 1e-4;
+        let keep = 1.0 - clamp(over / (ANTILAG * max(max(around.x, around.y), 1e-6)), 0.0, 1.0);
+        if (keep < 1.0) {
+            count = max(min(count, hd.w * keep + 1.0), 2.0);
+            m1 = mix(around.y, m1, keep);
             m2 = m1 * m1 + sd * sd;
         }
     }
