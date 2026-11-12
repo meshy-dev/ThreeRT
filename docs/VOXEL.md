@@ -560,9 +560,11 @@ setup: one smoke grid (`SimulatedSmoke`) over a box the game names, a pool of fi
 from it, and a pool of point lights. It adds no engine call.
 
 **Volumes must not overlap** (`core.ts`: the media are taken whole, in the order a ray enters them), so a fire never
-puts a volume inside another: a fire that touches the smoke box burns **in the grid** (hot smoke that flames,
-`SimulatedSmoke`'s `fire`: one medium with its smoke), and a fireball is placed only where it touches no other volume
-(a fire that would overlap a burning fireball takes it over; any other it would overlap ends). Before this the
+puts a volume inside another: a fire centred in the smoke box burns **in the grid** (hot smoke that flames,
+`SimulatedSmoke`'s `fire`: one medium with its smoke; its puff kept two cells in from the box's sides, which the grid
+clears), and elsewhere a fireball is placed only where it touches no other volume: no larger than reaches the box
+(`stats.shrunk`), and a fire that would overlap a placed fireball (burning, waiting or not yet parked) takes it over;
+any other it would overlap ends (`stats.merged`). Before this the
 fireballs sat inside the smoke box and the puff hid them whole: at 0.2 and 0.5 s after the explosion the fire was not
 seen at all, offline or live (the review of #29).
 

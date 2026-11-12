@@ -4313,9 +4313,10 @@ benchmark level. The order follows the dependencies; a step that meets a further
     - **(b) Fire and smoke** (branch `explosion-fire`; design `out/web-probe/step10/b-design.md`; docs/VOXEL.md "Fire
       and smoke"). The user's scope (2026-11-12): an explosion's fireball and smoke, on the existing volume and particle
       paths. `Explosions` (`packages/voxel`): one smoke grid, a pool of fireballs and a pool of point lights made in
-      setup; `fire` / `explode` / `step` / `dispose`. Volumes must not overlap, so a fire touching the grid burns in it
+      setup; `fire` / `explode` / `step` / `dispose`. Volumes must not overlap, so a fire centred in the grid burns in it
       (hot smoke that flames: `SimulatedSmoke`'s new `fire`, one medium with its smoke; the user's decision A,
-      2026-11-12), and a fireball is placed only where it touches no other volume. Caps on fireballs (32, with the grid
+      2026-11-12), and elsewhere a fireball is placed only where it touches no other volume (no larger than reaches the
+      box; one it would overlap is taken over). Caps on fireballs (32, with the grid
       31), lights (8), fires remembered (64), smoke cells (2^20) and puffs a step (16), with what happens past each;
       every number checked before anything changes. No engine call of its own, so nothing new for `physics_fuzz`
       (`voxelExplode` is in its set already). The scene sync checks grid sources and `customData` only, not transforms

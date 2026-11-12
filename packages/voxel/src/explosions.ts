@@ -173,6 +173,8 @@ export interface ExplosionStats {
   reused: number;
   /** Fireballs a new fire would have overlapped: taken over by it, or ended (volumes must not overlap). */
   merged: number;
+  /** Fireballs made smaller than their fire so as not to reach the smoke box. */
+  shrunk: number;
   /** The most fires burning without a light at once (more burning than there are lights). */
   unlit: number;
   /** Puffs never sent: time going back, or the grid not being synced. */
@@ -227,12 +229,12 @@ export class Explosions extends Group {
   readonly smoke: SimulatedSmoke | null = null;
   readonly life: number;
   readonly intensity: number;
-  readonly stats: ExplosionStats = { fired: 0, inGrid: 0, reused: 0, merged: 0, unlit: 0, unpuffed: 0, most: 0, burning: 0, lit: 0 };
+  readonly stats: ExplosionStats = { fired: 0, inGrid: 0, reused: 0, merged: 0, shrunk: 0, unlit: 0, unpuffed: 0, most: 0, burning: 0, lit: 0 };
   /** The fires that may still burn (oldest first; at most `MAX_FIRES`). */
   private fires: Fire[] = [];
   /** Per fireball: its fire, or null while parked. */
   private balls: (Fire | null)[] = [];
-  private box: { lo: [number, number, number]; hi: [number, number, number] } | null = null;
+  private box: { lo: [number, number, number]; hi: [number, number, number]; cell: number } | null = null;
   private next = 0;
   /** The scene time of the last `step` (-Infinity before the first). */
   private now = -Infinity;
@@ -306,19 +308,20 @@ export class Explosions extends Group {
       this.add(smoke);
       this.smoke = smoke;
       const half = box.size.map((v) => v / 2);
-      this.box = { lo: box.center.map((v, k) => v - half[k]) as [number, number, number], hi: box.center.map((v, k) => v + half[k]) as [number, number, number] };
+      const cells = smokeSettings.size!;
+      this.box = { lo: box.center.map((v, k) => v - half[k]) as [number, number, number], hi: box.center.map((v, k) => v + half[k]) as [number, number, number], cell: Math.max(...box.size.map((v, k) => v / cells[k])) };
     }
   }
 
   /**
    * A fire where an explosion of radius `r` (m) went off at `at` (world, m), starting at scene time `time` (the frame's
    * `f.time`; now or later), 2.2 r across (5 cm to 40 m), its centre 0.3 r above the explosion's point:
-   * - touching the smoke grid's box: it burns in the grid, a puff of hot smoke (sent at the first `step` at or after
-   *   `time`; at most 16 a step) that flames above the ignition temperature and cools to smoke: fire and smoke one
-   *   medium. Returns -1.
-   * - elsewhere: a fireball of the pool. A burning or waiting fireball it would overlap is taken over by it (and any
-   *   other it would overlap ends): volumes never overlap. Otherwise the next of the pool (the oldest taken over when
-   *   every one burns or waits). Returns its index.
+   * - its centre in the smoke grid's box: it burns in the grid, a puff of hot smoke (its centre kept two cells in from
+   *   the box's sides; sent at the first `step` at or after `time`; at most 16 a step) that flames above the ignition
+   *   temperature and cools to smoke: fire and smoke one medium. Returns -1.
+   * - elsewhere: a fireball of the pool, no larger than reaches the box. A placed fireball it would overlap is taken
+   *   over by it (and any other it would overlap ends): volumes never overlap. Otherwise the next of the pool (the
+   *   oldest taken over when every one burns or waits). Returns its index.
    * Either way a light while it burns. Throws a `RangeError` before changing anything for a position outside ±1,000
    * km or not three finite numbers, a radius that is not finite or not above 0, a time outside ±1e9 s, or the group
    * moved off the world's frame.
@@ -332,18 +335,29 @@ export class Explosions extends Group {
     // hole.
     const c: [number, number, number] = [at[0], at[1] + 0.3 * rr, at[2]];
     const fire: Fire = { start: time, size, c, ball: -1, order: this.stats.fired, puff: null };
-    if (this.box && touches(c, size / 2, this.box)) {
-      fire.puff = { c, radius: size / 2 };
+    if (this.box && inside(c, this.box)) {
+      // Its puff's centre kept two cells in from the box's sides (the grid clears its border cells every step).
+      const m = this.box.cell * 2;
+      const pc = c.map((v, k) => Math.min(Math.max(v, this.box!.lo[k] + m), this.box!.hi[k] - m)) as [number, number, number];
+      fire.puff = { c: pc, radius: size / 2 };
       this.stats.fired++;
       this.stats.inGrid++;
       this.remember(fire);
       return -1;
     }
-    // Fireballs it would overlap (burning, or waiting to start: their volumes are placed).
+    // Outside the box: a fireball, no larger than reaches the box (volumes must not overlap).
+    if (this.box) {
+      const reach = 2 * boxDistance(c, this.box);
+      if (fire.size > reach) {
+        fire.size = Math.max(Math.min(fire.size, reach), MIN_FIREBALL / 10);
+        this.stats.shrunk++;
+      }
+    }
+    // Placed fireballs it would overlap (burning, waiting to start, or out but not yet parked: their volumes are there).
     const over: number[] = [];
     for (let k = 0; k < this.balls.length; k++) {
       const b = this.balls[k];
-      if (b && time - b.start < this.life && b.start - time < this.life && dist(b.c, c) < (b.size + size) / 2) over.push(k);
+      if (b && dist(b.c, c) < (b.size + fire.size) / 2) over.push(k);
     }
     let k: number;
     if (over.length) {
@@ -359,7 +373,7 @@ export class Explosions extends Group {
     this.endBall(k);
     const f = this.fireballs[k];
     f.position.set(...c);
-    f.scale.setScalar(size);
+    f.scale.setScalar(fire.size);
     f.customData = [time, 0, 0, 0];
     fire.ball = k;
     this.balls[k] = fire;
@@ -418,14 +432,17 @@ export class Explosions extends Group {
     const alive = this.fires.filter((f) => time - f.start >= 0 && time - f.start < this.lifeOf(f));
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
-    // Lights for the youngest that give light (a fire at age 0 gives none yet: it takes no light from an older one).
-    const glowing = alive.filter((f) => time > f.start).sort((a, b) => b.order - a.order);
+    // Lights for the youngest that give light now (a fire at age 0, or one whose light has died, takes none from an
+    // older one that still glows).
+    const lightOf = (f: Fire) => (f.ball < 0 ? gridFireLight(time - f.start, f.size) : fireLight((time - f.start) / this.life, f.size));
+    const glowing = alive.map((f) => ({ f, rgb: lightOf(f) })).filter((g) => Math.max(...g.rgb) > 0).sort((a, b) => b.f.order - a.f.order);
     this.stats.unlit = Math.max(this.stats.unlit, glowing.length - this.lights.length);
     let lit = 0;
     for (let j = 0; j < this.lights.length; j++) {
       const l = this.lights[j];
-      const f = glowing[j];
-      const rgb = f === undefined ? [0, 0, 0] : f.ball < 0 ? gridFireLight(time - f.start, f.size) : fireLight((time - f.start) / this.life, f.size);
+      const g = glowing[j];
+      const f = g?.f;
+      const rgb = g?.rgb ?? [0, 0, 0];
       const peak = Math.max(...rgb);
       if (f === undefined || !(peak > 0)) {
         l.intensity = 0;
@@ -490,12 +507,11 @@ export class Explosions extends Group {
 }
 
 const dist = (a: readonly number[], b: readonly number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-/** Whether a sphere touches a box. */
-function touches(c: readonly number[], radius: number, box: { lo: readonly number[]; hi: readonly number[] }): boolean {
-  let d = 0;
-  for (let k = 0; k < 3; k++) {
-    const v = Math.max(box.lo[k] - c[k], 0, c[k] - box.hi[k]);
-    d += v * v;
-  }
-  return d < radius * radius;
+/** Whether a point is in a box. */
+function inside(c: readonly number[], box: { lo: readonly number[]; hi: readonly number[] }): boolean {
+  return [0, 1, 2].every((k) => c[k] >= box.lo[k] && c[k] <= box.hi[k]);
+}
+/** A point's distance to a box (0 inside). */
+function boxDistance(c: readonly number[], box: { lo: readonly number[]; hi: readonly number[] }): number {
+  return Math.hypot(...[0, 1, 2].map((k) => Math.max(box.lo[k] - c[k], 0, c[k] - box.hi[k])));
 }

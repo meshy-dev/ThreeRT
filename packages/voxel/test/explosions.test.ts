@@ -114,11 +114,11 @@ test("no two volumes overlap: a fire near a fireball takes it over, one near two
   assert.ok(x.stats.inGrid > 0 && x.stats.merged > 3);
 });
 
-test("a fire touching the grid burns in it: no fireball, its puff when it starts, its light from the grid table", () => {
+test("a fire centred in the grid burns in it: no fireball, its puff when it starts, its light from the grid table", () => {
   const x = new Explosions({ smoke });
   const { e, binding } = bound(x);
   assert.equal(x.fire([0, 0, 0], 1, 1), -1);
-  assert.equal(x.fire([11, 0, 0], 1, 1), -1, "outside the box, but its 2.2 m sphere reaches into it");
+  assert.equal(x.fire([9.9, 0, 0], 1, 1), -1, "centred in the box, near its side");
   assert.equal(placed(x).length, 0);
   assert.equal(x.stats.inGrid, 2);
   x.step(0.5);
@@ -129,7 +129,8 @@ test("a fire touching the grid burns in it: no fireball, its puff when it starts
   const calls = e.take();
   assert.equal(sources(calls), 2);
   const src = (calls.find((c) => c[0] === "gridSources")![2] as Float32Array);
-  assert.deepEqual([...src.slice(0, 4)].map((v) => +v.toFixed(5)), [0, 0.3, 0, 1.1], "at the fire's centre, its radius");
+  assert.deepEqual([...src.slice(0, 4)].map((v) => +v.toFixed(5)), [0, 1, 0, 1.1], "at the fire's centre (two cells, 1 m, up from the box's floor), its radius");
+  assert.deepEqual([...src.slice(12, 16)].map((v) => +v.toFixed(5)), [9, 1, 0, 1.1], "the one near the side: kept two cells in (the grid clears its border)");
   x.step(1.2);
   assert.equal(x.stats.lit, 2);
   const l = x.lights[0], rgb = gridFireLight(0.2, 2.2), peak = Math.max(...rgb);
@@ -138,6 +139,27 @@ test("a fire touching the grid burns in it: no fireball, its puff when it starts
   x.step(1 + FIRE_LIGHT_GRID[FIRE_LIGHT_GRID.length - 1][0] + 0.01);
   assert.equal(x.stats.burning, 0);
   assert.equal(x.stats.lit, 0);
+});
+
+test("a fire just outside the box: a fireball no larger than reaches it; a waiting fireball is overlapped too; dark fires take no light", () => {
+  const x = new Explosions({ smoke, lights: 1 });
+  const k = x.fire([11, 0, 0], 1, 1);
+  assert.ok(k >= 0, "a fireball, not the grid (its centre is outside)");
+  assert.ok(x.fireballs[k].scale.x <= 2 + 1e-9, "no larger than reaches the box (1 m away)");
+  assert.equal(x.stats.shrunk, 1);
+  // A fireball set for much later is placed: a fire on it takes it over, whatever the times.
+  const a = x.fire([OUT, 0, 0], 1, 100);
+  assert.equal(x.fire([OUT, 0, 0], 1, 1), a);
+  assert.equal(x.stats.merged, 1);
+  assert.equal(placed(x).length, 2);
+  // One light: an older grid fire that still glows (8.8 m, 1.1 s) keeps it from a younger one gone dark (1.1 m, 1.0 s).
+  const y = new Explosions({ smoke, lights: 1 });
+  y.fire([0, 0, 0], 4, 10);
+  y.fire([5, 0, 5], 0.5, 10.1);
+  y.step(11.1);
+  assert.ok(gridFireLight(1.1, 8.8)[0] > 0 && gridFireLight(1.0, 1.1)[0] === 0);
+  assert.equal(y.stats.lit, 1);
+  assert.equal(y.lights[0].position.x, 0, "the light is the glowing one's");
 });
 
 test("time: a fire set for later waits (its puff too), is counted when taken over; time going back ends every fire", () => {
