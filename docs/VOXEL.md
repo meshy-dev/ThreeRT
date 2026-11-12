@@ -747,6 +747,163 @@ native = parallel = wasm32 = recorded; `physics_fuzz` with `joint_set` (and refu
 anchor among every call's bodies (`pose` refused, the anchor checked unmoved), the joint reports and pushes (sane and
 wild).
 
+### Vehicles (ROADMAP § 6 step 10 c2; design: `out/web-probe/step10/c2-design.md`, candidate 6)
+
+A vehicle is a chassis (any dynamic body: a scene body, or a voxel body, a destructible car) and wheels that are not
+bodies. physics-core's `vehicle` module; the scene's `Vehicle` (an object, like `Joint`).
+
+**Structure (the industry's split).** Probing the ground and the spring and damper run outside the solver, as in
+Bullet's and Rapier's ray-cast vehicles; the hard stop and the low-speed tyre run inside it, as PhysX's suspension limit
+and sticky tyre, Chaos's hard stop and Jolt's max-up do. Bullet and Rapier have no hard stop.
+
+- **The controller** is a copy of Rapier 0.36.1's `DynamicRayCastVehicleController` (Bullet's `btRaycastVehicle`
+  ported; Apache-2.0, its own notice for Bullet's part: `renderer/physics-core/src/vehicle/NOTICE`), changed where its
+  head lists, each change marked "(ThreeRT)". It is updated for every vehicle in id order just before each world step.
+- **The probe**: a ball of the wheel's radius swept down the suspension from the hard point to the rest length, and
+  again from where the hard point will be after the tick (a face the wheel reaches this tick is met now). Of every hit
+  the nearest whose ground is no steeper than 80 degrees is kept (a step's or a chunk's side face is passed over and the
+  ground beyond found: another engine's sphere-cast wheel's rule and default). Voxel colliders are swept cell by cell,
+  each cell a box, in closed form (only cells with a free face turned up; the two sweeps share one walk); other
+  colliders through parry's shape cast. Within 2e-5 m of an exact f64 sweep (parry's general GJK cast is off by up to 5
+  mm). A ball that starts in the ground is the suspension fully compressed against ground straight up.
+- **Forces** along the contact normal, applied on the suspension's axis (the hard point plus the rest length), not at
+  the contact point; the tyre's grip held to `max(0, n · up)` of the load (a spring pressed into a wall does not grip
+  it).
+- **The bump stop**: over the last `bumpLength` of the travel the stiffness rises with the square of the compression
+  into it, k(x) = K (x / L)², F = K x³ / (3 L²).
+- **The stop**: a convex hull of the tyre (24 points a rim) on the chassis where the wheel is fully compressed, 2.5 cm
+  inside the tyre, massless, frictionless of its own; Rapier's contact solver stops it with every other contact. A
+  contact hook (`modify_solver_contacts`) gives its contacts the tyre's friction and the surface of a wheel rolling at
+  its hub's speed, so it rolls and does not drag (`the_stop_rolls_with_the_hub` holds the sign). It turns with the
+  steering. The hook only reads state built before the step (it may run on the solver's threads).
+- **The centre of mass** on the vehicle's description replaces the chassis's (its mass and inertia kept): the body's
+  whole mass goes into its additional mass properties, the colliders' own held while the vehicle is there and put back
+  when it goes (a centre of mass cannot move by adding a massless part to Rapier's sum). Kept through a voxel body's
+  weighing and colliders added or removed.
+- **What the probes see**: the world as the calls left it, as the queries do (a collider added, edited or moved since
+  the last step is tested where it is). A chassis asleep is not pushed, but its wheels are probed every tick: ground
+  carved, filled or moved under a car at rest wakes it (`a_car_falls_when_its_ground_is_carved`, awake and asleep). A
+  blast wakes it as any body.
+
+**Script-reachable surface** (bridge calls `vehicle`, `vehicle_set`, `vehicle_state`, `vehicle_changes`, `remove
+{vehicle}`; `packages/scene`: `Vehicle`, `VehicleWheel`, `WheelParameters`, `VehicleParameters`, additive). Limits,
+each checked before anything is made (a refused call changes nothing): at most 64 vehicles, 1 to 8 wheels; radius 0.05
+to 5 m; travel 0 to 2 m, the rest length at least the travel; width up to the diameter; stiffness, damping, bump
+stiffness and the largest force 0 to 1e8; friction and side grip 0 to 1,000; the bump stop no longer than the travel;
+the stop's inset up to half the radius; an axle across the suspension; the centre of mass within 1e4 m; a dynamic
+chassis. Controls: the drive's force within ±1e8 N, the brake 0 to 1e6 N s, the steering within ±1.5 rad; held until
+changed, a wheel or a control left out held. NaN and infinities are refused everywhere. A wheel's state is by its index
+as described, a lost one included.
+
+**Destruction**: a wheel belongs to the material at its anchor (the cell its hard point is in, or the nearest solid of
+its 26 neighbours, on a voxel chassis; as a joint does). That cell carved, or gone with a part cut off (debris or a body
+of its own), the wheel is lost: out of the vehicle with its stop, the vehicle goes on with the rest, "wheellost" (where
+it was) for the game to draw a wheel thrown off. The chassis carved away whole, retired, fallen or taken out by the
+world: the vehicle is removed and reported once ("removed"), not wheel by wheel. A hard point in a wheel well with no
+solid cell within one cell is on the body itself: never lost while the chassis stands.
+
+**The cars of the measurements** (`vehicle::scenarios`, the figures and their sources in its docs): a 2018 Toyota Camry
+LE (1,495 kg, wheelbase 2.825 m, track 1.60 m, 215/55 R17, clearance 0.15 m, the centre of mass 0.55 m up, front-wheel
+drive) and a 2020 Toyota 4Runner TRD Off-Road (2,155 kg, 2.789 m, 1.605 m, 265/70 R17, clearance 0.244 m, approach and
+departure 33 and 26 degrees, the centre of mass 0.69 m up, four-wheel drive). Where a figure is ours (the centre of
+mass's height from rollover ratings' stability factors, weight shares, inertia, ride frequency 1.5 / 1.3 Hz, damping,
+the bump stops' curves) the code says so.
+
+#### Measured: the scenarios (2026-11-13; `cargo run --release --example vehicles -- --table`)
+
+Rules (the step 10 c comparison's, revised for real cars): an obstacle taller than the car's ground clearance is one a
+real car does not pass: no flip, no launch (the car never faster than it was driven), tyres at most 5 cm into the
+ground; the loose debris the same; the rest drives over (speed held at least 0.8, tyres within 5 cm, ground missed at
+most 2 % of wheel-ticks); "N/A" where nothing the scenario is for happened. Columns: vy max (m/s), the car's top speed,
+the largest tilt (degrees), yaw rate max (rad/s) / heading at the end (degrees), the deepest tyre (m), speed held, where
+it ended (z, m), wheel-ticks in the bump stop's range / fully compressed / with the stop touching, ticks the body touched
+something, when it left the test road (s; measured until then).
+
+| car | scenario | verdict | vy max | top speed | tilt | yaw / heading | tyre in | held | end z | bump / full / stop | body | left road |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| sedan | DebrisFixed | PASS | 0.64 | 7.81 | 1 | 0.32 / -4 | 0.002 | 0.09 | 13.0 | 0 / 0 / 0 | 379/509 | - |
+| sedan | DebrisBodies | PASS | 1.50 | 7.97 | 27 | 1.09 / -21 | 0.039 | 0.78 | 40.5 | 41 / 9 / 7 | 80/420 | 7.5 |
+| sedan | DebrisLow | PASS | 1.13 | 7.83 | 7 | 0.89 / -18 | 0.014 | 0.21 | 20.0 | 15 / 0 / 0 | 364/509 | - |
+| sedan | DebrisSlow | PASS | 0.29 | 4.00 | 1 | 0.14 / -3 | 0.000 | 0.13 | 13.0 | 0 / 0 / 0 | 728/929 | - |
+| sedan | DebrisTravel | PASS | 0.54 | 7.86 | 3 | 0.17 / -2 | 0.014 | 0.94 | 60.2 | 48 / 0 / 0 | 8/509 | - |
+| sedan | WheelTrack | PASS | 0.56 | 7.99 | 6 | 0.24 / -4 | 0.013 | 0.94 | 60.7 | 78 / 2 / 0 | 8/509 | - |
+| sedan | GapsStraight | PASS | 0.21 | 8.01 | 1 | 0.00 / 0 | 0.000 | 0.99 | 71.4 | 0 / 0 / 0 | 0/569 | - |
+| sedan | GapsOblique | PASS | 0.13 | 8.00 | 1 | 0.04 / 0 | 0.009 | 0.99 | 71.4 | 0 / 0 / 0 | 0/569 | - |
+| sedan | Rim1 | PASS | 0.23 | 7.98 | 1 | 0.07 / 0 | 0.011 | 0.98 | 31.3 | 0 / 0 / 0 | 0/269 | - |
+| sedan | Rim4 | PASS | 0.15 | 7.99 | 1 | 0.04 / 0 | 0.007 | 0.98 | 31.4 | 0 / 0 / 0 | 0/269 | - |
+| sedan | Out1 | PASS | 0.14 | 5.00 | 5 | 0.03 / 0 | 0.005 | 1.00 | 26.3 | 5 / 0 / 0 | 5/329 | - |
+| sedan | Out4 | N/A | 0.00 | 0.27 | 1 | 0.07 / -0 | 0.007 | -0.00 | 0.0 | 0 / 0 / 0 | 569/569 | - |
+| sedan | Out8 | PASS | 1.13 | 3.36 | 22 | 0.59 / 9 | 0.014 | -0.00 | 2.6 | 0 / 0 / 0 | 537/569 | - |
+| sedan | step 0.1 m | PASS | 0.42 | 7.97 | 3 | 0.00 / 0 | 0.000 | 0.97 | 31.2 | 8 / 0 / 0 | 0/269 | - |
+| sedan | step 0.2 m | PASS | 0.95 | 7.95 | 4 | 0.34 / 1 | 0.002 | 0.42 | 18.0 | 5 / 0 / 0 | 101/269 | - |
+| sedan | step 0.3 m | PASS | 0.70 | 7.94 | 2 | 0.01 / -0 | 0.001 | 0.41 | 17.7 | 0 / 0 / 0 | 103/269 | - |
+| sedan | Posts | PASS | 0.95 | 7.55 | 2 | 1.22 / -28 | 0.006 | 0.04 | 10.5 | 0 / 0 / 0 | 464/569 | - |
+| sedan | SunkStart | PASS | 0.22 | 5.00 | 2 | 0.01 / 0 | 0.000 | 0.99 | 23.6 | 28 / 0 / 0 | 0/329 | - |
+| sedan | Drop | PASS | 0.10 | 6.70 | 4 | 0.00 / 0 | 0.025 | 0.00 | 0.0 | 34 / 16 / 10 | 0/269 | - |
+| sedan | Parked | PASS | 0.06 | 0.08 | 0 | 0.00 / 0 | 0.000 | 0.00 | 0.0 | 0 / 0 / 0 | 0/569 | - |
+| suv | DebrisFixed | PASS | 1.08 | 7.83 | 4 | 0.35 / -7 | 0.003 | 0.10 | 13.5 | 0 / 0 / 0 | 375/509 | - |
+| suv | DebrisBodies | PASS | 1.64 | 7.83 | 14 | 1.49 / 82 | 0.020 | 0.64 | 25.7 | 46 / 2 / 0 | 66/375 | 6.8 |
+| suv | DebrisLow | PASS | 0.96 | 7.85 | 13 | 0.65 / 8 | 0.020 | 0.82 | 37.2 | 75 / 5 / 0 | 8/357 | 6.5 |
+| suv | DebrisSlow | PASS | 0.52 | 4.00 | 2 | 0.16 / -3 | 0.001 | 0.14 | 13.5 | 0 / 0 / 0 | 720/929 | - |
+| suv | DebrisTravel | PASS | 0.33 | 7.85 | 3 | 0.09 / 0 | 0.016 | 0.95 | 60.8 | 5 / 0 / 0 | 0/509 | - |
+| suv | WheelTrack | FAIL | 1.67 | 7.97 | 14 | 0.41 / 0 | 0.020 | 0.78 | 51.2 | 59 / 8 / 0 | 31/509 | - |
+| suv | GapsStraight | PASS | 0.16 | 8.00 | 1 | 0.00 / 0 | 0.000 | 0.99 | 71.4 | 0 / 0 / 0 | 0/569 | - |
+| suv | GapsOblique | PASS | 0.11 | 8.00 | 1 | 0.04 / 0 | 0.010 | 0.99 | 71.4 | 0 / 0 / 0 | 0/569 | - |
+| suv | Rim1 | PASS | 0.22 | 7.99 | 1 | 0.04 / 0 | 0.012 | 0.98 | 31.4 | 0 / 0 / 0 | 0/269 | - |
+| suv | Rim4 | PASS | 0.14 | 7.99 | 1 | 0.05 / 0 | 0.013 | 0.98 | 31.4 | 0 / 0 / 0 | 0/269 | - |
+| suv | Out1 | PASS | 0.23 | 5.00 | 8 | 0.30 / -2 | 0.013 | 0.99 | 24.9 | 2 / 0 / 0 | 12/329 | - |
+| suv | Out4 | N/A | 0.09 | 0.36 | 0 | 0.03 / -0 | 0.000 | 0.00 | 0.0 | 0 / 0 / 0 | 569/569 | - |
+| suv | Out8 | PASS | 2.23 | 3.92 | 61 | 0.00 / 0 | 0.028 | 0.00 | 6.2 | 0 / 0 / 0 | 0/569 | - |
+| suv | step 0.1 m | PASS | 0.25 | 7.97 | 3 | 0.00 / 0 | 0.001 | 0.98 | 31.2 | 0 / 0 / 0 | 0/269 | - |
+| suv | step 0.2 m | PASS | 1.24 | 7.95 | 7 | 0.00 / 0 | 0.003 | 0.94 | 30.4 | 16 / 2 / 0 | 0/269 | - |
+| suv | step 0.3 m | FAIL | 3.06 | 7.95 | 33 | 0.13 / -1 | 0.018 | 0.75 | 26.1 | 27 / 9 / 4 | 14/269 | - |
+| suv | Posts | PASS | 1.96 | 7.94 | 44 | 0.95 / 30 | 0.031 | 0.76 | 30.9 | 42 / 8 / 3 | 6/339 | 6.2 |
+| suv | SunkStart | PASS | 0.62 | 5.00 | 5 | 0.02 / 0 | 0.002 | 0.98 | 22.5 | 27 / 2 / 0 | 0/329 | - |
+| suv | Drop | PASS | 0.18 | 6.70 | 2 | 0.00 / 0 | 0.036 | 0.00 | -0.0 | 28 / 20 / 10 | 0/269 | - |
+| suv | Parked | PASS | 0.06 | 0.08 | 0 | 0.00 / 0 | 0.000 | 0.00 | 0.1 | 0 / 0 / 0 | 0/569 | - |
+
+- **No car overturns anywhere.** What a real car does not pass (0.3 m debris, posts, a step above the clearance), it
+  stops at with its bumper or its underbody, or climbs with a jolt. The overturns of the step 10 c prototype came from
+  its car (0.65 m clearance, the centre of mass 0.89 m up).
+- **Failures, as they are**: the SUV over 0.2 m blocks in its tracks (below its clearance) keeps 0.78 of its speed
+  (rule: 0.8): each block meets a rigid wheel of half the block's height in radius about 60 degrees back from upright
+  (2 g of deceleration a block at 8 m/s; a pneumatic tyre envelops a step, this one does not), and the body touches the
+  blocks when the springs compress (31 ticks). The SUV up a 0.3 m step: it climbs it (end 0.32 m up) with a 3.06 m/s
+  vertical speed (rule: 3) and 33 degrees of pitch.
+- **Read with care**: the SUV on a post rolls to 44 degrees and recovers; the loose debris turns both cars round (no
+  steering in the test; the sedan to 27 degrees of roll); in the 8 m crater the SUV holds about 55 degrees of the wall at
+  1 g (a smooth wall allows 45 at a friction of 1; the wall is a voxel staircase of 0.1 m risers whose edges the ball
+  pushes against). The 4 m crater is N/A for both: a 4.8 m car rests on its bumpers in an 8 m bowl.
+
+#### Measured: what a vehicle costs (2026-11-13)
+
+- **The vehicles' update** (probes and controller, per step; `--cost`): 1 car 0.014-0.015 ms, 20 cars 0.27-0.33 ms on
+  the debris, gap, crater and parking scenarios (the target 0.03 and 0.5 ms). About 60 cells a sweep at 40-55 ns each;
+  half of it parry's cell iterator, the rest the closed form; the controller itself is negligible.
+- **The world's step with them** (Rapier, not the vehicles): 20 voxel-chassis cars from 0.016 ms parked to 2.6 ms on
+  the debris route; about nine tenths of it parry's voxels-voxels contact manifolds between the voxel chassis and the
+  debris under them. A box chassis does not pay it. Open (step 8's cost of voxel bodies, not changed here).
+- **On the benchmark level** (`tools/bench-voxel-fire.ts --only cost --route mesh --scenario drive | drive20`): GPU_PENDING
+
+**Checks**: physics-core `a_ball_against_a_box_in_closed_form`, `the_cars_on_destroyed_ground` (CI's subset: both cars
+on the gap, crater rim and exit, 0.1 m step, sunk start, drop, parked, 0.1 m debris, 0.3 m debris and posts scenarios,
+the sedan on the wheel tracks; a watchdog of 60 s a run, about 1 s in all), `the_suv_climbs_a_step_within_its_clearance`,
+`the_stop_rolls_with_the_hub`, `a_box_chassis_takes_the_vehicle_centre_of_mass`, `the_stops_turn_with_the_steering`,
+`a_car_falls_when_its_ground_is_carved`, `a_wheel_finds_ground_added_this_tick`, `a_blast_wakes_a_car_at_rest`,
+`a_vehicle_goes_with_its_chassis`, `a_vehicle_out_of_bounds_is_refused`, the bridge's `vehicles_through_the_bridge`; the
+renderer's `wheels_belong_to_the_cells_their_anchors_are_in`; the binding's vehicle tests (the engine faked) and
+test-render's `physics/vehicle-rests-live` and `physics/vehicle-wheel-live` (the real engine); the recorded vehicles'
+script (`check::vehicles`: two voxel-chassis cars and a box car over carved ground, steered, braked, the ground carved
+under one, a chassis carved, one removed, a blast): native = std in the graph = wasm32 = parallel 2 / 4 = the
+physics' own threads = recorded; every scenario's hash native = parallel 1 / 2 / 4 / 8 = wasm32; `physics_fuzz` with
+vehicles on any body (sane and wild wheels, wild controls, state, changes, removal; every state finite).
+
+**Open**: the probe is a ball, wider than the tyre (it meets what is beside the tyre within its radius; another engine
+offers a cylinder cast too); the wheel is rigid (no tyre envelopment of a step, no longitudinal compliance); a chassis
+whose mass comes from a voxel collider's density holds that collider's mass as it was when the vehicle was made (the
+engine's voxel bodies are weighed by `set_mass_properties` and do not meet this); the voxel chassis's contact cost
+above; parry's cell iterator is half the probe's cost (a walk over the chunk's cells directly would halve it).
+
 ### Temporary ways round on the engine's shared paths
 
 `Explosions` (step 10 b) works round six faults of the shared renderer, in its own code, until they are fixed

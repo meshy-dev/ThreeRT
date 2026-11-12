@@ -4469,6 +4469,15 @@ benchmark level. The order follows the dependencies; a step that meets a further
       fixed at the source (the user's decision, 2026-11-12: `renderer/third_party/parry3d`, its chunk walk only; the
       world's own walk removed, every ray through Rapier's query; branch `parry-voxel-ray`); and a CPU comparison of
       single-ray wheels against shape-cast wheels on debris and narrow gaps (to be scoped).
+      - Vehicles (2026-11-13; docs/VOXEL.md "Vehicles"): the comparison chose a ball swept down each suspension with
+        the 80-degree rule, the force on the suspension's axis, a progressive bump stop and a stop collider of the
+        tyre's shape behind it whose contacts roll through a contact hook (candidate 6 of the design; Rapier is not
+        forked: its controller is copied and changed, Apache-2.0). The probe is a closed-form ball sweep per voxel cell
+        (20 cars 0.27-0.33 ms a step). Two real cars (a sedan and an SUV) on twenty scenarios of destroyed ground: no
+        overturn; what a real car does not pass it stops at; the SUV over 0.2 m blocks in its tracks keeps 0.78 of its
+        speed and up a 0.3 m step jolts at 3.06 m/s (the two failures, a rigid wheel's). A wheel belongs to the material
+        at its anchor; the chassis gone takes the vehicle. Recorded hashes native = parallel = wasm32.
+      - Ropes: next, in a PR of their own.
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
 ## Known issues
