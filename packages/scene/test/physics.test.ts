@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   BoxGeometry, CapsuleGeometry, engineColliders, Group, HingeJoint, IcosahedronGeometry, Mesh, type Object3D, PerspectiveCamera, PlaneGeometry, Raycaster, RecordingEngine, RopeJoint, Scene, SceneBinding,
-  Shapecaster, SphereGeometry, Vector3, type ContactEvent, type ObjectDesc,
+  Shapecaster, SphereGeometry, Vector3, Vehicle, type ContactEvent, type ObjectDesc,
 } from "../src/index.ts";
 
 type Call = [string, ...unknown[]];
@@ -481,4 +481,96 @@ test("a scene without physics makes no physics call; gravity is sent when it is 
   scene.gravity.set(0, -1.62, 0);
   binding.sync();
   assert.deepEqual(physics(), [["gravity", { gravity: [0, -1.62, 0] }]]);
+});
+
+test("a vehicle drives while it and its chassis are in the scene; its wheels are read back and drawn", () => {
+  const { scene, engine, binding, physics } = world();
+  const body = new Mesh(new BoxGeometry(1.6, 0.5, 4));
+  body.physics = "dynamic";
+  const tyre = new Mesh(new BoxGeometry(0.2, 0.6, 0.6));
+  const wheel = (x: number, z: number) => ({ anchor: new Vector3(x, 0, z), rest: 0.3, travel: 0.2, radius: 0.33, width: 0.2, stiffness: 25, compression: 1.2, damping: 1.9, frictionSlip: 1, bumpLength: 0.04, bumpStiffness: 1000 });
+  const car = new Vehicle(body, { wheels: [wheel(-0.8, 1.4), wheel(0.8, 1.4)], centerOfMass: new Vector3(0, -0.2, 0.2) });
+  car.wheels[1].object = tyre;
+  scene.add(body, car, tyre);
+  binding.sync();
+  const made = physics().filter((c) => c[0].startsWith("vehicle"));
+  assert.equal(made.length, 2);
+  assert.equal(made[0][0], "vehicle");
+  const v = made[0][1] as { id: number; chassis: number; wheels: Record<string, unknown>[]; centerOfMass: number[]; forwardAxis: number };
+  assert.deepEqual([v.chassis, v.wheels.length, v.centerOfMass, v.forwardAxis], [1, 2, [0, -0.2, 0.2], 2]);
+  assert.deepEqual(v.wheels[0], { anchor: [-0.8, 0, 1.4], direction: [0, -1, 0], axle: [-1, 0, 0], rest: 0.3, travel: 0.2, radius: 0.33, width: 0.2, stiffness: 25, compression: 1.2, damping: 1.9, frictionSlip: 1, sideStiffness: 1, maxForce: 1e6, bumpLength: 0.04, bumpStiffness: 1000 });
+  assert.deepEqual(made[1], ["vehicle_set", { id: v.id, wheels: [{ engine: 0, brake: 0, steering: 0 }, { engine: 0, brake: 0, steering: 0 }] }]);
+  // Controls: sent when they change, not otherwise.
+  binding.sync();
+  assert.deepEqual(physics(), []);
+  car.wheels[0].engine = 900;
+  car.wheels[0].steering = 0.2;
+  binding.sync();
+  assert.deepEqual(physics(), [["vehicle_set", { id: v.id, wheels: [{ engine: 900, brake: 0, steering: 0.2 }, { engine: 0, brake: 0, steering: 0 }] }]]);
+  // After the ticks: a wheel lost, the state read back, the drawn wheel placed.
+  engine.answers.vehicle_changes = { lost: [{ vehicle: v.id, wheel: 0, position: [1, 2, 3] }], removed: [] };
+  engine.answers.vehicle_state = { speed: 4.5, wheels: [{ center: [1, 2, 3], rotation: [0, 0, 0, 1], contact: false, suspension: 0, lost: true }, { center: [0.8, 0.33, 1.4], rotation: [0, 0.7071068, 0, 0.7071068], contact: true, suspension: 0.19, lost: false }] };
+  const lost: unknown[] = [];
+  car.addEventListener("wheellost", (e) => lost.push([e.wheel, (e.position as Vector3).toArray()]));
+  binding.deliverPhysicsEvents();
+  assert.deepEqual(lost, [[0, [1, 2, 3]]]);
+  assert.deepEqual([car.speed, car.wheels[0].lost, car.wheels[1].contact, car.wheels[1].suspension], [4.5, true, true, 0.19]);
+  assert.deepEqual(tyre.position.toArray(), [0.8, 0.33, 1.4]);
+  assert.ok(Math.abs(tyre.quaternion.y - 0.7071068) < 1e-6);
+  assert.deepEqual(physics().map((c) => c[0]).filter((op) => op !== "faults"), ["vehicle_changes", "vehicle_state"]);
+  // Its description changed: made anew.
+  car.wheels[1].radius = 0.4;
+  car.needsUpdate = true;
+  binding.sync();
+  const remade = physics();
+  assert.deepEqual(remade[0], ["remove", { vehicle: v.id }]);
+  assert.equal(remade[1][0], "vehicle");
+  const id2 = (remade[1][1] as { id: number }).id;
+  assert.notEqual(id2, v.id);
+  // Its chassis went: removed, an event, nothing more sent for it until it leaves the scene.
+  engine.answers.vehicle_changes = { lost: [], removed: [id2] };
+  let removed = 0;
+  car.addEventListener("removed", () => removed++);
+  binding.deliverPhysicsEvents();
+  assert.deepEqual([removed, car.removed], [1, true]);
+  physics();
+  car.wheels[0].engine = 1;
+  binding.sync();
+  binding.deliverPhysicsEvents();
+  assert.deepEqual(physics().filter((c) => c[0] !== "faults"), []);
+  scene.remove(car);
+  binding.sync();
+  assert.deepEqual(physics(), [], "gone from the world already");
+  assert.equal(car.removed, false);
+  // Back in the scene: made anew; its chassis out of the scene: it goes.
+  scene.add(car);
+  binding.sync();
+  assert.deepEqual(physics().map((c) => c[0]), ["vehicle", "vehicle_set"]);
+  scene.remove(body);
+  binding.sync();
+  assert.deepEqual(physics().map((c) => c[0]), ["remove", "remove"], "the chassis's body, and the vehicle");
+});
+
+test("a vehicle the engine refuses is not sent again until its description changes; the sync throws once", () => {
+  const { scene, engine, binding, physics } = world();
+  const body = new Mesh(new BoxGeometry(1, 0.5, 2));
+  body.physics = "dynamic";
+  const car = new Vehicle(body, { wheels: [{ anchor: new Vector3(0, 0, 0), rest: 0.3, travel: 0.2, radius: 1e9, width: 0.2, stiffness: 25, compression: 1, damping: 1, frictionSlip: 1 }] });
+  scene.add(body, car);
+  const original = engine.physics.bind(engine);
+  engine.physics = (op: string, args: object) => {
+    if (op === "vehicle" && (args as { wheels: { radius: number }[] }).wheels[0].radius > 5) {
+      engine.calls.push(["physics", op, args]);
+      throw new TypeError("physics: a wheel's radius must be from 5e-2 to 5e0");
+    }
+    return original(op, args);
+  };
+  assert.throws(() => binding.sync(), /radius/);
+  physics();
+  binding.sync();
+  assert.deepEqual(physics(), []);
+  car.wheels[0].radius = 0.3;
+  car.needsUpdate = true;
+  binding.sync();
+  assert.deepEqual(physics().map((c) => c[0]), ["vehicle", "vehicle_set"]);
 });

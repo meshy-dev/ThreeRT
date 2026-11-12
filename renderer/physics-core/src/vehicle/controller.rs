@@ -18,7 +18,8 @@
 //!   into it; the stop collider behind it (`mod.rs`);
 //! - the tyre's grip held to the share of the load gravity holds against the ground (`max(0, n · up)`);
 //! - `update_vehicle` takes the colliders the broad phase does not have yet (`fresh`), which the probe tests where they
-//!   are; `ground_changed` probes a chassis asleep without pushing it, for the caller to wake it when its ground moved.
+//!   are; `ground_changed` probes a chassis asleep without pushing it, for the caller to wake it when its ground moved;
+//!   `remove_wheel`.
 
 use rapier3d::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet};
 use rapier3d::geometry::{ColliderHandle, ColliderSet};
@@ -502,6 +503,11 @@ impl DynamicRayCastVehicleController {
             self.probe(&queries.as_ref(), fresh, chassis, i);
         }
         self.wheels.iter().zip(before).any(|(w, (c, l))| w.raycast_info.is_in_contact != c || (w.raycast_info.suspension_length - l).abs() > 1e-3)
+    }
+
+    /// (ThreeRT) A wheel taken off (lost to destruction); the others keep their order.
+    pub fn remove_wheel(&mut self, i: usize) {
+        self.wheels.remove(i);
     }
 
     /// Reference to all the wheels attached to this vehicle.

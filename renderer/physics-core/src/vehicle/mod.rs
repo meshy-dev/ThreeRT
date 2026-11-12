@@ -111,14 +111,21 @@ pub struct WheelControl {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WheelState {
-    /// The wheel's centre (world), its spin about the axle (rad), on the ground or not, the suspension's length.
+    /// The wheel's centre (world); its turn for drawing it (world, xyzw: the chassis's, the steering about the
+    /// suspension's up, the spin about the axle; a wheel modelled in the chassis's axes takes it as it is); its spin
+    /// about the axle (rad) and its steering; on the ground or not; the suspension's length.
     pub center: [f32; 3],
-    pub rotation: f32,
+    pub orientation: [f32; 4],
+    pub spin: f32,
+    pub steering: f32,
     pub contact: bool,
     pub suspension: f32,
     /// Where it touches and the ground's normal (world; meaningful with `contact`).
     pub point: [f32; 3],
     pub normal: [f32; 3],
+    /// The wheel was lost (its anchor's material carved away, or cut off: `Physics::remove_wheel`); `center` is where
+    /// it was then, the rest is empty.
+    pub lost: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +143,11 @@ pub(super) struct Vehicle {
     stops: Vec<ColliderId>,
     stop_frames: Vec<(Vector, Vector)>,
     stop_steering: Vec<f32>,
+    /// Per wheel as described (scene code's index): its place among the controller's wheels and stops (None: lost),
+    /// where it was when it was lost, and its suspension's down and its axle (chassis frame).
+    slots: Vec<Option<usize>>,
+    lost_at: Vec<Option<[f32; 3]>>,
+    frames: Vec<(Vector, Vector)>,
     /// The centre of mass override, and what it is made of: the chassis's own additional mass properties (those of
     /// `set_mass_properties`), and its colliders' own, which the override holds (the colliders are made massless while
     /// it does). Both put back when the vehicle goes.
@@ -256,8 +268,9 @@ impl Physics {
         ctl.index_up_axis = d.up_axis;
         let g = self.world.gravity;
         ctl.up = if g.length() > 0.0 { -g.normalize() } else { Vector::Y };
-        let (mut stops, mut stop_frames) = (vec![], vec![]);
+        let (mut stops, mut stop_frames, mut frames) = (vec![], vec![], vec![]);
         for (w, dir, axle) in wheels {
+            frames.push((dir, axle));
             let t = WheelTuning {
                 suspension_stiffness: w.stiffness,
                 suspension_compression: w.compression,
@@ -287,7 +300,7 @@ impl Physics {
         let own_additional = self.own_additional(hb);
         let n = stops.len();
         let id = self.id();
-        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, stop_frames, stop_steering: vec![0.0; n], center_of_mass: com, own_additional, held: vec![] });
+        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, stop_frames, stop_steering: vec![0.0; n], slots: (0..n).map(Some).collect(), lost_at: vec![None; n], frames, center_of_mass: com, own_additional, held: vec![] });
         self.apply_center_of_mass(id);
         Ok(id)
     }
@@ -403,10 +416,13 @@ impl Physics {
             between(c.brake, 0.0, super::MAX_IMPULSE, "a wheel's brake")?;
             within(&[c.steering], MAX_STEERING, "a wheel's steering")?;
         }
-        for (w, c) in veh.ctl.wheels_mut().iter_mut().zip(controls) {
-            w.engine_force = c.engine;
-            w.brake = c.brake;
-            w.steering = c.steering;
+        // (By the wheels as described: a lost wheel's controls go nowhere.)
+        for (slot, c) in veh.slots.iter().zip(controls) {
+            if let Some(w) = slot.and_then(|i| veh.ctl.wheels_mut().get_mut(i)) {
+                w.engine_force = c.engine;
+                w.brake = c.brake;
+                w.steering = c.steering;
+            }
         }
         if controls.iter().any(|c| c.engine != 0.0) {
             if let Some(&hb) = self.bodies.get(&veh.chassis) {
@@ -416,23 +432,61 @@ impl Physics {
         Ok(())
     }
 
-    /// A vehicle's speed and wheels, as of the last tick.
+    /// A vehicle's speed and wheels (as described, a lost one included), as of the last tick.
     pub fn vehicle_state(&self, id: VehicleId) -> Option<VehicleState> {
         let veh = self.vehicles.get(&id)?;
         let b = self.body(veh.chassis)?;
-        let forward = b.position().rotation * Vector::ith(veh.ctl.index_forward_axis, 1.0);
-        Some(VehicleState {
-            speed: b.linvel().dot(forward),
-            wheels: veh
-                .ctl
-                .wheels()
-                .iter()
-                .map(|w| {
+        let rot = b.position().rotation;
+        let forward = rot * Vector::ith(veh.ctl.index_forward_axis, 1.0);
+        let wheels = veh
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(k, slot)| match slot.map(|i| &veh.ctl.wheels()[i]) {
+                Some(w) => {
                     let r = w.raycast_info();
-                    WheelState { center: w.center().to_array(), rotation: w.rotation, contact: r.is_in_contact, suspension: r.suspension_length, point: r.contact_point_ws.to_array(), normal: r.contact_normal_ws.to_array() }
-                })
-                .collect(),
-        })
+                    let (dir, axle) = veh.frames[k];
+                    // (Bullet's wheel turn: the steering about the suspension's up, then the spin about the axle.)
+                    let q = rot * rapier3d::math::rotation_from_angle(-dir * w.steering) * rapier3d::math::rotation_from_angle(axle * -w.rotation);
+                    WheelState { center: w.center().to_array(), orientation: q.to_array(), spin: w.rotation, steering: w.steering, contact: r.is_in_contact, suspension: r.suspension_length, point: r.contact_point_ws.to_array(), normal: r.contact_normal_ws.to_array(), lost: false }
+                }
+                None => WheelState { center: veh.lost_at[k].unwrap_or([0.0; 3]), orientation: [0.0, 0.0, 0.0, 1.0], spin: 0.0, steering: 0.0, contact: false, suspension: 0.0, point: [0.0; 3], normal: [0.0; 3], lost: true },
+            })
+            .collect();
+        Some(VehicleState { speed: b.linvel().dot(forward), wheels })
+    }
+
+    /// A vehicle's wheels that are not lost: each one's index as described and its anchor (the hard point, in the
+    /// chassis's frame). The engine finds by them what material each wheel belongs to (docs/VOXEL.md).
+    pub fn vehicle_wheels(&self, id: VehicleId) -> Vec<(usize, [f32; 3])> {
+        let Some(veh) = self.vehicles.get(&id) else { return vec![] };
+        veh.slots.iter().enumerate().filter_map(|(k, s)| s.map(|i| (k, veh.ctl.wheels()[i].chassis_connection_point_cs.to_array()))).collect()
+    }
+
+    /// The vehicles on a body, in id order.
+    pub fn vehicles_on(&self, body: BodyId) -> Vec<VehicleId> {
+        self.vehicles.iter().filter(|(_, v)| v.chassis == body).map(|(&i, _)| i).collect()
+    }
+
+    /// A wheel lost (its anchor's material carved away or cut off): out of the vehicle, its stop with it; the vehicle
+    /// goes on with the rest. Returns where it was (world), None if it was lost already or there is no such wheel.
+    pub fn remove_wheel(&mut self, id: VehicleId, wheel: usize) -> Option<[f32; 3]> {
+        let veh = self.vehicles.get_mut(&id)?;
+        let i = (*veh.slots.get(wheel)?)?;
+        let at = veh.ctl.wheels()[i].center().to_array();
+        veh.ctl.remove_wheel(i);
+        let stop = veh.stops.remove(i);
+        veh.stop_frames.remove(i);
+        veh.stop_steering.remove(i);
+        veh.slots[wheel] = None;
+        veh.lost_at[wheel] = Some(at);
+        for s in veh.slots.iter_mut().flatten() {
+            if *s > i {
+                *s -= 1;
+            }
+        }
+        self.remove_collider(stop);
+        Some(at)
     }
 
     /// The chassis a vehicle is on, and its wheels' stop colliders.

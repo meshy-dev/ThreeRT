@@ -11,7 +11,7 @@ import {
   AmbientLight, compatNote, DirectionalLight, Fog, FogExp2, GLTFModel, HDRIEnvironment, HemisphereLight, InstancedMesh, Light, MeshBasicMaterial, MaterialFunction, Mesh, MeshPhysicalMaterial, type MeshStandardMaterial, Object3D,
   type ParticleBinding, type ParticleFunction, Particles, GpuParticles, type ParticleProgram, type ParticleProgramBinding, type VolumeBinding, type VolumeFunction, VolumeMesh, type DensityGrid, type GridProgram, type GridProgramBinding, ProceduralMesh, ProceduralGeometry,
   DataTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
-  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, getEngineBodies,
+  bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, Vehicle, getEngineBodies,
   type SceneChanges, type ShaderBinding, type SwayDesc, type PhysicsDesc, type BoundBody,
 } from "./core.ts";
 import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
@@ -20,6 +20,10 @@ import { ENGINE_IDS, engineColliders } from "./raycaster.ts";
 
 /** A joint's state in the binding once the engine let go of it (`Joint.broken`). */
 const BROKEN = "broken";
+/** A vehicle's state in the binding once its chassis went (`Vehicle.removed`), and once the engine refused it (made
+ * again when its description changes). */
+const REMOVED = "removed";
+const REFUSED = "refused";
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -368,6 +372,9 @@ export class SceneBinding {
   private readonly engineJoints = new Set<Joint>();
   /** The engine bodies' `epoch` at the last look at the joints. */
   private engineEpoch = 0;
+  /** The vehicles in the scene with what the engine has of each: its id, its description (`key`), its controls as
+   * last sent. */
+  private readonly vehicles = new Map<Vehicle, { id: number; key: string; controls: string } | null>();
   /** The first body of this sync that could not be made: thrown when the sync is done (the scene stays bound). */
   private bodyError: unknown = null;
   /** Objects with bodies under a parent scaled anew in this sync: checked once every transform is sent. */
@@ -425,6 +432,7 @@ export class SceneBinding {
         if (b.epoch === epoch) continue;
         this.dropBody(o, b);
         if (o instanceof Joint) this.dropJoint(o);
+        if (o instanceof Vehicle) this.dropVehicle(o);
         this.engine.remove(b.id);
         this.objects.delete(o);
         this.byName.delete(b.name);
@@ -600,6 +608,7 @@ export class SceneBinding {
       if (!this.joints.has(o)) this.joints.set(o, null);
       this.jointsDirty = true;
     }
+    if (o instanceof Vehicle && !this.vehicles.has(o)) this.vehicles.set(o, null);
     if (o instanceof InstancedMesh) this.sendInstances(o, b, stats);
     if (o instanceof VolumeMesh && o.grid) {
       const g = o.grid;
@@ -774,6 +783,14 @@ export class SceneBinding {
     j.broken = false;
   }
 
+  private dropVehicle(v: Vehicle): void {
+    const bv = this.vehicles.get(v);
+    // (One whose chassis went is already gone from the world; out of the scene, it may be added again, made anew.)
+    if (bv && bv.key !== REMOVED && bv.key !== REFUSED) this.engine.physics("remove", { vehicle: bv.id });
+    this.vehicles.delete(v);
+    v.removed = false;
+  }
+
   /** The collider of an object's body: the engine's shape description and where it sits in the body. */
   private colliderShape(o: Object3D, d: Readonly<PhysicsDesc>, scale: Vec3, name: string): { shape: Record<string, unknown>; position?: Vec3 } {
     const fixed = d.type === "fixed";
@@ -861,6 +878,42 @@ export class SceneBinding {
       }
       stats.updated++;
     }
+    // A vehicle drives while it and its chassis's body are in the scene; its description changing (or its chassis's
+    // body made anew) makes it anew; its controls are sent when they change.
+    for (const [v, bv] of this.vehicles) {
+      if (bv?.key === REMOVED) continue;
+      const chassis = this.engineBodyOf(v.chassis);
+      const desc = chassis ? { chassis: chassis.id, ...v.vehicleDesc(chassis.scale) } : null;
+      const key = desc ? JSON.stringify(desc) : "";
+      if (key !== (bv?.key ?? "") && !(bv?.key === REFUSED && bv.controls === key)) {
+        if (bv && bv.key !== REFUSED) this.engine.physics("remove", { vehicle: bv.id });
+        this.vehicles.set(v, null);
+        stats.updated++;
+        if (!desc) continue;
+        const id = this.nextBody++;
+        try {
+          this.engine.physics("vehicle", { id, ...desc });
+          this.vehicles.set(v, { id, key, controls: "" });
+        } catch (e) {
+          // (Refused: not sent again until its description changes; the sync throws once it is done.)
+          this.vehicles.set(v, { id: -1, key: REFUSED, controls: key });
+          this.bodyError ??= e;
+          continue;
+        }
+      }
+      const b = this.vehicles.get(v);
+      if (!b || b.id < 0) continue;
+      const controls = v.wheels.map((w) => ({ engine: w.engine, brake: w.brake, steering: w.steering }));
+      const ck = JSON.stringify(controls);
+      if (ck === b.controls) continue;
+      b.controls = ck;
+      stats.updated++;
+      try {
+        this.engine.physics("vehicle_set", { id: b.id, wheels: controls });
+      } catch (e) {
+        this.bodyError ??= e;
+      }
+    }
     for (const c of takePhysicsCommands()) {
       const body = this.objects.get(c.object)?.body;
       // (An object without a body, or out of the scene by now: nothing to act on.)
@@ -879,13 +932,16 @@ export class SceneBinding {
    * axis; the rest, limits, motor and a rope's length, are its parameters, changed where it is: `joint_set`). No
    * description while either body is missing.
    */
+  /** The body an object has in the engine: one of the engine's own (a voxel body, the voxel level: its frame unscaled)
+   * or its own. */
+  private engineBodyOf(o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined {
+    if (!o) return undefined;
+    const id = getEngineBodies()?.bodyOf(o);
+    return id !== undefined ? { id, scale: [1, 1, 1] } : this.objects.get(o)?.body;
+  }
+
   private jointDescOf(j: Joint): { a?: { id: number }; b?: { id: number }; desc: Record<string, unknown> | null; key: string; shape: string } {
-    const engine = getEngineBodies();
-    const bodyOf = (o: Object3D | null | undefined): { id: number; scale: readonly number[] } | null | undefined => {
-      if (!o) return undefined;
-      const id = engine?.bodyOf(o);
-      return id !== undefined ? { id, scale: [1, 1, 1] } : this.objects.get(o)?.body;
-    };
+    const bodyOf = (o: Object3D | null | undefined) => this.engineBodyOf(o);
     const a = bodyOf(j.bodyA), b = bodyOf(j.bodyB);
     if (!a || !b) return { desc: null, key: "", shape: "" };
     const [sa, sb] = [a.scale, b.scale];
@@ -959,6 +1015,7 @@ export class SceneBinding {
   deliverPhysicsEvents(): void {
     if (this.bodies) this.takeFaults();
     if (this.engineJoints.size) this.takeJointChanges();
+    if (this.vehicles.size) this.takeVehicles();
     // (The engine's own bodies' events first: voxel bodies gone; and whether any of them listens for contacts.)
     const engineListens = getEngineBodies()?.frame() ?? false;
     if (!this.contactBodies && !engineListens) return;
@@ -978,6 +1035,74 @@ export class SceneBinding {
       b.dispatchEvent({ type, other: a });
     }
     if (contacts.length) this.scene.dispatchEvent({ type: "contacts", contacts });
+  }
+
+  /**
+   * What the engine did to the vehicles since the last call, and where they are (one call, and one more a vehicle):
+   * - lost: a wheel whose anchor's material was carved away or cut off is `lost` (a "wheellost" event: `wheel` its
+   *   index, `position` where it was);
+   * - removed: a vehicle whose chassis went is `removed` (a "removed" event), gone from the world;
+   * - every other vehicle's `speed` and its wheels' `contact`, `suspension` and `lost` as of the last tick, and each
+   *   wheel's `object` placed where the wheel is, turned as it turns and steers (in its parent's space).
+   * Every one is marked before any event: a listener that throws does not leave the rest unmarked; the first error is
+   * thrown once every event is dispatched.
+   */
+  private takeVehicles(): void {
+    const live = new Map<number, Vehicle>();
+    for (const [v, b] of this.vehicles) if (b && b.id >= 0) live.set(b.id, v);
+    if (!live.size) return;
+    const c = JSON.parse(this.engine.physics("vehicle_changes", {})) as { lost?: { vehicle: number; wheel: number; position: Vec3 }[]; removed?: number[] } | null;
+    const events: [Vehicle, Record<string, unknown>][] = [];
+    for (const l of c?.lost ?? []) {
+      const v = live.get(l.vehicle);
+      const w = v?.wheels[l.wheel];
+      if (!v || !w) continue;
+      w.lost = true;
+      w.contact = false;
+      events.push([v, { type: "wheellost", wheel: l.wheel, position: new Vector3(l.position[0], l.position[1], l.position[2]) }]);
+    }
+    for (const id of c?.removed ?? []) {
+      const v = live.get(id);
+      if (!v) continue;
+      live.delete(id);
+      this.vehicles.set(v, { id: -1, key: REMOVED, controls: "" });
+      v.removed = true;
+      v.speed = 0;
+      for (const w of v.wheels) w.contact = false;
+      events.push([v, { type: "removed" }]);
+    }
+    const q = new Quaternion(), pq = new Quaternion();
+    for (const [id, v] of live) {
+      const st = JSON.parse(this.engine.physics("vehicle_state", { id })) as { speed: number; wheels: { center: Vec3; rotation: Quat; contact: boolean; suspension: number; lost: boolean }[] } | null;
+      if (!st) continue;
+      v.speed = st.speed;
+      st.wheels.forEach((s, k) => {
+        const w = v.wheels[k];
+        if (!w) return;
+        w.contact = s.contact;
+        w.suspension = s.suspension;
+        w.lost ||= s.lost;
+        const o = w.object;
+        if (!o || s.lost) return;
+        o.position.set(s.center[0], s.center[1], s.center[2]);
+        q.set(s.rotation[0], s.rotation[1], s.rotation[2], s.rotation[3]);
+        if (o.parent) {
+          o.parent.updateWorldMatrix(true, false);
+          o.parent.worldToLocal(o.position);
+          q.premultiply(o.parent.getWorldQuaternion(pq).invert());
+        }
+        o.quaternion.copy(q);
+      });
+    }
+    let error: unknown = null;
+    for (const [v, e] of events) {
+      try {
+        v.dispatchEvent({ ...e, type: e.type as string, target: v });
+      } catch (err) {
+        error ??= err;
+      }
+    }
+    if (error !== null) throw error;
   }
 
   /**
