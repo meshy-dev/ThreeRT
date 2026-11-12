@@ -656,12 +656,13 @@ behind all the smoke on that ray. With the grid (fire at 0 s offline, at 2 s liv
 | 0.5 s | 6.61 / 0.850 / 1.22 | 9.36 / 0.820 / 1.30 |
 | 1.0 s | 4.36 / 0.839 / 1.09 | 6.14 / 0.851 / 1.14 |
 
-Burning the fire in the grid instead (hot smoke that flames, one medium) was tried and set aside: the fire was seen
-in its smoke (its region 6.91 / SSIM 0.946 at 0.2 s), but a grid covers its box only (the `-fire` box holds 16 of the
-level's 160 wall spots), a small fire is one to four cells (0.25 m cells; at a level-wide 1 m a 1 m explosion's fire is
-2 cells), every cell is simulated every frame, and an offline render has no reference for a fire that does not start
-at the scene's start (`out/web-probe/step10/b-structure-data.md`). The standard fix is in the shared renderer
-(overlapping media drawn together): the sixth temporary way round below.
+Burning the fire in the grid instead (hot smoke that flames, one medium; fires in the grid, fireballs outside it) was
+tried and set aside, on its measurements (`out/voxel-fire/sheet-gridfire.jpg`): at 0.2 s a large white ball without
+detail, at 0.5 and 1 s its region ΔE 17.0 and 10.8 with live 1.5 times offline's luminance (at 1 s offline dark smoke,
+live light flecks), against the fireball's 6.9 / 6.6 / 4.4 with a flame's shape; and a grid covers its box only (16 of
+the level's 160 wall spots), a small fire is one to four cells, every cell is simulated every frame, and offline has
+no reference for a fire that does not start at 0 s (`out/web-probe/step10/b-structure-data.md`). Until the engine
+draws overlapping media together (the sixth temporary way round below), the fire stays out of the grid.
 
 Cost: `--only cost`, the destruction game's routes at 0.75, lockstep (frames as fast as the GPU goes), GPU ms p50 over
 2 s before and 4 s after the explosion; no rebuild in any run.
