@@ -212,9 +212,14 @@ test("a voxel body in the scene's physics: a ray's hit has its object, a joint t
     engine.bodies = engine.bodies.filter((b) => (b as { body: number }).body !== fresh);
     f.carve({ box: [-1, -1, -1, 1, 1, 1] });
     assert.deepEqual([f.gone, fGone], [true, null], "gone at once, the event with the frame's");
-    engine.answers.contacts = [];
+    // Its contact with the crate ends at the frame's events (the bridge ends the pairs of a collider that goes): the
+    // crate hears it, with the gone part as `other`.
+    const crateEnded: unknown[] = [];
+    crate.addEventListener("contactend", (e) => crateEnded.push(e.other));
+    engine.answers.contacts = [{ a: 3, b: fresh + 1, bodyA: crate2, bodyB: fresh, started: false }];
     binding.deliverPhysicsEvents();
     assert.equal(fGone, "carved");
+    assert.deepEqual(crateEnded, [f], "the crate's contact with the gone part ends");
     // Retired for the cap: gone, with the reason, at the frame's events; a call does nothing afterwards.
     engine.gone = [[part, "cap"]];
     engine.bodies = [];

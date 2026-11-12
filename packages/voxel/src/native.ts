@@ -124,6 +124,10 @@ const registry = new Map<number, VoxelBody>();
 let listening = 0;
 /** Objects retired since the frame's events were last delivered, and why: their "gone" events, whoever noticed. */
 let pendingGone: { o: VoxelBody; reason: VoxelBodyGone }[] = [];
+/** Objects retired lately, by body id, with the frame they went in: the frame's contacts still name them (a pair's
+ *  end when its body goes), so they are found for those until the frame after (`frame`). */
+const recentlyGone = new Map<number, { o: VoxelBody; frame: number }>();
+let frameCount = 0;
 const CONTACTS = new Set(["contactstart", "contactend"]);
 
 /**
@@ -293,6 +297,7 @@ export class VoxelBody extends Object3D {
     if (this.gone) return;
     this.gone = true;
     this.goneReason = reason;
+    recentlyGone.set(this.body, { o: this, frame: frameCount });
     if (this.contactsOn) listening--;
     registry.delete(this.body);
     unbindBody(this);
@@ -338,9 +343,12 @@ function refresh(): void {
 /** The registry, known to `@threert/scene` (hits, joints, the frame's events). */
 function register(): void {
   setEngineBodies({
-    object: (body) => registry.get(body) ?? (body >= 2 ** 30 ? (refresh(), registry.get(body)) : undefined),
+    object: (body) => registry.get(body) ?? recentlyGone.get(body)?.o ?? (body >= 2 ** 30 ? (refresh(), registry.get(body) ?? recentlyGone.get(body)?.o) : undefined),
     bodyOf: (o) => (o instanceof VoxelBody && !o.gone ? o.body : undefined),
     frame: () => {
+      // (Those that went before the last frame's events have had their contacts' ends delivered.)
+      frameCount++;
+      for (const [body, g] of recentlyGone) if (g.frame < frameCount - 1) recentlyGone.delete(body);
       // (With no object made yet, the engine's list of gone bodies is only let go of: nothing holds them.)
       if (registry.size) refresh();
       else engine()?.voxelGone?.();
