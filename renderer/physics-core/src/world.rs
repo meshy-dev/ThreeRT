@@ -62,6 +62,9 @@ pub mod limits {
 }
 use limits::*;
 
+#[path = "vehicle/mod.rs"]
+pub mod vehicle;
+
 pub type BodyId = u32;
 pub type ColliderId = u32;
 pub type JointId = u32;
@@ -487,6 +490,10 @@ pub struct Physics {
     /// out of the broad phase's answer and test them one by one where they are, so a query sees the world as the
     /// calls left it, with or without a tick since.
     fresh: std::collections::BTreeSet<ColliderId>,
+    /// The vehicles (`vehicle`), updated in id order before each step, and those removed with their chassis since
+    /// `take_vehicles_gone`.
+    vehicles: BTreeMap<vehicle::VehicleId, vehicle::Vehicle>,
+    vehicles_gone: Vec<vehicle::VehicleId>,
 }
 
 impl Default for Physics {
@@ -519,6 +526,8 @@ impl Physics {
             contacts_dropped: 0,
             faults: vec![],
             fresh: Default::default(),
+            vehicles: BTreeMap::new(),
+            vehicles_gone: vec![],
         }
     }
 
@@ -982,7 +991,14 @@ impl Physics {
     /// why): one whose pose or velocity went non-finite (Rapier disables it and leaves it frozen, and a joint on it
     /// would panic a later tick), one whose collider did, and one past `WORLD_EDGE`.
     pub fn step(&mut self) {
-        self.world.step_with_events(&(), &self.events);
+        // (The vehicles push their chassis first; their stops' contacts are the hook's.)
+        let hooks = self.update_vehicles();
+        self.step_world(&hooks);
+    }
+
+    /// The world's step after the vehicles' update, and what follows it.
+    fn step_world(&mut self, hooks: &vehicle::StopHooks) {
+        self.world.step_with_events(hooks, &self.events);
         self.ticks += 1;
         // (The broad phase has every collider where it is now.)
         self.fresh.clear();
@@ -1086,6 +1102,7 @@ impl Physics {
         let b = &mut world.bodies[h];
         b.set_additional_mass_properties(props, true);
         b.recompute_mass_properties_from_colliders(&world.colliders);
+        self.vehicle_mass_changed(id);
         Ok(())
     }
 
