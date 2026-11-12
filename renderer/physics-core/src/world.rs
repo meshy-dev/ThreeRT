@@ -444,96 +444,12 @@ mod dispatch {
     }
 }
 
-/// A ray against a voxel shape placed at `at`, the cells walked one by one (Amanatides and Woo): the distance to the
-/// first solid cell within `max` and the normal of the face it is entered by (a ray that starts in a solid cell: 0,
-/// and against the ray). Parry's own (ray_voxels.rs) tests each cell's box with the ray and takes the next cell by
-/// the box's bounds, both in floating point: **a ray that lies on a plane of the lattice and runs along it misses
-/// every cell** (straight down at x = 1.5 onto cells of 0.1 m, which is where a game asks for the ground). Here a
-/// point belongs to the cell its coordinates floor to, the cell is stepped as an integer, and a cell that is solid
-/// is a hit.
 /// Every cell of a voxel shape. Not parry's `Voxels::voxels()`: it takes its range from the shape's box in metres, and
 /// f32's rounding can leave the lowest layer out (found by the fuzz: a body spanning -100.8 m .. 0.1 m listed 29 cells
 /// fewer than it holds, all of its lowest z row, at -67.3 m). `domain()` rounds from a voxel's centre, exactly.
 fn listed(v: &rapier3d::parry::shape::Voxels) -> impl Iterator<Item = rapier3d::parry::shape::VoxelData> + '_ {
     let d = v.domain();
     v.voxels_in_range(d[0], d[1])
-}
-
-fn voxel_ray(v: &rapier3d::parry::shape::Voxels, at: &Pose, ray: &Ray, max: f32) -> Option<(f32, Vector)> {
-    let size = v.voxel_size().x;
-    let (o, d) = (at.inverse_transform_point(ray.origin).to_array(), at.inverse_transform_vector(ray.dir).to_array());
-    let [lo, hi] = v.domain();
-    let (lo, hi) = (lo.to_array(), hi.to_array());
-    // The stretch of the ray inside the box of the shape's cells.
-    let (mut t0, mut t1, mut entered) = (0.0f32, max, 3usize);
-    for a in 0..3 {
-        let (min, max) = (lo[a] as f32 * size, hi[a] as f32 * size);
-        if d[a] == 0.0 {
-            if o[a] < min || o[a] >= max {
-                return None;
-            }
-            continue;
-        }
-        let (ta, tb) = ((min - o[a]) / d[a], (max - o[a]) / d[a]);
-        let (near, far) = (ta.min(tb), ta.max(tb));
-        if near > t0 {
-            (t0, entered) = (near, a);
-        }
-        t1 = t1.min(far);
-    }
-    if !(t0 <= t1) {
-        return None;
-    }
-    // The cell the ray is in there, held inside the box (it enters on a face, to rounding).
-    let mut cell = [0i32; 3];
-    for a in 0..3 {
-        cell[a] = (((o[a] + d[a] * t0) / size).floor() as i32).clamp(lo[a], hi[a] - 1);
-    }
-    let normal = |axis: usize| {
-        let mut n = [0.0f32; 3];
-        if axis < 3 {
-            n[axis] = if d[axis] > 0.0 { -1.0 } else { 1.0 };
-            at.transform_vector(Vector::new(n[0], n[1], n[2]))
-        } else {
-            -ray.dir.normalize_or_zero()
-        }
-    };
-    let mut t = t0;
-    let mut axis = entered;
-    // (At most every cell of the box's three sides: the walk leaves the box.)
-    loop {
-        if v.voxel_state(IVector::new(cell[0], cell[1], cell[2])).is_some_and(|s| !s.is_empty()) {
-            return Some((t, normal(axis)));
-        }
-        // The next lattice plane on each axis; the nearest is crossed (the lower axis first when they are equal).
-        let mut next = (f32::INFINITY, 3usize);
-        for a in 0..3 {
-            if d[a] != 0.0 {
-                let plane = (cell[a] + (d[a] > 0.0) as i32) as f32 * size;
-                let ta = ((plane - o[a]) / d[a]).max(t);
-                if ta < next.0 {
-                    next = (ta, a);
-                }
-            }
-        }
-        if next.1 == 3 || next.0 > t1 {
-            return None;
-        }
-        (t, axis) = next;
-        cell[axis] += if d[axis] > 0.0 { 1 } else { -1 };
-        if cell[axis] < lo[axis] || cell[axis] >= hi[axis] {
-            return None;
-        }
-    }
-}
-
-/// A ray against a collider's shape placed at `at` (the collider's pose, or where a fresh one is): the distance and
-/// the normal. Parry's answer, but for a voxel shape (`voxel_ray`).
-fn shape_ray(c: &Collider, at: &Pose, ray: &Ray, max: f32) -> Option<(f32, Vector)> {
-    match c.shape().as_voxels() {
-        Some(v) => voxel_ray(v, at, ray, max),
-        None => c.shape().cast_ray_and_get_normal(at, ray, max, true).map(|i| (i.time_of_impact, i.normal)),
-    }
 }
 
 /// A number's bits as the hash takes them: one NaN for all (the platforms make NaNs of different bits, ffc00000
@@ -554,8 +470,6 @@ pub struct Physics {
     /// Each collider with its shape's data (`Shape::data`), and their sum.
     colliders: BTreeMap<ColliderId, (ColliderHandle, usize)>,
     shape_data: usize,
-    /// The voxel colliders there are: rays are cast at them here (`voxel_ray`), not by the broad phase's query.
-    voxel_colliders: std::collections::BTreeSet<ColliderId>,
     joints: BTreeMap<JointId, ImpulseJointHandle>,
     /// Per joint: its kind (what `set_joint` may change), and for a hinge the centre of its limits (rad) by which its
     /// first frame is turned (`add_joint`).
@@ -596,7 +510,6 @@ impl Physics {
             bodies: BTreeMap::new(),
             colliders: BTreeMap::new(),
             shape_data: 0,
-            voxel_colliders: Default::default(),
             joints: BTreeMap::new(),
             joint_kinds: BTreeMap::new(),
             kinematic: Default::default(),
@@ -671,7 +584,6 @@ impl Physics {
         self.world.remove_body_with_colliders(h, true);
         for c in &gone {
             self.fresh.remove(c);
-            self.voxel_colliders.remove(c);
             if let Some((_, data)) = self.colliders.remove(c) {
                 self.shape_data -= data;
             }
@@ -718,9 +630,6 @@ impl Physics {
         self.colliders.insert(id, (h, data));
         self.shape_data += data;
         self.fresh.insert(id);
-        if matches!(d.shape, Shape::Voxels { .. } | Shape::SharedVoxels(_)) {
-            self.voxel_colliders.insert(id);
-        }
         Ok(id)
     }
 
@@ -729,7 +638,6 @@ impl Physics {
             self.world.remove_collider(h);
             self.shape_data -= data;
             self.fresh.remove(&id);
-            self.voxel_colliders.remove(&id);
         }
     }
 
@@ -1022,7 +930,6 @@ impl Physics {
             self.colliders.remove(&id);
             self.shape_data -= data;
             self.fresh.remove(&id);
-            self.voxel_colliders.remove(&id);
             return if left == 0 { Ok(0) } else { Err(format!("physics: a voxel shape holds at most {MAX_VOXELS} cells (the collider is gone)")) };
         }
         let h = self.world.insert_collider(c, parent);
@@ -1042,10 +949,10 @@ impl Physics {
     /// A shape several colliders share is counted once.
     pub fn voxel_bytes(&self) -> usize {
         let mut seen = std::collections::BTreeSet::new();
-        self.voxel_colliders
-            .iter()
-            .filter_map(|id| {
-                let shape = self.world.colliders.get(self.colliders.get(id)?.0)?.shared_shape();
+        self.colliders
+            .values()
+            .filter_map(|&(h, _)| {
+                let shape = self.world.colliders.get(h)?.shared_shape();
                 let first = seen.insert(std::sync::Arc::as_ptr(&shape.0) as *const () as usize);
                 shape.as_voxels().filter(|_| first).map(|v| v.total_memory_size())
             })
@@ -1379,11 +1286,11 @@ impl Physics {
     /// whose colliders the ray passes through (the one that casts it).
     pub fn cast_ray(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>) -> Result<Option<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(None) };
-        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32)) && c.shape().as_voxels().is_none();
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
         let mut best = self.world.cast_ray_and_get_normal(&ray, max, true, self.filter(skip, &settled)).and_then(|(h, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
-        for (h, c, at) in self.fresh(skip).chain(self.voxels_on(&ray, max, skip)) {
-            if let Some((t, n)) = shape_ray(c, &at, &ray, max) {
-                best = Self::nearer(best, self.hit(h, t, ray.point_at(t), n));
+        for (h, c, at) in self.fresh(skip) {
+            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
+                best = Self::nearer(best, self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
             }
         }
         Ok(best)
@@ -1392,32 +1299,17 @@ impl Physics {
     /// Every collider a ray passes through within `max` metres, nearest first, at most `limit` of them.
     pub fn cast_ray_all(&self, origin: [f32; 3], direction: [f32; 3], max: f32, skip: Option<BodyId>, limit: usize) -> Result<Vec<Hit>, String> {
         let Some((ray, max)) = Self::ray(origin, direction, max)? else { return Ok(vec![]) };
-        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32)) && c.shape().as_voxels().is_none();
+        let settled = |_: ColliderHandle, c: &Collider| !self.fresh.contains(&(c.user_data as u32));
         let mut hits: Vec<Hit> = self.world.intersect_ray(ray, max, true, self.filter(skip, &settled)).filter_map(|(h, _, i)| self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal)).collect();
-        for (h, c, at) in self.fresh(skip).chain(self.voxels_on(&ray, max, skip)) {
-            if let Some((t, n)) = shape_ray(c, &at, &ray, max) {
-                hits.extend(self.hit(h, t, ray.point_at(t), n));
+        for (h, c, at) in self.fresh(skip) {
+            if let Some(i) = c.shape().cast_ray_and_get_normal(&at, &ray, max, true) {
+                hits.extend(self.hit(h, i.time_of_impact, ray.point_at(i.time_of_impact), i.normal));
             }
         }
         // (Equal distances in collider order: the same answer on every machine.)
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.collider.cmp(&b.collider)));
         hits.truncate(limit);
         Ok(hits)
-    }
-
-    /// The settled voxel colliders whose boxes a ray passes within `max` (the broad phase's tree; not `skip`'s), each
-    /// where it is: the rays' own test of them (`voxel_ray`). None in a world without voxel shapes.
-    fn voxels_on<'a>(&'a self, ray: &'a Ray, max: f32, skip: Option<BodyId>) -> impl Iterator<Item = (ColliderHandle, &'a Collider, Pose)> + 'a {
-        let skip = skip.and_then(|b| self.bodies.get(&b)).copied();
-        let any = !self.voxel_colliders.is_empty();
-        let tree = self.world.query_pipeline().bvh;
-        tree.leaves(move |node: &rapier3d::parry::partitioning::BvhNode| any && node.aabb().intersects_local_ray(ray, max)).filter_map(move |leaf| {
-            let (c, h) = self.world.colliders.get_unknown_gen(leaf)?;
-            if !c.is_enabled() || c.shape().as_voxels().is_none() || self.fresh.contains(&(c.user_data as u32)) || (skip.is_some() && c.parent() == skip) {
-                return None;
-            }
-            Some((h, c, *c.position()))
-        })
     }
 
     /// A query's ray and reach (cut to `MAX_QUERY_DISTANCE`); None for a reach of 0 or less (it meets nothing).
@@ -1446,8 +1338,8 @@ impl Physics {
             Some(&h) => QueryFilter::default().exclude_rigid_body(h),
             None => QueryFilter::default(),
         };
-        // (Nothing fresh, as after every tick, and no voxel shape: the plain filter.)
-        if self.fresh.is_empty() && self.voxel_colliders.is_empty() {
+        // (Nothing fresh, as after every tick: the plain filter.)
+        if self.fresh.is_empty() {
             f
         } else {
             f.predicate(settled)
@@ -2150,8 +2042,13 @@ mod tests {
         assert!(p.take_faults().is_empty());
     }
 
-    /// A ray at a voxel shape meets what testing every solid cell's box finds, for random rays at a turned shape; and
-    /// a ray that lies on a plane of the lattice and runs along it meets the cells (parry's own walk misses them all).
+    /// Parry's ray at voxel shapes (its walk patched in third_party/parry3d: PATCH.md), through the world's query as
+    /// game code casts it, against testing every solid cell's box: random rays at a turned shape (towards it, from
+    /// inside it, anywhere); straight down onto a slab with x, z or both on the lattice's planes or both mid-cell
+    /// (4,000 each: unpatched, parry missed 8-22 % of the first three); along a plane between two layers and in the top
+    /// face's plane; along the lattice's edges and through its vertices; a shape far out at negative coordinates; a
+    /// shape edited. Every hit at the brute-force distance (0.1 mm; 1 mm 500 m out), its normal a unit vector against the ray (none
+    /// from inside a cell, as for every shape); every miss a miss.
     #[test]
     fn rays_at_voxel_shapes() {
         use rapier3d::parry::query::RayCast;
@@ -2162,58 +2059,144 @@ mod tests {
             seed ^= seed << 17;
             (seed >> 40) as f32 / 16_777_216.0
         };
-        let cells: Vec<[i32; 3]> = block([-6, -3, -5], [7, 4, 6]).into_iter().filter(|_| rnd() < 0.3).collect();
-        let voxels = rapier3d::parry::shape::Voxels::new(Vector::splat(0.25), &cells.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
-        let at = pose([0.3, -0.2, 0.1], [0.2, -0.4, 0.1, 0.9]).unwrap();
-        let (mut hits, mut misses) = (0, 0);
-        for _ in 0..4000 {
-            let o = Vector::new(rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0);
-            // (Towards the shape, about the origin, or anywhere.)
-            let to = Vector::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * if rnd() < 0.7 { 3.0 } else { 30.0 };
-            let d = (to - o).normalize();
-            let ray = Ray::new(o, d);
-            let max = 1.0 + rnd() * 8.0;
-            let brute = cells
+        // The world with one voxel collider, settled into the broad phase (a step), and the brute force on its cells.
+        let world = |size: f32, cells: &[[i32; 3]], at: [f32; 3], rot: [f32; 4]| {
+            let mut p = Physics::default();
+            let c = p.add_collider(None, &ColliderDesc { position: at, rotation: rot, ..ColliderDesc::new(Shape::Voxels { size, cells: cells.to_vec() }) }).unwrap();
+            run(&mut p, 1);
+            (p, c)
+        };
+        let brute = |size: f32, cells: &[[i32; 3]], at: &Pose, ray: &Ray, max: f32| {
+            cells
                 .iter()
                 .filter_map(|c| {
-                    let centre = at.transform_point(Vector::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) * 0.25);
-                    Cuboid::new(Vector::splat(0.125)).cast_ray(&Pose::from_parts(centre, at.rotation), &ray, max, true)
+                    let centre = at.transform_point(Vector::new(c[0] as f32 + 0.5, c[1] as f32 + 0.5, c[2] as f32 + 0.5) * size);
+                    Cuboid::new(Vector::splat(size * 0.5)).cast_ray(&Pose::from_parts(centre, at.rotation), ray, max, true)
                 })
-                .fold(f32::INFINITY, f32::min);
-            match voxel_ray(&voxels, &at, &ray, max) {
-                Some((t, n)) => {
-                    assert!((t - brute).abs() < 1e-4, "{t} for {brute}: from {o:?} along {d:?}");
-                    assert!((n.length() - 1.0).abs() < 1e-4 && (t == 0.0 || n.dot(d) < 1e-4), "{n:?}");
-                    hits += 1;
+                .fold(f32::INFINITY, f32::min)
+        };
+        // (Within 0.1 mm; 1 mm 500 m out, where an f32 is 30 um apart and a ray along an axis it barely moves on divides
+        // that.)
+        let check = |p: &Physics, want: f32, ray: &Ray, max: f32, what: &str| -> bool {
+            let tol = if ray.origin.length() > 100.0 { 1e-3 } else { 1e-4 };
+            let o = ray.origin.to_array();
+            match p.cast_ray(o, ray.dir.to_array(), max, None).unwrap() {
+                Some(h) => {
+                    let n = Vector::from(h.normal);
+                    assert!((h.distance - want).abs() < tol, "{what}: {} for {want}: from {o:?} along {:?}", h.distance, ray.dir);
+                    assert!(if h.distance == 0.0 { n == Vector::ZERO || (n.length() - 1.0).abs() < 1e-4 } else { (n.length() - 1.0).abs() < 1e-4 && n.dot(ray.dir) <= 1e-4 }, "{what}: normal {n:?} from {o:?} along {:?}", ray.dir);
+                    true
                 }
                 None => {
-                    assert!(brute == f32::INFINITY, "missed a cell at {brute}: from {o:?} along {d:?}");
-                    misses += 1;
+                    assert!(want == f32::INFINITY, "{what}: missed a cell at {want}: from {o:?} along {:?}", ray.dir);
+                    false
                 }
             }
-        }
-        assert!(hits > 800 && misses > 800, "{hits} hits, {misses} misses");
-        // On the lattice's planes, along them: a slab of cells of 0.1 m from above at every corner of its cells.
-        let slab = rapier3d::parry::shape::Voxels::new(Vector::splat(0.1), &block([-20, 0, -20], [20, 3, 20]).iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
-        let still = Pose::identity();
-        let mut parry_missed = 0;
-        for x in -19..19 {
-            for z in -19..19 {
-                let ray = Ray::new(Vector::new(x as f32 * 0.1, 5.0, z as f32 * 0.1), Vector::new(0.0, -1.0, 0.0));
-                let (t, n) = voxel_ray(&slab, &still, &ray, 10.0).unwrap_or_else(|| panic!("a ray down at ({x}, {z}) x 0.1 m misses the slab"));
-                assert!((t - 4.7).abs() < 1e-4 && n.y == 1.0, "{t} {n:?}");
-                parry_missed += slab.cast_ray(&still, &ray, 10.0, true).is_none() as u32;
+        };
+        // Random rays at a turned shape.
+        let cells: Vec<[i32; 3]> = block([-6, -3, -5], [7, 4, 6]).into_iter().filter(|_| rnd() < 0.3).collect();
+        let (at, rot) = ([0.3, -0.2, 0.1], [0.2, -0.4, 0.1, 0.9]);
+        let (p, _) = world(0.25, &cells, at, rot);
+        let pose_ = pose(at, rot).unwrap();
+        let (mut hits, mut misses) = (0, 0);
+        for k in 0..4000 {
+            // (From anywhere about it, or from inside one of its cells.)
+            let o = if k % 4 == 3 {
+                let c = cells[(rnd() * cells.len() as f32) as usize % cells.len()];
+                pose_.transform_point(Vector::new(c[0] as f32 + rnd(), c[1] as f32 + rnd(), c[2] as f32 + rnd()) * 0.25)
+            } else {
+                Vector::new(rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0)
+            };
+            let to = Vector::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * if rnd() < 0.7 { 3.0 } else { 30.0 };
+            let ray = Ray::new(o, (to - o).normalize());
+            let max = 1.0 + rnd() * 8.0;
+            if check(&p, brute(0.25, &cells, &pose_, &ray, max), &ray, max, "random") {
+                hits += 1;
+            } else {
+                misses += 1;
             }
         }
-        // (Why the walk is here. If parry mends its own, this count falls to 0 and the walk can go.)
-        assert!(parry_missed > 0, "parry's ray meets them all now");
-        // Along the top face, in it: nothing above the cells is met; one cell lower the first cell is.
-        assert!(voxel_ray(&slab, &still, &Ray::new(Vector::new(-5.0, 0.3, 0.05), Vector::new(1.0, 0.0, 0.0)), 20.0).is_none());
-        let (t, n) = voxel_ray(&slab, &still, &Ray::new(Vector::new(-5.0, 0.2, 0.05), Vector::new(1.0, 0.0, 0.0)), 20.0).unwrap();
-        assert!((t - 3.0).abs() < 1e-5 && n.x == -1.0);
-        // From inside a cell: at once, against the ray.
-        let (t, n) = voxel_ray(&slab, &still, &Ray::new(Vector::new(0.05, 0.15, 0.05), Vector::new(0.0, 1.0, 0.0)), 20.0).unwrap();
-        assert!(t == 0.0 && n.y == -1.0);
+        assert!(hits > 1500 && misses > 800, "{hits} hits, {misses} misses");
+        // Straight down onto a slab of 0.1 m cells (40 x 3 x 40 from the origin's corner at -2 m), the four ways.
+        let slab = block([-20, 0, -20], [20, 3, 20]);
+        let (p, _) = world(0.1, &slab, [0.0; 3], [0.0, 0.0, 0.0, 1.0]);
+        for (way, (xs, zs)) in [("x on a plane", (true, false)), ("x and z on planes", (true, true)), ("z on a plane", (false, true)), ("both mid-cell", (false, false))] {
+            for _ in 0..4000 {
+                let at = |plane: bool, r: f32| ((r * 38.0) as i32 - 19) as f32 * 0.1 + if plane { 0.0 } else { 0.05 };
+                let ray = Ray::new(Vector::new(at(xs, rnd()), 5.0, at(zs, rnd())), Vector::new(0.0, -1.0, 0.0));
+                assert!(check(&p, 4.7, &ray, 10.0, way), "{way}: missed");
+            }
+        }
+        // Along planes: between the two upper layers (it belongs to the upper, solid: met at the slab's side); in the
+        // top face's plane (above the cells: nothing); along edges (two planes at once); through vertices; on the
+        // chunks' faces (every 0.8 m: among the four ways above too) and the shape's own. (The
+        // distances here are exact, by hand: brute force on the cells' boxes misses some of these by rounding.)
+        let s2 = std::f32::consts::SQRT_2;
+        let still = Pose::identity();
+        for (o, d, want) in [
+            ([-5.0, 0.2, 0.05], [1.0, 0.0, 0.0], Some(3.0)),
+            ([-5.0, 0.3, 0.05], [1.0, 0.0, 0.0], None),
+            ([-5.0, 0.2, 0.3], [1.0, 0.0, 0.0], Some(3.0)),
+            ([0.5, 0.1, -5.0], [0.0, 0.0, 1.0], Some(3.0)),
+            ([-5.0, 0.3, 0.3], [1.0, 0.0, 0.0], None),
+            ([3.0, 0.1, 3.0], [-1.0, 0.0, -1.0], Some(s2)),
+            ([-0.7, 1.0, -0.7], [1.0, -1.0, 1.0], Some(0.7 * 3f32.sqrt())),
+            ([1.3, 2.3, -0.4], [-0.5, -1.0, 0.0], Some(5f32.sqrt())),
+            // On the shape's own faces (its box's, and the collider's in the broad phase): the lower one is its cells',
+            // the upper one the empty cells' beyond.
+            ([-2.0, 5.0, 0.05], [0.0, -1.0, 0.0], Some(4.7)),
+            ([2.0, 5.0, 0.05], [0.0, -1.0, 0.0], None),
+            ([0.05, 5.0, -2.0], [0.0, -1.0, 0.0], Some(4.7)),
+            ([-2.0, 5.0, -2.0], [0.0, -1.0, 0.0], Some(4.7)),
+        ] {
+            let ray = Ray::new(Vector::from(o), Vector::from(d).normalize());
+            check(&p, want.unwrap_or(f32::INFINITY), &ray, 20.0, "along planes, edges, vertices");
+        }
+        assert!(p.cast_ray([-5.0, 0.3, 0.05], [1.0, 0.0, 0.0], 20.0, None).unwrap().is_none(), "the top face's plane is above the cells");
+        let h = p.cast_ray([-5.0, 0.2, 0.05], [1.0, 0.0, 0.0], 20.0, None).unwrap().unwrap();
+        assert!((h.distance - 3.0).abs() < 1e-5 && h.normal == [-1.0, 0.0, 0.0], "{h:?}");
+        // From inside a cell: at once, no normal (as every shape answers from inside).
+        let h = p.cast_ray([0.05, 0.15, 0.05], [0.0, 1.0, 0.0], 20.0, None).unwrap().unwrap();
+        assert!(h.distance == 0.0 && h.normal == [0.0; 3], "{h:?}");
+        // Far out at negative coordinates (chunks of negative keys: parry's listing once lost a row there). Straight
+        // down on planes or mid-cell: the column the ray's x and z floor into, met at its highest solid cell's top (by
+        // this rule, not the cells' boxes: at 500 m a box's centre +- half its size and the plane k x size round apart
+        // by an ulp); oblique from anywhere: brute force.
+        let far: Vec<[i32; 3]> = block([-5013, -2, -4021], [-4987, 1, -3995]).into_iter().filter(|_| rnd() < 0.6).collect();
+        let (p, _) = world(0.1, &far, [0.0; 3], [0.0, 0.0, 0.0, 1.0]);
+        for k in 0..2000 {
+            if k % 5 == 0 {
+                let o = Vector::new(-501.2 + rnd() * 2.4, 3.0, -402.0 + rnd() * 2.4);
+                let ray = Ray::new(o, Vector::new(rnd() - 0.5, -1.0, rnd() - 0.5).normalize());
+                check(&p, brute(0.1, &far, &still, &ray, 10.0), &ray, 10.0, "far, negative, oblique");
+                continue;
+            }
+            let x = ((-5012.0 + rnd() * 24.0) as i32) as f32 * 0.1 + if k % 2 == 0 { 0.0 } else { 0.05 };
+            let z = ((-4020.0 + rnd() * 24.0) as i32) as f32 * 0.1 + if k % 3 == 0 { 0.0 } else { 0.05 };
+            let (cx, cz) = ((x / 0.1).floor() as i32, (z / 0.1).floor() as i32);
+            let top = far.iter().filter(|c| c[0] == cx && c[2] == cz).map(|c| c[1] + 1).max();
+            let ray = Ray::new(Vector::new(x, 3.0, z), Vector::new(0.0, -1.0, 0.0));
+            check(&p, top.map_or(f32::INFINITY, |t| 3.0 - t as f32 * 0.1), &ray, 10.0, "far, negative, straight down");
+        }
+        // Edited: a pit carved and a column added; rays on planes and mid-cell find what is there now (the column
+        // their x and z floor into, as above).
+        let (mut p, c) = world(0.1, &slab, [0.0; 3], [0.0, 0.0, 0.0, 1.0]);
+        let pit = block([-3, 1, -3], [3, 3, 3]);
+        let column = block([5, 3, 5], [7, 10, 7]);
+        p.edit_voxels(c, &pit, &column).unwrap();
+        let now: Vec<[i32; 3]> = slab.iter().filter(|c| !pit.contains(c)).chain(column.iter()).copied().collect();
+        for k in 0..2000 {
+            let x = ((rnd() * 20.0) as i32 - 10) as f32 * 0.1 + if k % 2 == 0 { 0.0 } else { 0.05 };
+            let z = ((rnd() * 20.0) as i32 - 10) as f32 * 0.1 + if k % 3 == 0 { 0.0 } else { 0.05 };
+            let (cx, cz) = ((x / 0.1).floor() as i32, (z / 0.1).floor() as i32);
+            let top = now.iter().filter(|c| c[0] == cx && c[2] == cz).map(|c| c[1] + 1).max();
+            let ray = Ray::new(Vector::new(x, 5.0, z), Vector::new(0.0, -1.0, 0.0));
+            check(&p, top.map_or(f32::INFINITY, |t| 5.0 - t as f32 * 0.1), &ray, 10.0, "edited");
+        }
+        // Parry's own `cast_ray` on the shape gives the same as the world's query (no walk of the world's own).
+        let shape = rapier3d::parry::shape::Voxels::new(Vector::splat(0.1), &slab.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
+        let ray = Ray::new(Vector::new(1.5, 5.0, -0.3), Vector::new(0.0, -1.0, 0.0));
+        assert!((shape.cast_ray(&still, &ray, 10.0, true).unwrap() - 4.7).abs() < 1e-5);
     }
 
     /// Colliders that share one voxel shape: its memory is counted once; an edit of one gives that one cells of its
