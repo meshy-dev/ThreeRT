@@ -4431,7 +4431,35 @@ benchmark level. The order follows the dependencies; a step that meets a further
         voxels**, are not done.
       - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
         from the cache): the fireball reads lighter than offline.
-    - (c) Vehicles and ropes on step 7's joints.
+    - **(c1) Joints and the blast** (branch `vehicles-ropes`; design `out/web-probe/step10/c-design.md`; docs/VOXEL.md
+      "Joints, the level's anchor and the blast"). (c) split in two (the supervisor, 2026-11-12: engine structure
+      first, features after). The user's decisions 1-4 (2026-11-12), each the standard structure where the engine did
+      otherwise: a joint's parameters change in place (`joint_set`; before, removed and made again; the engine refuses
+      one that names its bodies, anchors or axis); joints to the level hold to the world's anchor, a fixed body with no
+      collider (the level's colliders stay static, on no body); a joint belongs to the material at its anchor (it moves
+      with a part cut off and the engine reports it, `joint_changes`, so `bodyA` / `anchorA` name the part; it breaks
+      when its cell is carved or its body goes, the world's own removals included: `Joint.broken`, a "broken" event);
+      an explosion's blast pushes the bodies within 3 radii (impulse by area and distance, through the centre of mass;
+      the carve's radius) and kicks the parts it cuts loose (8 m/s at the default push, whatever their mass; at most
+      30 m/s in all; the supervisor for the user, 2026-11-12). Recorded hashes: physics-core's script
+      8e4af124a2061883 (the kick added to its blast), the voxel bodies' 3329720df1b31ca3 (an explosion added that
+      cuts a body in two, to kick its part); the anchor body itself changes neither (with the kick off, both are the
+      first draft's bits); native = parallel = wasm32.
+      - The independent review of #31 (2026-11-12): the first draft hung the level's colliders on a fixed body and hid
+        Rapier's per-edit mass sum over them with a zero-mass rule (an explosion's frame had taken 26 s); the tick
+        after a carve still grew with the level's colliders (1.2 ms at 10,000). The anchor body is the standard
+        structure: main's flat cost (0.02-0.05 ms), no special case. Also fixed: the binding did not know of joints the
+        engine moved (a later sync let go of them or remade them on the level); a throwing "broken" listener left the
+        rest unmarked; `pose` could move the level; the blast's radius was not the carve's; the world's own removals
+        reported no "broken"; joint lookups were linear in the world's joints (40,000 joints: 0.7 to 6 s stalls, now
+        8-11 ms).
+      - Open: the blast is not shielded by walls (decision 4: one voxel ray per body would do it); a joint's anchor on
+        a face between two cells is held by the cell the point falls in, else the nearest solid neighbour.
+    - (c2) Vehicles and ropes: the ray-cast vehicle (Rapier's `DynamicRayCastVehicleController`; the comparison in
+      `out/web-probe/step10/c-vehicle-compare.md`: steady, 250-300 times cheaper than a car of wheel joints, as
+      deterministic); ropes as `RopeJoint` and a drawn curve (they do not collide: they pass through walls). Waits on
+      the user's decision on parry's voxel ray, which misses 8-22 % of rays starting on a lattice plane (the wheels'
+      rays go through it).
     - (d) Acceptance: the benchmark level played through as a game, every line of `docs/VOXEL.md`'s benchmark measured.
 
 ## Known issues

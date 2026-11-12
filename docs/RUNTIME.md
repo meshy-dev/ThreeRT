@@ -226,7 +226,13 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   hello world's test for something fixed, `hit.object.physics?.type === "fixed"`, does not find the level: it is
   `hit.object === engineColliders`. A level that collides is in the physics world, and the queries ask it, whether or
   not any scene object has `physics`; contacts with it reach a body's listeners with `other: engineColliders`.
-  `voxelImpulse(body, impulse, point?)` (step 8's call by id) is kept, deprecated. An explosion's fire and smoke are
+  `voxelImpulse(body, impulse, point?)` (step 8's call by id) is kept, deprecated. A joint's parameters (limits,
+  motor, a rope's length) change in place (`joint_set`); a joint may hold to the voxel level (`engineColliders`: the
+  world's anchor, a fixed body with no collider); a joint on a voxel body or the level follows the cell its anchor is
+  in when bodies are cut (its `bodyA` / `anchorA`, or `bodyB` / `anchorB`, then name the part it is on), and is
+  `broken` (a "broken" event) when that cell is carved or its body goes. An explosion's blast pushes the bodies near
+  it, and kicks the parts it cuts loose (`push`; docs/VOXEL.md "Joints, the level's anchor and the blast", step 10
+  c1). An explosion's fire and smoke are
   `Explosions` (`packages/voxel`, step 10 b; docs/VOXEL.md "Fire and smoke"): scene objects pooled in setup, no engine
   call of their own. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
   cells, each within 2^20 cells and 100 km of the shape's origin.

@@ -197,7 +197,12 @@ test("explode: the voxel explosion, then the fire; dispose takes the pool out", 
     scene.add(x);
     assert.deepEqual(x.explode(1, 2, 3, 0.5, 4), { removed: 12 });
     assert.deepEqual(calls, [{ op: "explode", sphere: [1, 2, 3, 0.5] }]);
-    assert.equal(x.stats.fired, 1);
+    // Its blast's push (step 10 c1): passed on; out of range refused before the voxel call.
+    x.explode(20, 2, 3, 0.5, 4.1, { push: 0 });
+    assert.deepEqual(calls[1], { op: "explode", sphere: [20, 2, 3, 0.5], push: 0 });
+    for (const push of [-1, NaN, Infinity, 1e9]) assert.throws(() => x.explode(0, 0, 0, 1, 4.2, { push }), RangeError, String(push));
+    assert.equal(calls.length, 2);
+    assert.equal(x.stats.fired, 2);
     assert.equal(x.fireballs[0].position.x, 1);
     assert.deepEqual(x.fireballs[0].customData, [4, 0, 0, 0]);
     x.dispose();
@@ -205,7 +210,7 @@ test("explode: the voxel explosion, then the fire; dispose takes the pool out", 
     assert.equal(x.children.length, 0);
     assert.throws(() => x.fire([0, 0, 0], 1, 5), /disposed/);
     assert.throws(() => x.explode(0, 0, 0, 1, 5), /disposed/);
-    assert.equal(calls.length, 1, "no voxel call after dispose");
+    assert.equal(calls.length, 2, "no voxel call after dispose");
   } finally {
     g.__engine = before;
   }

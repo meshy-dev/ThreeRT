@@ -9,7 +9,7 @@
 // follow the fireball's age, from a table measured against the offline renderer (`FIRE_LIGHT`; tools/bench-voxel-fire.ts
 // --only calibrate).
 import { Fireball, Group, PointLight, type Object3D } from "@threert/scene";
-import { voxelExplode, type VoxelEdit } from "./native.ts";
+import { MAX_PUSH, voxelExplode, type VoxelEdit } from "./native.ts";
 
 /** The most fireballs a pool may have: the kernel draws at most 32 volumes (`MAX_MEDIA`, renderer/src/scene.rs; a
  *  scene with more is refused). */
@@ -234,12 +234,13 @@ export class Explosions extends Group {
     return k;
   }
 
-  /** `voxelExplode(x, y, z, r)` and `fire([x, y, z], r, time)`; the arguments are checked first (nothing happens if
-   *  they are refused). Returns the voxel edit's result. */
-  explode(x: number, y: number, z: number, r: number, time: number): VoxelEdit | { queued: true } {
+  /** `voxelExplode(x, y, z, r, { push })` (its blast pushes the bodies near it) and `fire([x, y, z], r, time)`; the
+   *  arguments are checked first (nothing happens if they are refused). Returns the voxel edit's result. */
+  explode(x: number, y: number, z: number, r: number, time: number, o: { push?: number } = {}): VoxelEdit | { queued: true } {
     check("Explosions.explode", [x, y, z], r, time);
+    if (o.push !== undefined) within("Explosions.explode: push", o.push, 0, MAX_PUSH);
     this.inWorldFrame("Explosions.explode");
-    const e = voxelExplode(x, y, z, r);
+    const e = voxelExplode(x, y, z, r, o);
     this.fire([x, y, z], r, time);
     return e;
   }

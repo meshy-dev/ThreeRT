@@ -227,7 +227,7 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     let v = voxels.clone();
     e.set("voxelLevel", Function::new(ctx.clone(), move |ctx: Ctx, d: Value| -> rquickjs::Result<()> { let json = to_json(&d)?; api::voxel_level(&mut v.borrow_mut(), &json).map_err(|e| thrown(&ctx, e)) })?)?;
     let (v, w, p, d) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
-    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), x, y, z, r).map_err(|e| thrown(&ctx, e)) })?)?;
+    e.set("voxelExplode", Function::new(ctx.clone(), move |ctx: Ctx, x: f64, y: f64, z: f64, r: f64, push: rquickjs::function::Opt<f64>| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_explode(&mut v.borrow_mut(), &mut w.borrow_mut(), &mut p.borrow_mut(), x, y, z, r, push.0).map_err(|e| thrown(&ctx, e)) })?)?;
     // An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`), and the level's
     // hash (16 hex digits; "" before a level): the same commands give the same hash.
     let (v, w, p, dl) = (voxels.clone(), world.clone(), physics.clone(), budget.clone());
@@ -244,6 +244,10 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     e.set("voxelContacts", Function::new(ctx.clone(), move |ctx: Ctx, body: f64, on: bool| -> rquickjs::Result<()> { api::voxel_contacts(&mut v.borrow_mut(), &mut p.borrow_mut(), body, on).map_err(|e| thrown(&ctx, e)) })?)?;
     let v = voxels.clone();
     e.set("voxelGone", Function::new(ctx.clone(), move || -> String { api::voxel_gone(&mut v.borrow_mut()) })?)?;
+    // The world's anchor (step 10 c1: a fixed body with no collider; a joint to the level holds to it), -1 before a level
+    // that collides.
+    let v = voxels.clone();
+    e.set("voxelLevelBody", Function::new(ctx.clone(), move || -> f64 { v.borrow().level_body().map_or(-1.0, |b| b as f64) })?)?;
     let v = voxels.clone();
     e.set("voxelHash", Function::new(ctx.clone(), move || -> String { api::voxel_hash(&v.borrow()) })?)?;
     let v = voxels.clone();

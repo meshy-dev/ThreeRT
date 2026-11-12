@@ -59,8 +59,10 @@ pub fn voxel_level(v: &mut VoxelWorld, d: &Value) -> Result<()> {
 }
 
 /// An explosion: what it did, as JSON.
-pub fn voxel_explode(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld>, x: f64, y: f64, z: f64, r: f64) -> Result<String> {
-    Ok(v.explode(w, p, Vec3::new(x as f32, y as f32, z as f32), r as f32)?.to_string())
+pub fn voxel_explode(v: &mut VoxelWorld, w: &mut World, p: &mut Option<PhysicsWorld>, x: f64, y: f64, z: f64, r: f64, push: Option<f64>) -> Result<String> {
+    // (A push out of range or not finite is refused before anything changes: `VoxelWorld::explode`.)
+    let push = push.map_or(crate::voxel::DEFAULT_PUSH, |p| if p.is_finite() && p.abs() <= f32::MAX as f64 { p as f32 } else { f32::NAN });
+    Ok(v.explode(w, p, Vec3::new(x as f32, y as f32, z as f32), r as f32, push)?.to_string())
 }
 
 /// An edit of the level (`voxelEdit({ op, sphere | box | capsule, material })`; voxel.rs `EditOp`).
