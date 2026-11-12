@@ -889,10 +889,26 @@ something, when it left the test road (s; measured until then).
 - **The vehicles' update** (probes and controller, per step; `--cost`): 1 car 0.014-0.015 ms, 20 cars 0.27-0.33 ms on
   the debris, gap, crater and parking scenarios (the target 0.03 and 0.5 ms). About 60 cells a sweep at 40-55 ns each;
   half of it parry's cell iterator, the rest the closed form; the controller itself is negligible.
-- **The world's step with them** (Rapier, not the vehicles): 20 voxel-chassis cars from 0.016 ms parked to 2.6 ms on
-  the debris route; about nine tenths of it parry's voxels-voxels contact manifolds between the voxel chassis and the
-  debris under them. A box chassis does not pay it. Open (step 8's cost of voxel bodies, not changed here).
-- **On the benchmark level** (`tools/bench-voxel-fire.ts --only cost --route mesh --scenario drive | drive20`): GPU_PENDING
+- **The world's step with them** (Rapier, not the vehicles' update): 20 voxel-chassis cars from 0.016 ms parked to 2.6
+  ms on the debris route; about nine tenths of it parry's voxels-voxels contact manifolds between the voxel chassis and
+  the debris under them (step 8's cost of voxel bodies).
+- **The stops make the chassis a CCD body** (found on the benchmark level, 2026-11-13). This Rapier sweeps every
+  "fast" dynamic body (one that moves more than half its thinnest sweepable collider in a tick) against fixed colliders,
+  whatever `ccd_enabled` says (that flag now only adds dynamic and kinematic targets: physics-core's `BodyDesc.ccd`,
+  documented as opt-in CCD, no longer gates it). Voxel shapes do not count toward the thinness; a stop hull does (half the
+  tyre's width, 0.11 m on the sedan), so a car is "fast" above about 3 m/s and its four stops are swept every tick.
+  On flat ground the sweep meets nothing; on the level's voxel slopes (0.1 m a metre) it casts against every cell in
+  the stops' swept boxes: 1.6-2.8 ms a car (CPU, a box chassis), 0.06 with the stops off the chassis. Skipping interior
+  cells in parry's voxel cast (an experiment, not kept) gives 1.3. Open, for a decision: the stop as a shape the sweep
+  does not take, a per-body CCD opt-out in Rapier (vehicle SDKs leave a chassis discrete unless asked), or parry's voxel
+  cast made cheap at its source.
+- **On the benchmark level** (`tools/bench-voxel-fire.ts --only cost --route mesh | fire --scenario drive | drive20`,
+  lockstep at 0.75; `out/web-probe/gpu-runs-10c2.md` V4-V6): one car: frame CPU 12.8 / 18.1 ms (p50 / p95), GPU
+  10.3 / 15.7, the physics step 0.58 / 3.64 (max 8.6; 0.04 before the car; 1.5-4.8 while it drives fast, 0.15 once it
+  stops against a parked car). Twenty cars (placed clear of the level's props, mostly in the one clear lane): the
+  physics step 17.8 / 42.0 ms on the mesh route and 11.2 / 29.9 on the fire route (machine load between the runs), the
+  frame's CPU 45.5 / 57.2 and 31.1 / 41.7, GPU 8.2-9.6 (the cars cost the GPU nothing measurable). The cars jam against
+  each other and the parked cars within seconds (no driver logic): the jams' contacts add to the sweeps.
 
 **Checks**: physics-core `a_ball_against_a_box_in_closed_form`, `the_cars_on_destroyed_ground` (CI's subset: both cars
 on the gap, crater rim and exit, 0.1 m step, sunk start, drop, parked, 0.1 m debris, 0.3 m debris and posts scenarios,
@@ -907,7 +923,7 @@ under one, a chassis carved, one removed, a blast): native = std in the graph = 
 physics' own threads = recorded; every scenario's hash native = parallel 1 / 2 / 4 / 8 = wasm32; `physics_fuzz` with
 vehicles on any body (sane and wild wheels, wild controls, state, changes, removal; every state finite).
 
-**Open**: the probe is a ball, wider than the tyre (it meets what is beside the tyre within its radius; another engine
+**Open**: the stops' CCD on voxel slopes (above: the largest cost a vehicle brings); the probe is a ball, wider than the tyre (it meets what is beside the tyre within its radius; another engine
 offers a cylinder cast too); the wheel is rigid (no tyre envelopment of a step, no longitudinal compliance); a chassis
 whose mass comes from a voxel collider's density holds that collider's mass as it was when the vehicle was made (the
 engine's voxel bodies are weighed by `set_mass_properties` and do not meet this); the voxel chassis's contact cost

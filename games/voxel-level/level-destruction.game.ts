@@ -20,8 +20,9 @@
 //   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner (past 500:
 //              the level's cap is reached and held)
 //   drive      a car (a sedan's figures: physics-core's vehicle scenarios, `SEDAN`) driving down the road ahead at 8 m/s,
-//              its wheels drawn; at 3 s a 1 m explosion in its way (ROADMAP § 6 step 10 c2: what a vehicle costs a frame)
-//   drive20    twenty such cars, four abreast
+//              its wheels drawn; at 3 s a 1 m explosion 9 m ahead of where it started (ROADMAP § 6 step 10 c2: what a
+//              vehicle costs a frame); cars start only where they touch no prop, building or other car
+//   drive20    twenty such cars
 // With `debris`
 // (level-destruction-debris.game.ts; ROADMAP § 6 step 2e), the voxels too few to make a piece are thrown out as
 // instances of one unit cube (an `InstancedMesh`, coloured per instance from the palette), fall, bounce on the ground
@@ -266,7 +267,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
   // The cars of `drive` / `drive20`, and the scene they go into.
   let world: Scene | null = null;
   const cars: Vehicle[] = [];
-  let lostWheels = 0;
+  let lostWheels = 0, blastSpot = 2 * 66;
   const flying = debris === true ? new Debris(seed) : null;
   const dust = debris === "dust" ? new Dust() : null;
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
@@ -297,17 +298,48 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
     console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...speedsNow() })}`);
   };
-  // `n` cars on the road ahead of the camera, facing along it: four abreast 2.5 m apart, rows 8 m apart, from 6 m on.
+  // `n` cars on the road ahead of the camera, facing along it, where none touches the level's props (each taken as up
+  // to 2.6 x 5.2 m about its point: parked cars, trees, lamps), its buildings or another car: across from -9 to 9 m by
+  // half metres (nearest the camera's line first), rows from 6 m ahead on, 7 m apart. (The street ahead is lined with
+  // parked cars and trees: one lane is clear near the camera, more further on.)
   const addCars = (n: number) => {
     if (!world) return;
     const [tx, , tz] = keys[0].target;
     const fx = tx - camX, fz = tz - camZ, len = Math.hypot(fx, fz);
     const [ux, uz] = [fx / len, fz / len];
+    const plan = levelPlan(seed);
+    const props = plan.props.map((p) => toScene(p.x, p.y, p.z));
+    const rects = plan.buildings.map((b) => { const a = toScene(b.x, 0, b.z), c = toScene(b.x + b.w, 0, b.z + b.d); return [Math.min(a[0], c[0]), Math.min(a[2], c[2]), Math.max(a[0], c[0]), Math.max(a[2], c[2])]; });
+    const placed: [number, number][] = [];
+    // (In the street's frame: `across` along -u⊥, `ahead` along u. A car is 1.8 x 4.8 m.)
+    const clear = (x: number, z: number) => {
+      const local = (px: number, pz: number) => [(px - x) * -uz + (pz - z) * ux, (px - x) * ux + (pz - z) * uz];
+      if (props.some((p) => { const [a, f] = local(p[0], p[2]); return Math.abs(a) < 0.9 + 1.3 + 0.3 && Math.abs(f) < 2.4 + 2.6 + 0.3; })) return false;
+      if (rects.some((r) => x > r[0] - 1.5 && x < r[2] + 1.5 && z > r[1] - 3 && z < r[3] + 3)) return false;
+      return placed.every(([px, pz]) => { const [a, f] = local(px, pz); return Math.abs(a) > 2.8 || Math.abs(f) > 5.8; });
+    };
+    const lanes = Array.from({ length: 37 }, (_, k) => -9 + k * 0.5).sort((p, q) => Math.abs(p) - Math.abs(q));
+    const spots: [number, number][] = [];
+    for (let ahead = 6; ahead < 120 && spots.length < n; ahead += 7) {
+      for (const across of lanes) {
+        if (spots.length >= n) break;
+        const x = camX + ux * ahead - uz * across, z = camZ + uz * ahead + ux * across;
+        if (clear(x, z)) {
+          placed.push([x, z]);
+          spots.push([x, z]);
+        }
+      }
+    }
+    console.log(`cars ${JSON.stringify({ asked: n, placed: spots.length, at: spots.map(([x, z]) => [+x.toFixed(2), +z.toFixed(2)]) })}`);
+    // The explosion of `drive` 9 m ahead of the first car, in its lane (a spot of its own at the list's end).
+    if (spots.length) {
+      const [x, z] = [spots[0][0] + ux * 9, spots[0][1] + uz * 9];
+      at.push([x, groundHeight(seed, Math.round(x / VOXEL + SIZE / 2), Math.round(z / VOXEL + SIZE / 2)) * VOXEL, z]);
+      blastSpot = at.length - 1;
+    }
     const paint = new MeshStandardMaterial({ name: "car_paint", color: 0x8a1c1c, roughness: 0.35, metalness: 0.6 });
     const rubber = new MeshStandardMaterial({ name: "tyre", color: 0x111111, roughness: 0.9 });
-    for (let k = 0; k < n; k++) {
-      const across = n === 1 ? -1.25 : ((k % 4) - 1.5) * 2.5, ahead = 6 + Math.floor(k / 4) * 8;
-      const x = camX + ux * ahead - uz * across, z = camZ + uz * ahead + ux * across;
+    for (const [x, z] of spots) {
       const vx = Math.round(x / VOXEL + SIZE / 2), vz = Math.round(z / VOXEL + SIZE / 2);
       const v = sedan(world, [x, groundHeight(seed, vx, vz) * VOXEL, z], Math.atan2(ux, uz), paint, rubber);
       v.addEventListener("wheellost", () => lostWheels++);
@@ -431,10 +463,10 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           fire(4, 2 * 62);
         }
       } else if (s === "drive" || s === "drive20") {
-        // Ground spot 66: 15 m ahead, 1.25 m left of the camera's line: in the way of a column of cars.
+        // 9 m ahead of where the first car started, in its lane.
         if (t >= 3 && last !== 0) {
           last = 0;
-          fire(1, 2 * 66);
+          fire(1, blastSpot);
         }
       } else if (s === "show") {
         // Ground spots 60-79 (spots() interleaves ground and walls): 6 m ahead and on, just left of the camera's line.

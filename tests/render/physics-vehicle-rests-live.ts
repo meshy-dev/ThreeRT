@@ -11,8 +11,9 @@ import { ground, glow } from "./physics-box-rest.ts";
 
 export const test: TestMeta = {
   id: "physics/vehicle-rests-live", features: ["physics", "vehicle"], reference: "analytic", temporal: true, live: 150,
-  // Camera 6 m away on +x at y = 0.5, 30 deg vertical fov, 16:9: z +2.86 .. -2.86 left to right, y 2.11 .. -1.11 top to
-  // bottom. The band: z -1 .. 1 -> u 0.325 .. 0.675; y 0.65 .. 0.55 -> v 0.453 .. 0.484.
+  // Camera 6 m away on +x at y = 0.5, 30 deg vertical fov, 16:9; the chassis's side toward it 5.2 m from it (x = 0.8):
+  // there the view spans z ±2.48 (left to right: +z to -z) and y 0.5 ± 1.39. The band: z -1 .. 1 -> u 0.298 .. 0.702;
+  // y 0.65 .. 0.55 -> v 0.446 .. 0.482.
   metric: { kind: "radiance", region: [0.40, 0.457, 0.60, 0.481], expected: 5, tolerance: 0.02 },
   note: "the chassis settles at its ride height on its springs: centre 0.502 m up",
 };
