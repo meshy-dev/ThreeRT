@@ -289,6 +289,8 @@ if (only.includes("cost")) {
       const explosions = s.lines.filter((l) => /^(\[game\] )?explosion \{/.test(l)).map((l) => JSON.parse(l.slice(l.indexOf("{"))) as { burning?: number; lit?: number });
       // The loose parts' top speed after the explosion (the game logs it every half second; step 10 c1's blast).
       const fastest = Math.max(0, ...s.lines.filter((l) => /^(\[game\] )?(bodies|explosion) \{/.test(l)).map((l) => (JSON.parse(l.slice(l.indexOf("{"))) as { fastest?: number }).fastest ?? 0));
+      // The bodies' speeds just after the first explosion (the parts it cut loose, kicked: step 10 c1).
+      const speeds = (explosions[0] as { speeds?: { n: number; p50: number; p90: number }; fastest?: number; kicked?: number } | undefined) ?? {};
       await s.quit();
       const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Frame);
       const ex = F.findIndex((f, k) => k > 200 && (f.voxel?.[0] ?? 0) > 0);
@@ -303,12 +305,13 @@ if (only.includes("cost")) {
         burning_max: Math.max(0, ...explosions.map((e) => e.burning ?? 0)), lit_max: Math.max(0, ...explosions.map((e) => e.lit ?? 0)), explosions: explosions.length,
         guard: Math.max(0, ...F.map((f) => f.guard ?? 0)),
         fastest,
+        speeds_after_explosion: { kicked: speeds.kicked ?? 0, ...(speeds.speeds ?? { n: 0, p50: 0, p90: 0 }), max: speeds.fastest ?? 0 },
         rebuilds_after: after.filter((f) => f.rebuild > 0).map((f) => `${r2(f.rebuild)} ms${f.fallback ? ` (${f.fallback})` : ""}`),
         // The GPU ms per frame over the 4 s after, in 0.25 s bins (the fire burns 1.6 s; the smoke after).
         gpu_bins: Array.from({ length: Math.ceil(after.length / 15) }, (_, k) => r2(frameStats(after.slice(k * 15, k * 15 + 15).map((f) => f.gpu)).p50)),
       };
       rows.push(row);
-      console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} before: CPU ${st(before.map((f) => f.cpu))}, GPU ${st(before.map((f) => f.gpu))};  explosion frame CPU ${row.explosion_frame.cpu}, GPU ${row.explosion_frame.gpu};  after: CPU ${st(after.map((f) => f.cpu))}, GPU ${st(after.map((f) => f.gpu))}${tag.startsWith("fire") ? `; burning at most ${row.burning_max}, lit ${row.lit_max}` : ""}${row.guard ? `; guard ${row.guard}` : ""}; rebuilds after: ${row.rebuilds_after.length ? row.rebuilds_after.join(", ") : "none"}; loose parts' top speed ${row.fastest} m/s`);
+      console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} before: CPU ${st(before.map((f) => f.cpu))}, GPU ${st(before.map((f) => f.gpu))};  explosion frame CPU ${row.explosion_frame.cpu}, GPU ${row.explosion_frame.gpu};  after: CPU ${st(after.map((f) => f.cpu))}, GPU ${st(after.map((f) => f.gpu))}${tag.startsWith("fire") ? `; burning at most ${row.burning_max}, lit ${row.lit_max}` : ""}${row.guard ? `; guard ${row.guard}` : ""}; rebuilds after: ${row.rebuilds_after.length ? row.rebuilds_after.join(", ") : "none"}; loose parts' top speed ${row.fastest} m/s; just after the explosion: ${row.speeds_after_explosion.kicked} kicked, ${row.speeds_after_explosion.n} moving, p50 ${row.speeds_after_explosion.p50} / p90 ${row.speeds_after_explosion.p90} / max ${row.speeds_after_explosion.max} m/s`);
       console.log(`  ${"".padEnd(25)} GPU p50 per 0.25 s after: ${row.gpu_bins.join(" ")}`);
     }
   }

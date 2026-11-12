@@ -676,49 +676,67 @@ Cost: `--only cost`, the destruction game's routes at 0.75, lockstep (frames as 
 | fire, `peak` (20 within a second) | 8.8 | 11.3 (max 12.7); 8 burning (the pool) | |
 | fire, software traversal (loop guard on: no stop) | 13.0 | 13.7 (max 18.0 while it burns) | 28.9 |
 
-### Joints, the level's body and the blast (ROADMAP § 6 step 10 c1; design: `out/web-probe/step10/c-design.md`)
+### Joints, the level's anchor and the blast (ROADMAP § 6 step 10 c1; design: `out/web-probe/step10/c-design.md`)
 
 Engine-side physics the vehicles and ropes of (c2) stand on, each the standard structure where the engine's code did
-otherwise (the user's decisions 1-4, 2026-11-12).
+otherwise (the user's decisions 1-4, 2026-11-12; the independent review of #31).
 
 - **A joint's parameters change in place.** A hinge's or a slider's limits and motor, a rope's length: `needsUpdate`
   sends `joint_set` (physics-core `Physics::set_joint`), the same Rapier joint; its frames are not taken anew from the
   bodies' poses, its warm-started impulses are kept. Before, every change removed the joint and made it again (a motor
-  set each frame remade it each frame). A change of its bodies, anchors or axis still makes it anew. A hinge's limits
-  are re-centred through its first frame with libm (as when it is made: the platform's `sin_cos` of a non-zero centre
-  is not on our path).
-- **The level has a fixed body.** Its colliders hang on one fixed engine body (made at load, at the origin, unturned),
-  as Rapier hangs static colliders on a fixed body; a joint whose object is `engineColliders` holds to it (a rope tied
-  to a wall). To queries and contacts the level is still on no body (`hit.object` is `engineColliders`, `hit.body`
-  undefined, a contact's other end `engineColliders`), and bodies resting on it sleep as before. A collider on a fixed
-  body carries no mass (a fixed body's is never used): found on the way, Rapier sums a body's colliders' mass
-  properties whenever one changes and integrates each voxel shape again, which with the level's ~4,000 shapes on its
-  body made an explosion's frame 26 s of CPU; now it is within main's spread (28 ms on the crater). The voxel bodies'
-  script moves bit for bit as before with it (end poses and cell counts compared); its recorded hash changed only
-  because the world lists one more body and later ids shift by one.
+  set each frame remade it each frame). A change of its bodies, anchors or axis makes it anew; the engine refuses a
+  `joint_set` that names any of them (the rule is the engine's, not only the binding's). A hinge's limits are
+  re-centred through its first frame with libm (as when it is made: the platform's `sin_cos` of a non-zero centre is
+  not on our path).
+- **Joints to the level hold to the world's anchor.** One fixed engine body with no collider (made at load, at the
+  origin, unturned), as engines give joints to the static world (Rapier's static colliders are on no body; a joint
+  needs a body): a joint whose object is `engineColliders` holds to it (a rope tied to a wall), a point of it the same
+  point of the world. The level's colliders stay static, on no body, as before: to queries and contacts the level has
+  no body (`hit.object` is `engineColliders`, `hit.body` undefined). Scene code cannot move the anchor (`pose` refused);
+  a query's `skip` of it skips nothing (it has no collider; the level's colliders are not a body's to skip). An earlier
+  draft hung the level's colliders on the fixed body instead, which made Rapier sum the body's colliders' mass
+  properties on every edit (O(colliders): a tick after a small carve grew from 0.03 to 1.2 ms over 64 to 10,000 level
+  colliders, and an explosion's frame took 26 s before a special case hid it); with the anchor the tick after a carve
+  is main's, flat (0.02-0.05 ms at 64 to 10,000 colliders), and no special case is left.
 - **A joint belongs to the material at its anchor.** Each joint on a voxel body or on the level is held by the cell its
-  anchor is in (or the nearest solid of its 26 neighbours), read before an edit: cut so that the cell is in a part cut
-  off, the joint moves onto that part's body (the same joint, its anchor where it was in the world); the cell carved, in
-  debris, or its body carved away whole, retired or fallen, the joint breaks: `joint.broken` is true, the joint gets a
-  "broken" event, and it is not made again until it leaves the scene (added back, it is joined anew). Before, a cut
-  body's joints all stayed on its largest part, and a joint in a carved cell held empty space.
+  anchor is in (or the nearest solid of its 26 neighbours): cut so that the cell is in a part cut off, the joint moves
+  onto that part's body (the same joint, its anchor where it was in the world); the cell carved, in debris, or its body
+  carved away whole, retired, fallen or taken out by the world (past its edge), the joint breaks. The engine reports
+  both (`joint_changes`): a moved joint's `bodyA` (or `bodyB`) becomes the part's `VoxelBody` and its `anchorA` (or
+  `anchorB`) the same point in the part's frame, so a rope drawn from them follows and a body of the joint made anew
+  joins it to the part; a broken one has `joint.broken` true and a "broken" event (every joint of a batch is marked
+  before any event is dispatched; a listener that throws does not stop the rest), and is not made again until it leaves
+  the scene. The engine finds a body's joints on the body (Rapier's joint graph), a carve's joints by the cells it took
+  (a level carve looks only at joints within a cell of what it cleared): costs go with what an edit touches, not with
+  the joints in the world (40,000 joints moved with a cut part: 8-10 ms; before, 6 s and more).
 - **The blast.** An explosion (`voxelExplode`, `voxelEdit` "explode", `Explosions.explode`) pushes every dynamic body
   within 3 radii (voxel bodies, the parts it just cut loose, scene code's bodies) away from its centre, through each
   one's centre of mass (no turn, as the industry's radial impulse by default):
   J = push x r x min(1, (r / d)²) x (1 - (d / 3r)²)² x A, with d the distance from the centre to the body's box (0
-  inside) and A its box's cross-section across the direction; at most 30 m/s of change a body (what the solver and CCD
-  follow). `push` defaults to 400 N s / m² per m of radius (a 1 m blast throws a 100 kg, 1 m crate whose face is 1 m
-  away at 3.2 m/s), 0 to 10,000, 0 none; out of range refused before anything changes. A light, broad body flies
-  faster than a heavy compact one (the impulse goes with area, not mass). Only +, -, x, / and square roots: the same
-  bits natively, in parallel and in wasm32. **Not shielded** (decision 4): a body behind a wall is pushed too; one
-  voxel ray per body would shield (ROADMAP Open).
+  inside) and A its box's cross-section across the direction. r is the radius the carve took (at most `MAX_RADIUS`, 128
+  voxels: a 600 m explosion pushes as far as the 12.8 m one it carves). `push` defaults to 400 N s / m² per m of radius
+  (a 1 m blast throws a 100 kg, 1 m crate whose face is 1 m away at 3.16 m/s), 0 to 10,000, 0 none; out of range
+  refused before anything changes. A light, broad body flies faster than a heavy compact one (the impulse goes with
+  area, not mass).
+- **The debris' kick.** The parts an explosion itself cuts loose also leave at a speed of their own, whatever their
+  mass: push x 0.02 m/s (8 m/s at the default push) x min(1, (r / d)²) x (1 - (d / 3r)²)², the same fall-off, added to
+  the push's, a body's whole change at most 30 m/s (what the solver and CCD follow). A charge throws what it breaks off
+  at a speed of the charge's (as in the Gurney model of fragments: set by the charge and what holds it, not by each
+  fragment's size); by area
+  alone a 1 m³ chunk of stone (2,400 kg) took 0.1 m/s and stayed where it was cut. `push` 0: neither. Only +, -, x, /
+  and square roots: the same bits natively, in parallel and in wasm32. **Not shielded** (decision 4): a body behind a
+  wall is pushed too; one voxel ray per body would shield (ROADMAP Open).
 
-Checks: physics-core `joints_change_in_place`, `a_blast_pushes_by_area_and_distance`; the renderer's
-`the_level_has_a_fixed_body_that_joints_hold_to`, `joints_follow_the_cells_their_anchors_are_in`,
-`an_explosion_pushes_the_bodies_near_it`; the binding's joint and broken-joint tests; recorded hashes with a blast and
-an in-place joint change (physics-core's script) and with the level's body and a pushing explosion (the voxel bodies'
-script): native = parallel = wasm32 = recorded; `physics_fuzz` with `joint_set`, joints to the level, the broken report
-and pushes (sane and wild).
+Checks: physics-core `joints_change_in_place`, `a_blast_pushes_by_area_and_distance`,
+`a_blast_kicks_its_debris_whatever_their_mass`, `a_bodys_joints_are_its_own`, `the_anchor_and_the_engines_joints`; the
+renderer's `the_level_has_an_anchor_that_joints_hold_to`, `joints_follow_the_cells_their_anchors_are_in`,
+`an_explosion_pushes_the_bodies_near_it`, `an_explosion_kicks_its_debris_and_reaches_what_it_carves`; the binding's
+joint, moved and broken-joint tests (the engine faked), and test-render's `voxel/joint-moved` and
+`voxel/joint-moved-body` (the binding on the real engine); recorded hashes with a blast, its kick and an in-place joint
+change (physics-core's script) and with a pushing explosion and one that cuts a body in two (the voxel bodies' script):
+native = parallel = wasm32 = recorded; `physics_fuzz` with `joint_set` (and refused fields), joints to the level, the
+anchor among every call's bodies (`pose` refused, the anchor checked unmoved), the joint reports and pushes (sane and
+wild).
 
 ### Temporary ways round on the engine's shared paths
 

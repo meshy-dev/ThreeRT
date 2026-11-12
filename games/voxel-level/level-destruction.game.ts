@@ -244,9 +244,13 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
     const e = boom ? boom.explode(x, y, z, r, now) : voxelExplode(x, y, z, r);
     const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
-    // (With physics: the voxel bodies' top speed just after it, its blast's push included: step 10 c1.)
-    const fastest = physics ? +voxelBodies().reduce((n, x) => Math.max(n, x.getLinearVelocity().length()), 0).toFixed(2) : undefined;
-    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...(fastest !== undefined ? { fastest } : {}) })}`);
+    // (With physics: the voxel bodies' speeds just after it, its blast's push and its debris' kick included: their
+    // top speed, and of those moving faster than 0.1 m/s how many and their median and 90th percentile: step 10 c1.)
+    const v = physics ? voxelBodies().map((x) => x.getLinearVelocity().length()) : [];
+    const fastest = physics ? +Math.max(0, ...v).toFixed(2) : undefined;
+    const moving = v.filter((x) => x > 0.1).sort((a, b) => a - b);
+    const speeds = physics ? { n: moving.length, p50: +(moving[Math.floor(moving.length * 0.5)] ?? 0).toFixed(2), p90: +(moving[Math.floor(moving.length * 0.9)] ?? 0).toFixed(2) } : undefined;
+    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...(fastest !== undefined ? { fastest, speeds } : {}) })}`);
   };
   return defineGame<State>({
     state: { scenario: null, started: 0 },

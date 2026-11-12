@@ -4403,20 +4403,27 @@ benchmark level. The order follows the dependencies; a step that meets a further
       - Open: the live march's media are lighter and more see-through than offline (8 steps; in-scattering isotropic
         from the cache): the fireball reads lighter than offline.
     - **(c1) Joints and the blast** (branch `vehicles-ropes`; design `out/web-probe/step10/c-design.md`; docs/VOXEL.md
-      "Joints, the level's body and the blast"). (c) split in two (the supervisor, 2026-11-12: engine structure first,
-      features after). The user's decisions 1-4 (2026-11-12), each the standard structure where the engine did
-      otherwise: a joint's parameters change in place (`joint_set`; before, removed and made again); the level's
-      colliders on one fixed engine body, so a joint can hold to the level (hits and contacts on the level unchanged:
-      no body); a joint belongs to the material at its anchor (it moves with a part cut off, breaks when its cell is
-      carved or its body goes: `Joint.broken`, a "broken" event); an explosion's blast pushes the bodies within 3 radii
-      (impulse by area and distance, through the centre of mass, at most 30 m/s; `push`). Recorded hashes changed once:
-      physics-core's script 7c0699cb79f4ac66, the voxel bodies' e91cec99f6e4e026; native = parallel = wasm32.
-      - Found on the way and fixed: with the level's colliders on its body an explosion's frame took 26 s of CPU (Rapier
-        integrated each of ~4,000 voxel shapes' mass again whenever one changed): a fixed body's colliders carry no
-        mass now; the crater's explosion frame is within main's spread.
-      - Open: the default push (400) barely moves heavy wall debris (a 1,000-voxel part weighs 1-2 t; the impulse goes
-        with area, not mass: hundredths of a m/s), while a 100 kg crate at 1 m takes 3.2 m/s: a game-feel question
-        (a stronger default, or a term for the parts the blast itself cuts loose).
+      "Joints, the level's anchor and the blast"). (c) split in two (the supervisor, 2026-11-12: engine structure
+      first, features after). The user's decisions 1-4 (2026-11-12), each the standard structure where the engine did
+      otherwise: a joint's parameters change in place (`joint_set`; before, removed and made again; the engine refuses
+      one that names its bodies, anchors or axis); joints to the level hold to the world's anchor, a fixed body with no
+      collider (the level's colliders stay static, on no body); a joint belongs to the material at its anchor (it moves
+      with a part cut off and the engine reports it, `joint_changes`, so `bodyA` / `anchorA` name the part; it breaks
+      when its cell is carved or its body goes, the world's own removals included: `Joint.broken`, a "broken" event);
+      an explosion's blast pushes the bodies within 3 radii (impulse by area and distance, through the centre of mass;
+      the carve's radius) and kicks the parts it cuts loose (8 m/s at the default push, whatever their mass; at most
+      30 m/s in all; the supervisor for the user, 2026-11-12). Recorded hashes: physics-core's script
+      8e4af124a2061883 (the kick added to its blast), the voxel bodies' 3329720df1b31ca3 (an explosion added that
+      cuts a body in two, to kick its part); the anchor body itself changes neither (with the kick off, both are the
+      first draft's bits); native = parallel = wasm32.
+      - The independent review of #31 (2026-11-12): the first draft hung the level's colliders on a fixed body and hid
+        Rapier's per-edit mass sum over them with a zero-mass rule (an explosion's frame had taken 26 s); the tick
+        after a carve still grew with the level's colliders (1.2 ms at 10,000). The anchor body is the standard
+        structure: main's flat cost (0.02-0.05 ms), no special case. Also fixed: the binding did not know of joints the
+        engine moved (a later sync let go of them or remade them on the level); a throwing "broken" listener left the
+        rest unmarked; `pose` could move the level; the blast's radius was not the carve's; the world's own removals
+        reported no "broken"; joint lookups were linear in the world's joints (40,000 joints: 0.7 to 6 s stalls, now
+        8-11 ms).
       - Open: the blast is not shielded by walls (decision 4: one voxel ray per body would do it); a joint's anchor on
         a face between two cells is held by the cell the point falls in, else the nearest solid neighbour.
     - (c2) Vehicles and ropes: the ray-cast vehicle (Rapier's `DynamicRayCastVehicleController`; the comparison in
