@@ -23,7 +23,8 @@ export function car(material: MeshStandardMaterial): { chassis: Mesh; vehicle: V
   chassis.position.set(0, 0.8, 0);
   chassis.physics = { type: "dynamic", density: 300 };
   const wheel = (x: number, z: number) => ({ anchor: new Vector3(x, 0, z), rest: 0.3, travel: 0.2, radius: 0.3, width: 0.2, stiffness: 25, compression: 2, damping: 3, frictionSlip: 1, bumpLength: 0.03, bumpStiffness: 500 });
-  const vehicle = new Vehicle(chassis, { wheels: [wheel(-0.7, 1.2), wheel(0.7, 1.2), wheel(-0.7, -1.2), wheel(0.7, -1.2)] });
+  // (The wheels' centre lines 0.1 m outside the chassis's sides: a wheel's object is seen clear of the body.)
+  const vehicle = new Vehicle(chassis, { wheels: [wheel(-0.9, 1.2), wheel(0.9, 1.2), wheel(-0.9, -1.2), wheel(0.9, -1.2)] });
   return { chassis, vehicle };
 }
 

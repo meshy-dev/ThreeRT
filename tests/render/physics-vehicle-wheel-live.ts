@@ -1,7 +1,8 @@
 // A vehicle's wheel drawn (step 10 c2): physics/vehicle-rests-live's car, its chassis black, a glowing 0.2 m box as its
 // front right wheel's object (`VehicleWheel.object`), put 10 m under the ground. The binding places it where the
-// wheel is every frame: at rest, the wheel's centre is its radius up, (0.7, 0.3, 1.2). Seen from the side after 150
-// frames, the box's middle reads its 5 nits; a wheel the binding does not place stays under the ground (dark there).
+// wheel is every frame: at rest, the wheel's centre is its radius up, (0.9, 0.3, 1.2), the box (x 0.8 .. 1.0) clear of
+// the chassis's side (x 0.8). Seen from the side after 150 frames, the box's middle reads its 5 nits; a wheel the binding
+// does not place stays under the ground (dark there).
 import { BoxGeometry, Mesh, MeshStandardMaterial } from "@threert/scene";
 import { camera, result, sceneWithSky, type TestMeta } from "./lib.ts";
 import { ground, glow } from "./physics-box-rest.ts";
@@ -12,7 +13,7 @@ export const test: TestMeta = {
   // The camera as physics/vehicle-rests-live's: the box (z 1.1 .. 1.3, y 0.2 .. 0.4) at u 0.273 .. 0.308, v 0.531 ..
   // 0.593; its middle.
   metric: { kind: "radiance", region: [0.281, 0.545, 0.300, 0.580], expected: 5, tolerance: 0.03 },
-  note: "the wheel's object placed at the wheel's centre, (0.7, 0.3, 1.2)",
+  note: "the wheel's object placed at the wheel's centre, (0.9, 0.3, 1.2)",
 };
 
 export default function () {
