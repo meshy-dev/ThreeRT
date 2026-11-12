@@ -52,12 +52,15 @@ pub struct Bridge {
     colliders: BTreeMap<u32, ColliderId>,
     /// The world's collider -> the caller's id of it and of its body.
     collider_ids: BTreeMap<ColliderId, (u32, Option<u32>)>,
-    /// The voxel level's fixed body (`engine_level_body`): its colliders hang on it, so a joint can hold to the level;
-    /// to queries and contacts they are on no body, as the level's colliders always were (`hit.object` is
-    /// `engineColliders`, with no `body`).
-    level_body: Option<u32>,
-    /// Scene code's joints the engine let go of since the last `broken` call: their anchor's material carved away, or
-    /// an engine body they held to gone (step 10 c1).
+    /// The world's anchor (`engine_anchor`): a fixed body with no collider that joints to the voxel level hold to (the
+    /// level's colliders are on no body, as static colliders are). Scene code cannot move it.
+    anchor: Option<u32>,
+    /// The world's joint -> scene code's id of it (the engine finds its joints by body: `Physics::joints_of`).
+    joint_ids: BTreeMap<JointId, u32>,
+    /// What the engine did to scene code's joints since the last `joint_changes` call (step 10 c1): the joints it moved
+    /// onto another body (their anchor's material went into a part cut off), by id, with where each end is now; and
+    /// those it let go of (their anchor's material carved away, or an engine body they held to gone).
+    joints_moved: BTreeMap<u32, (u32, bool, [f32; 3])>,
     broken: Vec<u32>,
     /// The pairs of colliders (the caller's ids, lower first) touching as reported, with their bodies: a start is
     /// reported once (a collider edited in place, taken out and put back, starts again without having ended), and a
@@ -170,7 +173,9 @@ impl Default for Bridge {
             body_ids: BTreeMap::new(),
             colliders: BTreeMap::new(),
             collider_ids: BTreeMap::new(),
-            level_body: None,
+            anchor: None,
+            joint_ids: BTreeMap::new(),
+            joints_moved: BTreeMap::new(),
             broken: vec![],
             touching: BTreeMap::new(),
             ended: vec![],
@@ -371,15 +376,27 @@ impl Bridge {
                 let (ba, bb) = (self.body(a, "a")?, self.body(a, "b")?);
                 let j = self.core.add_joint(ba, bb, &d)?;
                 self.joints.insert(jid, j);
+                self.joint_ids.insert(j, jid);
                 Value::Null
             }
-            // The joints the engine let go of since the last call: [id]: their anchor's material carved away, or an engine
-            // body they held to gone (a voxel body retired, carved away, fallen). Scene code's ids; gone from the world.
-            "broken" => json!(std::mem::take(&mut self.broken)),
+            // What the engine did to scene code's joints since the last call (step 10 c1), in id order: {moved: [{joint,
+            // end, body, anchor}], broken: [id]}. A moved joint's end ("a" or "b": its first or second body) is now on
+            // `body` at `anchor` in that body's space: its anchor's material went into a part cut off, and the joint
+            // with it (the same joint: id, kind and parameters). A broken one is gone from the world: its anchor's
+            // material was carved away, or an engine body it held to went (retired, carved away, fallen, taken out by
+            // the world). One moved and then broken is only broken.
+            "joint_changes" => {
+                let moved: Vec<Value> = std::mem::take(&mut self.joints_moved).into_iter().map(|(j, (body, first, anchor))| json!({ "joint": j, "end": if first { "a" } else { "b" }, "body": body, "anchor": anchor })).collect();
+                json!({ "moved": moved, "broken": std::mem::take(&mut self.broken) })
+            }
             // {id, type, limits?, motor?, length?}: a joint's parameters changed where it is (a hinge's or a slider's
-            // limits and motor, a rope's length); its bodies, anchors and axis stay as made (`Physics::set_joint`).
+            // limits and motor, a rope's length). Its bodies, anchors and axis are what make it this joint: a call
+            // naming any of them (`a`, `b`, `anchor1`, `anchor2`, `axis`) is refused (remove the joint and make it anew).
             "joint_set" => {
                 let jid = id(a, "id")?;
+                if let Some(k) = ["a", "b", "anchor1", "anchor2", "axis"].into_iter().find(|k| !a[*k].is_null()) {
+                    return Err(format!("physics: joint_set changes a joint's limits, motor and length only, not its {k} (remove the joint and make it anew)"));
+                }
                 let &j = self.joints.get(&jid).ok_or_else(|| format!("physics: unknown joint {jid}"))?;
                 self.core.set_joint(j, &joint_desc(a)?)?;
                 Value::Null
@@ -397,8 +414,12 @@ impl Bridge {
                     self.core.remove_collider(c);
                     self.unmap(c);
                 }
-                if let Some(j) = joint.and_then(|j| self.joints.remove(&j)) {
-                    self.core.remove_joint(j);
+                if let Some(jid) = joint {
+                    if let Some(j) = self.joints.remove(&jid) {
+                        self.joint_ids.remove(&j);
+                        self.core.remove_joint(j);
+                    }
+                    self.joints_moved.remove(&jid);
                 }
                 Value::Null
             }
@@ -430,7 +451,12 @@ impl Bridge {
                 self.core.set_velocity(b, opt("linvel")?, opt("angvel")?)?;
                 Value::Null
             }
+            // {body, position?, rotation?}: the body put there at once. (Not the world's anchor: the joints to the level
+            // would go with it.)
             "pose" => {
+                if whole(&a["body"]).is_some_and(|b| Some(b) == self.anchor) {
+                    return Err("physics: the world's anchor (the voxel level's body) does not move".into());
+                }
                 let b = self.body(a, "body")?;
                 let (p, q) = (vec3(a, "position", [0.0; 3])?, quat(a, "rotation")?);
                 self.core.set_pose(b, p, q)?;
@@ -522,7 +548,8 @@ impl Bridge {
         if id < ENGINE_IDS || self.bodies.contains_key(&id) {
             return Err(format!("physics: engine body {id} exists or is below {ENGINE_IDS}"));
         }
-        if self.bodies.range(ENGINE_IDS..).count() >= MAX_ENGINE_BODIES {
+        // (The anchor is not one of the bodies the engine makes as it goes.)
+        if self.bodies.range(ENGINE_IDS..).count() - self.anchor.is_some() as usize >= MAX_ENGINE_BODIES {
             return Err(format!("physics: more than {MAX_ENGINE_BODIES} engine bodies"));
         }
         let b = self.core.add_body(d)?;
@@ -544,23 +571,32 @@ impl Bridge {
             Some(b) => Some(*self.bodies.get(&b).ok_or_else(|| format!("physics: unknown body {b}"))?),
             None => None,
         };
+        if body.is_some() && body == self.anchor {
+            return Err("physics: the world's anchor holds joints, not colliders".into());
+        }
         let c = self.core.add_collider(owner, d)?;
         self.colliders.insert(id, c);
-        // (The level's colliders are on no body to queries and contacts.)
-        self.collider_ids.insert(c, (id, body.filter(|&b| Some(b) != self.level_body)));
+        self.collider_ids.insert(c, (id, body));
         Ok(())
     }
 
-    /// The voxel level's fixed body (at the origin, unturned): the engine hangs the level's colliders on it
-    /// (`engine_collider` with this body) so that joints can hold to the level, as Rapier hangs static colliders on a
-    /// fixed body. To queries and contacts its colliders are on no body (the level has no `body`). A level loaded
-    /// again makes it anew (the old one goes, with its colliders and joints).
-    pub fn engine_level_body(&mut self, id: u32) -> Result<(), String> {
-        if let Some(old) = self.level_body.take() {
+    /// The world's anchor (step 10 c1): a fixed body at the origin, unturned, with no collider, that joints to the voxel
+    /// level hold to (a point of it is the same point of the world). The level's colliders are static, on no body, as
+    /// before; the engine moves a joint off the anchor when its anchor's material comes loose, and lets it go when that
+    /// material is carved (docs/VOXEL.md). Scene code cannot move it (`pose` refuses it) and a query's `skip` of it
+    /// passes through nothing. A level loaded again makes it anew: the old one goes, its joints broken.
+    pub fn engine_anchor(&mut self, id: u32) -> Result<(), String> {
+        if id < ENGINE_IDS || self.bodies.contains_key(&id) {
+            return Err(format!("physics: engine body {id} exists or is below {ENGINE_IDS}"));
+        }
+        if let Some(old) = self.anchor.take() {
             self.engine_remove(Some(old), None);
         }
-        self.engine_body(id, &BodyDesc { kind: BodyKind::Fixed, ..Default::default() })?;
-        self.level_body = Some(id);
+        let b = self.core.add_body(&BodyDesc { kind: BodyKind::Fixed, ..Default::default() })?;
+        self.bodies.insert(id, b);
+        self.body_ids.insert(b, id);
+        self.faulted.remove(&id);
+        self.anchor = Some(id);
         Ok(())
     }
 
@@ -572,37 +608,46 @@ impl Bridge {
 
     /// One end of a joint moved from engine body `from` to `to` (its anchor's material went into another body), the same
     /// joint to scene code.
+    /// Reported to scene code (`joint_changes`: moved), so that its joint names the body and anchor it is on now.
     pub fn engine_rebind_joint(&mut self, joint: JointId, from: u32, to: u32) -> Result<(), String> {
         let (f, t) = (*self.bodies.get(&from).ok_or("physics: unknown body")?, *self.bodies.get(&to).ok_or("physics: unknown body")?);
-        self.core.rebind_joint(joint, f, t)
+        let (anchor, first) = self.core.rebind_joint(joint, f, t)?;
+        if let Some(&id) = self.joint_ids.get(&joint) {
+            self.joints_moved.insert(id, (to, first, anchor));
+        }
+        Ok(())
     }
 
     /// A joint let go of by the engine (its anchor's material carved away): gone from the world, reported to scene code
-    /// as broken (`broken`).
+    /// as broken (`joint_changes`).
     pub fn engine_break_joint(&mut self, joint: JointId) {
-        if let Some(id) = self.joints.iter().find(|(_, &v)| v == joint).map(|(&k, _)| k) {
+        if let Some(id) = self.joint_ids.remove(&joint) {
             self.joints.remove(&id);
             self.note_broken(id);
         }
         self.core.remove_joint(joint);
     }
 
-    /// A broken joint noted for `broken` (the newest `MAX_JOINTS` kept: nobody asking does not make it grow).
+    /// A broken joint noted for `joint_changes` (the newest `MAX_JOINTS` kept: nobody asking does not make it grow).
     fn note_broken(&mut self, id: u32) {
+        self.joints_moved.remove(&id);
         if self.broken.len() >= MAX_JOINTS {
             self.broken.remove(0);
         }
         self.broken.push(id);
     }
 
-    /// An explosion's push on every dynamic body near it (`Physics::blast`): how many were pushed.
-    pub fn engine_blast(&mut self, centre: [f32; 3], radius: f32, push: f32) -> Result<usize, String> {
-        self.core.blast(centre, radius, push)
+    /// An explosion's push on every dynamic body near it, and the kick of the engine bodies in `kicked` (the debris it
+    /// cut loose: `Physics::blast`): how many were pushed.
+    pub fn engine_blast(&mut self, centre: [f32; 3], radius: f32, push: f32, kick: f32, kicked: &[u32]) -> Result<usize, String> {
+        let mut k: Vec<BodyId> = kicked.iter().filter_map(|b| self.bodies.get(b).copied()).collect();
+        k.sort_unstable();
+        self.core.blast(centre, radius, push, kick, &k)
     }
 
-    /// The level's fixed body, if a level with colliders is loaded.
-    pub fn engine_level(&self) -> Option<u32> {
-        self.level_body
+    /// The world's anchor, if a voxel level with colliders is loaded (`engine_anchor`).
+    pub fn engine_anchor_body(&self) -> Option<u32> {
+        self.anchor
     }
 
     /// An engine voxel collider's cells changed (`Physics::edit_voxels`). Returns the cells it has; with none left
@@ -621,12 +666,9 @@ impl Bridge {
     pub fn engine_remove(&mut self, body: Option<u32>, collider: Option<u32>) {
         if let Some(b) = body.filter(|&b| b >= ENGINE_IDS).and_then(|b| self.bodies.get(&b).copied()) {
             // (Scene code's joints on it go with it: broken.)
-            for (j, _, _) in self.core.joints_of(b) {
-                if let Some(id) = self.joints.iter().find(|(_, &v)| v == j).map(|(&k, _)| k) {
-                    self.note_broken(id);
-                }
+            for id in self.forget_body(b) {
+                self.note_broken(id);
             }
-            self.forget_body(b);
         }
         if let Some(c) = collider.filter(|&c| c >= ENGINE_IDS).and_then(|c| self.colliders.remove(&c)) {
             self.core.remove_collider(c);
@@ -690,7 +732,8 @@ impl Bridge {
         self.bodies.get(&b).copied().ok_or_else(|| format!("physics: unknown body {b}"))
     }
 
-    /// A query's `skip`: the body whose colliders it passes through.
+    /// A query's `skip`: the body whose colliders it passes through. (The world's anchor has none: it skips nothing. The
+    /// voxel level's colliders are on no body, as every static collider: a query does not skip them.)
     fn skip(&self, a: &Value) -> Result<Option<BodyId>, String> {
         Ok(opt_id(a, "skip")?.and_then(|b| self.bodies.get(&b).copied()))
     }
@@ -716,14 +759,15 @@ impl Bridge {
         Some(ids)
     }
 
-    fn forget_body(&mut self, b: BodyId) {
-        let gone = self.core.remove_body(b);
-        self.forget_ids(b, &gone);
+    /// Removes a body with its colliders and joints; returns scene code's ids of the joints that went.
+    fn forget_body(&mut self, b: BodyId) -> Vec<u32> {
+        let (colliders, joints) = self.core.remove_body(b);
+        self.forget_ids(b, &colliders, &joints)
     }
 
-    /// Forgets the ids of a body the world no longer has (the world's id), of the colliders that went with it and of
-    /// its joints.
-    fn forget_ids(&mut self, b: BodyId, colliders: &[ColliderId]) {
+    /// Forgets the ids of a body the world no longer has (the world's id), of the colliders and the joints that went
+    /// with it. Returns scene code's ids of those joints.
+    fn forget_ids(&mut self, b: BodyId, colliders: &[ColliderId], joints: &[JointId]) -> Vec<u32> {
         for c in colliders {
             if let Some((id, _)) = self.unmap(*c) {
                 self.colliders.remove(&id);
@@ -738,17 +782,21 @@ impl Bridge {
         if let Some(id) = self.body_ids.remove(&b) {
             self.bodies.remove(&id);
         }
-        // (Its joints went with it: those the world no longer has.)
-        if !self.joints.is_empty() {
-            let core = &self.core;
-            self.joints.retain(|_, j| core.has_joint(*j));
+        let mut ids = vec![];
+        for j in joints {
+            if let Some(id) = self.joint_ids.remove(j) {
+                self.joints.remove(&id);
+                self.joints_moved.remove(&id);
+                ids.push(id);
+            }
         }
+        ids
     }
 
     fn hit(&self, h: Option<Hit>) -> Value {
         match h {
             Some(h) => json!({
-                "collider": self.collider_ids.get(&h.collider).map(|c| c.0), "body": h.body.and_then(|b| self.body_ids.get(&b)).filter(|&&b| Some(b) != self.level_body), "object": h.body.and_then(|b| self.drives.get(&b)).map(|d| d.0),
+                "collider": self.collider_ids.get(&h.collider).map(|c| c.0), "body": h.body.and_then(|b| self.body_ids.get(&b)), "object": h.body.and_then(|b| self.drives.get(&b)).map(|d| d.0),
                 "distance": h.distance, "point": h.point, "normal": h.normal,
             }),
             None => Value::Null,
@@ -831,8 +879,15 @@ impl Bridge {
         };
         let caller = self.body_ids.get(&b).copied();
         let object = self.drives.get(&b).map(|d| d.0);
-        self.forget_ids(b, &f.colliders);
+        let joints = self.forget_ids(b, &f.colliders, &f.joints);
         let Some(caller) = caller else { return };
+        // (An engine body's joints are scene code's to hear of as broken, as when the engine removes the body itself;
+        // a body of scene code's own is in "faults", its joints with it.)
+        if caller >= ENGINE_IDS {
+            for id in joints {
+                self.note_broken(id);
+            }
+        }
         if self.faults.len() == MAX_FAULTS {
             self.faults.remove(0);
         }
@@ -1184,5 +1239,80 @@ mod tests {
             b.tick();
         }
         assert_eq!((b.due_until(120), b.due_until(40), b.due_until(1_000_000)), (70, 0, 35_950));
+    }
+    /// The world's anchor and what the engine does to scene code's joints (step 10 c1): the anchor has no collider and
+    /// does not move (`pose` refused, a collider on it refused); the level's static colliders are on no body (a hit
+    /// names none; a `skip` of the anchor skips nothing). A joint to it moved onto an engine body is reported once as
+    /// moved, with its end, body and anchor; one moved and then let go of only as broken; joints of an engine body the
+    /// engine removes, of one the world takes out after a tick (it left the world) and of an anchor made anew are
+    /// broken; `joint_set` naming a joint's bodies, anchors or axis is refused.
+    #[test]
+    fn the_anchor_and_the_engines_joints() {
+        let (mut b, mut s) = (Bridge::default(), scene());
+        let (anchor, part, other) = (ENGINE_IDS, ENGINE_IDS + 1, ENGINE_IDS + 2);
+        b.engine_anchor(anchor).unwrap();
+        b.engine_collider(ENGINE_IDS + 10, None, &ColliderDesc { position: [0.0, -0.5, 0.0], ..ColliderDesc::new(Shape::Box([20.0, 0.5, 20.0])) }).unwrap();
+        assert!(b.engine_collider(ENGINE_IDS + 11, Some(anchor), &ColliderDesc::new(Shape::Sphere(0.1))).is_err(), "no collider on the anchor");
+        let err = b.call(&mut s, "pose", &json!({ "body": anchor, "position": [0, 50, 0] })).unwrap_err();
+        assert!(err.contains("anchor"), "{err}");
+        let ray = |b: &mut Bridge, s: &mut Objects, skip: Value| b.call(s, "ray", &json!({ "origin": [1, 5, 1], "direction": [0, -1, 0], "skip": skip })).unwrap();
+        let hit = ray(&mut b, &mut s, json!(anchor));
+        assert_eq!((hit["collider"].as_u64(), hit["body"].is_null(), hit["distance"].as_f64()), (Some(ENGINE_IDS as u64 + 10), true, Some(5.0)), "skipping the anchor skips nothing: {hit}");
+        for (id, at) in [(part, [3.0, 1.0, 0.0]), (other, [6.0, 1.0, 0.0])] {
+            b.engine_body(id, &BodyDesc { position: at, gravity_scale: 0.0, ..Default::default() }).unwrap();
+            b.engine_collider(id + 20, Some(id), &ColliderDesc::new(Shape::Box([0.5; 3]))).unwrap();
+        }
+        b.call(&mut s, "body", &json!({ "id": 2, "object": 2 })).unwrap();
+        b.call(&mut s, "collider", &json!({ "id": 2, "body": 2, "shape": { "type": "sphere", "radius": 0.1 } })).unwrap();
+        for id in [7, 8] {
+            b.call(&mut s, "joint", &json!({ "id": id, "a": anchor, "b": 2, "type": "rope", "length": 4.0, "anchor1": [3.2, 1.3, 0.0] })).unwrap();
+        }
+        b.call(&mut s, "body", &json!({ "id": 3, "position": [6.0, 3.0, 0.0], "gravityScale": 0.0 })).unwrap();
+        b.call(&mut s, "joint", &json!({ "id": 9, "a": other, "b": 3, "type": "rope", "length": 4.0 })).unwrap();
+        let changes = |b: &mut Bridge, s: &mut Objects| b.call(s, "joint_changes", &json!({})).unwrap();
+        assert_eq!(changes(&mut b, &mut s), json!({ "moved": [], "broken": [] }));
+        // Joint 7's anchor material came loose into `part`: moved, its anchor in the part's space (part at (3, 1, 0)).
+        let j7 = b.engine_joints_of(anchor)[0].0;
+        b.engine_rebind_joint(j7, anchor, part).unwrap();
+        let c = changes(&mut b, &mut s);
+        assert_eq!((&c["moved"][0]["joint"], &c["moved"][0]["end"], &c["moved"][0]["body"]), (&json!(7), &json!("a"), &json!(part)), "{c}");
+        let at: Vec<f64> = c["moved"][0]["anchor"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+        assert!((at[0] - 0.2).abs() < 1e-5 && (at[1] - 0.3).abs() < 1e-5 && at[2].abs() < 1e-5, "{at:?}");
+        assert_eq!(changes(&mut b, &mut s), json!({ "moved": [], "broken": [] }), "reported once");
+        // Moved and let go of in one batch: broken only.
+        let j8 = b.engine_joints_of(anchor)[0].0;
+        b.engine_rebind_joint(j8, anchor, part).unwrap();
+        b.engine_break_joint(j8);
+        assert_eq!(changes(&mut b, &mut s), json!({ "moved": [], "broken": [8] }));
+        // In place only: no bodies, anchors or axis.
+        for k in ["a", "b", "anchor1", "anchor2", "axis"] {
+            let mut a = json!({ "id": 7, "type": "rope", "length": 2.0 });
+            a[k] = json!([0, 0, 0]);
+            assert!(b.call(&mut s, "joint_set", &a).unwrap_err().contains(k), "{k}");
+        }
+        b.call(&mut s, "joint_set", &json!({ "id": 7, "type": "rope", "length": 2.0 })).unwrap();
+        // The engine removes `part`: joint 7 with it, broken.
+        b.engine_remove(Some(part), None);
+        assert_eq!(changes(&mut b, &mut s), json!({ "moved": [], "broken": [7] }));
+        // `other` leaves the world after a tick: joint 9 broken (and the body in "faults").
+        b.call(&mut s, "joint", &json!({ "id": 10, "a": anchor, "b": 2, "type": "rope", "length": 4.0, "anchor1": [0.0, 3.0, 0.0] })).unwrap();
+        // (Both ends of joint 9 thrown outward, the rope slack; they go at 400 m/s, which takes some 135,000 ticks.)
+        b.call(&mut s, "pose", &json!({ "body": other, "position": [99_999.0, 1.0, 0.0] })).unwrap();
+        b.call(&mut s, "pose", &json!({ "body": 3, "position": [99_999.0, 3.0, 0.0] })).unwrap();
+        for id in [other, 3] {
+            b.call(&mut s, "velocity", &json!({ "body": id, "linvel": [1e4, 0, 0] })).unwrap();
+        }
+        let mut ticks = 0;
+        while b.engine_pose(other).is_some() && ticks < 200_000 {
+            b.tick();
+            ticks += 1;
+        }
+        b.sync(&mut s);
+        assert_eq!(changes(&mut b, &mut s)["broken"], json!([9]));
+        assert!(b.call(&mut s, "faults", &json!({})).unwrap().as_array().unwrap().iter().any(|f| f["body"] == json!(other) && f["kind"] == json!("leftWorld")));
+        // An anchor made anew: the joints on the old one broken.
+        b.engine_anchor(ENGINE_IDS + 3).unwrap();
+        assert_eq!(changes(&mut b, &mut s)["broken"], json!([10]));
+        assert!(b.engine_pose(anchor).is_none() && b.engine_anchor_body() == Some(ENGINE_IDS + 3));
     }
 }

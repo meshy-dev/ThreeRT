@@ -105,7 +105,7 @@ pub fn voxel_explode(x: f64, y: f64, z: f64, r: f64, push: Option<f64>) -> Resul
     engine(|e| api::voxel_explode(&mut e.voxels, &mut e.world, &mut e.physics, x, y, z, r, push)).map_err(thrown)
 }
 
-/// The voxel level's fixed body (joints to the level hold to it), -1 before a level that collides.
+/// The world's anchor (a fixed body with no collider: joints to the level hold to it), -1 before a level that collides.
 #[wasm_bindgen(js_name = voxelLevelBody)]
 pub fn voxel_level_body() -> f64 {
     engine(|e| e.voxels.level_body().map_or(-1.0, |b| b as f64))

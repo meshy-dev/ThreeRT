@@ -100,6 +100,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
     };
     let (mut edits, mut refused, mut calls_refused, mut most, mut kicks) = (0u32, 0u32, 0u32, 0usize, 0u32);
     let mut broken_seen = 0u32;
+    let mut moved_seen = 0u32;
     let (mut body_edits, mut checked) = (0u32, 0usize);
     let mut advance = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>| {
         api::physics_advance(ph, v, w, 1.0 / 60.0);
@@ -173,7 +174,14 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                 let list = v.body_list(ph.as_ref().unwrap());
                 let ids: Vec<u64> = list.as_array().unwrap().iter().map(|b| b["body"].as_u64().unwrap()).collect();
                 let cols: Vec<u64> = list.as_array().unwrap().iter().map(|b| b["collider"].as_u64().unwrap()).collect();
-                let body = if ids.is_empty() || r.chance(0.2) { 1 + r.below(6) } else { ids[r.below(ids.len() as u64) as usize] };
+                // (The world's anchor, the voxel level's body, now and then too: `pose` must refuse it, `skip` of it
+                // skips nothing, the rest leave a fixed body as it is.)
+                let anchor = v.level_body().map(|l| l as u64);
+                let body = match anchor {
+                    Some(a) if r.chance(0.1) => a,
+                    _ if ids.is_empty() || r.chance(0.2) => 1 + r.below(6),
+                    _ => ids[r.below(ids.len() as u64) as usize],
+                };
                 let big = |r: &mut Rng| if r.chance(0.1) { 1e6 } else { r.range(-300.0, 300.0) };
                 let (op, args) = match r.below(14) {
                     0 => ("impulse", json!({ "body": body, "impulse": [big(&mut r), big(&mut r), big(&mut r)], "point": [r.range(0.0, 12.0), 1.0, 3.0] })),
@@ -181,26 +189,35 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                     2 => ("pose", json!({ "body": body, "position": [pos(&mut r, false), r.range(-300.0, 20.0), 3.0], "rotation": [r.unit(), r.unit(), r.unit(), r.unit() + 0.01] })),
                     3 => ("body", json!({ "id": 1 + r.below(6), "position": [r.range(0.0, 12.0), r.range(1.0, 6.0), 3.0], "kind": (["dynamic", "kinematic", "fixed"][r.below(3) as usize]) })),
                     4 => ("collider", json!({ "id": 10 + r.below(12), "body": body, "shape": { "type": "box", "halfExtents": [r.range(0.05, 2.0), 0.2, 0.2] }, "mass": if r.chance(0.3) { 1e7 } else { 10.0 }, "events": true })),
-                    // (Joints to the level's fixed body too: step 10 c1.)
-                    5 => ("joint", json!({ "id": 30 + r.below(8), "a": if r.chance(0.3) { v.level_body().map_or(body, |l| l as u64) } else { body }, "b": if ids.is_empty() { 2 } else { ids[r.below(ids.len() as u64) as usize] }, "type": (["fixed", "revolute", "spherical", "rope", "prismatic"][r.below(5) as usize]), "length": 1.0, "limits": [-0.5, 0.5] })),
+                    // (Joints to the level's anchor too: step 10 c1.)
+                    5 => ("joint", json!({ "id": 30 + r.below(8), "a": if r.chance(0.3) { anchor.unwrap_or(body) } else { body }, "b": if ids.is_empty() { 2 } else { ids[r.below(ids.len() as u64) as usize] }, "type": (["fixed", "revolute", "spherical", "rope", "prismatic"][r.below(5) as usize]), "length": 1.0, "limits": [-0.5, 0.5] })),
                     6 => ("remove", json!({ "body": if r.chance(0.5) { body } else { 1 + r.below(6) }, "collider": if r.chance(0.5) && !cols.is_empty() { cols[0] } else { 10 + r.below(12) }, "joint": 30 + r.below(8) })),
                     7 => ("force", json!({ "body": body, "force": [big(&mut r) * 100.0, 0.0, 0.0], "torque": [0.0, big(&mut r) * 100.0, 0.0] })),
                     8 => ("ray", json!({ "origin": [r.range(0.0, 12.0), 8.0, r.range(0.0, 6.0)], "direction": [r.range(-0.2, 0.2), -1.0, 0.0], "all": r.chance(0.5), "skip": body })),
                     9 => ("target", json!({ "body": body, "position": [1.0, 2.0, 3.0] })),
                     10 => ("contacts", json!({})),
-                    // The joints the engine let go of (anchors carved, step 10 c1).
-                    12 => ("broken", json!({})),
+                    // What the engine did to the joints (anchors carried off or carved, step 10 c1).
+                    12 => ("joint_changes", json!({})),
                     // A joint's parameters changed in place (step 10 c1): any kind named, sane or wild numbers.
                     11 => {
                         let wild_num = |r: &mut Rng| if r.chance(0.2) { [f64::NAN, f64::INFINITY, -1.0, 1e30, 0.0][r.below(5) as usize] } else { r.range(-3.0, 3.0) };
                         let (lo, hi) = (wild_num(&mut r), wild_num(&mut r));
-                        ("joint_set", json!({ "id": 30 + r.below(9), "type": (["fixed", "revolute", "spherical", "rope", "prismatic", "weld"][r.below(6) as usize]), "length": wild_num(&mut r), "limits": [lo, hi], "motor": { "velocity": wild_num(&mut r), "damping": wild_num(&mut r) * 1e4, "maxForce": wild_num(&mut r) * 1e3 } }))
+                        let mut a = json!({ "id": 30 + r.below(9), "type": (["fixed", "revolute", "spherical", "rope", "prismatic", "weld"][r.below(6) as usize]), "length": wild_num(&mut r), "limits": [lo, hi], "motor": { "velocity": wild_num(&mut r), "damping": wild_num(&mut r) * 1e4, "maxForce": wild_num(&mut r) * 1e3 } });
+                        // (Now and then naming what makes the joint: refused.)
+                        if r.chance(0.1) {
+                            a[["a", "b", "anchor1", "anchor2", "axis"][r.below(5) as usize]] = json!([0.0, 1.0, 0.0]);
+                        }
+                        ("joint_set", a)
                     }
                     _ => ("overlap", json!({ "shape": { "type": "sphere", "radius": r.range(0.1, 3.0) }, "position": [r.range(0.0, 12.0), 1.0, 3.0] })),
                 };
                 match ph.as_mut().unwrap().call(&mut w, op, &args) {
                     Err(_) => calls_refused += 1,
-                    Ok(v) if op == "broken" => broken_seen += v.as_array().map_or(0, |a| a.len()) as u32,
+                    Ok(v) if op == "joint_changes" => {
+                        broken_seen += v["broken"].as_array().map_or(0, |a| a.len()) as u32;
+                        moved_seen += v["moved"].as_array().map_or(0, |a| a.len()) as u32;
+                    }
+                    Ok(_) if op == "pose" && anchor == Some(body) => panic!("pose of the world's anchor was taken"),
                     Ok(_) => {}
                 }
             }
@@ -226,6 +243,10 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
             checked += v.check_shells(p).unwrap_or_else(|e| panic!("seed {seed}, iteration {it}: {e}"));
         }
         assert_eq!(list.len(), v.bodies(), "seed {seed}, iteration {it}: a voxel body without an engine body");
+        // (The world's anchor where it was made, whatever was called on it.)
+        if let Some(a) = v.level_body() {
+            assert_eq!(p.bridge_ref().engine_pose(a).map(|x| (x.0, x.1)), Some(([0.0; 3], [0.0, 0.0, 0.0, 1.0])), "seed {seed}, iteration {it}: the anchor moved");
+        }
         assert!(list.len() <= MAX_BODIES, "seed {seed}, iteration {it}: {} bodies", list.len());
         for b in list {
             let (id, collider, voxels) = (b["body"].as_u64().unwrap() as u32, b["collider"].as_u64().unwrap() as u32, b["voxels"].as_u64().unwrap() as usize);
@@ -236,7 +257,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
         }
     }
     println!(
-        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), body edits {body_edits}, calls refused {calls_refused}, joints broken {broken_seen}, most bodies {most}, retired {}, shells checked {checked}, kicks {kicks}, hash {:016x}/{:016x}",
+        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), body edits {body_edits}, calls refused {calls_refused}, joints broken {broken_seen}, moved {moved_seen}, most bodies {most}, retired {}, shells checked {checked}, kicks {kicks}, hash {:016x}/{:016x}",
         v.retired,
         v.hash().unwrap_or(0),
         ph.as_ref().unwrap().hash()
