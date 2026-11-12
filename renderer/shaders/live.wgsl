@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), frames since the view translated, the scene's lighting is changing (live.rs `live_lighting`), experiment flags
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live.rs `live_lighting`), experiment flags
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
@@ -124,8 +124,7 @@ fn ycocg_rgb(y: vec3<f32>) -> vec3<f32> {
 }
 
 // Experiment switches (THREERT_TEMPORAL_FLAGS): 1 = a-trous gated by history length (round 3), 2 = specular spatial
-// filter on mirror-like surfaces too (round 3), 4 = specular clamp also while the view holds still (UE's literal
-// setting; see the specular block in `temporal`).
+// filter on mirror-like surfaces too (round 3).
 fn xflag(b: u32) -> bool { return (L.mode.w & b) != 0u; }
 
 fn lum(c: vec3<f32>) -> f32 {
@@ -632,6 +631,9 @@ fn spec_history(pp: vec3<f32>, n: vec3<f32>, t: f32, rough: f32, virt: bool) -> 
     return h;
 }
 
+// The most a specular history may trail behind its reflection, output pixels (`stemporal`).
+const SPEC_TRAIL: f32 = 2.0;
+
 // Specular temporal accumulation on the traced grid (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the
 // surface history and the reflection-hit one (reprojected through the mirror image of what it shows); the one closer to
 // this frame's neighbourhood mean wins. Writes the specular filter's input and the traced grid's g-buffer.
@@ -683,26 +685,44 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mv = motion_in[q];
     var hs = vec4<f32>(0.0);
     var hv = vec4<f32>(0.0);
+    // What bounds this pixel's history, in output pixels a frame: its own speed (a resampled history blurs a little
+    // every frame) and its reflection's parallax, how far what it reflects moved against the surface (none in a turn of
+    // the camera; the history then trails behind the reflection).
+    var speed = 0.0;
+    var parallax = 0.0;
     if (L.size.w == 0u && L.isz.z > 0u) {
         let pp = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, mv.w > 0.5 && t > 0.0));
-        if (pp.z > 0.0) { hs = spec_history(pp, n, t, rough, false); }
-        // (Not on moving objects: the camera-only reprojection ignores a moving reflector's own motion.)
+        if (pp.z > 0.0) {
+            hs = spec_history(pp, n, t, rough, false);
+            speed = length(sp - 0.5 - pp.xy);
+            // (A moving reflector: the camera-only reprojection ignores its own motion, here and below. Its speed.)
+            parallax = speed;
+            if (mv.w <= 0.5) {
+                // Of the reflected point where this frame has one, else of the farthest (the sample took the diffuse
+                // lobe, or the sky): the most it can be.
+                let pf = prev_pixel(L.cur.pos.xyz + dir * (t + select(1.0e3, min(st, 1.0e3), t > 0.0 && st > 0.0)));
+                parallax = select(0.0, length(pf.xy - pp.xy), pf.z > 0.0);
+            }
+        }
         if (t > 0.0 && st > 0.0 && mv.w <= 0.5) {
             let pv = prev_pixel(L.cur.pos.xyz + dir * (t + min(st, 1.0e3)));
             if (pv.z > 0.0) { hv = spec_history(pv, n, t, rough, true); }
         }
     }
     let cap = select(L.misc.y, min(L.misc.y, 4.0), px.albedo.w > 1.5);
-    let moving = any(L.cur.pos.xyz != L.prev.pos.xyz) || any(L.cur.fwd.xyz != L.prev.fwd.xyz);
-    let translated = L.mode.y < 8u && !xflag(16384u);
     let ys = ycocg(hs.rgb);
     let yv = ycocg(hv.rgb);
     var surf = select(0.0, 0.8, length(smean - yv) > length(smean - ys) + 0.01 / exposure_scale());
     surf = select(surf, 1.0, hv.w <= 0.0);
     surf = select(surf, 0.0, hs.w <= 0.0 && hv.w > 0.0);
     let hy = mix(yv, ys, surf);
-    var max_s = select(cap, mix(2.0, 12.0, clamp(rough / 0.05, 0.0, 1.0)), moving);
-    if (translated) { max_s = min(max_s, 4.0); }
+    // The history's length is the pixel's own (until 2026-11-13 every pixel's was held to 2 .. 12 frames by roughness
+    // while the camera moved or turned at all, and to 4 for 8 frames after it translated): HIST_MOVING at a pixel a
+    // frame, as the diffuse; and no longer than keeps its trail behind the reflection (frames x parallax) within
+    // SPEC_TRAIL pixels, 2 frames at least on a mirror, 4 from roughness 0.05 (below that the filter has nothing to
+    // work with).
+    var max_s = mix(cap, min(cap, HIST_MOVING), clamp(speed, 0.0, 1.0));
+    max_s = min(max_s, clamp(SPEC_TRAIL / max(parallax, 1e-4), mix(2.0, 4.0, clamp(rough / 0.05, 0.0, 1.0)), cap));
     let frames_s = select(hv.w, hs.w, surf > 0.5);
     var count_s = 1.0;
     var s_out = cur;
