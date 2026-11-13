@@ -1993,6 +1993,53 @@ cut by luminance stays beside it. `bench-temporal --shot edit`, ΔE against the 
   view with no memory at half a second. The long history on a settled scene is untouched: nothing measured here
   speaks against it.
 
+**The upscaler's tolerance from the samples' own flicker (2026-11-13, after it).** The Tokyo clip of the site's reel
+(the afternoon into night in ten seconds, the camera still) showed every roof and the tower outlined in the sky of
+seconds ago, a glow ten pixels wide. The raw samples and the denoiser's accumulations are clean there; it is the
+upscaler's history. `judge` holds each traced sample against the range of the history's nine pixels around its
+point, and allowed it half that range outside (a point against means: detail finer than a pixel). The allowance was
+measured on the history it judges: beside a roof the range runs from the roof to the old sky, so the sky could dim
+by half of that unseen; the pixel left behind widened the range of the next, and so outward. With the verdicts off
+the clip is 15 times too bright (a 16-sample blend under a sky that falls 4 % a frame), which is what the outlines
+were.
+
+- The allowance is the samples' now (`Flicker`, kept by `compose` in the two words the fast mean's buffer had
+  free): how much the composed sample at a surface changes from frame to frame under the jitter, as a share of its
+  level; 2 deviations of it outside the history's range are allowed. The deviation is of the second difference (a
+  steady rise or fall has none), read where the surface was a frame ago, added to and kept by how still the pixel
+  is (none from a pixel a frame on: a pixel that moved earns it again at rest), and a frame counts for 4 deviations
+  at most (a light switched does not earn tolerance). UE's TSR keeps the input's flicker over time for the same
+  decision.
+- Tokyo at dusk, the real-time frame against the same moment held, ΔE / p99 over the skyline at 6, 7, 8 s: 3.82 /
+  37.6, 3.13 / 37.3, 1.51 / 26.2 → 2.05 / 11.0, 0.93 / 8.3, 0.42 / 5.0; the whole frame 2.70, 1.46, 0.84 → 1.54,
+  0.70, 0.55. (A session of this clip lands in one of two states a few tenths apart, the same build either way:
+  nothing finer than that is read from it.)
+- Elsewhere, main → now. Held still at 1440p against offline (ΔE; frame to frame): Bistro at 0.5 1.93; 0.54 →
+  1.85; 0.46, Kabukichō at 0.375 4.98 → 4.85. bench-ghosting, ΔE against each build's converged frames: Bistro
+  settled 0.98 → 0.82, turn 2.33 → 2.22, strafe 2.85 → 2.66, a tenth of a second after the stop 2.63 → 2.48;
+  Kabukichō 1.30 → 1.25, 3.63 → 3.53, 4.26 → 4.01, 3.81 → 3.50 (lower in every shot and region of both). The orbit
+  of Thames against offline: detail 0.52 → 0.57 moving, ΔE 1.51 → 1.34 held. The fire shot's box 6.28 / 5.56 /
+  3.66 → 5.99 / 5.15 / 3.45; the Bistro slice half a second after its explosion 5.76 → 5.28. The lighting-edit shot
+  as it was or a little under (the lamp's pool at 32 frames 3.05 → 3.02, lamp on 1.10 → 0.99). `compose` + `judge`
+  0.78 → 0.90 ms at 1440p output. test-render 188 pass (`upscale/dimming-behind-edge-live`: main 1.395 of 1 ± 0.1).
+- What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, U1–Z2, F1–J14):
+  - no allowance at all: Tokyo as good, a still Bistro three times the flicker (frame to frame 0.54 → 1.57);
+  - half the range on each side by that side's own spread: the outlines stay (any measure taken from the history
+    feeds itself);
+  - verdicts averaged among samples of the same depth and weighted by how narrow their range was: a tenth off the
+    outlines;
+  - the history clamped into the frame's nine samples always (a TAA's rule): the outlines go, and the rest of the
+    frame pays (p99 17.2 for 9.7);
+  - the deviation of the first difference: a dimming sky counts as flicker (Tokyo's skyline 1.75 at 7 s, above
+    either state of 1.06 / 1.44); in
+    absolute light, with a switch counted in full: the lamp's pool twice as far off at 32 frames (7.37); read at
+    the place on screen, in motion too: the ground after a strafe worse than main (Kabukichō 2.79 → 3.02);
+  - 1 and 3 deviations: Bistro's frame to frame 0.49, 0.38 for 0.42 at 2; Tokyo's skyline p99 at 3 the highest.
+- Left: the pixel at the silhouette itself (in the test, the first pixel beside the edge reads 2.3 times the wall,
+  the second 1.2; in Tokyo a rim one or two pixels thin). That is not the allowance: the sample there lies within a
+  range that runs from the roof to the sky whatever is allowed outside it, and the samples beside it lie between
+  their own history and the stale pixel. Holding still, nothing holds a history pixel against the samples.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
