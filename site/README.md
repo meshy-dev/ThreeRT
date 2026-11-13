@@ -56,7 +56,7 @@ page; change it in all four.
    nothing compared (`media/reel/`: 4 x 3 clips for a wide screen, 2 x 4 for a phone held upright; 60 fps, an 8 s
    loop). Nothing in it takes a touch, so a finger scrolling the page passes over it. Its first frame is what shows
    until it plays, and where it does not: reduced motion, a data saver, autoplay refused. A button pauses it.
-   "Path tracing at 60 fps."
+   "Hardware ray-traced three.js."
 2. **ThreeRT = Three + RT:** Ray Tracing, Real Time, Runtime.
 3. **Hello world looks right:** an auto-advancing reel of three starter scenes, the ThreeRT source next to its output
    (three.js as written | ThreeRT with every setting at its default).
