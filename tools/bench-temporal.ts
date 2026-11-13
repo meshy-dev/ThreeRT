@@ -1,7 +1,7 @@
 // Temporal quality of the live viewport against converged references (same renderer, same pose, same state):
 // frames during camera motion (ghosting + noise), right after it stops, and after a lighting change (noise + lag).
 // References are the live renderer itself converged for 1024 frames at 100% scale, cached per renderer build, bundle
-// and THREERT_* switch (out/bench-temporal/refs/<key>; THREERT_TEMPORAL_FLAGS excluded: its switches act while moving), so
+// and THREERT_* switch (out/bench-temporal/refs/<key>), so
 // every build is measured against its own converged frames: comparing with another build's mixes the change in what it
 // converges to (bias: judge that against UE or the path tracer) into the temporal error. With UE
 // references (--refs-ue, default out/bench-temporal/refs-ue when present: UE 5.8 MRQ frames of the same shots at 60 fps,
@@ -73,7 +73,7 @@ const scale = flag("--scale", "auto"); // test-run render scale (references are 
 const out = resolve(flag("--out", join(root, "out/bench-temporal", tag)));
 // Without it, none (games may switch UE's default on; the UE references have r.MotionBlurQuality 0).
 process.env.THREERT_MOTION_BLUR = args.includes("--motion-blur") ? "0.5,5,60" : "0,5,30";
-const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_TEMPORAL_FLAGS", "THREERT_BIN", "THREERT_MOTION_BLUR"].includes(k)).sort();
+const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_BIN", "THREERT_MOTION_BLUR"].includes(k)).sort();
 const refKey = createHash("sha256").update(rendererVersion(bin)).update(readFileSync(bundle)).update(JSON.stringify(switches)).digest("hex").slice(0, 12);
 const refs = resolve(flag("--refs", join(root, "out/bench-temporal/refs", refKey)));
 const refsUeArg = flag("--refs-ue", join(root, "out/bench-temporal", args.includes("--motion-blur") ? "refs-ue-mb" : "refs-ue"));

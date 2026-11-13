@@ -120,7 +120,7 @@ const out = resolve(join(root, "out/bench-ghosting", sceneName === "kabukicho" ?
 const blur = args.includes("--mrq-blur") ? { THREERT_MOTION_BLUR: "0.5,5,60" } : args.includes("--with-motion-blur") ? {} : { THREERT_MOTION_BLUR: "0,5,30" };
 const env = { ...process.env, THREERT_FREEZE_TIME: "1", THREERT_EXPOSURE_SNAP: "1", ...blur };
 const ueDir = args.includes("--ue") ? resolve(flag("--ue", "")) : null;
-const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_TEMPORAL_FLAGS", "THREERT_BIN", "THREERT_MOTION_BLUR", "THREERT_FREEZE_TIME", "THREERT_EXPOSURE_SNAP"].includes(k)).sort();
+const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_BIN", "THREERT_MOTION_BLUR", "THREERT_FREEZE_TIME", "THREERT_EXPOSURE_SNAP"].includes(k)).sort();
 const key = createHash("sha256").update(rendererVersion(bin)).update(readFileSync(bundle)).update(JSON.stringify(switches)).update(`${refScale}/${refFrames}`).digest("hex").slice(0, 12);
 const refs = join(root, "out/bench-ghosting/refs", key);
 mkdirSync(out, { recursive: true });

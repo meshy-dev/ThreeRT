@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live.rs `live_lighting`), experiment flags
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live.rs `live_lighting`), -
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
@@ -123,10 +123,6 @@ fn ycocg(c: vec3<f32>) -> vec3<f32> {
 fn ycocg_rgb(y: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z);
 }
-
-// Experiment switches (THREERT_TEMPORAL_FLAGS): 1 = a-trous gated by history length (round 3), 2 = specular spatial
-// filter on mirror-like surfaces too (round 3).
-fn xflag(b: u32) -> bool { return (L.mode.w & b) != 0u; }
 
 fn lum(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -592,7 +588,6 @@ fn atrous_gated(gid: vec3<u32>, stage: u32, step: i32, max_noise: f32) {
     // every noisy night pixel, +1.9 ms on Kabukicho at 60 %).
     let limits = array<f32, 5>(256.0, 128.0, 32.0, 8.0, 8.0);
     var noisy = (count < 4.0 || sqrt(max(c.w, 0.0)) > max_noise * max(li, 1e-4)) && (stage < 2u || count < limits[stage]);
-    if (xflag(1u)) { noisy = count < limits[stage]; }
     if (strength < 0.02 || !noisy || anim) { write_stage(stage, i, c); return; }
     let g = traced_surface(i);
     // Noise of the accumulated mean: temporal deviation / sqrt(frames). Fresh history has no reliable moments: assume
@@ -812,7 +807,7 @@ fn spec_filter_traced(gid: vec3<u32>, step: i32, from_a: bool) {
     let g = gb_unpack(gb_out[i]);
     let rough = g.rough;
     let fresh = c.w < 4.0;
-    let reach = select(4.0 * clamp(rough * 8.0, 0.0, 1.0), 4.0, xflag(2u) || fresh);
+    let reach = select(4.0 * clamp(rough * 8.0, 0.0, 1.0), 4.0, fresh);
     let npow = select(64.0, 8.0, fresh);
     let strength = (0.25 + smoothstep(0.08, 0.5, rough)) / sqrt(max(c.w, 1.0)) * 4.0;
     var outv = c.rgb;

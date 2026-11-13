@@ -1527,11 +1527,6 @@ fn light_lod_d0() -> f32 {
     *F.get_or_init(|| std::env::var("THREERT_LIGHT_LOD").ok().and_then(|v| v.parse().ok()).unwrap_or(LIGHT_LOD_D0))
 }
 
-/// THREERT_TEMPORAL_FLAGS: experiment switches of the temporal pass (live.wgsl `xflag`), 0 = defaults.
-fn temporal_flags() -> u32 {
-    static F: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_TEMPORAL_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
-}
 
 /// Halton(base) of index i (sub-pixel jitter sequence).
 fn halton(mut i: u32, base: u32) -> f32 {
@@ -3999,7 +3994,7 @@ impl LiveCore {
             // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
             // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
             misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
-            mode: [self.view_mode, 0, self.live_lighting() as u32, temporal_flags()],
+            mode: [self.view_mode, 0, self.live_lighting() as u32, 0],
             post: self.post,
             ae: self.sc.exposure_settings.ae,
             ae2: self.sc.exposure_settings.ae2,
