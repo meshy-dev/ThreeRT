@@ -897,10 +897,14 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     // How much this sample flickers (`Flicker`), from where its surface was in the previous frame's traced grid.
     let now = min(lum(shown), 6.0e4);
     var f = Flicker(vec2<f32>(0.0), 0.0, 0.0);
+    var lock_was = 0.0;
     let ps = vec2<i32>(L.isz.zw);
     if (L.size.w == 0u && ps.x > 0) {
         let pc = vec2<i32>(floor((sp - vel) * vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y))));
-        if (pc.x >= 0 && pc.y >= 0 && pc.x < ps.x && pc.y < ps.y) { f = flicker_at(u32(pc.y * ps.x + pc.x)); }
+        if (pc.x >= 0 && pc.y >= 0 && pc.x < ps.x && pc.y < ps.y) {
+            f = flicker_at(u32(pc.y * ps.x + pc.x));
+            lock_was = unpack2x16float(ae_out[u32(pc.y * ps.x + pc.x)].y).y;
+        }
     }
     let still = 1.0 - clamp(length(vel) / UP_SPEED, 0.0, 1.0);
     var sd = select(1.0, f.sd, f.n >= 1.0);
@@ -908,9 +912,30 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
         let bend = min(abs(now - 2.0 * f.last.x + f.last.y) / max(max(now, max(f.last.x, f.last.y)), 1e-9), UP_ONSET * max(f.sd, 0.01));
         sd = sqrt(mix(f.sd * f.sd, bend * bend / 6.0, still / min(f.n - 1.0, 8.0)));
     }
+    // The thin feature's lock here (`Lock`): new where this sample's emission is one, else a frame older, from where
+    // the surface was.
+    let floor_l = 0.01 / exposure_scale();
+    var e9: array<f32, 9>;
+    var like = 0u;
+    for (var k = 0; k < 9; k++) {
+        let j = u32(clamp(i32(gid.y) + k / 3 - 1, 0, i32(ih) - 1)) * iw + u32(clamp(i32(gid.x) + k % 3 - 1, 0, i32(iw) - 1));
+        e9[k] = lum(sample_px[j].emit.rgb) / max(L.misc2.w, 1.0) + floor_l;
+    }
+    for (var k = 0; k < 9; k++) {
+        if (max(e9[k], e9[4]) < THIN_LIKE * min(e9[k], e9[4])) { like |= 1u << u32(k); }
+    }
+    var across = false;
+    for (var k = 0; k < 4; k++) {
+        let a = e9[k];
+        let b = e9[8 - k];
+        across = across || (e9[4] > THIN_LIKE * max(a, b)) || (THIN_LIKE * e9[4] < min(a, b));
+    }
+    let thin = across && (like & 27u) != 27u && (like & 54u) != 54u && (like & 216u) != 216u && (like & 432u) != 432u;
+    // (None on animated shading: it shows this frame's picture, and its history is not kept for it to stand by.)
+    let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
+    ae_in[q].y = (ae_in[q].y & 0xffffu) | (pack2x16float(vec2<f32>(0.0, select(max(lock_was - 1.0 / jitter_phases(), 0.0), 1.0, thin) * (1.0 - reactive))) & 0xffff0000u);
     ae_in[q].z = pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0)));
     ae_in[q].w = pack2x16float(vec2<f32>(sd * still, min(max(f.n + still, 1.0), 9.0)));
-    let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
     xhist_out[q] = vec4<f32>(vel, depth, reactive);
 }
 
@@ -956,7 +981,12 @@ const UP_STALE: f32 = 0.05;
 // way every upscaler finds one, by depth: what is nearest the camera among the nine samples now lies behind what was
 // nearest among the nine of the previous frame there (both dilated, so a still edge under the jitter mostly agrees
 // with itself), confirmed by colour (the history there lies outside this frame's range), so the still edges that the
-// jitter does catch keep their history.
+// jitter does catch keep their history. Not where a thin feature is locked (`Lock`): a lamp finer than a pixel comes
+// and goes among the nine samples with the jitter alone, in front of whatever is behind it, its light in the history
+// and not in this frame; every lamp against the sky was something gone each frame the samples missed it, and a field
+// of them, held still, kept a third of its light. (Thin things that do not emit, a wire, a lattice by day, are still
+// taken so. Asking that the two depths move against each other on screen was tried and is wrong here: a wall blown
+// out uncovers what is behind it with nothing moving.)
 
 // A sample is a point and the history's pixels are means over a pixel: of a feature finer than a pixel (a row of
 // windows, a grating) a sample lies outside their range in a still picture too, a little further on some jitters than
@@ -983,6 +1013,31 @@ const UP_STALE: f32 = 0.05;
 //   every frame), so the deviation is added to by how still the pixel is and kept by the same, none from UP_SPEED on
 //   (TSR fades its flicker rule out with velocity too): a pixel that moved has none and earns it again at rest,
 //   while its history, cut to UP_MOVING samples by the motion, grows back.
+// `Lock`, per traced sample, in the half word the fast mean leaves free in `ae_in`'s y (f16): how much longer the
+// picture here counts as a thin feature, 1 when a sample showed one, a jitter sequence later 0 (FSR 2's pixel locks).
+// A thin feature is a sample no 2 x 2 block of the nine around it is like (within THIN_LIKE of its luminance: FSR
+// 2's rule) and that is above both or below both of some pair of opposite neighbours: a lamp or a lit window finer
+// than a traced pixel, which most frames' samples miss, and the dark sample between two of them, which is this
+// frame's miss. (FSR 2 asks for a sample brighter or darker than all those unlike it, a single line's rule: of
+// lamps strung a pixel apart, in several colours, most have a brighter neighbour, and Tokyo Tower's legs went
+// unlocked. A slope is above one neighbour and below the other in every direction and stays out.) Neither rule that holds the history to this frame's samples applies to a locked pixel: its
+// history is not clamped into the nine samples in motion (`upscale`: the lamp no sample hit this frame is still
+// there; Tokyo Tower in a turn lost a quarter of its light and its legs), and its sample's distance from the
+// history's range is no finding (`judge`: a hit lies above the range, a miss within it, and the corrections went one
+// way); nor is a lamp the samples miss this frame something gone from in front (`judge`'s depth test). `compose`
+// carries the lock with the surface. UE's TSR loosens its clamp the same way where it detects thin geometry.
+// The test runs on what the camera ray saw directly (the sample's emission: lamps, windows, signs), which has no
+// noise: FSR 2's test is made for a rasterised frame, and on the composed sample of a traced one (short histories
+// in motion, reflections without a spatial filter: more than 5 % from sample to sample) it called most of Kabukichō
+// thin; the clamp was then off everywhere and the reflections on the wet street trailed 78 pixels in a strafe for 53.
+const THIN_LIKE: f32 = 1.05;
+// The frames of the jitter sequence (live.rs: 8 at full resolution, as many more as an output pixel has fewer samples).
+fn jitter_phases() -> f32 {
+    return clamp(round(8.0 * f32(L.size.x) * f32(L.size.y) / (f32(L.isz.x) * f32(L.isz.y))), 8.0, 512.0);
+}
+// (In full for the first half of its life, fading over the second.)
+fn locked(q: u32) -> f32 { return clamp(2.0 * unpack2x16float(ae_in[q].y).y, 0.0, 1.0); }
+
 struct Flicker { last: vec2<f32>, sd: f32, n: f32 };
 fn flicker_at(q: u32) -> Flicker {
     let v = ae_out[q];
@@ -1076,20 +1131,27 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (was_near < 1.0e29 && now_near > was_near * (1.0 + UP_GONE) + 0.01) {
                     var clo = vec3<f32>(1.0e30);
                     var chi = vec3<f32>(-1.0e30);
+                    // (And no thin feature's lock among the nine: a lamp the samples miss this frame is not gone.)
+                    var lock = 0.0;
                     for (var k = 0; k < 9; k++) {
                         let qx = i32(gid.x) + k % 3 - 1;
                         let qy = i32(gid.y) + k / 3 - 1;
                         if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
-                        let cq = fb[u32(qy * iw + qx)].rgb;
+                        let j = u32(qy * iw + qx);
+                        let cq = fb[j].rgb;
                         clo = min(clo, cq);
                         chi = max(chi, cq);
+                        lock = max(lock, locked(j));
                     }
                     let hm = hsum / hn;
-                    gone = lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale();
+                    gone = lock < 0.5 && lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale();
                 }
             }
         }
     }
+    // A locked sample's distance from the history's range is no finding (a lamp finer than a pixel lies above it
+    // whenever a sample hits it).
+    d *= 1.0 - locked(q);
     ae_out[q] = vec4<u32>(pack2x16float(d.xy), pack2x16float(vec2<f32>(d.z, l)), pack2x16float(vel), u32(gone));
 }
 
@@ -1200,6 +1262,9 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     var wsum = 0.0;
     var xlo = vec3<f32>(1.0e30);
     var xhi = vec3<f32>(-1.0e30);
+    // (The lock of any of the nine: a lock is kept by the traced pixel, carried to the nearest, and the lamp it is for
+    // may be a pixel to the side by now.)
+    var lock = 0.0;
     for (var k = 0; k < 9; k++) {
         let qx = bc.x + k % 3 - 1;
         let qy = bc.y + k / 3 - 1;
@@ -1211,6 +1276,7 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
         wsum += wt;
         xlo = min(xlo, c);
         xhi = max(xhi, c);
+        lock = max(lock, locked(u32(qy * iw + qx)));
     }
     let cur = select(fb[u32(bc.y * iw + bc.x)].rgb, sum / wsum, wsum > 1e-9);
     let conf = min(wsum, 1.0);
@@ -1242,15 +1308,15 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     // In motion the history is resampled every frame, each time a little blurrier, and what it holds of another
     // surface (the band behind a moving edge reprojects by the edge's motion) nothing else removes: so, as the pixel's
     // speed nears UP_SPEED, it holds fewer samples (UE TSR's r.TSR.Velocity.WeightClampingSampleCount / PixelSpeed) and
-    // is clamped into the range of this frame's nine samples (every temporal AA's rule; FSR 2's rectification). Holding
-    // still it keeps both its length and the detail finer than a traced pixel, which the clamp would cut. The orbit of
-    // Thames at 9 pixels a frame against offline (detail / trail px): neither 0.48 / 49, the clamp 0.45 / 36, 4 samples
-    // 0.57 / 37, both 0.53 / 31.
+    // is clamped into the range of this frame's nine samples (every temporal AA's rule; FSR 2's rectification), but for
+    // a thin feature (`Lock`). Holding still it keeps both its length and the detail finer than a traced pixel, which
+    // the clamp would cut. The orbit of Thames at 9 pixels a frame against offline (detail / trail px): neither
+    // 0.48 / 49, the clamp 0.45 / 36, 4 samples 0.57 / 37, both 0.53 / 31.
     let moving = clamp(length(vel) / UP_SPEED, 0.0, 1.0);
     let kept = hist.w * (1.0 - verdict.w);
     if (kept > 0.0) {
         var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
-        hc = mix(hc, clamp(hc, xlo, xhi), moving);
+        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - lock));
         let most = min(mix(UP_SAMPLES, UP_MOVING, moving), mix(UP_SAMPLES, UP_REACTIVE, clamp(xhist_out[u32(bc.y * iw + bc.x)].w, 0.0, 1.0)));
         count = min(kept + conf, most);
         let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);

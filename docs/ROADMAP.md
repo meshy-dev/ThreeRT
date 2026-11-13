@@ -2040,6 +2040,61 @@ were.
   range that runs from the roof to the sky whatever is allowed outside it, and the samples beside it lie between
   their own history and the stale pixel. Holding still, nothing holds a history pixel against the samples.
 
+**Lamps finer than a pixel: the thin feature's lock (2026-11-13, after it).** Dragging the view over Tokyo at night,
+the tower broke up: its legs and most of its lamps gone while the camera turned, back half a second after it
+stopped. Measured against offline renders, two faults of the upscaler, both older than the change above:
+
+- Held still, a field of lamps a third of a pixel wide kept a third of its light (0.035 of 0.103). `judge` takes a
+  surface for gone from in front when what was nearest among the nine samples a frame ago is nearer than what is
+  nearest now and the history's colour is not in this frame; a lamp the jitter hit last frame and missed this one
+  is exactly that, and its history was dropped every frame it was missed.
+- In motion the history is clamped into the frame's nine samples, and a lamp none of them hit is outside them: the
+  tower in a turn lost a quarter of its light (the 4-sample cap in motion is not it: without it nothing changed).
+
+The remedy is the one FSR 2 (pixel locks) and UE's TSR (thin geometry detection) have: where the picture is a thin
+feature, the rules that hold the history to this frame's samples stand back. `Lock` in `live.wgsl`, a half word per
+traced pixel that the fast mean's buffer had free:
+
+- made by `compose` where the sample's emission is thin: no 2 × 2 block of the nine like it (FSR 2's rule), and
+  above or below both of some pair of opposite neighbours; a jitter sequence long, carried with the surface; none on
+  animated shading;
+- a locked pixel's history is not clamped in motion (the lock of any of its nine samples), a locked sample's
+  distance from the history's range is no finding, and nothing is gone where one of the nine is locked.
+
+| | main | now | offline |
+|---|---|---|---|
+| lamps field held still, mean radiance | 0.035 | 0.106 | 0.103 |
+| the same, the camera sliding 1.4 px a frame | 0.027 | 0.112 | 0.103 |
+| Tokyo Tower in a turn (3.5 px a frame), ΔE / SSIM / luminance against offline | 2.81 / 0.867 / 0.77 | 2.23 / 0.928 / 1.05 | |
+| the same, the whole frame | 2.69 / 0.889 / 1.01 | 2.56 / 0.915 / 1.06 | |
+| the tower half a second after the stop | 1.89 / 0.948 / 1.07 | 1.47 / 0.964 / 1.00 | |
+| the tower settled | 1.48 / 0.962 / 0.94 | 1.39 / 0.965 / 0.99 | |
+
+- What it costs, main → now. Where a view translates past emitters the locked ones trail a little: Kabukichō's
+  signs strafe 6.42 → 6.67, a tenth of a second after it 5.27 → 5.55 (trail 26 → 31 px), at the dolly's stop
+  6.75 → 7.07 (its ground the same to 0.01, its whole frame within 0.08); Bistro's whole frame a tenth of a second
+  after a strafe 2.49 → 2.63 (trail 13 → 24 px), else within 0.05; the Bistro slice half a second after its
+  explosion 5.28 → 5.41; the orbit of Thames moving 2.24 → 2.29 (held 1.34 → 1.24). bench-ghosting passes on both
+  scenes. Held still: Bistro 1.85 = 1.85 (frame to frame 0.46 → 0.44), Kabukichō 4.85 → 4.86. Tokyo at dusk the
+  same in the mean, the skyline's p99 at 6 s 11–14 → 16–18 (lamps coming on). The fire shot and the lighting-edit
+  shot as they were. `compose` + `judge` + `upscale` 1.73 → 1.80 ms at 1440p output.
+  test-render 190 pass (`upscale/lamps-still-live`, `upscale/lamps-in-motion-live`: main fails both).
+- What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, K1–X9):
+  - variance clipping: a lamp no sample hit is outside any box made of this frame's samples;
+  - FSR 2's test on the composed sample: a traced frame carries more than 5 % of noise from sample to sample, most
+    of Kabukichō was "thin", the clamp was off everywhere and the wet street's reflections trailed 78 px for 53; on
+    the sample less its specular part: the same. The test is on what the camera ray saw directly, which has no noise;
+  - FSR 2's ridge rule (brighter or darker than every sample unlike it): lamps strung a pixel apart have a brighter
+    neighbour more often than not, and the tower's legs stayed unlocked;
+  - the lock of the nearest sample alone: a lone lock is a traced pixel off its lamp half the time;
+  - the lock in motion only: after the stop the tower was 7 % too bright for half a second again;
+  - `gone` only where the two depths moved against each other on screen: right for a lamp, wrong for this engine,
+    where a wall blown out uncovers what is behind it with nothing moving (the slice 5.28 → 5.66);
+  - the lock ended by depth where something nearer stood a frame ago: that is the test the lamp fails.
+- Left: thin things that do not emit (a wire, a lattice by day) are still taken for gone under the jitter; the
+  locked lettering of a still sign comes back from a motion's blur by the blend alone (the 0.2 on Kabukichō's
+  signs); a lamp that comes on arrives over a quarter of a second.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
