@@ -80,7 +80,8 @@ export interface Live {
   quit(): Promise<void>;
 }
 
-export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string; width?: number; height?: number; bounces?: number } = {}): Live {
+/** `stdout`: the runner's stdout lines (what the game posts on the host channel: `{"host":[...]}`); `args`: more flags. */
+export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string; width?: number; height?: number; bounces?: number; stdout?: (line: string) => void; args?: string[] } = {}): Live {
   const args = ["live", bundle, "--assets", b.assets, "--presets", b.presets, "--width", String(o.width ?? 1280), "--height", String(o.height ?? 720), "--scale", o.scale ?? "0.5"];
   if (o.bounces) args.push("--bounces", String(o.bounces));
   if (o.room) args.push("--room", o.room);
@@ -90,7 +91,9 @@ export function startLive(b: Build, bundle: string, o: { scale?: string; env?: R
   }
   const t0 = performance.now();
   const env = { ...process.env, ...(o.profile ? switches("PROFILE", "1") : {}), ...o.env };
-  const p = spawn(b.bin, args, { stdio: ["pipe", "ignore", "pipe"], env });
+  if (o.args) args.push(...o.args);
+  const p = spawn(b.bin, args, { stdio: ["pipe", o.stdout ? "pipe" : "ignore", "pipe"], env });
+  if (o.stdout) createInterface({ input: p.stdout! }).on("line", o.stdout);
   const lines: string[] = [];
   let waiters: [(l: string) => boolean, (l: string) => void][] = [];
   createInterface({ input: p.stderr! }).on("line", (l) => {

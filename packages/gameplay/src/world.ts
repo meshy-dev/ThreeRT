@@ -36,6 +36,7 @@
 
 import type { Object3D, PerspectiveCamera, Scene } from "@threert/scene";
 import type { FrameRunner } from "./frame.ts";
+import type { Input } from "./input.ts";
 import { seededRandom, withDeterminism } from "./random.ts";
 import type { GameEvent } from "./tx.ts";
 import type { Json } from "./store.ts";
@@ -56,6 +57,8 @@ export interface WorldContext<S> {
   random(): number;
   /** Starts a state transaction: `handlers[type]` runs with `payload` after this handler and the event's own. */
   emit(type: string, payload?: unknown): void;
+  /** What the player holds and moves (input.ts), as of the app's last input message. */
+  readonly input: Input;
 }
 
 /** A world handler: receives a copy of the event payload. Must be synchronous. */
@@ -65,11 +68,9 @@ export type WorldHandler<S> = (world: WorldContext<S>, ev: any) => void;
 /** The random stream of a world handler's event (the transaction of the same event has stream `event.id`). */
 const WORLD_STREAM = 0x40000000;
 
-/**
- * Runs `on[event.type]` on this node. Returns the state events it emitted and its error, if it threw (what it had
- * emitted before is dropped with it, as a failed transaction's emits are).
- */
-export function runWorldHandler<S>(handler: WorldHandler<S>, frames: FrameRunner<S>, seed: number, event: GameEvent): { emits: { type: string; payload: Json }[]; error?: string } {
+/** The context of what runs on this node for `event` (a world handler, the listeners of a batch of host messages),
+ *  with the state events it emits and its random stream. */
+export function worldContext<S>(frames: FrameRunner<S>, seed: number, event: { id: number; ts: number }): { world: WorldContext<S>; emits: { type: string; payload: Json }[]; random: () => number } {
   const emits: { type: string; payload: Json }[] = [];
   const random = seededRandom(seed, (event.id + WORLD_STREAM) >>> 0);
   const world: WorldContext<S> = {
@@ -86,7 +87,17 @@ export function runWorldHandler<S>(handler: WorldHandler<S>, frames: FrameRunner
       if (text === undefined) throw new TypeError(`emit(${type}): the payload must be plain JSON`);
       emits.push({ type, payload: JSON.parse(text) as Json });
     },
+    input: frames.input,
   };
+  return { world, emits, random };
+}
+
+/**
+ * Runs `on[event.type]` on this node. Returns the state events it emitted and its error, if it threw (what it had
+ * emitted before is dropped with it, as a failed transaction's emits are).
+ */
+export function runWorldHandler<S>(handler: WorldHandler<S>, frames: FrameRunner<S>, seed: number, event: GameEvent): { emits: { type: string; payload: Json }[]; error?: string } {
+  const { world, emits, random } = worldContext(frames, seed, event);
   try {
     withDeterminism(event.ts, random, () => {
       const r: unknown = handler(world, structuredClone(event.payload));
