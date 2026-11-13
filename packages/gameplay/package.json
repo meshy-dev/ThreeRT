@@ -2,7 +2,9 @@
   "name": "@threert/gameplay",
   "private": true,
   "license": "MIT",
+  "description": "Game logic for ThreeRT: state, transactional handlers, world handlers and per-frame scripts on top of @threert/scene; deterministic and replayable.",
+  "keywords": ["threert", "three.js", "threejs", "game engine", "gameplay", "game state", "transactions", "deterministic", "replay", "ray tracing", "typescript"],
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@threert/scene": "*" }
+  "exports": {".": "./src/index.ts"},
+  "dependencies": {"@threert/scene": "*"}
 }
