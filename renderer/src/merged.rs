@@ -1,7 +1,8 @@
-//! The merged binding layout: the engine's shaders with at most eight storage buffers a stage, WebGPU's default limit
-//! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written and the live passes 25: more than a
-//! browser gives a page. There is one source: pathtrace.wgsl and live.wgsl, and the bindings gpu.rs and live/targets.rs make for
-//! them, are what the native renderer runs, unchanged. This module writes the browser's from them, as text (as
+//! The merged binding layout: the kernel with at most eight storage buffers a stage, WebGPU's default limit
+//! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written: more than a browser gives a page. (The
+//! live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.) There
+//! is one source: pathtrace.wgsl, and the bindings gpu.rs makes for it, are what the native renderer runs, unchanged.
+//! This module writes the browser's from them, as text (as
 //! `gpu::kernel_source` patches the kernel for a scene's features), and gives the Rust side the numbers that go with
 //! it. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the renderer
 //! check it too (docs/RUNTIME.md "The engine in a browser").
@@ -14,10 +15,9 @@
 //!    the struct's (`Gpu::sync_tables`; they are small).
 //!  - The kernel's six group-1 buffers (`KERNEL_LIVE`: the radiance cache, what the live passes read
 //!    of a trace) become the arrays of `ML: MergedLive`, one buffer that they are ranges of (`gpu::KernelBufs`).
-//!  - The live passes' buffers of one element type are ranges of one slab each (`SLABS`), indexed from an offset
-//!    the pass reads from a uniform (`LO`): the source does not change with the size of the view. (The lasting
-//!    buffers' two halves alternate by a uniform, live.wgsl `this_half`.) `MK` is the kernel's `ML` buffer read as
-//!    vec4s.
+//!    What the live passes read of it starts at a multiple of 256 bytes (`@align(256)`): the passes bind those
+//!    ranges as buffers of their own, and a binding's offset is a multiple of that (WebGPU's
+//!    `minStorageBufferOffsetAlignment`).
 //!
 //! A use of a merged name the generator does not know (anything but `name[...]`, `&name[...]` and
 //! `arrayLength(&name)`), a declaration that is not found exactly once, a name the generator adds that the source
@@ -31,7 +31,8 @@ pub const STORAGE_BUFFERS: u32 = 8;
 /// One of the kernel's buffers that becomes an array of a merged struct.
 pub struct Member {
     pub name: &'static str,
-    /// Its element type, the element's size and alignment in a storage buffer.
+    /// Its element type and the element's size in a storage buffer; where its array may start in the struct: its
+    /// element's alignment, or more (written `@align`).
     pub ty: &'static str,
     pub stride: u64,
     pub align: u64,
@@ -58,9 +59,9 @@ pub const KERNEL_LIVE: [Member; 6] = [
     Member { name: "cache_keys", ty: "atomic<u32>", stride: 4, align: 4, decl: "@group(1) @binding(1) var<storage, read_write> cache_keys: array<atomic<u32>>;" },
     Member { name: "cache_acc", ty: "atomic<u32>", stride: 4, align: 4, decl: "@group(1) @binding(2) var<storage, read_write> cache_acc: array<atomic<u32>>;" },
     Member { name: "cache_val", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(3) var<storage, read_write> cache_val: array<vec4<f32>>;" },
-    Member { name: "refl", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;" },
-    Member { name: "motion_out", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;" },
-    Member { name: "direct_out", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;" },
+    Member { name: "refl", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;" },
+    Member { name: "motion_out", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;" },
+    Member { name: "direct_out", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;" },
 ];
 pub const KERNEL_LIVE_BINDING: u32 = 1;
 /// `MergedLive`'s last array, after `KERNEL_LIVE`'s: the loop guard's count (`guard`; its first word: the invocations
@@ -81,7 +82,8 @@ pub fn live_layout(caps: &[u32; 6]) -> (Vec<u64>, u64) {
         out.push(at);
         at += m.stride * c as u64;
     }
-    (out, at.next_multiple_of(16))
+    // (A struct's size is a multiple of its largest member's alignment: 256 where the live passes' ranges are.)
+    (out, at.next_multiple_of(members.iter().map(|m| m.align).max().unwrap_or(16)))
 }
 
 /// The lengths of the merged structs' arrays: what a kernel's source is written for (`gpu::Kernel::caps`).
@@ -112,74 +114,6 @@ pub fn offsets(members: &[Member], caps: &[u32]) -> (Vec<u64>, u64) {
     }
     (out, at.next_multiple_of(members.iter().map(|m| m.align).max().unwrap_or(1)))
 }
-
-/// A slab of the live passes: buffers of one element type as ranges of one buffer.
-pub struct Slab {
-    pub name: &'static str,
-    pub ty: &'static str,
-    pub stride: u64,
-    pub binding: u32,
-    pub read_only: bool,
-}
-
-pub const SLABS: [Slab; 6] = [
-    Slab { name: "MV4", ty: "vec4<f32>", stride: 16, binding: 2, read_only: false },
-    Slab { name: "MU2", ty: "vec2<u32>", stride: 8, binding: 4, read_only: false },
-    Slab { name: "MF1", ty: "f32", stride: 4, binding: 15, read_only: false },
-    Slab { name: "MU4", ty: "vec4<u32>", stride: 16, binding: 17, read_only: false },
-    Slab { name: "MA", ty: "atomic<u32>", stride: 4, binding: 13, read_only: false },
-    // The kernel's `ML` buffer (what the live passes read of a trace), as vec4s: every array of it starts at a
-    // multiple of 16 bytes.
-    Slab { name: "MK", ty: "vec4<f32>", stride: 16, binding: 25, read_only: true },
-];
-pub const SLAB_V4: usize = 0;
-pub const SLAB_U2: usize = 1;
-pub const SLAB_F1: usize = 2;
-pub const SLAB_U4: usize = 3;
-pub const SLAB_A: usize = 4;
-pub const SLAB_K: usize = 5;
-
-/// One of the live passes' buffers that becomes a range of a slab: its binding in live.wgsl as written (what
-/// `live::Targets` binds there), its slab, its declaration up to the `;`.
-pub struct LiveBuf {
-    pub name: &'static str,
-    pub binding: u32,
-    pub slab: usize,
-    pub decl: &'static str,
-}
-
-/// In `MergedOffsets`' order (group 0, binding `OFFSETS_BINDING`: an (offset, length) pair of u32 each, in elements).
-pub const LIVE_BUFS: [LiveBuf; 23] = [
-    LiveBuf { name: "diffuse_hist", binding: 2, slab: SLAB_V4, decl: "@group(0) @binding(2) var<storage, read_write> diffuse_hist: array<vec4<f32>>;" },
-    LiveBuf { name: "color_hist", binding: 3, slab: SLAB_V4, decl: "@group(0) @binding(3) var<storage, read_write> color_hist: array<vec4<f32>>;" },
-    LiveBuf { name: "gbuffer", binding: 4, slab: SLAB_U2, decl: "@group(0) @binding(4) var<storage, read_write> gbuffer: array<vec2<u32>>;" },
-    LiveBuf { name: "spec_hist", binding: 5, slab: SLAB_V4, decl: "@group(0) @binding(5) var<storage, read_write> spec_hist: array<vec4<f32>>;" },
-    LiveBuf { name: "diffuse_mom", binding: 6, slab: SLAB_V4, decl: "@group(0) @binding(6) var<storage, read_write> diffuse_mom: array<vec4<f32>>;" },
-    LiveBuf { name: "diffuse_fast", binding: 7, slab: SLAB_U2, decl: "@group(0) @binding(7) var<storage, read_write> diffuse_fast: array<vec2<u32>>;" },
-    LiveBuf { name: "up_state", binding: 8, slab: SLAB_U4, decl: "@group(0) @binding(8) var<storage, read_write> up_state: array<vec4<u32>>;" },
-    LiveBuf { name: "sample_vel", binding: 9, slab: SLAB_V4, decl: "@group(0) @binding(9) var<storage, read_write> sample_vel: array<vec4<f32>>;" },
-    LiveBuf { name: "ae_bins", binding: 13, slab: SLAB_A, decl: "@group(0) @binding(13) var<storage, read_write> ae_bins: array<atomic<u32>, 64>;" },
-    LiveBuf { name: "ae_state", binding: 14, slab: SLAB_V4, decl: "@group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;" },
-    LiveBuf { name: "lumq", binding: 15, slab: SLAB_F1, decl: "@group(0) @binding(15) var<storage, read_write> lumq: array<f32>;" },
-    LiveBuf { name: "lumb", binding: 16, slab: SLAB_F1, decl: "@group(0) @binding(16) var<storage, read_write> lumb: array<f32>;" },
-    LiveBuf { name: "fa", binding: 17, slab: SLAB_V4, decl: "@group(0) @binding(17) var<storage, read_write> fa: array<vec4<f32>>;" },
-    LiveBuf { name: "fb", binding: 18, slab: SLAB_V4, decl: "@group(0) @binding(18) var<storage, read_write> fb: array<vec4<f32>>;" },
-    LiveBuf { name: "bloom_a", binding: 19, slab: SLAB_V4, decl: "@group(0) @binding(19) var<storage, read_write> bloom_a: array<vec4<f32>>;" },
-    LiveBuf { name: "bloom_b", binding: 20, slab: SLAB_V4, decl: "@group(0) @binding(20) var<storage, read_write> bloom_b: array<vec4<f32>>;" },
-    LiveBuf { name: "spec_pp", binding: 21, slab: SLAB_U2, decl: "@group(0) @binding(21) var<storage, read_write> spec_pp: array<vec2<u32>>;" },
-    LiveBuf { name: "sb", binding: 22, slab: SLAB_V4, decl: "@group(0) @binding(22) var<storage, read_write> sb: array<vec4<f32>>;" },
-    LiveBuf { name: "refl_in", binding: 23, slab: SLAB_K, decl: "@group(0) @binding(23) var<storage, read> refl_in: array<vec4<f32>>;" },
-    LiveBuf { name: "refl_res", binding: 24, slab: SLAB_V4, decl: "@group(0) @binding(24) var<storage, read_write> refl_res: array<vec4<f32>>;" },
-    LiveBuf { name: "motion_in", binding: 25, slab: SLAB_K, decl: "@group(0) @binding(25) var<storage, read> motion_in: array<vec4<f32>>;" },
-    LiveBuf { name: "direct_in", binding: 26, slab: SLAB_K, decl: "@group(0) @binding(26) var<storage, read> direct_in: array<vec4<f32>>;" },
-    LiveBuf { name: "lock_fwd", binding: 27, slab: SLAB_A, decl: "@group(0) @binding(27) var<storage, read_write> lock_fwd: array<atomic<u32>>;" },
-];
-pub const OFFSETS_BINDING: u32 = 31;
-/// `MergedOffsets`' size: a pair for each of `LIVE_BUFS`, and one unused that makes it a multiple of 16 bytes.
-pub const OFFSETS_BYTES: usize = (LIVE_BUFS.len() + 1) * 8;
-
-/// The live passes' storage bindings that stay as they are: (binding, read only).
-pub const LIVE_KEPT: [(u32, bool); 2] = [(1, true), (10, false)];
 
 /// How a merged name's uses are rewritten.
 struct Rule {
@@ -363,7 +297,7 @@ fn fresh(src: &str, names: &[&str]) {
 }
 
 fn merged_struct(name: &str, members: &[&Member], caps: &[u32]) -> String {
-    let fields: Vec<String> = members.iter().zip(caps).map(|(m, c)| format!("    {}: array<{}, {c}>,", m.name, m.ty)).collect();
+    let fields: Vec<String> = members.iter().zip(caps).map(|(m, c)| format!("    {}{}: array<{}, {c}>,", if m.align > 16 { format!("@align({}) ", m.align) } else { String::new() }, m.name, m.ty)).collect();
     format!("struct {name} {{\n{}\n}};\n", fields.join("\n"))
 }
 
@@ -430,30 +364,6 @@ pub fn uniform_tables(src: &str) -> String {
         take(&mut s, m.decl, &sized);
         rules.push(Rule { name: m.name, open: format!("{}[min(u32(", m.name), close: format!("), {}u)", len - 1), len: format!("{len}u") });
     }
-    rewrite(&s, &rules)
-}
-
-/// The live passes (live.wgsl) in the merged layout: sample_px, out_px and ae_bins as they are, the slabs, and the
-/// offsets `LO`.
-pub fn live(src: &str) -> String {
-    let mut names: Vec<&str> = SLABS.iter().map(|s| s.name).collect();
-    names.extend(["LO", "MergedOffsets", "merged_pad"]);
-    fresh(src, &names);
-    let mut s = src.to_string();
-    for b in LIVE_BUFS.iter() {
-        take(&mut s, b.decl, "");
-    }
-    // (A last pair unused: the struct is 208 bytes, a multiple of 16. WebGPU does not ask for that, but wgpu's
-    // downlevel targets do of a uniform binding's size, and it costs nothing; `OFFSETS_BYTES`.)
-    let fields: Vec<String> = LIVE_BUFS.iter().map(|b| format!("    {}: vec2<u32>,", b.name)).chain(["    merged_pad: vec2<u32>,".to_string()]).collect();
-    let mut head = format!("// The merged layout (renderer/src/merged.rs): each buffer's (first element, length) in its slab.\nstruct MergedOffsets {{\n{}\n}};\n@group(0) @binding({OFFSETS_BINDING}) var<uniform> LO: MergedOffsets;\n", fields.join("\n"));
-    for sl in &SLABS {
-        head += &format!("@group(0) @binding({}) var<storage, {}> {}: array<{}>;\n", sl.binding, if sl.read_only { "read" } else { "read_write" }, sl.name, sl.ty);
-    }
-    // After the uniforms' declaration (the file's first binding).
-    let anchor = "@group(0) @binding(0) var<uniform> L: LiveParams;\n";
-    take(&mut s, anchor, &format!("{anchor}{head}"));
-    let rules: Vec<Rule> = LIVE_BUFS.iter().map(|b| Rule { name: b.name, open: format!("{}[LO.{}.x + (", SLABS[b.slab].name, b.name), close: ")".into(), len: format!("LO.{}.y", b.name) }).collect();
     rewrite(&s, &rules)
 }
 
@@ -550,7 +460,6 @@ mod tests {
     use super::*;
 
     const KERNEL: &str = include_str!("../shaders/pathtrace.wgsl");
-    const LIVE: &str = include_str!("../shaders/live.wgsl");
 
     fn caps() -> Caps {
         // A cache of one entry, a view of 64 x 36: lengths that are not round.
@@ -656,23 +565,6 @@ mod tests {
         let out = uniform_tables(src);
         assert!(out.starts_with("@group(0) @binding(14) var<uniform> tex_info: array<vec4<f32>, 4096>;\n@group(0) @binding(15) var<uniform> objects: array<vec4<f32>, 4096>;\n@group(0) @binding(17) var<uniform> instances: array<Instance, 409>;\n@group(0) @binding(18) var<uniform> media: array<Medium, 32>;\n"), "{out}");
         assert!(out.ends_with("{ return objects[min(u32(a[1] * 3u + 1u), 4095u)].w + tex_info[min(u32(u32(objects[min(u32(k), 4095u)].x)), 4095u)].y + media[min(u32(0), 31u)].b.x; }\n"), "{out}");
-    }
-
-    /// The same for the live passes (25 as written).
-    #[test]
-    fn the_merged_live_passes_fit_eight_storage_buffers() {
-        let (m, info) = parse(LIVE);
-        assert_eq!(storage_buffers(&m, &info).1, 25, "the live passes as written");
-        let passes = m.entry_points.len();
-        let (m, info) = parse(&live(LIVE));
-        let (used, declared) = storage_buffers(&m, &info);
-        assert_eq!(declared as u32, STORAGE_BUFFERS);
-        assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "{used:?}");
-        assert_eq!(used.len(), passes, "every pass is still there");
-        // The offsets' struct: a pair of u32 each, in order (what `live::Targets` writes).
-        assert_eq!(layout(&m, "MergedOffsets"), ((0..24).map(|k| k * 8).collect(), OFFSETS_BYTES as u64));
-        assert_eq!(OFFSETS_BYTES % 16, 0);
-        assert_eq!(LIVE_BUFS.len(), 23);
     }
 
     /// The Rust side's records are the size the merged structs give their elements.

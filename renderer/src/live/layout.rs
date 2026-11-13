@@ -2,8 +2,9 @@
 //! `BINDINGS`, each binding's name, number, kind and element stride; `ENTRY_POINTS`, the bindings each entry point
 //! uses); here is only what the shader cannot say: what each binding is bound to and how many elements a buffer of
 //! the passes' own holds (`RESOURCES`), and the passes' order and the grid each runs over (`PASSES`). `check` holds
-//! the two to each other (a unit test, and every view as it starts). A buffer or a pass more: its declaration or
-//! entry point in live.wgsl, a line here.
+//! the two to each other (a unit test, and every view as it starts). Each pass binds what its entry point uses, and
+//! none more than a browser's eight storage buffers (the test below), so a page binds them as they are natively. A buffer
+//! or a pass more: its declaration or entry point in live.wgsl, a line here.
 
 /// A binding live.wgsl declares.
 pub(super) struct Binding {
@@ -117,6 +118,7 @@ pub(super) const PASSES: &[(&str, Grid)] = &[
     ("sfilt2", Grid::Traced),
     ("lock_carry", Grid::PrevTraced),
     ("compose", Grid::Traced),
+    ("track", Grid::Traced),
     ("judge", Grid::Traced),
     ("reject", Grid::Traced),
     ("upscale", Grid::Output),
@@ -143,8 +145,15 @@ pub(super) const PASSES: &[(&str, Grid)] = &[
     ("bloom_v1", Grid::Quarter),
     ("bloom_h0", Grid::Quarter),
     ("bloom_v0", Grid::Quarter),
+    ("view_raw", Grid::Output),
+    ("view_hdr", Grid::Output),
+    ("view_sample", Grid::Output),
     ("post", Grid::Output),
 ];
+
+/// The passes of the view modes (`LiveParams::mode`.x above 0): a frame in the lit picture does not run them (the
+/// per-pass profile times an empty pass for each, to keep its timestamps in `PASSES`' order).
+pub(super) const VIEW_MODE_PASSES: &[&str] = &["view_raw", "view_hdr", "view_sample"];
 
 impl Grid {
     /// Invocations, for an output of `out`, a traced grid of `traced` and the previous frame's `prev`.
@@ -217,10 +226,23 @@ pub(super) fn check() {
     assert!(problems.is_empty(), "the live passes' layout (live/layout.rs) and live.wgsl disagree:\n  {}", problems.join("\n  "));
 }
 
+/// The storage buffers pass `name` binds.
+pub(super) fn storage_count(name: &str) -> usize {
+    uses(name).iter().filter(|&&b| BINDINGS.iter().any(|x| x.binding == b && matches!(x.kind, Kind::Storage { .. }))).count()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn the_table_and_the_shader_agree() {
         super::check();
+    }
+
+    /// Every pass binds at most the storage buffers a browser gives a stage (WebGPU's default: merged.rs
+    /// `STORAGE_BUFFERS`), so that a page binds them as they are.
+    #[test]
+    fn every_pass_fits_a_browser() {
+        let over: Vec<String> = super::PASSES.iter().map(|p| (p.0, super::storage_count(p.0))).filter(|p| p.1 as u32 > crate::merged::STORAGE_BUFFERS).map(|p| format!("{} {}", p.0, p.1)).collect();
+        assert!(over.is_empty(), "passes over a browser's storage buffers: {over:?}");
     }
 }

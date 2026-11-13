@@ -1447,7 +1447,7 @@ impl Gpu {
         // layout with more does not validate).
         let merged = cfg!(target_arch = "wasm32") || std::env::var("THREERT_MERGED").is_ok_and(|v| v == "1");
         limits.max_storage_buffers_per_shader_stage = if merged { crate::merged::STORAGE_BUFFERS } else { al.max_storage_buffers_per_shader_stage.min(31) };
-        // Storage + uniform buffers together (the kernel binds 19 storage buffers, the live passes 25, each beside its
+        // Storage + uniform buffers together (the kernel binds 19 storage buffers, a live pass at most 8, each beside its
         // uniforms; Metal allows 31).
         limits.max_buffers_and_acceleration_structures_per_shader_stage = al.max_buffers_and_acceleration_structures_per_shader_stage.min(31);
         limits.max_acceleration_structures_per_shader_stage = al.max_acceleration_structures_per_shader_stage;
@@ -3297,8 +3297,8 @@ mod tests {
         assert_eq!(loop_guard(), None);
         let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
         let live = include_str!("../shaders/live.wgsl");
-        assert_eq!(crate::live::live_source(false), live);
-        println!("source live {}", sha(&crate::live::live_source(false)));
+        assert_eq!(crate::live::live_source(), live);
+        println!("source live {}", sha(&crate::live::live_source()));
         for hwrt in [false, true] {
             let base = kernel_base(hwrt);
             assert_eq!(guarded(&base, false, false), base);

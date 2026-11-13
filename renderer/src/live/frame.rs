@@ -556,10 +556,12 @@ impl LiveCore {
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 let q = (k as u32 + 1) * 2;
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
-                pass.set_pipeline(pipe);
-                pass.set_bind_group(0, &self.sc.bgs[k], &[]);
-                let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
-                pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
+                if self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name) {
+                    pass.set_pipeline(pipe);
+                    pass.set_bind_group(0, &self.sc.bgs[k], &[]);
+                    let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
+                    pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
+                }
                 drop(pass);
                 if *name == "upscale" && tl.is_some() {
                     for (j, train) in [(0u32, false), (1, true)] {
@@ -576,6 +578,9 @@ impl LiveCore {
             let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw });
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
+                if self.view_mode == 0 && layout::VIEW_MODE_PASSES.contains(name) {
+                    continue;
+                }
                 pass.set_pipeline(pipe);
                 pass.set_bind_group(0, &self.sc.bgs[k], &[]);
                 let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
