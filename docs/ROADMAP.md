@@ -1937,6 +1937,33 @@ the atlas) and field B are copied texture to texture, and the programs' step cou
 0.6024 (as without the rebuild); main 0.90. test-render 187 pass. Not carried: GPU particles (a rebuild still starts
 them afresh), and a grid whose size or program changed.
 
+**A lighting edit counted in frames (2026-11-13, after it).** The closing signs of `bench-temporal` run in real time
+and spread more than what they were asked to tell apart. `bench-temporal --shot edit` is the measure in frames
+(`tools/light-edit-scene.ts`: a closed room; a spot whose pool is on the back wall and whose bounce is on the floor;
+an emissive sign; each switched off and on at once; lockstep at 0.5, the frame k frames after the edit against the
+converged frame of the state after, beside the frame k frames after a history reset in that state). Two runs agree to
+0.01. Main (`cd54c70`), luminance against the reference at 1 / 8 / 32 / 128 / 256 frames after the edit:
+
+| edit, region | the edit | ΔE at 32 / 256 | a view with no memory, ΔE at 32 / 256 |
+|---|---|---|---|
+| lamp off, its pool | 29.8 / 11.2 / 3.33 / 1.36 / 1.17 | 15.2 / 1.75 | 0.53 / 0.36 |
+| lamp off, its bounce | 2.64 / 2.49 / 1.66 / 1.12 / 1.05 | 3.38 / 0.43 | 0.46 / 0.26 |
+| lamp on, its pool | 0.05 / 0.84 / 0.95 / 0.99 / 0.99 | 1.92 / 0.43 | 0.43 / 0.25 |
+| lamp on, its bounce | 0.37 / 0.43 / 0.72 / 0.93 / 0.97 | 3.00 / 0.53 | 1.15 / 0.52 |
+| sign off, the floor beside it | 2.94 / 2.53 / 1.66 / 1.12 / 1.05 | 12.7 / 1.56 | 0.73 / 0.46 |
+| sign on, the floor beside it | 0.35 / 0.48 / 0.76 / 0.95 / 0.97 | 7.28 / 0.84 | 0.80 / 0.43 |
+
+- **Open, the live view's largest fault found so far:** a lamp switched off leaves its pool on the wall for seconds,
+  11 times too bright after 8 frames, 3.3 times after half a second, still 17 % after 4 s, in blotches. The excess
+  falls as 1 / k. The diffuse history is cut once, to 2 frames, when its fast mean leaves the slow one; half the old
+  light is still in it, the slow mean is set to the fast one, the anti-lag has nothing more to find, and the history
+  accumulates again from there (and after 45 frames the long history is back). The upscaler's 16 samples follow that.
+  ReBLUR's form is another: the slow history clamped every frame into the range of a fast one (about 6 frames) around
+  the pixel, so it is dragged along until it has followed. Not done here.
+- The question #39 left: the radiance cache's 4 frames while the lighting is live. At 32 frames the bounce follows
+  later (lamp off: 2.24 for 1.66 at 32 frames, 1.38 for 1.12 at 128; lamp on: 0.50 for 0.72, 0.79 for 0.93). The 4
+  frames buy what they were said to and stay; the 0.16 ΔE they cost a scene at rest is the price.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
