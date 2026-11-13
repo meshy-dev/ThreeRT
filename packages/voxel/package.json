@@ -1,6 +1,7 @@
 {
   "name": "@threert/voxel",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": { "@threert/scene": "*" }

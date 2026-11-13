@@ -1,6 +1,7 @@
 {
   "name": "@threert/scene",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": { ".": "./src/index.ts" }
 }
