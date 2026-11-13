@@ -13,7 +13,7 @@
 //   node tools/bench-temporal.ts [--bundle out/bundles/kabukicho.js] [--out out/bench-temporal/<tag>] [--refs DIR]
 //                                [--refs-ue out/bench-temporal/refs-ue | none] [--bin renderer/target/release/threert-render]
 //                                [--tag name] [--scale auto|0.6|1] [--list-refs] [--motion-blur] [--region signs|ground|facades|u0,v0,u1,v1]
-//                                [--shot kabukicho|volumes|water|foliage]
+//                                [--shot kabukicho|volumes|water|foliage|edit]
 // --shot volumes: tools/volume-scene.ts (bundle out/bundles/volume-scene.js) at frozen scene time, the camera strafing 3 m
 // across the fog, smoke and fireball in 1 s; no lighting change. Regions fog | smoke | fire.
 // --shot water | foliage: motion in the scene, the camera still. water: tools/water-scene.ts (out/bundles/water-scene.js),
@@ -21,6 +21,14 @@
 // tools/foliage-scene.ts (out/bundles/foliage-scene.js), the plants swaying (windSway); regions plants | ferns. At scene
 // times T = 6, 7 and 8 s, lockstep at 100 % scale: the reference holds T for 1024 frames (frame time 0), `still` holds
 // it for 240 (the convergence floor), `moving` runs 240 frames at 60 fps up to T. The motion's cost is moving - still.
+// --shot edit: a lighting edit counted in frames (tools/light-edit-scene.ts, out/bundles/light-edit-scene.js; lockstep at
+// 60 fps, the camera still, --scale 0.5 unless given). A spot (`lamp`: its pool on the back wall, its bounce on the
+// floor) and an emissive panel (`sign`) are switched off and on at once. For each edit: the frame k frames after it
+// (k = 1 .. 256, after 300 frames in the state before) against the converged frame of the state after (1024 frames at
+// 100 %), per region: dE and the luminance ratio; beside it `fresh`, the frame k frames after a history reset in the
+// state after (a view with no memory of the state before). Where the edit's dE is above `fresh` the history holds the
+// old lighting; `settled` is the first k from which the luminance is within 2 % of the reference's for good (0: not
+// within the 256 frames). Lockstep: two runs of a build agree to 0.01.
 // --motion-blur: motion blur in both (UE: MB=1 bun ue5/temporal.ts -> refs-ue-mb, amount 0.5 / max 5 % / target 30 fps). Movie
 // Render Queue overrides the amount with its shutter fraction (the same 0.5) and the target FPS with the output rate (60;
 // MoviePipelineImagePassBase.cpp), half the blur of the real-time viewport, so ours runs with what MRQ rendered
@@ -31,6 +39,7 @@ import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { bundleGame } from "./bundle-game.ts";
 import { rendererVersion } from "./lib/bench.ts";
 
 const root = resolve(import.meta.dirname, "..");
@@ -44,15 +53,20 @@ const TIME_SHOTS: Record<string, { bundle: string; regions: string[] }> = {
   foliage: { bundle: "foliage-scene.js", regions: ["plants", "ferns"] },
 };
 const timeShot = TIME_SHOTS[flag("--shot", "kabukicho")];
+const editShot = flag("--shot", "kabukicho") === "edit";
+// (Its scene is one file: bundled here, unless a bundle is given.)
+if (editShot && !args.includes("--bundle")) await bundleGame(join(root, "tools/light-edit-scene.ts"), join(root, "out/bundles/light-edit-scene.js"));
 // The volume scene's media animate with scene time: frozen, references and test frames show the same smoke.
 if (volumes) process.env.THREERT_FREEZE_TIME = "1";
-const bundle = resolve(flag("--bundle", join(root, "out/bundles", volumes ? "volume-scene.js" : timeShot ? timeShot.bundle : "kabukicho.js")));
+const bundle = resolve(flag("--bundle", join(root, "out/bundles", volumes ? "volume-scene.js" : timeShot ? timeShot.bundle : editShot ? "light-edit-scene.js" : "kabukicho.js")));
 const tag = flag("--tag", "run");
 // --region: every comparison (ours and UE's) over one part of the frame, by name (bench-ghosting's regions of view v1)
 // or as u0,v0,u1,v1.
 const REGIONS: Record<string, string> = {
   ground: "0,0.62,1,1", signs: "0.2,0,0.8,0.45", facades: "0,0.1,0.25,0.62", fog: "0.08,0.42,0.38,0.72", smoke: "0.4,0.15,0.6,0.65", fire: "0.7,0.42,0.86,0.62",
   water: "0.3,0.55,1,1", reflections: "0.5,0.6,0.8,0.85", plants: "0,0.35,0.75,0.8", ferns: "0.12,0.55,0.75,0.8",
+  // The lighting-edit scene: the spot's pool on the back wall, the floor its bounce lights, the floor beside the sign.
+  pool: "0.6,0.28,0.8,0.58", bounce: "0.75,0.68,0.98,0.88", signfloor: "0.03,0.75,0.3,0.95", room: "0,0,1,1",
 };
 const region = args.includes("--region") ? (REGIONS[flag("--region", "")] ?? flag("--region", "")) : null;
 const scale = flag("--scale", "auto"); // test-run render scale (references are always 100%)
@@ -171,6 +185,94 @@ if (timeShot) {
   writeFileSync(join(out, "metrics.json"), JSON.stringify(rows, null, 1));
   execFileSync(bin, ["montage", join(out, "motion.jpg"), "--width", "640", ...["ref-8s", "still-8s", "moving-8s"].map((n) => join(out, `${n}.png`))]);
   console.log(`${out}/motion.jpg`);
+  process.exit(0);
+}
+
+// ------------------------------------------------------------------------------------------------ a lighting edit
+if (editShot) {
+  mkdirSync(out, { recursive: true });
+  mkdirSync(refs, { recursive: true });
+  const KS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  // The scene's states by what is off, and the events that reach them from all on.
+  const STATES: Record<string, string[]> = { on: [], "lamp-off": ["lamp"], "sign-off": ["sign"] };
+  const EDITS: { name: string; from: string; event: string; to: string; regions: string[] }[] = [
+    { name: "lamp off", from: "on", event: "lamp", to: "lamp-off", regions: ["pool", "bounce", "room"] },
+    { name: "lamp on", from: "lamp-off", event: "lamp", to: "on", regions: ["pool", "bounce", "room"] },
+    { name: "sign off", from: "on", event: "sign", to: "sign-off", regions: ["signfloor", "room"] },
+    { name: "sign on", from: "sign-off", event: "sign", to: "on", regions: ["signfloor", "room"] },
+  ];
+  const session = async (s: string, state: string) => {
+    const live = new Live(s);
+    await live.wait((l) => l.includes("fps on"));
+    live.send({ cmd: "lockstep", dt: 1 / 60 });
+    for (const e of STATES[state]) live.send({ cmd: "event", type: e });
+    const frames = async (n: number, path?: string) => {
+      const id = `s${Math.random().toString(36).slice(2)}`;
+      const done = live.wait((l) => (path ? l.includes(`snapshot ${path}`) : l === `live: sync ${id}`));
+      live.send({ cmd: "frames", n, ...(path ? { snapshot: path } : { sync: id }) });
+      await done;
+    };
+    // (The events land with the first frames; then the history starts over in that state.)
+    await frames(4);
+    live.send({ cmd: "reset" });
+    return { live, frames };
+  };
+  const quit = async (live: Live) => {
+    live.quit();
+    await sleep(300);
+  };
+  // References: each state converged at 100 %.
+  for (const state of Object.keys(STATES)) {
+    const ref = join(refs, `edit-${state}.png`);
+    if (existsSync(ref)) continue;
+    const { live, frames } = await session("1", state);
+    await frames(1024, ref);
+    await quit(live);
+  }
+  const testScale = args.includes("--scale") ? scale : "0.5";
+  // Fresh: k frames after a reset in each state.
+  for (const state of Object.keys(STATES)) {
+    const { live, frames } = await session(testScale, state);
+    let at = 0;
+    for (const k of KS) {
+      await frames(k - at, join(out, `fresh-${state}-${k}.png`));
+      at = k;
+    }
+    await quit(live);
+  }
+  const compare = (ref: string, img: string, r: string) => JSON.parse(execFileSync(bin, ["compare", ref, img, "--region", REGIONS[r]]).toString().trim().split("\n").pop()!);
+  const rows: Record<string, string | number>[] = [];
+  const summary: Record<string, string | number>[] = [];
+  for (const e of EDITS) {
+    const tag = e.name.replace(" ", "-");
+    const { live, frames } = await session(testScale, e.from);
+    await frames(300);
+    live.send({ cmd: "event", type: e.event });
+    let at = 0;
+    for (const k of KS) {
+      await frames(k - at, join(out, `${tag}-${k}.png`));
+      at = k;
+    }
+    await quit(live);
+    const ref = join(refs, `edit-${e.to}.png`);
+    for (const r of e.regions) {
+      const ms = KS.map((k) => ({ k, edit: compare(ref, join(out, `${tag}-${k}.png`), r), fresh: compare(ref, join(out, `fresh-${e.to}-${k}.png`), r) }));
+      for (const m of ms) rows.push({ edit: e.name, region: r, k: m.k, dE: m.edit.mean_delta_e, fresh_dE: m.fresh.mean_delta_e, luminance: m.edit.luminance_ratio, fresh_luminance: m.fresh.luminance_ratio, ssim: m.edit.ssim });
+      // The first k from which the luminance stays within 2 % of the reference's (0: never within the frames taken).
+      const off = (m: (typeof ms)[number]) => Math.abs(m.edit.luminance_ratio - 1) > 0.02;
+      const last = ms.findLastIndex(off);
+      const at = (k: number) => ms.find((m) => m.k === k)!;
+      summary.push({
+        edit: e.name, region: r, settled: last === ms.length - 1 ? 0 : ms[last + 1].k,
+        "lum@8": at(8).edit.luminance_ratio, "lum@32": at(32).edit.luminance_ratio, "lum@128": at(128).edit.luminance_ratio, "lum@256": at(256).edit.luminance_ratio,
+        "dE@32": at(32).edit.mean_delta_e, "fresh@32": at(32).fresh.mean_delta_e, "dE@256": at(256).edit.mean_delta_e, "fresh@256": at(256).fresh.mean_delta_e,
+      });
+    }
+  }
+  console.table(summary);
+  writeFileSync(join(out, "metrics.json"), JSON.stringify({ rows, summary }, null, 1));
+  execFileSync(bin, ["montage", join(out, "edit.jpg"), "--width", "640", ...["lamp-off-8", "lamp-off-32", "lamp-off-256"].map((n) => join(out, `${n}.png`)), join(refs, "edit-lamp-off.png")]);
+  console.log(`${out}/edit.jpg, metrics.json (every k)`);
   process.exit(0);
 }
 
