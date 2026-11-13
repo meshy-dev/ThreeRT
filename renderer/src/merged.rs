@@ -1,5 +1,5 @@
 //! The merged binding layout: the engine's shaders with at most eight storage buffers a stage, WebGPU's default limit
-//! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written and the live passes 28: more than a
+//! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written and the live passes 24: more than a
 //! browser gives a page. There is one source: pathtrace.wgsl and live.wgsl, and the bindings gpu.rs and live.rs make for
 //! them, are what the native renderer runs, unchanged. This module writes the browser's from them, as text (as
 //! `gpu::kernel_source` patches the kernel for a scene's features), and gives the Rust side the numbers that go with
@@ -15,8 +15,9 @@
 //!  - The kernel's six group-1 buffers (`KERNEL_LIVE`: the radiance cache, what the live passes read
 //!    of a trace) become the arrays of `ML: MergedLive`, one buffer that they are ranges of (`gpu::KernelBufs`).
 //!  - The live passes' buffers of one element type are ranges of one slab each (`SLABS`), indexed from an offset
-//!    the pass reads from a uniform (`LO`): the source does not change with the size of the view, and the two
-//!    bind groups of the history's ping-pong are two sets of offsets. `MK` is the kernel's `ML` buffer read as vec4s.
+//!    the pass reads from a uniform (`LO`): the source does not change with the size of the view. (The lasting
+//!    buffers' two halves alternate by a uniform, live.wgsl `this_half`.) `MK` is the kernel's `ML` buffer read as
+//!    vec4s.
 //!
 //! A use of a merged name the generator does not know (anything but `name[...]`, `&name[...]` and
 //! `arrayLength(&name)`), a declaration that is not found exactly once, a name the generator adds that the source
@@ -146,32 +147,28 @@ pub struct LiveBuf {
 }
 
 /// In `MergedOffsets`' order (group 0, binding `OFFSETS_BINDING`: an (offset, length) pair of u32 each, in elements).
-pub const LIVE_BUFS: [LiveBuf; 25] = [
-    LiveBuf { name: "hist_in", binding: 2, slab: SLAB_V4, decl: "@group(0) @binding(2) var<storage, read> hist_in: array<vec4<f32>>;" },
-    LiveBuf { name: "hist_out", binding: 3, slab: SLAB_V4, decl: "@group(0) @binding(3) var<storage, read_write> hist_out: array<vec4<f32>>;" },
-    LiveBuf { name: "gb_in", binding: 4, slab: SLAB_U2, decl: "@group(0) @binding(4) var<storage, read> gb_in: array<vec2<u32>>;" },
-    LiveBuf { name: "gb_out", binding: 5, slab: SLAB_U2, decl: "@group(0) @binding(5) var<storage, read_write> gb_out: array<vec2<u32>>;" },
-    LiveBuf { name: "fa", binding: 6, slab: SLAB_V4, decl: "@group(0) @binding(6) var<storage, read_write> fa: array<vec4<f32>>;" },
-    LiveBuf { name: "fb", binding: 7, slab: SLAB_V4, decl: "@group(0) @binding(7) var<storage, read_write> fb: array<vec4<f32>>;" },
-    LiveBuf { name: "bloom_a", binding: 8, slab: SLAB_V4, decl: "@group(0) @binding(8) var<storage, read_write> bloom_a: array<vec4<f32>>;" },
-    LiveBuf { name: "bloom_b", binding: 9, slab: SLAB_V4, decl: "@group(0) @binding(9) var<storage, read_write> bloom_b: array<vec4<f32>>;" },
+pub const LIVE_BUFS: [LiveBuf; 21] = [
+    LiveBuf { name: "diffuse_hist", binding: 2, slab: SLAB_V4, decl: "@group(0) @binding(2) var<storage, read_write> diffuse_hist: array<vec4<f32>>;" },
+    LiveBuf { name: "color_hist", binding: 3, slab: SLAB_V4, decl: "@group(0) @binding(3) var<storage, read_write> color_hist: array<vec4<f32>>;" },
+    LiveBuf { name: "gbuffer", binding: 4, slab: SLAB_U2, decl: "@group(0) @binding(4) var<storage, read_write> gbuffer: array<vec2<u32>>;" },
+    LiveBuf { name: "spec_hist", binding: 5, slab: SLAB_V4, decl: "@group(0) @binding(5) var<storage, read_write> spec_hist: array<vec4<f32>>;" },
+    LiveBuf { name: "diffuse_mom", binding: 6, slab: SLAB_V4, decl: "@group(0) @binding(6) var<storage, read_write> diffuse_mom: array<vec4<f32>>;" },
+    LiveBuf { name: "diffuse_fast", binding: 7, slab: SLAB_U2, decl: "@group(0) @binding(7) var<storage, read_write> diffuse_fast: array<vec2<u32>>;" },
+    LiveBuf { name: "up_state", binding: 8, slab: SLAB_U4, decl: "@group(0) @binding(8) var<storage, read_write> up_state: array<vec4<u32>>;" },
+    LiveBuf { name: "sample_vel", binding: 9, slab: SLAB_V4, decl: "@group(0) @binding(9) var<storage, read_write> sample_vel: array<vec4<f32>>;" },
     LiveBuf { name: "ae_state", binding: 14, slab: SLAB_V4, decl: "@group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;" },
     LiveBuf { name: "lumq", binding: 15, slab: SLAB_F1, decl: "@group(0) @binding(15) var<storage, read_write> lumq: array<f32>;" },
     LiveBuf { name: "lumb", binding: 16, slab: SLAB_F1, decl: "@group(0) @binding(16) var<storage, read_write> lumb: array<f32>;" },
-    LiveBuf { name: "ae_in", binding: 17, slab: SLAB_U4, decl: "@group(0) @binding(17) var<storage, read_write> ae_in: array<vec4<u32>>;" },
-    LiveBuf { name: "ae_out", binding: 18, slab: SLAB_U4, decl: "@group(0) @binding(18) var<storage, read_write> ae_out: array<vec4<u32>>;" },
-    LiveBuf { name: "shist_in", binding: 19, slab: SLAB_V4, decl: "@group(0) @binding(19) var<storage, read> shist_in: array<vec4<f32>>;" },
-    LiveBuf { name: "shist_out", binding: 20, slab: SLAB_V4, decl: "@group(0) @binding(20) var<storage, read_write> shist_out: array<vec4<f32>>;" },
-    LiveBuf { name: "mom_in", binding: 21, slab: SLAB_V4, decl: "@group(0) @binding(21) var<storage, read> mom_in: array<vec4<f32>>;" },
-    LiveBuf { name: "mom_out", binding: 22, slab: SLAB_V4, decl: "@group(0) @binding(22) var<storage, read_write> mom_out: array<vec4<f32>>;" },
-    LiveBuf { name: "spec_pp", binding: 23, slab: SLAB_U2, decl: "@group(0) @binding(23) var<storage, read_write> spec_pp: array<vec2<u32>>;" },
-    LiveBuf { name: "sb", binding: 24, slab: SLAB_V4, decl: "@group(0) @binding(24) var<storage, read_write> sb: array<vec4<f32>>;" },
-    LiveBuf { name: "refl_in", binding: 25, slab: SLAB_K, decl: "@group(0) @binding(25) var<storage, read> refl_in: array<vec4<f32>>;" },
-    LiveBuf { name: "refl_res", binding: 26, slab: SLAB_V4, decl: "@group(0) @binding(26) var<storage, read_write> refl_res: array<vec4<f32>>;" },
-    LiveBuf { name: "motion_in", binding: 27, slab: SLAB_K, decl: "@group(0) @binding(27) var<storage, read> motion_in: array<vec4<f32>>;" },
-    LiveBuf { name: "direct_in", binding: 28, slab: SLAB_K, decl: "@group(0) @binding(28) var<storage, read> direct_in: array<vec4<f32>>;" },
-    LiveBuf { name: "xhist_in", binding: 29, slab: SLAB_V4, decl: "@group(0) @binding(29) var<storage, read> xhist_in: array<vec4<f32>>;" },
-    LiveBuf { name: "xhist_out", binding: 30, slab: SLAB_V4, decl: "@group(0) @binding(30) var<storage, read_write> xhist_out: array<vec4<f32>>;" },
+    LiveBuf { name: "fa", binding: 17, slab: SLAB_V4, decl: "@group(0) @binding(17) var<storage, read_write> fa: array<vec4<f32>>;" },
+    LiveBuf { name: "fb", binding: 18, slab: SLAB_V4, decl: "@group(0) @binding(18) var<storage, read_write> fb: array<vec4<f32>>;" },
+    LiveBuf { name: "bloom_a", binding: 19, slab: SLAB_V4, decl: "@group(0) @binding(19) var<storage, read_write> bloom_a: array<vec4<f32>>;" },
+    LiveBuf { name: "bloom_b", binding: 20, slab: SLAB_V4, decl: "@group(0) @binding(20) var<storage, read_write> bloom_b: array<vec4<f32>>;" },
+    LiveBuf { name: "spec_pp", binding: 21, slab: SLAB_U2, decl: "@group(0) @binding(21) var<storage, read_write> spec_pp: array<vec2<u32>>;" },
+    LiveBuf { name: "sb", binding: 22, slab: SLAB_V4, decl: "@group(0) @binding(22) var<storage, read_write> sb: array<vec4<f32>>;" },
+    LiveBuf { name: "refl_in", binding: 23, slab: SLAB_K, decl: "@group(0) @binding(23) var<storage, read> refl_in: array<vec4<f32>>;" },
+    LiveBuf { name: "refl_res", binding: 24, slab: SLAB_V4, decl: "@group(0) @binding(24) var<storage, read_write> refl_res: array<vec4<f32>>;" },
+    LiveBuf { name: "motion_in", binding: 25, slab: SLAB_K, decl: "@group(0) @binding(25) var<storage, read> motion_in: array<vec4<f32>>;" },
+    LiveBuf { name: "direct_in", binding: 26, slab: SLAB_K, decl: "@group(0) @binding(26) var<storage, read> direct_in: array<vec4<f32>>;" },
 ];
 pub const OFFSETS_BINDING: u32 = 31;
 /// `MergedOffsets`' size: a pair for each of `LIVE_BUFS`, and one unused that makes it a multiple of 16 bytes.
@@ -661,7 +658,7 @@ mod tests {
     #[test]
     fn the_merged_live_passes_fit_eight_storage_buffers() {
         let (m, info) = parse(LIVE);
-        assert_eq!(storage_buffers(&m, &info).1, 28, "the live passes as written");
+        assert_eq!(storage_buffers(&m, &info).1, 24, "the live passes as written");
         let passes = m.entry_points.len();
         let (m, info) = parse(&live(LIVE));
         let (used, declared) = storage_buffers(&m, &info);
@@ -669,9 +666,9 @@ mod tests {
         assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "{used:?}");
         assert_eq!(used.len(), passes, "every pass is still there");
         // The offsets' struct: a pair of u32 each, in order (what `live::Targets` writes).
-        assert_eq!(layout(&m, "MergedOffsets"), ((0..26).map(|k| k * 8).collect(), OFFSETS_BYTES as u64));
+        assert_eq!(layout(&m, "MergedOffsets"), ((0..22).map(|k| k * 8).collect(), OFFSETS_BYTES as u64));
         assert_eq!(OFFSETS_BYTES % 16, 0);
-        assert_eq!(LIVE_BUFS.len(), 25);
+        assert_eq!(LIVE_BUFS.len(), 21);
     }
 
     /// The Rust side's records are the size the merged structs give their elements.
