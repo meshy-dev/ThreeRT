@@ -9,8 +9,8 @@ bun site/serve.ts           # http://localhost:4173/        [port] [--lan]
 bun site/tools/build.ts     # a static copy for any file host -> out/site/
 ```
 
-`--lan` listens on every interface and prints the LAN address: open that one on the Mac and a phone on the same
-network can scan the QR codes on the pages (they carry `threert://<lan ip>:<port>/play/<id>`).
+`--lan` listens on every interface and prints the LAN address, so a phone on the same network can open the pages and
+the packages in `play/` (`threert://<lan ip>:<port>/play/<id>`).
 
 **Live at https://threert.dev** (www.threert.dev redirects there). Deploy after a change:
 
@@ -20,7 +20,8 @@ bun site/tools/deploy.ts    # build out/site (strict, see below), then wrangler 
 ```
 
 It is a Cloudflare Worker, `threert-site`: static assets from `out/site` on the custom domains threert.dev and
-www.threert.dev; `site/worker.ts` redirects www to the apex, serves the clients' disk images from R2 and hands everything else to the assets.
+www.threert.dev; `site/worker.ts` redirects www to the apex and the old Showcase page to threert.app, serves the clients' disk images
+from R2 and hands everything else to the assets.
 Workers static assets take **25 MiB a file**, and the client's disk image is about 32 MiB (it carries the `threert`
 command line). So the image is not a static asset: it lives in the R2 bucket `threert-releases` under its file name,
 and `worker.ts` serves it at the URL the Download page links, `/releases/<file>` (ranges, `ETag`, `HEAD`). R2 rather
@@ -37,19 +38,30 @@ site/releases/<file> --local --config site/wrangler.jsonc`, then `bunx wrangler@
 
 ## Pages
 
-Every page has the same nav, top right: **Showcase / Download / Docs**, then GitHub (github.com/meshy-dev/ThreeRT),
-Discord (discord.gg/n7vsVmAKCK) and X (x.com/ThreeRT3D) as their marks, and the same links in the footer, over the
-line that says whose it is: a research project from MeshyAI (meshy.ai), © MeshyAI. The markup is repeated in each
-page; change it in all four.
+Two things are asked of a visitor, on every page: **a star** on github.com/meshy-dev/ThreeRT and **a visit to
+[threert.app](https://threert.app)**, the platform where ThreeRT apps and games are published and found (a catalogue,
+a page for each app at `<name>.threert.app`, `threert publish`, multiplayer rooms). threert.dev says what the engine
+is and proves it; the apps live there. So the site has no catalogue of its own.
+
+Every page has the same nav, top right: **Apps ↗** (threert.app; the arrow marks the one link that leaves the site),
+**Download**, **Docs**, then **Star** (GitHub's mark, the word and the repository's star count: `a.star`, below),
+Discord (discord.gg/n7vsVmAKCK) and X (x.com/ThreeRT3D) as their marks; on a phone Star is GitHub's mark alone. The
+footer has the same links, over the line that says whose it is: a research project from MeshyAI (meshy.ai), © MeshyAI.
+The markup is repeated in each page; change it in all of them (the privacy page has the three words only).
 
 | Page | What is on it |
 |---|---|
-| `index.html` | The landing page (below). Its two buttons, in the hero and at the end: **Download** (to `download/`, named for the visitor's platform by `js/site.js`) and **GitHub**. |
-| `showcase/` | Bistro night as a clip under a divider (three.js | ThreeRT at 60 fps, `media/bistro/hero*.mp4`: both sides in one file so they cannot drift) and Zero-Day as a camera move; **Not only games**: the cases (education, commerce, architecture, culture: the packages in `play/` with an `industry`, written in `showcase/` at the repo root), each with what it shows, how to play with it, its links and QR code, and a filter by field; then **Open on your device**: a card for each of the other example packages; then **Made by you**: the community's entries (`showcase/community.json`, `{items: [{id, title, author, repo, caption, image, package?}]}`: GitHub repositories registered through `.github/ISSUE_TEMPLATE/showcase.yml`, which ThreeRT for macOS fills from its Studio; an accepted issue becomes a line in that file by hand) and the button that opens the form. The app's Showcase reads the same file. The cases' credits go in the footer. |
+| `index.html` | The landing page (below). |
 | `download/` | ThreeRT for macOS (the build `releases/latest.json` names) and ThreeRT for iPhone (a TestFlight or App Store link once `ios.url` is set), then how a client loads a game: `threert dev`, scan, traced and live. |
-| `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format, links to the reference documents in `docs/` on GitHub. |
+| `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format and publishing to threert.app, links to the reference documents in `docs/` on GitHub. |
+| `privacy/` | What the apps and the site do with data, including the requests the pages make to other services (below). |
+| `showcase/` | Gone as a page: what it listed is published on threert.app. The Worker answers `/showcase`, `/showcase/` and `/showcase/index.html` with a 301 to `https://threert.app/` (old links: the npm packages' READMEs, the pages of packages built before, earlier apps); `showcase/index.html` is what is left for a host without the Worker, a page that sends the reader on. `showcase/community.json` stays where it is, served as before: ThreeRT for macOS before 0.4.0 reads it (and `play/index.json`) for its Showcase. Nothing is added to it any more: people publish with `threert publish`. |
 
 ### The landing page
+
+The buttons, in the hero and at the end, in this order of weight: **Explore apps** (filled, to threert.app), **Star on
+GitHub** (outlined, with the count), and under them a line with **Download** as a link (named for the visitor's
+platform by `js/site.js`). One filled button a row; three equal buttons were the thing to avoid.
 
 1. **Hero:** a reel behind the headline: a grid of short clips of this repository's demos (Bistro with a crowd,
    Tokyo at dusk, Kabukichō, the voxel level, the showcase cases) and of OpenStrike, all ThreeRT live, ray traced,
@@ -62,19 +74,55 @@ page; change it in all four.
    (three.js as written | ThreeRT with every setting at its default).
 4. **Against three.js at full power:** Bistro night and Zero-Day; the left side picks three.js WebGL, three.js WebGPU
    with SSGI, or the path-traced reference; the right side is ThreeRT live.
-5. **A camera move:** each scene's own camera path, both engines in lockstep.
+5. **A camera move:** Bistro night as a clip under a divider (three.js | ThreeRT at 60 fps, `media/bistro/hero*.mp4`:
+   both sides in one file so they cannot drift; it was the Showcase page's opening) and Zero-Day's camera path, 60
+   poses of both engines in lockstep.
 6. **What a ray finds:** four close-ups.
-7. **Traced where it can be, three.js everywhere else:** the native client on ray-tracing hardware and the same scene
+7. **Open source. MIT.** A strip, where the comparisons end: what is in the repository, why a star helps, the Star
+   button, the npm packages.
+8. **Traced where it can be, three.js everywhere else:** the native client on ray-tracing hardware and the same scene
    as three.js in any browser or WebView, drawn as live three.js device models at real proportions.
-8. **Not only games:** the cases the Showcase hosts, as a strip of pictures (from `play/index.json`; nothing on a
-   host without them).
-9. **Just light.**
+9. **Play it with a friend:** OpenStrikeRT (`https://openstrike.threert.app/`), the platform's first multiplayer game:
+   its cover with the words over it, two of its screenshots, three facts (rooms of up to 10, bots when alone, all of it
+   game code). Its pictures are copies in `media/openstrike/`.
+10. **Not only games. All on threert.app:** seven apps from the platform and an eighth cell that invites the reader's
+    own (next section).
+11. **One command puts yours online:** write three.js-style code, `threert publish`, the app's address. What it says
+    `threert publish` does is what https://threert.app/publish says; check there before changing it.
+12. **Just light.**
+
+### threert.app's apps on the landing page
+
+`js/platform.js` decides which apps are shown and builds a tile; it has no DOM and no imports, so the page and the
+tool below run the same code. The apps are the platform's "popular" list
+(`GET https://threert.app/api/v1/apps?sort=top&limit=24`, CORS-open) without the starters (tag `starter`: the hello
+world above already shows them) and without OpenStrikeRT (it has the section above), the first seven.
+
+- **Baked:** `bun site/tools/platform.ts` asks the platform, writes the seven tiles into `index.html` between the two
+  `apps:` comments, a 640 x 360 WebP of each cover into `media/apps/`, and OpenStrikeRT's pictures into
+  `media/openstrike/`. That is the page without JavaScript, for a crawler, and whenever the platform does not answer:
+  never an empty grid. Run it when the catalogue has moved on, and commit. `build.ts` stops a deploy whose page names
+  a picture that is not there.
+- **Live:** when the page loads it asks the same list and replaces the tiles that differ. Every tile has the same
+  box (one line of title, two of summary), so nothing moves. A tile keeps this site's small copy of a cover as long
+  as the app's cover is the one the copy was made from (`data-cover`); a new app, or a new cover, shows the
+  platform's own picture. An answer with fewer than seven apps leaves the baked tiles alone. If OpenStrikeRT is in
+  the answer with players in its rooms, its label says how many.
+
+### The Star buttons
+
+Every `a.star` has a `<b data-stars hidden>`; `js/site.js` (which every page but the privacy page imports) fills them
+from GitHub's public API (`api.github.com/repos/meshy-dev/ThreeRT`: no token, 60 requests an hour for an address). The
+count is kept in localStorage for six hours (`threert:stars`), a failed request is not repeated for an hour, and
+without a count the button is simply "Star". A count under `STARS.min` (10) is not shown either: set it to 0 to show
+every count.
 
 ## The two generated directories
 
 `site/releases/` and `site/play/` are not committed (.gitignore): the first holds a build of the closed-source
-client, the second packages built with it. The client repository's release script writes both, whole. Without them
-the pages still work: Download says that no build is published on this host, Showcase that there are no packages.
+client, the second packages built with it. The client repository's release script writes both, whole. No page reads
+`play/` any more (the apps are on threert.app); it is still deployed because ThreeRT for macOS before 0.4.0 lists it
+in its Showcase and opens its packages. Without `releases/` the Download page says that no build is published on this host.
 `serve.ts` and `build.ts` warn; `build.ts --require-release` (what `deploy.ts` runs) stops instead, so a deploy never
 puts up a Download button with nothing behind it.
 
@@ -110,8 +158,8 @@ another version, file or size than `latest.json`, or a non-https URL.
 ```
 
 `play/<id>/` is a ThreeRT package (the client repository's docs/CLIENT.md § 1): `threert.json` (format `threert/1`),
-`game.js`, `game.mjs`, the same game as three.js (`index.html`, `web.js`), `presets/`, `assets/`. The pages derive the
-links from where they are served (`js/site.js` `packageLinks`):
+`game.js`, `game.mjs`, the same game as three.js (`index.html`, `web.js`), `presets/`, `assets/`. Its addresses, from
+where it is served:
 
 | | over https | over http (a dev machine) |
 |---|---|---|
@@ -123,15 +171,18 @@ links from where they are served (`js/site.js` `packageLinks`):
 
 | Path | What |
 |---|---|
-| `index.html`, `showcase/`, `download/`, `docs/` | The pages (sections, their styles and their script) |
-| `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the nav and footer, the comparison and player components, the cards, steps and QR tiles of the inner pages |
+| `index.html`, `download/`, `docs/`, `privacy/` | The pages (sections, their styles and their script) |
+| `showcase/` | The page that sends old links on to threert.app, and `community.json` for clients before 0.4.0 |
+| `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the nav and footer (with the Star button and the arrow of a link to threert.app), the comparison and player components, the cards, steps and QR tiles of the inner pages |
 | `js/threert.js` | The wipe comparison (and the clip that can play over its two stills), the reel behind the landing page's headline, the synced camera-move player, the code highlighter. A divider follows a finger only once it moves sideways, so scrolling past one does not move it |
-| `js/site.js` | What the pages share: the visitor's platform, the release and the packages on this host, their links, QR codes |
+| `js/site.js` | What the pages share: the visitor's platform, the release on this host, the Star buttons' count, QR codes |
+| `js/platform.js` | threert.app on the landing page: which apps are shown, and a tile's markup (shared with `tools/platform.ts`) |
 | `js/devices.js` | The 3D device rows (three.js), with a still fallback when WebGL is off |
+| `brand/card.jpg` | The share card (Open Graph, 1200 x 630): the hero's headline over the reel's still, a screenshot of the page with the nav's links, the lede and the buttons hidden |
 | `brand/` | The mark ("Three bounces": the three.js triangle, tilted as three.js draws it, and the closed light path inside it, which is three.js's own inner triangle) and its variants. `js/mark.js` draws it live in the lockup and on the landing page, and turns the path on hover. `avatar.svg` is the profile picture (X, Discord): the mark on black for a round crop, its triangle concentric with the circle, heavier strokes (4.2 against 3.2) so it holds at 32 px |
 | `media/` | The renders, WebP, and the clips (the reel, the Bistro comparison), H.264. Generated; never retouched |
-| `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
-| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, disk images from R2, byte ranges for the clips, static assets) and its config (threert.dev) |
+| `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/platform.ts` bakes threert.app's apps and OpenStrikeRT's pictures into the landing page; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
+| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, the old Showcase page to threert.app, disk images from R2, byte ranges for the clips, static assets) and its config (threert.dev) |
 | `releases/`, `play/` | Generated, not committed (above) |
 
 ## Media
@@ -163,7 +214,7 @@ most shooting; for de_dust2 the opening run) go to `out/site-reel/os-<map>/` wit
 The committed ones are still the 2026-11-12 recordings (OpenStrike's renderer before #30): on 2d4e88a the same
 match at 1280 x 720, scale 0.6, boiled in large blotches on the walls and the ground at every muzzle flash and blast.
 
-The Bistro comparison clip on Showcase is recorded apart (it needs Bistro in the asset store: `bun scripts/orca.ts
+The Bistro comparison clip (the landing page's camera move) is recorded apart (it needs Bistro in the asset store: `bun scripts/orca.ts
 bistro`, and ffmpeg):
 
 ```bash
@@ -175,7 +226,9 @@ bun site/tools/hero.ts             # out/site-hero -> site/media/bistro/hero*.mp
 
 Every frame of the clip is one frame the live renderer drew, in lockstep at 60 fps; the probe draws the same move
 back to back, as on screen, with nothing else on the GPU, and `media/bistro/hero.json` keeps what it measured. The
-Showcase's footnote quotes that file (machine, size, scale, GPU ms): change the footnote when the clip changes.
+landing page's second footnote quotes that file (machine, size, scale, GPU ms): change the footnote when the clip
+changes. Since the clip took its place there, the 60 poses of Bistro's camera move (`media/bistro/move/`, still
+written by `media.ts`) are on no page.
 The one committed was recorded on an Apple M3 Max at 2d4e88a: 1920 × 1080 at render scale 0.5, 14.4 / 14.9 ms p50 / p95
 (before the live frame's temporal upscaler, #30, the same size took 22 ms there), a slow 2.2 s stretch of the scene's
 camera move taken in 6 s.

@@ -70,17 +70,32 @@ p { margin: 0; }
 .logo svg.mark { display: block; overflow: visible; }
 .logo .rt { background: var(--ray); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
-/* ---------- Nav: Showcase / Download / Docs / GitHub, the same on every page ---------- */
+/* ---------- Nav: Apps (threert.app) / Download / Docs / Star / Discord / X, the same on every page ---------- */
 .nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%); background: color-mix(in srgb, var(--ink-0) 72%, transparent); border-bottom: 1px solid var(--line); }
 .nav .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
 .nav .links { display: flex; align-items: center; gap: 28px; margin-left: auto; font-size: 14.5px; font-weight: 500; color: var(--bone-2); }
 .nav .links a { text-decoration: none; display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; border-bottom: 1.5px solid transparent; transition: color 0.2s; }
 .nav .links a:hover { color: var(--bone); }
 .nav .links a[aria-current="page"] { color: var(--bone); border-bottom-color: var(--bone-2); }
+/* A link that leaves for threert.app: an arrow after its words. */
+.out { display: block; flex: none; width: 9px; height: 9px; opacity: 0.6; transition: transform 0.2s var(--ease), opacity 0.2s; }
+a:hover > .out { transform: translate(1px, -1px); opacity: 1; }
+.btn .out { width: 10px; height: 10px; margin-left: -2px; opacity: 0.8; }
 /* GitHub, Discord and X, as their marks. */
 .si { display: block; width: 18px; height: 18px; flex: none; }
 .nav .links a.ic { padding: 6px 0; }
 .nav .links a.ic + a.ic { margin-left: -10px; }
+/* Star on GitHub: the mark, the word, and the repository's count once js/site.js knows it (none until then). In the
+   nav and the footer it is a small pill; on a .btn it is the button. */
+.star b { font: 500 12.5px/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--bone-2); padding-left: 9px; border-left: 1px solid var(--line-2); align-self: stretch; display: inline-flex; align-items: center; }
+.star b[hidden] { display: none; }
+.btn.star b { font-size: 13.5px; padding-left: 12px; margin: 12px 0; }
+.nav .links a.star, .foot .site a.star { gap: 7px; height: 32px; padding: 0 12px 0 9px; border: 1px solid var(--line-2); border-radius: 999px; color: var(--bone); font-size: 13.5px; font-weight: 500; line-height: 1; transition: border-color 0.2s, background 0.2s; }
+.nav .links a.star:hover, .foot .site a.star:hover { border-color: var(--bone-2); }
+.nav .links a.star .si, .foot .site a.star .si { width: 16px; height: 16px; }
+.nav .links a.star b, .foot .site a.star b { margin: 8px 0; padding-left: 8px; }
+.nav.overlay .links a.star { background: rgba(6, 7, 9, 0.45); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+a.star:focus-visible { border-radius: 999px; }
 .nav.overlay { position: absolute; left: 0; right: 0; background: transparent; border-bottom-color: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--tungsten); outline-offset: 3px; border-radius: 4px; }
 .btn:focus-visible { border-radius: 999px; }
@@ -157,7 +172,11 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .foot .site { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 18px; font-size: 14px; }
 .foot .site { align-items: center; }
 .foot .site a { text-decoration: none; }
-.foot .site a.ic { display: inline-flex; }
+.foot .site a { display: inline-flex; align-items: center; gap: 5px; }
+/* Two rows whatever the width: the pages, then the Star button and the marks. */
+.foot .site::before { content: ""; order: 1; flex-basis: 100%; height: 0; margin-top: 2px; }
+.foot .site a.star, .foot .site a.ic { order: 2; }
+.foot .site a.star { margin-right: -4px; }
 .foot .site a.ic + a.ic { margin-left: -6px; }
 .foot .site .si { width: 17px; height: 17px; }
 .foot .legal { margin-top: 18px; }
@@ -217,9 +236,13 @@ code, kbd { font: 500 0.9em var(--font-mono); color: var(--bone); background: rg
   .steps > li + li { padding-left: 0; border-left: 0; }
   .card { padding: 22px; }
 }
-/* A phone: the mark alone stands for the lockup, so the four links fit on one line. */
+/* A phone: the mark alone stands for the lockup and GitHub's mark for the Star button, so the links fit on one line. */
 @media (max-width: 520px) {
   .nav .logo > span { display: none; }
+  .nav .links a.star { height: auto; padding: 6px 0; border: 0; background: none; }
+  .nav .links a.star span, .nav .links a.star b { display: none; }
+  .nav .links a.star .si { width: 18px; height: 18px; }
+  .nav .links a.star + a.ic { margin-left: 0; }
   .nav .links { gap: 16px; font-size: 14px; }
   .nav .links a.ic + a.ic { margin-left: 0; }
   .nav .links { gap: 14px; }

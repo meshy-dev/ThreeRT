@@ -21,7 +21,7 @@
 <nav class="nav" aria-label="Site">
   <div class="wrap">
     <a class="logo" href="../" aria-label="ThreeRT home"><img src="../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
-    <div class="links"><a href="../showcase/">Showcase</a><a href="../download/">Download</a><a href="../docs/">Docs</a></div>
+    <div class="links"><a href="https://threert.app/" rel="noopener">Apps<svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a href="../download/">Download</a><a href="../docs/">Docs</a></div>
   </div>
 </nav>
 
@@ -34,16 +34,26 @@
 </header>
 
 <main class="wrap"><div class="prose">
-  <p class="date">Last updated 2026-11-12</p>
+  <p class="date">Last updated 2026-11-13</p>
 
   <h2>What the apps send, and where</h2>
   <ul>
     <li><b>Games you open.</b> The apps download a game from the address you give them: a <code>threert dev</code> server on your own network, threert.dev, or a link you open. That server sees the request, as any web server does.</li>
     <li><b>Logs back to your dev server.</b> A game opened from a <code>threert dev</code> server sends its console output back to that server, so it shows in your terminal. Nothing else receives it.</li>
-    <li><b>Showcase.</b> ThreeRT for macOS reads the list of games and their pictures from threert.dev.</li>
+    <li><b>Showcase.</b> ThreeRT for macOS reads the list of apps and games and their pictures from threert.app (versions before 0.4.0: from threert.dev). Playing one from there tells threert.app that it was played, with a random number the app made up on this device, so one device counts once a day. The number says nothing about you and is kept two days.</li>
+    <li><b>Multiplayer rooms.</b> A game that plays in a room connects to it on threert.app and sends what the game needs: the name you chose, a random player number kept on this device, and your moves. A room keeps them while it is open and no longer.</li>
     <li><b>Sharing a Mac's GPU</b> (ThreeRT for macOS, only when you turn it on): the frames and input go through the relay you set in Settings, by default one on your own machine.</li>
   </ul>
-  <p>There is no ThreeRT account, no tracking identifier, no crash or usage reporting, and no third-party SDK in either app.</p>
+  <p>Playing needs no account. There is no advertising identifier, no crash or usage reporting, and no third-party SDK in either app.</p>
+
+  <h2>threert.app</h2>
+  <p>Browsing and playing on threert.app need no account. Publishing does: you sign in with GitHub, and threert.app keeps your GitHub user number, login, display name and avatar address. It does not ask GitHub for your e-mail address or for access to your repositories.</p>
+  <ul>
+    <li><b>What you publish</b> (an app's files, its name, description and pictures) is public, with your GitHub login as its author. Deleting an app takes it down.</li>
+    <li><b>Sign-ins.</b> A session is one cookie on threert.app in a browser, or a token kept in your home folder by the <code>threert</code> command and ThreeRT for macOS. threert.app keeps only a hash of it, with what asked for it (for example "cli 0.4.0 macOS").</li>
+    <li><b>Likes</b> are kept with your account. <b>Reports</b> are kept with their text, and with your account if you were signed in.</li>
+    <li>threert.app is served by Cloudflare, which processes requests to deliver it and counts page views for the site's owner without cookies (Cloudflare Web Analytics).</li>
+  </ul>
 
   <h2>What stays on your device</h2>
   <ul>
@@ -56,6 +66,7 @@
 
   <h2>This site</h2>
   <p>threert.dev is served by Cloudflare, which processes requests to deliver the pages and downloads. The site sets no cookies and runs no analytics.</p>
+  <p>Your browser makes three kinds of request to other services when it shows these pages, and each of them sees the request as any web server does: the typefaces come from Google Fonts; the Star buttons ask GitHub’s public API for the repository’s star count; and the front page asks <a href="https://threert.app/" rel="noopener">threert.app</a> for the list of published apps. The star count is kept in your browser’s local storage for a few hours, so it is not asked for on every page. Nothing else is stored.</p>
 
   <h2>TestFlight</h2>
   <p>If you test ThreeRT for iPhone through TestFlight, Apple shares the information described in <a href="https://www.apple.com/legal/privacy/" rel="noopener">Apple's privacy policy</a> for TestFlight (such as crash reports and feedback you choose to send) with the developer.</p>

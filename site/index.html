@@ -4,9 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ThreeRT — Hardware ray-traced three.js</title>
-<meta name="description" content="ThreeRT is hardware-accelerated ray tracing behind a three.js-style API. Every light is path-traced in real time: Amazon Lumberyard Bistro and Beeple's Zero-Day at 60 fps, and three.js everywhere else.">
+<meta name="description" content="ThreeRT is a real-time path tracer behind a three.js-style API: Bistro and Zero-Day fully path-traced at 60 fps. Open source, MIT. Apps and games made with it are published at threert.app.">
+<link rel="canonical" href="https://threert.dev/">
+<meta name="theme-color" content="#060709">
+<meta property="og:site_name" content="ThreeRT">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ThreeRT — Hardware ray-traced three.js">
+<meta property="og:description" content="A real-time path tracer behind a three.js-style API, open source. Apps and games made with it are published at threert.app.">
+<meta property="og:url" content="https://threert.dev/">
+<meta property="og:image" content="https://threert.dev/brand/card.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Hardware ray-traced three.js: the headline over a grid of scenes ThreeRT traces live">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@ThreeRT3D">
 <link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","name":"ThreeRT","url":"https://threert.dev/","description":"Hardware ray-traced three.js: a real-time path tracer behind a three.js-style API. Apps and games made with it are published at threert.app.","publisher":{"@type":"Organization","name":"MeshyAI","url":"https://meshy.ai/"}},{"@type":"SoftwareSourceCode","name":"ThreeRT","description":"A real-time path tracer behind a three.js-style API: a Rust and wgpu engine, TypeScript scene and gameplay packages.","url":"https://threert.dev/","codeRepository":"https://github.com/meshy-dev/ThreeRT","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Rust","TypeScript"]}]}</script>
 <link rel="stylesheet" href="css/threert.css">
+<noscript><style>.rv { opacity: 1; transform: none; }</style></noscript>
 <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
 <style>
   /* ---- Hero: a reel of what the engine draws, the words over its darker side ---- */
@@ -22,6 +37,8 @@
   .hero h1 .l2 { display: block; }
   .hero .cta { display: flex; gap: 12px; margin-top: 4px; flex-wrap: wrap; }
   .hero .plat { margin-top: -10px; color: var(--bone-2); }
+  /* Over the reel, the outlined button keeps its words readable where a bright clip runs under it. */
+  .hero .btn.ghost { background: rgba(6, 7, 9, 0.45); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
 
   section { padding: 128px 0; }
   .sec-head { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: end; margin-bottom: 48px; }
@@ -84,17 +101,72 @@
   .tricks svg.mark { width: 150px; height: 150px; margin: 0 auto 40px; display: block; overflow: visible; }
   @media (prefers-reduced-motion: reduce) { .tricks svg.mark .pulse { display: none; } }
 
-  /* ---- Beyond games: the cases the Showcase hosts, by field ---- */
-  .beyond { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
-  .beyond a { position: relative; display: block; border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--line); background: #000; aspect-ratio: 4 / 3; text-decoration: none; isolation: isolate; }
-  .beyond a img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: transform 0.6s var(--ease); }
-  .beyond a:hover img { transform: scale(1.04); }
-  .beyond a::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(6, 7, 9, 0.94) 0%, rgba(6, 7, 9, 0.7) 30%, rgba(6, 7, 9, 0) 68%); z-index: 1; }
-  .beyond .t { position: absolute; z-index: 2; left: 16px; right: 16px; bottom: 14px; }
-  .beyond .t small { display: block; font: 500 11.5px/1 var(--font-mono); color: var(--tungsten); margin-bottom: 7px; }
-  .beyond .t b { display: block; font: 600 19px/1.15 var(--font-sans); letter-spacing: -0.025em; color: var(--bone); }
-  .beyond .t span { display: block; margin-top: 4px; font-size: 13.5px; color: var(--bone-2); }
-  #beyond[hidden] { display: none; }
+  /* ---- Open source: the reason to star, once the comparisons have been seen ---- */
+  .oss { padding: 0 0 128px; }
+  .oss .strip { display: grid; grid-template-columns: 1fr auto; gap: 28px 64px; align-items: center; padding: 36px 40px; border: 1px solid var(--line); border-radius: 22px; background: var(--ink-1); }
+  .oss h2 { font: 620 clamp(26px, 2.6vw, 34px)/1.08 var(--font-sans); letter-spacing: -.04em; }
+  .oss .strip p { margin-top: 12px; color: var(--bone-2); font-size: 15.5px; max-width: 66ch; }
+  .oss .act { display: grid; gap: 16px; justify-items: start; }
+  .oss .strip .pkgs { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font: 400 12.5px/1.5 var(--font-mono); color: var(--mute); max-width: none; }
+  .oss .pkgs a { color: var(--bone-2); text-decoration: none; }
+  .oss .pkgs a:hover { color: var(--bone); }
+
+  /* ---- OpenStrikeRT: the game's cover, the words over its darker side ---- */
+  .stage { position: relative; border-radius: var(--r-3); overflow: hidden; border: 1px solid var(--line); background: #000; isolation: isolate; }
+  .stage > img { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; }
+  .stage::after { content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none; background: linear-gradient(90deg, rgba(6,7,9,.95) 0%, rgba(6,7,9,.88) 28%, rgba(6,7,9,.4) 50%, rgba(6,7,9,0) 66%), linear-gradient(0deg, rgba(6,7,9,.45) 0%, rgba(6,7,9,0) 24%); }
+  .stage .lab { top: 22px; left: 22px; }
+  .stage .lab i { background: var(--tungsten); box-shadow: 0 0 8px var(--tungsten); }
+  .stage .over { position: absolute; z-index: 2; left: 48px; bottom: 44px; width: min(470px, 44%); display: grid; gap: 20px; }
+  .stage .over .lede { font-size: clamp(15.5px, 1.3vw, 18px); }
+  .stage .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
+  .stage .plat { margin-top: -8px; color: var(--bone-2); }
+  .plat a { color: var(--bone); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; transition: text-decoration-color 0.2s; }
+  .plat a:hover { text-decoration-color: var(--bone); }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .shots img { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--r-2); border: 1px solid var(--line); background: #000; }
+  .facts { list-style: none; margin: 48px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); }
+  .facts li { padding: 26px 32px 0 0; border-top: 1px solid var(--line-2); min-width: 0; }
+  .facts li + li { padding-left: 32px; border-left: 1px solid var(--line); }
+  .facts h3 { font: 600 24px/1.1 var(--font-sans); letter-spacing: -0.03em; }
+  .facts p { margin-top: 12px; color: var(--bone-2); font-size: 15.5px; max-width: 42ch; }
+
+  /* ---- threert.app: what is published there (js/platform.js builds a tile; site/tools/platform.ts bakes them) ---- */
+  .apps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  /* Every tile has the same box whatever its words (one line of title, two of summary), so a tile that changes when the
+     platform answers moves nothing. */
+  .app { display: flex; flex-direction: column; min-width: 0; border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--line); background: var(--ink-1); text-decoration: none; transition: border-color 0.2s; }
+  .app:hover { border-color: var(--line-2); }
+  .app .pic { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: #000; }
+  .app .pic img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.6s var(--ease); }
+  .app:hover .pic img { transform: scale(1.04); }
+  .app .t { display: block; padding: 15px 16px 16px; min-width: 0; }
+  .app .t small { display: block; font: 500 11.5px/1 var(--font-mono); color: var(--mute); margin-bottom: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app .t b { display: block; font: 600 18px/1.2 var(--font-sans); letter-spacing: -0.025em; color: var(--bone); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app .t > span { margin-top: 5px; font-size: 13.5px; line-height: 1.45; min-height: 2.9em; color: var(--bone-2); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .app .t em { display: block; margin-top: 12px; font: 400 11.5px/1 var(--font-mono); font-style: normal; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color 0.2s; }
+  .app:hover .t em { color: var(--bone-2); }
+  .app .now { position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 7px; background: rgba(8, 9, 11, 0.66); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font: 500 11.5px/1 var(--font-mono); font-style: normal; color: var(--bone); }
+  /* The eighth cell: the reader's own app, not there yet. */
+  .app.yours { justify-content: flex-end; background: transparent; border: 1px dashed var(--line-2); }
+  .app.yours:hover { border-color: var(--bone-2); }
+  .app.yours .t small { color: var(--bone-2); }
+  .app.yours .pic { background: none; display: grid; place-items: center; font: 500 12.5px/1 var(--font-mono); color: var(--mute); border-bottom: 1px dashed var(--line); transition: color 0.2s; }
+  .app.yours:hover .pic { color: var(--bone); }
+  .more { margin-top: 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+  .more .txt { color: var(--bone-2); font-size: 15px; text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 4px; }
+  .more .txt:hover { color: var(--bone); }
+
+  /* ---- Publish: three steps, each with the thing itself under it ---- */
+  /* The three things line up across the columns: a step's number, title, words and thing share the list's rows. */
+  .loop { grid-template-rows: repeat(4, auto); }
+  .loop > li { display: grid; grid-row: span 4; grid-template-rows: subgrid; align-content: start; }
+  .loop > li > :last-child { align-self: start; }
+  .loop .code { margin: 20px 0 0; font-size: 12px; line-height: 1.75; padding: 14px 16px; border-radius: 12px; }
+  .loop .code.sh { color: var(--bone); }
+  .loop .code.sh .c { font-style: normal; }
+  .loop .addr { margin-top: 20px; max-width: none; padding: 13px 16px; border: 1px solid var(--line); border-radius: 12px; background: #0a0b0e; font: 500 13.5px/1.5 var(--font-mono); color: var(--bone); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .loop .addr span { color: var(--mute); }
 
   /* ---- Everywhere: one scene, a rail to two renderers, every screen ---- */
   .root { display: inline-flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--ink-2); font: 500 13px var(--font-mono); color: var(--bone); position: relative; z-index: 1; }
@@ -131,12 +203,28 @@
     .sec-head .lede { justify-self: start; }
     .reel { grid-template-columns: 1fr; } .reel .left { border-right: 0; border-bottom: 1px solid var(--line); min-height: 300px; } .reel .story { grid-template-columns: 1fr 1fr 1fr auto; }
     .shelf { flex-wrap: wrap; }
+    .oss .strip { grid-template-columns: 1fr; padding: 28px; }
+    .facts { grid-template-columns: 1fr; } .facts li { padding-right: 0; padding-bottom: 26px; } .facts li + li { padding-left: 0; border-left: 0; }
+    .apps { grid-template-columns: repeat(2, 1fr); }
+  }
+  /* A screen too narrow for the words to stay on the picture's darker side: they go under it. */
+  @media (max-width: 1100px) {
+    .stage::after { content: none; }
+    .stage .over { position: static; width: auto; max-width: 640px; padding: 30px 32px 34px; gap: 16px; }
+  }
+  @media (max-width: 700px) {
+    .stage .over { padding: 26px 24px 28px; }
+    .stage .lab { top: 14px; left: 14px; }
   }
   /* A phone: nothing wider than the screen (the wordmark scales with it; the left-side picker scrolls in place). */
   @media (max-width: 700px) {
     .rtx .big h2 { font-size: 25vw; }
     .pick { max-width: calc(100% - 28px); overflow-x: auto; scrollbar-width: none; }
+    .apps, .shots { gap: 10px; } .shots { margin-top: 10px; }
+    .app .t { padding: 12px 12px 13px; } .app .t small { font-size: 10.5px; margin-bottom: 7px; } .app .t b { font-size: 15.5px; } .app .t > span { display: none; } .app .t em { margin-top: 8px; font-size: 10.5px; }
+    .btn .w { display: none; }
   }
+  @media (prefers-reduced-motion: reduce) { .app .pic img { transition: none; } .app:hover .pic img { transform: none; } }
 </style>
 </head>
 <body>
@@ -144,7 +232,7 @@
 <nav class="nav overlay" aria-label="Site">
   <div class="wrap">
     <a class="logo" href="./" aria-label="ThreeRT home"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
-    <div class="links"><a href="showcase/">Showcase</a><a href="download/">Download</a><a href="docs/">Docs</a><a class="ic" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="ThreeRT on GitHub" title="GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
+    <div class="links"><a href="https://threert.app/" rel="noopener">Apps<svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a href="download/">Download</a><a href="docs/">Docs</a><a class="star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub" title="Star ThreeRT on GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star</span><b data-stars hidden></b></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
   </div>
 </nav>
 
@@ -154,8 +242,8 @@
     <div class="wrap">
       <h1 class="h-display">Hardware<span class="l2">ray-traced</span><span class="l2 ray-text">three.js.</span></h1>
       <p class="lede" style="max-width:52ch">ThreeRT is the first three.js-style engine to fully path-trace industry-standard scenes at 60 fps.<sup>1</sup></p>
-      <div class="cta"><a class="btn primary" href="download/" data-dl><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg><span>Download</span></a><a class="btn ghost" href="https://github.com/meshy-dev/ThreeRT" rel="noopener"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>GitHub</a></div>
-      <p class="plat">macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
+      <div class="cta"><a class="btn primary" href="https://threert.app/" rel="noopener"><span>Explore apps<span class="w"> on threert.app</span></span><svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a class="btn ghost star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star<span class="w"> on GitHub</span></span><b data-stars hidden></b></a></div>
+      <p class="plat"><a href="download/" data-dl>Download ThreeRT</a> · macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
     </div>
   </div>
 </header>
@@ -208,16 +296,16 @@
   <div class="wrap">
     <div class="sec-head rv">
       <h2 class="h-1">Not a still.<br><span class="mute">A camera move.</span></h2>
-      <p class="lede">Each scene’s own camera path, both engines in lockstep. ThreeRT holds 60 fps the whole way.</p>
+      <p class="lede">Each scene’s own camera path, both engines in lockstep. ThreeRT holds 60 fps the whole way. Bistro is a recording of it doing so, every frame as it was drawn.<sup>2</sup></p>
     </div>
     <div class="motion rv">
       <div>
-        <div class="seqp" data-scene="media/bistro" data-la="three.js · 54 fps" data-lb="ThreeRT · 60 fps"></div>
-        <div class="cap"><b>Bistro night</b></div>
+        <div class="cmp" data-a="media/bistro/hero-three.webp" data-b="media/bistro/hero-rt.webp" data-video="media/bistro/hero.mp4" data-video-sm="media/bistro/hero-720.mp4" data-la="three.js" data-lb="ThreeRT · 60 fps" data-x="50"></div>
+        <div class="cap"><b>Bistro night</b><span>a 60 fps clip: drag the divider</span></div>
       </div>
       <div>
         <div class="seqp" data-scene="media/zero-day" data-la="three.js · 12 fps" data-lb="ThreeRT · 60 fps"></div>
-        <div class="cap"><b>Zero-Day</b></div>
+        <div class="cap"><b>Zero-Day</b><span>60 poses along the path</span></div>
       </div>
     </div>
   </div>
@@ -249,6 +337,21 @@
         <div class="cmp zoom" style="--z:1.9;--o:48% 30%" data-a="media/zero-day/strongest.webp" data-b="media/zero-day/live.webp" data-la="three.js" data-lb="ThreeRT" data-x="50"></div>
         <h3 class="h-3">Ten thousand small lights</h3>
         <p>Each of Zero-Day’s small emitters adds its own light, highlight and shadow.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="source" class="oss">
+  <div class="wrap">
+    <div class="strip rv">
+      <div>
+        <h2>Open source. MIT.</h2>
+        <p>The path tracer (Rust and wgpu), the three.js-style scene API and the gameplay runtime are one repository, along with every comparison on this page and how it was measured. If it is useful to you, a star helps the next three.js developer find it.</p>
+      </div>
+      <div class="act">
+        <a class="btn ghost star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star on GitHub</span><b data-stars hidden></b></a>
+        <p class="pkgs"><span>npm</span><a href="https://www.npmjs.com/package/@threert/scene" rel="noopener">@threert/scene</a><a href="https://www.npmjs.com/package/@threert/gameplay" rel="noopener">@threert/gameplay</a><a href="https://www.npmjs.com/package/@threert/voxel" rel="noopener">@threert/voxel</a></p>
       </div>
     </div>
   </div>
@@ -292,14 +395,71 @@
   </div>
 </section>
 
-<section id="beyond" style="padding-top:40px" hidden>
+<section id="play" style="padding-top:40px">
   <div class="wrap">
-    <div class="sec-head">
-      <h2 class="h-1">Not only games.<br><span class="mute">Light for everyone.</span></h2>
-      <p class="lede">Lighting of this quality used to take a studio and a render farm. The same engine now runs a physics lesson, a jeweller’s counter, a flat you might buy and a museum hall, live, on the laptop or phone you already own.</p>
+    <div class="stage rv">
+      <img src="media/openstrike/cover.webp" srcset="media/openstrike/cover-800.webp 800w, media/openstrike/cover.webp 1600w" sizes="(max-width: 1304px) calc(100vw - 40px), 1176px" width="1600" height="900" alt="OpenStrikeRT: a first-person view down a foundry hall, a tracer crossing it, the lamps and the sky mirrored in the polished floor" loading="lazy" decoding="async">
+      <div class="lab"><i></i><span>OpenStrikeRT<small id="osNow">path-traced, live</small></span></div>
+      <div class="over">
+        <h2 class="h-1">Play it<br>with a friend.</h2>
+        <p class="lede">OpenStrikeRT is a team shooter with every light traced: sun through the skylights onto a polished floor, the furnace’s glow, a muzzle flash that lights the hall for a frame or two. It is our first multiplayer game on threert.app.</p>
+        <div class="cta"><a class="btn primary" href="https://openstrike.threert.app/" rel="noopener"><span>Play OpenStrikeRT</span><svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a></div>
+        <p class="plat">Plays in <a href="download/">ThreeRT 0.4.0 or newer</a> · the browser shows a preview</p>
+      </div>
     </div>
-    <div class="beyond" id="beyondGrid"></div>
-    <p style="margin-top:28px"><a class="btn ghost" href="showcase/#cases">Open the cases</a></p>
+    <div class="shots rv">
+      <img src="media/openstrike/shot-3.webp" width="960" height="540" alt="OpenStrikeRT: three players of the two teams in the hall, lit by its skylights and lamps" loading="lazy" decoding="async">
+      <img src="media/openstrike/shot-6.webp" width="960" height="540" alt="OpenStrikeRT: the furnace, its opening lighting the floor around it" loading="lazy" decoding="async">
+    </div>
+    <ol class="facts rv">
+      <li><h3>Up to 10 in a room</h3><p>Open it and you are in a match: the public room with the most players and a free place. Or start a private room and send its link.</p></li>
+      <li><h3>Nobody around? Bots.</h3><p>Alone or offline, it is practice against bots on the same map.</p></li>
+      <li><h3>Game code, nothing else</h3><p>TypeScript against <code>@threert/scene</code>, <code>@threert/gameplay</code> and <code>@threert/net</code>. No engine changes, no native code.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="apps" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">Not only games.<br><span class="mute">All on threert.app.</span></h2>
+      <p class="lede">threert.app is where ThreeRT apps and games are published and found. A physics lesson, a jeweller’s counter, a flat you might buy, a museum hall: each has its own address. Open it in ThreeRT, traced on your GPU, or, where it has a three.js page, play it in this browser.</p>
+    </div>
+    <div class="apps rv" id="appGrid">
+      <!-- apps:begin (site/tools/platform.ts) -->
+      <a class="app" href="https://jewellery.threert.app/" rel="noopener" data-name="jewellery" data-cover="https://jewellery.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/jewellery.webp" width="640" height="360" alt="Jeweller’s Window, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · commerce</small><b>Jeweller’s Window</b><span>Gold, diamonds and pearls, turning under the lights</span><em>jewellery.threert.app</em></span></a>
+      <a class="app" href="https://daylight-home.threert.app/" rel="noopener" data-name="daylight-home" data-cover="https://daylight-home.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/daylight-home.webp" width="640" height="360" alt="Daylight Home, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · architecture real estate</small><b>Daylight Home</b><span>One living room, from morning sun to lamplight</span><em>daylight-home.threert.app</em></span></a>
+      <a class="app" href="https://colour-lab.threert.app/" rel="noopener" data-name="colour-lab" data-cover="https://colour-lab.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/colour-lab.webp" width="640" height="360" alt="Colour Lab, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · education</small><b>Colour Lab</b><span>Red, green and blue lamps; cyan, magenta and yellow shadows</span><em>colour-lab.threert.app</em></span></a>
+      <a class="app" href="https://showroom.threert.app/" rel="noopener" data-name="showroom" data-cover="https://showroom.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/showroom.webp" width="640" height="360" alt="Boutique Showroom, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · commerce</small><b>Boutique Showroom</b><span>A shop to walk through, lit by its own spots</span><em>showroom.threert.app</em></span></a>
+      <a class="app" href="https://museum.threert.app/" rel="noopener" data-name="museum" data-cover="https://museum.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/museum.webp" width="640" height="360" alt="Sculpture Gallery, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · culture</small><b>Sculpture Gallery</b><span>A daylit museum room you can walk through</span><em>museum.threert.app</em></span></a>
+      <a class="app" href="https://moon-phases.threert.app/" rel="noopener" data-name="moon-phases" data-cover="https://moon-phases.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/moon-phases.webp" width="640" height="360" alt="Moon Phases, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · education</small><b>Moon Phases</b><span>One Sun, one light: phases and eclipses, traced</span><em>moon-phases.threert.app</em></span></a>
+      <a class="app" href="https://refraction.threert.app/" rel="noopener" data-name="refraction" data-cover="https://refraction.threert.app/v/0.2.0+1/cover.jpg"><span class="pic"><img src="media/apps/refraction.webp" width="640" height="360" alt="Refraction Bench, rendered by ThreeRT" loading="lazy" decoding="async"></span><span class="t"><small>App · education</small><b>Refraction Bench</b><span>A straw breaks in water; a glass ball flips the arrows</span><em>refraction.threert.app</em></span></a>
+      <!-- apps:end -->
+      <a class="app yours" href="#publish"><span class="pic"><span>$ threert publish</span></span><span class="t"><small>your-app.threert.app</small><b>Yours goes here</b><span>One command publishes a project.</span></span></a>
+    </div>
+    <div class="more rv"><a class="btn primary" href="https://threert.app/" rel="noopener"><span>Explore threert.app</span><svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><span class="plat">New, popular and playing now, with search.</span></div>
+  </div>
+</section>
+
+<section id="publish" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <h2 class="h-1">One command<br><span class="mute">puts yours online.</span></h2>
+      <p class="lede">Publishing gives a project an address, a page in the catalogue and a package ThreeRT opens directly. It needs a GitHub account and nothing else.</p>
+    </div>
+    <ol class="steps loop rv">
+      <li><h3>Write three.js-style code</h3><p>A scene is a TypeScript module against <code>@threert/scene</code>: meshes, <code>MeshStandardMaterial</code>, lights, glTF models. The light is traced, not configured.</p>
+        <pre class="code" id="loopCode" aria-label="A few lines of a scene">const ball = new Mesh(sphere, gold);
+ball.position.set(0, 0.42, 0);
+scene.add(ball);
+return { scene, camera };</pre></li>
+      <li><h3>Run <code>threert publish</code></h3><p>In the project’s directory. It packs the project, takes a cover from ThreeRT, uploads the files that changed and prints the address. In ThreeRT for macOS, Studio has a Publish button that does the same.</p>
+        <pre class="code sh" aria-label="Terminal"><span class="c">$</span> threert login
+<span class="c">$</span> threert publish</pre></li>
+      <li><h3>Share the address</h3><p>The first publish claims the name, first come, first served. Its address is the app’s page and the link ThreeRT opens. A game that uses <code>@threert/net</code> gets multiplayer rooms, and anyone can start their own project from yours with <code>threert remix</code>.</p>
+        <p class="addr"><span>https://</span>your-app<span>.threert.app</span></p></li>
+    </ol>
+    <div class="more rv"><a class="btn ghost" href="https://threert.app/publish" rel="noopener"><span>How publishing works</span><svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a class="txt" href="docs/">Getting started</a></div>
   </div>
 </section>
 
@@ -315,8 +475,8 @@
   <div class="wrap">
     <div class="no rv"><s>Shadow maps.</s> <s>Light probes.</s> <s>Lightmaps.</s><br><s>Screen-space GI.</s> <s>Baking.</s></div>
     <div class="yes rv">Just <span class="ray-text">light</span>.</div>
-    <div class="cta rv"><a class="btn primary" href="download/" data-dl><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg><span>Download</span></a><a class="btn ghost" href="https://github.com/meshy-dev/ThreeRT" rel="noopener"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg>GitHub</a></div>
-    <p class="plat rv" style="margin-top:16px">macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
+    <div class="cta rv"><a class="btn primary" href="https://threert.app/" rel="noopener"><span>Explore apps<span class="w"> on threert.app</span></span><svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a class="btn ghost star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star<span class="w"> on GitHub</span></span><b data-stars hidden></b></a></div>
+    <p class="plat rv" style="margin-top:16px"><a href="download/" data-dl>Download ThreeRT</a> · macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
   </div>
 </section>
 
@@ -325,38 +485,55 @@
     <div>
       <a class="logo" href="./" aria-label="ThreeRT home"><img src="brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
       <p style="margin-top:14px">Hardware-accelerated ray tracing behind a three.js-style API.</p>
-      <div class="site"><a href="showcase/">Showcase</a><a href="download/">Download</a><a href="docs/">Docs</a><a class="ic" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="ThreeRT on GitHub" title="GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
+      <div class="site"><a href="https://threert.app/" rel="noopener">Apps<svg class="out" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1H9v5.8M9 1 1.4 8.6"/></svg></a><a href="download/">Download</a><a href="docs/">Docs</a><a class="star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub" title="Star ThreeRT on GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star</span><b data-stars hidden></b></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
       <p class="legal">A research project from <a href="https://meshy.ai/" rel="noopener">MeshyAI</a> · © 2026 MeshyAI · <a href="privacy/">Privacy</a></p>
     </div>
     <div class="note">
       <p><sup>1</sup> To our knowledge. 60 fps measured on an Apple M5 MacBook at 1280 × 720 output with dynamic resolution, along each scene’s own camera path; three.js r187 in Chrome on the same machine. The reel at the top of this page is ThreeRT live on an Apple M3 Max: this repository’s demos and OpenStrike, a shooter built on the engine, each clip recorded frame by frame at 60 fps: the demos at 1280 × 720 output (render scale 0.5 to 0.75, taken to the output by the engine’s temporal upscaler), OpenStrike at 960 × 540 (render scale 0.8) with an earlier build.</p>
+      <p><sup>2</sup> The Bistro clip is ThreeRT live on an Apple M3 Max at 1920 × 1080 (render scale 0.5), every frame as it drew it: 14.4 ms of GPU time a frame at the median, 14.9 ms at the 95th percentile, none over 16.7 ms. three.js follows the same camera path.</p>
       <p>Amazon Lumberyard Bistro: Amazon Lumberyard (2017). Zero-Day: Mike Winkelmann (Beeple) and Kate Anderson (2019). Both from NVIDIA’s Open Research Content Archive (ORCA), CC BY 4.0, converted from FBX to glTF. Damaged Helmet: Khronos glTF sample models. Tokyo: 3D city model, Project PLATEAU (MLIT Japan); elevation and aerial photos, GSI; roads and places © OpenStreetMap contributors. The maps in the OpenStrike clips (cs_assault, de_inferno, de_dust2) are Counter-Strike maps, © Valve, and part of neither project. three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+      <p>The pictures of OpenStrikeRT and of the apps are their covers and screenshots on <a href="https://threert.app/" rel="noopener">threert.app</a>, where each app’s page credits what it uses. In Boutique Showroom: Materials Variants Shoe (Shopify), Sunglasses Khronos (Eric Chadwick, Darmstadt Graphics Group GmbH) and Iridescence Lamp (Eric Chadwick, Wayfair, LLC), all CC BY 4.0, from the Khronos glTF Sample Assets.</p>
     </div>
   </div>
 </footer>
 
 <script type="module">
   import { $, $$, backdrop, compare, sequence, seg, reveal, highlight } from "./js/threert.js";
-  import { downloadButtons, packages, packageLinks } from "./js/site.js";
+  import { downloadButtons } from "./js/site.js";
+  import { FEATURED, LIST, TILES, pick, tile } from "./js/platform.js";
 
   // Sections fade in first, so a part that fails below (a missing three.js, a failed fetch) never blanks the page.
   reveal();
   const guard = (name, f) => { try { const r = f(); if (r?.catch) r.catch((e) => console.error(`${name}:`, e)); } catch (e) { console.error(`${name}:`, e); } };
-  // The cases the Showcase hosts (play/index.json, the games with an `industry`): a host without them shows nothing here.
-  guard("cases", async () => {
-    const cases = ((await packages())?.games ?? []).filter((g) => g.industry && g.thumb);
-    if (!cases.length) return;
-    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
-    $("#beyondGrid").innerHTML = cases.map((g) => `<a href="showcase/#case-${esc(g.id)}"><img src="${esc(packageLinks(g.id).thumb(g.thumb))}" alt="${esc(g.title)}, rendered by ThreeRT" loading="lazy"><span class="t"><small>${esc(g.industry)}</small><b>${esc(g.title)}</b><span>${esc(g.caption ?? "")}</span></span></a>`).join("");
-    $("#beyond").hidden = false;
+  // threert.app's apps, as the platform lists them now. The tiles in the page (baked by site/tools/platform.ts) stand
+  // until the answer comes and wherever it does not; a tile changes only when its app did, and every tile has the
+  // same box, so nothing on the page moves. A tile keeps this site's copy of a cover for as long as the app's cover
+  // is the one the copy was made from.
+  guard("apps", async () => {
+    const r = await fetch(LIST, { signal: AbortSignal.timeout(8000) }).catch(() => null); // out of reach: the baked tiles
+    if (!r?.ok) return;
+    const items = (await r.json()).items, apps = pick(items);
+    const slots = $$("#appGrid .app[data-name]"), local = new Map(slots.map((el) => [el.dataset.cover, $("img", el).getAttribute("src")]));
+    // The featured game says how many are in its rooms, when anyone is.
+    const playing = items?.find?.((a) => a?.name === FEATURED)?.stats?.playing;
+    if (playing > 0) $("#osNow").textContent = `${playing} playing now`;
+    if (apps.length < Math.min(TILES, slots.length)) return; // a thin answer: the baked tiles say more
+    slots.forEach((el, i) => {
+      const html = tile(apps[i], local.get(apps[i].cover) ?? apps[i].cover);
+      const t = document.createElement("template");
+      t.innerHTML = html;
+      if (!el.isEqualNode(t.content.firstChild)) el.replaceWith(t.content.firstChild);
+    });
   });
 
-  // The download buttons name the visitor's platform (they link to the download page either way).
+  guard("publish", () => { const c = $("#loopCode"); c.innerHTML = highlight(c.textContent); });
+
+  // The download links name the visitor's platform (they lead to the download page either way).
   guard("download", () => downloadButtons());
 
   guard("comparisons", () => {
     backdrop($("#hero"));
-    for (const el of $$(".details .cmp")) compare(el);
+    for (const el of $$(".details .cmp, .motion .cmp")) compare(el);
     for (const el of $$(".seqp")) sequence(el);
   });
 

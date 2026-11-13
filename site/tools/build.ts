@@ -3,8 +3,9 @@
 //
 // Two directories are generated elsewhere and copied when they are there (site/README.md):
 //   site/releases/   latest.json and the client build it names (the Download page), appcast.xml (the apps' update feed)
-//   site/play/       index.json and the example packages (Showcase's "Open on your device")
-// Without them the pages say that nothing is published on this host; the build warns. --require-release makes that
+//   site/play/       index.json and the example packages (what clients before 0.4.0 list in their Showcase; the
+//                    apps themselves are published on threert.app now)
+// Without releases/ the Download page says that no build is published on this host; the build warns. --require-release makes that
 // (and a file over the host's size limit) an error: what the deploy uses. The disk image itself stays out of the build
 // (--with-image copies it): threert.dev serves it from R2.
 import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -75,7 +76,13 @@ if (existsSync(index)) {
   cpSync(join(site, "play"), join(out, "play"), { recursive: true });
   console.log(`packages: ${(p.games ?? []).map((g: { id: string }) => g.id).join(", ")}`);
 } else {
-  problems.push("no site/play/index.json: Showcase will have no packages to open");
+  problems.push("no site/play/index.json: clients before 0.4.0 will have no examples to list in their Showcase");
+}
+
+// The landing page's own pictures (the baked tiles of threert.app's apps, OpenStrikeRT's: site/tools/platform.ts):
+// a tile whose copy of the cover is missing would be a hole in the page wherever the platform does not answer.
+for (const [, ref] of readFileSync(join(site, "index.html"), "utf8").matchAll(/(?:src|srcset)="(media\/(?:apps|openstrike)\/[^" ]+)/g)) {
+  if (!existsSync(join(site, ref))) problems.push(`site/index.html shows ${ref}, which is not in site/media (bun site/tools/platform.ts)`);
 }
 
 const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]));

@@ -26,7 +26,7 @@
 
 <p align="center">
   <a href="https://threert.dev"><b>Website</b></a> ·
-  <a href="https://threert.dev/showcase/">Showcase</a> ·
+  <a href="https://threert.app">Apps</a> ·
   <a href="https://threert.dev/download/">Download</a> ·
   <a href="https://threert.dev/docs/">Docs</a> ·
   <a href="https://discord.gg/n7vsVmAKCK">Discord</a> ·
@@ -102,7 +102,7 @@ The reference is an unbiased offline render (4,096 samples per pixel, no denoise
 ### Play and make games
 
 1. **[Download ThreeRT](https://threert.dev/download/)** for macOS (14 or later, Apple silicon) or iPhone and iPad (iOS 17 or later). The client fetches a game's code and traces it on the device's own GPU.
-2. Open an example from the app's library or from the [Showcase](https://threert.dev/showcase/).
+2. Open an example from the app's library or from [threert.app](https://threert.app), where ThreeRT apps and games are published.
 3. Write your own with the `threert` command line that ships inside the Mac app:
 
 ```bash
@@ -172,7 +172,7 @@ npm run test:render                                                      # the r
 | [`compare/`](compare) | Hello-world scenes side by side in three.js and ThreeRT |
 | [`ue5/`](ue5) | UE5 reference captures (Lumen and the Path Tracer): the ground truth the renderer is measured against |
 | [`playground/`](playground) | ThreeRT Playground, the macOS editor |
-| [`site/`](site) | [threert.dev](https://threert.dev): the landing page, Showcase, Download and Docs |
+| [`site/`](site) | [threert.dev](https://threert.dev): the landing page, Download and Docs (the apps themselves are on [threert.app](https://threert.app)) |
 
 ## Documentation
 
