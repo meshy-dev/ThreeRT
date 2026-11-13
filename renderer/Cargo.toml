@@ -52,6 +52,10 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
+# build.rs reads shaders/live.wgsl's bindings with the compiler wgpu uses (its version: 30), when the crate is built.
+[build-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 # src/merged.rs's tests read the generated shaders with the compiler wgpu uses: they are valid, and no stage binds more
 # storage buffers than a browser allows.
 [dev-dependencies]

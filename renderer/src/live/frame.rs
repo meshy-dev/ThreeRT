@@ -505,14 +505,13 @@ impl LiveCore {
             state: [1 - self.frame % 2, 0, 0, 0],
         };
         g.queue.write_buffer(&self.targets.params, 0, bytemuck::bytes_of(&lp));
-        let bg = &self.sc.bg;
         // Translucent particles: drawn over the upscaled image right after `upscale` (in sb when depth of field / motion
         // blur follow, else fa: they have no motion vectors, so they are no part of the colour history; UE draws its
         // translucency after the upscaler the same way), then their volume voxels trained.
         // (Nothing to draw while every translucent particle system is hidden in place.)
         let tl = self.sc.up.translucent.as_ref().filter(|_| g.translucent_particles_live(&self.sc.up)).map(|t| {
             let pipes = g.translucent_pipelines(&self.sc.up.kernel, true);
-            let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.sb.buffer } else { &self.targets.fa.buffer };
+            let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.buf("sb").buffer } else { &self.targets.buf("fa").buffer };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
             let low = (iw, ih) != (w, h);
             let tp = gpu::TranslucentParams { size: [w, h, t.first, 1], view: [iw, ih, gpu::VOLUME_TRAIN_CAP, low as u32], misc: [VOLUME_TRAIN_SHARE, translucent_hidden(self.frame) as u32 as f32, 0.0, 0.0] };
@@ -554,12 +553,12 @@ impl LiveCore {
         }
         if let Some(p) = &self.profile {
             // One compute pass per stage, each timed.
-            for (k, (name, pipe)) in self.passes.pipes.iter().enumerate() {
+            for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 let q = (k as u32 + 1) * 2;
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
                 pass.set_pipeline(pipe);
-                pass.set_bind_group(0, bg, &[]);
-                let (gw, gh) = pass_grid(name, (w, h), (iw, ih), self.prev_isz);
+                pass.set_bind_group(0, &self.sc.bgs[k], &[]);
+                let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 drop(pass);
                 if *name == "upscale" && tl.is_some() {
@@ -576,10 +575,10 @@ impl LiveCore {
         } else {
             let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw });
-            for (name, pipe) in &self.passes.pipes {
+            for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 pass.set_pipeline(pipe);
-                pass.set_bind_group(0, bg, &[]);
-                let (gw, gh) = pass_grid(name, (w, h), (iw, ih), self.prev_isz);
+                pass.set_bind_group(0, &self.sc.bgs[k], &[]);
+                let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 if *name == "upscale" {
                     tl_dispatch(&mut pass, false);
@@ -645,7 +644,7 @@ impl LiveCore {
             }
             p.frames += 1;
             if p.frames == 120 {
-                let names: Vec<&str> = std::iter::once("trace").chain(self.passes.pipes.iter().map(|(n, _)| *n)).chain(["cache", "particles", "blas", "translucent", "vtrain"]).collect();
+                let names: Vec<&str> = std::iter::once("trace").chain(self.passes.pipes.iter().map(|(n, ..)| *n)).chain(["cache", "particles", "blas", "translucent", "vtrain"]).collect();
                 let mut rows: Vec<String> = names.iter().zip(&p.sums).map(|(n, s)| format!("{n} {:.2}", s / p.frames as f64)).collect();
                 rows.push(format!("gridsim {:.2}", p.grid_sum / p.frames as f64));
                 rows.push(format!("media {:.2}", p.media_sum / p.frames as f64));
