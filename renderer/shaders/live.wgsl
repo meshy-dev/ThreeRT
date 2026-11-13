@@ -487,6 +487,39 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let fast = select(l, mix(hm.z, l, 0.25), hd.w > 0.0);
     var count = min(hd.w + 1.0, cap);
+    // The fast-history clamp (ReBLUR's), before the cut below: the cut acts once, on luminance, and the history it
+    // leaves still holds the old light (a lamp switched off left its pool on the wall 3.3 times too bright after half
+    // a second, 17 % after 4 s, falling as 1 / frames; a sign's, in its colour). So every frame the slow means around
+    // the point are held, a channel each, to the band of the fast means there: their mean +- FAST_BAND of its standard
+    // error (the fast luminances' spread over the root of their number; both means are of the same pixels, so what
+    // differs between neighbours cancels), and this pixel's history is changed as they are: by the same ratios, or
+    // by the difference itself in a channel the history has next to none of. Its luminance mean follows it (once:
+    // the cut then moves it toward the fast mean, it does not scale it again). What is left of the history counts
+    // for as many frames less, by the channel changed most among those that matter (a twentieth of the largest): the
+    // pixel goes back to the spatial filter. While the lighting is live, as the cut: on a settled scene there is
+    // nothing to find.
+    var hist = hd.rgb;
+    if (L.mode.z != 0u && around.x >= 0.0 && hd.w > 0.0 && !non_finite(fast_c) && !non_finite(slow_c)) {
+        let rel = FAST_BAND * fast_sd / sqrt(fast_n) / max(around.y, 1e-6);
+        let to = clamp(slow_c, fast_c * max(1.0 - rel, 0.0), fast_c * (1.0 + rel) + 1e-4);
+        if (any(to != slow_c)) {
+            let has = slow_c > vec3<f32>(1e-5);
+            let r = select(vec3<f32>(1.0), to / slow_c, has);
+            hist = max(hist * r + select(to - slow_c, vec3<f32>(0.0), has), vec3<f32>(0.0));
+            let was = lum(slow_c);
+            if (was > 1e-5) {
+                let rl = lum(to) / was;
+                m1 *= rl;
+                m2 = m1 * m1 + sd * sd * rl * rl;
+            } else {
+                m1 = max(m1 + lum(to) - was, 0.0);
+                m2 = m1 * m1 + sd * sd;
+            }
+            let big = max(slow_c, to);
+            let left = select(vec3<f32>(1.0), min(slow_c, to) / max(big, vec3<f32>(1e-6)), big > vec3<f32>(0.05 * max(big.x, max(big.y, big.z))));
+            count = max(min(count, hd.w * min(left.x, min(left.y, left.z)) + 1.0), 2.0);
+        }
+    }
     // Anti-lag (as ReBLUR's): around this point the fast average left the slow one by more than its
     // (neighbourhood-averaged) noise allows: the lighting changed here (a sign switched off, a door opened, a wall
     // gone, a spark passing). The history is cut by how far, down to two frames at ANTILAG of the mean: a slow change
@@ -495,7 +528,6 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // read dE 2.43 against offline with it always on, 2.23 without).
     // (The specular has none: at one sample a pixel its fast mean is noise, and cutting by it cost more than the lag:
     // the Bistro slice at 5 s read dE 2.98 with it for 2.82.)
-    var hist = hd.rgb;
     if (L.mode.z != 0u && hd.w >= 6.0 && around.x >= 0.0) {
         let over = abs(around.y - around.x) - 3.0 * 0.38 * sd / 3.0 - 1e-4;
         let keep = 1.0 - clamp(over / (ANTILAG * max(max(around.x, around.y), 1e-6)), 0.0, 1.0);
@@ -503,29 +535,6 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             count = max(min(count, hd.w * keep + 1.0), 2.0);
             m1 = mix(around.y, m1, keep);
             m2 = m1 * m1 + sd * sd;
-        }
-    }
-    // The fast-history clamp (ReBLUR's): the cut above acts once, on luminance, and the history it leaves still holds
-    // the old light (a lamp switched off left its pool on the wall 3.3 times too bright after half a second, 17 %
-    // after 4 s, falling as 1 / frames; a sign's, in its colour). So every frame the slow means around the point
-    // are held, a channel each, to the band of the fast means there: their mean +- FAST_BAND of its standard error
-    // (the fast luminances' spread over the root of their number; both means are of the same pixels, so what
-    // differs between neighbours cancels), and this pixel's history is changed by the same ratios. What is left of
-    // it counts for as many frames less: the pixel goes back to the spatial filter. While the lighting is live, as
-    // the cut: on a settled scene there is nothing to find.
-    if (L.mode.z != 0u && around.x >= 0.0 && hd.w > 0.0 && !non_finite(fast_c) && !non_finite(slow_c)) {
-        let rel = FAST_BAND * fast_sd / sqrt(fast_n) / max(around.y, 1e-6);
-        let to = clamp(slow_c, fast_c * max(1.0 - rel, 0.0), fast_c * (1.0 + rel) + 1e-4);
-        if (any(to != slow_c)) {
-            // (A channel the history has none of takes the difference itself.)
-            let has = slow_c > vec3<f32>(1e-5);
-            let r = select(vec3<f32>(1.0), to / slow_c, has);
-            hist = hist * r + select(to - slow_c, vec3<f32>(0.0), has);
-            let rl = lum(to) / max(lum(slow_c), 1e-6);
-            m1 *= rl;
-            m2 = m1 * m1 + sd * sd * rl * rl;
-            let left = min(r, 1.0 / max(r, vec3<f32>(1e-6)));
-            count = max(min(count, hd.w * min(left.x, min(left.y, left.z)) + 1.0), 2.0);
         }
     }
     let a = 1.0 / max(count, 1.0);
