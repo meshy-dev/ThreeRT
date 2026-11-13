@@ -127,8 +127,16 @@ highest tier any of its changes needs.
    What landed changes do together beyond these checks is the scheduled suites' to catch.
 7. **Visuals:** the supervisor opens the crops and checks that the conclusion matches the pictures.
 
-PRs are merged with `gh pr merge --merge`, which keeps one merge commit per PR on main's first-parent line. Branches
-are kept.
+PRs are merged with `gh pr merge --squash` (the repository allows nothing else), which keeps one commit per PR on
+main. Branches are kept.
+
+## The npm packages
+
+`@threert/scene`, `@threert/gameplay` and `@threert/voxel` are published from `packages/` with one version, the root
+`package.json`'s. In the repository they are their sources (no build step); `node tools/npm-pack.ts` builds what npm
+gets (JavaScript and declarations, in `out/npm/`) and checks it in an empty project, and CI runs it on every PR. To
+release: raise the version in a PR, merge it, and run the `npm` workflow (Actions → npm → Run workflow). It publishes
+the packages whose version npm does not have yet, without a token (npm trusts that workflow of this repository).
 
 ## Scheduled suites on main (after merging)
 
@@ -162,7 +170,7 @@ a later run compares against the previous one.
     builds alternately (a warm launch each, then 5 launches each, a then b), and counts only if the medians still
     differ by more than the floor. Measured hours apart, first frames drift with the machine's state: 0ee18d2 against
     fa83cef read Bistro 2.07 → 2.50 s and the district 2.10 → 2.70 s; alternated, 2.47 / 2.38 and 2.56 / 2.57 s.
-  - **When one is found:** the suite bisects the batch's first-parent merge commits with the same measurement (two or
+  - **When one is found:** the suite bisects the batch's first-parent commits with the same measurement (two or
     three steps for a batch of four).
   - **Culprit:** the author fixes it forward from main. If main is still over budget at the next check, the
     supervisor merges a revert PR.

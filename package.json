@@ -1,5 +1,6 @@
 {
   "name": "threert",
+  "version": "0.1.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -12,7 +13,8 @@
     "scenes": "node tools/build-scenes.ts",
     "test:render": "node tools/test-render.ts",
     "test:layer-b": "node tools/test-layer-b.ts",
-    "runtime": "node tools/build-runtime.ts"
+    "runtime": "node tools/build-runtime.ts",
+    "npm:pack": "node tools/npm-pack.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
