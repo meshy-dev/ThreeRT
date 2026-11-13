@@ -428,9 +428,18 @@ fn dof_params(dof: Option<&crate::desc::Dof>, tan_half_fov: f32, w: u32, h: u32)
     [diameter * 0.5 / sensor_h / aspect * w as f32, d.focus_distance, 0.025 * w as f32, 0.0]
 }
 
-/// Live passes that run on the traced grid (the rest on the output grid).
-fn traced_pass(name: &str) -> bool {
-    name == "refl" || name == "dtemporal" || name.starts_with("atrous") || name == "stemporal" || name.starts_with("sfilt") || name == "compose" || name == "judge" || name == "reject"
+/// The grid a live pass runs over (invocations; workgroups of 8 x 8, but `exposure`'s one): the traced grid, the
+/// previous frame's (`lock_carry`), the output grid, a quarter of it (bloom, the luminance), or its 16 x 16 tiles.
+fn pass_grid(name: &str, out: (u32, u32), traced: (u32, u32), prev_traced: (u32, u32)) -> (u32, u32) {
+    match name {
+        "exposure" => (8, 8),
+        "dof_tiles" => (out.0.div_ceil(16), out.1.div_ceil(16)),
+        "lock_carry" => (prev_traced.0.max(1), prev_traced.1.max(1)),
+        "refl" | "dtemporal" | "stemporal" | "compose" | "judge" | "reject" => traced,
+        _ if name.starts_with("atrous") || name.starts_with("sfilt") => traced,
+        _ if name.starts_with("bloom") || name.starts_with("lum_") => (out.0.div_ceil(4), out.1.div_ceil(4)),
+        _ => out,
+    }
 }
 
 

@@ -86,7 +86,7 @@ impl Passes {
         });
         entries.push(wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None });
         entries.extend([buf(13, false), buf(14, false), buf(15, false), buf(16, false), buf(17, false), buf(18, false)]);
-        entries.extend([buf(19, false), buf(20, false), buf(21, false), buf(22, false), buf(23, true), buf(24, false), buf(25, true), buf(26, true)]);
+        entries.extend([buf(19, false), buf(20, false), buf(21, false), buf(22, false), buf(23, true), buf(24, false), buf(25, true), buf(26, true), buf(27, false)]);
         // The merged layout: the buffers that stay, the slabs, and the offsets' uniform (merged.rs).
         if g.merged {
             use crate::merged::{LIVE_KEPT, OFFSETS_BINDING, SLABS};
@@ -96,7 +96,7 @@ impl Passes {
         }
         let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live"), entries: &entries });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipes = ["refl", "dtemporal", "atrous0", "atrous1", "atrous2", "atrous3", "atrous4", "stemporal", "sfilt0", "sfilt1", "sfilt2", "compose", "judge", "reject", "upscale", "dof_tiles", "dof", "mblur", "lum_down", "exposure", "lum_blur", "bloom_down", "bloom_dn1", "bloom_dn2", "bloom_dn3", "bloom_dn4",
+        let pipes = ["refl", "dtemporal", "atrous0", "atrous1", "atrous2", "atrous3", "atrous4", "stemporal", "sfilt0", "sfilt1", "sfilt2", "lock_carry", "compose", "judge", "reject", "upscale", "dof_tiles", "dof", "mblur", "lum_down", "exposure", "lum_blur", "bloom_down", "bloom_dn1", "bloom_dn2", "bloom_dn3", "bloom_dn4",
                      "bloom_h5", "bloom_v5", "bloom_h4", "bloom_v4", "bloom_h3", "bloom_v3", "bloom_h2", "bloom_v2", "bloom_h1", "bloom_v1", "bloom_h0", "bloom_v0", "post"]
             .into_iter()
             .map(|name| {
@@ -136,17 +136,21 @@ pub struct Targets {
     pub(super) refl_res: Buf,
     pub out: wgpu::Buffer,
     /// Auto exposure: 64 histogram buckets (fixed point), state (exposure, target, mean log2 luminance, valid).
-    pub(super) ae_bins: wgpu::Buffer,
+    pub(super) ae_bins: Buf,
     pub(super) ae_state: Buf,
     /// Quarter-resolution log2 luminance and its edge-aware blur (local exposure base).
     pub(super) lumq: Buf,
     pub(super) lumb: Buf,
+    /// The previous frame's thin-feature locks, carried to where they are now (live.wgsl `lock_carry`), per traced
+    /// sample: atomic, `compose` clears what it reads.
+    pub(super) lock_fwd: Buf,
     /// The kernel's group 1 (`gpu::KernelBufs`): the radiance cache, and what the passes here read of
     /// a trace: the specular-lobe rays (`refl`), motion vectors per traced pixel (pathtrace.wgsl `motion_out`) and the
     /// deterministic direct light per traced pixel (`direct_out`).
     pub kernel: gpu::KernelBufs,
-    /// The merged layout (merged.rs): the slabs the buffers above are ranges of (`SLABS`' first four).
-    pub(super) slabs: Option<[wgpu::Buffer; 4]>,
+    /// The merged layout (merged.rs): the slabs the buffers above are ranges of (`SLABS`' first five; the sixth is
+    /// the kernel's).
+    pub(super) slabs: Option<[wgpu::Buffer; 5]>,
     pub(super) lut_tex: wgpu::Texture,
     pub(super) lut_view: wgpu::TextureView,
     pub(super) sampler: wgpu::Sampler,
@@ -155,7 +159,7 @@ pub struct Targets {
 impl Targets {
     /// For a view of `w` x `h` and a radiance cache of `cache` entries.
     pub(super) fn new(g: &gpu::Gpu, w: u32, h: u32, lut: &[u16], cache: u64) -> Targets {
-        use crate::merged::{SLABS, SLAB_F1, SLAB_U2, SLAB_U4, SLAB_V4};
+        use crate::merged::{SLABS, SLAB_A, SLAB_F1, SLAB_U2, SLAB_U4, SLAB_V4};
         let d = &g.device;
         let n = (w * h) as u64;
         let sb = |label: &str, bytes: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
@@ -181,7 +185,7 @@ impl Targets {
         // The buffers, in the order of the fields below: a buffer each, or in the merged layout (merged.rs) a range of
         // the slab of its element type (each range starts at a multiple of 16 bytes: of every slab's element).
         // (The lasting ones are two halves of `n` elements: this frame's and the previous frame's.)
-        let specs: [(&str, u64, usize); 18] = [
+        let specs: [(&str, u64, usize); 20] = [
             ("diffuse_hist", 2 * n * 16, SLAB_V4),
             ("diffuse_mom", 2 * n * 16, SLAB_V4),
             ("diffuse_fast", 2 * n * 8, SLAB_U2),
@@ -197,12 +201,14 @@ impl Targets {
             ("bloom_a", bloom_texels * 16, SLAB_V4),
             ("bloom_b", bn, SLAB_V4),
             ("refl_res", n * 16, SLAB_V4),
+            ("ae_bins", 64 * 4, SLAB_A),
             ("ae_state", 32, SLAB_V4),
             ("lumq", bn / 4, SLAB_F1),
             ("lumb", bn / 4, SLAB_F1),
+            ("lock_fwd", n * 4, SLAB_A),
         ];
-        let slabs: Option<[wgpu::Buffer; 4]> = g.merged.then(|| std::array::from_fn(|k| sb(SLABS[k].name, specs.iter().filter(|s| s.2 == k).map(|s| s.1.next_multiple_of(16)).sum())));
-        let mut at = [0u64; 4];
+        let slabs: Option<[wgpu::Buffer; 5]> = g.merged.then(|| std::array::from_fn(|k| sb(SLABS[k].name, specs.iter().filter(|s| s.2 == k).map(|s| s.1.next_multiple_of(16)).sum())));
+        let mut at = [0u64; 5];
         let bufs: Vec<Buf> = specs
             .iter()
             .map(|&(label, bytes, slab)| match &slabs {
@@ -233,10 +239,11 @@ impl Targets {
             bloom: [b(), b()],
             refl_res: b(),
             out: sb("out", n * 4),
-            ae_bins: sb("ae_bins", 64 * 4),
+            ae_bins: b(),
             ae_state: b(),
             lumq: b(),
             lumb: b(),
+            lock_fwd: b(),
             kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, n * 16),
             slabs,
             lut_view: lut_tex.create_view(&Default::default()),
@@ -245,9 +252,8 @@ impl Targets {
         }
     }
 
-    /// What live.wgsl's buffer bindings hold (besides the uniforms at 0, the trace's samples at 1, `out` at 10 and
-    /// the histogram at 13).
-    pub(super) fn buffers(&self) -> [(u32, &Buf); 21] {
+    /// What live.wgsl's buffer bindings hold (besides the uniforms at 0, the trace's samples at 1 and `out` at 10).
+    pub(super) fn buffers(&self) -> [(u32, &Buf); 23] {
         [
             (2, &self.diffuse_hist),
             (3, &self.color_hist),
@@ -257,6 +263,7 @@ impl Targets {
             (7, &self.diffuse_fast),
             (8, &self.up_state),
             (9, &self.sample_vel),
+            (13, &self.ae_bins),
             (14, &self.ae_state),
             (15, &self.lumq),
             (16, &self.lumb),
@@ -270,6 +277,7 @@ impl Targets {
             (24, &self.refl_res),
             (25, &self.kernel.motion),
             (26, &self.kernel.direct),
+            (27, &self.lock_fwd),
         ]
     }
 
@@ -286,7 +294,6 @@ impl Targets {
                 e(10, &self.out),
                 wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.lut_view) },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                e(13, &self.ae_bins),
             ];
             let buffers = self.buffers();
             let offsets;

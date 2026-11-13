@@ -559,7 +559,7 @@ impl LiveCore {
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
                 pass.set_pipeline(pipe);
                 pass.set_bind_group(0, bg, &[]);
-                let (gw, gh) = if *name == "exposure" { (8, 8) } else if *name == "dof_tiles" { (w.div_ceil(16), h.div_ceil(16)) } else if traced_pass(name) { (iw, ih) } else if name.starts_with("bloom") || name.starts_with("lum_") { (w.div_ceil(4), h.div_ceil(4)) } else { (w, h) };
+                let (gw, gh) = pass_grid(name, (w, h), (iw, ih), self.prev_isz);
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 drop(pass);
                 if *name == "upscale" && tl.is_some() {
@@ -579,11 +579,7 @@ impl LiveCore {
             for (name, pipe) in &self.passes.pipes {
                 pass.set_pipeline(pipe);
                 pass.set_bind_group(0, bg, &[]);
-                if *name == "exposure" {
-                    pass.dispatch_workgroups(1, 1, 1);
-                    continue;
-                }
-                let (gw, gh) = if *name == "dof_tiles" { (w.div_ceil(16), h.div_ceil(16)) } else if traced_pass(name) { (iw, ih) } else if name.starts_with("bloom") || name.starts_with("lum_") { (w.div_ceil(4), h.div_ceil(4)) } else { (w, h) };
+                let (gw, gh) = pass_grid(name, (w, h), (iw, ih), self.prev_isz);
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 if *name == "upscale" {
                     tl_dispatch(&mut pass, false);
