@@ -61,6 +61,7 @@ export default defineGame({
 - **Handlers are transactions.** A click reaches the game as a `click` event whose `target` is the object under the cursor. `tx.decide` refuses an event, and nothing is half-written.
 - **Deterministic and replayable.** Events are logged with what they read and wrote; `replayLog` and `verifyLog` rebuild a world from its log, and seeded randomness (`seededRandom`) gives the same result on every machine.
 - **World handlers** (`on`) reach the engine's own world: physics, a ray cast into the scene, objects added and removed as an event arrives.
+- **Input, a HUD and the app.** A game with `pointer: "look"` reads the keys and the mouse every frame (`f.input.move`, `f.input.look`, `f.input.pressed("Space")`); `hud.set(...)` describes a crosshair, figures, bars and a scoreboard for the app to draw; `host.post` / `host.on` reach what the app owns (a WebSocket, an HTTP request, how the game was opened).
 
 How scene code runs in the engine is in [RUNTIME.md](https://github.com/meshy-dev/ThreeRT/blob/main/docs/RUNTIME.md).
 

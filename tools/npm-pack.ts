@@ -120,7 +120,7 @@ function check(dirs: string[]): void {
   writeFileSync(join(project, "package.json"), JSON.stringify({ name: "check", private: true, type: "module" }));
   run("npm", ["install", "--silent", "--no-audit", "--no-fund", "--ignore-scripts", ...tarballs], project);
   writeFileSync(join(project, "use.ts"), `import { Scene, PerspectiveCamera, Mesh, BoxGeometry, MeshStandardMaterial, DirectionalLight, SkyAtmosphere, resolvePreset } from "@threert/scene";
-import { defineGame, describeGame, type GameDefinition } from "@threert/gameplay";
+import { defineGame, describeGame, host, hud, type GameDefinition, type Hud, type Input } from "@threert/gameplay";
 import { VoxelGrid } from "@threert/voxel";
 
 const game = defineGame({
@@ -139,10 +139,19 @@ const game = defineGame({
     return { scene, camera };
   },
   handlers: { click(tx) { tx.state.lit = !tx.state.lit; } },
+  pointer: "look",
+  frame(f) {
+    const input: Input = f.input;
+    const view: Hud = { crosshair: { style: "dot" }, items: [{ type: "text", anchor: "top-left", text: input.down("W") ? "walking" : "still" }] };
+    hud.set(view);
+  },
 });
+// The host channel: nobody listens in Node, so a post is dropped; a listener is typed by its message.
+const off = host.on("net.messages", (m) => void m.list.length);
+off();
 const about = describeGame(game as GameDefinition<unknown>);
 const built = game.setup({} as Parameters<typeof game.setup>[0]);
-if (!about.handlers.includes("click") || !(built.scene instanceof Scene) || typeof resolvePreset("preview") !== "object" || new VoxelGrid(0.1).size !== 0.1) throw new Error("the packages did not load as expected");
+if (!about.handlers.includes("click") || about.pointer !== "look" || host.post({ t: "net.close", id: "none" }) !== false || !(built.scene instanceof Scene) || typeof resolvePreset("preview") !== "object" || new VoxelGrid(0.1).size !== 0.1) throw new Error("the packages did not load as expected");
 `);
   // What a user's compiler makes of the declarations: strict, nothing skipped, no Node or DOM types given; resolved
   // as a bundler does, and as Node does.
@@ -151,7 +160,7 @@ if (!about.handlers.includes("click") || !(built.scene instanceof Scene) || type
     step(`the check's typecheck (${moduleResolution})`, process.execPath, [tsc, "-p", project], project);
   }
   step("the check's run", process.execPath, ["use.ts"], project);
-  console.log("check: the tarballs install, typecheck (strict, no skipLibCheck, no Node or DOM types) and build a scene and a game in Node");
+  console.log("check: the tarballs install, typecheck (strict, no skipLibCheck, no Node or DOM types) and build a scene and a game (with input, a HUD and the host channel) in Node");
 }
 
 const dirs = NAMES.map(build);

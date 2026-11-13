@@ -118,7 +118,7 @@ The same address in any browser shows the game as three.js. The full walk-throug
 | Package | What |
 |---|---|
 | [`@threert/scene`](packages/scene) | The three.js-style scene API: meshes, PBR materials, lights, glTF models, physics, volumes |
-| [`@threert/gameplay`](packages/gameplay) | Games: state, transactional handlers, world handlers, frame scripts; deterministic and replayable |
+| [`@threert/gameplay`](packages/gameplay) | Games: state, transactional handlers, world handlers, frame scripts; input, a HUD and a channel to the app that runs the game; deterministic and replayable |
 | [`@threert/voxel`](packages/voxel) | Destructible voxel levels: explosions, cuts, and pieces that break off as rigid bodies |
 
 ```bash
