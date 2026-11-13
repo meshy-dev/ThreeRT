@@ -654,7 +654,7 @@ mod tests {
         assert!(out.ends_with("{ return objects[min(u32(a[1] * 3u + 1u), 4095u)].w + tex_info[min(u32(u32(objects[min(u32(k), 4095u)].x)), 4095u)].y + media[min(u32(0), 31u)].b.x; }\n"), "{out}");
     }
 
-    /// The same for the live passes (28 as written).
+    /// The same for the live passes (24 as written).
     #[test]
     fn the_merged_live_passes_fit_eight_storage_buffers() {
         let (m, info) = parse(LIVE);

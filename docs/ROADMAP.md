@@ -4835,6 +4835,9 @@ benchmark level. The order follows the dependencies; a step that meets a further
     Basis: the scene is one plane with the library's facade windows and no instance, so nothing of step 7b is in
     its kernel (the source is main's byte for byte), and main's build reads the same 0.3934 in both layouts. The
     cause was not looked for.
+  - 2026-11-13 (main `8746130`, 190 tests): 24 fail, the 23 above and `wind/pivot-sway-live`, which reads 9.241 for
+    10 (its offline twin `wind/pivot-sway` passes; hardware traversal passes both). The same 24 in the merged layout.
+    Not in any gate: CI runs no render test, and the merge gate runs them on hardware traversal only.
 - Offline renders of `bistro`, `bistro-slice`, `bistro-district`, `zero-day` and `zero-day-animated` are not the same
   bytes twice under hardware traversal (measured 2026-11-11 in § 6 step 7b's merge gate; the last entry here has
   Bistro's ties between coincident surfaces at 2–4 %). Main `a707e1c` against itself, 320 × 180, 4 spp: 1,782 /

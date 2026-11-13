@@ -85,7 +85,7 @@ jobs:
       - run: node tools/npm-pack.ts
 
   renderer:
-    name: "renderer: release build"
+    name: "renderer: release build, unit tests"
     needs: changes
     if: needs.changes.outputs.renderer == 'true'
     runs-on: ubuntu-26.04
@@ -96,6 +96,10 @@ jobs:
         with:
           workspaces: renderer
       - run: cd renderer && cargo build --release --locked
+      # The renderer's unit tests (the merge gate's `cargo test --release`). The runner has no GPU: the few tests that
+      # open a device say "skipped" and return, the rest (scene, world, script, voxel, physics, the merged layout's
+      # naga checks, the kernel's source switches) run as on a Mac.
+      - run: cd renderer && cargo test --release --locked
       # The voxel bodies and the physics on the CPU, through the engine's own path (ROADMAP § 6 step 8), on the
       # physics' own threads as the renderer steps (src/physics.rs `in_pool`; tools/physics-determinism.ts steps from
       # outside any pool, which is not that path): the recorded hashes at 2 and 4 threads (native parallel = native
