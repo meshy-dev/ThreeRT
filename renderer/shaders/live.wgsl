@@ -1014,23 +1014,33 @@ const UP_STALE: f32 = 0.05;
 //   (TSR fades its flicker rule out with velocity too): a pixel that moved has none and earns it again at rest,
 //   while its history, cut to UP_MOVING samples by the motion, grows back.
 // `Lock`, per traced sample, in the half word the fast mean leaves free in `ae_in`'s y (f16): how much longer the
-// picture here counts as a thin feature, 1 when a sample showed one, a jitter sequence later 0 (FSR 2's pixel locks).
-// A thin feature is a sample no 2 x 2 block of the nine around it is like (within THIN_LIKE of its luminance: FSR
-// 2's rule) and that is above both or below both of some pair of opposite neighbours: a lamp or a lit window finer
-// than a traced pixel, which most frames' samples miss, and the dark sample between two of them, which is this
-// frame's miss. (FSR 2 asks for a sample brighter or darker than all those unlike it, a single line's rule: of
-// lamps strung a pixel apart, in several colours, most have a brighter neighbour, and Tokyo Tower's legs went
-// unlocked. A slope is above one neighbour and below the other in every direction and stays out.) Neither rule that holds the history to this frame's samples applies to a locked pixel: its
-// history is not clamped into the nine samples in motion (`upscale`: the lamp no sample hit this frame is still
-// there; Tokyo Tower in a turn lost a quarter of its light and its legs), and its sample's distance from the
-// history's range is no finding (`judge`: a hit lies above the range, a miss within it, and the corrections went one
-// way); nor is a lamp the samples miss this frame something gone from in front (`judge`'s depth test). `compose`
-// carries the lock with the surface. UE's TSR loosens its clamp the same way where it detects thin geometry.
-// The test runs on what the camera ray saw directly (the sample's emission: lamps, windows, signs), which has no
-// noise: FSR 2's test is made for a rasterised frame, and on the composed sample of a traced one (short histories
-// in motion, reflections without a spatial filter: more than 5 % from sample to sample) it called most of Kabukichō
-// thin; the clamp was then off everywhere and the reflections on the wet street trailed 78 pixels in a strafe for 53.
+// picture here counts as a thin feature, 1 when a sample showed one, a jitter sequence later 0 (FSR 2's pixel locks). A
+// thin feature is a sample no 2 x 2 block of the nine around it is like (within THIN_LIKE of its luminance: FSR 2's
+// rule) and that is above both or below both of some pair of opposite neighbours: a lamp or a lit window finer than a
+// traced pixel, which most frames' samples miss, and the dark sample between two of them, which is this frame's miss.
+// (FSR 2 asks for a sample brighter or darker than all those unlike it, a single line's rule: of lamps strung a pixel
+// apart, in several colours, most have a brighter neighbour, and Tokyo Tower's legs went unlocked. A slope is above one
+// neighbour and below the other in every direction and stays out.) The rules that hold the history to this frame's
+// samples stand back for a locked pixel: its history is clamped into the nine samples in motion only in part (`upscale`,
+// LOCK_RELAX: the lamp no sample hit this frame is still there; Tokyo Tower in a turn lost a quarter of its light and
+// its legs), and its sample's distance from the history's range is no finding (`judge`: a hit lies above the range, a
+// miss within it, and the corrections went one way); nor is a lamp the samples miss this frame something gone from in
+// front (`judge`'s depth test). `compose` carries the lock with the surface. UE's TSR loosens its clamp the same way
+// where it detects thin geometry.
+// The test runs on what the camera ray saw directly (the sample's emission: lamps, windows, signs), which has no noise:
+// FSR 2's test is made for a rasterised frame, and on the composed sample of a traced one (short histories in motion,
+// reflections without a spatial filter: more than 5 % from sample to sample) it called most of Kabukichō thin; the
+// clamp was then off everywhere and the reflections on the wet street trailed 78 pixels in a strafe for 53.
 const THIN_LIKE: f32 = 1.05;
+// How much of a locked pixel's history the clamp spares in motion, a frame (a relaxation weight: TSR caps its own
+// loosening for thin geometry, r.TSR.ThinGeometryDetection.Coverage.MaxRelaxationWeight). A lamp no sample hit this
+// frame stays, and what no sample supports fades by a quarter a frame instead of staying a jitter sequence: drawn
+// where the background's motion took it (a lamp the samples missed reprojects with what is behind it), a spared
+// history was a second copy of the lamp. Tokyo Tower in a quick orbit of the play window (a degree a frame, about a
+// point 50 m ahead) against offline, ΔE / luminance: spared whole 4.86 / 1.20, its beacon doubled; 0.75: 4.25 / 0.82;
+// 0.5: 4.47 / 0.69; not spared (main) 5.06 / 0.71. In a slow turn (0.25 degrees a frame) 2.23 / 1.05, 2.17 / 0.80,
+// main 2.81 / 0.77.
+const LOCK_RELAX: f32 = 0.75;
 // The frames of the jitter sequence (live.rs: 8 at full resolution, as many more as an output pixel has fewer samples).
 fn jitter_phases() -> f32 {
     return clamp(round(8.0 * f32(L.size.x) * f32(L.size.y) / (f32(L.isz.x) * f32(L.isz.y))), 8.0, 512.0);
@@ -1316,7 +1326,7 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     let kept = hist.w * (1.0 - verdict.w);
     if (kept > 0.0) {
         var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
-        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - lock));
+        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - LOCK_RELAX * lock));
         let most = min(mix(UP_SAMPLES, UP_MOVING, moving), mix(UP_SAMPLES, UP_REACTIVE, clamp(xhist_out[u32(bc.y * iw + bc.x)].w, 0.0, 1.0)));
         count = min(kept + conf, most);
         let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);

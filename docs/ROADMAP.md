@@ -2058,27 +2058,34 @@ traced pixel that the fast mean's buffer had free:
 - made by `compose` where the sample's emission is thin: no 2 × 2 block of the nine like it (FSR 2's rule), and
   above or below both of some pair of opposite neighbours; a jitter sequence long, carried with the surface; none on
   animated shading;
-- a locked pixel's history is not clamped in motion (the lock of any of its nine samples), a locked sample's
-  distance from the history's range is no finding, and nothing is gone where one of the nine is locked.
+- in motion a locked pixel's history is clamped into the frame's nine samples only in part (`LOCK_RELAX` 0.75 of
+  it spared a frame: the lock of any of its nine samples), a locked sample's distance from the history's range is no
+  finding, and nothing is gone where one of the nine is locked.
 
 | | main | now | offline |
 |---|---|---|---|
 | lamps field held still, mean radiance | 0.035 | 0.106 | 0.103 |
-| the same, the camera sliding 1.4 px a frame | 0.027 | 0.112 | 0.103 |
-| Tokyo Tower in a turn (3.5 px a frame), ΔE / SSIM / luminance against offline | 2.81 / 0.867 / 0.77 | 2.23 / 0.928 / 1.05 | |
-| the same, the whole frame | 2.69 / 0.889 / 1.01 | 2.56 / 0.915 / 1.06 | |
-| the tower half a second after the stop | 1.89 / 0.948 / 1.07 | 1.47 / 0.964 / 1.00 | |
-| the tower settled | 1.48 / 0.962 / 0.94 | 1.39 / 0.965 / 0.99 | |
+| the same, the camera sliding 1.4 px a frame (see below: this does not exercise the motion clamp) | 0.027 | 0.112 | 0.103 |
+| Tokyo Tower in a turn (0.25° a frame), ΔE / SSIM / luminance against offline | 2.81 / 0.867 / 0.77 | 2.17 / 0.919 / 0.80 | |
+| Tokyo Tower in a quick orbit of the play window (1.15° a frame about a point 50 m ahead) | 5.06 / 0.808 / 0.71 | 4.15 / 0.872 / 0.86 | |
+| the tower settled after the turn | 1.48 / 0.962 / 0.94 | 1.39 / 0.965 / 0.99 | |
 
+- The share spared in motion. All of it (the first form) kept the tower whole in the slow turn (2.23 / 0.928 / 1.05)
+  but, in the play window's quick orbit, drew its lamps out sideways and doubled its beacon (4.86, luminance 1.20):
+  a lamp the samples miss reprojects with what is behind it, and a spared history was a second copy. 0.5: 4.47 /
+  0.69; none above 16 px a frame: main again (5.11 / 0.56). TSR likewise caps how far it loosens its clamp.
 - What it costs, main → now. Where a view translates past emitters the locked ones trail a little: Kabukichō's
-  signs strafe 6.42 → 6.67, a tenth of a second after it 5.27 → 5.55 (trail 26 → 31 px), at the dolly's stop
-  6.75 → 7.07 (its ground the same to 0.01, its whole frame within 0.08); Bistro's whole frame a tenth of a second
-  after a strafe 2.49 → 2.63 (trail 13 → 24 px), else within 0.05; the Bistro slice half a second after its
-  explosion 5.28 → 5.41; the orbit of Thames moving 2.24 → 2.29 (held 1.34 → 1.24). bench-ghosting passes on both
-  scenes. Held still: Bistro 1.85 = 1.85 (frame to frame 0.46 → 0.44), Kabukichō 4.85 → 4.86. Tokyo at dusk the
+  signs strafe 6.42 → 6.55, a tenth of a second after it 5.27 → 5.39 (trail 26 → 29 px), at the dolly's stop
+  6.75 → 6.96 (its ground the same to 0.01); Bistro's whole frame a tenth of a second after a strafe 2.49 → 2.54
+  (trail 13 → 18 px), else within 0.03; the Bistro slice half a second after its explosion 5.28 → 5.40; the orbit
+  of Thames moving 2.24 → 2.16 (trail 33 → 31 px), held 1.34 → 1.39. bench-ghosting passes on both scenes. Held still: Bistro 1.85 = 1.85 (frame to frame 0.46 → 0.44), Kabukichō 4.85 → 4.86. Tokyo at dusk the
   same in the mean, the skyline's p99 at 6 s 11–14 → 16–18 (lamps coming on). The fire shot and the lighting-edit
   shot as they were. `compose` + `judge` + `upscale` 1.73 → 1.80 ms at 1440p output.
-  test-render 190 pass (`upscale/lamps-still-live`, `upscale/lamps-in-motion-live`: main fails both).
+  test-render 190 pass (`upscale/lamps-still-live`, `upscale/lamps-in-motion-live`: main fails both). The moving
+  test reads the same with the motion clamp on, off or relaxed (test-render's live path; the cause not found): it
+  guards the camera moving from a frame script, not the motion clamp, which the Tokyo shots above measure.
+- A lamp switched off fades over 4 to 8 frames at full resolution where main drops it at once (a lamp is sampled
+  about once a jitter sequence, the lock's life: nothing tells sooner that it is off).
 - What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, K1–X9):
   - variance clipping: a lamp no sample hit is outside any box made of this frame's samples;
   - FSR 2's test on the composed sample: a traced frame carries more than 5 % of noise from sample to sample, most
@@ -2090,7 +2097,12 @@ traced pixel that the fast mean's buffer had free:
   - the lock in motion only: after the stop the tower was 7 % too bright for half a second again;
   - `gone` only where the two depths moved against each other on screen: right for a lamp, wrong for this engine,
     where a wall blown out uncovers what is behind it with nothing moving (the slice 5.28 → 5.66);
-  - the lock ended by depth where something nearer stood a frame ago: that is the test the lamp fails.
+  - the lock ended by depth where something nearer stood a frame ago: that is the test the lamp fails;
+  - FSR 2's release of a lock on a change of the scene (its `UpdateLockStatus`: a coarse mip of the frame's log
+    luminance, the lock killed when it changes by more than 0.1 of its sixth root; the same change as a reactive
+    factor): no effect on any shot here, nor on a probe made for it (lamps on a wall whose light goes out). FSR 2
+    and TSR take the raw rasterised frame; this upscaler sits behind a temporal denoiser, a change of lighting
+    reaches it over frames and is the denoiser's to follow (the fast-history clamp above).
 - Left: thin things that do not emit (a wire, a lattice by day) are still taken for gone under the jitter; the
   locked lettering of a still sign comes back from a motion's blur by the blend alone (the 0.2 on Kabukichō's
   signs); a lamp that comes on arrives over a quarter of a second.
