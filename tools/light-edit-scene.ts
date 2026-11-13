@@ -6,6 +6,7 @@
 //   - `sign`: an emissive panel on the left wall (light-sampled as an emitter), lighting the floor beside it.
 // Events `lamp` and `sign` switch one off or on at once (the object's power: a parameter change, in place), so the
 // bench can count the frames the live view takes to follow: direct light of a local light, its bounce, an emitter's.
+// To look at it: `threert-render play out/bundles/light-edit-scene.js`, keys L (the lamp) and K (the sign).
 //   node tools/bench-temporal.ts --shot edit      (it bundles this file to out/bundles/light-edit-scene.js)
 import { BoxGeometry, Color, Mesh, MeshStandardMaterial, PerspectiveCamera, PointLight, Scene, SkyColor, SpotLight } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
@@ -61,6 +62,8 @@ export default defineGame({
     f.object("lamp")!.power = f.state.lamp ? 1 : 0;
     f.object("sign")!.power = f.state.sign ? 1 : 0;
   },
+  // In a window (`threert-render play out/bundles/light-edit-scene.js`): L switches the lamp, K the sign.
+  keys: { L: "lamp", K: "sign" },
   handlers: {
     lamp(tx) {
       tx.state.lamp = !tx.state.lamp;
