@@ -30,7 +30,8 @@ export interface GameDefinition<S = JsonObject> {
   seed?: number;
   /** Initial JSON state. */
   state: S;
-  /** Builds the scene (render nodes, the editor). Deterministic per seed: no Math.random / Date beyond ctx. */
+  /** Builds the scene (render nodes, the editor). Deterministic per seed: no Math.random / Date beyond ctx.
+   *  Synchronous: it returns the scene, not a promise of one (an `async` setup is an error). */
   setup(ctx: SetupContext): SetupResult;
   handlers: Record<string, Handler<S>>;
   /** Handles "tick" events (`{dt}` payload, seconds) unless a "tick" handler exists. */
@@ -107,6 +108,11 @@ export function buildScene(game: GameDefinition<unknown>, opts: { roomId: string
   // Event ids start at 1, so stream 0 is reserved for setup.
   const random = seededRandom(seed, 0);
   const r = withDeterminism(opts.ts ?? 0, random, () => game.setup({ roomId: opts.roomId, seed, random }));
+  // (Nothing waits for a promise here: a scene is built when setup returns. What setup starts with promises runs
+  // after it and may add to the scene it returned.)
+  if (typeof (r as unknown as PromiseLike<unknown> | undefined)?.then === "function") {
+    throw new Error("setup must be synchronous: it returns { scene, camera }, not a promise (setup is not awaited; build the scene, and add what arrives later to it)");
+  }
   return { ...r, seed };
 }
 

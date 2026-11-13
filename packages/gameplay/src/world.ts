@@ -24,7 +24,12 @@
 //   runs `handlers` on its own, so neither may depend on the other having run.
 // - `world.emit(type, payload)` starts a state transaction (`handlers[type]`, as `tx.emit` does from a handler): on
 //   this node when it is the authority, as it is wherever world handlers run today.
-// - Synchronous, as handlers are: no await. `Math.random` and `Date` are the event's (`world.random`, `world.now`).
+// - Synchronous, as handlers are: the handler itself returns no promise (an `async` function as a world handler is
+//   an error). `Math.random` and `Date` are the event's (`world.random`, `world.now`).
+// - What it starts with promises (`load().then(...)`, an `async` function it calls and does not wait for) runs when
+//   the event's entry into the script is over, as in a browser (docs/RUNTIME.md "Promises"): the scene is still the
+//   scene and what that code changes reaches the engine, but the event is over. `world.emit` throws there, and
+//   `Math.random` and `Date` are the host's.
 // - A world handler that throws does not stop the world: what it had changed is synced, the event's handler and the
 //   engine's next tick run all the same, and the error is in the event's log.
 // - Where they do not run: in a room. A node that follows a room gets committed state (`commit`, `setState`), not
@@ -55,7 +60,8 @@ export interface WorldContext<S> {
   object(id: string): Object3D | undefined;
   /** Random stream of this event (seeded from the room seed and the event; `Math.random` in the handler is this). */
   random(): number;
-  /** Starts a state transaction: `handlers[type]` runs with `payload` after this handler and the event's own. */
+  /** Starts a state transaction: `handlers[type]` runs with `payload` after this handler and the event's own.
+   *  Throws once the handler has returned (code after an `await`, a `world` kept for later): its emits were taken. */
   emit(type: string, payload?: unknown): void;
   /** What the player holds and moves (input.ts), as of the app's last input message. */
   readonly input: Input;
@@ -69,9 +75,12 @@ export type WorldHandler<S> = (world: WorldContext<S>, ev: any) => void;
 const WORLD_STREAM = 0x40000000;
 
 /** The context of what runs on this node for `event` (a world handler, the listeners of a batch of host messages),
- *  with the state events it emits and its random stream. */
-export function worldContext<S>(frames: FrameRunner<S>, seed: number, event: { id: number; ts: number }): { world: WorldContext<S>; emits: { type: string; payload: Json }[]; random: () => number } {
+ *  with the state events it emits and its random stream. `close()` when what it is for has run and its emits are
+ *  taken: an `emit` after that (from a promise's callback, which runs when the entry is over) would be lost, so it
+ *  throws. */
+export function worldContext<S>(frames: FrameRunner<S>, seed: number, event: { id: number; ts: number }): { world: WorldContext<S>; emits: { type: string; payload: Json }[]; random: () => number; close: () => void } {
   const emits: { type: string; payload: Json }[] = [];
+  let closed = false;
   const random = seededRandom(seed, (event.id + WORLD_STREAM) >>> 0);
   const world: WorldContext<S> = {
     scene: frames.scene,
@@ -83,13 +92,14 @@ export function worldContext<S>(frames: FrameRunner<S>, seed: number, event: { i
     random,
     emit(type, payload = {}) {
       if (typeof type !== "string" || !type) throw new TypeError("emit: event type must be a non-empty string");
+      if (closed) throw new Error(`emit(${type}): the handler or listener this world was given to has returned (code after an await runs when its entry is over); emit while it runs, or from a host listener`);
       const text = JSON.stringify(payload) as string | undefined;
       if (text === undefined) throw new TypeError(`emit(${type}): the payload must be plain JSON`);
       emits.push({ type, payload: JSON.parse(text) as Json });
     },
     input: frames.input,
   };
-  return { world, emits, random };
+  return { world, emits, random, close: () => void (closed = true) };
 }
 
 /**
@@ -97,7 +107,7 @@ export function worldContext<S>(frames: FrameRunner<S>, seed: number, event: { i
  * emitted before is dropped with it, as a failed transaction's emits are).
  */
 export function runWorldHandler<S>(handler: WorldHandler<S>, frames: FrameRunner<S>, seed: number, event: GameEvent): { emits: { type: string; payload: Json }[]; error?: string } {
-  const { world, emits, random } = worldContext(frames, seed, event);
+  const { world, emits, random, close } = worldContext(frames, seed, event);
   try {
     withDeterminism(event.ts, random, () => {
       const r: unknown = handler(world, structuredClone(event.payload));
@@ -108,5 +118,7 @@ export function runWorldHandler<S>(handler: WorldHandler<S>, frames: FrameRunner
     return { emits };
   } catch (e) {
     return { emits: [], error: e instanceof Error ? (e.stack ?? e.message) : String(e) };
+  } finally {
+    close();
   }
 }
