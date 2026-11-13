@@ -125,7 +125,7 @@
 // An alpha-cutout triangle: its material has an alpha test (as the build flags TRI_MASKED; model instances' pool
 // triangles carry no flags).
 @if(hwrt) fn cutout(ti: u32) -> bool {
-    return materials[bitcast<u32>(attrs[ti].uv.w)].uv2.w > 0.0;
+    return material_at(bitcast<u32>(attrs[ti].uv.w)).uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
@@ -139,7 +139,7 @@
 // traversal group's.
 @if(hwrt) fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
     if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) {
-        let r = instances[custom & (INSTANCE_BIT - 1u)].info;
+        let r = instance_at(custom & (INSTANCE_BIT - 1u)).info;
         return r.x + select(0u, r.w, geometry == 1u) + prim;
     }
     return group_tri(custom, prim);

@@ -77,7 +77,7 @@
         } else if (rec == NO_INST) {
             // A top leaf: one unit. The ray in the unit's space (its direction not renormalised: t is the world's):
             // `proc_point`, `proc_dir`, or the origin moved alone.
-            let u = instances[n.left_or_first];
+            let u = instance_at(n.left_or_first);
             if (mode != TRACE_SHADOW || bitcast<u32>(u.n1.w) != 0u) {
                 rec = n.left_or_first;
                 ro = o - vec3<f32>(u.m0.w, u.m1.w, u.m2.w);

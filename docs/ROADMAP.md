@@ -2260,6 +2260,34 @@ surface materials' hash (`a * b ^ c * d`: a bitwise operator's operands must be 
 naga had taken it, so those materials (and the particle passes, the same three times) never compiled in a browser.
 Fixed with parentheses in the order naga read them; a unit test holds the other shader files to the grammar.
 
+**The kernel's layouts in its source, and the loop guard on its syntax tree (2026-11-14, after it).** The browser's
+merged layout, Android's uniform tables and the loop guard were still made by rewriting the kernel's text: merged.rs
+scanned the WGSL for every use of thirteen buffer names, followed the locals that shadowed them through their scopes,
+rewrote each use (`MT.materials[`, `min(u32(i), last)`), and put a counter after the `{` of every loop it found by its
+keyword. Now:
+- The kernel reads its seven tables and uses its six group-1 buffers only through functions (`material_at`,
+  `light_at`, ..., `cache_key_claim`, `cache_acc_add`, `refl_store`, `direct_len`, ...: 87 reads of the tables, 40 uses
+  of group 1), and each layout is a block of declarations in pathtrace.wgsl that declares the buffers and those
+  functions: `@if(merged) { .. } @else { @if(uniform_tables) { .. } @else { .. } }` (WESL's blocks; scene data
+  behind an accessor module, as engines keep it).
+- The numbers a variant needs are WESL constants the source imports (`import constants::..`): the merged arrays'
+  lengths, the uniform arrays', the loop guard's limit. gpu.rs `KernelVariant` gives a variant's flags and constants.
+- The loop guard's count is put into every loop by a pass over the variant's syntax tree (gpu.rs `guard_loops`), the
+  scene's functions' loops too; its declarations are in the source under `@if(guard)`.
+- merged.rs's scanner, its rewriter and their tests are gone (637 lines to 302); the numbers the Rust side needs for
+  its buffers stay. What is left as text: a scene's functions in their slots.
+
+A read or write that goes past the functions does not compile in the merged variant, whose block declares none of
+the buffers by name, and the tests read the merged variants with naga. Checks: render-identity against main, all
+with the loop guard first (natively, merged, with the uniform tables, with every switch on), then native without it:
+0 of 190 outputs changed in any (172-175 byte-identical, the rest within their run-to-run spread), so the tree pass
+and the text scan guard the same loops; `tools/web-hello.ts` in Chrome: pass. Cost (1440p at 0.375, alternated, both
+orders): native hardware traversal equal (Bistro 8.28-8.97 ms against 8.30-8.96, Kabukichō 15.46-16.17 against
+15.53-16.25); software traversal -0.2 ms in the layout as written (46.8 against 47.0) and +0.2 ms merged (47.3 against
+47.1). The Metal source naga writes is the same in meaning both ways (compared function by function); neither
+one-field accessors nor main's parameter order moved the merged +0.2, which comes and goes with the layout: the
+compiler's arrangement around the accessors, +-0.5 %.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

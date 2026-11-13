@@ -1,29 +1,28 @@
 //! The merged binding layout: the kernel with at most eight storage buffers a stage, WebGPU's default limit
 //! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written: more than a browser gives a page. (The
-//! live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.) There
-//! is one source: pathtrace.wgsl, and the bindings gpu.rs makes for it, are what the native renderer runs, unchanged.
-//! This module writes the browser's from them, as text (as
-//! `gpu::kernel_wgsl` makes the kernel's variants), and gives the Rust side the numbers that go with
-//! it. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the renderer
-//! check it too (docs/RUNTIME.md "The engine in a browser").
+//! live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.)
 //!
-//! What is merged, and how:
+//! The kernel's source has both layouts: pathtrace.wgsl declares its tables and its group-1 buffers in an
+//! `@if(merged) { .. } @else { .. }` block each (WESL's conditional translation, `gpu::KernelVariant`), and reads and
+//! writes them only through functions declared in each (`material_at`, `cache_acc_add`, `refl_store`, ...). This
+//! module is the Rust side's half: which buffers are merged, the lengths of the merged structs' arrays (WESL constants
+//! the source imports, `gpu::KernelVariant::constants`) and where the arrays are, for the buffers the renderer makes
+//! and copies. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the
+//! renderer check it too (docs/RUNTIME.md "The engine in a browser").
+//!
+//! What is merged:
 //!  - The kernel's seven tables (`TABLES`: materials, lights, emitters, texture pages, objects, instances, media)
-//!    become the arrays of one struct, `MT: MergedTables`, in one buffer. Their lengths are written into the source
-//!    (a struct's arrays are sized), each a power of two no less than `TABLE_MIN`, so a scene that grows compiles a
-//!    kernel again only when a table doubles. The renderer keeps writing its own buffers; each frame copies them into
-//!    the struct's (`Gpu::sync_tables`; they are small).
-//!  - The kernel's six group-1 buffers (`KERNEL_LIVE`: the radiance cache, what the live passes read
-//!    of a trace) become the arrays of `ML: MergedLive`, one buffer that they are ranges of (`gpu::KernelBufs`).
-//!    What the live passes read of it starts at a multiple of 256 bytes (`@align(256)`): the passes bind those
-//!    ranges as buffers of their own, and a binding's offset is a multiple of that (WebGPU's
+//!    become the arrays of one struct, `MT: MergedTables`, in one buffer. Their lengths are each a power of two no
+//!    less than `TABLE_MIN`, so a scene that grows compiles a kernel again only when a table doubles. The renderer
+//!    keeps writing its own buffers; each frame copies them into the struct's (`Gpu::sync_tables`; they are small).
+//!  - The kernel's six group-1 buffers (`KERNEL_LIVE`: the radiance cache, what the live passes read of a trace) and
+//!    the loop guard's count become the arrays of `ML: MergedLive`, one buffer that they are ranges of
+//!    (`gpu::KernelBufs`). What the live passes read of it starts at a multiple of 256 bytes (`@align(256)`): the
+//!    passes bind those ranges as buffers of their own, and a binding's offset is a multiple of that (WebGPU's
 //!    `minStorageBufferOffsetAlignment`).
 //!
-//! A use of a merged name the generator does not know (anything but `name[...]`, `&name[...]` and
-//! `arrayLength(&name)`), a declaration that is not found exactly once, a name the generator adds that the source
-//! already has: each stops the renderer with the name and the line. Locals and parameters that shadow a merged name
-//! are followed through their scopes and left alone. The test below reads what comes out with naga: it is valid WGSL,
-//! no stage has more than `STORAGE_BUFFERS`, and the structs' arrays are where the Rust side puts them.
+//! The tests below read every variant with naga: valid WGSL, no stage with more than `STORAGE_BUFFERS`, and the
+//! structs' arrays where `offsets` and `live_layout` put them.
 
 /// WebGPU's default `maxStorageBuffersPerShaderStage`: what the merged layout fits.
 pub const STORAGE_BUFFERS: u32 = 8;
@@ -31,24 +30,21 @@ pub const STORAGE_BUFFERS: u32 = 8;
 /// One of the kernel's buffers that becomes an array of a merged struct.
 pub struct Member {
     pub name: &'static str,
-    /// Its element type and the element's size in a storage buffer; where its array may start in the struct: its
-    /// element's alignment, or more (written `@align`).
-    pub ty: &'static str,
+    /// Its element's size in a storage buffer; where its array may start in the struct: its element's alignment, or
+    /// more (`@align` in pathtrace.wgsl's struct).
     pub stride: u64,
     pub align: u64,
-    /// Its declaration in pathtrace.wgsl, as written.
-    pub decl: &'static str,
 }
 
 /// The kernel's tables, in `MergedTables`' order (group 0, binding `TABLES_BINDING`).
 pub const TABLES: [Member; 7] = [
-    Member { name: "materials", ty: "Material", stride: 288, align: 16, decl: "@group(0) @binding(4) var<storage, read> materials: array<Material>;" },
-    Member { name: "lights", ty: "Light", stride: 80, align: 16, decl: "@group(0) @binding(5) var<storage, read> lights: array<Light>;" },
-    Member { name: "emitters", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(0) @binding(6) var<storage, read> emitters: array<vec4<f32>>;" },
-    Member { name: "tex_info", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(0) @binding(14) var<storage, read> tex_info: array<vec4<f32>>;" },
-    Member { name: "objects", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(0) @binding(15) var<storage, read> objects: array<vec4<f32>>;" },
-    Member { name: "instances", ty: "Instance", stride: 160, align: 16, decl: "@group(0) @binding(17) var<storage, read> instances: array<Instance>;" },
-    Member { name: "media", ty: "Medium", stride: 224, align: 16, decl: "@group(0) @binding(18) var<storage, read> media: array<Medium>;" },
+    Member { name: "materials", stride: 288, align: 16 },
+    Member { name: "lights", stride: 80, align: 16 },
+    Member { name: "emitters", stride: 16, align: 16 },
+    Member { name: "tex_info", stride: 16, align: 16 },
+    Member { name: "objects", stride: 16, align: 16 },
+    Member { name: "instances", stride: 160, align: 16 },
+    Member { name: "media", stride: 224, align: 16 },
 ];
 pub const TABLES_BINDING: u32 = 4;
 /// The least length of each table's array: scenes below it share one kernel source.
@@ -56,17 +52,17 @@ pub const TABLE_MIN: [u32; 7] = [64, 64, 1024, 256, 1024, 64, 16];
 
 /// The kernel's group-1 buffers, in `MergedLive`'s order (group 1, binding `KERNEL_LIVE_BINDING`).
 pub const KERNEL_LIVE: [Member; 6] = [
-    Member { name: "cache_keys", ty: "atomic<u32>", stride: 4, align: 4, decl: "@group(1) @binding(1) var<storage, read_write> cache_keys: array<atomic<u32>>;" },
-    Member { name: "cache_acc", ty: "atomic<u32>", stride: 4, align: 4, decl: "@group(1) @binding(2) var<storage, read_write> cache_acc: array<atomic<u32>>;" },
-    Member { name: "cache_val", ty: "vec4<f32>", stride: 16, align: 16, decl: "@group(1) @binding(3) var<storage, read_write> cache_val: array<vec4<f32>>;" },
-    Member { name: "refl", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;" },
-    Member { name: "motion_out", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;" },
-    Member { name: "direct_out", ty: "vec4<f32>", stride: 16, align: 256, decl: "@group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;" },
+    Member { name: "cache_keys", stride: 4, align: 4 },
+    Member { name: "cache_acc", stride: 4, align: 4 },
+    Member { name: "cache_val", stride: 16, align: 16 },
+    Member { name: "refl", stride: 16, align: 256 },
+    Member { name: "motion_out", stride: 16, align: 256 },
+    Member { name: "direct_out", stride: 16, align: 256 },
 ];
 pub const KERNEL_LIVE_BINDING: u32 = 1;
-/// `MergedLive`'s last array, after `KERNEL_LIVE`'s: the loop guard's count (`guard`; its first word: the invocations
+/// `MergedLive`'s last array, after `KERNEL_LIVE`'s: the loop guard's count (`gpu::guard_loops`; its first word: the invocations
 /// a loop of which was stopped). Always there in the merged layout, written only by a kernel with the guard.
-pub const GUARD_TRIPS: Member = Member { name: "loop_guard_trips", ty: "atomic<u32>", stride: 4, align: 4, decl: "" };
+pub const GUARD_TRIPS: Member = Member { name: "loop_guard_trips", stride: 4, align: 4 };
 /// The same count in the layout as written, when the kernel has the guard (group 1, binding `GUARD_BINDING`).
 pub const GUARD_BINDING: u32 = 8;
 pub const GUARD_WORDS: u32 = 4;
@@ -115,237 +111,17 @@ pub fn offsets(members: &[Member], caps: &[u32]) -> (Vec<u64>, u64) {
     (out, at.next_multiple_of(members.iter().map(|m| m.align).max().unwrap_or(1)))
 }
 
-/// How a merged name's uses are rewritten.
-struct Rule {
-    name: &'static str,
-    /// What `name[` becomes, and what goes before the `]` that closes it.
-    open: String,
-    close: String,
-    /// What `arrayLength(&name)` becomes.
-    len: String,
-}
-
-fn fail(what: &str, src: &str, at: usize) -> ! {
-    panic!("merged layout: {what} (line {})", src[..at].matches('\n').count() + 1)
-}
-
-/// The identifier at `i` (bytes), if one starts there.
-fn ident(b: &[u8], i: usize) -> Option<usize> {
-    let start = |c: u8| c.is_ascii_alphabetic() || c == b'_';
-    if i >= b.len() || !start(b[i]) {
-        return None;
-    }
-    let mut j = i + 1;
-    while j < b.len() && (start(b[j]) || b[j].is_ascii_digit()) {
-        j += 1;
-    }
-    Some(j)
-}
-
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    i
-}
-
-/// Rewrites every use of the rules' names in `src` (WGSL): a scan that knows comments, blocks and the locals and
-/// parameters that shadow a name (from the end of their declaration to the end of their block).
-fn rewrite(src: &str, rules: &[Rule]) -> String {
-    let b = src.as_bytes();
-    let rule = |name: &[u8]| rules.iter().position(|r| r.name.as_bytes() == name);
-    let mut out: Vec<u8> = Vec::with_capacity(b.len() + b.len() / 16);
-    // Blocks and brackets open; the brackets a rewritten index closes with more than `]`.
-    let (mut depth, mut brackets, mut parens) = (0usize, 0usize, 0usize);
-    let mut closes: Vec<(usize, &str)> = vec![];
-    // Names shadowed, each with the block depth it lives in; those declared in the statement being read.
-    let mut shadows: Vec<(usize, usize)> = vec![];
-    let mut pending: Vec<(usize, usize)> = vec![];
-    // The last byte of code before here (not space, not comment); after `var` / `let` / `const` in a function; in a
-    // function's header (its parameters).
-    let (mut last, mut declares, mut header) = (0u8, false, false);
-    let mut i = 0;
-    while i < b.len() {
-        if b[i..].starts_with(b"//") {
-            let j = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |k| i + k);
-            out.extend_from_slice(&b[i..j]);
-            i = j;
-            continue;
-        }
-        if b[i..].starts_with(b"/*") {
-            let j = src[i + 2..].find("*/").map_or(b.len(), |k| i + 2 + k + 2);
-            out.extend_from_slice(&b[i..j]);
-            i = j;
-            continue;
-        }
-        let Some(j) = ident(b, i) else {
-            let c = b[i];
-            match c {
-                b'{' => {
-                    depth += 1;
-                    header = false;
-                }
-                b'}' => {
-                    depth = depth.checked_sub(1).unwrap_or_else(|| fail("an unmatched }", src, i));
-                    shadows.retain(|s| s.1 <= depth);
-                }
-                b';' => shadows.append(&mut pending),
-                b'(' => parens += 1,
-                b')' => parens = parens.saturating_sub(1),
-                b'[' => brackets += 1,
-                b']' => {
-                    if closes.last().is_some_and(|c| c.0 == brackets) {
-                        out.extend_from_slice(closes.pop().unwrap().1.as_bytes());
-                    }
-                    brackets = brackets.checked_sub(1).unwrap_or_else(|| fail("an unmatched ]", src, i));
-                }
-                _ => {}
-            }
-            if !c.is_ascii_whitespace() {
-                last = c;
-            }
-            out.push(c);
-            i += 1;
-            continue;
-        };
-        let word = &b[i..j];
-        let after = skip_space(b, j);
-        let next = b.get(after).copied().unwrap_or(0);
-        let (was, declared) = (last, std::mem::take(&mut declares));
-        last = b'a';
-        if depth > 0 && matches!(word, b"var" | b"let" | b"const") {
-            declares = true;
-        } else if depth == 0 && word == b"fn" {
-            header = true;
-        } else if word == b"arrayLength" && next == b'(' {
-            // `arrayLength(&name)` of a merged name that nothing shadows: its length.
-            let amp = skip_space(b, after + 1);
-            if b.get(amp) == Some(&b'&') {
-                let n0 = skip_space(b, amp + 1);
-                if let Some(n1) = ident(b, n0) {
-                    let end = skip_space(b, n1);
-                    if let Some(r) = rule(&b[n0..n1]).filter(|r| !shadows.iter().any(|s| s.0 == *r)) {
-                        if b.get(end) != Some(&b')') {
-                            fail(&format!("arrayLength of something inside `{}`", rules[r].name), src, i);
-                        }
-                        out.extend_from_slice(rules[r].len.as_bytes());
-                        last = b')';
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-        } else if let Some(r) = rule(word) {
-            let name = rules[r].name;
-            if declared {
-                // A local of that name: it shadows the buffer from the end of this statement to the end of its block
-                // (a `for`'s own variable: the loop's block).
-                pending.push((r, depth + (parens > 0) as usize));
-            } else if was == b'.' {
-                // A member of something else.
-            } else if next == b':' && b.get(after + 1) != Some(&b':') {
-                // A parameter of that name shadows the buffer in the function's body; a struct's member does nothing.
-                if header {
-                    shadows.push((r, 1));
-                }
-            } else if shadows.iter().any(|s| s.0 == r) {
-                // The local.
-            } else if next == b'[' {
-                out.extend_from_slice(rules[r].open.as_bytes());
-                brackets += 1;
-                if !rules[r].close.is_empty() {
-                    closes.push((brackets, &rules[r].close));
-                }
-                last = b'[';
-                i = after + 1;
-                continue;
-            } else {
-                fail(&format!("`{name}` is used in a way the generator does not know"), src, i);
-            }
-        }
-        out.extend_from_slice(word);
-        i = j;
-    }
-    if depth != 0 || brackets != 0 || !closes.is_empty() {
-        fail("unbalanced braces or brackets", src, b.len());
-    }
-    String::from_utf8(out).expect("the source's own bytes")
-}
-
-/// Takes the declaration `decl` out of `s` (it is there exactly once), leaving `with` in its place.
-fn take(s: &mut String, decl: &str, with: &str) {
-    assert_eq!(s.matches(decl).count(), 1, "merged layout: the declaration {decl:?}");
-    *s = s.replacen(decl, with, 1);
-}
-
-/// Stops if the source already has a name the generator adds.
-fn fresh(src: &str, names: &[&str]) {
-    let b = src.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i..].starts_with(b"//") {
-            i = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |k| i + k);
-        } else if let Some(j) = ident(b, i) {
-            if names.iter().any(|n| n.as_bytes() == &b[i..j]) {
-                fail(&format!("the source already has a `{}`", &src[i..j]), src, i);
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-}
-
-fn merged_struct(name: &str, members: &[&Member], caps: &[u32]) -> String {
-    let fields: Vec<String> = members.iter().zip(caps).map(|(m, c)| format!("    {}{}: array<{}, {c}>,", if m.align > 16 { format!("@align({}) ", m.align) } else { String::new() }, m.name, m.ty)).collect();
-    format!("struct {name} {{\n{}\n}};\n", fields.join("\n"))
-}
-
-/// The kernel (its source, `gpu::kernel_template`, its functions spliced in; before its variant is made) in the merged
-/// layout for arrays of `caps`' lengths: group 0 binds tri_verts, attrs, nodes, `MT`, env_cdf, accum and prev_verts,
-/// group 1 `ML`.
-pub fn kernel(src: &str, caps: &Caps) -> String {
-    fresh(src, &["MT", "ML", "MergedTables", "MergedLive", GUARD_TRIPS.name]);
-    let mut s = src.to_string();
-    for (k, m) in TABLES.iter().enumerate() {
-        let with = if k == 0 {
-            format!("{}@group(0) @binding({TABLES_BINDING}) var<storage, read> MT: MergedTables;", merged_struct("MergedTables", &TABLES.iter().collect::<Vec<_>>(), &caps.tables))
-        } else {
-            String::new()
-        };
-        take(&mut s, m.decl, &with);
-    }
-    for (k, m) in KERNEL_LIVE.iter().enumerate() {
-        let with = if k == 0 {
-            format!("{}@group(1) @binding({KERNEL_LIVE_BINDING}) var<storage, read_write> ML: MergedLive;", merged_struct("MergedLive", &KERNEL_LIVE.iter().chain([&GUARD_TRIPS]).collect::<Vec<_>>(), &caps.live.iter().copied().chain([GUARD_WORDS]).collect::<Vec<_>>()))
-        } else {
-            String::new()
-        };
-        take(&mut s, m.decl, &with);
-    }
-    let rule = |var: &str, m: &Member, cap: u32| Rule { name: m.name, open: format!("{var}.{}[", m.name), close: String::new(), len: format!("{cap}u") };
-    let rules: Vec<Rule> = TABLES.iter().zip(caps.tables).map(|(m, c)| rule("MT", m, c)).chain(KERNEL_LIVE.iter().zip(caps.live).map(|(m, c)| rule("ML", m, c))).collect();
-    rewrite(&s, &rules)
-}
-
 /// The uniform tables (`gpu::GpuOptions::uniform_tables`; docs/RUNTIME.md "Android"): which of `TABLES` the kernel
 /// reads from uniform buffers instead of storage buffers, in the layout as written. Qualcomm's Adreno 740 driver
 /// (Vulkan, Android 13) gave the kernel other buffers' contents for these four: a model's textures came out as
 /// another table's numbers, instance records sent hits to the wrong triangles, an emissive object's power read as
 /// something else's and lit nothing. As uniform buffers they read right. They are the four of the kernel's read-only
-/// tables that are bounded (the others: `uniform_tables`).
-pub const UNIFORM_TABLES: [usize; 4] = [3, 4, 5, 6];
-/// Their arrays' lengths (a uniform buffer's array is sized): what 64 KiB hold, the size every device gives a uniform
-/// binding (WebGPU's `maxUniformBufferBindingSize`, Vulkan's least `maxUniformBufferRange` on the phones this is
-/// for), and for the media what a scene may have (`scene::MAX_MEDIA`). In a scene's terms: 2,048 textures, 1,365
-/// objects (1,024 with instance colours), 409 instance records, every medium.
-pub const UNIFORM_LEN: [u32; 4] = [4096, 4096, 409, 32];
-
-/// The kernel (as `kernel` takes it: a scene's variant, its functions spliced in) with the uniform tables: the four
-/// declarations as sized uniform arrays at their own bindings, and every index into them held to the array
-/// (`min(u32(i), last)`). A scene with more entries than an array holds reads the last one for the rest (the renderer
-/// says so when it uploads one, `Gpu::upload`); nothing is read outside the buffer, which the kernel's unchecked
-/// indexing would otherwise do. Everything else is the source as written.
+/// tables that are bounded (the others: below).
+///
+/// In the kernel (pathtrace.wgsl, `@if(uniform_tables)`) the four are sized uniform arrays at their own bindings, and
+/// every index into them is held to the array (`tex_info_at` and the others: `min(i, last)`). A scene with more
+/// entries than an array holds reads the last one for the rest (the renderer says so when it uploads one,
+/// `Gpu::upload`); nothing is read outside the buffer, which the kernel's unchecked indexing would otherwise do.
 ///
 /// The kernel's other storage buffers stay storage buffers, each for its reason:
 ///  - `materials` (288 B each), `lights` (80 B): the device drew right with them as they are, and 64 KiB would hold
@@ -354,119 +130,22 @@ pub const UNIFORM_LEN: [u32; 4] = [4096, 4096, 409, 32];
 ///    geometry's data), `tri_verts`, `attrs`, `nodes`, `prev_verts` (and the vertex colours after them): megabytes,
 ///    which no uniform binding holds;
 ///  - `accum` and group 1 (the radiance cache, the trace's outputs): written by the kernel.
-pub fn uniform_tables(src: &str) -> String {
-    let mut s = src.to_string();
-    let mut rules = vec![];
-    for (&k, &len) in UNIFORM_TABLES.iter().zip(&UNIFORM_LEN) {
-        let m = &TABLES[k];
-        let sized = m.decl.replace("var<storage, read>", "var<uniform>").replace(&format!("array<{}>", m.ty), &format!("array<{}, {len}>", m.ty));
-        assert!(sized.contains("var<uniform>") && sized.ends_with(&format!(", {len}>;")), "uniform tables: the declaration {:?}", m.decl);
-        take(&mut s, m.decl, &sized);
-        rules.push(Rule { name: m.name, open: format!("{}[min(u32(", m.name), close: format!("), {}u)", len - 1), len: format!("{len}u") });
-    }
-    rewrite(&s, &rules)
-}
-
-/// A bound on every loop of a shader: each `loop`, `for` and `while` body begins with a count of the invocation's
-/// loop iterations so far, and leaves the loop past `limit`. The kernel's traversals (the BVH, the light tree, the
-/// procedural boxes) follow indices they read from buffers and end only if the data is sound: on data that is not, a
-/// dispatch never ends, and a GPU that never gets a dispatch back takes the whole machine's display with it (it did:
-/// docs/RUNTIME.md "The engine in a browser"). With the bound a dispatch always ends: wrong pixels instead of no
-/// frame. No formula changes, but the image is not bit-identical to the kernel's without the guard: the compiler
-/// arranges the arithmetic of the functions it is in differently (hello world, one sample a pixel: 354 of 43,200
-/// numbers differ, by at most 2 x 10^-7 of their value). Between the two layouts, guard or not, the bytes are equal.
-/// `THREERT_LOOP_GUARD=<limit>` natively (`gpu::loop_guard_of`: a kernel with units has it with nothing set); a
-/// browser's kernel always has it.
-///
-/// A stopped loop is counted, not hidden: the invocation that reaches the limit adds one to the first word of `trips`
-/// (an `array<atomic<u32>, 4>` the source can name: `ML.loop_guard_trips` in the merged layout, the buffer `guard_decl`
-/// declares in the layout as written), which the renderer reads back (`live::LiveCore::guard_trips`, an offline
-/// render's error). A frame with a count above zero is a frame with wrong pixels, and says so.
-pub fn guard(src: &str, limit: u32, trips: &str) -> String {
-    fresh(src, &["loop_guard", "LOOP_GUARD_N"]);
-    let b = src.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len() + 4096);
-    let mut i = 0;
-    while i < b.len() {
-        if b[i..].starts_with(b"//") {
-            let j = b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |k| i + k);
-            out.extend_from_slice(&b[i..j]);
-            i = j;
-            continue;
-        }
-        if b[i..].starts_with(b"/*") {
-            let j = src[i + 2..].find("*/").map_or(b.len(), |k| i + 2 + k + 2);
-            out.extend_from_slice(&b[i..j]);
-            i = j;
-            continue;
-        }
-        let Some(j) = ident(b, i) else {
-            out.push(b[i]);
-            i += 1;
-            continue;
-        };
-        let word = &b[i..j];
-        let mut body = None;
-        let after = skip_space(b, j);
-        if word == b"loop" && b.get(after) == Some(&b'{') {
-            body = Some(after);
-        } else if matches!(word, b"for" | b"while") && b.get(after) == Some(&b'(') {
-            // The header's closing parenthesis, then the body.
-            let (mut depth, mut k) = (0usize, after);
-            while k < b.len() {
-                match b[k] {
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                k += 1;
-            }
-            let open = skip_space(b, k + 1);
-            if b.get(open) != Some(&b'{') {
-                fail("a loop without a body the guard can open", src, i);
-            }
-            body = Some(open);
-        }
-        match body {
-            Some(open) => {
-                out.extend_from_slice(&b[i..=open]);
-                out.extend_from_slice(b" if (loop_guard()) { break; }");
-                i = open + 1;
-            }
-            None => {
-                out.extend_from_slice(word);
-                i = j;
-            }
-        }
-    }
-    let mut s = String::from_utf8(out).expect("the source's own bytes");
-    s += &format!("\n// The loop guard (renderer/src/merged.rs `guard`): an invocation's loop iterations, all its loops together; the\n// invocations stopped at the limit are counted.\nvar<private> LOOP_GUARD_N: u32 = 0u;\nfn loop_guard() -> bool {{\n    LOOP_GUARD_N += 1u;\n    if (LOOP_GUARD_N == {limit}u + 1u) {{ atomicAdd(&{trips}[0], 1u); }}\n    return LOOP_GUARD_N > {limit}u;\n}}\n");
-    s
-}
-
-/// The loop guard's count as a buffer of its own, for a kernel in the layout as written (the merged layout has it in
-/// `MergedLive`): the declaration `guard`'s `trips` names.
-pub fn guard_decl() -> String {
-    format!("@group(1) @binding({GUARD_BINDING}) var<storage, read_write> {}: array<atomic<u32>, {GUARD_WORDS}>;\n", GUARD_TRIPS.name)
-}
+pub const UNIFORM_TABLES: [usize; 4] = [3, 4, 5, 6];
+/// Their arrays' lengths (a uniform buffer's array is sized): what 64 KiB hold, the size every device gives a uniform
+/// binding (WebGPU's `maxUniformBufferBindingSize`, Vulkan's least `maxUniformBufferRange` on the phones this is
+/// for), and for the media what a scene may have (`scene::MAX_MEDIA`). In a scene's terms: 2,048 textures, 1,365
+/// objects (1,024 with instance colours), 409 instance records, every medium.
+pub const UNIFORM_LEN: [u32; 4] = [4096, 4096, 409, 32];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const KERNEL: &str = include_str!("../shaders/pathtrace.wgsl");
+    use crate::gpu::{kernel_template, kernel_wgsl, KernelVariant};
 
-    /// A scene's kernel (software traversal, no switch) as compiled: the merged layout put into its text first when
-    /// given, as `gpu::Gpu::kernel_module` does, then its variant.
+    /// A scene's kernel (software traversal, no switch) as compiled, in the merged layout when given its lengths.
     fn variant(features: u32, merged: Option<&Caps>) -> String {
-        let t = crate::gpu::kernel_template();
-        let t = merged.map_or(t.clone(), |c| kernel(&t, c));
-        crate::gpu::kernel_wgsl(&t, &crate::gpu::kernel_flags(false, &Default::default(), features))
+        kernel_wgsl(&kernel_template(), &KernelVariant { merged: merged.copied(), ..KernelVariant::new(false, Default::default(), features) })
     }
 
     fn caps() -> Caps {
@@ -497,9 +176,11 @@ mod tests {
         }
     }
 
-    /// Every kernel variant the source patches make, in the merged layout: valid WGSL, no entry point with more than
-    /// eight storage buffers, none declared beyond them (a pipeline layout counts what is declared), and the merged
-    /// structs' arrays where `offsets` puts them. The source as written has 19, so the count is the generator's.
+    /// Kernel variants in the merged layout: valid WGSL, no entry point with more than eight storage buffers, none
+    /// declared beyond them (a pipeline layout counts what is declared), and the merged structs' arrays where `offsets`
+    /// and `live_layout` put them. The layout as written has 19. Because the merged block declares none of the
+    /// buffers by their own names, a read or write of one past its accessor does not compile here (and naga says
+    /// where), whatever the other layouts take.
     #[test]
     fn the_merged_kernel_fits_eight_storage_buffers() {
         let (m, info) = parse(&variant(0, None));
@@ -509,6 +190,7 @@ mod tests {
         let caps = caps();
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = variant(features, Some(&caps));
+            assert!(src.contains("const MT_MEDIA = 16u;") && src.contains(&format!("const ML_REFL = {}u;", caps.live[3])), "the lengths, as constants");
             let (m, info) = parse(&src);
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
@@ -521,15 +203,10 @@ mod tests {
 
     /// Every kernel variant with the uniform tables: valid WGSL; the four tables are uniform buffers at their own
     /// bindings, sized as the Rust side makes their buffers; the other fifteen storage buffers are as written; and
-    /// every index into the four is held to its array, so nothing is read outside a uniform buffer.
+    /// each of the four is indexed once, in its accessor, held to its array, so nothing is read outside a uniform
+    /// buffer.
     #[test]
     fn the_uniform_tables_are_four_sized_uniform_arrays() {
-        // A name's index sites in code (not comments): `name[` that is not part of a longer name or a member.
-        let sites = |src: &str, name: &str| {
-            let code: String = src.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
-            let open = format!("{name}[");
-            code.match_indices(&open).filter(|(k, _)| !code[..*k].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')).count()
-        };
         let globals = |m: &naga::Module, uniform: bool| -> Vec<(String, u32, u32)> {
             let mut out: Vec<(String, u32, u32)> = m
                 .global_variables
@@ -549,8 +226,7 @@ mod tests {
         };
         let (written, _) = parse(&variant(0, None));
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
-            let base = variant(features, None);
-            let src = crate::gpu::kernel_wgsl(&uniform_tables(&crate::gpu::kernel_template()), &crate::gpu::kernel_flags(false, &Default::default(), features));
+            let src = kernel_wgsl(&kernel_template(), &KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), features) });
             let (m, info) = parse(&src);
             assert_eq!(storage_buffers(&m, &info).1, 15, "features {features:#x}");
             let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P" && g.0 != "energy_lut").collect();
@@ -559,20 +235,13 @@ mod tests {
             // The storage buffers that stay: the same names at the same bindings as the kernel as written.
             let kept = |m: &naga::Module| globals(m, false).into_iter().map(|g| (g.0, g.1)).filter(|g| !want.iter().any(|w| w.0 == g.0)).collect::<Vec<_>>();
             assert_eq!(kept(&m), kept(&written), "features {features:#x}");
-            for (&k, len) in UNIFORM_TABLES.iter().zip(UNIFORM_LEN) {
+            for &k in &UNIFORM_TABLES {
                 let name = TABLES[k].name;
-                let held = format!("{name}[min(u32(");
-                assert!(sites(&base, name) >= 3, "{name}: the kernel indexes it");
-                assert_eq!(src.matches(&held).count(), sites(&base, name), "{name}: every index is held (features {features:#x})");
-                assert_eq!(sites(&src, name), src.matches(&held).count(), "{name}: no index is left as written");
-                assert!(src.contains(&format!("), {}u)]", len - 1)));
+                let upper = name.to_uppercase();
+                assert_eq!(src.matches(&format!("{name}[")).count(), 1, "{name}: indexed in its accessor only (features {features:#x})");
+                assert!(src.contains(&format!("{name}[min(i, UT_{upper} - 1u)]")), "{name}: held to its array");
             }
         }
-        // One index, as it is rewritten: an expression with brackets of its own, and a table inside another's index.
-        let src = "@group(0) @binding(14) var<storage, read> tex_info: array<vec4<f32>>;\n@group(0) @binding(15) var<storage, read> objects: array<vec4<f32>>;\n@group(0) @binding(17) var<storage, read> instances: array<Instance>;\n@group(0) @binding(18) var<storage, read> media: array<Medium>;\nfn f(a: array<u32, 4>, k: i32) -> f32 { return objects[a[1] * 3u + 1u].w + tex_info[u32(objects[k].x)].y + media[0].b.x; }\n";
-        let out = uniform_tables(src);
-        assert!(out.starts_with("@group(0) @binding(14) var<uniform> tex_info: array<vec4<f32>, 4096>;\n@group(0) @binding(15) var<uniform> objects: array<vec4<f32>, 4096>;\n@group(0) @binding(17) var<uniform> instances: array<Instance, 409>;\n@group(0) @binding(18) var<uniform> media: array<Medium, 32>;\n"), "{out}");
-        assert!(out.ends_with("{ return objects[min(u32(a[1] * 3u + 1u), 4095u)].w + tex_info[min(u32(u32(objects[min(u32(k), 4095u)].x)), 4095u)].y + media[min(u32(0), 31u)].b.x; }\n"), "{out}");
     }
 
     /// The Rust side's records are the size the merged structs give their elements.
@@ -586,52 +255,48 @@ mod tests {
         assert_eq!(table_cap(2, 512), 1024);
     }
 
-    /// The scan follows scopes: a local or a parameter of a merged name is left alone, from the end of its
-    /// declaration to the end of its block; comments are not read.
-    #[test]
-    fn locals_that_shadow_a_buffer_are_left_alone() {
-        let rules = [Rule { name: "refl", open: "ML.refl[".into(), close: String::new(), len: "7u".into() }, Rule { name: "fa", open: "MV4[LO.fa.x + (".into(), close: ")".into(), len: "LO.fa.y".into() }];
-        let src = "struct S { refl: f32 };\nfn f(i: u32) -> f32 {\n    let a = refl[i].x; // refl[0] }\n    {\n        let refl = refl[i + 1u].y;\n        if (refl > 0.0) { return refl; }\n    }\n    var s: S;\n    return s.refl + refl[arrayLength(&refl) - 1u].x + fa[fa[i].x].y;\n}\nfn g(refl: array<f32, 4>) -> f32 { return refl[1]; }\nfn h() -> f32 { return refl[2].x; }\n";
-        let want = "struct S { refl: f32 };\nfn f(i: u32) -> f32 {\n    let a = ML.refl[i].x; // refl[0] }\n    {\n        let refl = ML.refl[i + 1u].y;\n        if (refl > 0.0) { return refl; }\n    }\n    var s: S;\n    return s.refl + ML.refl[7u - 1u].x + MV4[LO.fa.x + (MV4[LO.fa.x + (i)].x)].y;\n}\nfn g(refl: array<f32, 4>) -> f32 { return refl[1]; }\nfn h() -> f32 { return ML.refl[2].x; }\n";
-        assert_eq!(rewrite(src, &rules), want);
-    }
-
-    /// The loop guard opens every loop of the kernel and of the live passes, in the layout as written and in the
-    /// merged one, and what comes out is valid WGSL.
+    /// The loop guard opens every loop of the kernel, the scene's functions' too, in the layout as written and in the
+    /// merged one (its count a buffer of its own, or in `MergedLive`), and what comes out is valid WGSL.
     #[test]
     fn the_guard_bounds_every_loop() {
-        let loops = |s: &str| {
-            let code: String = s.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
-            let words = |w: &str| code.match_indices(w).filter(|(k, _)| !code[..*k].ends_with(|c: char| c.is_alphanumeric() || c == '_')).count();
-            words("loop {") + words("for (") + words("while (")
-        };
-        // The kernel as written (its count a buffer of its own) and merged (its count in `MergedLive`).
-        let template = crate::gpu::kernel_template();
-        let merged = kernel(&template, &caps());
-        for (src, trips) in [(format!("{template}{}", guard_decl()), "loop_guard_trips"), (merged, "ML.loop_guard_trips")] {
-            let g = guard(&src, 1 << 16, trips);
-            assert!(loops(&src) > 40, "the kernel's loops");
-            assert_eq!(g.matches("if (loop_guard()) { break; }").count(), loops(&src));
-            // (The variant every loop of which is there: software traversal with the scene's features.)
-            let (m, info) = parse(&crate::gpu::kernel_wgsl(&g, &crate::gpu::kernel_flags(false, &Default::default(), crate::gpu::F_SOURCE)));
+        let loops = |s: &str| s.matches("loop {").count() + s.matches("for (").count() + s.matches("while (").count();
+        for merged in [None, Some(caps())] {
+            let v = KernelVariant { merged, ..KernelVariant::new(false, Default::default(), crate::gpu::F_SOURCE) };
+            let plain = kernel_wgsl(&kernel_template(), &v);
+            let g = kernel_wgsl(&kernel_template(), &KernelVariant { guard: Some(1 << 16), ..v });
+            assert!(loops(&plain) > 40, "the kernel's loops");
+            assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain));
+            let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
             // (As written: one buffer more, where the device has room. Merged: still eight.)
-            assert!(declared == 20 || declared as u32 == STORAGE_BUFFERS, "{declared}: {used:?}");
+            assert_eq!(declared as u32, if merged.is_some() { STORAGE_BUFFERS } else { 20 }, "{used:?}");
         }
-        let g = guard("fn f() {\n    for (var i = 0u; i < n(2u); i++) { x(); }\n    loop { // {\n        break;\n    }\n    while (a) { }\n}\n", 9, "T");
-        assert!(g.starts_with("fn f() {\n    for (var i = 0u; i < n(2u); i++) { if (loop_guard()) { break; } x(); }\n    loop { if (loop_guard()) { break; } // {\n        break;\n    }\n    while (a) { if (loop_guard()) { break; } }\n}\n"), "{g}");
-        assert!(g.ends_with("fn loop_guard() -> bool {\n    LOOP_GUARD_N += 1u;\n    if (LOOP_GUARD_N == 9u + 1u) { atomicAdd(&T[0], 1u); }\n    return LOOP_GUARD_N > 9u;\n}\n"), "{g}");
+        // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`.
+        let mut tu = crate::gpu::wesl_wgsl("fn f() {\n    for (var i = 0u; i < 2u; i++) { // {\n        loop { if (a) { break; } continuing { while (b) { } } }\n    }\n    if (c) { while (d) { } } else { x(); }\n}\n", &[], &[]);
+        crate::gpu::guard_loops(&mut tu);
+        let g = tu.to_string();
+        assert_eq!(g.matches("if (loop_guard()) {").count(), 4, "{g}");
+        let first = |w: &str| g[g.find(w).unwrap()..].split('\n').nth(1).unwrap().trim().to_string();
+        assert_eq!([first("for ("), first("loop {"), first("while (b)"), first("while (d)")], ["if (loop_guard()) {"; 4], "{g}");
+    }
+
+    /// The constants a variant imports are the ones it is given, by name: a merged kernel's lengths, a guard's limit.
+    #[test]
+    fn the_variant_gives_what_it_imports() {
+        let v = KernelVariant { merged: Some(caps()), guard: Some(9), ..KernelVariant::new(false, Default::default(), 0) };
+        let c = v.constants();
+        assert_eq!(c.len(), 7 + 6 + 2);
+        assert!(c.contains(&("MT_TEX_INFO".into(), TABLE_MIN[3])) && c.contains(&("ML_DIRECT_OUT".into(), 64 * 36)) && c.contains(&("LOOP_GUARD_LIMIT".into(), 9)) && c.contains(&("GUARD_WORDS".into(), GUARD_WORDS)));
+        let u = KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), 0) }.constants();
+        assert_eq!(u, vec![("UT_TEX_INFO".into(), 4096), ("UT_OBJECTS".into(), 4096), ("UT_INSTANCES".into(), 409), ("UT_MEDIA".into(), 32)]);
+        assert!(KernelVariant::default().constants().is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "`refl` is used in a way the generator does not know (line 2)")]
-    fn a_use_the_generator_does_not_know_stops_it() {
-        rewrite("fn f() {\n    let p = &refl;\n}\n", &[Rule { name: "refl", open: "ML.refl[".into(), close: String::new(), len: "7u".into() }]);
-    }
-
-    #[test]
-    #[should_panic(expected = "the declaration")]
-    fn a_declaration_that_moved_stops_it() {
-        kernel(&KERNEL.replace("var<storage, read> lights: array<Light>;", "var<storage, read>  lights: array<Light>;"), &caps());
+    #[should_panic(expected = "MT_MEDIA")]
+    fn a_constant_the_source_imports_must_be_given() {
+        let mut c = KernelVariant { merged: Some(caps()), ..KernelVariant::new(false, Default::default(), 0) }.constants();
+        c.retain(|(n, _)| n != "MT_MEDIA");
+        crate::gpu::wesl_wgsl(&kernel_template(), &KernelVariant { merged: Some(caps()), ..Default::default() }.flags(), &c);
     }
 }
