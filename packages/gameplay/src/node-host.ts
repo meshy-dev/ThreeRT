@@ -13,6 +13,9 @@
 //   hostMessages(list, ts)        the app's messages (host.ts), a batch in one entry: `input` is kept for `f.input`
 //                                 and `world.input` (input.ts), the others go to their `host.on` listeners, which
 //                                 change the scene as world handlers do
+//   sync()                        the engine follows the scene once more: the renderer calls it when promise jobs
+//                                 ran after an entry (a `.then` callback, the code after an `await`: they run when
+//                                 the entry is over, after its own sync), so what they changed is in the same commit
 //   seek(time, now)               the frame script's clock set to `time`, the scene shown settled at that moment (an
 //                                 offline render at a scene time: the timeline a frame script draws)
 //   outline() / inspect(name) / edit(name, path, value)   the editor: the live scene, not a document (name "" = the
@@ -42,6 +45,7 @@ export interface NodeHost {
   state(): string;
   frame(dt: number, now: number): void;
   hostMessages(list: string, ts: number): void;
+  sync(): void;
   seek(time: number, now: number): void;
   outline(): string;
   inspect(name: string): string;
@@ -198,6 +202,8 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
         for (const error of withDeterminism(ts, random, () => channel.deliver(m, world))) console.error(`host message ${m.t}: ${error}`);
       }
       if (!ctx) return;
+      // (The batch's listeners have run: what they emitted is taken below, and a later `emit` on their world throws.)
+      ctx.close();
       // As after a world handler: the engine follows the scene as the listeners left it; the state events they
       // emitted are transactions, and the frame script then shows the new state.
       if (!ctx.emits.length) {
@@ -208,6 +214,11 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
       transact(ctx.emits.splice(0), ts, [], log);
       for (const l of log) if (l.startsWith("✗")) console.error(l);
       refresh(ts);
+    },
+
+    sync() {
+      // (Before setup there is no scene to follow: jobs a bundle left while loading.)
+      binding?.sync();
     },
 
     seek(time, now) {

@@ -47,13 +47,75 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Scene binding | `packages/scene/src/engine.ts` `SceneBinding` | Keeps the engine in step with a DSL scene. Objects report their own changes (core.ts change tracking: transforms, visibility, power, shadow flag, mesh geometry / material, add / remove), so a sync visits only what changed. Lights, cameras and materials are compared against what was last sent. |
 | World | `renderer/src/world.rs` | The engine's objects, resources, environment and settings, and what changed since the last commit: parameter changes (power, light / material parameters, environment, camera) or structural ones. Asset paths must stay inside the asset root (game code is untrusted on nodes). |
 | Live commit | `renderer/src/live.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera), and so does hiding or showing a volume, a light without a card or a particle system that is not light-sampled by its own `visible`. Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
-| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers; what needs the outside is asked of the app, "The host channel"). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. The time the engine spends inside a voxel call (`voxelExplode`, `voxelEdit`, `voxelFrame`) is the engine's, not the script's: the deadline moves by it as measured, up to 250 ms an entry; past that it counts against the script, and a voxel call made after the deadline throws "interrupted" at once. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
-| Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, `hostMessages(list, ts)` (the app's messages), and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
+| Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers; what needs the outside is asked of the app, "The host channel"). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. Every entry ends by running the promise jobs it left, inside its budget ("Promises", below). The time the engine spends inside a voxel call (`voxelExplode`, `voxelEdit`, `voxelFrame`) is the engine's, not the script's: the deadline moves by it as measured, up to 250 ms an entry; past that it counts against the script, and a voxel call made after the deadline throws "interrupted" at once. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
+| Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, `hostMessages(list, ts)` (the app's messages), `sync()` (the engine follows the scene once more: after an entry's promise jobs), and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
 | World handlers | `packages/gameplay/src/world.ts` | `on[type](world, ev)`: an event handled on this node, changing the scene at once. `WorldContext`: `scene`, `camera`, read-only `state`, `object(id)`, `time`, `now`, `random()`, `emit(type, payload)`. |
 | Frame scripts | `packages/gameplay/src/frame.ts` | `FrameContext`: `time`, `dt`, `snap`, `now`, read-only `state`, `scene`, `camera`, `object(id)`, `random()`, `input`. |
 | Host channel | `packages/gameplay/src/host.ts`, `input.ts`, `hud.ts`; `renderer/src/host.rs`, `script.rs` (`__host_post`, `GameSession::take_posts` / `host_messages`) | Messages between game code and the app that embeds the engine: the app's input every frame (`f.input`), sockets and HTTP the app owns (`net.*`), the HUD the app draws (`hud.set`), how the game was opened (`launch`). See "The host channel" below. |
 | Game session | `renderer/src/script.rs` `GameSession` | A runtime + its live view: events, clicks (CPU pick → `click {target, point, ray: {origin, direction}}`, with `instanceId` on an `InstancedMesh`; `ray` is the view ray, for a `Raycaster`), frame script, the physics world's ticks, editor edits, each followed by a commit. Shared by `play`, `live` and the playground. |
 | Physics | `renderer/physics-core` (`Physics` on Rapier, `bridge::Bridge`), `renderer/src/physics.rs`, `packages/scene` (`Object3D.physics`, joints, `Raycaster.intersectPhysics`, `Shapecaster`) | The session's physics world, made by the first physics call (none: nothing runs). The engine steps it at 1 / 60 s after the frame script (at most 5 ticks a frame; offline renders step to their scene time) and places the objects of the bodies that moved: instances, so a move is a TLAS transform. Scripts cannot step it. See "Physics" below. |
+
+### Promises
+
+QuickJS has no event loop of its own: a promise's callbacks are jobs that somebody has to run. The runtime runs them
+at the end of every entry into the script (`ScriptHost::enter`: the loading of the bundle, setup, an event, a frame,
+a batch of host messages, `commit` / `setState`, `seek`, an editor call), until none is left: a `.then` callback, the
+code after an `await`, and the jobs those queue in turn. That is when a browser runs them: when the script that was
+called has returned.
+
+```ts
+// A request as a promise (what a library makes of `net.fetch`): the app's answer is a later message.
+const answers = new Map<string, (m: HostEvents["net.fetched"]) => void>();
+host.on("net.fetched", (m) => answers.get(m.id)?.(m));
+const fetched = (id: string, url: string) =>
+  new Promise<HostEvents["net.fetched"]>((resolve) => {
+    answers.set(id, resolve);
+    host.post({ t: "net.fetch", id, url });
+  });
+
+async function load(url: string, scene: Scene) {
+  const m = await fetched("level", url);        // goes on in the entry of the batch that brings `net.fetched`
+  scene.add(build(JSON.parse(m.body)));         // in the engine when that entry returns
+}
+host.on("launch", (m, world) => void load(String(m.params.level), world.scene));   // the listener returns no promise
+```
+
+- **A promise resolves at the end of the entry that resolved it.** `Promise.resolve(x).then(f)` in a frame script
+  runs `f` in that frame, before the frame's physics ticks and its commit; so does the code after an `await` of a
+  promise that is settled by then, in a frame script, a handler, a world handler, a listener or setup.
+- **There are still no timers and no I/O**, so nothing resumes on its own. A promise only the app can settle (the
+  request above) stays pending through the frames in between, and its awaiter runs in the entry that settles it: a
+  host message, an event, a frame. One that nothing settles never goes on.
+- **The jobs run when the entry's own code is over**, not inside it. For the code after an `await` the event has
+  ended: `Math.random` and `Date` are the host's again, a `world` shows the state as it was, and its `emit` throws
+  (the handler's emits were taken when it returned; start a state transaction while a handler or a listener runs,
+  for example in the listener that hears the answer). The scene is the scene: what the jobs changed in it goes to the
+  engine when they have run (the runtime calls the node host's `sync()` after them; the entry's own sync came
+  before), so the commit that follows the entry applies it.
+- **`setup`, handlers, world handlers and host listeners return no promise themselves.** An `async` function as one
+  of them is the error it was (`handlers must be synchronous`, `world handlers must be synchronous`, `host listeners
+  must be synchronous`), and an `async` setup is one now too (`setup must be synchronous: it returns { scene, camera
+  }, not a promise`): setup is not awaited, a scene is built when it returns. What any of them starts and does not
+  wait for (`void load()`, a `.then`) runs as above; from setup that is at the end of the setup entry, and may add to
+  the scene setup returned. A frame script's return value is not looked at.
+- **Inside the entry's budget.** The deadline of the entry holds for its jobs: one that spins is interrupted, and a
+  chain that never ends (`const again = () => Promise.resolve().then(again)`, an `async` loop of awaits) is ended
+  when the time is up. The entry then fails as one that overran does (`interrupted`). The jobs not run stay queued
+  and run after the next entry, so a chain that queues itself for ever fails every entry until the script stops it.
+- **Errors.** What a callback throws rejects its promise. A promise rejected that nothing has handled when the
+  entry's jobs have run is reported once, as an error line with its reason: `unhandled rejection: TypeError: ... (at
+  ...)` in the game's log (stderr `[game error]`, the log sink), and for an event in the event's log (`✗ unhandled
+  rejection: ...`). At most eight an entry by their reasons; the rest are counted. One that gets its handler later
+  in the same entry (a `catch` added by a later job, an `await` in a `try`) is not reported; one handled in a later
+  entry was.
+- **In a browser** (`renderer/web`, the three.js view) the page's engine runs the jobs, at the same point, so game
+  code behaves the same there. Nothing calls `sync()` after them: what they changed in the scene goes to the engine
+  with the next entry's sync (the next frame's, where frames run).
+- Checked: `renderer/src/script.rs` tests (a `.then` chain and an `await` in a frame, an event and a batch of host
+  messages run within the entry, and what they changed is synced after them; a promise a later host message resolves;
+  a chain that never ends; rejections reported once), `packages/gameplay/test/promises.test.ts` (the node host's
+  `sync`, `emit` after the handler, what stays synchronous), and `node tools/host-echo.ts` (`games/host/echo.game.ts`
+  awaits its page as the promise above, in `live`, `play` and Chrome).
 
 ## Entry points
 
@@ -116,7 +178,9 @@ export default defineGame({
   event; then the handler's transaction; then what the world handler emitted, in order; then the frame script shows
   the new state. A room that is the authority runs `handlers` on its own, so neither may rely on the other having run.
 - **`keys`** map to either; `describe()` lists them as `on`; a game of world handlers only needs no `handlers`.
-- **Synchronous:** no await, as for handlers.
+- **Synchronous**, as handlers are: a world handler returns no promise (an `async` function as one is an error).
+  What it starts with promises runs when the event is over ("Promises", above): the scene it changes there is
+  synced, but `world.emit` throws.
 - **A world handler that throws** does not stop the world, as a frame script that throws does not: what it had changed
   is synced, the event's handler and the next tick run all the same, and the error is in the event's log.
 - **In a room:** they do not run. A node that follows a room gets committed state, not events; an event with a world
@@ -303,7 +367,9 @@ export default defineGame({
   context as their second argument (`scene`, `camera`, the committed `state`, `object(id)`, `time`, `now`,
   `random()`, `emit`, `input`). What they change in the scene reaches the engine when the batch returns, once.
   What they `emit` are state transactions, run after the batch's listeners, followed by the frame script as after
-  any event. A listener that throws does not stop the batch: the error is logged and the next listener runs.
+  any event. A listener that throws does not stop the batch: the error is logged and the next listener runs. A
+  listener returns no promise; the code after an `await` it started runs at the end of the batch's entry, or of the
+  later entry that settles what it waits for ("Promises", above).
 - **The same object is `globalThis.__threert_host`** (`{ post, on, launch }`), for a library that does not import
   `@threert/gameplay`. A second copy of the package in one runtime finds the first's channel.
 - **It is not one of the four channels** of "The runtime's shape" below: those are between the script and the
@@ -401,7 +467,7 @@ Game code reads it as `f.input` in the frame script and `world.input` in world h
 | `input.down(key)` | the key is held |
 | `input.pressed(key)`, `input.released(key)` | it went down / up since the last frame |
 | `input.axis(negative, positive)` | -1, 0 or 1 from two keys |
-| `input.move` | `{ x, y }`: the app's move stick if it sent one, else W A S D; x right, y forward, never longer than 1 |
+| `input.move` | `{ x, y }`: the app's move stick if its last message had one, else W A S D; x right, y forward, never longer than 1 |
 | `input.look` | `{ dx, dy }`, radians to turn this frame: right and down are positive |
 | `input.button(n)` | mouse button `n` is held (0 left, 1 middle, 2 right); the same as `down("Mouse<n>")`, and `pressed("Mouse0")` is its edge |
 | `input.pointer` | `{ u, v }`, 0..1 from the picture's top left; (0.5, 0.5) while captured |
@@ -418,7 +484,7 @@ The message, every field optional but `t`:
 | `dx`, `dy` | look since the last message, radians |
 | `wheel` | notches since the last message |
 | `captured` | the pointer is captured |
-| `move: [x, y] \| null` | a move stick (gamepad, touch), each -1..1; `null` or left out: none |
+| `move: [x, y] \| null` | a move stick (gamepad, touch), each -1..1; `null` or left out: none, and `input.move` is the keys' (the one field a message does not keep from the message before: an app with a stick sends it every frame) |
 
 - **Keys are named by their place on a US keyboard**, not by what the layout prints (W A S D stay where they are on
   AZERTY): `"A"`–`"Z"`, `"0"`–`"9"`, `"Space"`, `"Shift"`, `"Ctrl"`, `"Alt"`, `"Meta"`, `"Tab"`, `"Enter"`,
