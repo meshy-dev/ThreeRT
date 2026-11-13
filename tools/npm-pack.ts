@@ -1,6 +1,7 @@
 // The npm packages: @threert/scene, @threert/gameplay and @threert/voxel as they are published, in out/npm/<name>/.
 //   node tools/npm-pack.ts                      build and check all three
-//   node tools/npm-pack.ts --publish [--tag t]  then publish the ones whose version npm does not have yet
+//   node tools/npm-pack.ts --publish [--tag t]  then publish the ones whose version npm does not have yet (the npm
+//                                               workflow does; from a terminal npm asks for the account's second factor)
 //   node tools/npm-pack.ts --version x.y.z      another version than the root package.json's (a trial; not written back)
 //
 // In this repository the packages are their sources: `exports` names src/index.ts, and the tools, the tests and the
@@ -163,7 +164,7 @@ if (args.includes("--publish")) {
     let published = "";
     try { published = run("npm", ["view", `${name}@${version}`, "version"], dir, "pipe").trim(); } catch { /* E404: not there yet */ }
     if (published === version) { console.log(`${name}@${version}: already on npm`); continue; }
-    run("npm", ["publish", "--access", "public", "--tag", tag], dir);
+    step(`${name}: npm publish`, "npm", ["publish", "--access", "public", "--tag", tag], dir);
     console.log(`${name}@${version}: published (${tag})`);
   }
 } else console.log(`out/npm/{${NAMES.join(",")}}: built and checked; --publish sends them`);
