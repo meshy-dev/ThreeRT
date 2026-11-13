@@ -74,13 +74,13 @@ pub struct Prepared {
     pub light_tree: Option<ltree::LightTree>,
     /// Material -> runs of its flattened static triangles (first, end in the traversal order, object), and the
     /// materials that also cover pool or dynamic triangles: a material that starts emitting gets emitter entries in
-    /// place from its runs (live.rs `add_material_emitters`), unless fixed.
+    /// place from its runs (live/edits.rs `add_material_emitters`), unless fixed.
     pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub fixed_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
     pub tri_order: Vec<u32>,
     /// The brightest sky texel (luminance) from which the environment is light-sampled (`Params::counts2[1]`): 0 when
-    /// there are no emitters. A dynamic sky re-decides with each bake (live.rs `DynamicSky`).
+    /// there are no emitters. A dynamic sky re-decides with each bake (live/load.rs `DynamicSky`).
     pub env_nee_floor: f32,
 }
 
@@ -402,7 +402,7 @@ fn units_said(var: Option<&str>, live: bool) -> bool {
 }
 
 /// Whether `prepare_live` will keep the scene's instances as units (software traversal, and it has instances), asked
-/// before it runs (live.rs `load_scene`: the light tree's part for emitters edits add).
+/// before it runs (live/load.rs `load_scene`: the light tree's part for emitters edits add).
 pub fn units_wanted(hwrt: bool, sc: &scene::Scene) -> bool {
     !hwrt && units_on(true) && !sc.instances.is_empty() && sc.instances.len() <= units::MAX_UNITS
 }
@@ -675,7 +675,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let procs = [env_cdf.len() as u32, sc.procs.len() as u32, sc.gpu_instances.len() as u32, sc.vcolor_base];
     // Environment light sampling (one shadow ray per vertex) is skipped when the sky is negligible next to the emitters
     // (night streets): escaping BSDF rays still pick it up, with full MIS weight. The emitters as if all on: a
-    // time-of-day room loaded by day decides at dusk as one loaded at night does (live.rs `put_sky`).
+    // time-of-day room loaded by day decides at dusk as one loaded at night does (live/edits.rs `put_sky`).
     let env_max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max).max(0.2126 * sky_color.x + 0.7152 * sky_color.y + 0.0722 * sky_color.z);
     let em_area: f32 = emitters[..emitter_tris.len()].iter().map(|e| e[3]).sum();
     let env_nee_floor = if emitter_tris.is_empty() { 0.0 } else { 0.01 * all_power / em_area.max(1e-6) };

@@ -1,4 +1,4 @@
-// Emitting geometry added in place (live.rs `edit_geometry`; ROADMAP § 6 step 3): after a few frames the frame script
+// Emitting geometry added in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 3): after a few frames the frame script
 // adds a `dynamicGeometry` panel of an emissive material (1 nit, black) 1 m above a Lambert 0.5 floor, so large it
 // fills the floor's hemisphere. Its emitter entries come in place (no rebuild), and the floor reads 0.5 x 1 = 0.5.
 // The material is in the scene from the start (a speck far away): a new material rebuilds.

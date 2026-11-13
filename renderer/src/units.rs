@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     /// A scene as the renderer keeps one under software traversal with units, small: the buffers the kernel reads and
-    /// the bookkeeping that writes them. Its operations are what an edit does (live.rs): a mesh's triangles and tree
+    /// the bookkeeping that writes them. Its operations are what an edit does (live/edits.rs): a mesh's triangles and tree
     /// into room, a record, the top tree again.
     struct Scene {
         nodes: Vec<GpuNode>,
@@ -1736,7 +1736,7 @@ mod tests {
         assert_eq!((none.nodes(), none.max_units()), (1, 1));
     }
 
-    /// `Units` (what live.rs's edits keep): a unit names the tree its mesh has when its record is written; a top tree
+    /// `Units` (what live/edits.rs's edits keep): a unit names the tree its mesh has when its record is written; a top tree
     /// is refused, and nothing changed, while a shown unit names a tree that was freed or placed again elsewhere, or
     /// sits past the kernel's records; writing the record again (`moved`), hiding it or clearing it mends that.
     #[test]
@@ -1807,7 +1807,7 @@ mod tests {
         assert_eq!((u.top().unwrap().len(), u.count), (0, 0));
     }
 
-    /// A mesh written again where it was (a geometry that moves every frame: live.rs writes a mesh of the same
+    /// A mesh written again where it was (a geometry that moves every frame: live/edits.rs writes a mesh of the same
     /// triangle count over the one it replaces) has a new tree, and its unit's box in the top tree is the new tree's:
     /// the walk must reach triangles that left the old bounds. (Seen on the GPU, voxel/cut-falls-live: a part that
     /// fell 0.2 m was cut off at the box it had before.)

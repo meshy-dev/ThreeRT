@@ -1,4 +1,4 @@
-// A glTF model added in place (live.rs `edit_geometry`; ROADMAP § 6 step 5): a static model already in the scene (a
+// A glTF model added in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 5): a static model already in the scene (a
 // grey quad, tests/render/data/quad.glb, on the left) gets a second copy on the right at frame 3, another instance of
 // its mesh, without a rebuild. Both under a uniform 1-nit sky: the right reads as the left, ratio 1.
 import { GLTFModel } from "@threert/scene";

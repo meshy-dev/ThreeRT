@@ -1,8 +1,8 @@
-// InstancedMesh instances changed in place (live.rs `update_instanced`; ROADMAP § 6 step 2e): two copies of a dark
+// InstancedMesh instances changed in place (live/edits.rs `update_instanced`; ROADMAP § 6 step 2e): two copies of a dark
 // cover hide the centre of a plane, a third waits behind it. After a few frames the frame script moves the first
 // cover behind the plane (`setMatrixAt`, `needsUpdate`), recolours it, and lowers `count` to hide the last one; the
 // second is hidden by a matrix scaled to 0. In the same frame a `dynamicGeometry` mesh off to the side gets a new
-// geometry: the instances' TLAS changes then ride on that edit's TLAS build (live.rs `commit`). The centre then shows
+// geometry: the instances' TLAS changes then ride on that edit's TLAS build (live/edits.rs `commit`). The centre then shows
 // the plane: Lambert, albedo 0.5, facing a uniform sky of 1 nit with nothing in its hemisphere, so 0.5. The same frames
 // with THREERT_EDIT_REBUILD=1 (every change rebuilds the scene) are byte-identical (the PR's A/B).
 import { Color, InstancedMesh, Matrix4, Mesh, PlaneGeometry } from "@threert/scene";

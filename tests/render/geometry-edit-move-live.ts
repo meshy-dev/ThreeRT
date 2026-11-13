@@ -1,4 +1,4 @@
-// An object added in place, then moved (live.rs `commit`: objects added in place are not in the move tables, so the
+// An object added in place, then moved (live/edits.rs `commit`: objects added in place are not in the move tables, so the
 // move rebuilds the scene). After a few frames the frame script adds a procedural box beside the view, a few frames
 // later it moves the box across the centre: Lambert 0.5 facing the camera under a uniform sky of 1 nit, nothing else in
 // its hemisphere, so 0.5. Left where it was added, the centre would show the sky (1).

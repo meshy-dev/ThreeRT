@@ -118,7 +118,7 @@ pub struct Params {
     pub background: [f32; 4],
 }
 
-/// Room the live view's in-place geometry edits grow into (live.rs `edit_geometry`), past the scene's own data:
+/// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
 /// triangles (verts, attrs, BLAS vertices), kernel records and TLAS instances, object-table entries, procedural words.
 /// Only scenes with editable geometry (procedural meshes, `own_blas` meshes) under hardware RT get any: a quarter of
 /// what they have, at least a minimum; `THREERT_EDIT_RESERVE` scales it (0: none). Past it an edit rebuilds the scene.
@@ -582,7 +582,7 @@ pub struct Accel {
     pool_first: usize,
     /// The TLAS index of model instance 0 (the traversal groups' instances come first).
     pub inst_base: usize,
-    /// The build's triangle BLAS bytes per triangle (Metal's sizes): edits' memory estimates (live.rs `room_stats`).
+    /// The build's triangle BLAS bytes per triangle (Metal's sizes): edits' memory estimates (live/mod.rs `room_stats`).
     pub blas_per_tri: f64,
     /// The TLAS index of the first procedural object's instance (after the model instances; each has its own AABB
     /// BLAS, which its TLAS instance keeps).
@@ -1062,7 +1062,7 @@ impl CacheBuffers {
 }
 
 /// The kernel's group-1 buffers: the radiance cache, and what the live passes read of a trace
-/// (live.rs `Targets`): the specular-lobe rays, the motion vectors, the directional lights' direct light. In the
+/// (live/targets.rs `Targets`): the specular-lobe rays, the motion vectors, the directional lights' direct light. In the
 /// merged layout they are ranges of one buffer, the arrays of the kernel's `MergedLive` (merged.rs `KERNEL_LIVE`).
 pub struct KernelBufs {
     pub cache: CacheBuffers,
@@ -1839,7 +1839,7 @@ impl Gpu {
         // by the same figures.)
         let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt, scene.units.is_some());
         let st = wgpu::BufferUsages::STORAGE;
-        // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live.rs `edit_geometry`.)
+        // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live/edits.rs `edit_geometry`.)
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let b_verts = buf_room("verts", bytemuck::cast_slice(tri_verts), room.tris * 48, edit | wgpu::BufferUsages::COPY_SRC);
         let dynamic_first: usize = groups[..4].iter().sum();
@@ -2769,7 +2769,7 @@ impl Gpu {
     /// Rebuilds the BLASes of the dynamic groups (posed models, after their vertices changed) and the TLAS.
     /// Rebuilds the TLAS alone (instance transforms changed, no triangles).
     /// `old`'s contents in a new buffer of `size` bytes (its usage and label), copied on the GPU and submitted now, so
-    /// writes queued after this land on the copy (live.rs `edit_geometry` growing past its room).
+    /// writes queued after this land on the copy (live/edits.rs `edit_geometry` growing past its room).
     pub fn grown(&self, old: &wgpu::Buffer, size: u64, label: &str) -> wgpu::Buffer {
         let b = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: old.usage(), mapped_at_creation: false });
         let mut e = self.device.create_command_encoder(&Default::default());
@@ -2819,7 +2819,7 @@ impl Gpu {
         (blas, (parts, sizes))
     }
 
-    /// A new instanced mesh over `count` triangles from GPU-order index `first` (in the edit room; live.rs
+    /// A new instanced mesh over `count` triangles from GPU-order index `first` (in the edit room; live/edits.rs
     /// `edit_geometry`), its first `opaque` ones opaque: its BLAS, which `rebuild_meshes` builds. Returns its index.
     pub fn add_mesh(&self, accel: &mut Accel, first: usize, count: u32, opaque: u32) -> u32 {
         // Built fast rather than traced fast (edits come every frame under destruction; the batches of pieces are rebuilt
@@ -2835,7 +2835,7 @@ impl Gpu {
         &accel.meshes[k as usize]
     }
 
-    /// The AABB BLAS of a procedural geometry's boxes (live.rs `edit_geometry`): the one kept by its hash or built
+    /// The AABB BLAS of a procedural geometry's boxes (live/edits.rs `edit_geometry`): the one kept by its hash or built
     /// earlier in this edit (`fresh`), or a new one whose build goes into `e` and into `fresh`. The edit keeps `fresh`
     /// (`keep_proc_blases`) only once `e` is submitted: an edit that falls back never submits, and a BLAS never built
     /// must not be reused.
@@ -2865,7 +2865,7 @@ impl Gpu {
         }
     }
 
-    /// The scene bind group again, from `up`'s buffers as they are now (a buffer that grew: live.rs `write_emitters`).
+    /// The scene bind group again, from `up`'s buffers as they are now (a buffer that grew: live/edits.rs `write_emitters`).
     pub fn rebind_scene(&self, up: &mut Uploaded) {
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
@@ -3019,7 +3019,7 @@ impl Gpu {
 
     /// The BLASes of instanced meshes `meshes` and, with `tlas`, the TLAS in the same build (the TLAS reads the BLASes'
     /// bounds through their resource ids, which Metal does not order a later build after: a TLAS built apart from a
-    /// BLAS it references, in the same encoder, could see it unbuilt and lose its instance; live.rs `edit_geometry`).
+    /// BLAS it references, in the same encoder, could see it unbuilt and lose its instance; live/edits.rs `edit_geometry`).
     pub fn build_meshes(&self, accel: &Accel, meshes: &[u32], e: &mut wgpu::CommandEncoder, tlas: bool) {
         self.build_edit(accel, meshes, &[], e, tlas);
     }

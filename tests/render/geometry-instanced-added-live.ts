@@ -1,4 +1,4 @@
-// An InstancedMesh added in place (live.rs `edit_geometry`; ROADMAP § 6 step 5): a scene of one `dynamicGeometry`
+// An InstancedMesh added in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 5): a scene of one `dynamicGeometry`
 // speck gets an InstancedMesh of two planes at frame 3 (its records, TLAS instances and object entries from the room,
 // contiguous, as the build places one), one across the centre: Lambert 0.5 under a uniform 1-nit sky, so 0.5. A
 // later move of an instance (setMatrixAt) applies in place too.

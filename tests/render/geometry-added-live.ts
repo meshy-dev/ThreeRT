@@ -1,4 +1,4 @@
-// An object added in place is drawn (live.rs `edit_geometry`; ROADMAP § 6 step 5): a scene of one `dynamicGeometry`
+// An object added in place is drawn (live/edits.rs `edit_geometry`; ROADMAP § 6 step 5): a scene of one `dynamicGeometry`
 // speck far away (its TLAS one instance) gets a `dynamicGeometry` plane across the centre at frame 3: Lambert 0.5 facing
 // a uniform 1-nit sky, so 0.5. Before, the plane's new BLAS and the TLAS were built apart in one encoder, and Metal,
 // which the TLAS reaches its BLASes by resource id through, could build the TLAS first: the plane was missing in most

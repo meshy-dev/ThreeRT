@@ -45,13 +45,13 @@ pub struct Tables {
     pub(crate) emissive: HashSet<u32>,
     pub wetness: f32,
     pub rain: f32,
-    /// Cloud cover (0..1): a change re-bakes the sky and dims the sun (live.rs `move_sun`).
+    /// Cloud cover (0..1): a change re-bakes the sky and dims the sun (live/edits.rs `move_sun`).
     pub cloud_cover: f32,
     pub fog: Option<desc::Fog>,
     /// three.js `scene.background` (`Params::background`).
     pub background: Option<[f32; 3]>,
     /// A material that starts emitting gets emitter entries in place (the live view sets these up, `prepare`'s
-    /// `mat_runs` / `fixed_mats`): it is queued in `started_emitting` for live.rs `add_material_emitters`, unless its
+    /// `mat_runs` / `fixed_mats`): it is queued in `started_emitting` for live/edits.rs `add_material_emitters`, unless its
     /// triangles include pool or dynamic ones (fixed: a rebuild flattens them). Off: such a material rebuilds.
     pub emit_in_place: bool,
     pub fixed_mats: HashSet<u32>,
@@ -64,7 +64,7 @@ pub struct Tables {
     /// vec4s an object in `objects` (`scene::object_stride`).
     pub stride: usize,
     /// Power edits are held back in `deferred` instead of written to `objects` (the live view's emitter worker: a
-    /// scene with many emitters, live.rs `EmitterWorker`).
+    /// scene with many emitters, live/load.rs `EmitterWorker`).
     pub defer_powers: bool,
     /// Held-back power edits: (the object's first row in `objects`, its power, the time of the edit).
     pub deferred: Vec<(usize, f32, f32)>,

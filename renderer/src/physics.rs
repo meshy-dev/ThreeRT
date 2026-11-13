@@ -3,7 +3,7 @@
 //! objects that bodies drive; it has no GPU in it and builds for wasm32); here is the scene it drives, the renderer's
 //! `World`, and the frame's timing. Scene code reaches it through `__engine.physics(op, args)` and reads the driven
 //! objects' poses through `__engine.physicsPoses()`; it never steps it. After a frame's ticks the bodies that moved
-//! place their objects: a driven mesh or model is an instance, so a move is its TLAS transform, no triangle (live.rs
+//! place their objects: a driven mesh or model is an instance, so a move is its TLAS transform, no triangle (live/edits.rs
 //! `move_instances`), and nothing of it passes through the script. A session that never makes a physics call has no
 //! world and pays nothing.
 
