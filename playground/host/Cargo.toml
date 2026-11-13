@@ -3,6 +3,7 @@ name = "threert-playground"
 version = "0.1.0"
 edition = "2024"
 description = "ThreeRT Playground: native macOS editor client (PocketJS UI + the threert real-time renderer, one wgpu device)"
+license = "MIT"
 publish = false
 
 [dependencies]

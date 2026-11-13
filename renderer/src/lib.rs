@@ -10,6 +10,8 @@ pub mod denoise;
 pub mod desc;
 pub mod files;
 pub mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host;
 pub mod live;
 pub mod ltree;
 pub mod merged;
@@ -207,7 +209,7 @@ pub fn rng_seed() -> u32 {
 pub const LIGHT_GROUP: usize = 16;
 
 /// Distance beyond which a local light gives nothing (the kernel's range test in `local_lights`); f32::MAX without a
-/// range.
+/// range. (A black light gives nothing anywhere: `lights_with_groups` leaves it out.)
 fn light_reach(l: &scene::GpuLight) -> f32 {
     if l.color[3] <= 0.0 {
         return f32::MAX;
@@ -267,22 +269,28 @@ pub fn light_order(lights: &[scene::GpuLight]) -> Vec<usize> {
 }
 
 /// The light table as uploaded: the lights, then per group of LIGHT_GROUP local lights (counted from the first local
-/// one) an entry whose `pos` is the sphere (centre, radius) holding every point its lights reach. THREERT_LIGHT_GROUPS=0:
-/// unbounded spheres, every light tested (A/B).
+/// one) an entry whose `pos` is the sphere (centre, radius) holding every point its lights reach. Black lights (off, or
+/// hidden: `scene::gpu_light_shown`) reach nothing and are in no sphere; a group of them alone has radius -1 (no point
+/// is in it). THREERT_LIGHT_GROUPS=0: unbounded spheres, every light tested (A/B).
 pub fn lights_with_groups(lights: &[scene::GpuLight]) -> Vec<scene::GpuLight> {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let off = *OFF.get_or_init(|| std::env::var("THREERT_LIGHT_GROUPS").is_ok_and(|v| v == "0"));
     let nd = lights.iter().take_while(|l| l.pos[3] == 0.0).count();
     let mut out = lights.to_vec();
     for g in lights[nd..].chunks(LIGHT_GROUP) {
+        let lit = |l: &&scene::GpuLight| l.color[..3].iter().any(|c| *c > 0.0);
+        if !off && !g.iter().any(|l| lit(&l)) {
+            out.push(scene::GpuLight { pos: [0.0, 0.0, 0.0, -1.0], ..Default::default() });
+            continue;
+        }
         let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for l in g {
+        for l in g.iter().filter(lit) {
             a = a.min(Vec3::from_slice(&l.pos[..3]));
             b = b.max(Vec3::from_slice(&l.pos[..3]));
         }
         let c = (a + b) * 0.5;
         let mut r = 0.0f32;
-        for l in g {
+        for l in g.iter().filter(lit) {
             let reach = light_reach(l);
             r = if reach == f32::MAX { f32::MAX } else { r.max(c.distance(Vec3::from_slice(&l.pos[..3])) + reach) };
         }
@@ -1036,6 +1044,24 @@ mod light_lod_tests {
             r.iter().sum::<f32>() / r.len() as f32
         };
         assert!(mean(&table) < 0.5 * mean(&unsorted), "groups are compact: {} vs {}", mean(&table), mean(&unsorted));
+    }
+
+    /// Black lights (off, or hidden) are in no group's sphere: one parked far away does not widen its group, and a
+    /// group of them alone holds no point.
+    #[test]
+    fn black_lights_reach_nothing() {
+        let at = |x: f32, lit: bool| scene::GpuLight { pos: [x, 0.0, 0.0, 1.0], color: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 10.0], ..Default::default() };
+        // 16 lit lights within 15 m and, in their group's place, one of them black 10 km away: the sphere as without it.
+        let mut near: Vec<_> = (0..LIGHT_GROUP).map(|k| at(k as f32, true)).collect();
+        let lit = lights_with_groups(&near)[LIGHT_GROUP].pos;
+        near[3] = at(-10_000.0, false);
+        let with_black = lights_with_groups(&near)[LIGHT_GROUP].pos;
+        assert!(with_black[3] <= lit[3] && with_black[3] > 0.0, "{with_black:?} for {lit:?}");
+        // A group of black lights alone: radius -1.
+        let dark: Vec<_> = (0..LIGHT_GROUP + 2).map(|k| at(k as f32, k < LIGHT_GROUP)).collect();
+        let t = lights_with_groups(&dark);
+        assert!(t[dark.len()].pos[3] > 0.0);
+        assert_eq!(t[dark.len() + 1].pos[3], -1.0);
     }
 }
 

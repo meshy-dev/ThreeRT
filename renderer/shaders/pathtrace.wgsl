@@ -129,7 +129,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
 @group(0) @binding(17) var<storage, read> instances: array<Instance>;
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
-// (volume function, shape: 0 box / 1 sphere, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
+// (volume function, shape: 0 box / 1 sphere / 2 none while its node is hidden, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
 // simulated grid), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
 struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: vec4<f32>, c: vec4<f32>, p: array<vec4<f32>, 8> };
 @group(0) @binding(18) var<storage, read> media: array<Medium>;
@@ -1612,8 +1612,9 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
             }
             for (; i < gend; i++) {
                 let li = lights[i];
-                // Cheap rejects before sampling the light: beyond its attenuation range (the window is zero there), or
-                // entirely behind the surface.
+                // Cheap rejects before sampling the light: black (off, or hidden), beyond its attenuation range (the
+                // window is zero there), or entirely behind the surface.
+                if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
                 let dc = li.pos.xyz - x;
                 let reach = li.color.w + select(li.dir.w, length(li.ext.xyz) + li.dir.w, u32(li.pos.w) == 3u);
                 if (li.color.w > 0.0 && dot(dc, dc) > reach * reach) { continue; }
@@ -2016,6 +2017,8 @@ fn medium_local(m: Medium, x: vec3<f32>) -> vec3<f32> {
 fn medium_span(m: Medium, o: vec3<f32>, d: vec3<f32>) -> vec2<f32> {
     let lo = medium_local(m, o);
     let ld = vec3<f32>(dot(m.w0.xyz, d), dot(m.w1.xyz, d), dot(m.w2.xyz, d));
+    // (Its node hidden: scene.rs MEDIUM_HIDDEN. No ray crosses it.)
+    if (m.a.y >= 2u) { return vec2<f32>(1.0, 0.0); }
     if (m.a.y == 1u) {
         let a = dot(ld, ld);
         let b = dot(lo, ld);

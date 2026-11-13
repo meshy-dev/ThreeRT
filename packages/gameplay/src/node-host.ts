@@ -10,6 +10,12 @@
 //   setState(state, seq)          replace the state (a render of a room's current state)
 //   state()                       the committed state and its sequence number
 //   frame(dt, now)                the game's frame script
+//   hostMessages(list, ts)        the app's messages (host.ts), a batch in one entry: `input` is kept for `f.input`
+//                                 and `world.input` (input.ts), the others go to their `host.on` listeners, which
+//                                 change the scene as world handlers do
+//   sync()                        the engine follows the scene once more: the renderer calls it when promise jobs
+//                                 ran after an entry (a `.then` callback, the code after an `await`: they run when
+//                                 the entry is over, after its own sync), so what they changed is in the same commit
 //   seek(time, now)               the frame script's clock set to `time`, the scene shown settled at that moment (an
 //                                 offline render at a scene time: the timeline a frame script draws)
 //   outline() / inspect(name) / edit(name, path, value)   the editor: the live scene, not a document (name "" = the
@@ -23,8 +29,12 @@ import {
 } from "@threert/scene";
 import { buildScene, describeGame, executeEvent, gameKeys, initialWorld, type GameDefinition } from "./game.ts";
 import { FrameRunner } from "./frame.ts";
+import { channel, type HostMessage } from "./host.ts";
+import { hud } from "./hud.ts";
+import { InputState, type InputMessage } from "./input.ts";
+import { withDeterminism } from "./random.ts";
 import { applyCommitted, commit, createStore, type Json, type JsonObject, type Store, type Write } from "./store.ts";
-import { runWorldHandler } from "./world.ts";
+import { runWorldHandler, worldContext } from "./world.ts";
 
 export interface NodeHost {
   describe(): string;
@@ -34,6 +44,8 @@ export interface NodeHost {
   setState(state: string, seq: number): void;
   state(): string;
   frame(dt: number, now: number): void;
+  hostMessages(list: string, ts: number): void;
+  sync(): void;
   seek(time: number, now: number): void;
   outline(): string;
   inspect(name: string): string;
@@ -45,6 +57,8 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
   let frames: FrameRunner<unknown> | null = null;
   let binding: SceneBinding | null = null;
   let eventId = 0;
+  // (The node's input outlives a scene built anew in the same runtime: the keys the player holds are still held.)
+  const input = new InputState();
   const live = () => {
     if (!store || !frames || !binding) throw new Error("setup() has not run");
     return { store, frames, binding };
@@ -55,6 +69,26 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
     binding.deliverPhysicsEvents();
     frames.run(0, now, snap);
     binding.sync();
+  };
+  /** The state transactions of `queue`, each with the events it emits after it; what they wrote and how they went. */
+  const transact = (queue: { type: string; payload: Json; id?: number }[], ts: number, writes: Write[], log: string[]) => {
+    const { store } = live();
+    while (queue.length) {
+      const ev = queue.shift()!;
+      const res = executeEvent(game, store, { id: ev.id ?? ++eventId, type: ev.type, payload: ev.payload, ts });
+      if (res.status === "error") {
+        log.push(`✗ ${ev.type}: error ${res.failure?.split("\n")[0]}`);
+        continue;
+      }
+      const c = commit(store, res);
+      if (!c.ok) {
+        log.push(`✗ ${ev.type}: conflict on ${c.conflicts.join(", ")}`);
+        continue;
+      }
+      writes.push(...c.applied);
+      queue.push(...res.emits.map((e) => ({ type: e.type, payload: e.payload })));
+      if (ev.type !== "tick") log.push(`${res.status === "ok" ? "✓" : "✗"} seq ${c.seq} ${ev.type}${res.failure ? ` — ${res.failure}` : ""} · ${Object.keys(res.reads).length}R/${res.writes.length}W`);
+    }
   };
   const object = (name: string): Object3D => {
     const o = live().binding.objectNamed(name);
@@ -68,7 +102,9 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
       const t0 = Date.now();
       const s = buildScene(game, { roomId, seed: seed ?? undefined });
       store = createStore(initialWorld(game), s.seed);
-      frames = new FrameRunner(game.frame, store, s.seed, s.scene, s.camera);
+      frames = new FrameRunner(game.frame, store, s.seed, s.scene, s.camera, input);
+      // (An app that kept the HUD of the scene before gets this one's first description whatever it says.)
+      hud.reset();
       const eng = engine ?? (globalThis as { __engine?: Engine }).__engine;
       if (!eng) throw new Error("no engine: run the bundle in the renderer (threert-render play / live / render)");
       binding = new SceneBinding(eng, s.scene, s.camera, s.options);
@@ -99,22 +135,7 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
         binding.sync();
         return JSON.stringify({ writes, log, seq: store.seq });
       }
-      while (queue.length) {
-        const ev = queue.shift()!;
-        const res = executeEvent(game, store, { id: ev.id ?? ++eventId, type: ev.type, payload: ev.payload, ts });
-        if (res.status === "error") {
-          log.push(`✗ ${ev.type}: error ${res.failure?.split("\n")[0]}`);
-          continue;
-        }
-        const c = commit(store, res);
-        if (!c.ok) {
-          log.push(`✗ ${ev.type}: conflict on ${c.conflicts.join(", ")}`);
-          continue;
-        }
-        writes.push(...c.applied);
-        queue.push(...res.emits.map((e) => ({ type: e.type, payload: e.payload })));
-        if (ev.type !== "tick") log.push(`${res.status === "ok" ? "✓" : "✗"} seq ${c.seq} ${ev.type}${res.failure ? ` — ${res.failure}` : ""} · ${Object.keys(res.reads).length}R/${res.writes.length}W`);
-      }
+      transact(queue, ts, writes, log);
       refresh(ts);
       return JSON.stringify({ writes, log, seq: store.seq });
     },
@@ -150,6 +171,8 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
       } catch (error) {
         failed = { error };
       }
+      // What the input message brought for a frame (pressed, released, look, wheel) ends with the frame.
+      input.endFrame();
       try {
         binding.sync();
       } catch (error) {
@@ -157,6 +180,45 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
         console.error(error);
       }
       if (failed) throw failed.error;
+    },
+
+    hostMessages(list, ts) {
+      const { store, frames, binding } = live();
+      const messages = JSON.parse(list) as unknown;
+      if (!Array.isArray(messages)) throw new TypeError("hostMessages: a JSON array of messages");
+      // One context for the batch, made when the first listener is to run: a batch of input alone (every frame's)
+      // runs no game code and sends the engine nothing.
+      let ctx: ReturnType<typeof worldContext<unknown>> | null = null;
+      for (const m of messages as (HostMessage | null)[]) {
+        if (!m || typeof m !== "object" || typeof m.t !== "string") continue;
+        if (m.t === "input") {
+          input.apply(m as unknown as InputMessage);
+          continue;
+        }
+        if (m.t === "launch") channel.setLaunch(m.params);
+        if (!channel.listens(m.t)) continue;
+        ctx ??= worldContext(frames, store.seed, { id: ++eventId, ts });
+        const { world, random } = ctx;
+        for (const error of withDeterminism(ts, random, () => channel.deliver(m, world))) console.error(`host message ${m.t}: ${error}`);
+      }
+      if (!ctx) return;
+      // (The batch's listeners have run: what they emitted is taken below, and a later `emit` on their world throws.)
+      ctx.close();
+      // As after a world handler: the engine follows the scene as the listeners left it; the state events they
+      // emitted are transactions, and the frame script then shows the new state.
+      if (!ctx.emits.length) {
+        binding.sync();
+        return;
+      }
+      const log: string[] = [];
+      transact(ctx.emits.splice(0), ts, [], log);
+      for (const l of log) if (l.startsWith("✗")) console.error(l);
+      refresh(ts);
+    },
+
+    sync() {
+      // (Before setup there is no scene to follow: jobs a bundle left while loading.)
+      binding?.sync();
     },
 
     seek(time, now) {

@@ -27,6 +27,7 @@ import type {
   AnimationDesc, CameraDesc, Engine, EnvironmentDesc, LightDesc, MaterialDesc, ObjectDesc, SettingsDesc, SwayDesc, TextureDesc,
 } from "@threert/scene";
 import { windAngle, windPhase } from "@threert/scene";
+import type { ScenePhysics } from "./physics.ts";
 import { bakeEquirect, gradientRadiance, type Mask, SKY_NITS_PER_LUX, sunTransmittance, type V3 } from "./sky.ts";
 
 interface Node {
@@ -144,6 +145,11 @@ export class ThreeEngine implements Engine {
   private sky: THREE.Mesh | null = null;
   private envTexture: THREE.Texture | null = null;
   private readonly droppedBy = new Map<string, Set<string>>();
+  /** The engine's physics, when the view loaded it (tools/three/physics.ts): without it bodies stay where the scene
+   *  put them and the queries find nothing, as before. Set before the game's setup. */
+  bodies: ScenePhysics | null = null;
+  /** The bodies that drive an object: body id -> its object and its slot of the pose table. */
+  private readonly driven = new Map<number, { object: number; slot: number }>();
 
   /** `backend`: a WebGLRenderer (the baseline) or any ThreeBackend (the WebGPU one of tools/compare). */
   constructor(backend: THREE.WebGLRenderer | ThreeBackend) {
@@ -181,6 +187,7 @@ export class ThreeEngine implements Engine {
     if (uvs.length) g.setAttribute("uv", new THREE.BufferAttribute(uvs.slice(), 2));
     g.setIndex(new THREE.BufferAttribute(indices.slice(), 1));
     g.computeBoundingSphere();
+    this.bodies?.geometry(id, positions, indices);
     const old = this.geometries.get(id);
     this.geometries.set(id, g);
     if (old) {
@@ -307,10 +314,42 @@ export class ThreeEngine implements Engine {
 
   particlesSpawn(): void {}
 
-  physics(op: string): string {
-    // No physics in this baseline: driven objects stay where the scene put them.
-    this.notes.add(`physics ${op}`);
-    return "null";
+  physics(op: string, args?: object): string {
+    if (!this.bodies) {
+      // Without the engine's physics (the measured baseline): driven objects stay where the scene put them.
+      this.notes.add(`physics ${op}`);
+      return "null";
+    }
+    const answer = this.bodies.physics(op, args ?? {});
+    // Which object each body moves: `step` places it from the body's slot of the pose table.
+    const a = (args ?? {}) as { id?: number; object?: number; slot?: number; body?: number };
+    if (op === "body" && a.id !== undefined && a.object !== undefined && a.slot !== undefined) this.driven.set(a.id, { object: a.object, slot: a.slot });
+    else if (op === "remove" && a.body !== undefined) this.driven.delete(a.body);
+    return answer;
+  }
+
+  physicsPoses(): Float32Array {
+    return this.bodies?.poses() ?? new Float32Array(0);
+  }
+
+  /** A frame of the physics world (the view calls it after the frame script, as the renderer steps its own): the
+   *  ticks that fit in `dt`, then the objects of the bodies placed where the bodies are. */
+  step(dt: number): void {
+    if (!this.bodies) return;
+    this.bodies.advance(dt);
+    const poses = this.bodies.poses();
+    for (const [body, { object, slot }] of this.driven) {
+      const n = this.nodes.get(object);
+      if (!n || slot * 7 + 6 >= poses.length) {
+        // (The object went, and its body with it.)
+        if (!n) this.driven.delete(body);
+        continue;
+      }
+      const k = slot * 7;
+      n.holder.position.set(poses[k], poses[k + 1], poses[k + 2]);
+      n.rest.set(poses[k + 3], poses[k + 4], poses[k + 5], poses[k + 6]);
+      n.holder.quaternion.copy(n.rest);
+    }
   }
 
   gridProgram(name: string): void {
@@ -420,6 +459,7 @@ export class ThreeEngine implements Engine {
       n = { id, desc, holder, content: null, power: 1, anim: null, mixer: null, sway: null, rest: new THREE.Quaternion() };
       this.nodes.set(id, n);
     }
+    this.bodies?.object(id, desc);
     n.desc = desc;
     n.power = 1;
     n.holder.visible = true;
@@ -513,6 +553,7 @@ export class ThreeEngine implements Engine {
   }
 
   transform(id: number, trs: Float32Array): void {
+    this.bodies?.transform(id, trs);
     const n = this.node(id);
     const h = n.holder;
     h.position.set(trs[0], trs[1], trs[2]);
@@ -740,6 +781,7 @@ export class ThreeEngine implements Engine {
   }
 
   remove(id: number): void {
+    this.bodies?.remove(id);
     const n = this.nodes.get(id);
     if (!n) return;
     n.holder.parent?.remove(n.holder);

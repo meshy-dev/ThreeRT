@@ -600,8 +600,8 @@ pub struct PoseGroup {
 /// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop.
 type PoseKey = (String, Option<Vec<String>>, String, u32, bool);
 
-/// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape, homogeneous,
-/// animated),
+/// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape or
+/// `MEDIUM_HIDDEN`, homogeneous, animated),
 /// (majorant 1/m, HG anisotropy, -, -), the node's customData, 32 parameter floats.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -626,6 +626,8 @@ pub struct GridBuild {
     pub params: [f32; 32],
     pub node: u32,
     pub medium: u32,
+    /// `world::DensityGrid::made`.
+    pub made: u32,
 }
 
 /// The world -> local rows of a medium whose node has world matrix `m` (pathtrace.wgsl `Medium.w0..w2`).
@@ -654,7 +656,7 @@ pub struct ParticleSystem {
     pub seed: u32,
     /// The node's customData (the particle function's `i.custom`).
     pub custom: [f32; 4],
-    /// Hidden by its own `visible` (`World::particles_hidden_built`): in the build, its pass idle until it is shown.
+    /// Hidden by its own `visible` (`World::hidden_built`): in the build, its pass idle until it is shown.
     pub hidden: bool,
 }
 
@@ -842,6 +844,16 @@ pub fn apply_shader(gm: &mut GpuMaterial, sh: &desc::ShaderRef, shaders: &HashMa
 
 /// Analytic light of a light object with world matrix `m` (rect lights with a visible card are emitter geometry
 /// instead, see `card_material`). Emission scales with the node's power.
+/// `gpu_light` of a light that may be hidden (`shown`: `World::shown`): hidden, its entry stays where it is in the
+/// table, black (the kernel skips black lights, and they are in no group's sphere: lib.rs `lights_with_groups`).
+pub fn gpu_light_shown(l: &Light, m: Mat4, power: f32, shown: bool) -> Option<GpuLight> {
+    let mut gl = gpu_light(l, m, power)?;
+    if !shown {
+        gl.color = [0.0, 0.0, 0.0, gl.color[3]];
+    }
+    Some(gl)
+}
+
 pub fn gpu_light(l: &Light, m: Mat4, power: f32) -> Option<GpuLight> {
     let pos = m.transform_point3(Vec3::ZERO);
     let dir = m.transform_vector3(Vec3::NEG_Z).normalize();
@@ -916,6 +928,9 @@ pub fn card_material(color: [f32; 3], intensity: f32) -> GpuMaterial {
 /// The most volumes a scene may show at once: the kernel loops over at most 32 media with a 32-bit mask
 /// (pathtrace.wgsl `media_track`, `media_march`, `media_shadows`). A scene past it is refused, not drawn without some.
 pub const MAX_MEDIA: usize = 32;
+/// A medium's shape (`MediumGpu::a[1]`: 0 box, 1 sphere) while its node is hidden: none, no ray crosses it
+/// (pathtrace.wgsl `medium_span`).
+pub const MEDIUM_HIDDEN: u32 = 2;
 
 pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<Scene> {
     let t0 = web_time::Instant::now();
@@ -1026,6 +1041,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut procs: Vec<ProcObject> = vec![];
     let mut media: Vec<MediumGpu> = vec![];
     let mut media_nodes: Vec<u32> = vec![];
+    // Volumes shown that the loop below has yet to place: hidden ones take what the kernel has left after them.
+    let mut media_to_show = w.objects.iter().filter(|(id, o)| matches!(o.kind, Kind::Volume { .. }) && w.shown(**id)).count();
     let mut grids: Vec<GridBuild> = vec![];
     let grid_programs: Vec<(String, String, String)> = w.grid_programs.iter().map(|(k, (c, h))| (k.clone(), c.clone(), h.clone())).collect();
     let mut objects: Vec<[f32; 4]> = vec![];
@@ -1540,7 +1557,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     retained.dynamic.insert(*id, DynamicModel { first, mats, ..Default::default() });
                 }
             }
-            Kind::Light(l) => match (l, gpu_light(l, m, n.power)) {
+            Kind::Light(l) => match (l, gpu_light_shown(l, m, n.power, shown)) {
                 (_, Some(gl)) => {
                     lights.push(gl);
                     retained.light_nodes.push(*id);
@@ -1560,7 +1577,12 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 }
                 _ => {}
             },
-            Kind::Volume { function, params, shape, majorant, g, homogeneous, animated, grid } if shown => {
+            // (Hidden by its own `visible`: built while the kernel has room after the volumes shown, with no shape,
+            // so that showing it is in place: gpu.rs `set_medium_hidden`.)
+            Kind::Volume { function, params, shape, majorant, g, homogeneous, animated, grid } if shown || (w.hidden_built(*id) && media.len() + media_to_show < MAX_MEDIA) => {
+                if shown {
+                    media_to_show -= 1;
+                }
                 let func = volume_fns.iter().position(|(k, _, _)| k == function).ok_or_else(|| anyhow!("object {}: unknown volume function {function}", n.name))? as u32;
                 let mut p = [0.0f32; 32];
                 for (k, v) in params.iter().take(32).enumerate() {
@@ -1585,13 +1607,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 gp[k] = *v;
                             }
                             let z0 = grids.iter().map(|b| b.dims[2]).sum::<u32>();
-                            let cells = grids.iter().chain([&GridBuild { id: 0, dims: dg.dims, z0, data: None, program: None, params: [0.0; 32], node: 0, medium: 0 }]).map(|b| b.dims.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
+                            let cells = grids.iter().chain([&GridBuild { id: 0, dims: dg.dims, z0, data: None, program: None, params: [0.0; 32], node: 0, medium: 0, made: 0 }]).map(|b| b.dims.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
                             // (The atlas is as wide and high as the widest and highest grid: its texels count too.)
                             let atlas = grids.iter().map(|b| b.dims[0]).chain([dg.dims[0]]).max().unwrap() as u64 * grids.iter().map(|b| b.dims[1]).chain([dg.dims[1]]).max().unwrap() as u64 * (z0 + dg.dims[2]) as u64;
                             if cells > world::GRID_MAX_SCENE_CELLS || atlas > 2 * world::GRID_MAX_SCENE_CELLS || z0 + dg.dims[2] > world::GRID_MAX_LAYERS {
                                 return Err(anyhow!("object {}: the scene's density grids exceed {} cells or {} layers along z together (or differ too much in width and height)", n.name, world::GRID_MAX_SCENE_CELLS, world::GRID_MAX_LAYERS));
                             }
-                            grids.push(GridBuild { id: *gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node: *id, medium: media.len() as u32 });
+                            grids.push(GridBuild { id: *gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node: *id, medium: media.len() as u32, made: dg.made });
                             grids.len() - 1
                         }
                     };
@@ -1601,7 +1623,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if media.len() >= MAX_MEDIA {
                     return Err(anyhow!("object {}: more than {MAX_MEDIA} volumes shown at once (the kernel takes {MAX_MEDIA}; the rest would not be drawn)", n.name));
                 }
-                media.push(MediumGpu { w: medium_rows(m), a: [func, *shape, *homogeneous as u32, *animated as u32], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
+                media.push(MediumGpu { w: medium_rows(m), a: [func, if shown { *shape } else { MEDIUM_HIDDEN }, *homogeneous as u32, *animated as u32], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
                 media_nodes.push(*id);
             }
             Kind::Procedural { .. } if shown => {
@@ -1611,7 +1633,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     procs.push(p);
                 }
             }
-            Kind::Particles { count, emitter, params, material, emitter_area } if (shown || w.particles_hidden_built(*id)) && *count > 0 => {
+            Kind::Particles { count, emitter, params, material, emitter_area } if (shown || w.hidden_built(*id)) && *count > 0 => {
                 // Quads collapsed at the node until the particle pass places them (each its own object: pivot,
                 // bounds and per-particle data for material functions).
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
@@ -2341,5 +2363,8 @@ mod instance_tests {
         let e = build_with(MAX_MEDIA as u32 + 1, 0).err().expect("33 volumes refused");
         assert!(format!("{e:#}").contains("more than 32 volumes"), "{e:#}");
         assert_eq!(build_with(MAX_MEDIA as u32, 4).unwrap().media.len(), MAX_MEDIA, "hidden ones do not count");
+        // Hidden by their own `visible`, they keep a place while there is room after those shown (shown in place).
+        let b = build_with(MAX_MEDIA as u32 - 2, 4).unwrap();
+        assert_eq!((b.media.len(), b.media.iter().filter(|m| m.a[1] == MEDIUM_HIDDEN).count()), (MAX_MEDIA, 2));
     }
 }

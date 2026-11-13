@@ -1,0 +1,40 @@
+# Publishes @threert/scene, @threert/gameplay and @threert/voxel to npm, when asked (Actions -> npm -> Run workflow),
+# from main: the version in the root package.json, built and checked by tools/npm-pack.ts. A package whose version npm
+# already has is skipped, so a run after a failed one finishes it, and a second run changes nothing. To release:
+# raise "version" in the root package.json in a PR, merge it, run this.
+#
+# No token: npm trusts this workflow of this repository (each package's Settings -> Trusted publishing on npmjs.com:
+# meshy-dev/ThreeRT, npm.yml), and signs what it publishes with where it was built (provenance). That needs a
+# GitHub-hosted runner and `id-token: write`.
+name: npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "dist-tag: latest, or next for a preview"
+        default: latest
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency: npm
+
+jobs:
+  publish:
+    name: "publish @threert/*"
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm test
+      - run: node tools/npm-pack.ts --publish --tag "$TAG"
+        env:
+          TAG: ${{ inputs.tag }}

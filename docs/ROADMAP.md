@@ -1902,6 +1902,68 @@ fire shot reads 6.28 / 5.56 / 3.69 as before, to the digit.
 - test-render 181 pass. Not done: `Explosions` still refuses a smoke grid and says why in the old words (the voxel
   line's to change, with the comparison that found it); at most 32 media a scene, as before.
 
+**Hiding in place, black lights (2026-11-13, after it).** `World::set_visible` rebuilt the live scene for anything but
+a particle system, so a pool parked its idle fireballs 10 km below the level and gave its idle lights a 1 mm range
+(§ 6 step 10 b). And the build placed every light whatever its visibility: hiding a light cost the rebuild and
+changed nothing (`light/hidden`: 238 for 39.8). Now, by an object's own `visible`, in place (`Changes::shown`):
+- a volume keeps its medium in the table with no shape (`MEDIUM_HIDDEN`: `medium_span` gives no crossing). Hidden
+  ones are built while the kernel has room after those shown (32 in all); no media pass runs while every medium is
+  hidden;
+- a light without a card keeps its entry in the light table, black. The kernel skips black lights first in its exact
+  loop, and they are in no group's sphere (a group of them alone holds no point), so a light parked anywhere costs
+  nothing; a hidden ancestor still rebuilds, and the build then places the lights under it black;
+- when a local light moves, or goes dark or lit, the groups are sorted again (`Tables::regroup_lights`): they were
+  sorted when the scene was built, and lights that drifted apart made their group's sphere as wide as the level.
+A rect light's card and the sun still rebuild (geometry; the sky's bake).
+
+- A fireball and a light hidden and shown every half second for 3 s (a scratch game): 6 rebuilds before (1,958 ms
+  the first, 9 ms each after), none now; the frame's CPU p50 4.70 ms, max 18 ms.
+- New tests: `light/hidden`, `light/hidden-in-place-live`, `light/shown-in-place-live`, `volume/hidden-in-place-live`,
+  `volume/shown-in-place-live`; test-render 186 pass. Bistro held still, Kabukichō's ghosting and the fire shot read
+  as before.
+- Seen on the way, not this change's: 2 s after a 5,000 cd light is hidden beside a 1,000 cd one the plane under
+  them still reads 6 % high. 45 frames after a lighting edit the long history comes back, and what is left of the
+  old light then averages out as 1 / n (NRD's fixed 30 frames would decay it for good). And 0.3 s after a fireball
+  is hidden a faint ring stays where its edge was (the upscaler's history: nothing says a medium went).
+- Not done: `Explosions` still parks (the voxel line's to change); a mesh hidden by its own `visible` still rebuilds.
+
+**Simulated grids across a rebuild (2026-11-13, after it).** A rebuild of the live scene made new grid textures, so
+any structural change in a game (an object hidden, a texture, an edit's fallback) started every simulated grid again
+from its data: the smoke vanished (§ 6 step 10 b kept its pool movable and parked for that). Now the scene before
+hands what its grid programs had simulated to the scene after (`Gpu::carry_grids`): per grid that is the same grid
+still (`world::DensityGrid::made`: its size and its program's name; new parameters keep it), field A (its layers of
+the atlas) and field B are copied texture to texture, and the programs' step count goes with them.
+`volume/grid-rebuild-live`: a grid filled at 1.5 a second for 24 frames, the scene rebuilt after 12, reads 0.6075 of
+0.6024 (as without the rebuild); main 0.90. test-render 187 pass. Not carried: GPU particles (a rebuild still starts
+them afresh), and a grid whose size or program changed.
+
+**A lighting edit counted in frames (2026-11-13, after it).** The closing signs of `bench-temporal` run in real time
+and spread more than what they were asked to tell apart. `bench-temporal --shot edit` is the measure in frames
+(`tools/light-edit-scene.ts`: a closed room; a spot whose pool is on the back wall and whose bounce is on the floor;
+an emissive sign; each switched off and on at once; lockstep at 0.5, the frame k frames after the edit against the
+converged frame of the state after, beside the frame k frames after a history reset in that state). Two runs agree to
+0.01. Main (`cd54c70`), luminance against the reference at 1 / 8 / 32 / 128 / 256 frames after the edit:
+
+| edit, region | the edit | ΔE at 32 / 256 | a view with no memory, ΔE at 32 / 256 |
+|---|---|---|---|
+| lamp off, its pool | 29.8 / 11.2 / 3.33 / 1.36 / 1.17 | 15.2 / 1.75 | 0.53 / 0.36 |
+| lamp off, its bounce | 2.64 / 2.49 / 1.66 / 1.12 / 1.05 | 3.38 / 0.43 | 0.46 / 0.26 |
+| lamp on, its pool | 0.05 / 0.84 / 0.95 / 0.99 / 0.99 | 1.92 / 0.43 | 0.43 / 0.25 |
+| lamp on, its bounce | 0.37 / 0.43 / 0.72 / 0.93 / 0.97 | 3.00 / 0.53 | 1.15 / 0.52 |
+| sign off, the floor beside it | 2.94 / 2.53 / 1.66 / 1.12 / 1.05 | 12.7 / 1.56 | 0.73 / 0.46 |
+| sign on, the floor beside it | 0.35 / 0.48 / 0.76 / 0.95 / 0.97 | 7.28 / 0.84 | 0.80 / 0.43 |
+
+- **Open, the live view's largest fault found so far:** a lamp switched off leaves its pool on the wall for seconds,
+  11 times too bright after 8 frames, 3.3 times after half a second, still 17 % after 4 s, in blotches. The excess
+  falls as 1 / k. The diffuse history is cut once, to 2 frames, when its fast mean leaves the slow one; half the old
+  light is still in it, the slow mean is set to the fast one, the anti-lag has nothing more to find, and the history
+  accumulates again from there (and after 45 frames the long history is back). The upscaler's 16 samples follow that.
+  ReBLUR's form is another: the slow history clamped every frame into the range of a fast one (about 6 frames) around
+  the pixel, so it is dragged along until it has followed. Not done here.
+- The question #39 left: the radiance cache's 4 frames while the lighting is live. At 32 frames the bounce follows
+  later (lamp off: 2.24 for 1.66 at 32 frames, 1.38 for 1.12 at 128; lamp on: 0.50 for 0.72, 0.79 for 0.93). The 4
+  frames buy what they were said to and stay; the 0.16 ΔE they cost a scene at rest is the price.
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.

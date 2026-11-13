@@ -42,7 +42,7 @@ export async function bundlePage(id: string, src: string, page = join(root, "too
 const TYPES: Record<string, string> = {
   ".html": "text/html", ".js": "text/javascript", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream", ".exr": "application/octet-stream", ".hdr": "application/octet-stream",
-  ".ktx2": "image/ktx2", ".webp": "image/webp",
+  ".ktx2": "image/ktx2", ".webp": "image/webp", ".wasm": "application/wasm",
 };
 
 /** Static file server for the repo root (read-only, no directory listings); `assets/...` may also come from another
@@ -106,6 +106,8 @@ export interface Page {
   evaluate<T = unknown>(expression: string, timeoutMs?: number): Promise<T>;
   /** A PNG of the viewport. */
   screenshot(file: string): Promise<void>;
+  /** An input event as the browser gets one from a device (DevTools' `Input.<method>`): a key, the mouse. */
+  input(method: string, params: object): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -199,6 +201,9 @@ export async function launch(log: (line: string) => void = () => {}): Promise<Br
         async screenshot(file) {
           const r = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
           writeFileSync(file, Buffer.from(r.data, "base64"));
+        },
+        async input(method, params) {
+          await cdp.send(`Input.${method}`, params, sessionId);
         },
         async close() {
           await cdp.send("Target.closeTarget", { targetId }).catch(() => {});

@@ -1,5 +1,5 @@
 {
- "at": "2026-11-12T00:02:46.765Z",
+ "at": "2026-11-13T00:46:52.456Z",
  "wide": {
   "width": 1920,
   "height": 1080,
@@ -10,15 +10,15 @@
   "clips": [
    {
     "id": "crowd",
-    "what": "Bistro night with a crowd and traffic: 150 walkers, 60 vans with their lights on",
-    "width": 960,
-    "height": 540,
-    "scale": 0.7,
+    "what": "Bistro night with a crowd: 150 walkers, the lanterns swinging (no traffic: moving headlights still read noisy)",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.5,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 7.35,
-     "p95": 7.81
+     "p50": 6.87,
+     "p95": 7.16
     }
    },
    {
@@ -34,53 +34,53 @@
    {
     "id": "tokyo",
     "what": "Tokyo (PLATEAU city model) around Tokyo Tower from afternoon into night, the lamps coming on",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 8.69,
-     "p95": 11.05
+     "p50": 9.2,
+     "p95": 13.74
     }
    },
    {
     "id": "kabukicho",
     "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
-    "width": 960,
-    "height": 540,
-    "scale": 0.7,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.5,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 9.14,
-     "p95": 9.69
+     "p50": 8.1,
+     "p95": 8.32
     }
    },
    {
     "id": "home",
     "what": "Daylight Home: golden hour, night with the lamps on, then the morning sun",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 8.98,
-     "p95": 11.21
+     "p50": 8.48,
+     "p95": 10.7
     }
    },
    {
     "id": "jewellery",
     "what": "Jeweller's Window: the display turning under the soft boxes",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 8.61,
-     "p95": 9.05
+     "p50": 9,
+     "p95": 9.39
     }
    },
    {
@@ -96,53 +96,53 @@
    {
     "id": "museum",
     "what": "Sculpture Gallery: walking up to the marble bust and the bronze lion",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 6.01,
-     "p95": 7.12
+     "p50": 6.11,
+     "p95": 6.41
     }
    },
    {
     "id": "voxels",
-    "what": "The voxel level under explosions: what is cut loose falls",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "what": "The voxel level under explosions, each with its fireball and light: what is cut loose falls",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 6.97,
-     "p95": 7.97
+     "p50": 8.33,
+     "p95": 9.06
     }
    },
    {
     "id": "colour",
     "what": "Colour Lab: the three lamps switched one by one",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 9.24,
-     "p95": 9.57
+     "p50": 9.36,
+     "p95": 9.9
     }
    },
    {
     "id": "showroom",
     "what": "Boutique Showroom in the evening: walking to the sneaker, then the sunglasses",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 9.78,
-     "p95": 10.77
+     "p50": 9.65,
+     "p95": 13.48
     }
    },
    {
@@ -168,14 +168,14 @@
    {
     "id": "kabukicho",
     "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
-    "width": 960,
-    "height": 540,
-    "scale": 0.7,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.5,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 9.14,
-     "p95": 9.69
+     "p50": 8.1,
+     "p95": 8.32
     }
    },
    {
@@ -191,40 +191,40 @@
    {
     "id": "home",
     "what": "Daylight Home: golden hour, night with the lamps on, then the morning sun",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 8.98,
-     "p95": 11.21
+     "p50": 8.48,
+     "p95": 10.7
     }
    },
    {
     "id": "jewellery",
     "what": "Jeweller's Window: the display turning under the soft boxes",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 8.61,
-     "p95": 9.05
+     "p50": 9,
+     "p95": 9.39
     }
    },
    {
     "id": "crowd",
-    "what": "Bistro night with a crowd and traffic: 150 walkers, 60 vans with their lights on",
-    "width": 960,
-    "height": 540,
-    "scale": 0.7,
+    "what": "Bistro night with a crowd: 150 walkers, the lanterns swinging (no traffic: moving headlights still read noisy)",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.5,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 7.35,
-     "p95": 7.81
+     "p50": 6.87,
+     "p95": 7.16
     }
    },
    {
@@ -240,27 +240,27 @@
    {
     "id": "museum",
     "what": "Sculpture Gallery: walking up to the marble bust and the bronze lion",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 6.01,
-     "p95": 7.12
+     "p50": 6.11,
+     "p95": 6.41
     }
    },
    {
     "id": "colour",
     "what": "Colour Lab: the three lamps switched one by one",
-    "width": 960,
-    "height": 540,
-    "scale": 1,
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "b646a20",
+    "commit": "2d4e88a",
     "gpu_ms": {
-     "p50": 9.24,
-     "p95": 9.57
+     "p50": 9.36,
+     "p95": 9.9
     }
    }
   ]

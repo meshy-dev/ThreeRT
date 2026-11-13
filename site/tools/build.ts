@@ -2,7 +2,7 @@
 // The pages plus the npm files they import (three.js, the QR encoder); no bundling, nothing rewritten.
 //
 // Two directories are generated elsewhere and copied when they are there (site/README.md):
-//   site/releases/   latest.json and the client build it names (the Download page)
+//   site/releases/   latest.json and the client build it names (the Download page), appcast.xml (the apps' update feed)
 //   site/play/       index.json and the example packages (Showcase's "Open on your device")
 // Without them the pages say that nothing is published on this host; the build warns. --require-release makes that
 // (and a file over the host's size limit) an error: what the deploy uses. The disk image itself stays out of the build
@@ -22,7 +22,7 @@ const problems: string[] = [];
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 copyFileSync(join(site, "index.html"), join(out, "index.html"));
-for (const d of ["showcase", "download", "docs", "css", "js", "brand", "media"]) cpSync(join(site, d), join(out, d), { recursive: true });
+for (const d of ["showcase", "download", "docs", "privacy", "css", "js", "brand", "media"]) cpSync(join(site, d), join(out, d), { recursive: true });
 for (const [rel, file] of Object.entries(VENDOR)) {
   mkdirSync(dirname(join(out, rel)), { recursive: true });
   copyFileSync(file, join(out, rel));
@@ -44,8 +44,23 @@ if (existsSync(latest)) {
   // A public build opens like any app: never one that asks the user to get past Gatekeeper.
   if (r.macos && (r.macos.signed !== "developer-id" || r.macos.notarized !== true))
     problems.push(`site/releases/latest.json: the macOS build is ${r.macos.signed ?? "unsigned"}${r.macos.notarized ? "" : ", not notarized"} (release.ts --sign <Developer ID> --notarize <profile>)`);
+  // The update feed installed apps read (the client's tools/sparkle.ts): it must offer the image latest.json names, at
+  // its size, or an app would download something else than the Download page offers (or fail the length check).
+  const feed = join(site, "releases/appcast.xml");
+  if (existsSync(feed) && r.macos) {
+    const xml = readFileSync(feed, "utf8");
+    const enc = /<enclosure\s+url="([^"]+)"\s+length="(\d+)"[^>]*sparkle:edSignature="[^"]+"/.exec(xml);
+    const ver = /<sparkle:version>([^<]+)<\/sparkle:version>/.exec(xml)?.[1];
+    if (!enc) problems.push("site/releases/appcast.xml: no enclosure with a URL, a length and an EdDSA signature");
+    else {
+      if (!/^https:\/\//.test(enc[1])) problems.push(`site/releases/appcast.xml: the update is not on https (${enc[1]})`);
+      if (!enc[1].endsWith(`/${r.macos.file}`) && enc[1] !== r.macos.url) problems.push(`site/releases/appcast.xml offers ${enc[1]}, latest.json ${r.macos.url ?? r.macos.file}`);
+      if (Number(enc[2]) !== r.macos.size) problems.push(`site/releases/appcast.xml says ${enc[2]} bytes, latest.json ${r.macos.size}`);
+      if (ver !== r.version) problems.push(`site/releases/appcast.xml offers ${ver}, latest.json is ${r.version}`);
+    }
+  }
   cpSync(join(site, "releases"), join(out, "releases"), { recursive: true, filter: (src) => withImage || !src.endsWith(".dmg") });
-  console.log(`release ${r.version}: ${r.macos?.url ?? r.macos?.file ?? "no macOS build"}${r.macos?.url || withImage ? "" : " (served from R2: deploy.ts uploads it)"}; iOS ${r.ios?.url ?? "not published"}`);
+  console.log(`release ${r.version}: ${r.macos?.url ?? r.macos?.file ?? "no macOS build"}${r.macos?.url || withImage ? "" : " (served from R2: deploy.ts uploads it)"}; updates ${existsSync(feed) ? "releases/appcast.xml" : "none (no appcast.xml)"}; iOS ${r.ios?.url ?? "not published"}`);
 } else {
   problems.push("no site/releases/latest.json: the Download page will say that no build is published on this host");
 }

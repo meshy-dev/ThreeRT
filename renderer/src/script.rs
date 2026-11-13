@@ -5,12 +5,17 @@
 //! then applies what changed (GPU tables in place, or a rebuild).
 //!
 //! Sandbox: the engine has no I/O at all (no fs, network, timers or module loader); the host adds only a log sink, a
-//! monotonic clock and the engine API. Memory is capped and every call runs under a time budget (the interrupt
-//! handler aborts it).
+//! monotonic clock, the engine API and the host channel's queue (`__host_post`: messages for the app that embeds the
+//! session, which may answer with `host_messages`; docs/RUNTIME.md "The host channel"). Memory is capped and every
+//! call runs under a time budget (the interrupt handler aborts it).
+//!
+//! Promises: the engine has no event loop of its own, so every entry into the script (`ScriptHost::enter`) ends by
+//! running the promise jobs it left (a `.then` callback, the code after an `await`), within the entry's budget, as a
+//! browser does when a script returns. docs/RUNTIME.md "Promises".
 
 use crate::world::World;
 use anyhow::{anyhow, Result};
-use rquickjs::{CatchResultExt, Context, Ctx, Exception, Function, Module, Object, Runtime, TypedArray, Value};
+use rquickjs::{CatchResultExt, Coerced, Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime, TypedArray, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +88,11 @@ const SETUP_MS: u64 = 120_000;
 const EVENT_MS: u64 = 1_000;
 const FRAME_MS: u64 = 50;
 
+/// The host channel's queue (`__host_post`): the most messages it holds until the app takes them (a session nobody
+/// drains, a render node's, keeps the first of them and drops the rest), and the most bytes of one.
+const MAX_POSTS: usize = 1024;
+const MAX_POST_BYTES: usize = 1 << 20;
+
 /// The most engine time one entry into the script (a frame, an event, setup) is lent, µs: past it the time the engine
 /// spends in voxel calls counts against the script's budget again. 250 ms: the largest single edit measured on the
 /// benchmark level, the 30 x 30 m cut, takes 115 ms of engine time, so two of those fit; a frame that spends more in
@@ -136,8 +146,49 @@ impl Drop for Lent<'_> {
     }
 }
 
+/// The promises rejected with no handler in the entry running now, each with its reason: one that gets a handler
+/// before the entry's jobs have all run is taken off again, and what is left then is reported (`ScriptHost::enter`).
+/// They are kept alive here, and none outlives its entry. Past `MAX_TRACKED` of them at once (a script that rejects
+/// without end) the rest are only counted.
+#[derive(Default)]
+struct Rejections {
+    list: Vec<(Persistent<Value<'static>>, Persistent<Value<'static>>)>,
+    more: usize,
+}
+type Rejected = Rc<RefCell<Rejections>>;
+
+/// The most unhandled rejections one entry reports by their reasons (the rest are counted), and the most it tracks.
+const MAX_REJECTIONS: usize = 8;
+const MAX_TRACKED: usize = 4096;
+
+/// A game log line (`console.*`, an unhandled rejection): stderr, and the sink if there is one.
+fn game_log(level: &str, msg: &str) {
+    eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") });
+    if let Some(sink) = LOG_SINK.read().ok().and_then(|s| *s) {
+        sink(level, msg);
+    }
+}
+
+/// A rejection's reason as one line: what `String(reason)` says (an error's name and message), and where an error
+/// was thrown (the first line of its stack).
+fn reason_text<'js>(ctx: &Ctx<'js>, reason: &Value<'js>) -> String {
+    let Ok(Coerced(text)) = reason.get::<Coerced<String>>() else {
+        // (Its `toString` threw, or the entry's time was up.)
+        ctx.catch();
+        return "a value that cannot be shown".into();
+    };
+    let stack = reason.as_object().and_then(|o| o.get::<_, Option<String>>("stack").unwrap_or_else(|_| {
+        ctx.catch();
+        None
+    }));
+    match stack.as_deref().and_then(|s| s.lines().map(str::trim).find(|l| !l.is_empty() && *l != text)) {
+        Some(at) => format!("{text} ({at})"),
+        None => text,
+    }
+}
+
 pub struct ScriptHost {
-    _rt: Runtime,
+    rt: Runtime,
     ctx: Context,
     /// The deadline of the entry running now and the engine time lent to it (`Budget`).
     budget: Arc<Budget>,
@@ -150,6 +201,17 @@ pub struct ScriptHost {
     pub voxels: Rc<RefCell<crate::voxel::VoxelWorld>>,
     /// The physics world (`__engine.physics`; renderer/src/physics.rs): None until scene code makes a physics call.
     pub physics: Rc<RefCell<Option<crate::physics::PhysicsWorld>>>,
+    /// What the game posted for the app (`host.post`: JSON texts), until `take_posts`.
+    posts: Rc<RefCell<Vec<String>>>,
+    /// The promises rejected with no handler in the entry running now (`Rejected`); empty between entries.
+    rejected: Rejected,
+}
+
+impl Drop for ScriptHost {
+    fn drop(&mut self) {
+        // (Values of the script engine must be gone before its runtime is.)
+        self.rejected.borrow_mut().list.clear();
+    }
 }
 
 pub struct EventOut {
@@ -377,36 +439,142 @@ impl ScriptHost {
         let budget = Arc::new(Budget { epoch, deadline: AtomicU64::new(0), lent: AtomicU64::new(0) });
         let b = budget.clone();
         rt.set_interrupt_handler(Some(Box::new(move || b.up())));
+        // A promise rejected with no handler is noted, and taken off again if it gets one (`then` / `catch` / `await`
+        // on it later in the entry: `async` code that throws before its caller has the promise is such a case).
+        let rejected = Rejected::default();
+        let r = rejected.clone();
+        rt.set_host_promise_rejection_tracker(Some(Box::new(move |ctx, promise, reason, handled| {
+            let promise = Persistent::save(&ctx, promise);
+            let mut r = r.borrow_mut();
+            if handled {
+                r.list.retain(|(p, _)| *p != promise);
+            } else if r.list.len() < MAX_TRACKED {
+                r.list.push((promise, Persistent::save(&ctx, reason)));
+            } else {
+                r.more += 1;
+            }
+        })));
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { _rt: rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default() };
-        let (w, v, ph, d2) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone());
-        let info: String = h.call(SETUP_MS, |ctx| {
+        let mut h = ScriptHost { rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), posts: Default::default(), rejected };
+        let (w, v, ph, d2, posts) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone(), h.posts.clone());
+        let (info, rejections) = h.enter(SETUP_MS, |ctx| {
             let g = ctx.globals();
-            g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| {
-                eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") });
-                if let Some(sink) = LOG_SINK.read().ok().and_then(|s| *s) {
-                    sink(&level, &msg);
-                }
-            })?)?;
+            g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| game_log(&level, &msg))?)?;
             g.set("__host_now", Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1000.0)?)?;
+            // The host channel, script to app: a message's JSON text onto the queue the app drains. False when the
+            // queue is full (nobody drains it); a message past the size bound is the script's error.
+            g.set("__host_post", Function::new(ctx.clone(), move |ctx: Ctx, text: String| -> rquickjs::Result<bool> {
+                if text.len() > MAX_POST_BYTES {
+                    return Err(Exception::throw_range(&ctx, &format!("host.post: a message of {} bytes (at most {MAX_POST_BYTES})", text.len())));
+                }
+                let mut q = posts.borrow_mut();
+                let room = q.len() < MAX_POSTS;
+                if room {
+                    q.push(text);
+                }
+                Ok(room)
+            })?)?;
             install_engine(ctx, &w, &v, &ph, &d2)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
-            host(ctx)?.get::<_, Function>("describe")?.call(())
-        })?;
+            host(ctx)?.get::<_, Function>("describe")?.call::<_, String>(())
+        });
+        // (A module that throws as it loads rejects its promise: the error returned says it, once.)
+        let info = info?;
+        for line in &rejections {
+            game_log("error", line);
+        }
         h.info = serde_json::from_str(&info)?;
         Ok(h)
     }
 
-    /// Runs `f` in the engine under a time budget; JS exceptions become errors with their message and stack.
+    /// Runs `f` in the engine under a time budget, then the promise jobs it left (`enter`); JS exceptions become
+    /// errors with their message and stack, and the entry's unhandled rejections are error lines of the game's log.
     fn call<T>(&self, budget_ms: u64, f: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<T>) -> Result<T> {
+        let (r, rejections) = self.enter(budget_ms, f);
+        for line in &rejections {
+            game_log("error", line);
+        }
+        r
+    }
+
+    /// One entry into the script: `f` under a time budget, then the promise jobs the entry left (`run_jobs`), within
+    /// the same budget, whether `f` threw or not. Returns `f`'s result (its own error first, else the jobs': the entry
+    /// fails when its time is up with jobs still to run, as it does when `f` overruns) and the entry's unhandled
+    /// rejections as lines for its log.
+    fn enter<T>(&self, budget_ms: u64, f: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<T>) -> (Result<T>, Vec<String>) {
         self.budget.lent.store(0, Ordering::Relaxed);
         self.budget.deadline.store(self.epoch.elapsed().as_micros() as u64 + budget_ms * 1000, Ordering::Relaxed);
         let r = self.ctx.with(|ctx| f(&ctx).catch(&ctx).map_err(|e| anyhow!("{e}")));
+        let jobs = self.run_jobs();
+        let rejections = self.take_rejections();
         self.budget.deadline.store(0, Ordering::Relaxed);
-        r
+        (r.and_then(|v| jobs.map(|()| v)), rejections)
+    }
+
+    /// Runs the pending promise jobs until none is left: the callbacks of promises the entry settled, the code after
+    /// an `await`, and the jobs those queue in turn. The script engine has no event loop, so without this nothing
+    /// after a promise ever ran. What they changed in the scene is sent to the engine by the node host's `sync`
+    /// (the entry's own sync ran before them), so the commit that follows the entry applies it.
+    ///
+    /// The entry's deadline holds: a job that spins is interrupted like any script, and a chain that queues itself
+    /// for ever is ended here when the time is up. The jobs not run stay queued, and run after the next entry.
+    fn run_jobs(&self) -> Result<()> {
+        loop {
+            let mut ran = false;
+            while self.rt.is_job_pending() {
+                if self.budget.up() {
+                    return Err(anyhow!("interrupted (the script's time is up with promise jobs still to run)"));
+                }
+                // (A job fails only on what a script cannot catch, the interrupt: what a callback throws rejects its
+                // promise.)
+                if self.rt.execute_pending_job().is_err() {
+                    return Err(self.ctx.with(|ctx| match Err::<(), _>(rquickjs::Error::Exception).catch(&ctx) {
+                        Err(e) => anyhow!("{e}"),
+                        Ok(()) => anyhow!("a promise job failed"),
+                    }));
+                }
+                ran = true;
+            }
+            if !ran {
+                return Ok(());
+            }
+            // (Bundles built before `sync` existed, the scripts of tests, and a bundle still loading have none.)
+            self.ctx.with(|ctx| {
+                let sync = || -> rquickjs::Result<()> {
+                    let Some(host) = ctx.globals().get::<_, Option<Object>>("__threert")? else { return Ok(()) };
+                    match host.get::<_, Option<Function>>("sync")? {
+                        Some(f) => f.call(()),
+                        None => Ok(()),
+                    }
+                };
+                sync().catch(&ctx).map_err(|e| anyhow!("{e}"))
+            })?;
+        }
+    }
+
+    /// The entry's unhandled rejections (promises rejected that no `then`, `catch` or `await` had taken up when the
+    /// entry's jobs had run), each once, as error lines naming their reasons.
+    fn take_rejections(&self) -> Vec<String> {
+        let Rejections { list, more } = std::mem::take(&mut *self.rejected.borrow_mut());
+        if list.is_empty() {
+            return Vec::new();
+        }
+        self.ctx.with(|ctx| {
+            let more = more + list.len().saturating_sub(MAX_REJECTIONS);
+            let mut lines: Vec<String> = Vec::new();
+            for (k, (_promise, reason)) in list.into_iter().enumerate() {
+                if k < MAX_REJECTIONS {
+                    lines.push(format!("unhandled rejection: {}", reason.restore(&ctx).map_or_else(|_| "a value that cannot be shown".into(), |r| reason_text(&ctx, &r))));
+                }
+            }
+            if more > 0 {
+                lines.push(format!("unhandled rejection: {more} more in the same entry"));
+            }
+            lines
+        })
     }
 
     fn call_host<T: for<'js> rquickjs::FromJs<'js>>(&self, budget_ms: u64, name: &str, args: impl for<'js> rquickjs::function::IntoArgs<'js>) -> Result<T> {
@@ -415,6 +583,32 @@ impl ScriptHost {
 
     pub fn has_frame(&self) -> bool {
         self.info["frame"].as_bool().unwrap_or(false)
+    }
+
+    /// The input the game asked for (`pointer` in its definition): "look" (the app captures the pointer) or "free".
+    /// None: the game reads no input, and the app keeps its own camera controls.
+    pub fn pointer(&self) -> Option<&str> {
+        self.info["pointer"].as_str()
+    }
+
+    /// The messages the game posted for the app since the last call (`host.post`), as JSON values, in order.
+    pub fn take_posts(&self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut *self.posts.borrow_mut()).iter().filter_map(|t| serde_json::from_str(t).ok()).collect()
+    }
+
+    /// The app's messages for the game, a batch in one entry (the node host's `hostMessages`): `input` is kept for
+    /// the frame script, the others go to their `host.on` listeners. Bundles built before the channel have no such
+    /// entry: nothing to do then.
+    pub fn host_messages(&self, messages: &[serde_json::Value]) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
+        let list = serde_json::Value::Array(messages.to_vec()).to_string();
+        self.call(EVENT_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("hostMessages")? {
+            Some(f) => f.call((list, ts)),
+            None => Ok(()),
+        })
     }
 
     /// Handler bound to a key ("R", "Space"), if any.
@@ -447,9 +641,21 @@ impl ScriptHost {
     pub fn event(&self, kind: &str, payload: &serde_json::Value) -> Result<EventOut> {
         let t = Instant::now();
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
-        let json: String = self.call_host(EVENT_MS, "event", (kind, payload.to_string(), ts))?;
+        let (json, rejections) = self.enter(EVENT_MS, |ctx| host(ctx)?.get::<_, Function>("event")?.call::<_, String>((kind, payload.to_string(), ts)));
+        let json = match json {
+            Ok(json) => json,
+            Err(e) => {
+                for line in &rejections {
+                    game_log("error", line);
+                }
+                return Err(e);
+            }
+        };
         let v: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(EventOut { log: serde_json::from_value(v["log"].clone()).unwrap_or_default(), seq: v["seq"].as_i64().unwrap_or(-1), ms: t.elapsed().as_secs_f64() * 1000.0 })
+        // (An event's unhandled rejections are lines of its log, as its handlers' errors are.)
+        let mut log: Vec<String> = serde_json::from_value(v["log"].clone()).unwrap_or_default();
+        log.extend(rejections.iter().map(|l| format!("✗ {l}")));
+        Ok(EventOut { log, seq: v["seq"].as_i64().unwrap_or(-1), ms: t.elapsed().as_secs_f64() * 1000.0 })
     }
 
     /// State writes another authority (the room) committed.
@@ -677,6 +883,25 @@ impl GameSession {
         eprintln!("click: pick {pick_ms:.3} ms, script {:.3} ms (the physics world's calls {physics:.3} ms), commit {:.3} ms ({})", e.ms, all - e.ms, if self.rebuilt { "rebuild" } else { "in place" });
         self.clicked = Some(t0);
         Ok(Some(e))
+    }
+
+    /// The app's messages for the game (the host channel: its input, what its sockets received, `launch`), a batch in
+    /// one script entry; what the game's listeners changed in the scene is applied. True if that rebuilt the scene.
+    /// Listeners that throw do not fail the batch (their errors are in the game's log).
+    pub fn host_messages(&mut self, core: &mut crate::live::LiveCore, messages: &[serde_json::Value]) -> Result<bool> {
+        if messages.is_empty() {
+            return Ok(false);
+        }
+        let sent = self.host.host_messages(messages);
+        let rebuilt = self.commit(core)?;
+        sent?;
+        Ok(rebuilt)
+    }
+
+    /// The messages the game posted for the app since the last call (`host.post`), in order: to be taken after each
+    /// entry into the script, or once a frame.
+    pub fn take_posts(&mut self) -> Vec<serde_json::Value> {
+        self.host.take_posts()
     }
 
     /// A frame was drawn: the first one after a click is timed (THREERT_CLICK_LOG=1).
@@ -1008,6 +1233,204 @@ mod tests {
             JSON.parse(__engine.physics("state", { body: hit.body })).linvel[1]
         "#)).unwrap();
         assert!((up - 500.0 / 336.0).abs() < 0.05, "{up} m/s");
+    }
+
+    /// The host channel: what the script posts is the app's to take, in order, and bounded; the app's messages go to
+    /// the node host's `hostMessages` as one JSON array; a bundle without that entry (built before the channel) is
+    /// left alone.
+    #[test]
+    fn the_host_channel_queues_posts_and_delivers_batches() {
+        let game = GAME.replace("frame: (dt) => { frames++; },", "frame: (dt) => { frames++; }, hostMessages: (list, ts) => { for (const m of JSON.parse(list)) __host_post(JSON.stringify({ t: 'echo', of: m, timed: ts > 0 })); },");
+        assert!(game.contains("hostMessages"));
+        let h = ScriptHost::new(&game).unwrap();
+        assert!(h.take_posts().is_empty());
+        h.host_messages(&[serde_json::json!({ "t": "net.opened", "id": "a" }), serde_json::json!({ "t": "input", "keys": ["W"] })]).unwrap();
+        assert_eq!(h.take_posts(), vec![serde_json::json!({ "t": "echo", "of": { "t": "net.opened", "id": "a" }, "timed": true }), serde_json::json!({ "t": "echo", "of": { "t": "input", "keys": ["W"] }, "timed": true })]);
+        assert!(h.take_posts().is_empty(), "taken once");
+        // A queue nobody drains keeps its first messages and says no to the rest; a message past the bound throws.
+        let kept: i32 = h.call(1000, |ctx| ctx.eval("let kept = 0; for (let i = 0; i < 3000; i++) if (__host_post(JSON.stringify({ t: 'n', i }))) kept++; kept")).unwrap();
+        assert_eq!(kept as usize, MAX_POSTS);
+        let posts = h.take_posts();
+        assert_eq!((posts.len(), posts[0]["i"].as_u64(), posts[MAX_POSTS - 1]["i"].as_u64()), (MAX_POSTS, Some(0), Some(MAX_POSTS as u64 - 1)));
+        let err = h.call(1000, |ctx| ctx.eval::<bool, _>("__host_post('x'.repeat(2 << 20))")).unwrap_err();
+        assert!(format!("{err}").contains("host.post"), "{err}");
+        assert!(h.take_posts().is_empty());
+        // No `pointer` in the game's description: it asks for no input.
+        assert_eq!(h.pointer(), None);
+        assert_eq!(ScriptHost::new(&game.replace("frame: true,", "frame: true, pointer: 'look',")).unwrap().pointer(), Some("look"));
+        // A bundle from before the channel.
+        let old = ScriptHost::new(GAME).unwrap();
+        old.host_messages(&[serde_json::json!({ "t": "launch", "params": {} })]).unwrap();
+        assert!(old.take_posts().is_empty());
+    }
+
+    // The game above with what a game written with promises leaves behind in each entry: a `.then` chain and an
+    // `async` function (`left`), and a request the app answers in a later message (`ask`: the host channel's
+    // `net.fetch` as a library wraps it). `sync` is the node host's: the engine follows what the jobs changed.
+    const PROMISES: &str = r#"
+        const trace = [], waiting = new Map();
+        let syncs = 0, dim = 1;
+        const left = (name) => {
+            Promise.resolve(1).then((v) => v + 1).then((v) => { trace.push(name + " then " + v); dim = dim / 2; });
+            (async () => { await null; const v = await Promise.resolve(3); trace.push(name + " await " + v); })();
+        };
+        const ask = (id) => new Promise((resolve) => { waiting.set(id, resolve); __host_post(JSON.stringify({ t: "ask", id })); });
+        Object.assign(globalThis.__threert, {
+            event: (type, payload, ts) => {
+                if (type === "ask") (async () => { const v = await ask("a"); trace.push("answered " + v); dim = 0.75; })();
+                else if (type === "reject") Promise.resolve().then(() => { throw new TypeError("thrown in a job"); });
+                else left(type);
+                return JSON.stringify({ log: ["ok " + type], seq: 1 });
+            },
+            frame: (dt) => left("frame"),
+            hostMessages: (list) => { for (const m of JSON.parse(list)) if (m.t === "answer") waiting.get(m.id)(m.value); else left(m.t); },
+            sync: () => { syncs++; __engine.power(4, dim); },
+        });
+        globalThis.took = () => JSON.stringify([trace.splice(0), syncs]);
+    "#;
+
+    fn promises() -> ScriptHost {
+        let h = ScriptHost::new(&format!("{GAME}{PROMISES}")).unwrap();
+        h.setup("room", None).unwrap();
+        h.world.borrow_mut().take_changes();
+        h
+    }
+
+    /// What the script traced since the last look, and how often the node host's `sync` has run.
+    fn took(h: &ScriptHost) -> (Vec<String>, u32) {
+        serde_json::from_str(&h.call(100, |ctx| ctx.eval::<String, _>("took()")).unwrap()).unwrap()
+    }
+
+    /// The script engine has no event loop: each entry runs the promise jobs it left before it returns (a `.then`
+    /// chain to its end, an `async` function past its awaits), then has the node host sync, so what the jobs changed
+    /// in the scene is in the world the entry's commit applies. An entry that left none syncs nothing more.
+    #[test]
+    fn promise_jobs_run_in_the_entry_that_left_them() {
+        let h = promises();
+        let power = |h: &ScriptHost| {
+            let mut w = h.world.borrow_mut();
+            (w.objects[&4].power, w.take_changes().powers.contains(&4))
+        };
+        h.frame(1.0 / 60.0).unwrap();
+        assert_eq!(took(&h), (vec!["frame then 2".to_string(), "frame await 3".into()], 1), "a frame script");
+        assert_eq!(power(&h), (0.5, true), "what a job changed is synced after it");
+        let e = h.event("click", &serde_json::json!({})).unwrap();
+        assert_eq!(e.log, vec!["ok click"]);
+        assert_eq!(took(&h), (vec!["click then 2".to_string(), "click await 3".into()], 2), "an event's handler");
+        assert_eq!(power(&h), (0.25, true));
+        h.host_messages(&[serde_json::json!({ "t": "note" }), serde_json::json!({ "t": "more" })]).unwrap();
+        assert_eq!(took(&h), (["note then 2", "note await 3", "more then 2", "more await 3"].map(String::from).to_vec(), 3), "a batch's listeners: one sync for the batch");
+        assert_eq!(power(&h), (0.0625, true));
+        // Entries that leave no job: no second sync, nothing changed.
+        h.commit(&serde_json::json!([]), 1).unwrap();
+        h.set_state(&serde_json::json!({}), 1).unwrap();
+        h.edit("sign", "node.visible", &serde_json::json!(true)).unwrap();
+        assert_eq!(took(&h), (vec![], 3));
+        assert_eq!(power(&h), (0.0625, false));
+        // The loading of a bundle is an entry too (a module's top-level code, a library that starts with a promise).
+        let h = ScriptHost::new(&format!("{GAME} globalThis.loaded = 0; Promise.resolve().then(() => {{ loaded = 1; }});")).unwrap();
+        assert_eq!(h.call(100, |ctx| ctx.eval::<i32, _>("loaded")).unwrap(), 1);
+    }
+
+    /// No timers and no I/O: a promise only the app can resolve (its answer is a later host message) stays pending
+    /// through the frames in between, and its awaiter runs in the entry of the message that resolves it.
+    #[test]
+    fn a_promise_a_later_host_message_resolves_resumes_its_awaiter_in_that_entry() {
+        let h = promises();
+        h.event("ask", &serde_json::json!({})).unwrap();
+        assert_eq!(h.take_posts(), vec![serde_json::json!({ "t": "ask", "id": "a" })]);
+        for _ in 0..3 {
+            h.frame(1.0 / 60.0).unwrap();
+        }
+        let (trace, syncs) = took(&h);
+        assert!(!trace.iter().any(|l| l.starts_with("answered")), "nothing resumes it between entries: {trace:?}");
+        h.world.borrow_mut().take_changes();
+        h.host_messages(&[serde_json::json!({ "t": "answer", "id": "a", "value": 7 })]).unwrap();
+        assert_eq!(took(&h), (vec!["answered 7".to_string()], syncs + 1));
+        assert_eq!(h.world.borrow().objects[&4].power, 0.75, "and what it changed is in the world when the entry returns");
+        assert!(h.world.borrow_mut().take_changes().powers.contains(&4));
+    }
+
+    /// The jobs run within the entry's budget: a chain that queues itself for ever is ended when the time is up and
+    /// the entry fails as one that spins does; so does a job that spins. The chain is still queued (the next entry
+    /// runs into it) until the script stops it; then the host is as before.
+    #[test]
+    fn an_endless_chain_of_jobs_is_ended_by_the_budget() {
+        let h = promises();
+        let t = Instant::now();
+        let err = h.call(FRAME_MS, |ctx| ctx.eval::<(), _>("globalThis.on = true; globalThis.turns = 0; const again = () => { turns++; if (on) Promise.resolve().then(again); }; again();")).unwrap_err();
+        let ms = t.elapsed().as_millis();
+        assert!(format!("{err}").contains("interrupted"), "{err}");
+        assert!((FRAME_MS as u128..FRAME_MS as u128 + 500).contains(&ms), "ended after {ms} ms");
+        let turns = |h: &ScriptHost| h.call(FRAME_MS, |ctx| ctx.eval::<f64, _>("turns"));
+        assert!(format!("{}", turns(&h).unwrap_err()).contains("interrupted"), "the chain goes on after the next entry");
+        h.call(FRAME_MS, |ctx| ctx.eval::<(), _>("on = false")).unwrap();
+        let n = turns(&h).unwrap();
+        assert!(n > 1000.0, "{n} turns");
+        assert_eq!(turns(&h).unwrap(), n, "stopped");
+        // A job that spins is interrupted where it is, and is gone: the next entry is as any other.
+        for code in ["Promise.resolve().then(spin)", "(async () => { await null; spin(); })()"] {
+            let t = Instant::now();
+            let err = h.call(FRAME_MS, |ctx| ctx.eval::<(), _>(code)).unwrap_err();
+            assert!(format!("{err}").contains("interrupted"), "{code}: {err}");
+            assert!(t.elapsed().as_millis() < 1000, "{code}: ended after {} ms", t.elapsed().as_millis());
+            h.frame(1.0 / 60.0).unwrap();
+        }
+        // An `async` function that never gets past its loop of awaits, left by a frame script.
+        let h = ScriptHost::new(&format!("{GAME}{PROMISES}").replace("frame: (dt) => left(\"frame\"),", "frame: (dt) => { (async () => { for (;;) await null; })(); },")).unwrap();
+        h.setup("room", None).unwrap();
+        let t = Instant::now();
+        let err = h.frame(1.0 / 60.0).unwrap_err();
+        assert!(format!("{err}").contains("interrupted"), "{err}");
+        assert!(t.elapsed().as_millis() < 1000, "ended after {} ms", t.elapsed().as_millis());
+    }
+
+    /// A promise rejected that nothing handles is one error line of the entry it was rejected in, naming its reason
+    /// (an error thrown in a job is such a rejection). One that gets its handler before the entry's jobs have run is
+    /// none, and no entry reports another's.
+    #[test]
+    fn an_unhandled_rejection_is_reported_once() {
+        let h = promises();
+        let lines = |code: &str| {
+            let (r, lines) = h.enter(100, |ctx| ctx.eval::<(), _>(code));
+            r.unwrap();
+            lines
+        };
+        let one = |code: &str| {
+            let l = lines(code);
+            assert_eq!(l.len(), 1, "{code}: {l:?}");
+            l.into_iter().next().unwrap()
+        };
+        assert!(one("Promise.reject(new Error('lost'))").starts_with("unhandled rejection: Error: lost"));
+        assert!(one("Promise.resolve().then(() => { throw new TypeError('thrown in a job'); })").starts_with("unhandled rejection: TypeError: thrown in a job (at "));
+        assert!(one("(async () => { await null; null.x; })()").contains("cannot read property"));
+        assert_eq!(one("Promise.reject('only text')"), "unhandled rejection: only text");
+        assert_eq!(one("Promise.reject({ toString() { throw 1; } })"), "unhandled rejection: a value that cannot be shown");
+        assert_eq!(lines("1"), Vec::<String>::new(), "reported in its own entry only");
+        // Handled: at once, by an await's try, by a job later in the same entry.
+        for code in [
+            "Promise.reject(new Error('caught')).catch(() => {})",
+            "(async () => { try { await Promise.reject(new Error('caught')); } catch (e) {} })()",
+            "const p = Promise.reject(new Error('caught')); Promise.resolve().then(() => p.catch(() => {}))",
+            "const f = async () => { throw new Error('caught'); }; (async () => { try { await f(); } catch (e) {} })()",
+        ] {
+            assert_eq!(lines(&format!("{{ {code} }}")), Vec::<String>::new(), "{code}");
+        }
+        // Many in one entry: the first by their reasons, the rest counted.
+        let many = lines("for (let i = 0; i < 20; i++) Promise.reject(new Error('n' + i))");
+        assert_eq!(many.len(), MAX_REJECTIONS + 1);
+        assert!(many[0].starts_with("unhandled rejection: Error: n0") && many[MAX_REJECTIONS] == "unhandled rejection: 12 more in the same entry", "{many:?}");
+        // An event's are lines of its log, after its handlers' own.
+        let e = h.event("reject", &serde_json::json!({})).unwrap();
+        assert_eq!(e.log.len(), 2, "{:?}", e.log);
+        assert!(e.log[0] == "ok reject" && e.log[1].starts_with("✗ unhandled rejection: TypeError: thrown in a job"), "{:?}", e.log);
+        assert_eq!(h.event("click", &serde_json::json!({})).unwrap().log, vec!["ok click"]);
+        // A module that throws while it loads is the load's error (and a module's top-level await is waited for).
+        let runtime = "export const defineGame = (g) => g; export function installNodeHost(game) { globalThis.__threert = { describe: () => JSON.stringify({ handlers: [], frame: false, keys: {}, late: game.late }) }; }";
+        let err = ScriptHost::from_modules("await null; throw new Error('no game'); export default {};", runtime).err().unwrap();
+        assert!(format!("{err}").contains("no game"), "{err}");
+        let h = ScriptHost::from_modules("const late = await Promise.resolve().then(() => 5); export default { late };", runtime).unwrap();
+        assert_eq!(h.info["late"], 5);
     }
 
     #[test]

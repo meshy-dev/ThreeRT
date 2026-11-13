@@ -10,7 +10,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-threert-render = { path = ".." }
+# (Without its default features: `net` is the native binary's sockets, not the library's.)
+threert-render = { path = "..", default-features = false }
 wgpu = "30"
 glam = "0.30"
 serde_json = "1"

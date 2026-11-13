@@ -30,7 +30,8 @@ export interface GameDefinition<S = JsonObject> {
   seed?: number;
   /** Initial JSON state. */
   state: S;
-  /** Builds the scene (render nodes, the editor). Deterministic per seed: no Math.random / Date beyond ctx. */
+  /** Builds the scene (render nodes, the editor). Deterministic per seed: no Math.random / Date beyond ctx.
+   *  Synchronous: it returns the scene, not a promise of one (an `async` setup is an error). */
   setup(ctx: SetupContext): SetupResult;
   handlers: Record<string, Handler<S>>;
   /** Handles "tick" events (`{dt}` payload, seconds) unless a "tick" handler exists. */
@@ -50,6 +51,14 @@ export interface GameDefinition<S = JsonObject> {
   on?: Record<string, WorldHandler<S>>;
   /** Keyboard shortcuts of the native viewer and the playground: key ("R", "Space") -> handler or world handler. */
   keys?: Record<string, string>;
+  /**
+   * The game reads input every frame (`f.input`, `world.input`; input.ts) and its camera is its own: the app that
+   * shows it sends the input and leaves the camera alone (no orbit or fly controls of its own).
+   * - `"look"`: the app captures the pointer (Esc lets go, a click takes it again) and its motion is `input.look`.
+   * - `"free"`: the pointer stays free; `input.pointer` is where it is.
+   * Left out: no input is sent, and the app keeps its own camera controls. `keys` work in every case.
+   */
+  pointer?: "look" | "free";
 }
 
 /** What `defineGame` takes: a game, whose `handlers` may be left out when it has world handlers (`on`) only. */
@@ -72,14 +81,15 @@ export function defineGame<S>(input: GameInput<S>): GameDefinition<S> {
   if (!game.handlers || typeof game.handlers !== "object") throw new TypeError("defineGame: handlers are required");
   for (const [type, h] of Object.entries(game.handlers)) if (typeof h !== "function") throw new TypeError(`defineGame: handler "${type}" is not a function`);
   if (game.frame !== undefined && typeof game.frame !== "function") throw new TypeError("defineGame: frame must be a function");
+  if (game.pointer !== undefined && game.pointer !== "look" && game.pointer !== "free") throw new TypeError('defineGame: pointer must be "look" or "free"');
   for (const [key, h] of Object.entries(game.keys ?? {})) if (!game.handlers[h] && !game.on?.[h]) throw new TypeError(`defineGame: key "${key}" maps to unknown handler "${h}"`);
   if (canonicalJson(game.state) !== canonicalJson(JSON.parse(JSON.stringify(game.state ?? {})))) throw new TypeError("defineGame: state must be plain JSON");
   return game;
 }
 
 /** What a game has: `handlers` are the state's (a room runs them), `on` the world's (the node that owns the scene). */
-export function describeGame(game: GameDefinition<unknown>): { handlers: string[]; on: string[]; tick: boolean; frame: boolean; keys: Record<string, string>; seed: number | null } {
-  return { handlers: Object.keys(game.handlers), on: Object.keys(game.on ?? {}), tick: typeof game.tick === "function", frame: typeof game.frame === "function", keys: gameKeys(game), seed: game.seed ?? null };
+export function describeGame(game: GameDefinition<unknown>): { handlers: string[]; on: string[]; tick: boolean; frame: boolean; keys: Record<string, string>; seed: number | null; pointer: "look" | "free" | null } {
+  return { handlers: Object.keys(game.handlers), on: Object.keys(game.on ?? {}), tick: typeof game.tick === "function", frame: typeof game.frame === "function", keys: gameKeys(game), seed: game.seed ?? null, pointer: game.pointer ?? null };
 }
 
 /** The room's seed: the game's, else derived from the room id. */
@@ -98,6 +108,11 @@ export function buildScene(game: GameDefinition<unknown>, opts: { roomId: string
   // Event ids start at 1, so stream 0 is reserved for setup.
   const random = seededRandom(seed, 0);
   const r = withDeterminism(opts.ts ?? 0, random, () => game.setup({ roomId: opts.roomId, seed, random }));
+  // (Nothing waits for a promise here: a scene is built when setup returns. What setup starts with promises runs
+  // after it and may add to the scene it returned.)
+  if (typeof (r as unknown as PromiseLike<unknown> | undefined)?.then === "function") {
+    throw new Error("setup must be synchronous: it returns { scene, camera }, not a promise (setup is not awaited; build the scene, and add what arrives later to it)");
+  }
   return { ...r, seed };
 }
 

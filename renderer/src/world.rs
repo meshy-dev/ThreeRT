@@ -66,6 +66,9 @@ pub struct DensityGrid {
     pub data: Option<Arc<Vec<f32>>>,
     /// The grid program (by name) and its 32 parameter floats.
     pub program: Option<(String, Vec<f32>)>,
+    /// A number of its own for the grid as it was made: another when it is made again with another size or another
+    /// program. What a program has simulated in it is carried across a rebuild while this stays (gpu.rs `carry_grids`).
+    pub made: u32,
 }
 
 /// A grid's most cells per axis (pathtrace.wgsl `vgrid` packs them in 10 bits each) and in all (8 bytes a cell and
@@ -273,9 +276,10 @@ impl Default for Settings {
 #[derive(Default, Debug, Clone)]
 pub struct Changes {
     pub structural: bool,
-    /// Particle systems (`Kind::Particles`, not light-sampled) shown or hidden by their own `visible`: in place when
-    /// the build has them (live.rs `commit`, gpu.rs `set_particles_hidden`), else a rebuild.
-    pub particles_shown: HashSet<u32>,
+    /// Objects shown or hidden by their own `visible` whose build can take it in place (live.rs `commit`): particle
+    /// systems that are not light-sampled (gpu.rs `set_particles_hidden`), volumes (their medium: `set_medium_hidden`)
+    /// and lights without a card (their table entry goes black). A rebuild where the build left the object out.
+    pub shown: HashSet<u32>,
     pub materials: HashSet<u32>,
     /// Objects whose light parameters changed.
     pub lights: HashSet<u32>,
@@ -321,7 +325,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.particles_shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -357,6 +361,8 @@ pub struct World {
     /// live view last took them: per volume object, (x, y, z, radius, a rgba, b rgba) each.
     pub grids: HashMap<u32, DensityGrid>,
     pub grid_dirty: BTreeSet<u32>,
+    /// The last `DensityGrid::made` given.
+    pub grids_made: u32,
     pub grid_programs: BTreeMap<String, (String, String)>,
     pub grid_sources: BTreeMap<u32, Vec<f32>>,
     /// Volume functions by name: (WGSL code, helpers) (pathtrace.wgsl `vf_<name>`).
@@ -385,6 +391,7 @@ impl Default for World {
             voxel_occupancy: None,
             grids: HashMap::new(),
             grid_dirty: BTreeSet::new(),
+            grids_made: 0,
             grid_programs: BTreeMap::new(),
             grid_sources: BTreeMap::new(),
             volume_fns: BTreeMap::new(),
@@ -752,8 +759,18 @@ impl World {
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         if o.visible != visible {
             o.visible = visible;
-            if matches!(o.kind, Kind::Particles { emitter_area, .. } if emitter_area <= 0.0) {
-                self.changes.particles_shown.insert(id);
+            // In place: what keeps its slot in the build while hidden (`hidden_built`), and lights, which always
+            // have theirs (not a rect light's card, which is geometry, nor the sun, whose colour is the sky bake's).
+            let sun = matches!(self.environment.sky, desc::Sky::Atmosphere { sun: Some(s), .. } if s == id);
+            let o = &self.objects[&id];
+            let in_place = match &o.kind {
+                Kind::Particles { emitter_area, .. } => *emitter_area <= 0.0,
+                Kind::Volume { .. } => true,
+                Kind::Light(l) => !sun && !matches!(l, desc::Light::Rect { visible: true, .. }),
+                _ => false,
+            };
+            if in_place {
+                self.changes.shown.insert(id);
             } else {
                 self.changes.structural = true;
             }
@@ -761,11 +778,17 @@ impl World {
         Ok(())
     }
 
-    /// Whether the build holds particle system `id` though it is hidden: its own `visible` is false, everything above
-    /// it is shown, and it is not light-sampled (a rain curtain the weather turns off): shown again in place.
-    pub fn particles_hidden_built(&self, id: u32) -> bool {
+    /// Whether the build holds `id` though it is hidden: its own `visible` is false, everything above it is shown, and
+    /// it is a particle system that is not light-sampled (a rain curtain the weather turns off) or a volume (a pool's
+    /// idle fireball): shown again in place. (Volumes while the kernel has room for them: scene.rs `build`.)
+    pub fn hidden_built(&self, id: u32) -> bool {
         let Some(o) = self.objects.get(&id) else { return false };
-        !o.visible && matches!(o.kind, Kind::Particles { emitter_area, .. } if emitter_area <= 0.0) && o.parent.is_none_or(|p| self.shown(p))
+        let kept = match o.kind {
+            Kind::Particles { emitter_area, .. } => emitter_area <= 0.0,
+            Kind::Volume { .. } => true,
+            _ => false,
+        };
+        !o.visible && kept && o.parent.is_none_or(|p| self.shown(p))
     }
 
     pub fn set_power(&mut self, id: u32, power: f32) -> Result<()> {
@@ -1050,7 +1073,16 @@ impl World {
         }
         // (No data with a same grid: its contents stay, e.g. a simulated grid whose parameters were sent again.)
         let keep = if same && data.is_none() { self.grids.get(&id).and_then(|g| g.data.clone()) } else { None };
-        self.grids.insert(id, DensityGrid { dims, data: data.or(keep), program });
+        // The same grid still, for what its program has simulated: its size and its program's name (new parameters
+        // rebuild the scene, and the smoke stays).
+        let made = match self.grids.get(&id) {
+            Some(g) if g.dims == dims && g.program.as_ref().map(|p| &p.0) == program.as_ref().map(|p| &p.0) => g.made,
+            _ => {
+                self.grids_made = self.grids_made.wrapping_add(1);
+                self.grids_made
+            }
+        };
+        self.grids.insert(id, DensityGrid { dims, data: data.or(keep), program, made });
         Ok(())
     }
 
@@ -1166,8 +1198,14 @@ mod tests {
         assert!(!w.take_changes().structural && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
         assert!(w.take_changes().structural, "another program");
-        w.set_grid(1, [2, 2, 4], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
-        assert!(w.take_changes().structural, "another size");
+        let made = w.grids[&1].made;
+        w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![2.0]))).unwrap();
+        assert!(w.take_changes().structural && w.grids[&1].made == made, "new parameters rebuild; it is the same grid still (what it simulated is carried)");
+        w.set_grid(1, [2, 2, 2], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
+        assert!(w.grids[&1].made != made, "another program: another grid");
+        let made = w.grids[&1].made;
+        w.set_grid(1, [2, 2, 4], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
+        assert!(w.take_changes().structural && w.grids[&1].made != made, "another size");
         // Sources.
         let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid };
         w.set_object(5, "plain".into(), None, volume(None), false, false).unwrap();
@@ -1189,6 +1227,43 @@ mod tests {
         w.take_changes();
         w.set_grid(13, [256, 256, 128], 1, None, None).unwrap();
         assert!(w.grids.contains_key(&1) && w.grids.contains_key(&13) && !w.grids.contains_key(&10), "unused ones went, grid 1 (in use) stayed");
+    }
+
+    /// Hiding by an object's own `visible`: in place for a volume, a light without a card and a particle system that
+    /// is not light-sampled (`Changes::shown`; hidden, the build keeps a volume: `hidden_built`); a rebuild for a mesh,
+    /// a rect light with its card, the sun.
+    #[test]
+    fn hiding_a_volume_or_a_light_is_not_structural() {
+        let mut w = World::default();
+        let light = |json: serde_json::Value| Kind::Light(serde_json::from_value(json).unwrap());
+        let volume = Kind::Volume { function: "f".into(), params: vec![], shape: 1, majorant: 1.0, g: 0.0, homogeneous: false, animated: true, grid: None };
+        w.set_object(1, "fire".into(), None, volume, false, false).unwrap();
+        w.set_object(2, "lamp".into(), None, light(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": true, "intensity": 100, "radius": 0.01, "range": 0 })), false, false).unwrap();
+        w.set_object(3, "card".into(), None, light(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 100, "width": 1, "height": 1, "range": 0 })), false, false).unwrap();
+        w.set_object(4, "panel".into(), None, light(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 100, "width": 1, "height": 1, "range": 0, "visible": false })), false, false).unwrap();
+        w.set_object(5, "group".into(), None, Kind::Group, false, false).unwrap();
+        assert!(w.take_changes().structural, "the first commit builds the scene");
+        for id in [1, 2, 4] {
+            w.set_visible(id, false).unwrap();
+            let c = w.take_changes();
+            assert!(!c.structural && c.shown.contains(&id) && c.any(), "{id}: hidden in place");
+            assert!(!w.shown(id));
+            w.set_visible(id, false).unwrap();
+            assert!(!w.take_changes().any(), "{id}: no change");
+            w.set_visible(id, true).unwrap();
+            let c = w.take_changes();
+            assert!(!c.structural && c.shown.contains(&id), "{id}: shown in place");
+        }
+        w.set_visible(1, false).unwrap();
+        assert!(w.hidden_built(1) && !w.hidden_built(2), "a hidden volume keeps its place in the build; a light always has one");
+        for id in [3, 5] {
+            w.set_visible(id, false).unwrap();
+            assert!(w.take_changes().structural, "{id}: a rect light's card and a group are geometry");
+        }
+        let inner = Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid: None };
+        w.set_object(6, "inner".into(), Some(5), inner, false, false).unwrap();
+        w.set_visible(6, false).unwrap();
+        assert!(!w.hidden_built(6), "under a hidden parent nothing is kept");
     }
 
     /// Wind sway: the object leans downwind about its origin by Sway::angle, the phase from its world position when it

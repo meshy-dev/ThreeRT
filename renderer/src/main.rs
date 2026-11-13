@@ -13,6 +13,8 @@
 //!   threert-render edit-check <bundle.js> --events '[{"type":..,"payload":..}]'
 //!   threert-render info                       # print adapter info
 
+mod net;
+
 use threert_render::script::ScriptHost;
 use threert_render::{compare, default_presets_dir, denoise, gpu, live, post, prepare, scene, view};
 
@@ -222,7 +224,9 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&r)?);
         }
         "view" | "play" => {
-            view::run(view::parse_args(&args, &presets)?)?;
+            // The window is the app of the game's host channel: its `net.*` messages are this binary's sockets and
+            // HTTP (src/net.rs; a build without the `net` feature answers that it has none).
+            view::run(view::parse_args(&args, &presets)?, Box::new(net::Net::new()))?;
         }
         "setup" => {
             // Setup cost of a game bundle in the embedded runtime (as on a render node).

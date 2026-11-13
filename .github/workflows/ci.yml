@@ -81,6 +81,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The npm packages as they are published: built, installed into an empty project, typechecked and run there.
+      - run: node tools/npm-pack.ts
 
   renderer:
     name: "renderer: release build"

@@ -13,6 +13,7 @@
 // changes, not every frame on a big street.
 
 import type { Object3D, PerspectiveCamera, Scene } from "@threert/scene";
+import { InputState, type Input } from "./input.ts";
 import { seededRandom } from "./random.ts";
 import type { Store } from "./store.ts";
 
@@ -34,6 +35,8 @@ export interface FrameContext<S> {
   object(id: string): Object3D | undefined;
   /** Random stream of this node's frame loop (seeded from the room seed). */
   random(): number;
+  /** What the player holds and moves this frame (input.ts): nothing, unless the game asked for input (`pointer`). */
+  readonly input: Input;
 }
 
 export type FrameFn<S> = (f: FrameContext<S>) => void;
@@ -48,8 +51,11 @@ export class FrameRunner<S> {
   readonly scene: Scene;
   readonly camera: PerspectiveCamera;
   private ids = new Map<string, Object3D>();
+  /** The node's input, as the app last sent it (`f.input`, `world.input`). */
+  readonly input: InputState;
 
-  constructor(fn: FrameFn<S> | undefined, store: Store, seed: number, scene: Scene, camera: PerspectiveCamera) {
+  constructor(fn: FrameFn<S> | undefined, store: Store, seed: number, scene: Scene, camera: PerspectiveCamera, input = new InputState()) {
+    this.input = input;
     this.fn = fn;
     this.store = store;
     this.scene = scene;
@@ -97,7 +103,7 @@ export class FrameRunner<S> {
     dt = Math.min(Math.max(dt, 0), 0.1);
     this.time += dt;
     if (!this.fn) return;
-    this.fn({ time: this.time, dt, snap, now, state: this.committed(), scene: this.scene, camera: this.camera, object: (id) => this.object(id), random: this.random });
+    this.fn({ time: this.time, dt, snap, now, state: this.committed(), scene: this.scene, camera: this.camera, object: (id) => this.object(id), random: this.random, input: this.input });
   }
 }
 
