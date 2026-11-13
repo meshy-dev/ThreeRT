@@ -60,8 +60,8 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(15) var<storage, read_write> lumq: array<f32>;                 // quarter res log2 luminance (unexposed)
 @group(0) @binding(16) var<storage, read_write> lumb: array<f32>;                 // edge-aware blur of lumq
 // Per traced sample, what `judge` finds of the output grid's colour history (`Judged`, f16), in `ae_out`. Until then
-// `ae_out` holds what the previous frame's `dtemporal` wrote to `ae_in`, its ping-pong partner: the diffuse fast mean
-// in colour (`fast_load`).
+// `ae_out` holds what the previous frame wrote to `ae_in`, its ping-pong partner: `dtemporal` the diffuse fast mean
+// in colour (`fast_load`: x, y), `compose` how much the composed sample flickers (`Flicker`: z, w).
 @group(0) @binding(17) var<storage, read_write> ae_in: array<vec4<u32>>;
 @group(0) @binding(18) var<storage, read_write> ae_out: array<vec4<u32>>;
 // Specular history on the traced grid (rgb + history length), diffuse luminance moments (mean, mean square, fast mean, -).
@@ -892,7 +892,24 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pv = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, object_moves));
         if (pv.z > 0.0) { vel = clamp(sp - 0.5 - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0)); }
     }
-    fb[q] = vec4<f32>(finite_or_zero(max(c, vec3<f32>(0.0))), t);
+    let shown = finite_or_zero(max(c, vec3<f32>(0.0)));
+    fb[q] = vec4<f32>(shown, t);
+    // How much this sample flickers (`Flicker`), from where its surface was in the previous frame's traced grid.
+    let now = min(lum(shown), 6.0e4);
+    var f = Flicker(vec2<f32>(0.0), 0.0, 0.0);
+    let ps = vec2<i32>(L.isz.zw);
+    if (L.size.w == 0u && ps.x > 0) {
+        let pc = vec2<i32>(floor((sp - vel) * vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y))));
+        if (pc.x >= 0 && pc.y >= 0 && pc.x < ps.x && pc.y < ps.y) { f = flicker_at(u32(pc.y * ps.x + pc.x)); }
+    }
+    let still = 1.0 - clamp(length(vel) / UP_SPEED, 0.0, 1.0);
+    var sd = select(1.0, f.sd, f.n >= 1.0);
+    if (f.n >= 2.0) {
+        let bend = min(abs(now - 2.0 * f.last.x + f.last.y) / max(max(now, max(f.last.x, f.last.y)), 1e-9), UP_ONSET * max(f.sd, 0.01));
+        sd = sqrt(mix(f.sd * f.sd, bend * bend / 6.0, still / min(f.n - 1.0, 8.0)));
+    }
+    ae_in[q].z = pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0)));
+    ae_in[q].w = pack2x16float(vec2<f32>(sd * still, min(max(f.n + still, 1.0), 9.0)));
     let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
     xhist_out[q] = vec4<f32>(vel, depth, reactive);
 }
@@ -914,8 +931,13 @@ const UP_REJECT: f32 = 0.25;
 const UP_REACTIVE: f32 = 4.0;
 // The share of a pixel a medium that changes with time takes (`medium_share`) from which the pixel is as reactive.
 const UP_MEDIUM: f32 = 0.25;
-// How far outside the range of the history's pixels around it a point sample may lie, in that range's widths (`judge`).
-const UP_POINT: f32 = 0.5;
+// How far outside the range of the history's pixels around it a point sample may lie (`judge`): this many deviations
+// of the traced sample's own flicker (`Flicker`). Of 1, 2, 3 (measured while the deviation was still an amount of
+// light): Bistro held still changes 0.49, 0.42, 0.38 from frame to frame, and Tokyo's skyline at dusk is furthest from
+// its held frame at 3.
+const UP_FLICKER: f32 = 2.0;
+// The most a frame's change counts for in the flicker, in deviations of what it was (or of 1 % of the level).
+const UP_ONSET: f32 = 4.0;
 // A surface counts as gone from in front when what is nearest now lies behind what was nearest by this share of its
 // depth (`judge`), and the history as stale there when it lies outside this frame's range by UP_STALE of its luminance.
 const UP_GONE: f32 = 0.05;
@@ -935,6 +957,38 @@ const UP_STALE: f32 = 0.05;
 // nearest among the nine of the previous frame there (both dilated, so a still edge under the jitter mostly agrees
 // with itself), confirmed by colour (the history there lies outside this frame's range), so the still edges that the
 // jitter does catch keep their history.
+
+// A sample is a point and the history's pixels are means over a pixel: of a feature finer than a pixel (a row of
+// windows, a grating) a sample lies outside their range in a still picture too, a little further on some jitters than
+// on others, and correcting for that flickers. How far is not the history's to say. (It was: half the range of the
+// history's nine pixels. A pixel standing off the truth then widened the range of the samples next to it, which were
+// allowed to stand off by half of that, and so outward: under a sky that dimmed every frame a silhouette kept the sky
+// of seconds ago in a glow ten pixels wide, with nothing but the blend to bound it.) It is the samples': how much the
+// traced sample at this place changes from one frame to the next under the jitter, which is what a temporal
+// upscaler's flicker history is for (UE's TSR keeps the input's luminance over time for the same decision).
+
+// `Flicker`, per traced sample, in the words `dtemporal` leaves free in `ae_in` (f16; `compose` keeps it): the
+// composed sample's luminance of the last frame and of the one before, the deviation of its frame-to-frame change as
+// a share of its level, and of how many frames that is (0: none; the deviation is then 1: unknown, as much as the
+// level), all read where the sample's surface was a frame ago (in motion the place on screen would read the motion
+// as flicker).
+// - The deviation is of the second difference (this frame's, less twice the last, plus the one before: of
+//   independent samples its mean square is six variances), which a steady rise or fall does not have: a sky dimming
+//   4 % a frame is no flicker. A running mean over the first eight frames, an exponential one after.
+// - A share of the level (the largest of the three frames), not an amount of light: what a lit floor's samples
+//   scattered by says nothing of the same floor with the lamp off.
+// - Tolerance is earned slowly: a frame's second difference counts for UP_ONSET deviations at most, so a light
+//   switched (two large ones) raises it by a fifth and a pixel that really flickers reaches its level in a second.
+// - Flicker is the jitter's with all else still: a pixel in motion changes by its motion (a wet street's reflections
+//   every frame), so the deviation is added to by how still the pixel is and kept by the same, none from UP_SPEED on
+//   (TSR fades its flicker rule out with velocity too): a pixel that moved has none and earns it again at rest,
+//   while its history, cut to UP_MOVING samples by the motion, grows back.
+struct Flicker { last: vec2<f32>, sd: f32, n: f32 };
+fn flicker_at(q: u32) -> Flicker {
+    let v = ae_out[q];
+    let b = unpack2x16float(v.w);
+    return Flicker(unpack2x16float(v.z), b.x, b.y);
+}
 
 // `judge`: per traced sample, into `ae_out` (f16): that distance (linear RGB), the sample's luminance (< 0: no
 // history there), the motion its output pixels reproject by: the surface nearest the camera among the nine samples
@@ -990,10 +1044,10 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
             hn += 1.0;
         }
         if (hn > 0.0) {
-            // The history's pixels are means over a pixel and the sample is a point: of a feature finer than a pixel
-            // it can lie outside their range by as much as they differ among themselves (UP_POINT of it allowed).
-            let slack = UP_POINT * (hi - lo);
+            // (The sample is a point and the history's pixels are means: UP_FLICKER deviations of its own flicker
+            // outside their range are the jitter's.)
             let c = fb[q].rgb;
+            let slack = UP_FLICKER * unpack2x16float(ae_in[q].w).x * c;
             d = clamp(c - clamp(c, lo - slack, hi + slack), vec3<f32>(-6.0e4), vec3<f32>(6.0e4));
             l = min(lum(c), 6.0e4);
             // Gone from in front: the previous frame's nearest depth around where this point was (its traced grid's
