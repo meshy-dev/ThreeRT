@@ -130,6 +130,21 @@ highest tier any of its changes needs.
 PRs are merged with `gh pr merge --squash` (the repository allows nothing else), which keeps one commit per PR on
 main. Branches are kept.
 
+## CI
+
+`.github/workflows/ci.yml` runs on every push to main and every PR, as parallel jobs:
+- `ts`: `npm run typecheck`, `npm test`;
+- `renderer`: the renderer's release build;
+- `voxel`: the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
+- `physics`: the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
+- `wasm`: the engine library's wasm32 build;
+- `web`: the browser module's build (`renderer/web`), and the physics hello world on that module in Node (`tools/web-engine.ts`: no browser, no GPU).
+
+A PR runs a job only when it changes that job's inputs (the paths in the workflow's `changes` job; a change to the workflows runs them all); a push to main runs them all.
+`threert` sums them up and is the check to read before merging: it fails when a job failed or was cancelled, and passes when each one passed or was skipped by its paths.
+
+The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per the merge gate above.
+
 ## The npm packages
 
 `@threert/scene`, `@threert/gameplay` and `@threert/voxel` are published from `packages/` with one version, the root
