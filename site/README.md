@@ -94,6 +94,12 @@ puts up a Download button with nothing behind it.
 }
 ```
 
+`releases/appcast.xml`, written by the same release for a signed build, is the update feed installed copies of ThreeRT
+for macOS read (Sparkle, from 0.3.0; `https://threert.dev/releases/appcast.xml` is in the app's Info.plist): one item,
+the release, its image's URL and length and the EdDSA signature the apps check. It is a static asset next to
+`latest.json`; the image it names is the one `deploy.ts` puts in R2 first. `build.ts` stops on a feed that offers
+another version, file or size than `latest.json`, or a non-https URL.
+
 `play/index.json`, next to a thumbnail and a package directory for each game:
 
 ```jsonc
