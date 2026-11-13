@@ -94,7 +94,7 @@ fn solid(x: vec3<f32>) -> bool {
     if (any(c < vec3<f32>(0.0)) || c.x >= f32(PPS.grid_n.x) || c.y >= f32(PPS.grid_n.y) || c.z >= f32(PPS.grid_n.z)) { return false; }
     let q = vec3<u32>(c);
     let row = (q.y * PPS.grid_n.z + q.z) * PPS.grid_n.w + q.x / 32u;
-    return (grid[row] >> (q.x % 32u) & 1u) != 0u;
+    return ((grid[row] >> (q.x % 32u)) & 1u) != 0u;
 }
 
 // One step of a particle that moves from `s.pos` by `s.vel` x dt, against the voxel grid and the plane (y = height): on
@@ -191,7 +191,7 @@ fn gpu_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
         var i: EIn;
         i.index = k;
         i.time = PPS.cam.w;
-        let h = pcg(sys.b.x * 2654435761u ^ pcg(k ^ pcg(sys.e.z)));
+        let h = pcg((sys.b.x * 2654435761u) ^ pcg(k ^ pcg(sys.e.z)));
         i.rand = vec4<f32>(unit(pcg(h)), unit(pcg(h + 1u)), unit(pcg(h + 2u)), unit(pcg(h + 3u)));
         i.pivot = sys.c.xyz;
         i.spawned = rel < sys.e.y;

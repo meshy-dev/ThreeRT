@@ -655,7 +655,7 @@ fn std_pcg(v: u32) -> u32 {
     return (w >> 22u) ^ w;
 }
 fn std_hashi(x: i32, y: i32, z: i32) -> f32 {
-    return f32(std_pcg(bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u) >> 8u) * (1.0 / 16777216.0);
+    return f32(std_pcg((bitcast<u32>(x) * 73856093u) ^ (bitcast<u32>(y) * 19349663u) ^ (bitcast<u32>(z) * 83492791u)) >> 8u) * (1.0 / 16777216.0);
 }
 fn std_vnoise(p: vec2<f32>) -> f32 {
     let i = floor(p);
@@ -1013,7 +1013,7 @@ export class SurfaceMaterial extends LibraryMaterial<SurfaceParameters> {
 // text, and the Metal compiler failed on the translucent pass with SURFACE_HELPERS' window code in it.)
 const WET_HELPERS = `
 fn std_wl_hash(x: i32, y: i32, z: i32) -> f32 {
-    let v = bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u;
+    let v = (bitcast<u32>(x) * 73856093u) ^ (bitcast<u32>(y) * 19349663u) ^ (bitcast<u32>(z) * 83492791u);
     let s = v * 747796405u + 2891336453u;
     let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
     return f32(((w >> 22u) ^ w) >> 8u) * (1.0 / 16777216.0);

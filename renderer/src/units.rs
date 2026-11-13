@@ -1025,7 +1025,7 @@ pub(crate) mod cpu {
         }
 
         /// pathtrace.wgsl `trace`, the still scene's tree (no cutouts: the scenes here have none), then the units as
-        /// `kernel_source` splices them in.
+        /// the kernel has them under `@if(units)`.
         pub(crate) fn trace(&self, o: Vec3A, d: Vec3A, tmax_in: f32, mode: u32) -> Walk<Hit> {
             let mut hit = Hit { t: tmax_in, tri: 0xffff_ffff, inst: NO_INST };
             let inv_d = Self::inv(d);

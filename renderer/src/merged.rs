@@ -3,7 +3,7 @@
 //! live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.) There
 //! is one source: pathtrace.wgsl, and the bindings gpu.rs makes for it, are what the native renderer runs, unchanged.
 //! This module writes the browser's from them, as text (as
-//! `gpu::kernel_source` patches the kernel for a scene's features), and gives the Rust side the numbers that go with
+//! `gpu::kernel_wgsl` makes the kernel's variants), and gives the Rust side the numbers that go with
 //! it. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the renderer
 //! check it too (docs/RUNTIME.md "The engine in a browser").
 //!
@@ -301,7 +301,7 @@ fn merged_struct(name: &str, members: &[&Member], caps: &[u32]) -> String {
     format!("struct {name} {{\n{}\n}};\n", fields.join("\n"))
 }
 
-/// The kernel (pathtrace.wgsl as a scene's variant: `gpu::kernel_source`, its functions spliced in) in the merged
+/// The kernel (its source, `gpu::kernel_template`, its functions spliced in; before its variant is made) in the merged
 /// layout for arrays of `caps`' lengths: group 0 binds tri_verts, attrs, nodes, `MT`, env_cdf, accum and prev_verts,
 /// group 1 `ML`.
 pub fn kernel(src: &str, caps: &Caps) -> String {
@@ -461,6 +461,14 @@ mod tests {
 
     const KERNEL: &str = include_str!("../shaders/pathtrace.wgsl");
 
+    /// A scene's kernel (software traversal, no switch) as compiled: the merged layout put into its text first when
+    /// given, as `gpu::Gpu::kernel_module` does, then its variant.
+    fn variant(features: u32, merged: Option<&Caps>) -> String {
+        let t = crate::gpu::kernel_template();
+        let t = merged.map_or(t.clone(), |c| kernel(&t, c));
+        crate::gpu::kernel_wgsl(&t, &crate::gpu::kernel_flags(false, &Default::default(), features))
+    }
+
     fn caps() -> Caps {
         // A cache of one entry, a view of 64 x 36: lengths that are not round.
         let n = 64 * 36;
@@ -494,13 +502,13 @@ mod tests {
     /// structs' arrays where `offsets` puts them. The source as written has 19, so the count is the generator's.
     #[test]
     fn the_merged_kernel_fits_eight_storage_buffers() {
-        let (m, info) = parse(KERNEL);
+        let (m, info) = parse(&variant(0, None));
         let (used, declared) = storage_buffers(&m, &info);
         assert_eq!(declared, 19, "the kernel as written");
         assert_eq!(used.iter().map(|u| u.1).max(), Some(19), "{used:?}");
         let caps = caps();
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
-            let src = kernel(&crate::gpu::kernel_source(KERNEL, features), &caps);
+            let src = variant(features, Some(&caps));
             let (m, info) = parse(&src);
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
@@ -539,10 +547,10 @@ mod tests {
             out.sort_by_key(|g| g.1);
             out
         };
-        let (written, _) = parse(KERNEL);
+        let (written, _) = parse(&variant(0, None));
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
-            let base = crate::gpu::kernel_source(KERNEL, features);
-            let src = uniform_tables(&base);
+            let base = variant(features, None);
+            let src = crate::gpu::kernel_wgsl(&uniform_tables(&crate::gpu::kernel_template()), &crate::gpu::kernel_flags(false, &Default::default(), features));
             let (m, info) = parse(&src);
             assert_eq!(storage_buffers(&m, &info).1, 15, "features {features:#x}");
             let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P" && g.0 != "energy_lut").collect();
@@ -598,12 +606,14 @@ mod tests {
             words("loop {") + words("for (") + words("while (")
         };
         // The kernel as written (its count a buffer of its own) and merged (its count in `MergedLive`).
-        let merged = kernel(&crate::gpu::kernel_source(KERNEL, crate::gpu::F_SOURCE), &caps());
-        for (src, trips) in [(format!("{KERNEL}{}", guard_decl()), "loop_guard_trips"), (merged, "ML.loop_guard_trips")] {
+        let template = crate::gpu::kernel_template();
+        let merged = kernel(&template, &caps());
+        for (src, trips) in [(format!("{template}{}", guard_decl()), "loop_guard_trips"), (merged, "ML.loop_guard_trips")] {
             let g = guard(&src, 1 << 16, trips);
             assert!(loops(&src) > 40, "the kernel's loops");
             assert_eq!(g.matches("if (loop_guard()) { break; }").count(), loops(&src));
-            let (m, info) = parse(&g);
+            // (The variant every loop of which is there: software traversal with the scene's features.)
+            let (m, info) = parse(&crate::gpu::kernel_wgsl(&g, &crate::gpu::kernel_flags(false, &Default::default(), crate::gpu::F_SOURCE)));
             let (used, declared) = storage_buffers(&m, &info);
             // (As written: one buffer more, where the device has room. Merged: still eight.)
             assert!(declared == 20 || declared as u32 == STORAGE_BUFFERS, "{declared}: {used:?}");

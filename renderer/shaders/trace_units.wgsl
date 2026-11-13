@@ -1,6 +1,6 @@
 // Units: software traversal's second level (gpu.rs F_UNITS, renderer/src/units.rs; docs/RUNTIME.md "Software traversal
-// with units"). Spliced into pathtrace.wgsl's software traversal by `kernel_source` for scenes that have units; a scene
-// without them, and hardware traversal, never see this file.
+// with units"). Part of the kernel under `@if(units)` (pathtrace.wgsl's head): a scene with units under software
+// traversal has it; a scene without them, and hardware traversal, do not.
 //
 // A unit is a model instance (`instances`, as hardware traversal's): its mesh's triangles in model space in
 // `tri_verts`, from the record's first triangle; its mesh's tree in `nodes`, from the root in the record's `n0.w`
@@ -14,7 +14,7 @@
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it.
 //
 // The stack is the module's, one for an invocation of the kernel, and in a kernel with units the still walk uses it
-// too (gpu.rs `kernel_source` takes its own away). An array a function declares is set to zero each time the
+// too (`@if(!units)` takes its own away). An array a function declares is set to zero each time the
 // function is entered, whatever the ray then meets, and a ray's walk is entered many times a pixel: the unit walk's
 // own 64 words cost hello 0.3 ms a frame and the city 0.75, and the still walk's 48 cost every scene as much again,
 // flattened ones too. This one is set to zero once. A walk reads only what it has pushed: what an earlier ray left
@@ -33,9 +33,9 @@
 //
 // The root's box is tested before the walk: a ray that meets no unit reads one node, and a scene of one unit is a
 // root that is a leaf, whose record only the rays that meet its box read.
-var<private> stack: array<u32, 64>;
+@if(units) var<private> stack: array<u32, 64>;
 
-fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
+@if(units) fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
     if (bitcast<u32>(P.motion.w) == 0u) { return hit; }
     let top = bitcast<u32>(P.motion.z);

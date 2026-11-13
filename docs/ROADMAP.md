@@ -2235,6 +2235,31 @@ Checks: render-identity against the build before, native: 3 of 190 outputs diffe
 the passes after the trace 6.00-6.08 -> 6.19-6.24; `track` 0.27 less `compose`'s 0.08; the surfaces' copy in `refl`
 +0.02, a pass of its own read the samples again: 0.18).
 
+**The kernel's variants by WESL, and the Rust pinned (2026-11-14, after it).** The kernel was made for a device and
+a scene by text patches: the hardware traversal cut in at markers (`kernel_base`), a device's switches and a scene's
+source features found and replaced at anchors that were whole lines of code (`kernel_switches`, `kernel_source`), an
+edit of such a line breaking a patch at run time. Now the kernel is one WESL module (pathtrace.wgsl, then
+trace_units.wgsl, trace_hw.wgsl, translucent.wgsl) and every variant is in it under WESL's conditional translation,
+`@if(flag)` on a declaration or a statement (WESL: the community's WGSL extension, Bevy's and Vello's; wesl-rs 0.6,
+natively and in a browser). The flags: `hwrt`, the switches (`strict`, `cutout_lite`, `cutout_lite2`, `last_direct`,
+`light_pick`), the source features (`vcolor`, `grid`, `tint`, `unlit`, `units`, `background`); gpu.rs `kernel_flags`,
+`kernel_wgsl`, docs/RUNTIME.md "The kernel's source". Checks: for all 2,304 combinations of the flags the Metal source
+naga writes is the patched kernel's, two rewrites allowed for (the light pick's blocks take their condition from a
+local; vertex and instance colours multiply in turn: the same products in the same order); render-identity against
+main, native, merged, with every switch on and with the uniform tables (below). Left as text, before the variant: a
+scene's functions in their slots, the merged layout, the uniform tables, the loop guard.
+
+The repository's Rust is pinned (`rust-toolchain.toml`, 1.100.0; CI's jobs run for it): wesl-rs 0.6 asks for 1.97.1,
+and it was whatever stable a machine had (1.96 here). On 1.100 the determinism checks give their recorded hashes
+(voxel, physics sequential and on 2 and 4 threads, the renderer's wasm32 graph), and main built with either compiler
+renders the same (render-identity, native and merged: nothing changed). One deprecation: `fetch_update` is
+`try_update`.
+
+On the way, WGSL a browser refuses: WESL parses by the specification's grammar, as Chrome's Tint does, and the
+surface materials' hash (`a * b ^ c * d`: a bitwise operator's operands must be unary) did not compile through it.
+naga had taken it, so those materials (and the particle passes, the same three times) never compiled in a browser.
+Fixed with parentheses in the order naga read them; a unit test holds the other shader files to the grammar.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

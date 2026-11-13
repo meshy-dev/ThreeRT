@@ -54,19 +54,20 @@ jobs:
           }
           # The renderer's release build: the crate, its path dependencies (voxel-core, physics-core, third_party) and
           # the presets it embeds (src/files.rs); not the browser module's crate (renderer/web), which it does not build.
-          job renderer '^(renderer/|presets/)' '^renderer/web/'
+          # Every Rust job runs for the toolchain (rust-toolchain.toml: the Rust they all build with).
+          job renderer '^(renderer/|presets/|rust-toolchain\.toml$)' '^renderer/web/'
           # voxel-core and its determinism check.
-          job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$)'
+          job voxel '^(renderer/voxel-core/|tools/voxel-determinism\.ts$|rust-toolchain\.toml$)'
           # physics-core, the patched crates it builds with, its determinism check, and what that check builds of the
           # renderer for wasm32 (examples/physics_bits.rs, in the renderer's crate graph: its manifest and lock file;
           # the voxel bodies' script it runs there: voxel-core, the renderer's voxel and physics adapters, and the api
           # and world they go through).
-          job physics '^(renderer/(physics-core/|voxel-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$|src/(voxel|physics|api|world)\.rs$)|tools/physics-determinism\.ts$)'
+          job physics '^(renderer/(physics-core/|voxel-core/|third_party/|Cargo\.toml$|Cargo\.lock$|examples/physics_bits\.rs$|src/(voxel|physics|api|world)\.rs$)|tools/physics-determinism\.ts$|rust-toolchain\.toml$)'
           # The engine's library for wasm32: the same as the renderer's.
-          job wasm '^(renderer/|presets/)' '^renderer/web/'
+          job wasm '^(renderer/|presets/|rust-toolchain\.toml$)' '^renderer/web/'
           # The browser module (renderer/web, on the engine's library) and tools/web-engine.ts: the module in Node with
           # the physics hello world's bundle (games/, packages/, the bundler's and the build's tools, the npm manifests).
-          job web '^(renderer/|presets/|games/|packages/|tools/(web-engine\.ts|bundle-game\.ts|lib/)|package(-lock)?\.json$)'
+          job web '^(renderer/|presets/|games/|packages/|tools/(web-engine\.ts|bundle-game\.ts|lib/)|package(-lock)?\.json$|rust-toolchain\.toml$)'
 
   ts:
     name: "ts: typecheck, tests"

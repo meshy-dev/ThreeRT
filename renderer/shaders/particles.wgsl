@@ -127,7 +127,7 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     i.fwd = PPS.fwd.xyz;
     i.rain = PPS.env.x;
     i.wetness = PPS.env.y;
-    let h = pcg(s.b.x * 2654435761u ^ pcg(k));
+    let h = pcg((s.b.x * 2654435761u) ^ pcg(k));
     i.rand = vec4<f32>(unit(pcg(h)), unit(pcg(h + 1u)), unit(pcg(h + 2u)), unit(pcg(h + 3u)));
     i.pivot = s.c.xyz;
     i.custom = s.d;
