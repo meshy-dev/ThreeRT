@@ -20,19 +20,24 @@ bun site/tools/deploy.ts    # build out/site (strict, see below), then wrangler 
 ```
 
 It is a Cloudflare Worker, `threert-site`: static assets from `out/site` on the custom domains threert.dev and
-www.threert.dev; `site/worker.ts` redirects www to the apex and the old Showcase page to threert.app, serves the clients' disk images
+www.threert.dev; `site/worker.ts` redirects www to the apex and the old Showcase page to threert.app, serves the clients' files
 from R2 and hands everything else to the assets.
-Workers static assets take **25 MiB a file**, and the client's disk image is about 32 MiB (it carries the `threert`
-command line). So the image is not a static asset: it lives in the R2 bucket `threert-releases` under its file name,
-and `worker.ts` serves it at the URL the Download page links, `/releases/<file>` (ranges, `ETag`, `HEAD`). R2 rather
+Workers static assets take **25 MiB a file**, and the macOS disk image is about 34 MiB (it carries the `threert`
+command line). So the clients' files are not static assets: the disk image (`.dmg`), the Linux tarball (`.tar.gz`)
+and the Android APK (`.apk`) live in the R2 bucket `threert-releases` under their file names, and `worker.ts` serves
+them at the URL the Download page links, `/releases/<file>` (ranges, `ETag`, `HEAD`), each with its type
+(`application/x-apple-diskimage`, `application/gzip`, `application/vnd.android.package-archive`) and
+`content-disposition: attachment`, so a phone's browser saves the APK instead of trying to show it. R2 rather
 than a GitHub release because the client is closed source and has no public repository to carry one. Once:
 
 ```bash
 bunx wrangler@4 r2 bucket create threert-releases
 ```
 
-`deploy.ts` uploads the image `releases/latest.json` names, then deploys. `build.ts` leaves the image out of
-`out/site` (`--with-image` copies it, for a plain file host). Locally, `serve.ts` serves it from `site/releases/`.
+`deploy.ts` uploads every file `releases/latest.json` names, then deploys. A file the bucket already has is not sent
+again: the script asks the live site (`HEAD /releases/<file>`) and skips one with the same size (and the same MD5,
+where the object's ETag is one). `build.ts` leaves the clients' files out of `out/site` (`--with-image` copies them,
+for a plain file host). Locally, `serve.ts` serves them from `site/releases/`.
 To check the Worker itself without an account: `bunx wrangler@4 r2 object put threert-releases/<file> --file
 site/releases/<file> --local --config site/wrangler.jsonc`, then `bunx wrangler@4 dev --config site/wrangler.jsonc`.
 
@@ -52,7 +57,7 @@ The markup is repeated in each page; change it in all of them (the privacy page 
 | Page | What is on it |
 |---|---|
 | `index.html` | The landing page (below). |
-| `download/` | ThreeRT for macOS (the build `releases/latest.json` names) and ThreeRT for iPhone (a TestFlight or App Store link once `ios.url` is set), then how a client loads a game: `threert dev`, scan, traced and live. |
+| `download/` | The four clients, a card each (below), then how a client loads a game: `threert dev`, scan, traced and live. |
 | `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format and publishing to threert.app, links to the reference documents in `docs/` on GitHub. |
 | `privacy/` | What the apps and the site do with data, including the requests the pages make to other services (below). |
 | `showcase/` | Gone as a page: what it listed is published on threert.app. The Worker answers `/showcase`, `/showcase/` and `/showcase/index.html` with a 301 to `https://threert.app/` (old links: the npm packages' READMEs, the pages of packages built before, earlier apps); `showcase/index.html` is what is left for a host without the Worker, a page that sends the reader on. `showcase/community.json` stays where it is, served as before: ThreeRT for macOS before 0.4.0 reads it (and `play/index.json`) for its Showcase. Nothing is added to it any more: people publish with `threert publish`. |
@@ -60,8 +65,10 @@ The markup is repeated in each page; change it in all of them (the privacy page 
 ### The landing page
 
 The buttons, in the hero and at the end, in this order of weight: **Explore apps** (filled, to threert.app), **Star on
-GitHub** (outlined, with the count), and under them a line with **Download** as a link (named for the visitor's
-platform by `js/site.js`). One filled button a row; three equal buttons were the thing to avoid.
+GitHub** (outlined, with the count), and under them a line with **Download** as a link, named for the visitor's
+platform by `js/site.js` (`a[data-dl]`), then the other clients in a word each (`[data-dl-others]`: "Download for
+macOS · iPhone · Steam Deck · Android"). One filled button a row; three equal buttons were the thing to avoid, and
+the clients do not get buttons here.
 
 1. **Hero:** a reel behind the headline: a grid of short clips of this repository's demos (Bistro with a crowd,
    Tokyo at dusk, Kabukichō, the voxel level, the showcase cases) and of OpenStrike, all ThreeRT live, ray traced,
@@ -90,6 +97,26 @@ platform by `js/site.js`). One filled button a row; three equal buttons were the
 11. **One command puts yours online:** write three.js-style code, `threert publish`, the app's address. What it says
     `threert publish` does is what https://threert.app/publish says; check there before changing it.
 12. **Just light.**
+
+### The Download page
+
+Four cards, the same anatomy in each: a glyph, the name, one requirement line, three short lines, then one button
+with the version and the size beside it, and under it at most a fine line and the file's SHA-256 behind a
+disclosure. **Keep it that terse**: a card that grows a paragraph stops matching the others.
+
+| Card | From `latest.json` | Under the button |
+|---|---|---|
+| ThreeRT for macOS | `macos`: the disk image | SHA-256 |
+| ThreeRT for iPhone | `ios.url`: TestFlight or the App Store | the link as a QR code in the card's corner |
+| ThreeRT for Steam Deck | `linux`: the tarball (x86_64; Linux is in the requirement line) | the two commands that install it, in a block with a Copy button (`tar xzf ~/Downloads/<file>`, `ThreeRT/install.sh`: what the tarball's README says, with the place a browser saves to), one line on what they do, SHA-256 |
+| ThreeRT for Android | `android`: the APK (arm64) | one line on installing it, SHA-256; the APK's address as a QR code in the corner |
+
+Two cards a row from 1021 px up, one column below. The two cards of a row share their rows (`subgrid`), so the
+buttons are level whatever the lines above them wrap to; the pairs stay together (macOS with iPhone, Steam Deck with
+Android). The visitor's own client comes first and is the lit card (`platform()` in `js/site.js`: an Android browser
+says Linux too, so it is asked first; `Linux x86_64` is what a Steam Deck's browsers say in Desktop Mode and in Game
+Mode); the QR codes show from 1241 px up, and never for the device the visitor is on. A client `latest.json` has no
+entry for gets a disabled button and "No … build is published on this host yet."
 
 ### threert.app's apps on the landing page
 
@@ -126,27 +153,41 @@ in its Showcase and opens its packages. Without `releases/` the Download page sa
 `serve.ts` and `build.ts` warn; `build.ts --require-release` (what `deploy.ts` runs) stops instead, so a deploy never
 puts up a Download button with nothing behind it.
 
-`releases/latest.json`, next to the file it names:
+`releases/latest.json`, next to the files it names. An entry a client; each has its own `version` and `date`,
+because clients are released on different days (an entry without them has the top-level ones, which are the macOS
+release's). A client without an entry is not published on this host:
 
 ```jsonc
 {
-  "version": "0.1.0", "date": "2026-11-11",
-  "macos": { "file": "ThreeRT-0.1.0-macos-arm64.dmg", "size": 33981234, "sha256": "…", "minOS": "14.0", "arch": "arm64",
+  "version": "0.4.0", "date": "2026-11-13",
+  "macos": { "version": "0.4.0", "date": "2026-11-13",
+             "file": "ThreeRT-0.4.0-macos-arm64.dmg", "size": 35754483, "sha256": "…", "minOS": "14.0", "arch": "arm64",
              "url": null,              // null: `releases/<file>` on this host (R2 behind the Worker; site/releases/ locally);
-                                       // or the https URL of the image when it is hosted elsewhere (`release.ts --macos-url`)
+                                       // or the https URL of the file when it is hosted elsewhere. The same in every entry
              "signed": "developer-id", // or "adhoc" (a local preview)
              "notarized": true },      // build.ts --require-release (the deploy) refuses anything but a notarized Developer ID build
-  "ios": { "url": null,                // the TestFlight / App Store link; null: "TestFlight beta not open yet"
+  "ios": { "version": "0.4.0", "date": "2026-11-13",
+           "url": null,                // the TestFlight / App Store link; null: "TestFlight beta not open yet"
            "channel": "testflight",    // or "appstore"
-           "minOS": "17.0" }
+           "minOS": "17.0" },
+  "linux": { "version": "0.4.0", "date": "2026-11-13",
+             "file": "ThreeRT-0.4.0-linux-x86_64.tar.gz", "url": null, "size": 18871783, "sha256": "…", "arch": "x86_64",
+             "needs": "SteamOS 3 or a Linux with Vulkan ray queries" },
+  "android": { "version": "0.4.0", "date": "2026-11-13",
+               "file": "ThreeRT-0.4.0-android-arm64.apk", "url": null, "size": 10012854, "sha256": "…", "arch": "arm64",
+               "minOS": "10",          // the Android release
+               "signed": true }        // with the release key; the deploy refuses anything else
 }
 ```
+
+`build.ts` checks that every file named is in `site/releases/` at the size named (`--require-release`: or stops).
+The release script keeps the entries and files of the clients a release does not make.
 
 `releases/appcast.xml`, written by the same release for a signed build, is the update feed installed copies of ThreeRT
 for macOS read (Sparkle, from 0.3.0; `https://threert.dev/releases/appcast.xml` is in the app's Info.plist): one item,
 the release, its image's URL and length and the EdDSA signature the apps check. It is a static asset next to
 `latest.json`; the image it names is the one `deploy.ts` puts in R2 first. `build.ts` stops on a feed that offers
-another version, file or size than `latest.json`, or a non-https URL.
+another version, file or size than `latest.json`'s macOS entry, or a non-https URL.
 
 `play/index.json`, next to a thumbnail and a package directory for each game:
 
@@ -175,14 +216,14 @@ where it is served:
 | `showcase/` | The page that sends old links on to threert.app, and `community.json` for clients before 0.4.0 |
 | `css/threert.css` | The visual system: ink, bone and tungsten tokens, type, the nav and footer (with the Star button and the arrow of a link to threert.app), the comparison and player components, the cards, steps and QR tiles of the inner pages |
 | `js/threert.js` | The wipe comparison (and the clip that can play over its two stills), the reel behind the landing page's headline, the synced camera-move player, the code highlighter. A divider follows a finger only once it moves sideways, so scrolling past one does not move it |
-| `js/site.js` | What the pages share: the visitor's platform, the release on this host, the Star buttons' count, QR codes |
+| `js/site.js` | What the pages share: the visitor's platform (macOS, iPhone, Android, Linux x86_64), the clients released on this host, the Star buttons' count, QR codes |
 | `js/platform.js` | threert.app on the landing page: which apps are shown, and a tile's markup (shared with `tools/platform.ts`) |
 | `js/devices.js` | The 3D device rows (three.js), with a still fallback when WebGL is off |
 | `brand/card.jpg` | The share card (Open Graph, 1200 x 630): the hero's headline over the reel's still, a screenshot of the page with the nav's links, the lede and the buttons hidden |
 | `brand/` | The mark ("Three bounces": the three.js triangle, tilted as three.js draws it, and the closed light path inside it, which is three.js's own inner triangle) and its variants. `js/mark.js` draws it live in the lockup and on the landing page, and turns the path on hover. `avatar.svg` is the profile picture (X, Discord): the mark on black for a round crop, its triangle concentric with the circle, heavier strokes (4.2 against 3.2) so it holds at 32 px |
 | `media/` | The renders, WebP, and the clips (the reel, the Bistro comparison), H.264. Generated; never retouched |
 | `serve.ts`, `tools/` | Local server, static build, deploy, media and device-still generators; `tools/platform.ts` bakes threert.app's apps and OpenStrikeRT's pictures into the landing page; `tools/vendor.ts` names the npm files the pages import (three.js, qrcode-generator) |
-| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, the old Showcase page to threert.app, disk images from R2, byte ranges for the clips, static assets) and its config (threert.dev) |
+| `worker.ts`, `wrangler.jsonc` | The Cloudflare Worker (www redirect, the old Showcase page to threert.app, the clients' files from R2 as downloads, byte ranges for the clips, static assets) and its config (threert.dev) |
 | `releases/`, `play/` | Generated, not committed (above) |
 
 ## Media

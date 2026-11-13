@@ -8,21 +8,37 @@ import { mark } from "./mark.js";
 export const ROOT = new URL("..", import.meta.url);
 export const GITHUB = "https://github.com/meshy-dev/ThreeRT";
 
-/** "macos" | "ios" | "other". An iPad asks for the desktop site as a Mac with a touch screen. */
-export function platform() {
-  const ua = navigator.userAgent;
-  if (/iPhone|iPod|iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "ios";
+/** The clients there are, as a visitor knows the device each is for. */
+export const CLIENTS = { macos: "macOS", ios: "iPhone", linux: "Steam Deck", android: "Android" };
+
+/**
+ * "macos" | "ios" | "android" | "linux" | "other": the client a visitor's device takes. An iPad asks for the desktop
+ * site as a Mac with a touch screen. An Android browser says Linux too, so it is asked first. "linux" is x86_64
+ * alone, what the tarball is built for: a Steam Deck's browsers say "X11; Linux x86_64", in Desktop Mode and in Game
+ * Mode alike.
+ */
+export function platform(ua = navigator.userAgent, touchPoints = navigator.maxTouchPoints) {
+  if (/iPhone|iPod|iPad/.test(ua) || (/Macintosh/.test(ua) && touchPoints > 1)) return "ios";
+  if (/Android/.test(ua)) return "android";
   if (/Macintosh|Mac OS X/.test(ua)) return "macos";
+  if (/Linux x86_64/.test(ua)) return "linux";
   return "other";
 }
 
-/** The download links (`a[data-dl]`, leading to the download page) name the visitor's platform. */
+/**
+ * The download links (`a[data-dl]`, leading to the download page) name the visitor's platform, and the list beside
+ * one (`[data-dl-others]`) the other clients.
+ */
 export function downloadButtons(root = document) {
-  const text = { macos: "Download for macOS", ios: "Get ThreeRT for iPhone", other: "Download" }[platform()];
+  const p = platform();
+  const text = { macos: "Download for macOS", ios: "Get ThreeRT for iPhone", linux: "Download for Steam Deck", android: "Download for Android", other: "Download" }[p];
   for (const a of root.querySelectorAll("a[data-dl]")) {
     const label = a.querySelector("span") ?? a;
     label.textContent = text;
   }
+  // (A name stays whole: the line breaks at a dot.)
+  const others = Object.entries(CLIENTS).filter(([k]) => k !== p).map(([, name]) => name.replaceAll(" ", "\u00a0")).join(" · ");
+  for (const el of root.querySelectorAll("[data-dl-others]")) el.textContent = others;
 }
 
 async function json(rel) {
@@ -34,12 +50,19 @@ async function json(rel) {
   }
 }
 
-/** The client release on this host: {version, date, macos: {file, url, size, sha256, minOS, arch, signed, notarized}, ios: {url, channel, minOS}}, or null. */
+/**
+ * The clients released on this host, or null: {version, date, macos, ios, linux, android}, an entry a client, each
+ * with its own `version` (clients are released on different days; an entry without one has the top-level version):
+ * macos {file, url, size, sha256, minOS, arch, signed, notarized}, ios {url, channel, minOS},
+ * linux {file, url, size, sha256, arch, needs}, android {file, url, size, sha256, arch, minOS, signed}.
+ * A client without an entry is not published here.
+ */
 export const release = () => json("releases/latest.json");
 
 export const fileUrl = (file) => new URL(`releases/${file}`, ROOT).href;
-/** Where a release's macOS disk image is: `macos.url` when it is hosted elsewhere (it is over this host's size limit), else next to latest.json. */
-export const macUrl = (m) => (m.url ? m.url : fileUrl(m.file));
+/** Where a client's file is: its `url` when it is hosted elsewhere, else next to latest.json. */
+export const clientUrl = (entry) => (entry.url ? entry.url : fileUrl(entry.file));
+export const macUrl = clientUrl;
 export const megabytes = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
 
 let qrcode;
