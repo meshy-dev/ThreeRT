@@ -12,7 +12,8 @@ import { Fireball, Group, PointLight, type Object3D } from "@threert/scene";
 import { MAX_PUSH, voxelExplode, type VoxelEdit } from "./native.ts";
 
 /** The most fireballs a pool may have: the kernel draws at most 32 volumes (`MAX_MEDIA`, renderer/src/scene.rs; a
- *  scene with more is refused). */
+ *  scene with more is refused). A hidden fireball keeps its place among them (so that showing it again is in place),
+ *  so the cap counts every fireball of the pool, burning or not. */
 export const MAX_FIREBALLS = 32;
 export const MAX_MEDIA = 32;
 /** The most fire lights: the kernel evaluates up to 8 shadowed local lights exactly at camera hits (`RIS_EXACT` in
@@ -25,12 +26,6 @@ export const MAX_TIME = 1e9;
 export const FIREBALL_SIZE = 2.2;
 export const MAX_FIREBALL = 40;
 export const MIN_FIREBALL = 0.05;
-/** Where idle fireballs wait: tiny, far below any level (moving a volume is done in place; hiding one is not
- *  promised to be). */
-const PARK: [number, number, number] = [0, -10000, 0];
-const PARKED = 1e-3;
-/** An idle light's reach (m): its light group's sphere, parked with it, then holds no pixel. */
-const IDLE_REACH = 1e-3;
 
 /** The fireball sizes (full size, m) the fire light was measured at. */
 export const FIRE_LIGHT_SIZES = [1.1, 2.2, 4.4, 8.8] as const;
@@ -152,7 +147,7 @@ export class Explosions extends Group {
   readonly life: number;
   readonly intensity: number;
   readonly stats: ExplosionStats = { fired: 0, reused: 0, unlit: 0, most: 0, burning: 0, lit: 0 };
-  /** Per fireball: when it started (scene time; NaN = parked), its full size, its centre, the order it was fired in. */
+  /** Per fireball: when it started (scene time; NaN = idle), its full size, its centre, the order it was fired in. */
   private started: number[] = [];
   private sizes: number[] = [];
   private centers: [number, number, number][] = [];
@@ -176,27 +171,27 @@ export class Explosions extends Group {
     for (let k = 0; k < n; k++) {
       const f = new Fireball({ life: this.life, intensity: this.intensity, density });
       f.name = `fireball-${k}`;
-      // Moved at every fire: movable from the start (a fixed object's first move rebuilds the live scene once).
+      // Moved at every fire: movable (a fixed object's first move rebuilds the live scene once); hidden while idle
+      // (in place: it keeps its place in the build).
       f.movable = true;
-      // Parked while idle: a temporary way round (docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
-      f.position.set(...PARK);
-      f.scale.setScalar(PARKED);
+      f.visible = false;
       f.customData = [-1e6, 0, 0, 0];
       this.add(f);
       this.fireballs.push(f);
       this.started.push(NaN);
       this.sizes.push(0);
-      this.centers.push([...PARK]);
+      this.centers.push([0, 0, 0]);
       this.order.push(-1);
     }
     for (let k = 0; k < nl; k++) {
-      // The stand-in light, and its idle reach of 1 mm where it is parked: temporary ways round (docs/VOXEL.md,
-      // "Temporary ways round on the engine's shared paths").
+      // The stand-in light: a temporary way round (docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
+      // Moved to each fire it lights: movable; black, without a reach and hidden while idle (a black or hidden light
+      // is in no group of lights and costs no pixel).
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
-      l.distance = IDLE_REACH;
+      l.distance = 0;
       l.movable = true;
-      l.position.set(...PARK);
+      l.visible = false;
       this.add(l);
       this.lights.push(l);
     }
@@ -227,6 +222,7 @@ export class Explosions extends Group {
     f.position.set(...c);
     f.scale.setScalar(size);
     f.customData = [time, 0, 0, 0];
+    f.visible = true;
     this.started[k] = time;
     this.sizes[k] = size;
     this.centers[k] = c;
@@ -246,16 +242,16 @@ export class Explosions extends Group {
   }
 
   /** Once a frame (scene time): each light set from its fireball's age (the youngest that give light have them);
-   *  burnt-out fireballs parked. Time going back (a restart) ends every fire. */
+   *  burnt-out fireballs hidden. Time going back (a restart) ends every fire. */
   step(time: number): void {
     within("Explosions.step: the time (the frame's f.time)", time, -MAX_TIME, MAX_TIME);
     if (this.disposed) return;
-    if (time < this.now) for (let k = 0; k < this.fireballs.length; k++) this.park(k);
+    if (time < this.now) for (let k = 0; k < this.fireballs.length; k++) this.idle(k);
     this.now = time;
     const alive: number[] = [];
     for (let k = 0; k < this.fireballs.length; k++) {
       if (this.burning(k, time)) alive.push(k);
-      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.park(k);
+      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.idle(k);
     }
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
@@ -268,8 +264,8 @@ export class Explosions extends Group {
       const g = glowing[j];
       if (g === undefined) {
         l.intensity = 0;
-        l.distance = IDLE_REACH;
-        l.position.set(...PARK);
+        l.distance = 0;
+        l.visible = false;
         continue;
       }
       lit++;
@@ -281,6 +277,7 @@ export class Explosions extends Group {
       // Its reach: 25 sizes (the light group's sphere; past it the fire's light is under a thousandth of its peak).
       l.distance = 25 * this.sizes[k];
       l.radius = 0.15 * this.sizes[k];
+      l.visible = true;
     }
     this.stats.lit = lit;
   }
@@ -298,10 +295,9 @@ export class Explosions extends Group {
     return !Number.isNaN(s) && time - s >= 0 && time - s < this.life;
   }
 
-  private park(k: number): void {
+  private idle(k: number): void {
     this.started[k] = NaN;
-    this.fireballs[k].position.set(...PARK);
-    this.fireballs[k].scale.setScalar(PARKED);
+    this.fireballs[k].visible = false;
   }
 
   /** The pool's positions are the world's: it and every parent at the origin, unrotated, unscaled. */

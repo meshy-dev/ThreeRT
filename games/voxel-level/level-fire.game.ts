@@ -4,14 +4,17 @@
 //
 // fireShot: the level by day from the destruction game's first camera, a 4 m explosion at its `crater` spot (9 m ahead
 // on the road; done in setup, so the crater is there from the start in both renders), its fire (`Explosions`) starting
-// at scene time `at`: with the fire light or without. Offline, the fire light is left
+// at scene time `at`: with the fire light or without; with a smoke grid each fire puffs into (the game's own
+// `SimulatedSmoke`, as `Explosions` would make it once it takes one again), a second fireball overlapping the first, or
+// an object added at `rebuildAt` to make the live scene rebuild (the checks of docs/VOXEL.md's "Temporary ways round on
+// the engine's shared paths"). Offline, the fire light is left
 // out: the fireball's own emission lights the street there (paths reach the medium), which is what the light stands in
 // for live.
 //
 // fireRoom: a grey floor and a wall, no sky; either one fireball of size `size` m burning from scene time 0, high enough
 // that the floor is below it, or a white point light of 1,000 cd at its centre. The floor's and the wall's radiance
 // near it, fire against light, is the fireball's equivalent intensity (`FIRE_LIGHT`).
-import { DirectionalLight, Mesh, MeshStandardMaterial, PerspectiveCamera, PlaneGeometry, PointLight, Scene, SkyAtmosphere } from "@threert/scene";
+import { BoxGeometry, DirectionalLight, Mesh, MeshStandardMaterial, PerspectiveCamera, PlaneGeometry, PointLight, Scene, SimulatedSmoke, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
 import { Explosions, voxelExplode, voxelLevel } from "@threert/voxel";
 import { spots } from "./level-destruction.game.ts";
@@ -25,6 +28,14 @@ export interface FireShot {
   at?: number;
   /** The explosion's radius (m; default 4). */
   r?: number;
+  /** The smoke grid (the destruction game's: 88 x 56 x 144 cells over the streets ahead). Default off. */
+  smoke?: boolean;
+  /** The smoke's turbulence (its random push; `SimulatedSmoke`'s default 15). */
+  turbulence?: number;
+  /** A second fire as the first, its centre 0.4 of its size to the side: two fireballs that overlap. */
+  pair?: boolean;
+  /** A box added to the scene at this scene time (s): the live scene rebuilds then. */
+  rebuildAt?: number;
 }
 
 /** The shot's camera (the destruction game's first) and the explosion's spot. */
@@ -37,7 +48,18 @@ export function fireShot(o: FireShot = {}) {
   const seed = 1, at = o.at ?? 4, r = o.r ?? 4;
   const view = fireShotView(seed);
   let boom: Explosions;
-  let fired = false;
+  let cloud: SimulatedSmoke | null = null;
+  let fired = false, rebuilt = false;
+  let world: Scene;
+  // The fire, and with `pair` a second one 0.4 of the fireball's size (2.2 r) to the side; with the grid, a puff of hot
+  // smoke at each fireball's centre (0.3 r above the explosion's point, 0.8 r + 0.3 m across).
+  const fireAll = () => {
+    const spots: [number, number, number][] = [view.spot, ...(o.pair ? [[view.spot[0] + 0.88 * r, view.spot[1], view.spot[2]] as [number, number, number]] : [])];
+    for (const p of spots) {
+      boom.fire(p, r, at);
+      cloud?.puff([p[0], p[1] + 0.3 * r, p[2]], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
+    }
+  };
   return defineGame<Record<string, never>>({
     state: {},
     setup: () => {
@@ -63,11 +85,21 @@ export function fireShot(o: FireShot = {}) {
       }
       voxelLevel({ route: "mesh", palette: nativePalette(false), objects: nativeObjects(seed), physics: false });
       voxelExplode(...view.spot, r);
-      boom = new Explosions({ fireballs: 1, lights: o.light === false ? 0 : 1 });
+      const [cx, cy, cz] = view.pos;
+      boom = new Explosions({ fireballs: o.pair ? 2 : 1, lights: o.light === false ? 0 : o.pair ? 2 : 1 });
       scene.add(boom);
-      // A fire at scene time 0 is started in setup.
+      // The smoke grid (the destruction game's box and cells; `Explosions`' old defaults for the smoke and the puff).
+      cloud = o.smoke ? new SimulatedSmoke({ size: [88, 56, 144], density: 2.5, wind: [0.8, 0, 0.3], buoyancy: 3.5, cooling: 0.9, dissipation: 0.2, turbulence: o.turbulence ?? 15 }) : null;
+      if (cloud) {
+        cloud.position.set(cx, cy + 5, cz + 21);
+        cloud.scale.set(22, 14, 36);
+        scene.add(cloud);
+      }
+      world = scene;
+      rebuilt = false;
+      // A fire at scene time 0 is started in setup: its puff then reaches the grid at the first step, live and offline.
       if (at <= 0) {
-        boom.fire(view.spot, r, at);
+        fireAll();
         fired = true;
       }
       return { scene, camera, options: { name: `voxel-level-fire`, width: 1280, height: 720, preset: "cinematic" as const } };
@@ -75,8 +107,16 @@ export function fireShot(o: FireShot = {}) {
     frame(f) {
       if (!fired && f.time >= at) {
         fired = true;
-        boom.fire(view.spot, r, at);
+        fireAll();
         console.log(`fire ${JSON.stringify({ at, time: f.time })}`);
+      }
+      if (o.rebuildAt !== undefined && !rebuilt && f.time >= o.rebuildAt) {
+        rebuilt = true;
+        // Out of the view, behind the camera: the added object changes what is built, not what is seen.
+        const crate = new Mesh(new BoxGeometry(0.5, 0.5, 0.5), new MeshStandardMaterial({ name: "crate", color: 0x777777 }));
+        crate.position.set(view.pos[0], view.pos[1] - 3, view.pos[2] - 20);
+        world.add(crate);
+        console.log(`rebuild ${JSON.stringify({ time: f.time })}`);
       }
       boom.step(f.time);
     },
