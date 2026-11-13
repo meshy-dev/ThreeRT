@@ -154,6 +154,8 @@ pub(super) struct Vehicle {
     center_of_mass: Option<Vector>,
     own_additional: MassProperties,
     held: Vec<(ColliderId, MassProperties)>,
+    /// Whether the chassis was asleep after the last step (`settle_vehicles`).
+    asleep: bool,
 }
 
 /// A stop collider's state for the hook: the wheel's axle and forward (world), and the speed of its surface along the
@@ -311,7 +313,7 @@ impl Physics {
         let own_additional = self.own_additional(hb);
         let n = stops.len();
         let id = self.id();
-        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, stop_frames, stop_steering: vec![0.0; n], slots: (0..n).map(Some).collect(), lost_at: vec![None; n], frames, center_of_mass: com, own_additional, held: vec![] });
+        self.vehicles.insert(id, Vehicle { chassis: d.chassis, ctl, stops, stop_frames, stop_steering: vec![0.0; n], slots: (0..n).map(Some).collect(), lost_at: vec![None; n], frames, center_of_mass: com, own_additional, held: vec![], asleep: false });
         self.apply_center_of_mass(id);
         Ok(id)
     }
@@ -569,16 +571,21 @@ impl Physics {
             let hb = self.bodies[&veh.chassis];
             let mine: Vec<(ColliderHandle, Pose)> = fresh.iter().filter(|f| f.2 != Some(hb)).map(|f| (f.0, f.1)).collect();
             let filter = QueryFilter::default().exclude_rigid_body(hb).predicate(&settled);
-            if world.bodies[hb].is_sleeping() {
+            // (A car asleep on ground that has not changed is not updated, but its stops still go to the hook: what
+            // wakes it in this step, debris or another car, meets tyres, not the stops' own friction of 0. Bugbot on
+            // #38.)
+            let resting = world.bodies[hb].is_sleeping() && {
                 let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
-                if !veh.ctl.ground_changed(q, &mine) {
-                    continue;
+                !veh.ctl.ground_changed(q, &mine)
+            };
+            if !resting {
+                if world.bodies[hb].is_sleeping() {
+                    world.bodies[hb].wake_up(true);
                 }
-                world.bodies[hb].wake_up(true);
+                let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
+                veh.ctl.update_vehicle(dt, q, &mine);
             }
-            let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
-            veh.ctl.update_vehicle(dt, q, &mine);
-            // The stops roll at the hub's speed.
+            // The stops roll at the hub's speed (none, asleep).
             let b = &world.bodies[hb];
             for (w, s) in veh.ctl.wheels().iter().zip(&veh.stops) {
                 let h = self.colliders[s].0;
@@ -590,6 +597,24 @@ impl Physics {
             }
         }
         hooks
+    }
+
+    /// After a step: a vehicle whose chassis the step put to sleep probes its ground where the chassis now rests. That
+    /// is what `ground_changed` compares with while it sleeps: the probes of the step's start were taken before the
+    /// step moved it, by up to what Rapier still lets fall asleep (a few millimetres a tick), more than a change of
+    /// ground is told by (1 mm), so a car parked woke at the next tick and never stayed asleep (one tick in 30).
+    pub(super) fn settle_vehicles(&mut self) {
+        let world = &mut self.world;
+        for veh in self.vehicles.values_mut() {
+            let Some(&hb) = self.bodies.get(&veh.chassis) else { continue };
+            let asleep = world.bodies.get(hb).is_some_and(|b| b.is_sleeping());
+            if asleep && !veh.asleep {
+                let filter = QueryFilter::default().exclude_rigid_body(hb);
+                let q = world.broad_phase.as_query_pipeline_mut(world.narrow_phase.query_dispatcher(), &mut world.bodies, &mut world.colliders, filter);
+                veh.ctl.ground_changed(q, &[]);
+            }
+            veh.asleep = asleep;
+        }
     }
 
     /// The vehicles removed since the last call because their chassis went (removed, or taken out by the world).
@@ -769,6 +794,30 @@ mod tests {
         let after = p.pose(b).unwrap().0;
         assert!(!p.sleeping(b) || (after[0] - before[0]).abs() > 0.05, "{before:?} -> {after:?}");
         assert!((after[0] - before[0]).abs() > 0.05, "the blast did not move it: {before:?} -> {after:?}");
+    }
+
+    /// A car parked falls asleep and stays asleep (its own probes do not wake it), and still hands its stops to the
+    /// contact hook with the tyres' friction: what wakes it in a step (debris, another car) meets tyres, not the stops'
+    /// own friction of 0 (Bugbot on #38).
+    #[test]
+    fn a_car_asleep_keeps_its_tyres_for_what_wakes_it() {
+        let mut p = Physics::default();
+        flat(&mut p);
+        let (b, _) = SEDAN.add(&mut p, [0.0, 0.0, 0.0], true);
+        // (Asleep within 5 s and asleep from then on: parked, it is not woken by its own probes.)
+        let mut asleep = 0;
+        for k in 0..600 {
+            p.step();
+            if k >= 300 {
+                asleep += p.sleeping(b) as u32;
+            }
+        }
+        assert_eq!(asleep, 300, "asleep {asleep} of the last 300 ticks");
+        let hooks = p.update_vehicles();
+        assert!(p.sleeping(b), "not woken by the update");
+        assert_eq!(hooks.stops.len(), 4);
+        assert!(hooks.stops.values().all(|s| s.friction == SEDAN.wheels()[0].friction_slip && s.friction > 0.0 && s.surface == 0.0));
+        p.step_world(&hooks);
     }
 
     /// A wheel lost is where it was on the chassis then (the chassis's pose now; a vehicle never stepped: at its rest

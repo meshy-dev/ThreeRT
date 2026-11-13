@@ -1028,6 +1028,8 @@ impl Physics {
                 self.contacts.push_back(Contact { a: a.min(b), b: a.max(b), started: e.started() });
             }
         }
+        // (The vehicles that fell asleep in this step take their ground as it is under them now.)
+        self.settle_vehicles();
         let q = self.world.quarantine();
         let mut out: Vec<(RigidBodyHandle, bool, &'static str)> = q.bodies().iter().map(|&h| (h, false, "its pose or velocity went non-finite")).collect();
         let mut statics = vec![];
