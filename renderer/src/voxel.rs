@@ -1530,6 +1530,8 @@ impl VoxelWorld {
             // Scene code's joints on it, each by the cell its anchor is held by (before the carve takes cells).
             let body_id = b.body;
             let anchored: Vec<(physics_core::JointId, [i32; 3])> = p.bridge_ref().engine_joints_of(body_id).into_iter().filter_map(|(j, _, a)| anchor_cell(a, size, |c| b.grid.get(c[0], c[1], c[2]) != 0).map(|c| (j, c))).collect();
+            // The wheels of vehicles on it, the same way (step 10 c2): a wheel belongs to the material at its anchor.
+            let wheels: Vec<(physics_core::vehicle::VehicleId, usize, [i32; 3])> = p.bridge_ref().engine_vehicles_of(body_id).into_iter().flat_map(|(v, ws)| ws.into_iter().map(move |(k, a)| (v, k, a))).filter_map(|(v, k, a)| anchor_cell(a, size, |c| b.grid.get(c[0], c[1], c[2]) != 0).map(|c| (v, k, c))).collect();
             // (What is left of it is not retired for the cap while this carve makes the parts it cut off.)
             self.this_edit.insert(k);
             self.keep(gone.iter().map(|&(g, mat)| (centre_of(g), mat)));
@@ -1552,6 +1554,17 @@ impl VoxelWorld {
             // here. A joint is the material's at its anchor.
             // (By cell: what the carve took, and which part each loose cell is in.)
             let mut moves: Vec<(physics_core::JointId, usize)> = vec![];
+            // A wheel whose cell was carved, or went with a part cut off (debris or a body of its own), is lost: a
+            // vehicle is one body, its wheels do not move to another. The vehicle goes on with the rest. (Nothing left
+            // of the chassis: the vehicle goes with it, reported as removed, not wheel by wheel.)
+            if !wheels.is_empty() && b.grid.count() > 0 {
+                let carved: std::collections::HashSet<[i32; 3]> = gone.iter().map(|g| g.0).chain(loose.iter().flat_map(|part| part.iter().map(|&(g, _)| g))).collect();
+                for &(v, k, c) in &wheels {
+                    if carved.contains(&c) {
+                        p.bridge().engine_lose_wheel(v, k);
+                    }
+                }
+            }
             if !anchored.is_empty() {
                 let carved: std::collections::HashSet<[i32; 3]> = gone.iter().map(|g| g.0).collect();
                 let part_of: HashMap<[i32; 3], usize> = loose.iter().enumerate().flat_map(|(i, part)| part.iter().map(move |&(g, _)| (g, i))).collect();
@@ -2911,6 +2924,53 @@ mod tests {
         let p = ph.as_mut().unwrap();
         assert_eq!(broken(p, &mut w), vec![21]);
         assert_eq!(on(p, lb), 0);
+    }
+
+    /// A wheel belongs to the material at its anchor (step 10 c2), as a joint does. A car whose chassis is a voxel body
+    /// (1.6 x 0.5 x 3 m), a wheel at each corner of its bottom layer: its front left anchor's cell carved, that wheel is
+    /// lost (reported, the vehicle goes on with three); its front right corner cut off as a part of its own, that wheel
+    /// is lost too (it does not move to the part); the chassis carved away whole, the vehicle is removed (reported).
+    #[test]
+    fn wheels_belong_to_the_cells_their_anchors_are_in() {
+        let mut w = World::default();
+        let mut ph: Option<PhysicsWorld> = None;
+        let mut v = VoxelWorld::of_blocks(&[([0, 0, 0], [64, 4, 64], Some((0, 0)), true), ([10, 4, 10], [16, 6, 30], None, false)], &mut w, &mut ph);
+        // Cut loose at its foot: a body of 16 x 5 x 30 cells, its frame's origin at its lowest corner, (1.0, 0.5, 1.0).
+        v.edit(&mut w, &mut ph, &op(serde_json::json!({ "op": "carve", "box": [0.95, 0.4, 0.95, 2.65, 0.5, 4.05] }))).unwrap();
+        assert_eq!(v.bodies(), 1);
+        let car = *v.bodies.values().map(|x| &x.body).next().unwrap();
+        let p = ph.as_mut().unwrap();
+        let (at, _, _) = p.bridge_ref().engine_pose(car).unwrap();
+        assert_eq!(at, [1.0, 0.5, 1.0]);
+        let wheel = |x: f32, z: f32| serde_json::json!({ "anchor": [x, 0.05, z], "rest": 0.3, "travel": 0.15, "radius": 0.15, "width": 0.1, "stiffness": 30, "compression": 2, "damping": 3, "frictionSlip": 1 });
+        p.call(&mut w, "vehicle", &serde_json::json!({ "id": 5, "chassis": car, "wheels": [wheel(0.15, 2.75), wheel(1.45, 2.75), wheel(0.15, 0.25), wheel(1.45, 0.25)], "centerOfMass": [0.8, 0.0, 1.5] })).unwrap();
+        let changes = |p: &mut PhysicsWorld, w: &mut World| {
+            let c = p.call(w, "vehicle_changes", &serde_json::json!({})).unwrap();
+            (c["lost"].as_array().unwrap().iter().map(|l| (l["vehicle"].as_u64().unwrap(), l["wheel"].as_u64().unwrap())).collect::<Vec<_>>(), c["removed"].as_array().unwrap().iter().map(|r| r.as_u64().unwrap()).collect::<Vec<_>>())
+        };
+        // The front left anchor's cell (1, 0, 27) carved.
+        v.edit_body(&mut w, &mut ph, car, &op(serde_json::json!({ "op": "carve", "sphere": [1.15, 0.55, 3.75, 0.06] }))).unwrap();
+        let p = ph.as_mut().unwrap();
+        assert_eq!(changes(p, &mut w), (vec![(5, 0)], vec![]));
+        // The front right corner (cells x 12-15, z 25-29) cut off: an L of carved cells round it.
+        v.edit_body(&mut w, &mut ph, car, &op(serde_json::json!({ "op": "carve", "box": [2.11, 0.45, 3.41, 2.19, 1.05, 4.05] }))).unwrap();
+        v.edit_body(&mut w, &mut ph, car, &op(serde_json::json!({ "op": "carve", "box": [2.11, 0.45, 3.41, 2.65, 1.05, 3.49] }))).unwrap();
+        assert_eq!(v.bodies(), 2, "the corner is a body of its own");
+        let p = ph.as_mut().unwrap();
+        assert_eq!(changes(p, &mut w), (vec![(5, 1)], vec![]));
+        for _ in 0..30 {
+            crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        }
+        let p = ph.as_mut().unwrap();
+        let st = p.call(&mut w, "vehicle_state", &serde_json::json!({ "id": 5 })).unwrap();
+        let lost: Vec<bool> = st["wheels"].as_array().unwrap().iter().map(|x| x["lost"].as_bool().unwrap()).collect();
+        assert_eq!(lost, [true, true, false, false], "{st}");
+        // The chassis carved away whole: the vehicle goes with it.
+        v.edit_body(&mut w, &mut ph, car, &op(serde_json::json!({ "op": "carve", "box": [0.0, 0.0, 0.0, 3.0, 2.0, 4.5] }))).unwrap();
+        crate::api::physics_advance(&mut ph, &mut v, &mut w, 1.0 / 60.0);
+        let p = ph.as_mut().unwrap();
+        assert_eq!(changes(p, &mut w), (vec![], vec![5]));
+        assert!(p.call(&mut w, "vehicle_state", &serde_json::json!({ "id": 5 })).is_err());
     }
 
     /// An explosion pushes the bodies near it (step 10 c1): the bar standing 0.4 m from a 0.3 m blast it does not reach
