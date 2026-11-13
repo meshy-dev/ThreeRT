@@ -141,7 +141,8 @@ main. Branches are kept.
 
 `.github/workflows/ci.yml` runs on every push to main and every PR, as parallel jobs:
 - `ts`: `npm run typecheck`, `npm test`;
-- `renderer`: the renderer's release build;
+- `renderer`: the renderer's release build and its unit tests (`cargo test --release`; the runner has no GPU, so the
+  tests that open a device skip themselves);
 - `voxel`: the voxel core's wasm32 build and tests, and native / wasm32 edit determinism;
 - `physics`: the physics core's wasm32 build and tests, and native / wasm32 determinism (a script and 1,200 random worlds);
 - `wasm`: the engine library's wasm32 build;
@@ -150,7 +151,7 @@ main. Branches are kept.
 A PR runs a job only when it changes that job's inputs (the paths in the workflow's `changes` job; a change to the workflows runs them all); a push to main runs them all.
 `threert` sums them up and is the check to read before merging: it fails when a job failed or was cancelled, and passes when each one passed or was skipped by its paths.
 
-The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per the merge gate above.
+The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per the merge gate above, on hardware traversal only: what software traversal draws (the browser's, a device without ray queries) is in no gate yet (ROADMAP "Known issues").
 
 ## The npm packages
 
