@@ -43,7 +43,7 @@ Two things are asked of a visitor, on every page: **a star** on github.com/meshy
 a page for each app at `<name>.threert.app`, `threert publish`, multiplayer rooms). threert.dev says what the engine
 is and proves it; the apps live there. So the site has no catalogue of its own.
 
-Every page has the same nav, top right: **Apps ↗** (threert.app; the arrow marks the one link that leaves the site),
+Every page has the same nav, top right: **Apps** (threert.app, in the same tab and without an external-link arrow: the platform is the same product, its own nav leads back to Download and Docs here, and a new tab costs the back button on phones),
 **Download**, **Docs**, then **Star** (GitHub's mark, the word and the repository's star count: `a.star`, below),
 Discord (discord.gg/n7vsVmAKCK) and X (x.com/ThreeRT3D) as their marks; on a phone Star is GitHub's mark alone. The
 footer has the same links, over the line that says whose it is: a research project from MeshyAI (meshy.ai), © MeshyAI.
