@@ -42,6 +42,10 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 
 // ---- The live passes' buffers, by what they hold and how long.
 //
+// The declarations below are the passes' layout: build.rs reads them (with naga) when the renderer is built, and each
+// pass binds what its entry point uses; live/layout.rs says what each binding is bound to, how large a buffer of the
+// passes' own is, and the passes' order and grids. A buffer more: its declaration here, a line there.
+//
 // What lasts from one frame to the next has a buffer of its own, in two halves: this frame's, which the passes write
 // (`this_half`), and the previous frame's, which they read (`last_half`); live/frame.rs alternates them (`L.state.x`). A half
 // is L.size.x * L.size.y elements, indexed by traced sample (by output pixel: `color_hist`).
@@ -54,7 +58,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 //   color_hist    the output grid's colour history: rgb, samples (`upscale`)
 //   up_state      the upscaler's state per traced sample (`compose`): x, y `Flicker`; z, w `Lock` (its life and the
 //                 view depth of what it is for; where in the traced pixel that is, f16 each)
-// What lives within a frame shares buffers whose uses do not overlap (the passes run in live/targets.rs `Passes` order):
+// What lives within a frame shares buffers whose uses do not overlap (the passes run in live/layout.rs `PASSES` order):
 //   sample_vel    per traced sample: screen velocity (output pixels this frame), view depth, animated shading
 //                 (`compose`; `judge`, `upscale`, depth of field and motion blur read it)
 //   judged        `judge`'s findings per traced sample (`Judged`), in up_state's previous half: `compose` has read it

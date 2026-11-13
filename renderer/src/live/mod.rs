@@ -47,6 +47,7 @@ use web_time::Instant;
 
 mod edits;
 mod frame;
+mod layout;
 mod load;
 #[cfg(not(target_arch = "wasm32"))]
 mod session;
@@ -428,21 +429,6 @@ fn dof_params(dof: Option<&crate::desc::Dof>, tan_half_fov: f32, w: u32, h: u32)
     [diameter * 0.5 / sensor_h / aspect * w as f32, d.focus_distance, 0.025 * w as f32, 0.0]
 }
 
-/// The grid a live pass runs over (invocations; workgroups of 8 x 8, but `exposure`'s one): the traced grid, the
-/// previous frame's (`lock_carry`), the output grid, a quarter of it (bloom, the luminance), or its 16 x 16 tiles.
-fn pass_grid(name: &str, out: (u32, u32), traced: (u32, u32), prev_traced: (u32, u32)) -> (u32, u32) {
-    match name {
-        "exposure" => (8, 8),
-        "dof_tiles" => (out.0.div_ceil(16), out.1.div_ceil(16)),
-        "lock_carry" => (prev_traced.0.max(1), prev_traced.1.max(1)),
-        "refl" | "dtemporal" | "stemporal" | "compose" | "judge" | "reject" => traced,
-        _ if name.starts_with("atrous") || name.starts_with("sfilt") => traced,
-        _ if name.starts_with("bloom") || name.starts_with("lum_") => (out.0.div_ceil(4), out.1.div_ceil(4)),
-        _ => out,
-    }
-}
-
-
 /// Light LOD (`emitter_lod`): emitters within this distance of the camera keep their sampling weight, farther ones
 /// lose it as (d0 / d)^2.
 const LIGHT_LOD_D0: f32 = 10.0;
@@ -782,7 +768,8 @@ impl LiveCore {
         let size = self.w as u64 * self.h as u64 * 16;
         let read = d.create_buffer(&wgpu::BufferDescriptor { label: Some("hdr read"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut e = d.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(&self.targets.fa.buffer, self.targets.fa.offset, &read, 0, size);
+        let fa = self.targets.buf("fa");
+        e.copy_buffer_to_buffer(&fa.buffer, fa.offset, &read, 0, size);
         self.g.queue.submit([e.finish()]);
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         d.poll(wgpu::PollType::wait_indefinitely())?;
@@ -813,8 +800,10 @@ impl LiveCore {
             Ok(v)
         };
         let half = |b: u32, hi: bool| half::f16::from_bits(if hi { (b >> 16) as u16 } else { b as u16 }).to_f32();
-        let composed = read(&t.fb.buffer, t.fb.offset, tn * 16)?;
-        let spec = read(&t.spec_pp.buffer, t.spec_pp.offset + n * 8, tn * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
+        let fb = t.buf("fb");
+        let composed = read(&fb.buffer, fb.offset, tn * 16)?;
+        let spec_pp = t.buf("spec_pp");
+        let spec = read(&spec_pp.buffer, spec_pp.offset + n * 8, tn * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
         let samples = read(&self.sc.up.accum, 0, tn * 80)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
         let (composed, spec, samples): (&[[f32; 4]], &[[u32; 2]], &[[f32; 20]]) = (bytemuck::cast_slice(&composed), bytemuck::cast_slice(&spec), bytemuck::cast_slice(&samples));
         let (mut dif, mut spe, mut emi) = (Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3));
@@ -846,7 +835,8 @@ impl LiveCore {
         let d = &self.g.device;
         let read = d.create_buffer(&wgpu::BufferDescriptor { label: Some("ae read"), size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut e = d.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(&self.targets.ae_state.buffer, self.targets.ae_state.offset, &read, 0, 16);
+        let ae = self.targets.buf("ae_state");
+        e.copy_buffer_to_buffer(&ae.buffer, ae.offset, &read, 0, 16);
         self.g.queue.submit([e.finish()]);
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         d.poll(wgpu::PollType::wait_indefinitely())?;

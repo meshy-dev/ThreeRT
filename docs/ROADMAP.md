@@ -2198,6 +2198,21 @@ its two levels: the unchanged trace read the same when alternated).
 passed by its trail (the light the lamps left on the sky made up the mean); with the trail gone it reads 0.066 for
 0.1. What it was for is open (Known issues: lamps in motion keep half their light).
 
+**The live passes from one place (2026-11-14, after it).** A buffer and a pass more (the locks' carry, above) took
+seven edits that had to agree: the declaration in live.wgsl, the bind group layout's entries, the pass list, the
+buffers' sizes and order, the bind group's entries, the dispatch grid (in two copies), and the merged layout's table.
+Now live.wgsl's declarations are the layout: build.rs reads them with naga (the compiler wgpu uses; a build
+dependency, so the browser's build carries none of it) into each binding's name, number, kind and element stride and
+the bindings each entry point uses, and `live/layout.rs` holds only what the shader cannot say: what each binding is
+bound to and how many elements a buffer of the passes' own holds (`RESOURCES`), and the passes' order and grids
+(`PASSES`). `layout::check` holds the table to the shader (a unit test, and every view as it starts). Natively each
+pass has a bind group layout and a bind group of its own, of the bindings its entry point uses (one shared group of
+every binding was the passes' layout before). Measured on 39 passes: 36 bind at most the browser's eight storage
+buffers; `post` binds 13 (most of them its debug view modes'), `compose` 11, `dtemporal` 10, so the browser's layout
+is still the merged one, for all passes, until those three are rearranged. Check: render-identity against the
+build before, native and merged, nothing changed; the passes after the trace 6.03-6.09 ms on both (Bistro, 1440p at
+0.375, alternated).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

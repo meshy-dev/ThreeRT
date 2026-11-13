@@ -31,7 +31,8 @@ pub(super) struct LoadedScene {
     pub(super) triangles: usize,
     pub(super) up: gpu::Uploaded,
     pub(super) base: gpu::Params,
-    pub(super) bg: wgpu::BindGroup,
+    /// The live passes' bind groups, a pass each (`Targets::bind_groups`).
+    pub(super) bgs: Vec<wgpu::BindGroup>,
     pub(super) exposure: f32,
     pub(super) exposure_settings: ExposureSettings,
     pub(super) tan_half_fov: f32,
@@ -241,7 +242,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         base.ltree[3] = crate::ltree::live_candidates() as f32;
     }
     base.cam_fwd[3] = w as f32 / h as f32;
-    let bg = targets.bind_group(&g.device, &passes.layout, &up.accum);
+    let bgs = targets.bind_groups(&g.device, passes, &up.accum);
     let exposure_settings = ExposureSettings::new(&sc.camera.exposure, &sc.preset.post);
     // Manual: 2^-EV100. Auto: a first guess for the firefly clamp (the GPU histogram takes over from frame 1).
     let exposure = match &sc.camera.exposure {
@@ -300,5 +301,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         inst_at_load: instances.len(),
         added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bg, exposure, exposure_settings, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
 }

@@ -688,7 +688,9 @@ tree (ROADMAP § 6).
   the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
   [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
-  kernel binds 19 and the live passes 25. There is one source: the browser's shaders are written from
+  kernel binds 19 and the live passes 25. (Natively each live pass has a layout of its own, of the bindings its
+  entry point uses: `renderer/src/live/layout.rs`, from live.wgsl as build.rs reads it; three passes use more than
+  eight, so the browser's layout is still one for all, merged.) There is one source: the browser's shaders are written from
   `pathtrace.wgsl` and `live.wgsl` as text when a module is compiled, and the native ones are untouched.
   - The kernel's seven tables become the arrays of one struct in one buffer; their lengths are in the source, each a
     power of two above a floor, so a kernel is compiled again only when a table doubles. The renderer keeps writing
