@@ -30,6 +30,7 @@ pub mod texpack;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod view;
 pub mod physics;
+pub mod pipeline_cache;
 pub mod voxel;
 pub mod world;
 
@@ -361,6 +362,18 @@ pub fn fog_params(fog: Option<&desc::Fog>) -> [[f32; 4]; 4] {
     ]
 }
 
+/// Whether a baked environment map (an HDRI, a `SkyAtmosphere`'s bake) is light-sampled: THREERT_ENV_NEE=1|0, on
+/// everywhere but Android. On Adreno 740 the kernel's reads of `env_cdf` for it went to the wrong memory (tens of
+/// thousands of GPU page faults a second under a `SkyAtmosphere`, a trace up to twice as slow). Without it the sky
+/// still lights through the paths' own rays, with their full weight; the sun is a directional light, sampled as ever.
+pub fn env_nee_on() -> bool {
+    env_nee_of(std::env::var("THREERT_ENV_NEE").ok().as_deref(), cfg!(target_os = "android"))
+}
+
+fn env_nee_of(var: Option<&str>, android: bool) -> bool {
+    var.map_or(!android, |v| v != "0")
+}
+
 /// `prepare` for an offline render: under software traversal every instance flattened unless THREERT_UNITS=1.
 pub fn prepare(g: &gpu::Gpu, sc: &mut scene::Scene, timings: &mut Vec<(String, f64)>) -> Prepared {
     prepare_as(g.hwrt, units_on(false), sc, timings)
@@ -666,7 +679,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let env_max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max).max(0.2126 * sky_color.x + 0.7152 * sky_color.y + 0.0722 * sky_color.z);
     let em_area: f32 = emitters[..emitter_tris.len()].iter().map(|e| e[3]).sum();
     let env_nee_floor = if emitter_tris.is_empty() { 0.0 } else { 0.01 * all_power / em_area.max(1e-6) };
-    let env_nee = env_max >= env_nee_floor;
+    // (A uniform sky is sampled regardless of `env_nee_on`: it reads no table.)
+    let env_nee = env_max >= env_nee_floor && (!has_env || env_nee_on());
     // The kernel's light order (`light_order`).
     let class = light_class;
     let order = light_order(&sc.lights);

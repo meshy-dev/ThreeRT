@@ -1170,6 +1170,158 @@ the CPU's update of the instances, not the trace.
 main; `cargo test --release` whole (79 pass); the atomic tests under hardware traversal (170 pass) and the 29 with
 units under software traversal; hello world natively and in Chrome (every check, the guard 0, no frame rebuilt).
 
+## Android (Adreno): what a phone's Vulkan driver needed
+
+The engine's library builds for `aarch64-linux-android` and runs under an Android client on Vulkan with ray queries.
+On Qualcomm's Adreno 740 (Snapdragon 8 Gen 2, Android 13; an AYN Thor handheld) the renderer as written did not
+draw correctly: a model's textures came out as another table's numbers, emissive objects lit nothing, Light Room was
+black. What follows is what fixed it there, on this engine's current source, and it has run on the device ("Checked
+on the device" below). All of it is off on every other platform unless asked for: with nothing set the device, its
+layout and its kernels' source are what they were (`gpu.rs` `the_options_default_to_the_device_as_written`,
+`the_default_sources_are_untouched`).
+
+**The figures in the two tables are the original author's, measured on that handheld with the engine at `b646a20`,**
+on scenes that are not all at hand. What was measured again on this source, on the same handheld, is under "Checked
+on the device", and differs where it says so.
+
+- **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android; never with the
+  merged layout). The driver gave the kernel other buffers' contents for four of its read-only storage buffers:
+  `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18). As uniform buffers they read right.
+  - The kernel's source is rewritten when a module is compiled, as the merged layout's is (`merged::uniform_tables`):
+    the four declarations become sized uniform arrays at the same bindings, and every index into them is held to the
+    array (`min(u32(i), last)`), so nothing is read outside a uniform buffer.
+  - The renderer keeps writing its storage buffers. `Gpu::sync_tables` copies the four into their uniform buffers in
+    a frame's encoder, after the particle passes (which write their objects' entries on the GPU) and before the trace.
+  - A uniform binding holds 64 KiB, so the arrays are bounded: 2,048 textures, 4,096 object entries (1,365 objects;
+    1,024 with instance colours), 409 instance records (model instances, procedural objects, `dynamicGeometry`
+    meshes), all 32 media. A scene with more reads the last entry for the rest, and the renderer says so on stderr
+    when it uploads the scene and once when in-place edits pass a bound. `THREERT_UNIFORM_TABLES=0` binds storage
+    buffers again.
+- **The kernel's other storage buffers stay as they are**, each for its reason:
+
+  | buffer | size | decision |
+  |---|---|---|
+  | `materials` (4), `lights` (5) | 288 B and 80 B an entry | storage: the device drew right with them as they are; 64 KiB would hold 227 materials |
+  | `emitters` (6) | the emitter CDF and the light tree | storage: megabytes in a lit scene |
+  | `env_cdf` (10) | the environment's CDF, then the procedural geometry's data | storage (megabytes); its light sampling is off on Android, below |
+  | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (16) | per triangle | storage (megabytes) |
+  | `accum` (11), group 1 (radiance cache, reservoirs, the trace's outputs, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
+  | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
+  | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |
+  | the live passes (`live.wgsl`: 28 storage buffers, `ae_bins` and `ae_state` among them) | per pixel; two tiny | storage: written by the passes; the device showed their output right |
+
+  Two of these are what a device run should look at first: `prev_verts` is the one storage buffer left after the
+  acceleration structure's binding (13) and feeds the motion vectors of moving objects and the vertex colours;
+  `env_cdf` also holds the procedural geometry (voxel worlds).
+- **The kernel's switches** (`gpu::KernelSwitches`; patches of the kernel's source, as a scene's features are):
+
+  | switch | default | what it does | on the device |
+  |---|---|---|---|
+  | `THREERT_KERNEL_STRICT` | Android: 1 | a ray query with a ray that is not finite, or a length that is negative or NaN, is not made (the ray misses): the kernel's two and the translucency pass's; `env_pdf` does not form the index before the first entry | the odd such ray faulted the GPU's MMU thousands of times a second and doubled the trace |
+  | `THREERT_ENV_NEE` | Android: 0 | 0 = a baked environment map (an HDRI, a `SkyAtmosphere`) is not light-sampled, at load and when a dynamic sky is baked again; the sky lights through the paths' own rays, the sun is a directional light as ever | its reads of `env_cdf` went to the wrong memory: tens of thousands of GPU page faults a second, a trace up to twice as slow |
+  | `THREERT_CUTOUT_LITE` | Android: 1 | hardware traversal: 1 = shadow and any-hit rays take alpha cutouts as opaque; 2 = camera rays also step through at most 4 cutouts | a map with cutout foliage: the trace 235 ms, 41 ms without cutouts |
+  | `THREERT_LAST_DIRECT` | Android: 1 | the path's last vertex (at the bounce limit, past the camera hit) takes its direct light | with one bounce and no radiance cache (which cost 30-60 % more trace) sunlit ground lit nothing and interiors were black |
+  | `THREERT_LIGHT_PICK` | 0 | past the camera hit, the directional lights and one of the other kinds (local lights, emitters, the sky), weighted by their number: two shadow rays a vertex instead of four; unbiased, noisier | a handheld's host sets it with `THREERT_LAST_DIRECT` |
+
+  `THREERT_CHECKED=1` (or a mask: 2 bounds, 4 loop bounding, 8 ray-query initialization) compiles the kernel with
+  naga's runtime checks, to tell a driver's fault from the kernel's.
+- **The pipeline cache** (`GpuOptions::pipeline_cache`, `THREERT_PIPELINE_CACHE=<directory>`; `pipeline_cache.rs`).
+  The driver compiles a kernel variant for about ten seconds. With a directory given, the device has a wgpu
+  `PipelineCache` (Vulkan only), every compute pipeline of the engine and the raster pass's are made with it, and it
+  is saved after a kernel variant, a scene's passes and the live passes are compiled. Opening a game a second time
+  went from 10.6 s to 0.4 s (the author's; on this source a scene's pipelines compile for 16 to 31 s the first time
+  and are there in under a second from the cache, below).
+  - One file per adapter, named by wgpu's key (backend, vendor, device). wgpu's header in the data holds the driver's
+    cache identity: after a driver update the data is not used and the next save replaces the file.
+  - The data is sealed (a magic, its length, its SHA-256): a file cut short or damaged is not handed to the driver.
+  - Two processes may share the directory: a save writes a file of its own name and renames it over the old one. The
+    last save wins; what the other compiled meanwhile is compiled again by whoever misses it.
+  - The directory may be deleted at any time. A file past 256 MiB is not read.
+- **What a client sets.** `Gpu::new()` reads the environment, so an Android client that sets
+  `THREERT_PIPELINE_CACHE` to a directory of its own before opening the device has everything above. In code:
+  `Gpu::new_with(GpuOptions { pipeline_cache: Some(dir), ..GpuOptions::from_env() })` (`from_env` is the platform's
+  defaults under the environment; `GpuOptions::default()` has no switch on).
+- **What the device affords.** The author's figure for `b646a20` was 640 × 360 at 30 fps with one or two bounces
+  (a tenth of the rays an iPhone 15 Pro traces). This source does not reach it: the trace costs 0.42 to 0.65 µs a
+  traced pixel at one bounce whatever the scene, which is 249 × 140 to 333 × 187 traced at 30 fps ("Checked on the
+  device").
+- **Dynamic resolution by the clock** (`THREERT_GOVERN_CLOCK=1|0`, default on Android; `live.rs`
+  `govern_resolution`). The render scale was governed in frames (a check every 30th, the urgent one after the first
+  120), which is twice a second and 2 s only at 60 frames a second. A scene opens at its full scale, on this GPU at
+  about 6 frames a second, so it was a slide show for 25 s. With the clock it is at its frame rate 3 s after its
+  first frame.
+- **Not carried over from the original change:** it also sorted bind group layout entries and bind group entries by
+  binding, for a driver thought to mind their order. wgpu puts both in binding order itself before its backend sees
+  them (wgpu-core 30 `bgl::EntryMap::from_entries`, `Device::create_bind_group`), so the sort changed nothing; a test
+  holds wgpu to it (`wgpu_takes_bind_group_entries_in_any_order`).
+
+**Checked on the device** (AYN Thor: Snapdragon 8 Gen 2, Adreno 740, Android 13, driver 0676.53; 2026-11-13, this
+source under ThreeRT for Android 0.4.0, which sets `THREERT_PIPELINE_CACHE` and nothing else):
+
+- **It draws right.** The live view's frame (the client's `POST /screenshot`, 1280 × 720 or 960 × 540, 32 to 88
+  frames of history) against the same scene's picture from a Mac (the published cover, same camera): mean absolute
+  difference per channel, of 255: Material balls 0.8, Light Room 1.3 (it was black), Damaged Helmet 1.6 (its
+  textures were another table's numbers), Boutique Showroom 3.0 (its shelf strips and spots light the room).
+  OpenStrikeRT's hall from the place its page's picture was taken: the same walls, pillars, crates, signs, tube
+  lights, the sun through the skylight on the floor, the furnace's glow; soldiers and their weapons (instanced,
+  posed) are whole and in their teams' colours. No GPU fault in the kernel log (`dmesg`, kgsl) in any run.
+- **The bounds.** OpenStrikeRT (104,898 triangles, 271 objects) with nine bots stays inside the uniform tables:
+  the renderer's warning does not appear.
+- **The pipeline cache works.** A first open, after the package is on the device: OpenStrikeRT 31 s, Boutique
+  Showroom 18 s, Material balls 16 s (kernel variants and the live passes compiling). The same after a restart of
+  the app: 0.9 s, 1.7 s (1.1 s of it the scene's setup), 0.5 s.
+- **What a frame costs.** GPU time at 640 × 360 traced (scale 1), one bounce, Android's defaults: Hello (31,362
+  triangles) 101 ms, Material balls (217,730) 96 ms, Sunlit room (6,400) 149 ms, Boutique Showroom (131,200)
+  139 ms, OpenStrikeRT 146 ms; with ray tracing off (the camera ray alone) OpenStrikeRT still takes 90 ms. Of
+  Material balls' frame at 1280 × 720 out, 416 × 234 traced: the trace 40.7 ms, every other pass together 9 ms
+  (upscale 1.7 ms, the denoisers 4 ms); at 960 × 540 out the others take about 5 ms. So the trace is the frame,
+  it goes with the pixels traced and not with the scene, and 30 fps is 249 × 140 (OpenStrikeRT, the showroom) to
+  333 × 187 (Material balls, two bounces) under a 960 × 540 view; 40 fps is 249 × 140 to 291 × 164 under
+  853 × 480 (36 to 37 fps reached); 60 fps is 192 × 108 to 224 × 126 under 640 × 360 (54 to 58 reached).
+- **The switches, one at a time** (OpenStrikeRT, 640 × 360 traced, one bounce; 146 ms as shipped; one run each):
+  `THREERT_LIGHT_PICK=1` 137 ms; `THREERT_LAST_DIRECT=0` 116 ms; `THREERT_UNIFORM_TABLES=0` 135 ms (so the uniform
+  tables and their index clamps cost about 8 %); `THREERT_KERNEL_STRICT=0` 151 ms (no slower with the guard, and no
+  fault without it in these scenes); `THREERT_CACHE=0` with the light pick 135 ms (Material balls: 96.9 against
+  96.5 ms: the radiance cache costs nothing measurable here). None of them is the factor of four to the author's
+  figure.
+- **Hardware against software traversal** (`THREERT_HWRT=0`, same size and bounce): Sunlit room 78 ms against
+  149 ms and Material balls 74 against 96 are faster without ray queries; OpenStrikeRT is 336 against 146. A ray
+  query has a high fixed cost on this driver; ray queries stay the default. `THREERT_RASTER=1` (raster primary
+  visibility): Sunlit room 136 against 149 ms.
+- **Not looked at on the device:** voxel worlds and procedural geometry (`env_cdf`'s second half), particles, media,
+  a map with cutout foliage (`THREERT_CUTOUT_LITE`'s figures are the author's), `THREERT_ENV_NEE=1`, and the
+  motion vectors of moving objects (`prev_verts`): soldiers were looked at standing, not frame by frame in motion.
+
+**Checked on a Mac** (Apple M3 Max, Metal, 2026-11-13; main `f69b1bc` against this change):
+- The atomic tests (`npm run test:render`, 187), run in full on main's build, on this build, and on this build
+  with `THREERT_UNIFORM_TABLES=1` (the last two twice): every test passes in every run but `geometry/grow-live`
+  (below). Their HDR outputs, byte for byte: all 126 offline renders are identical in all five runs. Of the 60 other
+  live tests, 41 gave the same bytes in every run, with the uniform tables and without. The other 19 differ between
+  two runs without the uniform tables, and by as much as with them (18 of them run three or four more times both
+  ways: about as many differing numbers and as large a relative difference, 10⁻⁶ to 0.6 by test).
+- Under software traversal (`THREERT_HWRT=0`) the same 24 tests fail with and without the uniform tables (particles,
+  translucency: hardware traversal's), and 173 of 187 outputs are identical. The other 14 are live tests: 13 of them
+  differ from run to run without the uniform tables too, and `animation/shared-pose-live` was identical both ways
+  when run again.
+- With the uniform tables and `THREERT_KERNEL_STRICT=1`: the 126 offline renders are still main's bytes. With all of
+  Android's defaults: 187 pass, and 117 of the 126 are main's bytes (nine differ as the last vertex's direct light
+  and the unsampled sky intend).
+- `geometry/grow-live` adds 1,100 `dynamicGeometry` objects in a frame and often stops at the script's deadline
+  ("interrupted") on this machine while other jobs run: on main's build in 4 of the 7 times it was run, on this
+  build more often than not, whatever is set. Where it ran, it passed under hardware traversal in every configuration. Its 1,102 instance
+  records are past the uniform tables' 409, which the renderer says; under software traversal with the uniform
+  tables its centre reads 1 (the sky) instead of 0.5, both times it was run. That is the bound above, at work: a
+  scene past it is not drawn right with the uniform tables.
+- `cargo test --release` passes as written, with `THREERT_UNIFORM_TABLES=1`, and with all of Android's defaults.
+  `live::the_uniform_tables_render_what_the_tables_do` renders a scene offline on a device with and without the
+  uniform tables to the same bytes and reads the uniform buffers back against their tables, before and after an
+  edit in place.
+- The library checks for `aarch64-linux-android` (NDK 27.1, `cargo ndk -t arm64-v8a --platform 29 check --release
+  --lib --features "winit/android-native-activity rquickjs/bindgen"`, with `LIBCLANG_PATH` and the NDK sysroot for
+  bindgen) and for wasm32.
+- Not checked here: the pipeline cache against a driver (Metal has none: its file handling is tested, its wgpu
+  calls only compile), and anything on an Adreno.
+
 ## Correctness
 
 * `threert-render edit-check` builds the GPU tables both ways for a list of events: edited in place, and built fresh
