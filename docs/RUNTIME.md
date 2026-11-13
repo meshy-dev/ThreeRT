@@ -688,22 +688,20 @@ tree (ROADMAP § 6).
   the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
   [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
-  kernel binds 19 and the live passes 25. (Natively each live pass has a layout of its own, of the bindings its
-  entry point uses: `renderer/src/live/layout.rs`, from live.wgsl as build.rs reads it; three passes use more than
-  eight, so the browser's layout is still one for all, merged.) There is one source: the browser's shaders are written from
-  `pathtrace.wgsl` and `live.wgsl` as text when a module is compiled, and the native ones are untouched.
+  kernel binds 19. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
+  uses, `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit
+  test's check; a page binds them as natively.) There is one source: the browser's kernel is written from
+  `pathtrace.wgsl` as text when a module is compiled, and the native one is untouched.
   - The kernel's seven tables become the arrays of one struct in one buffer; their lengths are in the source, each a
     power of two above a floor, so a kernel is compiled again only when a table doubles. The renderer keeps writing
     its own buffers and a frame copies them into the struct's.
   - The kernel's six group-1 buffers (the radiance cache, what the live passes read of a trace) are ranges of one
-    buffer, the arrays of a second struct.
-  - The live passes' buffers of one element type are ranges of a slab each (the two atomic ones, the exposure
-    histogram and the carried thin-feature locks, share one), indexed from offsets in a uniform. A
-    lasting buffer's two halves (this frame's and the last, `LiveParams.state`) lie in its range, as natively.
+    buffer, the arrays of a second struct; what the live passes read of it starts at multiples of 256 bytes, so they
+    bind those ranges as buffers of their own.
   - A use of a merged name the generator does not know, a declaration not found exactly once, a name it would add
     that is taken: each stops the renderer, with the line. Locals that shadow a name are followed through their
-    scopes. A test reads the result with naga: valid WGSL, 8 storage buffers for the kernel and for the live passes
-    (19 and 25 as written), the structs' arrays where the Rust side puts them.
+    scopes. A test reads the result with naga: valid WGSL, 8 storage buffers for the kernel (19 as written), the
+    structs' arrays where the Rust side puts them.
   - `THREERT_MERGED=1` runs it natively (software traversal, the device held to 8).
 - **The loop guard** (`merged::guard`). The kernel's traversals follow indices they read from buffers and end only on
   sound data. On 2026-11-11 two dispatches that did not return took this machine's display down (WindowServer's
@@ -1211,7 +1209,7 @@ on the device", and differs where it says so.
   | `accum` (11), group 1 (radiance cache, the trace's outputs, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
   | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |
-  | the live passes (`live.wgsl`: 25 storage buffers, `ae_bins` and `ae_state` among them) | per pixel; two tiny | storage: written by the passes; the device showed their output right |
+  | the live passes (`live.wgsl`: 25 storage buffers, `ae_bins` and `ae_state` among them; at most eight a pass) | per pixel; two tiny | storage: written by the passes; the device showed their output right |
 
   Two of these are what a device run should look at first: `prev_verts` is the one storage buffer left after the
   acceleration structure's binding (13) and feeds the motion vectors of moving objects and the vertex colours;

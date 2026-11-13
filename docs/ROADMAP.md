@@ -2213,6 +2213,28 @@ is still the merged one, for all passes, until those three are rearranged. Check
 build before, native and merged, nothing changed; the passes after the trace 6.03-6.09 ms on both (Bistro, 1440p at
 0.375, alternated).
 
+**The live passes in a browser as natively (2026-11-14, after it).** The three passes over a browser's eight storage
+buffers, rearranged so that each binds at most eight, and the browser's layout is now the native one, a layout a
+pass:
+- `post` (13): the view modes are passes of their own before it, which a frame in the lit picture does not run
+  (`view_raw`: base colour, normal, history length into the output as they are; `view_hdr` and `view_sample`: the
+  signals in place of the image `post` exposes). An HDR snapshot in a view mode is now that signal (it was the
+  lit image).
+- `compose` (11): the upscaler's state of each sample (`Flicker`, `Lock`) is a pass of its own after it, `track`.
+- `dtemporal` (10): the surfaces' compact copy (`sb`) is written by `refl`, which reads each sample whole anyway.
+- The sample's parts are read apart (`sample_diffuse`, `_specular`, `_emission`): a pass binds the resolved reflection
+  only if it takes the specular part.
+- merged.rs's live half is gone (the slabs, the offsets' uniform, the live source's rewrite); the kernel's outputs the
+  passes read start at multiples of 256 bytes in its merged buffer (`@align(256)`), so a page binds those ranges.
+  `every_pass_fits_a_browser` holds every pass to eight.
+
+Checks: render-identity against the build before, native: 3 of 190 outputs differ by rounding
+(`particles-motion-repose` 277 pixels, at most ~3e-6 nits on dark ones; `wind-pivot-sway-live` and
+`voxel-cut-body-push` ~3e-5 relative); `THREERT_MERGED=1`: 3 (at most 7.5e-5 nits on values of 1 to 4). The view modes
+1-8: every PNG identical. `tools/web-hello.ts` in Chrome: pass. Cost +0.18 ms (Bistro, 1440p at 0.375, alternated:
+the passes after the trace 6.00-6.08 -> 6.19-6.24; `track` 0.27 less `compose`'s 0.08; the surfaces' copy in `refl`
++0.02, a pass of its own read the samples again: 0.18).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

@@ -47,18 +47,14 @@ pub(super) fn tonemap_lut(p: &crate::desc::PostPreset) -> Vec<u16> {
     out
 }
 
-/// The live passes' source: live.wgsl as it is, or in the merged layout its buffers merged into slabs (merged.rs).
-pub(crate) fn live_source(merged: bool) -> std::borrow::Cow<'static, str> {
-    let src = include_str!("../../shaders/live.wgsl");
-    if merged {
-        crate::merged::live(src).into()
-    } else {
-        src.into()
-    }
+/// The live passes' source: live.wgsl, natively and in a browser alike (each pass binds at most a browser's storage
+/// buffers: `layout`).
+pub(crate) fn live_source() -> &'static str {
+    include_str!("../../shaders/live.wgsl")
 }
 
 pub(super) struct Passes {
-    /// Each pass's bind group layout: the bindings it uses. In the merged layout (merged.rs) one for all.
+    /// Each pass's bind group layout: the bindings it uses.
     pub(super) layouts: Vec<wgpu::BindGroupLayout>,
     /// The passes in `layout::PASSES`' order, with the grid each runs over.
     pub(super) pipes: Vec<(&'static str, layout::Grid, wgpu::ComputePipeline)>,
@@ -78,42 +74,33 @@ fn layout_entry(b: &layout::Binding) -> wgpu::BindGroupLayoutEntry {
 impl Passes {
     pub(super) fn new(g: &gpu::Gpu) -> Passes {
         layout::check();
+        if g.merged {
+            // (A browser's stage binds at most eight storage buffers; the device here is held to them.)
+            let over: Vec<String> = layout::PASSES.iter().map(|p| (p.0, layout::storage_count(p.0))).filter(|p| p.1 as u32 > crate::merged::STORAGE_BUFFERS).map(|p| format!("{} binds {}", p.0, p.1)).collect();
+            assert!(over.is_empty(), "live passes over a browser's storage buffers: {}", over.join(", "));
+        }
         let d = &g.device;
-        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("live"), source: wgpu::ShaderSource::Wgsl(live_source(g.merged).into()) });
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("live"), source: wgpu::ShaderSource::Wgsl(live_source().into()) });
         let pipe = |name: &str, layout: &wgpu::BindGroupLayout| {
             let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(layout)], immediate_size: 0 });
             d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(name), layout: Some(&pl), module: &module, entry_point: Some(name), compilation_options: Default::default(), cache: g.cache() })
         };
-        let (layouts, pipes) = if g.merged {
-            // The merged layout: one for all passes, the buffers that stay, the slabs, and the offsets' uniform.
-            use crate::merged::{LIVE_KEPT, OFFSETS_BINDING, SLABS};
-            let mut entries: Vec<wgpu::BindGroupLayoutEntry> = layout::BINDINGS.iter().map(layout_entry).collect();
-            let storage = |e: &wgpu::BindGroupLayoutEntry| matches!(e.ty, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { .. }, .. });
-            entries.retain(|e| !storage(e) || LIVE_KEPT.iter().any(|k| k.0 == e.binding));
-            entries.extend(SLABS.iter().map(|s| layout_entry(&layout::Binding { name: s.name, binding: s.binding, kind: layout::Kind::Storage { read_only: s.read_only, stride: s.stride, len: 0 } })));
-            entries.push(wgpu::BindGroupLayoutEntry { binding: OFFSETS_BINDING, ..layout_entry(layout::binding("L")) });
-            let all = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live"), entries: &entries });
-            let pipes = layout::PASSES.iter().map(|&(name, grid)| (name, grid, pipe(name, &all))).collect();
-            (vec![all], pipes)
-        } else {
-            // A layout a pass, of the bindings it uses.
-            let mut layouts = vec![];
-            let mut pipes = vec![];
-            for &(name, grid) in layout::PASSES {
-                let entries: Vec<wgpu::BindGroupLayoutEntry> = layout::uses(name).iter().map(|&b| layout_entry(layout::BINDINGS.iter().find(|x| x.binding == b).expect("a binding of live.wgsl"))).collect();
-                let l = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries });
-                pipes.push((name, grid, pipe(name, &l)));
-                layouts.push(l);
-            }
-            (layouts, pipes)
-        };
+        // A layout a pass, of the bindings it uses.
+        let mut layouts = vec![];
+        let mut pipes = vec![];
+        for &(name, grid) in layout::PASSES {
+            let entries: Vec<wgpu::BindGroupLayoutEntry> = layout::uses(name).iter().map(|&b| layout_entry(layout::BINDINGS.iter().find(|x| x.binding == b).expect("a binding of live.wgsl"))).collect();
+            let l = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(name), entries: &entries });
+            pipes.push((name, grid, pipe(name, &l)));
+            layouts.push(l);
+        }
         g.save_pipeline_cache();
         Passes { layouts, pipes }
     }
 
     /// The layout pass `k` binds.
     pub(super) fn layout(&self, k: usize) -> &wgpu::BindGroupLayout {
-        &self.layouts[if self.layouts.len() == 1 { 0 } else { k }]
+        &self.layouts[k]
     }
 }
 
@@ -129,8 +116,6 @@ pub struct Targets {
     /// a trace: the specular-lobe rays (`refl`), motion vectors per traced pixel (pathtrace.wgsl `motion_out`) and the
     /// deterministic direct light per traced pixel (`direct_out`).
     pub kernel: gpu::KernelBufs,
-    /// The merged layout (merged.rs): the slabs the buffers above are ranges of (`SLABS` but the kernel's).
-    pub(super) slabs: Option<[wgpu::Buffer; 5]>,
     pub(super) lut_tex: wgpu::Texture,
     pub(super) lut_view: wgpu::TextureView,
     pub(super) sampler: wgpu::Sampler,
@@ -139,7 +124,6 @@ pub struct Targets {
 impl Targets {
     /// For a view of `w` x `h` and a radiance cache of `cache` entries.
     pub(super) fn new(g: &gpu::Gpu, w: u32, h: u32, lut: &[u16], cache: u64) -> Targets {
-        use crate::merged::{LIVE_BUFS, SLABS, SLAB_K};
         let d = &g.device;
         let n = (w * h) as u64;
         let sb = |label: &str, bytes: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
@@ -162,10 +146,8 @@ impl Targets {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(LUT * 8), rows_per_image: Some(LUT) },
             wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
         );
-        // The passes' own buffers, in binding order: their bytes, and in the merged layout the slab of their element
-        // type (merged.rs `LIVE_BUFS`; none: a buffer that stays, `out_px`). Each range in a slab starts at a multiple
-        // of 16 bytes: of every slab's element.
-        let own: Vec<(&layout::Binding, u64, Option<usize>)> = layout::BINDINGS
+        // The passes' own buffers, in binding order.
+        let bufs: Vec<(u32, Buf)> = layout::BINDINGS
             .iter()
             .filter_map(|b| {
                 let layout::Res::Own(count) = layout::resource(b) else { return None };
@@ -176,26 +158,7 @@ impl Targets {
                     layout::Count::Bloom => bloom_texels,
                     layout::Count::Declared => len,
                 };
-                Some((b, elements * stride, LIVE_BUFS.iter().find(|m| m.name == b.name).map(|m| m.slab)))
-            })
-            .collect();
-        let slabs: Option<[wgpu::Buffer; 5]> = g.merged.then(|| {
-            debug_assert_eq!(SLAB_K, 5, "the owned slabs are the first five");
-            std::array::from_fn(|k| sb(SLABS[k].name, own.iter().filter(|o| o.2 == Some(k)).map(|o| o.1.next_multiple_of(16)).sum()))
-        });
-        let mut at = [0u64; 5];
-        let bufs: Vec<(u32, Buf)> = own
-            .iter()
-            .map(|&(b, bytes, slab)| {
-                let buf = match (&slabs, slab) {
-                    (Some(s), Some(k)) => {
-                        let r = Buf { buffer: s[k].clone(), offset: at[k], size: bytes };
-                        at[k] += bytes.next_multiple_of(16);
-                        r
-                    }
-                    _ => Buf::whole(sb(b.name, bytes)),
-                };
-                (b.binding, buf)
+                Some((b.binding, Buf::whole(sb(b.name, elements * stride))))
             })
             .collect();
         let out = bufs.iter().find(|b| b.0 == layout::binding("out_px").binding).expect("out_px").1.buffer.clone();
@@ -204,7 +167,6 @@ impl Targets {
             bufs,
             out,
             kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, n * 16),
-            slabs,
             lut_view: lut_tex.create_view(&Default::default()),
             lut_tex,
             sampler: d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
@@ -226,8 +188,7 @@ impl Targets {
         }
     }
 
-    /// The bind group of each pass, in `Passes::pipes`' order (`sample`: the trace's samples). In the merged layout
-    /// (merged.rs) one for all, the slabs and the offsets the passes read (`LO`).
+    /// The bind group of each pass, in `Passes::pipes`' order (`sample`: the trace's samples).
     pub(super) fn bind_groups(&self, d: &wgpu::Device, passes: &Passes, sample: &wgpu::Buffer) -> Vec<wgpu::BindGroup> {
         let entry = |b: &'_ layout::Binding| -> wgpu::BindGroupEntry<'_> {
             let resource = match layout::resource(b) {
@@ -239,40 +200,14 @@ impl Targets {
             };
             wgpu::BindGroupEntry { binding: b.binding, resource }
         };
-        match (&self.slabs, &self.kernel.merged) {
-            (Some(slabs), Some((live, _))) => {
-                use crate::merged::{LIVE_BUFS, LIVE_KEPT, OFFSETS_BINDING, SLABS, SLAB_K};
-                // Each merged buffer's (first element, length) in its slab, in `MergedOffsets`' order, and the
-                // struct's unused last pair (`merged::OFFSETS_BYTES`).
-                let mut lo: Vec<[u32; 2]> = LIVE_BUFS
-                    .iter()
-                    .map(|m| {
-                        let buf = self.buf(m.name);
-                        let stride = SLABS[m.slab].stride;
-                        debug_assert!(buf.offset % stride == 0 && buf.size % stride == 0);
-                        [(buf.offset / stride) as u32, (buf.size / stride) as u32]
-                    })
-                    .collect();
-                lo.push([0, 0]);
-                debug_assert_eq!(lo.len() * 8, crate::merged::OFFSETS_BYTES);
-                let offsets = wgpu::util::DeviceExt::create_buffer_init(d, &wgpu::util::BufferInitDescriptor { label: Some("live offsets"), contents: bytemuck::cast_slice(&lo), usage: wgpu::BufferUsages::UNIFORM });
-                let storage = |b: &layout::Binding| matches!(b.kind, layout::Kind::Storage { .. });
-                let mut entries: Vec<wgpu::BindGroupEntry> = layout::BINDINGS.iter().filter(|b| !storage(b) || LIVE_KEPT.iter().any(|k| k.0 == b.binding)).map(entry).collect();
-                entries.extend(slabs.iter().zip(&SLABS).map(|(s, m)| wgpu::BindGroupEntry { binding: m.binding, resource: s.as_entire_binding() }));
-                entries.push(wgpu::BindGroupEntry { binding: SLABS[SLAB_K].binding, resource: live.as_entire_binding() });
-                entries.push(wgpu::BindGroupEntry { binding: OFFSETS_BINDING, resource: offsets.as_entire_binding() });
-                let all = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout: passes.layout(0), entries: &entries });
-                vec![all; passes.pipes.len()]
-            }
-            _ => passes
-                .pipes
-                .iter()
-                .enumerate()
-                .map(|(k, (name, ..))| {
-                    let entries: Vec<wgpu::BindGroupEntry> = layout::uses(name).iter().map(|&b| entry(layout::BINDINGS.iter().find(|x| x.binding == b).expect("a binding of live.wgsl"))).collect();
-                    d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(name), layout: passes.layout(k), entries: &entries })
-                })
-                .collect(),
-        }
+        passes
+            .pipes
+            .iter()
+            .enumerate()
+            .map(|(k, (name, ..))| {
+                let entries: Vec<wgpu::BindGroupEntry> = layout::uses(name).iter().map(|&b| entry(layout::BINDINGS.iter().find(|x| x.binding == b).expect("a binding of live.wgsl"))).collect();
+                d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(name), layout: passes.layout(k), entries: &entries })
+            })
+            .collect()
     }
 }
