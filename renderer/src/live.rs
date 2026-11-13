@@ -246,7 +246,7 @@ impl Passes {
             count: None,
         });
         entries.push(wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None });
-        entries.extend([buf(13, false), buf(14, false), buf(15, false), buf(16, false), buf(17, true), buf(18, false)]);
+        entries.extend([buf(13, false), buf(14, false), buf(15, false), buf(16, false), buf(17, false), buf(18, false)]);
         entries.extend([buf(19, true), buf(20, false), buf(21, true), buf(22, false), buf(23, false), buf(24, false), buf(25, true), buf(26, false), buf(27, true), buf(28, true), buf(29, true), buf(30, false)]);
         // The merged layout: the buffers that stay, the slabs, and the offsets' uniform (merged.rs).
         if g.merged {
@@ -275,7 +275,8 @@ pub struct Targets {
     hist: [Buf; 2],
     /// The traced grid's g-buffer (ping-pong: this frame's, the previous frame's).
     gb: [Buf; 2],
-    /// What `judge` finds of the colour history per traced sample (live.wgsl `Judged`); the second is not read.
+    /// Ping-pong, per traced sample: what `judge` finds of the colour history (live.wgsl `Judged`) in the one a frame
+    /// writes, the diffuse fast mean in colour (`fast_load`) in the other, which the next frame reads before `judge`.
     alb: [Buf; 2],
     /// Specular history, diffuse luminance moments (ping-pong, traced grid), the specular filter's two slots, and the
     /// scratch `dtemporal` and the upscaled image share.
