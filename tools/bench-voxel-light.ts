@@ -14,8 +14,8 @@
 //            above it around its foot.
 //  subtree   when emitters added in place get a light-tree subtree of their own (the supervisor's rule): the same lamp
 //            in the static tree (its pole cut in setup), and after the same cut in place at frame 3 in the subtree of
-//            emitters added in place (ltree.rs `set_dynamic`) and, THREERT_LT_DYNAMIC=0, in the CDF's power-share part,
-//            at the same frames, against the offline render of that world over what it lights: mean ΔE of the
+//            emitters added in place (ltree.rs `set_dynamic`), at the same frames, against the offline render of that
+//            world over what it lights: mean ΔE of the
 //            64-frame shot, and the per-pixel variance of the luminance over `--repeat` such shots.
 //  blast     the lamp blown up live at 5 s (a 1 m explosion; its pieces fly, the glowing ones lighting what they pass,
 //            and settle back after 3 s), `--rounds` runs: the explosion frame (the worse of its two), frames over 50
@@ -183,18 +183,18 @@ if (only.includes("subtree")) {
   const lb = await bundle("pole-live-0", { blast: "pole", when: 3 });
   const t = truth("pole-setup-0", tb);
   const rows: Record<string, unknown>[] = [];
-  for (const [tag, b, env] of [["static tree", tb, {}], ["in place, own subtree", lb, {}], ["in place, power share", lb, { THREERT_LT_DYNAMIC: "0" }]] as const) {
-    const shots = await liveShots(`subtree-${tag.replace(/[^a-z]+/g, "-")}`, b, repeat, { env });
+  for (const [tag, b] of [["static tree", tb], ["in place, own subtree", lb]] as const) {
+    const shots = await liveShots(`subtree-${tag.replace(/[^a-z]+/g, "-")}`, b, repeat, {});
     const de = shots.map((s) => compare(t.png, s, LIT));
     const v = await variance(shots, LIT);
     rows.push({ tag, de: de.map((m) => m.mean_delta_e), de_mean: r3(de.reduce((a, m) => a + m.mean_delta_e, 0) / de.length), ssim_mean: r3(de.reduce((a, m) => a + m.ssim, 0) / de.length), lum_ratio: r3(de.reduce((a, m) => a + m.luminance_ratio, 0) / de.length), var_rel: v.rel, var: v.var });
   }
-  const [s, d, p] = rows as { de_mean: number; var: number }[];
+  const [s, d] = rows as { de_mean: number; var: number }[];
   const over = (x: { de_mean: number; var: number }) => x.de_mean - s.de_mean > 0.5 || x.var > 1.5 * s.var;
-  result.subtree = { rows, own: { de_diff: r3(d.de_mean - s.de_mean), var_ratio: r3(d.var / s.var), over: over(d) }, power_share: { de_diff: r3(p.de_mean - s.de_mean), var_ratio: r3(p.var / s.var), over: over(p) } };
-  console.log(`\nsubtree: the lamp's emitters in the static tree, and moved in place to the subtree of emitters added in place or to the CDF's power-share part; ${repeat} live shots of 64 frames each, over what it lights`);
+  result.subtree = { rows, own: { de_diff: r3(d.de_mean - s.de_mean), var_ratio: r3(d.var / s.var), over: over(d) } };
+  console.log(`\nsubtree: the lamp's emitters in the static tree, and moved in place to the subtree of emitters added in place; ${repeat} live shots of 64 frames each, over what it lights`);
   for (const r of rows) console.log(`  ${String(r.tag).padEnd(24)} ΔE ${r.de_mean} (${(r.de as number[]).map((x) => x.toFixed(2)).join(" ")}), SSIM ${r.ssim_mean}, luminance ${r.lum_ratio} of offline, variance ${(r.var as number).toExponential(3)} (relative ${(r.var_rel as number).toExponential(3)})`);
-  for (const [tag, x] of [["own subtree", d], ["power share", p]] as const) console.log(`  ${tag}: ΔE ${x.de_mean - s.de_mean >= 0 ? "+" : ""}${r3(x.de_mean - s.de_mean)}, variance x${r3(x.var / s.var)} of the static tree's: ${over(x) ? "over the rule's line (ΔE +0.5 or variance +50 %)" : "within the rule's lines"}`);
+  for (const [tag, x] of [["own subtree", d]] as const) console.log(`  ${tag}: ΔE ${x.de_mean - s.de_mean >= 0 ? "+" : ""}${r3(x.de_mean - s.de_mean)}, variance x${r3(x.var / s.var)} of the static tree's: ${over(x) ? "over the rule's line (ΔE +0.5 or variance +50 %)" : "within the rule's lines"}`);
 }
 
 if (only.includes("blast")) {
