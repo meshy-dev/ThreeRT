@@ -24,7 +24,7 @@ test("the fire light: the table's rows at the measured sizes, linear in age betw
   for (const d of [0, -1, NaN]) assert.deepEqual(fireLight(0.2, d), [0, 0, 0], `size ${d}`);
 });
 
-const state = (x: Explosions) => JSON.stringify([x.fireballs.map((f) => [f.position.toArray(), f.scale.toArray(), f.customData]), x.lights.map((l) => [l.position.toArray(), l.intensity, l.distance]), x.stats]);
+const state = (x: Explosions) => JSON.stringify([x.fireballs.map((f) => [f.position.toArray(), f.scale.toArray(), f.customData, f.visible]), x.lights.map((l) => [l.position.toArray(), l.intensity, l.distance, l.visible]), x.stats]);
 function bound(x: Explosions) {
   const scene = new Scene();
   scene.add(x);
@@ -33,8 +33,8 @@ function bound(x: Explosions) {
   binding.sync();
   return { scene, e, binding, made: e.take() };
 }
-/** Placed fireballs (not parked). */
-const placed = (x: Explosions) => x.fireballs.filter((f) => f.position.y > -1000);
+/** Fireballs shown (burning or waiting to start; idle ones are hidden). */
+const placed = (x: Explosions) => x.fireballs.filter((f) => f.visible);
 
 test("the pool: the next fireball each fire, the oldest taken over, lights for the youngest that give light", () => {
   const x = new Explosions({ fireballs: 3, lights: 2 });
@@ -66,11 +66,11 @@ test("the pool: the next fireball each fire, the oldest taken over, lights for t
   assert.deepEqual(x.lights.map((q) => q.position.x).sort((a, b) => a - b), [20, 30]);
   x.step(10.45);
   assert.deepEqual(x.lights.map((q) => q.position.x).sort((a, b) => a - b), [30, 40], "a frame on, it has one");
-  // Burnt out: parked, the lights off.
+  // Burnt out: hidden, the lights off (black, without a reach, hidden: in no group of lights).
   x.step(20);
   assert.equal(x.stats.burning, 0);
   assert.equal(x.stats.lit, 0);
-  assert.ok(x.lights.every((q) => q.intensity === 0 && q.distance > 0 && q.distance < 0.01), "off, and reaching nothing (distance 0 would be unbounded)");
+  assert.ok(x.lights.every((q) => q.intensity === 0 && q.distance === 0 && !q.visible), "black, hidden");
   assert.equal(placed(x).length, 0);
   assert.equal(x.stats.most, 3);
 });
@@ -101,6 +101,17 @@ test("time: a fire set for later waits, is counted when taken over; time going b
   assert.equal(placed(x).length, 0);
   x.step(6.1);
   assert.equal(x.stats.burning, 0, "nothing set before the restart burns after it");
+});
+
+test("idle fireballs and lights are hidden from the start, shown while they burn and light, hidden again after", () => {
+  const x = new Explosions({ fireballs: 2, lights: 1 });
+  assert.ok(x.fireballs.every((f) => !f.visible) && x.lights.every((l) => !l.visible && l.distance === 0));
+  x.fire([0, 0, 0], 1, 1);
+  assert.ok(x.fireballs[0].visible && !x.fireballs[1].visible, "the one fired is shown at once (it may wait to start)");
+  x.step(1.2);
+  assert.ok(x.lights[0].visible && x.lights[0].distance > 0);
+  x.step(5);
+  assert.ok(x.fireballs.every((f) => !f.visible) && x.lights.every((l) => !l.visible && l.intensity === 0 && l.distance === 0));
 });
 
 test("firing changes objects in place: after setup no object is made or removed", () => {

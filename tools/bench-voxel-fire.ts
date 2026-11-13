@@ -10,6 +10,12 @@
 //             no edge anti-aliasing) against our offline render at that scene time (no clamps, no denoiser), which has
 //             the fireball's own light and no fire light. Live with the fire light and without (what it buys). ΔE (mean,
 //             p99) and SSIM over the image, the fireball, the street before it, and 3 x 3 regions.
+//  smoke      `fireShot` with a smoke grid each fire puffs into (the game's own `SimulatedSmoke`), `--ages` (0.2,0.5) after the
+//             fire: live fires at 2 s (after the level's load), offline at 0 s (an offline render gives a grid the
+//             sources pending at it at its first step), so both are the same age. Without the grid, with it, and with it
+//             and two overlapping fireballs: the fire seen in its smoke, offline and live (each region's ΔE and
+//             luminance). Then the grid through a rebuild: the live frame at 3 s after the fire with a box added at 1 s
+//             (the live scene rebuilds) against the same without it; the frame log's rebuilds.
 //  cost       games/voxel-level/level-destruction{,-smoke,-fire}.game.ts at 0.75, lockstep (frames as fast as the GPU
 //             goes): the frame's CPU and GPU ms for 2 s before and 4 s after the 4 m explosion (`crater`); with fire,
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
@@ -17,7 +23,7 @@
 //             `--scenario name`: instead, that scenario of the game on every route (`sustained`, `topple`: explosions that
 //             cut parts loose): each such explosion's parts kicked and the bodies' speeds just after it (step 10 c1).
 //
-//   node tools/bench-voxel-fire.ts [--only calibrate,quality,cost] [--spp 2048] [--software]
+//   node tools/bench-voxel-fire.ts [--only calibrate,quality,smoke,cost] [--spp 2048] [--software] [--ages 0.2,0.5]
 //
 // One renderer at a time. A step that gives no answer in its time ends this script with exit 3 and leaves the renderer
 // alone (never killed). Result: out/bench/voxel-fire/<time>.json and tables on stdout.
@@ -34,7 +40,7 @@ import { generate } from "./voxel-level/generate.ts";
 
 const args = process.argv.slice(2);
 const opt = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const only = opt("--only", "calibrate,quality,cost").split(",");
+const only = opt("--only", "calibrate,quality,smoke,cost").split(",");
 const SPP = Number(opt("--spp", "2048"));
 const SCALE = opt("--scale", "0.75");
 const dir = join(repoRoot, "out/voxel-fire");
@@ -270,6 +276,76 @@ if (only.includes("quality")) {
   const own = judge(truths[1].png, half.png, 0.5);
   report(`offline ${SPP / 2} vs ${SPP} spp, 0.5 s`, own);
   result.quality = { rows, own };
+}
+
+if (only.includes("smoke")) {
+  generate(1, "object");
+  const ages = opt("--ages", "0.2,0.5").split(",").map(Number), T0 = 2;
+  const rows: Record<string, unknown>[] = [];
+  console.log(`\nsmoke: the fire with the smoke grid, live (scale ${SCALE}, fire at ${T0} s) against offline (${SPP} spp, fire at 0 s), at the same age; ΔE mean / p99 / SSIM / luminance`);
+  // (`--variants`: which of them; "grid, no light" is the grid live without the fire light, against the grid's offline
+  // reference: what the stand-in light adds to the smoke.)
+  const variants = opt("--variants", "no grid,grid,grid, two fireballs").split(/,(?! )/);
+  const all = [["no grid", {}, true], ["grid", { smoke: true }, true], ["grid, two fireballs", { smoke: true, pair: true }, true], ["grid, no light", { smoke: true }, false]] as const;
+  for (const [tag, o, light] of all.filter((v) => variants.includes(v[0]))) {
+    const ref = tag === "grid, no light" ? "grid" : tag;
+    const refB = await bundle(`smoke-ref-${ref.replace(/\W+/g, "-")}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: false, at: 0, ...o });
+    const litB = await bundle(`smoke-lit-${tag.replace(/\W+/g, "-")}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light, at: T0, ...o });
+    const truths = ages.map((x) => offline(`smoke-${ref.replace(/\W+/g, "-")}-${x}`, refB, x));
+    const log = join(dir, `smoke-${tag.replace(/\W+/g, "-")}.jsonl`);
+    const s = live(`smoke-${tag}`, litB, { frameLog: log });
+    const shots: string[] = [];
+    for (const x of ages) {
+      const png = join(dir, `smoke-${tag.replace(/\W+/g, "-")}-${x}.png`);
+      await s.frames(Math.round((T0 + x) * 60) - s.frame - 1);
+      await s.frames(1, png);
+      shots.push(png);
+    }
+    await s.quit();
+    const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { rebuild: number });
+    const rebuilds = F.filter((f, k) => k > 60 && f.rebuild > 0).length;
+    for (let k = 0; k < ages.length; k++) {
+      const j = judge(truths[k].png, shots[k], ages[k]);
+      rows.push({ tag, age: ages[k], j, offline: truths[k].png, live: shots[k], rebuilds });
+      report(`${tag}, ${ages[k]} s`, j);
+    }
+    console.log(`  ${tag}: rebuilds after the load ${rebuilds}; pictures ${shots.join(", ")}; offline ${truths.map((t) => t.png).join(", ")}`);
+  }
+  // Through a rebuild: a box added at 1 s after the fire (the live scene rebuilds), the frame at 3 s against the same
+  // run without it (`--no-rebuild-check`: not run).
+  const rb: string[] = [];
+  if (!args.includes("--no-rebuild-check")) {
+  for (const [tag, o] of [["no rebuild", {}], ["rebuild at 1 s", { rebuildAt: T0 + 1 }]] as const) {
+    const b = await bundle(`smoke-rb-${tag.replace(/\W+/g, "-")}`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, at: T0, smoke: true, ...o });
+    const log = join(dir, `smoke-rb-${tag.replace(/\W+/g, "-")}.jsonl`);
+    const s = live(`smoke-rb-${tag}`, b, { frameLog: log });
+    const png = join(dir, `smoke-rb-${tag.replace(/\W+/g, "-")}.png`);
+    await s.frames(Math.round((T0 + 3) * 60) - 1);
+    await s.frames(1, png);
+    await s.quit();
+    const F = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { rebuild: number });
+    const rebuilds = F.flatMap((f, k) => (k > 60 && f.rebuild > 0 ? [`frame ${k}: ${f.rebuild.toFixed(0)} ms`] : []));
+    console.log(`  ${tag}: rebuilds after the load ${rebuilds.length ? rebuilds.join(", ") : "none"}; ${png}`);
+    rb.push(png);
+    rows.push({ tag, rebuilds, png });
+  }
+  const through = judge(rb[0], rb[1], 3);
+  report("rebuild vs none, 3 s", through);
+  rows.push({ tag: "rebuild vs none", age: 3, j: through });
+  // The live view's own run-to-run spread at that frame: the same run twice.
+  {
+    const b = await bundle(`smoke-rb-no-rebuild`, "games/voxel-level/level-fire.game.ts", "fireShot", { light: true, at: T0, smoke: true });
+    const s = live(`smoke-rb-again`, b);
+    const png = join(dir, `smoke-rb-again.png`);
+    await s.frames(Math.round((T0 + 3) * 60) - 1);
+    await s.frames(1, png);
+    await s.quit();
+    const aa = judge(rb[0], png, 3);
+    report("no rebuild, run 2 vs 1", aa);
+    rows.push({ tag: "live A/A", age: 3, j: aa });
+  }
+  }
+  result.smoke = rows;
 }
 
 if (only.includes("cost")) {
