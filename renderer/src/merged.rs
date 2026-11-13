@@ -159,7 +159,7 @@ pub const LIVE_BUFS: [LiveBuf; 25] = [
     LiveBuf { name: "ae_state", binding: 14, slab: SLAB_V4, decl: "@group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;" },
     LiveBuf { name: "lumq", binding: 15, slab: SLAB_F1, decl: "@group(0) @binding(15) var<storage, read_write> lumq: array<f32>;" },
     LiveBuf { name: "lumb", binding: 16, slab: SLAB_F1, decl: "@group(0) @binding(16) var<storage, read_write> lumb: array<f32>;" },
-    LiveBuf { name: "ae_in", binding: 17, slab: SLAB_U4, decl: "@group(0) @binding(17) var<storage, read> ae_in: array<vec4<u32>>;" },
+    LiveBuf { name: "ae_in", binding: 17, slab: SLAB_U4, decl: "@group(0) @binding(17) var<storage, read_write> ae_in: array<vec4<u32>>;" },
     LiveBuf { name: "ae_out", binding: 18, slab: SLAB_U4, decl: "@group(0) @binding(18) var<storage, read_write> ae_out: array<vec4<u32>>;" },
     LiveBuf { name: "shist_in", binding: 19, slab: SLAB_V4, decl: "@group(0) @binding(19) var<storage, read> shist_in: array<vec4<f32>>;" },
     LiveBuf { name: "shist_out", binding: 20, slab: SLAB_V4, decl: "@group(0) @binding(20) var<storage, read_write> shist_out: array<vec4<f32>>;" },

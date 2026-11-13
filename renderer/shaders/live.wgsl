@@ -59,9 +59,10 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;    // exposure, target, mean log2 lum, valid
 @group(0) @binding(15) var<storage, read_write> lumq: array<f32>;                 // quarter res log2 luminance (unexposed)
 @group(0) @binding(16) var<storage, read_write> lumb: array<f32>;                 // edge-aware blur of lumq
-// Per traced sample, what `judge` finds of the output grid's colour history (`Judged`, f16). (`ae_in`: its ping-pong
-// partner, not read.)
-@group(0) @binding(17) var<storage, read> ae_in: array<vec4<u32>>;
+// Per traced sample, what `judge` finds of the output grid's colour history (`Judged`, f16), in `ae_out`. Until then
+// `ae_out` holds what the previous frame's `dtemporal` wrote to `ae_in`, its ping-pong partner: the diffuse fast mean
+// in colour (`fast_load`).
+@group(0) @binding(17) var<storage, read_write> ae_in: array<vec4<u32>>;
 @group(0) @binding(18) var<storage, read_write> ae_out: array<vec4<u32>>;
 // Specular history on the traced grid (rgb + history length), diffuse luminance moments (mean, mean square, fast mean, -).
 @group(0) @binding(19) var<storage, read> shist_in: array<vec4<f32>>;
@@ -295,6 +296,14 @@ fn medium_share(q: u32) -> f32 {
     return floor(sample_px[q].normal.w) / 255.0;
 }
 
+// The diffuse irradiance's fast mean in colour (f16 rgb; a quarter of each new sample, as its luminance in the
+// moments), per traced sample: `dtemporal` reads the previous frame's from `ae_out` (before `judge` writes its own
+// there) and writes this frame's to `ae_in`, the next frame's `ae_out`.
+fn fast_load(j: u32) -> vec3<f32> {
+    let v = ae_out[j];
+    return vec3<f32>(unpack2x16float(v.x), unpack2x16float(v.y).x);
+}
+
 fn sample_color(q: u32) -> vec3<f32> {
     let s = sample_parts(q);
     return (s[0] + s[1]) * medium_tr(q) + s[2];
@@ -348,6 +357,9 @@ const HIST_CENTRE: f32 = 16.0;
 // noise, at which anti-lag leaves it two frames (`dtemporal`).
 const HIST_MOVING: f32 = 48.0;
 const ANTILAG: f32 = 0.15;
+// The fast-history clamp's band, in standard errors of the fast means' mean around the pixel (`dtemporal`). At 2 the
+// Bistro slice at rest read dE 2.92 for 2.82 (it found noise); at 3, 2.83.
+const FAST_BAND: f32 = 3.0;
 // Diffuse history length from which the firefly cut stops (dtemporal).
 const FIREFLY_FRAMES: f32 = 16.0;
 
@@ -374,7 +386,12 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     var l = lum(irr);
     var hd = vec4<f32>(0.0);
     var hm = vec4<f32>(0.0);
+    var hf = vec3<f32>(0.0);     // the fast mean in colour, reprojected
+    var slow_c = vec3<f32>(0.0); // the slow and the fast means in colour around the point
+    var fast_c = vec3<f32>(0.0);
     var around = vec2<f32>(-1.0);
+    var fast_sd = 0.0; // of the fast luminances around the point (their spread in space), and how many
+    var fast_n = 1.0;
     var speed = 0.0; // output pixels this frame
     let ps = vec2<i32>(L.isz.zw);
     if (L.size.w == 0u && ps.x > 0) {
@@ -408,16 +425,18 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let j = u32(ty * ps.x + tx);
                 hd += hist_in[j] * bw;
                 hm += mom_in[j] * bw;
+                hf += fast_load(j) * bw;
                 wsum += bw;
             }
             if (wsum > 1e-3) {
                 hd /= wsum;
                 hm /= wsum;
+                hf /= wsum;
             } else {
                 hd = vec4<f32>(0.0);
                 hm = vec4<f32>(0.0);
             }
-            if (non_finite(hd.rgb) || non_finite(hm.xyz)) {
+            if (non_finite(hd.rgb) || non_finite(hm.xyz) || non_finite(hf)) {
                 hd = vec4<f32>(0.0);
                 hm = vec4<f32>(0.0);
             }
@@ -425,17 +444,28 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Slow / fast means over the 3x3 around it on the same surface (anti-lag compares them).
             if (t > 0.0 && L.mode.z != 0u) {
                 var acc = vec2<f32>(0.0);
+                var acc2 = 0.0;
                 var na = 0.0;
                 for (var k = 0; k < 9; k++) {
                     let tx = i32(round(tc.x)) + k % 3 - 1;
                     let ty = i32(round(tc.y)) + k / 3 - 1;
                     if (tx < 0 || ty < 0 || tx >= ps.x || ty >= ps.y || !same_surface(tx, ty, pp.z, n, t)) { continue; }
-                    let m = mom_in[u32(ty * ps.x + tx)];
+                    let j = u32(ty * ps.x + tx);
+                    let m = mom_in[j];
                     if (m.w <= 0.0 || non_finite(m.xyz)) { continue; }
+                    slow_c += hist_in[j].rgb;
+                    fast_c += fast_load(j);
                     acc += vec2<f32>(m.x, m.z);
+                    acc2 += m.z * m.z;
                     na += 1.0;
                 }
-                if (na > 0.0) { around = acc / na; }
+                if (na > 0.0) {
+                    around = acc / na;
+                    slow_c /= na;
+                    fast_c /= na;
+                    fast_sd = sqrt(max(acc2 / na - around.y * around.y, 0.0));
+                    fast_n = na;
+                }
             }
         }
     }
@@ -465,6 +495,7 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // read dE 2.43 against offline with it always on, 2.23 without).
     // (The specular has none: at one sample a pixel its fast mean is noise, and cutting by it cost more than the lag:
     // the Bistro slice at 5 s read dE 2.98 with it for 2.82.)
+    var hist = hd.rgb;
     if (L.mode.z != 0u && hd.w >= 6.0 && around.x >= 0.0) {
         let over = abs(around.y - around.x) - 3.0 * 0.38 * sd / 3.0 - 1e-4;
         let keep = 1.0 - clamp(over / (ANTILAG * max(max(around.x, around.y), 1e-6)), 0.0, 1.0);
@@ -474,9 +505,34 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             m2 = m1 * m1 + sd * sd;
         }
     }
+    // The fast-history clamp (ReBLUR's): the cut above acts once, on luminance, and the history it leaves still holds
+    // the old light (a lamp switched off left its pool on the wall 3.3 times too bright after half a second, 17 %
+    // after 4 s, falling as 1 / frames; a sign's, in its colour). So every frame the slow means around the point
+    // are held, a channel each, to the band of the fast means there: their mean +- FAST_BAND of its standard error
+    // (the fast luminances' spread over the root of their number; both means are of the same pixels, so what
+    // differs between neighbours cancels), and this pixel's history is changed by the same ratios. What is left of
+    // it counts for as many frames less: the pixel goes back to the spatial filter. While the lighting is live, as
+    // the cut: on a settled scene there is nothing to find.
+    if (L.mode.z != 0u && around.x >= 0.0 && hd.w > 0.0 && !non_finite(fast_c) && !non_finite(slow_c)) {
+        let rel = FAST_BAND * fast_sd / sqrt(fast_n) / max(around.y, 1e-6);
+        let to = clamp(slow_c, fast_c * max(1.0 - rel, 0.0), fast_c * (1.0 + rel) + 1e-4);
+        if (any(to != slow_c)) {
+            // (A channel the history has none of takes the difference itself.)
+            let has = slow_c > vec3<f32>(1e-5);
+            let r = select(vec3<f32>(1.0), to / slow_c, has);
+            hist = hist * r + select(to - slow_c, vec3<f32>(0.0), has);
+            let rl = lum(to) / max(lum(slow_c), 1e-6);
+            m1 *= rl;
+            m2 = m1 * m1 + sd * sd * rl * rl;
+            let left = min(r, 1.0 / max(r, vec3<f32>(1e-6)));
+            count = max(min(count, hd.w * min(left.x, min(left.y, left.z)) + 1.0), 2.0);
+        }
+    }
     let a = 1.0 / max(count, 1.0);
     let mom = vec4<f32>(mix(m1, l, a), mix(m2, l * l, a), fast, 1.0);
-    let d = mix(hd.rgb, irr, a);
+    let d = mix(hist, irr, a);
+    let fc = select(irr, mix(hf, irr, 0.25), hd.w > 0.0);
+    ae_in[q] = vec4<u32>(pack2x16float(min(fc.rg, vec2<f32>(6.0e4))), pack2x16float(vec2<f32>(min(fc.b, 6.0e4), 0.0)), 0u, 0u);
     hist_out[q] = vec4<f32>(d, count);
     mom_out[q] = mom;
     // Denoiser input; w = variance of the accumulated mean luminance (its noise estimate).

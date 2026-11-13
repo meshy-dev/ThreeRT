@@ -1953,16 +1953,45 @@ converged frame of the state after, beside the frame k frames after a history re
 | sign off, the floor beside it | 2.94 / 2.53 / 1.66 / 1.12 / 1.05 | 12.7 / 1.56 | 0.73 / 0.46 |
 | sign on, the floor beside it | 0.35 / 0.48 / 0.76 / 0.95 / 0.97 | 7.28 / 0.84 | 0.80 / 0.43 |
 
-- **Open, the live view's largest fault found so far:** a lamp switched off leaves its pool on the wall for seconds,
-  11 times too bright after 8 frames, 3.3 times after half a second, still 17 % after 4 s, in blotches. The excess
-  falls as 1 / k. The diffuse history is cut once, to 2 frames, when its fast mean leaves the slow one; half the old
-  light is still in it, the slow mean is set to the fast one, the anti-lag has nothing more to find, and the history
-  accumulates again from there (and after 45 frames the long history is back). The upscaler's 16 samples follow that.
-  ReBLUR's form is another: the slow history clamped every frame into the range of a fast one (about 6 frames) around
-  the pixel, so it is dragged along until it has followed. Not done here.
+- **The live view's largest fault found so far:** a lamp switched off leaves its pool on the wall for seconds, 11
+  times too bright after 8 frames, 3.3 times after half a second, still 17 % after 4 s, in blotches. The excess
+  falls as 1 / k: the diffuse history is cut once, on luminance, when its fast mean leaves the slow one, and what the
+  cut leaves still holds the old light. Closed below ("The fast-history clamp").
 - The question #39 left: the radiance cache's 4 frames while the lighting is live. At 32 frames the bounce follows
   later (lamp off: 2.24 for 1.66 at 32 frames, 1.38 for 1.12 at 128; lamp on: 0.50 for 0.72, 0.79 for 0.93). The 4
   frames buy what they were said to and stay; the 0.16 ΔE they cost a scene at rest is the price.
+
+**The fast-history clamp (2026-11-13, after it).** ReBLUR's way of following a lighting change, in `dtemporal`: every
+frame, while the scene's lighting is live, the slow means around the pixel (3 × 3 on its surface) are held, a channel
+each, to the band of the fast means there (a quarter of each new sample; their mean ± 3 standard errors, from the fast
+luminances' spread), and the pixel's history is changed by the same ratios and counts for as many frames less. The
+fast mean in colour is kept in the buffer that was the `judge` pass's unread ping-pong partner: no new memory. The
+cut by luminance stays beside it. `bench-temporal --shot edit`, ΔE against the converged frame of the state after:
+
+| edit, region | 8 frames: before → now | 32 frames | 128 frames | a view with no memory, 32 |
+|---|---|---|---|---|
+| lamp off, its pool | 37.2 → 24.0 | 15.2 → 3.05 | 3.48 → 0.72 | 0.50 |
+| lamp off, its bounce | 6.77 → 6.07 | 3.38 → 1.32 | 0.73 → 0.40 | 0.45 |
+| lamp on, its pool | 5.68 → 5.12 | 1.92 → 1.10 | 0.62 → 0.51 | 0.43 |
+| lamp on, its bounce | 6.65 → 6.63 | 3.00 → 2.73 | 0.81 → 0.77 | 1.15 |
+| sign off, the floor beside it | 23.4 → 15.6 | 12.7 → 4.72 | 3.07 → 1.16 | 0.94 |
+| sign on, the floor beside it | 18.3 → 12.3 | 7.28 → 3.77 | 1.52 → 0.93 | 0.80 |
+
+- Elsewhere: the Bistro slice half a second after its explosion 6.02 → 5.76, at rest 2.82 → 2.83; bench-ghosting
+  (both scenes), Bistro and Thames held still and the fire shot as before (where the lighting is not live the clamp
+  does not run). test-render 187 pass. `dtemporal` 0.22 → 0.25 ms on the slice.
+- What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, A0–A10, B1–B8):
+  - what the code seemed to say (the slow mean set to the fast one at a cut; the test waiting for 6 frames): taking
+    both away changed little (the pool 2.7 times too bright at half a second for 3.3);
+  - the clamp on luminance alone, a pixel's or the neighbourhood's: the luminance follows and the colour does not (a
+    pink floor after the sign: ΔE 9.6 at 32 frames);
+  - a band of 2 standard errors: the edits a little closer (the pool 2.78 for 3.05) and the slice at rest 0.10
+    worse (2.92: it finds noise);
+  - the clamp alone, without the cut by luminance: 0.23 better again at the explosion, 0.11 worse at rest.
+- Left: the first 8 frames (the fast mean itself takes a few frames); the bounce, which is the radiance cache's
+  memory (the raw samples' own luminance 8 frames after the lamp goes: 1.31 on the floor); 3 to 6 times the ΔE of a
+  view with no memory at half a second. The long history on a settled scene is untouched: nothing measured here
+  speaks against it.
 
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
