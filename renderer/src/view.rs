@@ -6,12 +6,22 @@
 //! The game runs in this process (script.rs): its code builds the scene, key bindings and clicks run its handlers, its
 //! frame script animates. `view` is the same window.
 //!
+//! A game that reads input (`pointer` in its definition; docs/RUNTIME.md "Input") has the keys, the pointer and the
+//! camera to itself: the window sends it an `input` message every frame and keeps none of the controls below but
+//! Esc. With `pointer: "look"` a click captures the pointer (its motion is the game's look), Esc lets go of it, and
+//! Esc again quits. The window is the app of the host channel: `--launch '{"room":"K7Q4MZ"}'` is the `launch`
+//! message, `--sensitivity 1.5` scales the look, `--hud-log` prints the HUD the game describes (the window draws
+//! none), and the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs).
+//!
 //! Controls: left-drag orbit · right/shift-drag pan · wheel zoom · WASD/QE fly · R reset camera · 1/2/4/8 cap spp,
 //! 0 adaptive · P snapshot · Esc quit. Scripted over stdio:
 //!   stdin  JSON lines: {"cmd":"event","type":t,"payload":{..}} | {"cmd":"camera",...} | {"cmd":"snapshot","path":p} | {"cmd":"quit"}
+//!                      | {"cmd":"host","messages":[{"t":..}, ..]}
 //!   stdout JSON lines: {"type":"ready"} | {"type":"click","u":..,"v":..,"cam":{..},"seq":n} | {"type":"key","key":"L"}
+//!                      | {"type":"host","messages":[..]} (what the game posted)
 
 use crate::gpu;
+use crate::host::{launch_message, HostServices, InputTracker};
 use crate::live::{next_spp, parse_cmd, parse_scale, save_bgra, Camera, Cmd, LiveCore};
 use crate::script::GameSession;
 use anyhow::Result;
@@ -22,10 +32,10 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 pub struct ViewArgs {
     /// Game bundle to run in-process.
@@ -40,6 +50,12 @@ pub struct ViewArgs {
     pub bounces: u32,
     /// Render scale; None = dynamic resolution (default).
     pub scale: Option<f32>,
+    /// `--launch`: the `params` of the host channel's `launch` message.
+    pub launch: Option<serde_json::Value>,
+    /// `--hud-log`: the HUD the game describes, printed when it changes.
+    pub hud_log: bool,
+    /// `--sensitivity`: scales the pointer's motion into the game's look (1: `host::LOOK_RADIANS` a count).
+    pub sensitivity: f32,
 }
 
 /// Editor-style orbit camera around a target point.
@@ -90,10 +106,68 @@ struct State {
     last: Instant,
     snapshot: Option<PathBuf>,
     game: GameSession,
+    /// The game reads input (`pointer`): the keys and the pointer between two frames. None: the window's own
+    /// controls, as for every game before input.
+    input: Option<InputTracker>,
+    /// `pointer: "look"`: a click captures the pointer.
+    look: bool,
+}
+
+impl State {
+    /// Captures the pointer for the game's look (hidden, held in the window), or lets go of it.
+    fn capture(&mut self, on: bool) {
+        let Some(i) = self.input.as_mut() else { return };
+        if on == i.captured {
+            return;
+        }
+        if on {
+            // (Locked where the system has it, macOS among them; held inside the window elsewhere.)
+            if self.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined)).is_err() {
+                return eprintln!("view: the pointer cannot be captured here");
+            }
+            self.window.set_cursor_visible(false);
+        } else {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+        }
+        i.captured = on;
+    }
+}
+
+/// A key by its place on the keyboard, as game code names it (packages/gameplay/src/input.ts).
+fn key_name(code: KeyCode) -> Option<String> {
+    use KeyCode::*;
+    let fixed = match code {
+        Space => "Space",
+        ShiftLeft | ShiftRight => "Shift",
+        ControlLeft | ControlRight => "Ctrl",
+        AltLeft | AltRight => "Alt",
+        SuperLeft | SuperRight => "Meta",
+        Tab => "Tab",
+        Enter | NumpadEnter => "Enter",
+        Escape => "Escape",
+        Backspace => "Backspace",
+        ArrowLeft => "Left",
+        ArrowRight => "Right",
+        ArrowUp => "Up",
+        ArrowDown => "Down",
+        Minus | Equal | BracketLeft | BracketRight | Semicolon | Quote | Comma | Period | Slash | Backslash | Backquote => return Some(format!("{code:?}")),
+        _ => {
+            // KeyW -> "W", Digit1 -> "1", F5 -> "F5".
+            let name = format!("{code:?}");
+            return match name.strip_prefix("Key").or_else(|| name.strip_prefix("Digit")) {
+                Some(k) if k.len() == 1 => Some(k.to_string()),
+                _ => (name.len() <= 3 && name.starts_with('F') && name[1..].parse::<u8>().is_ok()).then_some(name),
+            };
+        }
+    };
+    Some(fixed.to_string())
 }
 
 struct App {
     args: ViewArgs,
+    /// What the window offers the game beyond the picture (the binary's sockets and HTTP).
+    services: Box<dyn HostServices>,
     cmds: mpsc::Receiver<Cmd>,
     state: Option<State>,
     error: Option<anyhow::Error>,
@@ -132,7 +206,15 @@ impl App {
         // The view is the window's physical pixels (`--width` / `--height` are its size in points): the temporal upscaler
         // resolves to the display, and nothing is stretched after it.
         let (vw, vh) = (config.width, config.height);
-        let (game, mut core) = GameSession::start(&a.bundle, &a.room, &a.assets, g, &a.presets, vw, vh)?;
+        let (mut game, mut core) = GameSession::start(&a.bundle, &a.room, &a.assets, g, &a.presets, vw, vh)?;
+        // The host channel: how the game was opened, once after setup.
+        if let Err(e) = game.host_messages(&mut core, &[launch_message(a.launch.as_ref())]) {
+            eprintln!("game: launch: {e:#}");
+        }
+        let pointer = game.host.pointer().map(String::from);
+        if let Some(p) = &pointer {
+            eprintln!("view: the game reads input (pointer: {p}){}", if p == "look" { ": click to capture the pointer, Esc lets go" } else { "" });
+        }
         core.set_display_scale(window.scale_factor() as f32);
         core.bounces = a.bounces;
         if let Some(s) = a.scale {
@@ -190,6 +272,8 @@ impl App {
             last: Instant::now(),
             snapshot: None,
             game,
+            input: pointer.is_some().then(InputTracker::new),
+            look: pointer.as_deref() == Some("look"),
         });
         Ok(())
     }
@@ -211,9 +295,25 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => s.mods = m.state(),
+            WindowEvent::Focused(false) => {
+                // (The keys' ups go to whoever has the keyboard now.)
+                s.capture(false);
+                if let Some(i) = s.input.as_mut() {
+                    i.release_all();
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let (dx, dy) = ((position.x - s.cursor.x) as f32, (position.y - s.cursor.y) as f32);
                 s.cursor = position;
+                if let Some(i) = s.input.as_mut() {
+                    let size = s.window.inner_size();
+                    i.pointer((position.x / size.width.max(1) as f64) as f32, (position.y / size.height.max(1) as f64) as f32);
+                    // (The game's pointer: nothing orbits. A click is still a click: below.)
+                    if let Some((_, start, moved)) = &mut s.press {
+                        *moved |= (position.x - start.x).hypot(position.y - start.y) > 4.0 * s.window.scale_factor();
+                    }
+                    return;
+                }
                 let scale = s.window.scale_factor() as f32;
                 if let Some((button, start, moved)) = &mut s.press {
                     if (position.x - start.x).hypot(position.y - start.y) > 4.0 * scale as f64 {
@@ -232,9 +332,36 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::MouseInput { state, button, .. } if s.look => {
+                // The pointer is the game's look: the first click captures it, and from then on the buttons are
+                // the game's input (no `click` event: there is no place the pointer points at).
+                let n = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
+                let captured = s.input.as_ref().is_some_and(|i| i.captured);
+                if !captured && state == ElementState::Pressed {
+                    s.capture(true);
+                } else if let Some(i) = s.input.as_mut() {
+                    // (An up always: of a button that went down while captured.)
+                    if captured || state == ElementState::Released {
+                        i.button(n, state == ElementState::Pressed);
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => match state {
-                ElementState::Pressed => s.press = Some((button, s.cursor, false)),
+                ElementState::Pressed => {
+                    s.press = Some((button, s.cursor, false));
+                    if let (Some(i), Some(n)) = (s.input.as_mut(), button_number(button)) {
+                        i.button(n, true);
+                    }
+                }
                 ElementState::Released => {
+                    if let (Some(i), Some(n)) = (s.input.as_mut(), button_number(button)) {
+                        i.button(n, false);
+                    }
                     if let Some((MouseButton::Left, _, false)) = s.press.take() {
                         let size = s.window.inner_size();
                         let (u, v) = ((s.cursor.x / size.width as f64) as f32, (s.cursor.y / size.height as f64) as f32);
@@ -256,9 +383,18 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
+                if let Some(i) = s.input.as_mut() {
+                    return i.wheel(dy / 40.0);
+                }
                 s.orbit.dist = (s.orbit.dist * (-dy * 0.002).exp()).clamp(0.3, 100.0);
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // The game's input: the key by its place on the keyboard, down or up.
+                if let (Some(i), PhysicalKey::Code(code)) = (s.input.as_mut(), event.physical_key) {
+                    if let Some(name) = key_name(code) {
+                        i.key(&format!("{code:?}"), &name, event.state == ElementState::Pressed);
+                    }
+                }
                 let name = match &event.logical_key {
                     Key::Character(c) => c.to_uppercase(),
                     Key::Named(NamedKey::Escape) => "Escape".into(),
@@ -273,6 +409,15 @@ impl ApplicationHandler for App {
                             eprintln!("game: {h} failed: {e:#}");
                         }
                         follow_game_camera(s, cam);
+                    } else if s.input.is_some() {
+                        // The keys are the game's. Esc lets go of a captured pointer, and quits without one.
+                        if name == "Escape" && !event.repeat {
+                            if s.input.as_ref().is_some_and(|i| i.captured) {
+                                s.capture(false);
+                            } else {
+                                el.exit();
+                            }
+                        }
                     } else if !event.repeat {
                         match name.as_str() {
                             "Escape" => el.exit(),
@@ -292,7 +437,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = frame(s, &self.cmds, fps) {
+                if let Err(e) = frame(s, &self.cmds, self.services.as_mut(), &self.args, fps) {
                     eprintln!("view: {e:#}");
                 }
                 if s.keys.contains("__quit") {
@@ -300,6 +445,15 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        // A captured pointer does not move: its motion comes from the device, and is the game's look.
+        if let (DeviceEvent::MouseMotion { delta }, Some(s)) = (event, self.state.as_mut()) {
+            if let Some(i) = s.input.as_mut().filter(|i| i.captured) {
+                i.motion(delta.0 as f32, delta.1 as f32, self.args.sensitivity);
+            }
         }
     }
 
@@ -312,7 +466,16 @@ impl ApplicationHandler for App {
     }
 }
 
-fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, fps: u32) -> Result<()> {
+fn button_number(b: MouseButton) -> Option<u8> {
+    match b {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServices, args: &ViewArgs, fps: u32) -> Result<()> {
     // Content runs at `fps` regardless of the display's refresh rate (120 Hz panels re-show the last image).
     let render_new = s.last.elapsed() >= Duration::from_secs_f64(1.0 / fps as f64) - Duration::from_millis(2);
     if !render_new {
@@ -353,27 +516,56 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, fps: u32) -> Result<()> {
                 s.game.click(&mut s.core, u, v)?;
                 follow_game_camera(s, cam);
             }
+            Cmd::Host(messages) => {
+                let cam = s.core.scene_camera();
+                s.game.host_messages(&mut s.core, &messages)?;
+                follow_game_camera(s, cam);
+            }
             Cmd::Quit => {
                 s.keys.insert("__quit".into());
             }
         }
     }
-    // WASD / QE fly: move the orbit target in the view plane.
-    let speed = s.orbit.dist * 0.8 * dt;
-    let fwd = Vec3::new(-s.orbit.yaw.sin(), 0.0, -s.orbit.yaw.cos());
-    let right = Vec3::new(s.orbit.yaw.cos(), 0.0, -s.orbit.yaw.sin());
-    for (k, dir) in [("W", fwd), ("S", -fwd), ("D", right), ("A", -right), ("E", Vec3::Y), ("Q", -Vec3::Y)] {
-        if s.keys.contains(k) {
-            s.orbit.target += dir * speed;
+    // WASD / QE fly: move the orbit target in the view plane (the keys of a game that reads input are its own).
+    if s.input.is_none() {
+        let speed = s.orbit.dist * 0.8 * dt;
+        let fwd = Vec3::new(-s.orbit.yaw.sin(), 0.0, -s.orbit.yaw.cos());
+        let right = Vec3::new(s.orbit.yaw.cos(), 0.0, -s.orbit.yaw.sin());
+        for (k, dir) in [("W", fwd), ("S", -fwd), ("D", right), ("A", -right), ("E", Vec3::Y), ("Q", -Vec3::Y)] {
+            if s.keys.contains(k) {
+                s.orbit.target += dir * speed;
+            }
         }
     }
     let cam = s.core.scene_camera();
     s.core.advance_time(dt);
+    // The host channel, app to game, before the frame script: the frame's input (for a game that reads it), then
+    // what the services have (a batch of each socket's messages, answers to requests). One entry for all of it.
+    let mut messages: Vec<serde_json::Value> = s.input.as_mut().map(|i| i.message()).into_iter().collect();
+    messages.extend(services.poll());
+    if let Err(e) = s.game.host_messages(&mut s.core, &messages) {
+        eprintln!("game: host messages: {e:#}");
+    }
     if let Err(e) = s.game.frame(&mut s.core, dt) {
         eprintln!("game: frame script: {e:#}");
     }
-    follow_game_camera(s, cam);
-    s.core.set_camera(s.orbit.camera(s.tan));
+    // Game to app: what the game posted in this frame's entries (events among them).
+    let posts = s.game.take_posts();
+    for p in &posts {
+        services.post(p);
+        if args.hud_log && p["t"] == "hud" {
+            eprintln!("hud: {}", p["hud"]);
+        }
+    }
+    if !posts.is_empty() {
+        emit(serde_json::json!({ "type": "host", "messages": posts }));
+    }
+    // A game that reads input has the camera to itself (the view follows it with every commit); any other game is
+    // looked at through the window's orbit camera, which follows the game's when a handler moves it.
+    if s.input.is_none() {
+        follow_game_camera(s, cam);
+        s.core.set_camera(s.orbit.camera(s.tan));
+    }
 
     let tex = match s.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -519,7 +711,8 @@ fn texel(x: i32, y: i32) -> vec4<f32> {
 }
 "#;
 
-pub fn run(args: ViewArgs) -> Result<()> {
+/// Opens the window. `services`: what the app answers the game's posts with (`host::NoServices`: nothing).
+pub fn run(args: ViewArgs, services: Box<dyn HostServices>) -> Result<()> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -536,7 +729,7 @@ pub fn run(args: ViewArgs) -> Result<()> {
         }
     });
     let el = EventLoop::new()?;
-    let mut app = App { args, cmds: rx, state: None, error: None };
+    let mut app = App { args, services, cmds: rx, state: None, error: None };
     el.run_app(&mut app)?;
     if let Some(e) = app.error {
         return Err(e);
@@ -557,5 +750,8 @@ pub fn parse_args(args: &[String], presets: &Path) -> Result<ViewArgs> {
         fps: num("--fps", 60),
         bounces: num("--bounces", 4),
         scale: parse_scale(flag("--scale").as_deref(), None)?,
+        launch: crate::live::parse_launch(flag("--launch").as_deref())?,
+        hud_log: args.iter().any(|a| a == "--hud-log"),
+        sensitivity: flag("--sensitivity").map(|v| v.parse::<f32>()).transpose()?.filter(|v| v.is_finite()).unwrap_or(1.0),
     })
 }

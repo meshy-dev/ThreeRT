@@ -58,6 +58,8 @@ pub struct LiveOpts {
     pub frame_log: Option<PathBuf>,
     /// The output's pixels a point of its display (1: the output is in points).
     pub display_scale: f32,
+    /// `--launch`: the `params` of the host channel's `launch` message (docs/RUNTIME.md "The host channel").
+    pub launch: Option<serde_json::Value>,
 }
 
 /// Lowest dynamic-resolution scale (UE r.DynamicRes.MinScreenPercentage default) of a view whose pixels are the
@@ -1066,6 +1068,9 @@ pub enum Cmd {
     Event(String, serde_json::Value),
     /// A click at (u, v) for the in-process game (picks the node under it).
     Click(f32, f32),
+    /// Messages of the host channel for the in-process game (`{"cmd":"host","messages":[{"t":...}, ...]}`: what an
+    /// app would send, its input among them; docs/RUNTIME.md "The host channel").
+    Host(Vec<serde_json::Value>),
     /// Snapshot (path) of the first frame whose history length reaches `after` (None = any) and that is at least the
     /// `frames`-th frame from now (None = the next).
     Snapshot(PathBuf, Option<u32>, Option<u32>),
@@ -4363,6 +4368,12 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     spawn_stdin_reader(cmd_tx);
     let (mut game, mut core) = crate::script::GameSession::start(&opts.bundle, &opts.room, &opts.assets, gpu::Gpu::new()?, presets, w, h)?;
+    // The host channel: this runner is the app. How the game was opened, once after setup; what the game posts goes
+    // out on stdout (`emit_posts`), and whoever drives the runner answers with `{"cmd":"host"}`.
+    if let Err(e) = game.host_messages(&mut core, &[crate::host::launch_message(opts.launch.as_ref())]) {
+        eprintln!("live: launch: {e:#}");
+    }
+    emit_posts(&mut game);
     // Frame-script cost (script + commit), reported every 2 s.
     let (mut fs_sum, mut fs_max, mut fs_n) = (0.0f32, 0.0f32, 0u32);
     core.bounces = opts.bounces;
@@ -4436,12 +4447,18 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
                         eprintln!("live: click failed: {e:#}");
                     }
                 }
+                Cmd::Host(messages) => {
+                    if let Err(e) = game.host_messages(&mut core, &messages) {
+                        eprintln!("live: host messages failed: {e:#}");
+                    }
+                }
                 Cmd::SppCap(_) | Cmd::Status(_) => {}
                 Cmd::Quit => return Ok(()),
             }
         }
         // The frame script runs on wall-clock time (frames slower than the target rate still animate at real speed).
         if lockstep.is_some() && budget == 0 {
+            emit_posts(&mut game);
             continue; // commands without frames (events, switches): wait for a step
         }
         let dt = if freeze_time() { 0.0 } else { lockstep.unwrap_or_else(|| last.elapsed().as_secs_f32().min(0.1)) };
@@ -4450,6 +4467,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
         if let Err(e) = game.frame(&mut core, dt) {
             eprintln!("live: frame script: {e:#}");
         }
+        emit_posts(&mut game);
         if game.host.has_frame() {
             (fs_sum, fs_max, fs_n) = (fs_sum + game.frame_ms, fs_max.max(game.frame_ms), fs_n + 1);
             if fs_n == opts.fps * 2 {
@@ -4536,6 +4554,19 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// What the game posted on the host channel since the last call, as one line on stdout: `{"host":[{"t":...}, ...]}`
+/// (nothing when it posted nothing).
+fn emit_posts(game: &mut crate::script::GameSession) {
+    use std::io::Write;
+    let posts = game.take_posts();
+    if !posts.is_empty() {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{}", serde_json::json!({ "host": posts }));
+        let _ = out.flush();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Sleeps until `t` without trusting the timer's precision: macOS gives a process that is not a foreground app timer
 /// leeway of half the interval (a 16 ms sleep returned after 24, measured from a terminal-launched viewport and from
 /// plain Python alike). Pacing sleeps of the headless viewport overslept by ~5 ms once the GPU fit the frame: Bistro's
@@ -4599,6 +4630,7 @@ pub fn parse_cmd(line: &str) -> Option<Cmd> {
         "lockstep" => Cmd::Lockstep(if v["on"].as_bool().unwrap_or(true) { Some(v["dt"].as_f64().unwrap_or(1.0 / 60.0) as f32) } else { None }),
         "event" => Cmd::Event(v["type"].as_str()?.to_string(), if v["payload"].is_null() { serde_json::json!({}) } else { v["payload"].clone() }),
         "click" => Cmd::Click(v["u"].as_f64()? as f32, v["v"].as_f64()? as f32),
+        "host" => Cmd::Host(v["messages"].as_array()?.clone()),
         "snapshot" => Cmd::Snapshot(PathBuf::from(v["path"].as_str().unwrap_or("snapshot.png")), v["after"].as_u64().map(|a| a as u32), v["frames"].as_u64().map(|a| a as u32)),
         "reset" => Cmd::Reset,
         "time" => Cmd::Time(v["t"].as_f64()? as f32),
@@ -4628,7 +4660,14 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
         room: flag("--room").unwrap_or_else(|| "local".into()),
         frame_log: flag("--frame-log").map(PathBuf::from),
         display_scale: flag("--display-scale").map(|v| v.parse::<f32>()).transpose()?.unwrap_or(1.0),
+        launch: parse_launch(flag("--launch").as_deref())?,
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// `--launch '{"room":"K7Q4MZ","name":"Ada"}'`: the `params` of the host channel's `launch` message.
+pub fn parse_launch(v: Option<&str>) -> Result<Option<serde_json::Value>> {
+    v.map(|t| serde_json::from_str::<serde_json::Value>(t).ok().filter(|p| p.is_object()).ok_or_else(|| anyhow!("--launch must be a JSON object, as in --launch '{{\"room\":\"K7Q4MZ\"}}'"))).transpose()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

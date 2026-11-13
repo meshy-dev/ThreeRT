@@ -7,7 +7,7 @@ import { mark } from "./mark.js";
 
 /** The site's root URL (this file is <root>/js/site.js), so pages one level down resolve the same paths. */
 export const ROOT = new URL("..", import.meta.url);
-export const GITHUB = "https://github.com/taichi-dev/ThreeRT";
+export const GITHUB = "https://github.com/meshy-dev/ThreeRT";
 
 /** "macos" | "ios" | "other". An iPad asks for the desktop site as a Mac with a touch screen. */
 export function platform() {

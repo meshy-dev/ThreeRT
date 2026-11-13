@@ -5,8 +5,9 @@
 //! then applies what changed (GPU tables in place, or a rebuild).
 //!
 //! Sandbox: the engine has no I/O at all (no fs, network, timers or module loader); the host adds only a log sink, a
-//! monotonic clock and the engine API. Memory is capped and every call runs under a time budget (the interrupt
-//! handler aborts it).
+//! monotonic clock, the engine API and the host channel's queue (`__host_post`: messages for the app that embeds the
+//! session, which may answer with `host_messages`; docs/RUNTIME.md "The host channel"). Memory is capped and every
+//! call runs under a time budget (the interrupt handler aborts it).
 
 use crate::world::World;
 use anyhow::{anyhow, Result};
@@ -83,6 +84,11 @@ const SETUP_MS: u64 = 120_000;
 const EVENT_MS: u64 = 1_000;
 const FRAME_MS: u64 = 50;
 
+/// The host channel's queue (`__host_post`): the most messages it holds until the app takes them (a session nobody
+/// drains, a render node's, keeps the first of them and drops the rest), and the most bytes of one.
+const MAX_POSTS: usize = 1024;
+const MAX_POST_BYTES: usize = 1 << 20;
+
 /// The most engine time one entry into the script (a frame, an event, setup) is lent, µs: past it the time the engine
 /// spends in voxel calls counts against the script's budget again. 250 ms: the largest single edit measured on the
 /// benchmark level, the 30 x 30 m cut, takes 115 ms of engine time, so two of those fit; a frame that spends more in
@@ -150,6 +156,8 @@ pub struct ScriptHost {
     pub voxels: Rc<RefCell<crate::voxel::VoxelWorld>>,
     /// The physics world (`__engine.physics`; renderer/src/physics.rs): None until scene code makes a physics call.
     pub physics: Rc<RefCell<Option<crate::physics::PhysicsWorld>>>,
+    /// What the game posted for the app (`host.post`: JSON texts), until `take_posts`.
+    posts: Rc<RefCell<Vec<String>>>,
 }
 
 pub struct EventOut {
@@ -380,8 +388,8 @@ impl ScriptHost {
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { _rt: rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default() };
-        let (w, v, ph, d2) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone());
+        let mut h = ScriptHost { _rt: rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), posts: Default::default() };
+        let (w, v, ph, d2, posts) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone(), h.posts.clone());
         let info: String = h.call(SETUP_MS, |ctx| {
             let g = ctx.globals();
             g.set("__host_log", Function::new(ctx.clone(), |level: String, msg: String| {
@@ -391,6 +399,19 @@ impl ScriptHost {
                 }
             })?)?;
             g.set("__host_now", Function::new(ctx.clone(), move || epoch.elapsed().as_secs_f64() * 1000.0)?)?;
+            // The host channel, script to app: a message's JSON text onto the queue the app drains. False when the
+            // queue is full (nobody drains it); a message past the size bound is the script's error.
+            g.set("__host_post", Function::new(ctx.clone(), move |ctx: Ctx, text: String| -> rquickjs::Result<bool> {
+                if text.len() > MAX_POST_BYTES {
+                    return Err(Exception::throw_range(&ctx, &format!("host.post: a message of {} bytes (at most {MAX_POST_BYTES})", text.len())));
+                }
+                let mut q = posts.borrow_mut();
+                let room = q.len() < MAX_POSTS;
+                if room {
+                    q.push(text);
+                }
+                Ok(room)
+            })?)?;
             install_engine(ctx, &w, &v, &ph, &d2)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
@@ -415,6 +436,32 @@ impl ScriptHost {
 
     pub fn has_frame(&self) -> bool {
         self.info["frame"].as_bool().unwrap_or(false)
+    }
+
+    /// The input the game asked for (`pointer` in its definition): "look" (the app captures the pointer) or "free".
+    /// None: the game reads no input, and the app keeps its own camera controls.
+    pub fn pointer(&self) -> Option<&str> {
+        self.info["pointer"].as_str()
+    }
+
+    /// The messages the game posted for the app since the last call (`host.post`), as JSON values, in order.
+    pub fn take_posts(&self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut *self.posts.borrow_mut()).iter().filter_map(|t| serde_json::from_str(t).ok()).collect()
+    }
+
+    /// The app's messages for the game, a batch in one entry (the node host's `hostMessages`): `input` is kept for
+    /// the frame script, the others go to their `host.on` listeners. Bundles built before the channel have no such
+    /// entry: nothing to do then.
+    pub fn host_messages(&self, messages: &[serde_json::Value]) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
+        let list = serde_json::Value::Array(messages.to_vec()).to_string();
+        self.call(EVENT_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("hostMessages")? {
+            Some(f) => f.call((list, ts)),
+            None => Ok(()),
+        })
     }
 
     /// Handler bound to a key ("R", "Space"), if any.
@@ -677,6 +724,25 @@ impl GameSession {
         eprintln!("click: pick {pick_ms:.3} ms, script {:.3} ms (the physics world's calls {physics:.3} ms), commit {:.3} ms ({})", e.ms, all - e.ms, if self.rebuilt { "rebuild" } else { "in place" });
         self.clicked = Some(t0);
         Ok(Some(e))
+    }
+
+    /// The app's messages for the game (the host channel: its input, what its sockets received, `launch`), a batch in
+    /// one script entry; what the game's listeners changed in the scene is applied. True if that rebuilt the scene.
+    /// Listeners that throw do not fail the batch (their errors are in the game's log).
+    pub fn host_messages(&mut self, core: &mut crate::live::LiveCore, messages: &[serde_json::Value]) -> Result<bool> {
+        if messages.is_empty() {
+            return Ok(false);
+        }
+        let sent = self.host.host_messages(messages);
+        let rebuilt = self.commit(core)?;
+        sent?;
+        Ok(rebuilt)
+    }
+
+    /// The messages the game posted for the app since the last call (`host.post`), in order: to be taken after each
+    /// entry into the script, or once a frame.
+    pub fn take_posts(&mut self) -> Vec<serde_json::Value> {
+        self.host.take_posts()
     }
 
     /// A frame was drawn: the first one after a click is timed (THREERT_CLICK_LOG=1).
@@ -1008,6 +1074,35 @@ mod tests {
             JSON.parse(__engine.physics("state", { body: hit.body })).linvel[1]
         "#)).unwrap();
         assert!((up - 500.0 / 336.0).abs() < 0.05, "{up} m/s");
+    }
+
+    /// The host channel: what the script posts is the app's to take, in order, and bounded; the app's messages go to
+    /// the node host's `hostMessages` as one JSON array; a bundle without that entry (built before the channel) is
+    /// left alone.
+    #[test]
+    fn the_host_channel_queues_posts_and_delivers_batches() {
+        let game = GAME.replace("frame: (dt) => { frames++; },", "frame: (dt) => { frames++; }, hostMessages: (list, ts) => { for (const m of JSON.parse(list)) __host_post(JSON.stringify({ t: 'echo', of: m, timed: ts > 0 })); },");
+        assert!(game.contains("hostMessages"));
+        let h = ScriptHost::new(&game).unwrap();
+        assert!(h.take_posts().is_empty());
+        h.host_messages(&[serde_json::json!({ "t": "net.opened", "id": "a" }), serde_json::json!({ "t": "input", "keys": ["W"] })]).unwrap();
+        assert_eq!(h.take_posts(), vec![serde_json::json!({ "t": "echo", "of": { "t": "net.opened", "id": "a" }, "timed": true }), serde_json::json!({ "t": "echo", "of": { "t": "input", "keys": ["W"] }, "timed": true })]);
+        assert!(h.take_posts().is_empty(), "taken once");
+        // A queue nobody drains keeps its first messages and says no to the rest; a message past the bound throws.
+        let kept: i32 = h.call(1000, |ctx| ctx.eval("let kept = 0; for (let i = 0; i < 3000; i++) if (__host_post(JSON.stringify({ t: 'n', i }))) kept++; kept")).unwrap();
+        assert_eq!(kept as usize, MAX_POSTS);
+        let posts = h.take_posts();
+        assert_eq!((posts.len(), posts[0]["i"].as_u64(), posts[MAX_POSTS - 1]["i"].as_u64()), (MAX_POSTS, Some(0), Some(MAX_POSTS as u64 - 1)));
+        let err = h.call(1000, |ctx| ctx.eval::<bool, _>("__host_post('x'.repeat(2 << 20))")).unwrap_err();
+        assert!(format!("{err}").contains("host.post"), "{err}");
+        assert!(h.take_posts().is_empty());
+        // No `pointer` in the game's description: it asks for no input.
+        assert_eq!(h.pointer(), None);
+        assert_eq!(ScriptHost::new(&game.replace("frame: true,", "frame: true, pointer: 'look',")).unwrap().pointer(), Some("look"));
+        // A bundle from before the channel.
+        let old = ScriptHost::new(GAME).unwrap();
+        old.host_messages(&[serde_json::json!({ "t": "launch", "params": {} })]).unwrap();
+        assert!(old.take_posts().is_empty());
     }
 
     #[test]

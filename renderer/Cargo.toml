@@ -3,6 +3,7 @@ name = "threert-render"
 version = "0.1.0"
 edition = "2021"
 description = "Native renderer for ThreeRT games: embedded scene runtime, GPU path tracer + UE5-matched post chain"
+license = "MIT"
 
 [dependencies]
 voxel-core = { path = "voxel-core" }
@@ -39,6 +40,14 @@ oidn = { version = "2.5", optional = true }
 # Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
 rquickjs = "0.12"
 
+# The `threert-render` binary's sockets and HTTP, for the games its window runs (src/net.rs: the `net.*` messages of
+# the host channel, docs/RUNTIME.md). Only the binary uses them, and only with the `net` feature: the library has no
+# network in it, and a program that embeds the library leaves them out with `default-features = false` (the browser
+# module does). TLS is rustls with the ring provider and the webpki roots: no system TLS library.
+tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls", "gzip"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+
 # The performance cores' count (src/physics.rs: the physics' threads).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
@@ -53,7 +62,16 @@ naga = { version = "30", features = ["wgsl-in"] }
 name = "physics_bits"
 crate-type = ["cdylib"]
 
+# tools/three/physics.ts: the engine's world and physics as a wasm32 module, for the three.js view.
+[[example]]
+name = "physics_scene"
+crate-type = ["cdylib"]
+
 [features]
+default = ["net"]
+# WebSockets and HTTP in `threert-render play` (above). Without it the window answers every `net.*` request with a
+# failure that says so.
+net = ["dep:tungstenite", "dep:ureq", "dep:rustls"]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
 oidn = ["dep:oidn"]
 

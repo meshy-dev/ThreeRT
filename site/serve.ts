@@ -16,7 +16,7 @@ const port = Number(args.find((a) => /^\d+$/.test(a)) ?? process.env.PORT ?? 417
 
 // What the site is made of: the pages, their shared files, and the two generated directories. Nothing else under
 // site/ (tools, the worker, this file) is served.
-const PAGES = new Set(["index.html", "showcase/index.html", "download/index.html", "docs/index.html"]);
+const PAGES = new Set(["index.html", "showcase/index.html", "download/index.html", "docs/index.html", "privacy/index.html"]);
 const DIRS = ["css/", "js/", "brand/", "media/", "releases/", "play/"];
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",

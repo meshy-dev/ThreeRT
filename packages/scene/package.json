@@ -1,6 +1,9 @@
 {
   "name": "@threert/scene",
   "private": true,
+  "license": "MIT",
+  "description": "The ThreeRT scene API: three.js-style meshes, PBR materials, lights and glTF models, in physical units, for a hardware ray-traced renderer.",
+  "keywords": ["threert", "three.js", "threejs", "ray tracing", "path tracing", "raytracing", "real-time", "renderer", "webgpu", "3d", "scene graph", "game engine", "typescript"],
   "type": "module",
-  "exports": { ".": "./src/index.ts" }
+  "exports": {".": "./src/index.ts"}
 }

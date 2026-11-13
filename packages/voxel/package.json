@@ -1,7 +1,10 @@
 {
   "name": "@threert/voxel",
   "private": true,
+  "license": "MIT",
+  "description": "The voxel engine for ThreeRT: destructible voxel levels, explosions and rigid bodies cut loose, meshed and ray-traced by the native renderer.",
+  "keywords": ["threert", "voxel", "voxels", "destructible", "magicavoxel", "three.js", "threejs", "game engine", "ray tracing", "physics", "typescript"],
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@threert/scene": "*" }
+  "exports": {".": "./src/index.ts"},
+  "dependencies": {"@threert/scene": "*"}
 }

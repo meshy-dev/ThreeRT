@@ -10,6 +10,8 @@ pub mod denoise;
 pub mod desc;
 pub mod files;
 pub mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host;
 pub mod live;
 pub mod ltree;
 pub mod merged;
