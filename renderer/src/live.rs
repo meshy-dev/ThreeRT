@@ -261,9 +261,10 @@ impl Passes {
                      "bloom_h5", "bloom_v5", "bloom_h4", "bloom_v4", "bloom_h3", "bloom_v3", "bloom_h2", "bloom_v2", "bloom_h1", "bloom_v1", "bloom_h0", "bloom_v0", "post"]
             .into_iter()
             .map(|name| {
-                (name, d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(name), layout: Some(&pl), module: &module, entry_point: Some(name), compilation_options: Default::default(), cache: None }))
+                (name, d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(name), layout: Some(&pl), module: &module, entry_point: Some(name), compilation_options: Default::default(), cache: g.cache() }))
             })
             .collect();
+        g.save_pipeline_cache();
         Passes { layout, pipes }
     }
 }
@@ -775,6 +776,9 @@ struct EditState {
     /// Times the room grew (frame log `grows`), and whether the scene bind group must be made again.
     grows: u32,
     rebind: bool,
+    /// The uniform tables (`gpu::Gpu::uniform_tables`): an edit placed entries past what their arrays hold, and it
+    /// was said (once a scene, as its upload says it of the scene's own).
+    uniform_said: bool,
     /// (triangles, records, objects, words, TLAS instances) the scene itself has: the room starts there.
     base: (usize, usize, usize, usize, usize),
     /// The first pool triangle (instanced meshes' triangles are counted from it).
@@ -1052,6 +1056,7 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
         dead_meshes: vec![],
         grows: 0,
         rebind: false,
+        uniform_said: false,
         base: room_base,
         pool_first: prep.groups.iter().sum(),
         blobs,
@@ -1187,6 +1192,9 @@ pub struct LiveCore {
     /// Dynamic resolution: consecutive measured frames well over the frame time, and the first frame at the current
     /// scale.
     over_budget: (u32, u32),
+    /// When this view was made, and when its render scale was last checked (`govern_resolution` by the clock).
+    born: Instant,
+    governed: Instant,
     /// THREERT_PROFILE=1: GPU time per pass (timestamp queries), printed every 2 s.
     profile: Option<Profile>,
     /// GPU time per frame without stalls (timestamp queries; None: measured by draining the queue twice a second).
@@ -1373,8 +1381,9 @@ impl Raster {
             depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
             multisample: Default::default(),
             multiview_mask: None,
-            cache: None,
+            cache: g.cache(),
         });
+        g.save_pipeline_cache();
         let tex = |format, usage| {
             d.create_texture(&wgpu::TextureDescriptor { label: Some("raster"), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
                 .create_view(&Default::default())
@@ -1432,6 +1441,13 @@ const COLD_FALLBACK_FRAMES: u32 = 30;
 /// Bistro crowd in motion (lockstep at 10 s) diffuse 0.87 -> 0.90 of our offline render, specular 0.83 -> 0.89, the
 /// pavement under the headlights 0.71 -> 0.77. 1024 adds nothing more.
 const SAMPLE_CEILING: f32 = 256.0;
+
+/// THREERT_GOVERN_CLOCK=1|0 (default 1 on Android): dynamic resolution also checks by the clock, so a view whose
+/// frames are far slower than 60 a second comes down to its frame rate in seconds (`LiveCore::govern_resolution`).
+fn govern_by_clock() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("THREERT_GOVERN_CLOCK").map(|v| v == "1").unwrap_or(cfg!(target_os = "android")))
+}
 
 fn cache_flags() -> u32 {
     static F: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -1632,7 +1648,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -1991,8 +2007,9 @@ impl LiveCore {
     fn put_sky(&mut self, (env, cdf, max): (gpu::EnvMap, Vec<f32>, f32)) {
         let Some(sky) = self.sc.sky.as_ref() else { return };
         self.g.write_env(&self.sc.up, &env, &cdf);
-        // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night).
-        self.sc.base.counts2[1] = (max >= sky.env_nee_floor) as u32;
+        // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night), or a
+        // baked sky is not light-sampled at all (`env_nee_on`).
+        self.sc.base.counts2[1] = (max >= sky.env_nee_floor && crate::env_nee_on()) as u32;
         self.lit_changed = self.frame.max(1);
     }
 
@@ -3499,6 +3516,14 @@ impl LiveCore {
             let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
             self.gpu_blas_ms += t.elapsed().as_secs_f32() * 1000.0;
         }
+        // The uniform tables: entries the edits placed past what a uniform buffer holds read as its last one.
+        if g.uniform_tables && !edit.uniform_said {
+            let notes = gpu::uniform_overflow([0, (edit.objects.end * tables.stride) as u64, edit.records.end as u64, 0]);
+            for note in &notes {
+                eprintln!("threert: {note}");
+            }
+            edit.uniform_said = !notes.is_empty();
+        }
         split.objects = ch.added.len() + ch.removed.len();
         self.edit_split.add(&split);
         if emitters_changed {
@@ -3638,6 +3663,12 @@ impl LiveCore {
     /// heavy one otherwise cost up to 30 frames at 35-48 ms (the 3 x 3 district's drive, its far end). Just over the
     /// frame time waits for the regular check, as before. After a change, only frames rendered at the new scale count:
     /// GPU time lags the scale by the frames in flight, and acting on the old scale's time overshot to the floor.
+    ///
+    /// "Twice a second" and "the first 2 s" are counted in frames (every 30th, the first 120), which is the same thing
+    /// at 60 frames a second. Where frames are much slower (`govern_by_clock`: a phone's GPU, on which a scene opens
+    /// at its full scale at 6 frames a second) they are also read off the clock: counted in frames alone the first
+    /// check that may act at once came after 20 s and the regular one every 5 s, and a game opened as a slide show
+    /// for half a minute (Adreno 740, OpenStrikeRT: 25 s to its frame rate; 3 s with the clock).
     pub fn govern_resolution(&mut self, fps: u32) {
         if !self.dynamic_res || self.gpu_ms <= 0.0 {
             return;
@@ -3645,13 +3676,19 @@ impl LiveCore {
         if (self.gpu_frame.wrapping_sub(self.over_budget.1) as i32) < 0 {
             return;
         }
+        let clock = govern_by_clock();
         // Not in the first 2 s: those frames run while caches fill (Kabukichō's first frames at 0.7 take ~47 ms), and
         // the regular check settles the start as before.
-        self.over_budget.0 = if self.frame >= 120 && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
+        let warm = self.frame >= 120 || (clock && self.born.elapsed().as_secs_f32() >= 2.0);
+        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
         let urgent = self.over_budget.0 >= 2;
-        if self.frame % 30 != 1 && !urgent {
+        // (By the clock only when 30 frames take longer than 0.75 s: at 40 frames a second and above the frame count
+        // comes first, as it always did.)
+        let due = self.frame % 30 == 1 || (clock && self.governed.elapsed().as_secs_f32() >= 0.75);
+        if !due && !urgent {
             return;
         }
+        self.governed = Instant::now();
         self.over_budget.0 = 0;
         let before = self.render_scale;
         let budget = 1000.0 / fps as f32 * 0.9;
@@ -3855,10 +3892,6 @@ impl LiveCore {
             p.counts[3] = p.counts[3].min(2);
             g.queue.write_buffer(&self.sc.up.params, 0, bytemuck::bytes_of(&p));
             let mut e = g.device.create_command_encoder(&Default::default());
-            // (The merged layout: the tables as this frame's edits left them, where the kernel reads them; merged.rs.)
-            if k == 0 {
-                g.sync_tables(&self.sc.up, &mut e);
-            }
             // Particles: placed for this frame's time and camera, then the dynamic BLASes rebuilt (before the raster and
             // the trace).
             // The grid programs (density grids changed on the GPU), before anything reads the grids.
@@ -3893,6 +3926,11 @@ impl LiveCore {
                 };
                 let blas_ts = self.profile.as_ref().map(|p| (&p.queries, n * 2 + 2));
                 g.run_particles(&self.sc.up, cam.pos.to_array(), cam.fwd.to_array(), shader_time(self.time), self.frame_dt, b.time[2], b.time[1], &mut e, pass_ts, blas_ts);
+            }
+            // (The merged layout and the uniform tables: the tables as this frame's edits and the particle passes above
+            // left them, where the kernel reads them; merged.rs.)
+            if k == 0 {
+                g.sync_tables(&self.sc.up, &mut e);
             }
             if let (Some(r), 0, false) = (&self.raster, k, self.sc.instanced) {
                 let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::RenderPassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 4), end_of_pass_write_index: Some(slot as u32 * 8 + 5) });
@@ -4858,5 +4896,96 @@ mod instanced_tests {
         assert!(!core.commit(&mut w).unwrap(), "in place");
         let r = core.sc.gpu_instances[first + 1];
         assert_eq!((r.m[0][3], r.m[1][3], r.p[0][3], r.p[1][3]), (3.0, 1.0, 2.0, 0.0), "moved: last frame's rows kept");
+    }
+
+    /// The uniform tables (`gpu::GpuOptions::uniform_tables`: what a device is opened with on Android), on this
+    /// machine's GPU: a lit scene with an instanced mesh renders offline to the default device's image, bit for bit;
+    /// live, the four uniform buffers hold what their tables hold when a frame is traced, and after an edit in place
+    /// what the tables hold then. (Skipped without a GPU.)
+    #[test]
+    fn the_uniform_tables_render_what_the_tables_do() {
+        let open = |uniform: bool| gpu::Gpu::new_with(gpu::GpuOptions { uniform_tables: Some(uniform), ..Default::default() });
+        let (plain, uniform) = match (open(false), open(true)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+        };
+        if uniform.merged {
+            return eprintln!("skipped: the merged layout has no uniform tables");
+        }
+        assert!(uniform.uniform_tables && !plain.uniform_tables);
+        let mut w = World::default();
+        let mat = |color: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [color, color * 0.5, color], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
+        w.set_material(1, mat(0.8, 0.0));
+        w.set_material(5, mat(0.0, 40.0));
+        let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+        w.set_geometry(2, quad(1.0)).unwrap();
+        w.set_geometry(3, quad(0.25)).unwrap();
+        let mesh = |geometry, material, own_blas| Kind::Mesh { geometry, material, own_blas, materials: vec![] };
+        // A wall, a small movable panel in front of it, and an emissive quad that lights both from the side.
+        w.set_object(10, "wall".into(), None, mesh(2, 1, false), true, false).unwrap();
+        w.set_object(11, "panel".into(), None, mesh(3, 1, true), true, true).unwrap();
+        w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_object(12, "lamp".into(), None, mesh(3, 5, false), true, false).unwrap();
+        w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(4, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
+        let presets = crate::default_presets_dir();
+
+        // Offline: the same bytes.
+        let offline = |g: &gpu::Gpu| {
+            let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
+            (sc.width, sc.height) = (64, 36);
+            let prep = crate::prepare(g, &mut sc, &mut vec![]);
+            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
+        };
+        let (a, b) = (offline(&plain), offline(&uniform));
+        let lit = a.iter().filter(|v| f32::from_bits(**v) > 0.0).count();
+        assert!(lit > a.len() / 16, "the scene is lit ({lit} of {} numbers)", a.len());
+        let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        assert_eq!(differ, 0, "{differ} of {} numbers differ between the storage tables and the uniform ones", a.len());
+        drop(plain);
+
+        // Live: the uniform buffers follow the tables.
+        let mut core = LiveCore::new(uniform, &w, Path::new("."), &presets, 64, 36).unwrap();
+        w.take_changes();
+        let read = |core: &LiveCore, buf: &wgpu::Buffer, bytes: u64| -> Vec<u8> {
+            let d = &core.g.device;
+            let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let mut e = d.create_command_encoder(&Default::default());
+            e.copy_buffer_to_buffer(buf, 0, &to, 0, bytes);
+            core.g.queue.submit([e.finish()]);
+            to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
+            bytes
+        };
+        // Each table's bytes and its uniform copy's, over what both hold.
+        let pairs = |core: &LiveCore| -> Vec<(Vec<u8>, Vec<u8>)> {
+            let up = &core.sc.up;
+            let copies = up.uniform.as_ref().expect("the uniform tables' buffers");
+            [&up.bg_parts.texinfo, &up.objects, &up.instances, &up.media].into_iter().zip(copies).map(|(t, c)| {
+                let n = t.size().min(c.size()) & !3;
+                (read(core, t, n), read(core, c, n))
+            }).collect()
+        };
+        core.render(1, |_, _| {});
+        let first = pairs(&core);
+        for (k, (table, copy)) in first.iter().enumerate() {
+            assert!(!table.is_empty() && table == copy, "table {k} and its uniform buffer differ after a frame");
+        }
+        assert!(first[1].0.iter().any(|b| *b != 0), "the objects' table has the scene's objects");
+        // The panel moves in place: its object's entry and its instance's record change, and the next frame's
+        // uniform buffers have them.
+        w.set_transform(11, Vec3::new(0.3, 0.2, 0.75), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        assert!(!core.commit(&mut w).unwrap(), "moved in place");
+        core.render(1, |_, _| {});
+        let moved = pairs(&core);
+        for (k, (table, copy)) in moved.iter().enumerate() {
+            assert!(table == copy, "table {k} and its uniform buffer differ after an edit");
+        }
+        assert!(moved[1].1 != first[1].1 || moved[2].1 != first[2].1, "the move reached the uniform buffers");
     }
 }

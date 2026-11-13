@@ -186,7 +186,7 @@ struct Rule {
     name: &'static str,
     /// What `name[` becomes, and what goes before the `]` that closes it.
     open: String,
-    close: &'static str,
+    close: String,
     /// What `arrayLength(&name)` becomes.
     len: String,
 }
@@ -223,7 +223,7 @@ fn rewrite(src: &str, rules: &[Rule]) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(b.len() + b.len() / 16);
     // Blocks and brackets open; the brackets a rewritten index closes with more than `]`.
     let (mut depth, mut brackets, mut parens) = (0usize, 0usize, 0usize);
-    let mut closes: Vec<(usize, &'static str)> = vec![];
+    let mut closes: Vec<(usize, &str)> = vec![];
     // Names shadowed, each with the block depth it lives in; those declared in the statement being read.
     let mut shadows: Vec<(usize, usize)> = vec![];
     let mut pending: Vec<(usize, usize)> = vec![];
@@ -320,7 +320,7 @@ fn rewrite(src: &str, rules: &[Rule]) -> String {
                 out.extend_from_slice(rules[r].open.as_bytes());
                 brackets += 1;
                 if !rules[r].close.is_empty() {
-                    closes.push((brackets, rules[r].close));
+                    closes.push((brackets, &rules[r].close));
                 }
                 last = b'[';
                 i = after + 1;
@@ -389,8 +389,47 @@ pub fn kernel(src: &str, caps: &Caps) -> String {
         };
         take(&mut s, m.decl, &with);
     }
-    let rule = |var: &str, m: &Member, cap: u32| Rule { name: m.name, open: format!("{var}.{}[", m.name), close: "", len: format!("{cap}u") };
+    let rule = |var: &str, m: &Member, cap: u32| Rule { name: m.name, open: format!("{var}.{}[", m.name), close: String::new(), len: format!("{cap}u") };
     let rules: Vec<Rule> = TABLES.iter().zip(caps.tables).map(|(m, c)| rule("MT", m, c)).chain(KERNEL_LIVE.iter().zip(caps.live).map(|(m, c)| rule("ML", m, c))).collect();
+    rewrite(&s, &rules)
+}
+
+/// The uniform tables (`gpu::GpuOptions::uniform_tables`; docs/RUNTIME.md "Android"): which of `TABLES` the kernel
+/// reads from uniform buffers instead of storage buffers, in the layout as written. Qualcomm's Adreno 740 driver
+/// (Vulkan, Android 13) gave the kernel other buffers' contents for these four: a model's textures came out as
+/// another table's numbers, instance records sent hits to the wrong triangles, an emissive object's power read as
+/// something else's and lit nothing. As uniform buffers they read right. They are the four of the kernel's read-only
+/// tables that are bounded (the others: `uniform_tables`).
+pub const UNIFORM_TABLES: [usize; 4] = [3, 4, 5, 6];
+/// Their arrays' lengths (a uniform buffer's array is sized): what 64 KiB hold, the size every device gives a uniform
+/// binding (WebGPU's `maxUniformBufferBindingSize`, Vulkan's least `maxUniformBufferRange` on the phones this is
+/// for), and for the media what a scene may have (`scene::MAX_MEDIA`). In a scene's terms: 2,048 textures, 1,365
+/// objects (1,024 with instance colours), 409 instance records, every medium.
+pub const UNIFORM_LEN: [u32; 4] = [4096, 4096, 409, 32];
+
+/// The kernel (as `kernel` takes it: a scene's variant, its functions spliced in) with the uniform tables: the four
+/// declarations as sized uniform arrays at their own bindings, and every index into them held to the array
+/// (`min(u32(i), last)`). A scene with more entries than an array holds reads the last one for the rest (the renderer
+/// says so when it uploads one, `Gpu::upload`); nothing is read outside the buffer, which the kernel's unchecked
+/// indexing would otherwise do. Everything else is the source as written.
+///
+/// The kernel's other storage buffers stay storage buffers, each for its reason:
+///  - `materials` (288 B each), `lights` (80 B): the device drew right with them as they are, and 64 KiB would hold
+///    227 materials;
+///  - `emitters` (the emitter CDF and the light tree), `env_cdf` (the environment's CDF, then the procedural
+///    geometry's data), `tri_verts`, `attrs`, `nodes`, `prev_verts` (and the vertex colours after them): megabytes,
+///    which no uniform binding holds;
+///  - `accum` and group 1 (the radiance cache, the reservoirs, the trace's outputs): written by the kernel.
+pub fn uniform_tables(src: &str) -> String {
+    let mut s = src.to_string();
+    let mut rules = vec![];
+    for (&k, &len) in UNIFORM_TABLES.iter().zip(&UNIFORM_LEN) {
+        let m = &TABLES[k];
+        let sized = m.decl.replace("var<storage, read>", "var<uniform>").replace(&format!("array<{}>", m.ty), &format!("array<{}, {len}>", m.ty));
+        assert!(sized.contains("var<uniform>") && sized.ends_with(&format!(", {len}>;")), "uniform tables: the declaration {:?}", m.decl);
+        take(&mut s, m.decl, &sized);
+        rules.push(Rule { name: m.name, open: format!("{}[min(u32(", m.name), close: format!("), {}u)", len - 1), len: format!("{len}u") });
+    }
     rewrite(&s, &rules)
 }
 
@@ -414,7 +453,7 @@ pub fn live(src: &str) -> String {
     // After the uniforms' declaration (the file's first binding).
     let anchor = "@group(0) @binding(0) var<uniform> L: LiveParams;\n";
     take(&mut s, anchor, &format!("{anchor}{head}"));
-    let rules: Vec<Rule> = LIVE_BUFS.iter().map(|b| Rule { name: b.name, open: format!("{}[LO.{}.x + (", SLABS[b.slab].name, b.name), close: ")", len: format!("LO.{}.y", b.name) }).collect();
+    let rules: Vec<Rule> = LIVE_BUFS.iter().map(|b| Rule { name: b.name, open: format!("{}[LO.{}.x + (", SLABS[b.slab].name, b.name), close: ")".into(), len: format!("LO.{}.y", b.name) }).collect();
     rewrite(&s, &rules)
 }
 
@@ -563,6 +602,62 @@ mod tests {
         }
     }
 
+    /// Every kernel variant with the uniform tables: valid WGSL; the four tables are uniform buffers at their own
+    /// bindings, sized as the Rust side makes their buffers; the other sixteen storage buffers are as written; and
+    /// every index into the four is held to its array, so nothing is read outside a uniform buffer.
+    #[test]
+    fn the_uniform_tables_are_four_sized_uniform_arrays() {
+        // A name's index sites in code (not comments): `name[` that is not part of a longer name or a member.
+        let sites = |src: &str, name: &str| {
+            let code: String = src.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+            let open = format!("{name}[");
+            code.match_indices(&open).filter(|(k, _)| !code[..*k].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')).count()
+        };
+        let globals = |m: &naga::Module, uniform: bool| -> Vec<(String, u32, u32)> {
+            let mut out: Vec<(String, u32, u32)> = m
+                .global_variables
+                .iter()
+                .filter(|(_, v)| if uniform { v.space == naga::AddressSpace::Uniform } else { matches!(v.space, naga::AddressSpace::Storage { .. }) })
+                .map(|(_, v)| {
+                    let b = v.binding.as_ref().expect("a bound global");
+                    let bytes = match &m.types[v.ty].inner {
+                        naga::TypeInner::Array { size: naga::ArraySize::Constant(n), stride, .. } => n.get() * stride,
+                        _ => 0,
+                    };
+                    (v.name.clone().unwrap_or_default(), b.group * 100 + b.binding, bytes)
+                })
+                .collect();
+            out.sort_by_key(|g| g.1);
+            out
+        };
+        let (written, _) = parse(KERNEL);
+        for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
+            let base = crate::gpu::kernel_source(KERNEL, features);
+            let src = uniform_tables(&base);
+            let (m, info) = parse(&src);
+            assert_eq!(storage_buffers(&m, &info).1, 16, "features {features:#x}");
+            let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P" && g.0 != "energy_lut").collect();
+            let want: Vec<(String, u32, u32)> = UNIFORM_TABLES.iter().zip(UNIFORM_LEN).zip([14, 15, 17, 18]).map(|((&k, len), binding)| (TABLES[k].name.to_string(), binding, (TABLES[k].stride * len as u64) as u32)).collect();
+            assert_eq!(tables, want, "features {features:#x}");
+            // The storage buffers that stay: the same names at the same bindings as the kernel as written.
+            let kept = |m: &naga::Module| globals(m, false).into_iter().map(|g| (g.0, g.1)).filter(|g| !want.iter().any(|w| w.0 == g.0)).collect::<Vec<_>>();
+            assert_eq!(kept(&m), kept(&written), "features {features:#x}");
+            for (&k, len) in UNIFORM_TABLES.iter().zip(UNIFORM_LEN) {
+                let name = TABLES[k].name;
+                let held = format!("{name}[min(u32(");
+                assert!(sites(&base, name) >= 3, "{name}: the kernel indexes it");
+                assert_eq!(src.matches(&held).count(), sites(&base, name), "{name}: every index is held (features {features:#x})");
+                assert_eq!(sites(&src, name), src.matches(&held).count(), "{name}: no index is left as written");
+                assert!(src.contains(&format!("), {}u)]", len - 1)));
+            }
+        }
+        // One index, as it is rewritten: an expression with brackets of its own, and a table inside another's index.
+        let src = "@group(0) @binding(14) var<storage, read> tex_info: array<vec4<f32>>;\n@group(0) @binding(15) var<storage, read> objects: array<vec4<f32>>;\n@group(0) @binding(17) var<storage, read> instances: array<Instance>;\n@group(0) @binding(18) var<storage, read> media: array<Medium>;\nfn f(a: array<u32, 4>, k: i32) -> f32 { return objects[a[1] * 3u + 1u].w + tex_info[u32(objects[k].x)].y + media[0].b.x; }\n";
+        let out = uniform_tables(src);
+        assert!(out.starts_with("@group(0) @binding(14) var<uniform> tex_info: array<vec4<f32>, 4096>;\n@group(0) @binding(15) var<uniform> objects: array<vec4<f32>, 4096>;\n@group(0) @binding(17) var<uniform> instances: array<Instance, 409>;\n@group(0) @binding(18) var<uniform> media: array<Medium, 32>;\n"), "{out}");
+        assert!(out.ends_with("{ return objects[min(u32(a[1] * 3u + 1u), 4095u)].w + tex_info[min(u32(u32(objects[min(u32(k), 4095u)].x)), 4095u)].y + media[min(u32(0), 31u)].b.x; }\n"), "{out}");
+    }
+
     /// The same for the live passes (28 as written).
     #[test]
     fn the_merged_live_passes_fit_eight_storage_buffers() {
@@ -595,7 +690,7 @@ mod tests {
     /// declaration to the end of its block; comments are not read.
     #[test]
     fn locals_that_shadow_a_buffer_are_left_alone() {
-        let rules = [Rule { name: "refl", open: "ML.refl[".into(), close: "", len: "7u".into() }, Rule { name: "fa", open: "MV4[LO.fa.x + (".into(), close: ")", len: "LO.fa.y".into() }];
+        let rules = [Rule { name: "refl", open: "ML.refl[".into(), close: String::new(), len: "7u".into() }, Rule { name: "fa", open: "MV4[LO.fa.x + (".into(), close: ")".into(), len: "LO.fa.y".into() }];
         let src = "struct S { refl: f32 };\nfn f(i: u32) -> f32 {\n    let a = refl[i].x; // refl[0] }\n    {\n        let refl = refl[i + 1u].y;\n        if (refl > 0.0) { return refl; }\n    }\n    var s: S;\n    return s.refl + refl[arrayLength(&refl) - 1u].x + fa[fa[i].x].y;\n}\nfn g(refl: array<f32, 4>) -> f32 { return refl[1]; }\nfn h() -> f32 { return refl[2].x; }\n";
         let want = "struct S { refl: f32 };\nfn f(i: u32) -> f32 {\n    let a = ML.refl[i].x; // refl[0] }\n    {\n        let refl = ML.refl[i + 1u].y;\n        if (refl > 0.0) { return refl; }\n    }\n    var s: S;\n    return s.refl + ML.refl[7u - 1u].x + MV4[LO.fa.x + (MV4[LO.fa.x + (i)].x)].y;\n}\nfn g(refl: array<f32, 4>) -> f32 { return refl[1]; }\nfn h() -> f32 { return ML.refl[2].x; }\n";
         assert_eq!(rewrite(src, &rules), want);
@@ -629,7 +724,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "`refl` is used in a way the generator does not know (line 2)")]
     fn a_use_the_generator_does_not_know_stops_it() {
-        rewrite("fn f() {\n    let p = &refl;\n}\n", &[Rule { name: "refl", open: "ML.refl[".into(), close: "", len: "7u".into() }]);
+        rewrite("fn f() {\n    let p = &refl;\n}\n", &[Rule { name: "refl", open: "ML.refl[".into(), close: String::new(), len: "7u".into() }]);
     }
 
     #[test]

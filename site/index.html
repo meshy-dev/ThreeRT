@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ThreeRT — Hardware ray-traced three.js</title>
-<meta name="description" content="ThreeRT is a real-time path tracer behind a three.js-style API: Bistro and Zero-Day fully path-traced at 60 fps. Open source, MIT. Apps and games made with it are published at threert.app.">
+<meta name="description" content="ThreeRT is a real-time path tracer behind a three.js-style API: Bistro and Zero-Day fully path-traced at 60 fps. Open source, MIT. Apps and games made with it are published at threert.app; free clients for macOS, iPhone, Steam Deck and Android.">
 <link rel="canonical" href="https://threert.dev/">
 <meta name="theme-color" content="#060709">
 <meta property="og:site_name" content="ThreeRT">
@@ -19,7 +19,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@ThreeRT3D">
 <link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","name":"ThreeRT","url":"https://threert.dev/","description":"Hardware ray-traced three.js: a real-time path tracer behind a three.js-style API. Apps and games made with it are published at threert.app.","publisher":{"@type":"Organization","name":"MeshyAI","url":"https://meshy.ai/"}},{"@type":"SoftwareSourceCode","name":"ThreeRT","description":"A real-time path tracer behind a three.js-style API: a Rust and wgpu engine, TypeScript scene and gameplay packages.","url":"https://threert.dev/","codeRepository":"https://github.com/meshy-dev/ThreeRT","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Rust","TypeScript"]}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebSite","name":"ThreeRT","url":"https://threert.dev/","description":"Hardware ray-traced three.js: a real-time path tracer behind a three.js-style API. Apps and games made with it are published at threert.app.","publisher":{"@type":"Organization","name":"MeshyAI","url":"https://meshy.ai/"}},{"@type":"SoftwareSourceCode","name":"ThreeRT","description":"A real-time path tracer behind a three.js-style API: a Rust and wgpu engine, TypeScript scene and gameplay packages.","url":"https://threert.dev/","codeRepository":"https://github.com/meshy-dev/ThreeRT","license":"https://opensource.org/licenses/MIT","programmingLanguage":["Rust","TypeScript"]},{"@type":"SoftwareApplication","name":"ThreeRT","description":"The free clients that open ThreeRT apps and games and path-trace them on the device's own GPU.","url":"https://threert.dev/download/","applicationCategory":"GameApplication","operatingSystem":"macOS 14, iOS 17, SteamOS 3 and Linux x86_64, Android 10","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}]}</script>
 <link rel="stylesheet" href="css/threert.css">
 <noscript><style>.rv { opacity: 1; transform: none; }</style></noscript>
 <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
@@ -243,7 +243,7 @@
       <h1 class="h-display">Hardware<span class="l2">ray-traced</span><span class="l2 ray-text">three.js.</span></h1>
       <p class="lede" style="max-width:52ch">ThreeRT is the first three.js-style engine to fully path-trace industry-standard scenes at 60 fps.<sup>1</sup></p>
       <div class="cta"><a class="btn primary" href="https://threert.app/" rel="noopener"><span>Explore apps</span></a><a class="btn ghost star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star<span class="w"> on GitHub</span></span><b data-stars hidden></b></a></div>
-      <p class="plat"><a href="download/" data-dl>Download ThreeRT</a> · macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
+      <p class="plat"><a href="download/" data-dl>Download ThreeRT</a> · <span data-dl-others>macOS · iPhone · Steam&nbsp;Deck · Android</span></p>
     </div>
   </div>
 </header>
@@ -371,7 +371,7 @@
             <div>
               <h3>Native client</h3><span class="req">hardware ray tracing</span>
               <p class="sub">Every light path traced, at 60 fps.</p>
-              <ul><li>Dynamic resolution holds the frame rate</li><li><span>Installs like any game client: <a href="download/">macOS and iPhone</a></span></li></ul>
+              <ul><li>Dynamic resolution holds the frame rate</li><li><span>Installs like any game client: <a href="download/">macOS, iPhone, Steam Deck, Android</a></span></li></ul>
             </div>
             <div class="shelf3d" id="shelfNative"></div>
           </div>
@@ -476,7 +476,7 @@ return { scene, camera };</pre></li>
     <div class="no rv"><s>Shadow maps.</s> <s>Light probes.</s> <s>Lightmaps.</s><br><s>Screen-space GI.</s> <s>Baking.</s></div>
     <div class="yes rv">Just <span class="ray-text">light</span>.</div>
     <div class="cta rv"><a class="btn primary" href="https://threert.app/" rel="noopener"><span>Explore apps</span></a><a class="btn ghost star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star<span class="w"> on GitHub</span></span><b data-stars hidden></b></a></div>
-    <p class="plat rv" style="margin-top:16px"><a href="download/" data-dl>Download ThreeRT</a> · macOS 14+ on Apple silicon · iPhone and iPad, iOS 17+</p>
+    <p class="plat rv" style="margin-top:16px"><a href="download/" data-dl>Download ThreeRT</a> · <span data-dl-others>macOS · iPhone · Steam&nbsp;Deck · Android</span></p>
   </div>
 </section>
 
