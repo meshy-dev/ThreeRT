@@ -730,11 +730,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
         // `render --signals`'.)
         motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, 0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count)]),
-        prev_pos: [0.0; 4],
-        prev_fwd: [0.0; 4],
-        prev_right: [0.0; 4],
-        prev_up: [0.0; 4],
-        restir: [0.0; 4],
         group_first: [[0; 4]; 2],
         light_lod: [0.0; 4],
         emit_power: [total, 0.0, 0.0, 0.0],

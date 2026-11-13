@@ -1,7 +1,7 @@
 // Temporal quality on moving objects (GTA gap 4, docs/ROADMAP.md § 5): the mannequin plaza with its walkers, jogger and
 // car moving; a frame taken right as everything freezes (its history built while moving) against the same pose
 // converged (1024 frames after the freeze). ΔE / SSIM over the whole frame and the error map show ghosting, smearing and
-// noise on the movers. Run twice to compare (e.g. THREERT_NO_MV=1: no motion vectors).
+// noise on the movers. Run twice to compare (two builds, THREERT_BIN).
 //
 //   node tools/bench-motion.ts [--assets DIR] [--tag name] [--seconds 6]
 import { spawn, execFileSync } from "node:child_process";

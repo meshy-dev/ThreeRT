@@ -301,7 +301,7 @@ pub struct Targets {
     /// Quarter-resolution log2 luminance and its edge-aware blur (local exposure base).
     lumq: Buf,
     lumb: Buf,
-    /// The kernel's group 1 (`gpu::KernelBufs`): the radiance cache, the reservoirs, and what the passes here read of
+    /// The kernel's group 1 (`gpu::KernelBufs`): the radiance cache, and what the passes here read of
     /// a trace: the specular-lobe rays (`refl`), motion vectors per traced pixel (pathtrace.wgsl `motion_out`) and the
     /// deterministic direct light per traced pixel (`direct_out`).
     pub kernel: gpu::KernelBufs,
@@ -313,8 +313,8 @@ pub struct Targets {
 }
 
 impl Targets {
-    /// For a view of `w` x `h`, a radiance cache of `cache` entries and reservoirs for `resv` pixels.
-    fn new(g: &gpu::Gpu, w: u32, h: u32, lut: &[u16], cache: u64, resv: u64) -> Targets {
+    /// For a view of `w` x `h` and a radiance cache of `cache` entries.
+    fn new(g: &gpu::Gpu, w: u32, h: u32, lut: &[u16], cache: u64) -> Targets {
         use crate::merged::{SLABS, SLAB_F1, SLAB_U2, SLAB_U4, SLAB_V4};
         let d = &g.device;
         let n = (w * h) as u64;
@@ -398,7 +398,7 @@ impl Targets {
             ae_state: b(),
             lumq: b(),
             lumb: b(),
-            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, resv, n * 32, n * 16, n * 16),
+            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, n * 16),
             slabs,
             lut_view: lut_tex.create_view(&Default::default()),
             lut_tex,
@@ -614,7 +614,7 @@ const ASYNC_EMITTERS: usize = 100_000;
 /// nodes into a mapped staging buffer; the frame only copies it on the GPU (a 22 MB `write_buffer` cost it ~5 ms).
 /// Lockstep frames wait for it, so they repeat. Scenes whose emitters change in place (added in place: the tree's slot;
 /// moving emitters, whose nodes the frame refits) keep `write_emitters`; so does any other emitter edit (materials),
-/// which first lands the edits held back. THREERT_EMIT_SYNC=1: never.
+/// which first lands the edits held back.
 struct EmitterWorker {
     ask: mpsc::Sender<EmitterJob>,
     done: mpsc::Receiver<EmitterBuilt>,
@@ -655,7 +655,7 @@ impl EmitterWorker {
     #[cfg(not(target_arch = "wasm32"))]
     fn new(e: &tables::Tables, device: &wgpu::Device) -> Option<EmitterWorker> {
         let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0);
-        if e.emitter_tris.len() < ASYNC_EMITTERS || changing || std::env::var("THREERT_EMIT_SYNC").is_ok_and(|v| v == "1") {
+        if e.emitter_tris.len() < ASYNC_EMITTERS || changing {
             return None;
         }
         let device = device.clone();
@@ -979,10 +979,9 @@ fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32
     let mut sc = scene::build(world, assets, presets, None)?;
     sc.width = w;
     sc.height = h;
-    // Emitters its edits add get a light-tree subtree of their own (ROADMAP § 6 step 4; THREERT_LT_DYNAMIC=0: by power
-    // share, the A/B).
+    // Emitters its edits add get a light-tree subtree of their own (ROADMAP § 6 step 4).
     // (Software traversal with units edits in place as hardware traversal does: `units_wanted`.)
-    sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt || crate::units_wanted(g.hwrt, &sc)) && std::env::var("THREERT_LT_DYNAMIC").map_or(true, |v| v != "0");
+    sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt || crate::units_wanted(g.hwrt, &sc));
     let mut timings = vec![("build_ms".to_string(), t0.elapsed().as_secs_f64() * 1000.0)];
     let mut prep = crate::prepare_live(g, &mut sc, &mut timings);
     let mut tables = tables::Tables::new(&sc, std::mem::take(&mut prep.emitter_tris), prep.light_tree.take());
@@ -1203,11 +1202,7 @@ pub struct LiveCore {
     raster: Option<Raster>,
     /// World-space radiance cache (pathtrace.wgsl; None: THREERT_CACHE=0, paths trace every bounce).
     cache: Option<RadianceCache>,
-    /// Emitter reservoirs at camera hits (pathtrace.wgsl; experiment, THREERT_RESTIR=1), and the previous frame's traced
-    /// size while its reservoirs are valid (not after a reset or a rebuild: triangle indices change).
-    restir: bool,
-    restir_prev: Option<(u32, u32)>,
-    /// Kernel group 1: primary visibility + radiance cache + emitter reservoirs.
+    /// Kernel group 1: primary visibility + radiance cache + what the live passes read of a trace.
     kernel_bg: wgpu::BindGroup,
     /// Span (relative to the dynamic tail) re-transformed by the last in-place update whose previous-frame vertices
     /// (`Uploaded::prev_verts`) still hold the frame before it: synced to the current ones next frame.
@@ -1490,42 +1485,23 @@ fn traced_pass(name: &str) -> bool {
     name == "refl" || name == "dtemporal" || name.starts_with("atrous") || name == "stemporal" || name.starts_with("sfilt") || name == "compose" || name == "judge" || name == "reject"
 }
 
-/// Per-object motion vectors (THREERT_NO_MV=1: off, moving objects keep a short history instead).
-fn motion_vectors() -> bool {
-    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| !std::env::var("THREERT_NO_MV").is_ok_and(|v| v == "1"))
-}
 
 /// Light LOD (`emitter_lod`): emitters within this distance of the camera keep their sampling weight, farther ones
-/// lose it as (d0 / d)^2. THREERT_LIGHT_LOD = d0 in metres (0 = off).
+/// lose it as (d0 / d)^2.
 const LIGHT_LOD_D0: f32 = 10.0;
 
 /// Emitters farther than this from the light LOD's reference are not proposed (`emitter_lod`); BSDF rays bring their
-/// light. THREERT_EMITTER_CULL = metres (0 = off).
+/// light.
 const EMITTER_CULL: f32 = 60.0;
 
 /// The cull's reach inside the view cone (`EmitterCull`), in cull radii: emitters ahead of the camera are kept out to
-/// this. THREERT_EMITTER_CULL_VIEW = the multiple (0 = no cone: the camera-centred cull alone, as before 2026-11-08).
+/// this.
 const EMITTER_CULL_VIEW: f32 = 2.0;
 /// The view cone: the frustum's half-diagonal plus this margin (degrees); the CDF is rebuilt when the camera turns by
 /// LIGHT_LOD_TURN, so the frustum stays inside the cone between rebuilds.
 const EMITTER_CULL_MARGIN: f32 = 20.0;
 const LIGHT_LOD_TURN: f32 = 15.0;
 
-fn emitter_cull_view() -> f32 {
-    static F: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_EMITTER_CULL_VIEW").ok().and_then(|v| v.parse().ok()).unwrap_or(EMITTER_CULL_VIEW))
-}
-
-fn emitter_cull() -> f32 {
-    static F: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_EMITTER_CULL").ok().and_then(|v| v.parse().ok()).unwrap_or(EMITTER_CULL))
-}
-
-fn light_lod_d0() -> f32 {
-    static F: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_LIGHT_LOD").ok().and_then(|v| v.parse().ok()).unwrap_or(LIGHT_LOD_D0))
-}
 
 
 /// Halton(base) of index i (sub-pixel jitter sequence).
@@ -1610,9 +1586,8 @@ impl LiveCore {
         let passes = Passes::new(&g);
         // The scene's post preset replaces this LUT below (apply_post).
         let cache_on = !std::env::var("THREERT_CACHE").is_ok_and(|v| v == "0");
-        let restir = std::env::var("THREERT_RESTIR").is_ok_and(|v| v == "1");
-        // (Without the cache the kernel binds one of one entry; without ReSTIR, one reservoir.)
-        let targets = Targets::new(&g, w, h, &vec![0u16; (LUT * LUT * LUT * 4) as usize], if cache_on { gpu::CACHE_SIZE } else { 1 }, if restir { w as u64 * h as u64 } else { 1 });
+        // (Without the cache the kernel binds one of one entry.)
+        let targets = Targets::new(&g, w, h, &vec![0u16; (LUT * LUT * LUT * 4) as usize], if cache_on { gpu::CACHE_SIZE } else { 1 });
         let (sc, pp) = load_scene(&g, world, assets, presets, w, h, &targets, &passes)?;
         let cam = sc.scene_camera;
         let (triangles, scene_name) = (sc.triangles, sc.name.clone());
@@ -1643,7 +1618,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, restir, restir_prev: None, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);
@@ -1750,8 +1725,7 @@ impl LiveCore {
             match r {
                 Ok(()) => {
                     self.edit_ms += t.elapsed().as_secs_f32() * 1e3;
-                    // As after a rebuild: history validated per pixel, the reservoirs' triangle indices dropped.
-                    self.restir_prev = None;
+                    // As after a rebuild: history validated per pixel.
                     self.lit_changed = self.frame.max(1);
                 }
                 Err(why) => {
@@ -2064,10 +2038,6 @@ impl LiveCore {
             let st = self.sc.tables.stride;
             let o = &mut self.sc.tables.objects[inst.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
-            // Without motion vectors (THREERT_NO_MV=1) its surfaces keep a short history, as moved triangles do.
-            if !motion_vectors() {
-                self.sc.tables.objects[inst.object as usize * st + 1][3] = shader_time(self.time);
-            }
             let slot = top.inst_base() + i as usize;
             top.moved(slot, w, None);
             self.inst_moving.push(i);
@@ -2350,7 +2320,7 @@ impl LiveCore {
             return Err("THREERT_EDIT_REBUILD=1".into());
         }
         let size = std::mem::size_of::<scene::GpuInstance>();
-        let (now, mv) = (shader_time(self.time), motion_vectors());
+        let now = shader_time(self.time);
         let empty = crate::world::InstanceTable::default();
         let sc = &mut self.sc;
         let Some(mut top) = gpu::Top::of(&mut sc.up.accel, &mut sc.up.units) else { return Err("software traversal".into()) };
@@ -2394,12 +2364,11 @@ impl LiveCore {
                 };
                 rec.p = old.m;
                 sc.gpu_instances[rec0 + i] = rec;
-                // The time of the last power edit: now for a new power, or (without motion vectors, THREERT_NO_MV=1)
-                // for every move, as `move_instances` does.
+                // The time of the last power edit: now for a new power.
                 let st = sc.tables.stride;
                 let at = (place.object as usize + i) * st;
                 let e = &mut sc.tables.objects[at..at + st];
-                let edited = if !mv || e[0][3] != entry[0][3] { now } else { e[1][3] };
+                let edited = if e[0][3] != entry[0][3] { now } else { e[1][3] };
                 e.copy_from_slice(&entry[..st]);
                 e[1][3] = edited;
                 top.moved(slot0 + i, wm, Some((n.cast_shadow, hidden)));
@@ -2449,9 +2418,6 @@ impl LiveCore {
             let st = self.sc.tables.stride;
             let o = &mut self.sc.tables.objects[p.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
-            if !motion_vectors() {
-                self.sc.tables.objects[p.object as usize * st + 1][3] = shader_time(self.time);
-            }
             if let Some(accel) = self.sc.up.accel.as_mut() {
                 if let Some(t) = accel.tlas[accel.proc_base + j].as_mut() {
                     t.transform = gpu::tlas_rows(w);
@@ -2678,10 +2644,9 @@ impl LiveCore {
         if self.sc.up.accel.is_none() || ids.iter().any(|id| !self.sc.tables.retained.dynamic.contains_key(id)) {
             return Ok(false);
         }
-        let now = shader_time(self.time);
         let models = std::mem::take(&mut self.sc.tables.retained.dynamic);
         let t_skin = Instant::now();
-        let res = self.reskin(world, ids, &models, now);
+        let res = self.reskin(world, ids, &models);
         self.cpu_skin_ms += t_skin.elapsed().as_secs_f32() * 1000.0;
         self.sc.tables.retained.dynamic = models;
         let Some((lo, hi)) = res? else { return Ok(false) };
@@ -2793,7 +2758,7 @@ impl LiveCore {
 
     /// Skins / transforms the objects into the CPU copy of the dynamic tail; the touched span (relative to the tail), or
     /// None when one cannot be updated in place.
-    fn reskin(&mut self, world: &World, ids: &std::collections::HashSet<u32>, models: &std::collections::HashMap<u32, scene::DynamicModel>, now: f32) -> Result<Option<(usize, usize)>> {
+    fn reskin(&mut self, world: &World, ids: &std::collections::HashSet<u32>, models: &std::collections::HashMap<u32, scene::DynamicModel>) -> Result<Option<(usize, usize)>> {
         use rayon::prelude::*;
         if ids.iter().any(|id| !world.shown(*id)) {
             return Ok(None);
@@ -2885,15 +2850,11 @@ impl LiveCore {
         }
         for id in ids {
             let d = &models[id];
-            // Pivot (material functions' object position). Motion vectors carry its history; without them
-            // (THREERT_NO_MV=1) its surfaces keep a short history for a moment, like a power edit.
+            // Pivot (material functions' object position). Motion vectors carry its history.
             let pivot = world.world_matrix(*id).transform_point3(glam::Vec3::ZERO);
             let st = sc.tables.stride;
             let o = &mut sc.tables.objects[d.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
-            if !motion_vectors() {
-                sc.tables.objects[d.object as usize * st + 1][3] = now;
-            }
         }
         Ok((lo < hi).then_some((lo, hi)))
     }
@@ -3541,7 +3502,6 @@ impl LiveCore {
         self.g.carry_grids(&self.sc.up, &s.up);
         self.sc = s;
         self.spark_lights = self.sc.tables.emitter_tris.iter().any(|e| e.nominal);
-        self.restir_prev = None;
         self.inst_moving.clear();
         self.prev_span = None;
         self.pose_span = None;
@@ -3710,7 +3670,7 @@ impl LiveCore {
     /// cone (`EmitterCull`), rebuilt when the camera is 15 m from where it was last built or has turned LIGHT_LOD_TURN
     /// from that direction (the kernel's emitter pdfs read the same reference from the parameters).
     fn update_light_lod(&mut self) {
-        let d0 = light_lod_d0();
+        let d0 = LIGHT_LOD_D0;
         let (w, h) = (self.w, self.h);
         let b = &mut self.sc.base;
         // The light tree weighs emitters by their distance to each shading point itself: no light LOD, no cull.
@@ -3724,8 +3684,8 @@ impl LiveCore {
             return;
         }
         b.light_lod = [self.cam.pos.x, self.cam.pos.y, self.cam.pos.z, d0];
-        b.emit_power[1] = emitter_cull();
-        b.emit_power[2] = emitter_cull() * emitter_cull_view();
+        b.emit_power[1] = EMITTER_CULL;
+        b.emit_power[2] = EMITTER_CULL * EMITTER_CULL_VIEW;
         // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
         let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, half.min(std::f32::consts::PI).cos()];
@@ -3852,19 +3812,7 @@ impl LiveCore {
             }
             p.raster = [(self.raster.is_some() && !self.sc.instanced) as u32 as f32, jitter.0, jitter.1, 0.0];
             p.raster[3] = if self.rays { 0.0 } else { 1.0 };
-            if self.restir {
-                let pc = self.prev_cam;
-                p.prev_pos = [pc.pos.x, pc.pos.y, pc.pos.z, pc.tan_half_fov];
-                p.prev_fwd = [pc.fwd.x, pc.fwd.y, pc.fwd.z, self.aspect];
-                p.prev_right = [pc.right.x, pc.right.y, pc.right.z, 0.0];
-                p.prev_up = [pc.up.x, pc.up.y, pc.up.z, 0.0];
-                let (mode, (pw, ph)) = match self.restir_prev {
-                    Some(prev) if !self.reset => (2.0, prev),
-                    _ => (1.0, (iw, ih)),
-                };
-                p.restir = [mode, pw as f32, ph as f32, (self.frame % 2) as f32];
-            }
-            if (!self.sc.dynamic.1.is_empty() || !self.sc.tables.retained.instance_of.is_empty() || !self.sc.tables.retained.rigid.is_empty()) && motion_vectors() {
+            if (!self.sc.dynamic.1.is_empty() || !self.sc.tables.retained.instance_of.is_empty() || !self.sc.tables.retained.rigid.is_empty()) {
                 // The kernel finds the first dynamic triangle in Params::group_first (group 4), a u32.
                 p.motion[0] = 1.0;
             }
@@ -4166,7 +4114,6 @@ impl LiveCore {
         }
         self.prev_cam = cam;
         self.shown_spp = spp.max(1);
-        self.restir_prev = Some((iw, ih));
         self.prev_isz = (iw, ih);
         self.reset = false;
         self.frame = self.frame.wrapping_add(1);

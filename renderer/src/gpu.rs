@@ -35,8 +35,8 @@ pub struct Gpu {
     pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool, Option<crate::merged::Caps>), wgpu::ComputePipeline>>,
     layout: wgpu::BindGroupLayout,
     /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
-    /// the emitter reservoirs (`reservoirs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`, one-entry
-    /// cache, one reservoir).
+    /// what the live passes read of a trace (`KernelBufs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`,
+    /// one-entry cache).
     pub vis_layout: wgpu::BindGroupLayout,
     pub no_vis: wgpu::BindGroup,
     /// `no_vis`'s buffers (the merged layout: an offline kernel's source is written for their lengths).
@@ -94,11 +94,6 @@ pub struct Params {
     pub raster: [f32; 4],    // live primary visibility from the raster pass (1 = on), sub-pixel jitter x, y; ray tracing off (1)
     pub cache: [f32; 4],     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     pub motion: [f32; 4],    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1][0])
-    pub prev_pos: [f32; 4],  // live: the previous frame's camera (emitter reservoir reprojection), as cam_*
-    pub prev_fwd: [f32; 4],
-    pub prev_right: [f32; 4],
-    pub prev_up: [f32; 4],
-    pub restir: [f32; 4],    // live emitter reservoirs: 0 off, 1 on without history, 2 on; previous traced width, height; this frame's half
     /// First global triangle of each traversal group (`Prepared::groups`; group 4 = the first dynamic one). Hardware
     /// BLAS instances carry their group index, not this offset: instance custom data has only 24 bits (16.7 M).
     pub group_first: [[u32; 4]; 2],
@@ -952,8 +947,8 @@ fn kernel_switches(src: String, k: &KernelSwitches, hwrt: bool) -> String {
     if k.light_pick {
         // One of the three kinds of light below the directional ones, drawn among those the scene has.
         patch(
-            "    sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (P.counts.y > 0u && restir_here()) {\n",
-            "    // gpu.rs `KernelSwitches::light_pick`.\n    let has_local = P.counts.x > P.counts2.x;\n    let has_emit = P.counts.y > 0u;\n    let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);\n    var take_local = true;\n    var take_emit = true;\n    var take_env = true;\n    var pick_w = 1.0;\n    let kinds = u32(has_local) + u32(has_emit) + u32(has_env);\n    if (cur_depth > 0u && kinds > 1u) {\n        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);\n        take_local = has_local && k == 0u;\n        if (has_local) { k -= 1u; }\n        take_emit = has_emit && k == 0u;\n        if (has_emit) { k -= 1u; }\n        take_env = has_env && k == 0u;\n        pick_w = f32(kinds);\n    }\n    let sum_sun = sum;\n    let spec_sun = dl_spec;\n    if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (!take_emit) {\n    } else if (P.counts.y > 0u && restir_here()) {\n",
+            "    sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (P.counts.y > 0u) {\n",
+            "    // gpu.rs `KernelSwitches::light_pick`.\n    let has_local = P.counts.x > P.counts2.x;\n    let has_emit = P.counts.y > 0u;\n    let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);\n    var take_local = true;\n    var take_emit = true;\n    var take_env = true;\n    var pick_w = 1.0;\n    let kinds = u32(has_local) + u32(has_emit) + u32(has_env);\n    if (cur_depth > 0u && kinds > 1u) {\n        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);\n        take_local = has_local && k == 0u;\n        if (has_local) { k -= 1u; }\n        take_emit = has_emit && k == 0u;\n        if (has_emit) { k -= 1u; }\n        take_env = has_env && k == 0u;\n        pick_w = f32(kinds);\n    }\n    let sum_sun = sum;\n    let spec_sun = dl_spec;\n    if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (!take_emit) {\n    } else if (P.counts.y > 0u) {\n",
         );
         patch(
             "    // Environment\n    if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {\n        let l = sample_env();\n        let f = eval_bsdf(s, lb, v, l);\n",
@@ -1066,17 +1061,11 @@ impl CacheBuffers {
     }
 }
 
-/// Emitter reservoirs of the live camera hits (pathtrace.wgsl `resv`) for up to `pixels` traced pixels.
-pub fn reservoirs(d: &wgpu::Device, pixels: u64) -> wgpu::Buffer {
-    d.create_buffer(&wgpu::BufferDescriptor { label: Some("reservoirs"), size: pixels * 64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
-}
-
-/// The kernel's group-1 buffers: the radiance cache, the emitter reservoirs, and what the live passes read of a trace
+/// The kernel's group-1 buffers: the radiance cache, and what the live passes read of a trace
 /// (live.rs `Targets`): the specular-lobe rays, the motion vectors, the directional lights' direct light. In the
 /// merged layout they are ranges of one buffer, the arrays of the kernel's `MergedLive` (merged.rs `KERNEL_LIVE`).
 pub struct KernelBufs {
     pub cache: CacheBuffers,
-    pub resv: Buf,
     pub refl: Buf,
     pub motion: Buf,
     pub direct: Buf,
@@ -1084,28 +1073,28 @@ pub struct KernelBufs {
     /// the guard, and always in the merged layout (the last array of `MergedLive`).
     pub guard: Option<Buf>,
     /// The merged layout: the one buffer, and its arrays' lengths.
-    pub merged: Option<(wgpu::Buffer, [u32; 7])>,
+    pub merged: Option<(wgpu::Buffer, [u32; 6])>,
 }
 
 impl KernelBufs {
-    /// For a cache of `entries`, reservoirs for `pixels` and the live passes' three of these bytes.
+    /// For a cache of `entries` and the live passes' three of these bytes.
     /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
-    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, pixels: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
         if !merged {
             let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
             let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
-            return KernelBufs { cache: CacheBuffers::new(d, entries), resv: Buf::whole(reservoirs(d, pixels)), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
+            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
         }
-        let bytes = [entries * 4, entries * 32, entries * 32, pixels * 64, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
-        let caps: [u32; 7] = std::array::from_fn(|k| crate::merged::live_cap(k, bytes[k]));
+        let bytes = [entries * 4, entries * 32, entries * 32, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
+        let caps: [u32; 6] = std::array::from_fn(|k| crate::merged::live_cap(k, bytes[k]));
         let (at, size) = crate::merged::live_layout(&caps);
         let buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("merged live"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let b = |k: usize| Buf { buffer: buffer.clone(), offset: at[k], size: bytes[k] };
-        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, resv: b(3), refl: b(4), motion: b(5), direct: b(6), guard: Some(b(7)), merged: Some((buffer, caps)) }
+        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, refl: b(3), motion: b(4), direct: b(5), guard: Some(b(6)), merged: Some((buffer, caps)) }
     }
 }
 
-/// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache, the emitter reservoirs and the
+/// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache and the
 /// reflection resolve's inputs (`KernelBufs`); in the merged layout, the texture and the one buffer.
 pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView, b: &KernelBufs) -> wgpu::BindGroup {
     fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
@@ -1115,7 +1104,7 @@ pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &w
     match &b.merged {
         Some((buffer, _)) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::KERNEL_LIVE_BINDING, resource: buffer.as_entire_binding() }] }),
         None => {
-            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(4, &b.resv), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
+            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
             d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &entries })
         }
@@ -1258,8 +1247,7 @@ pub const F_FOG: u32 = 64;
 pub const F_VOLUME: u32 = 128;
 pub const F_TEX: u32 = 256;
 pub const F_FUNC: u32 = 512;
-/// The emitter-reservoir experiment (THREERT_RESTIR=1): compiled out otherwise, its registers cost the kernel otherwise.
-pub const F_RESTIR: u32 = 1024;
+// (1024: the emitter-reservoir experiment, removed 2026-11-13.)
 pub const F_GLASS: u32 = 2048;
 pub const F_COAT: u32 = 4096;
 /// A traversal group starts beyond 2^24 triangles: hardware instances carry their group index instead of their first
@@ -1370,9 +1358,6 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], fog: Option<&crate::desc::F
         f |= F_HUGE;
     }
 
-    if std::env::var("THREERT_RESTIR").is_ok_and(|v| v == "1") {
-        f |= F_RESTIR;
-    }
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
         f &= mask | F_HUGE | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' custom data / the object table holds
     }
@@ -1566,12 +1551,11 @@ impl Gpu {
             storage(1, false),
             storage(2, false),
             storage(3, false),
-            storage(4, false),
             storage(5, false),
             storage(6, false),
             storage(7, false),
         ];
-        // The merged layout: group 1's seven buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
+        // The merged layout: group 1's six buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
         // As written, a kernel with the guard has the count in a buffer of its own: the binding is there whenever a
         // kernel of this device may have the guard (`guard_room`; a kernel without it does not name the binding).
         if merged {
@@ -1604,7 +1588,7 @@ impl Gpu {
                 storage(6, true),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 1, 64, 64, 64);
+        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
@@ -3279,7 +3263,7 @@ mod tests {
     #[test]
     fn feature_bits_are_distinct() {
         let all = [
-            ("F_MASKED", F_MASKED), ("F_FOG", F_FOG), ("F_VOLUME", F_VOLUME), ("F_TEX", F_TEX), ("F_FUNC", F_FUNC), ("F_RESTIR", F_RESTIR),
+            ("F_MASKED", F_MASKED), ("F_FOG", F_FOG), ("F_VOLUME", F_VOLUME), ("F_TEX", F_TEX), ("F_FUNC", F_FUNC),
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID),

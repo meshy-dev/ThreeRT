@@ -2107,6 +2107,25 @@ traced pixel that the fast mean's buffer had free:
   locked lettering of a still sign comes back from a motion's blur by the blend alone (the 0.2 on Kabukichō's
   signs); a lamp that comes on arrives over a quarter of a second.
 
+**Cleanup: experiments and switches that outlived their measurement (2026-11-13, after it).** Removed, each off by
+default, so nothing a scene shows changes:
+
+- the temporal pass's two round-3 experiment switches (`THREERT_TEMPORAL_FLAGS` 1: the à-trous stages gated by
+  history length alone; 2: the specular filter on mirror-like surfaces too) and the flag word that carried them;
+- the emitter-reservoir experiment (`THREERT_RESTIR`, ReSTIR DI at camera hits; measured above: k = 1 0.608 → 0.613,
+  motion +0.1 ΔE, +0.44 ms): its kernel code, the reservoir buffer (group 1, binding 4: the kernel binds 19 storage
+  buffers as written, the merged layout's `MergedLive` six arrays) and five vec4 of `Params`;
+- `THREERT_NO_MV` (no per-object motion vectors), `THREERT_LT_DYNAMIC=0` (emitters added in place by power share;
+  `bench-voxel-light`'s third row goes with it), `THREERT_EMIT_SYNC`, and the overrides of three constants
+  (`THREERT_EMITTER_CULL`, `THREERT_EMITTER_CULL_VIEW`, `THREERT_LIGHT_LOD`).
+
+Kept: the switches the benches and tests use (`THREERT_PROFILE`, `_PROFILE_BLAS`, `_FREEZE_TIME`, `_EXPOSURE_SNAP`,
+`_NO_GRAIN`, `_MOTION_BLUR`, `_EDIT_REBUILD`, `_INSTANCING`), the diagnostics (`_EDIT_LOG`, `_VIEW_MODE`, `_TL_HIDE`,
+`_CACHE`, `_CACHE_FLAGS`), and two that are configuration (`_GOVERN_CLOCK`; `_RASTER`, the primary-visibility path
+kept for devices without hardware ray tracing). Check: test-render, every output a run repeats to the byte, is
+byte-identical to the build before; with `THREERT_MERGED=1` one volume test differs at a relative 2e-6 (the kernel
+is compiled from a shorter source).
+
 Not done here: filters sized by hit distance, which is what would let a short history stand without noise; the
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.

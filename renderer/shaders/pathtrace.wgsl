@@ -42,7 +42,6 @@ const F_FOG: u32 = 64u;
 const F_VOLUME: u32 = 128u;
 const F_TEX: u32 = 256u;
 const F_FUNC: u32 = 512u;
-const F_RESTIR: u32 = 1024u;
 const F_GLASS: u32 = 2048u;
 const F_COAT: u32 = 4096u;
 const F_HUGE: u32 = 8192u;
@@ -73,11 +72,6 @@ struct Params {
     raster: vec4<f32>,    // live: primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1)
     cache: vec4<f32>,     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     motion: vec4<f32>,    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1].x)
-    prev_pos: vec4<f32>,  // live: the previous frame's camera (emitter reservoir reprojection), as cam_*
-    prev_fwd: vec4<f32>,
-    prev_right: vec4<f32>,
-    prev_up: vec4<f32>,
-    restir: vec4<f32>,    // live emitter reservoirs: 0 off, 1 on without history, 2 on; previous traced width, height; this frame's half (0 / 1)
     group_first: array<vec4<u32>, 2>, // first global triangle of each traversal group ([1].x = the first dynamic one)
     light_lod: vec4<f32>, // live light LOD (lib.rs emitter_lod): reference position, d0 (0 = off)
     emit_power: vec4<f32>, // x: the emitter CDF's total without light LOD (= misc.y when it is off); y: emitter cull radius (0 = off); z: its reach in the view cone
@@ -1856,9 +1850,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     // Emissive triangles (incl. rect lights)
     mis_x = o;
     mis_n = s.n;
-    if (P.counts.y > 0u && restir_here()) {
-        sum += restir_emitters(s, lb, v, o);
-    } else if (P.counts.y > 0u) {
+    if (P.counts.y > 0u) {
         var es: ES;
         // With the light tree its candidates are already near the point: P.ltree.y of them at camera hits, one elsewhere.
         if (lt_on()) { es = sample_emitter_ris(o, s.n, select(1u, u32(P.ltree.w), cur_depth == 0u), s, lb, v); } else if (seen_directly()) { es = sample_emitter_ris(o, s.n, select(EMIT_RIS_M / 2u, EMIT_RIS_M, cur_depth == 0u), s, lb, v); } else if (P.light_lod.w > 0.0) { es = sample_emitter_ris(o, s.n, 2u, s, lb, v); } else { es = sample_emitter(o, s.n); }
@@ -2472,27 +2464,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Emitter reservoirs at live camera hits (ReSTIR DI, Bitterli et al. 2020; docs/ROADMAP.md § 1, step 1: direct light
-// from the many emissive surfaces as clean as the exact light loop). Each pixel resamples RESTIR_M emitter points by
-// their unshadowed contribution, then the previous frame's reservoir at its reprojected position and RESTIR_SPATIAL
-// neighbours of it (same surface by normal and distance), and shades the winner with one shadow ray; occluded winners
-// are stored with weight 0. The target is cheap (the emitter's factor and animation, not its texture); the winner gets
-// the full emitted radiance, and its MIS weight against BSDF sampling uses the emitter CDF's pdf, as before. Reuse
-// without visibility or pairwise MIS: slightly biased at shadow and surface boundaries. An experiment (THREERT_RESTIR=1):
-// on Kabukicho it changed neither the k = 1 disocclusion frame (no history there) nor motion error (+0.1 ΔE), for
-// +0.44 ms at 60 %; reuse among this frame's reservoirs needs a pass of its own.
-
-const RESTIR_M: u32 = 4u;
-const RESTIR_SPATIAL: u32 = 2u;
-const RESTIR_RADIUS: f32 = 12.0; // traced pixels
-const RESTIR_CAP: f32 = 80.0;    // history, in candidates (20 x RESTIR_M)
-
-// Two halves (this frame's, the previous one's) of 2 entries per traced pixel: (triangle, barycentrics unorm16x2,
-// weight W, count M), (octahedral normal snorm16x2, distance to the camera, -, -).
-@group(1) @binding(4) var<storage, read_write> resv: array<vec4<u32>>;
-
-// The camera ray's pixel (traced grid) and whether this path vertex uses the reservoirs.
-var<private> cur_pix: u32;
+// What a live trace leaves the live passes (live.wgsl).
 
 // Reflection resolve inputs (live; live.wgsl `refl`), 2 per traced pixel: the camera hit's specular-lobe ray
 // (radiance it brought back, its lobe pdf; pdf 0 = the pixel sampled another lobe), (specular albedo E at the hit,
@@ -2515,158 +2487,11 @@ fn pdf_spec(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
     return g1(lb.a2, nov) * d_ggx(lb.a2, noh) / (4.0 * nov);
 }
 
-fn restir_here() -> bool {
-    return LIVE && has(F_RESTIR) && P.restir.x > 0.5 && cur_depth == 0u && P.misc.w < 0.5;
-}
-
+// A unit vector, octahedral (snorm16x2).
 fn oct_enc(n: vec3<f32>) -> u32 {
     let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
     let q = select(p, (1.0 - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)), n.z < 0.0);
     return pack2x16snorm(q);
-}
-
-fn oct_dec(u: u32) -> vec3<f32> {
-    let p = unpack2x16snorm(u);
-    var n = vec3<f32>(p, 1.0 - abs(p.x) - abs(p.y));
-    let t = max(-n.z, 0.0);
-    n.x += select(t, -t, n.x >= 0.0);
-    n.y += select(t, -t, n.y >= 0.0);
-    return normalize(n);
-}
-
-// An emitter point: triangle (0xffffffff: none), barycentrics, and its selection probability at the point that drew it
-// (-1: unknown, a reused reservoir sample; emitter_eval asks the light tree then).
-struct Cand { tri: u32, b: vec2<f32>, sel: f32 };
-
-// One emitter point for x (normal n) by emitter_draw (the light tree or the CDF: area x emitted luminance).
-fn emitter_point(x: vec3<f32>, n: vec3<f32>) -> Cand {
-    let pk = emitter_draw(x, n);
-    var b1 = rnd();
-    var b2 = rnd();
-    if (b1 + b2 > 1.0) { b1 = 1.0 - b1; b2 = 1.0 - b2; }
-    return Cand(select(0xffffffffu, bitcast<u32>(pk.e.x), pk.p > 0.0), vec2<f32>(b1, b2), pk.p);
-}
-
-// Emitter point c seen from x on surface s, unshadowed: target (luminance of factor x animation x BSDF x geometry x
-// MIS weight), the CDF's area pdf, direction, distance, the BSDF's specular share; with `full`, the contribution with
-// the emitted radiance (texture) in `f`.
-struct EmitEval { f: vec3<f32>, ph: f32, pdf_a: f32, l: vec3<f32>, dist: f32, frac: vec3<f32> };
-
-fn emitter_eval(s: Surface, lb: Lobes, v: vec3<f32>, x: vec3<f32>, c: Cand, full: bool) -> EmitEval {
-    var r: EmitEval;
-    if (c.tri == 0xffffffffu || c.tri >= arrayLength(&attrs)) { return r; }
-    let ti = c.tri;
-    let e1 = tri_verts[ti * 3u + 1u].xyz;
-    let e2 = tri_verts[ti * 3u + 2u].xyz;
-    let lp = tri_verts[ti * 3u].xyz + e1 * c.b.x + e2 * c.b.y;
-    let cr = cross(e1, e2);
-    let dl = lp - x;
-    let d2 = max(dot(dl, dl), 1e-8);
-    let dist = sqrt(d2);
-    let l = dl / dist;
-    let a = attrs[ti];
-    let mi = bitcast<u32>(a.uv.w);
-    let mat = materials[mi];
-    var cos_l = dot(normalize(cr), -l);
-    if (mat.tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
-    if (cos_l <= 0.0) { return r; }
-    let f = eval_bsdf(s, lb, v, l);
-    if (all(f <= vec3<f32>(0.0))) { return r; }
-    r.frac = split_frac;
-    // Source pdf of the candidate (the CDF, light LOD included); MIS against the BSDF rays weighs by power alone (emit_mis).
-    var lum_p = luminance(mat.emissive.rgb) * obj_power(a);
-    // Particle emitters: nominal area (x.z) in the CDF, uniform over the actual one.
-    if (has(F_PEMIT) && a.x.z > 0.0) { lum_p *= a.x.z / max(0.5 * length(cr), 1e-12); }
-    var pdf_m = lum_p / P.emit_power.x;
-    if (lt_on()) {
-        // The light tree: its pmf at x per area, for the candidate's weight and for MIS (as emit_mis weighs).
-        var sel = c.sel;
-        if (sel < 0.0) { sel = emitter_sel(ti, x, s.n); }
-        r.pdf_a = sel / max(0.5 * length(cr), 1e-12);
-        pdf_m = r.pdf_a;
-    } else {
-        r.pdf_a = lum_p * emitter_lod(ti) / P.misc.y;
-    }
-    let m = power_heuristic(pdf_m * d2 / cos_l, pdf_bsdf(s, lb, v, l));
-    let g = cos_l / d2 * m;
-    r.ph = luminance(mat.emissive.rgb) * obj_power(a) * luminance(f) * g;
-    if (full) { r.f = emitter_radiance(ti, c.b.x, c.b.y, l) * f * g; }
-    r.l = l;
-    r.dist = dist;
-    return r;
-}
-
-fn restir_emitters(s: Surface, lb: Lobes, v: vec3<f32>, x: vec3<f32>) -> vec3<f32> {
-    var pick = Cand(0xffffffffu, vec2<f32>(0.0), -1.0);
-    var pick_ph = 0.0;
-    var wsum = 0.0;
-    var m = 0.0;
-    for (var k = 0u; k < RESTIR_M; k++) {
-        let c = emitter_point(x, s.n);
-        m += 1.0;
-        let ev = emitter_eval(s, lb, v, x, c, false);
-        if (ev.ph <= 0.0 || ev.pdf_a <= 0.0) { continue; }
-        let w = ev.ph / ev.pdf_a;
-        wsum += w;
-        if (rnd() * wsum < w) {
-            pick = c;
-            pick_ph = ev.ph;
-        }
-    }
-    let half = arrayLength(&resv) / 4u;
-    if (P.restir.x > 1.5) {
-        // Previous frame's traced-grid position of this surface point.
-        let dp = s.p - P.prev_pos.xyz;
-        let z = dot(dp, P.prev_fwd.xyz);
-        let dist = length(dp);
-        if (z > 1e-4) {
-            let pw = P.restir.y;
-            let ph = P.restir.z;
-            let c0 = vec2<f32>((dot(dp, P.prev_right.xyz) / (z * P.prev_pos.w * P.prev_fwd.w) * 0.5 + 0.5) * pw, (0.5 - dot(dp, P.prev_up.xyz) / (z * P.prev_pos.w) * 0.5) * ph);
-            let prev = (1u - u32(P.restir.w)) * half;
-            for (var j = 0u; j <= RESTIR_SPATIAL; j++) {
-                var q = c0;
-                if (j > 0u) {
-                    let r = RESTIR_RADIUS * sqrt(rnd());
-                    let a = 2.0 * PI * rnd();
-                    q += r * vec2<f32>(cos(a), sin(a));
-                }
-                if (q.x < 0.0 || q.y < 0.0 || q.x >= pw || q.y >= ph) { continue; }
-                let qi = prev + u32(q.y) * u32(pw) + u32(q.x);
-                let e1 = resv[qi * 2u + 1u];
-                if (dot(oct_dec(e1.x), s.n) < 0.9 || abs(bitcast<f32>(e1.y) - dist) > 0.1 * dist) { continue; }
-                let e0 = resv[qi * 2u];
-                let mq = min(bitcast<f32>(e0.w), RESTIR_CAP);
-                let c = Cand(e0.x, unpack2x16unorm(e0.y), -1.0);
-                m += mq;
-                let ev = emitter_eval(s, lb, v, x, c, false);
-                let w = ev.ph * bitcast<f32>(e0.z) * mq;
-                if (!(w > 0.0)) { continue; }
-                wsum += w;
-                if (rnd() * wsum < w) {
-                    pick = c;
-                    pick_ph = ev.ph;
-                }
-            }
-        }
-    }
-    var wgt = 0.0;
-    var c = vec3<f32>(0.0);
-    if (pick_ph > 0.0) {
-        wgt = wsum / (m * pick_ph);
-        let ev = emitter_eval(s, lb, v, x, pick, true);
-        if (ev.ph > 0.0 && !occluded_any(x, ev.l, ev.dist * 0.999)) {
-            c = ev.f * wgt;
-            dl_spec += c * ev.frac;
-        } else {
-            wgt = 0.0;
-        }
-    }
-    if (non_finite(c)) { c = vec3<f32>(0.0); wgt = 0.0; }
-    let cur = u32(P.restir.w) * half + cur_pix;
-    resv[cur * 2u] = vec4<u32>(pick.tri, pack2x16unorm(pick.b), bitcast<u32>(wgt), bitcast<u32>(min(m, RESTIR_CAP)));
-    resv[cur * 2u + 1u] = vec4<u32>(oct_enc(s.n), bitcast<u32>(length(s.p - P.cam_pos.xyz)), 0u, 0u);
-    return c;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -3007,7 +2832,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = P.size.y;
     if (gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
-    cur_pix = pix;
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
     if (LIVE && P.misc.w < 0.5 && arrayLength(&direct_out) >= w * h) { direct_out[pix] = vec4<f32>(0.0); }
