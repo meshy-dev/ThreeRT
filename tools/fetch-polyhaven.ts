@@ -40,7 +40,7 @@ export const SETS: Record<string, { textures: string[]; models: string[] }> = {
       "exterior_aircon_unit", "trashbag", "metal_trash_can", "fire_hydrant", "utility_box_01", "utility_box_02",
       "plastic_crate_01", "plastic_crate_02", "security_camera_01", "street_lamp_01", "water_manhole_cover",
       "concrete_road_barrier", "cardboard_box_01", "plastic_monobloc_chair_01", "bar_chair_round_01", "metal_stool_01",
-      "propane_tank", "WetFloorSign_01", "mounted_fluorescent_lights",
+      "propane_tank", "WetFloorSign_01", "mounted_fluorescent_lights", "potted_plant_02",
     ],
   },
 };
