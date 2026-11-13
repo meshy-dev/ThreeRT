@@ -1,7 +1,6 @@
 // ThreeRT site: what the pages share besides the components in threert.js. The platform a visitor is on (for the
-// download buttons), the client release this host carries (releases/latest.json), the example packages it hosts
-// (play/index.json), their links, and QR codes. Both JSON files are generated (site/README.md); a host without them
-// gets pages that say so.
+// download links), the client release this host carries (releases/latest.json, generated: site/README.md; a host
+// without it gets a Download page that says so), the repository's star count, and QR codes.
 
 import { mark } from "./mark.js";
 
@@ -17,7 +16,7 @@ export function platform() {
   return "other";
 }
 
-/** The download buttons (`a[data-dl]`, linking to the download page) name the visitor's platform. */
+/** The download links (`a[data-dl]`, leading to the download page) name the visitor's platform. */
 export function downloadButtons(root = document) {
   const text = { macos: "Download for macOS", ios: "Get ThreeRT for iPhone", other: "Download" }[platform()];
   for (const a of root.querySelectorAll("a[data-dl]")) {
@@ -37,29 +36,11 @@ async function json(rel) {
 
 /** The client release on this host: {version, date, macos: {file, url, size, sha256, minOS, arch, signed, notarized}, ios: {url, channel, minOS}}, or null. */
 export const release = () => json("releases/latest.json");
-/** The example packages on this host: {client, games: [{id, title, caption, kind, thumb}]}, or null. */
-export const packages = () => json("play/index.json");
 
 export const fileUrl = (file) => new URL(`releases/${file}`, ROOT).href;
 /** Where a release's macOS disk image is: `macos.url` when it is hosted elsewhere (it is over this host's size limit), else next to latest.json. */
 export const macUrl = (m) => (m.url ? m.url : fileUrl(m.file));
 export const megabytes = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
-
-/**
- * A hosted package's addresses. `url`: its base (threert.json lives under it) and, with a slash, the same game as
- * three.js. `open`: the link ThreeRT clients register (threerts:// = https, threert:// = http). `qr`: what its QR code
- * carries. Over https that is the plain URL: the phone's camera opens the three.js page, the app's scanner opens the
- * package. Over http (a dev machine) it is the threert:// link, which the camera hands to the app.
- */
-export function packageLinks(id) {
-  const url = new URL(`play/${id}`, ROOT).href;
-  const secure = url.startsWith("https:");
-  const open = url.replace(/^https:/, "threerts:").replace(/^http:/, "threert:");
-  return { url, web: `${url}/`, open, qr: secure ? `${url}/` : open, thumb: (file) => new URL(`play/${file}`, ROOT).href };
-}
-
-/** Whether a phone can reach this page's host (a QR code of localhost only opens on this machine). */
-export const reachable = () => !/^(localhost|127\.|\[?::1)/.test(location.hostname);
 
 let qrcode;
 /** `text` as a QR code: an SVG string, dark modules only (put it in a `.qr` tile). Loads the encoder on first use. */
@@ -105,5 +86,41 @@ export function guard(name, f) {
   }
 }
 
-// Every page imports this file: the lockup's mark comes alive on all of them (js/mark.js).
+/**
+ * The repository's stars, in every `[data-stars]` (the Star buttons: the nav, the footer, the landing page's own).
+ * GitHub's public API takes 60 requests an hour from an address without a token, so the count is kept in
+ * localStorage for six hours, and an answer that is not a count (a rate limit, no network) is not asked again for an
+ * hour. Until a count is known the buttons simply have none; below `min` they keep none either, because a button
+ * that says "Star 2" asks less well than one that says "Star".
+ */
+const STARS = { api: "https://api.github.com/repos/meshy-dev/ThreeRT", key: "threert:stars", ttl: 6 * 3600e3, retry: 3600e3, min: 10 };
+export async function stars(root = document) {
+  const els = [...root.querySelectorAll("[data-stars]")];
+  if (!els.length) return;
+  const show = (n) => {
+    if (!Number.isFinite(n) || n < STARS.min) return;
+    const text = n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, "")}k`;
+    for (const el of els) {
+      el.textContent = text;
+      el.hidden = false;
+      el.closest("a")?.setAttribute("aria-label", `Star ThreeRT on GitHub (${n} stars)`);
+    }
+  };
+  const read = () => { try { return JSON.parse(localStorage.getItem(STARS.key)); } catch { return null; } };
+  const write = (v) => { try { localStorage.setItem(STARS.key, JSON.stringify(v)); } catch { /* private mode: ask again next time */ } };
+  const kept = read();
+  show(kept?.n);
+  if (kept && Date.now() < kept.until) return;
+  let n = null;
+  try {
+    const r = await fetch(STARS.api, { signal: AbortSignal.timeout(8000) });
+    if (r.ok) n = (await r.json()).stargazers_count;
+  } catch { /* offline, blocked: as a rate limit */ }
+  if (Number.isFinite(n)) { show(n); write({ n, until: Date.now() + STARS.ttl }); }
+  else write({ n: kept?.n ?? null, until: Date.now() + STARS.retry });
+}
+
+// Every page imports this file: the lockup's mark comes alive on all of them (js/mark.js), and the Star buttons get
+// their count.
 try { mark(); } catch (e) { console.error("mark:", e); }
+guard("stars", () => stars());

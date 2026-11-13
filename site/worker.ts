@@ -1,6 +1,6 @@
 // The site on Cloudflare Workers: static assets (out/site, built by site/tools/build.ts) on threert.dev, the clients'
 // disk images from R2, and byte ranges for the clips (media/**.mp4), which the assets alone do not answer.
-// www.threert.dev redirects to the apex.
+// www.threert.dev redirects to the apex, and the old Showcase page to threert.app.
 //
 // Why R2: the disk image (releases/ThreeRT-<version>-macos-arm64.dmg, about 32 MiB with the `threert` command line in
 // it) is over the 25 MiB a file that static assets take, and the client is closed source, so it has no public
@@ -109,6 +109,14 @@ async function clip(request: Request, env: Env): Promise<Response> {
   return new Response(bytes.slice(range[0], range[1] + 1), { status: 206, headers: out });
 }
 
+/**
+ * The Showcase page's address: /showcase, /showcase/, /showcase/index.html. What it listed is now published on
+ * threert.app, so old links (the npm packages' READMEs, the pages of packages built before, earlier apps) go to the
+ * catalogue there. Only the page: showcase/community.json stays an asset, because clients before 0.4.0 read it.
+ */
+export const isShowcase = (pathname: string) => /^\/showcase(\/(index\.html)?)?$/.test(pathname);
+export const PLATFORM = "https://threert.app/";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -116,6 +124,7 @@ export default {
       url.hostname = "threert.dev";
       return Response.redirect(url.toString(), 301);
     }
+    if (isShowcase(url.pathname)) return Response.redirect(PLATFORM, 301);
     const key = imageKey(url.pathname);
     if (key) return image(request, env, key);
     if (isClip(url.pathname)) return clip(request, env);
