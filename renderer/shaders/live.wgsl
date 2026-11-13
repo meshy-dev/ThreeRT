@@ -966,7 +966,7 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
     let fw = atomicLoad(&lock_fwd[q]);
     atomicStore(&lock_fwd[q], 0u);
-    var was = Carried(0.0, 0.0, vec2<f32>(0.0), false);
+    var was = Carried(0.0, 0.0, 0.0, vec2<f32>(0.0), false);
     if (fw != 0u && L.size.w == 0u && ps.x > 0) { was = carry((fw & 0x1ffffffu) - 1u); }
     var life = max(was.life - 1.0 / jitter_phases(), 0.0);
     var lz = was.depth;
@@ -1098,16 +1098,17 @@ fn jitter_phases() -> f32 {
 // (In full for the first half of its life, fading over the second.)
 fn locked(q: u32) -> f32 { return clamp(2.0 * unpack2x16float(up_state[this_half(q)].z).x, 0.0, 1.0); }
 
-// The previous frame's lock at its traced sample p (`Lock`): its life and depth, and where what it is for is now, in
-// this frame's traced coordinates (sample q sits at q + L.jit.xy); `ahead`: in front of the camera.
-struct Carried { life: f32, depth: f32, at: vec2<f32>, ahead: bool };
+// The previous frame's lock at its traced sample p (`Lock`): its life, the view depth of what it is for in the previous
+// frame's view (`was`: the previous g-buffer's) and in this frame's (`depth`; 0 both: the sky), and where it is now,
+// in this frame's traced coordinates (sample q sits at q + L.jit.xy); `ahead`: in front of the camera.
+struct Carried { life: f32, was: f32, depth: f32, at: vec2<f32>, ahead: bool };
 fn carry(p: u32) -> Carried {
     let ps = vec2<f32>(L.isz.zw);
     let v = up_state[last_half(p)];
     let lz = unpack2x16float(v.z);
     let was = (vec2<f32>(f32(p % L.isz.z), f32(p / L.isz.z)) + unpack2x16float(v.w)) * vec2<f32>(f32(L.size.x), f32(L.size.y)) / ps;
     let c = cur_pixel(view_point(L.prev, was, lz.y));
-    return Carried(lz.x, lz.y, (c.xy + 0.5) * vec2<f32>(f32(L.isz.x), f32(L.isz.y)) / vec2<f32>(f32(L.size.x), f32(L.size.y)), c.z > 0.0);
+    return Carried(lz.x, lz.y, select(0.0, c.z, lz.y > 0.0), (c.xy + 0.5) * vec2<f32>(f32(L.isz.x), f32(L.isz.y)) / vec2<f32>(f32(L.size.x), f32(L.size.y)), c.z > 0.0);
 }
 
 // Each lock of the previous frame onto the traced sample its point falls in now (`Lock`), the longest-lived where two
@@ -1122,8 +1123,8 @@ fn lock_carry(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.y * L.isz.z + gid.x;
     let c = carry(p);
     let g = gb_unpack(gbuffer[last_half(p)]);
-    if (c.life > 0.0 && c.depth > 0.0 && (g.depth <= 0.0 || c.depth < g.depth)) {
-        gbuffer[last_half(p)].y = pack2x16float(vec2<f32>(min(c.depth, 6.0e4), g.rough));
+    if (c.life > 0.0 && c.was > 0.0 && (g.depth <= 0.0 || c.was < g.depth)) {
+        gbuffer[last_half(p)].y = pack2x16float(vec2<f32>(min(c.was, 6.0e4), g.rough));
     }
     if (c.life * jitter_phases() <= 1.0 || !c.ahead) { return; }
     let q = vec2<i32>(floor(c.at));
