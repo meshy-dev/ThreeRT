@@ -3,6 +3,7 @@ name = "threert-render"
 version = "0.1.0"
 edition = "2021"
 description = "Native renderer for ThreeRT games: embedded scene runtime, GPU path tracer + UE5-matched post chain"
+license = "MIT"
 
 [dependencies]
 voxel-core = { path = "voxel-core" }
