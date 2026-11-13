@@ -10,37 +10,41 @@
 //   node tools/render-identity.ts --a <threert-render> --b <threert-render> [--runs 2] [--tolerance 0] [--env K=V,K=V]
 //                                 [--filter id] [--out out/render-identity/<tag>]
 //
-// `--env` goes to both builds (THREERT_MERGED=1: the browser's binding layout, natively). Each run holds the GPU lock
-// as test-render does; the runs of one build follow each other.
+// `--env` goes to both builds (THREERT_MERGED=1: the browser's binding layout, natively). Each run is test-render with
+// an output directory of its own (it holds the GPU lock as it always does); the runs of one build follow each other.
+// No outputs on a side, or no binary at --a / --b, is an error (exit 2): a gate that compared nothing has passed
+// nothing.
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { repoRoot } from "./lib/bench.ts";
 
 const args = process.argv.slice(2);
 const flag = (k: string, d = "") => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const a = resolve(flag("--a")), b = resolve(flag("--b"));
-if (!existsSync(a) || !existsSync(b)) {
+const isFile = (p: string) => p !== "" && existsSync(p) && statSync(p).isFile();
+if (!isFile(flag("--a")) || !isFile(flag("--b"))) {
   console.error("render-identity: --a and --b must name two threert-render binaries");
   process.exit(2);
 }
+const a = resolve(flag("--a")), b = resolve(flag("--b"));
 const runs = Number(flag("--runs", "2"));
 const tolerance = Number(flag("--tolerance", "0"));
 const extra = Object.fromEntries(flag("--env").split(",").filter(Boolean).map((kv) => kv.split("=") as [string, string]));
 const filter = flag("--filter");
 const out = resolve(flag("--out", join(repoRoot, "out/render-identity", new Date().toISOString().replace(/[:.]/g, "-"))));
-const rendered = join(repoRoot, "out/tests/render");
-
-/** One test-render run on `bin`, its HDR outputs copied to `dir`. */
+/** One test-render run on `bin`, its outputs in `dir` (its own: nothing else writes there). */
 function run(bin: string, dir: string) {
-  for (const f of existsSync(rendered) ? readdirSync(rendered) : []) if (f.endsWith(".raw")) rmSync(join(rendered, f));
+  rmSync(dir, { recursive: true, force: true });
   try {
-    execFileSync("node", [join(repoRoot, "tools/test-render.ts"), ...(filter ? [filter] : [])], { env: { ...process.env, ...extra, THREERT_BIN: bin }, stdio: ["ignore", "ignore", "inherit"] });
+    execFileSync("node", [join(repoRoot, "tools/test-render.ts"), ...(filter ? [filter] : []), "--out", dir], { env: { ...process.env, ...extra, THREERT_BIN: bin }, stdio: ["ignore", "ignore", "inherit"] });
   } catch {
     // (Failing tests still leave their outputs; what is compared here is the pictures, not the verdicts.)
   }
-  mkdirSync(dir, { recursive: true });
-  for (const f of readdirSync(rendered)) if (f.endsWith(".raw")) cpSync(join(rendered, f), join(dir, f));
+  const n = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".raw")).length : 0;
+  if (n === 0) {
+    console.error(`render-identity: test-render left no outputs in ${dir} (${bin})`);
+    process.exit(2);
+  }
 }
 
 const dirs = { a: [] as string[], b: [] as string[] };
@@ -73,7 +77,7 @@ const spread = (ds: string[], f: string) => {
   return m;
 };
 
-const names = new Set([...dirs.a, ...dirs.b].flatMap((d) => readdirSync(d)));
+const names = new Set([...dirs.a, ...dirs.b].flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".raw"))));
 let same = 0, within = 0, rounding = 0;
 const changed: string[] = [];
 for (const f of [...names].sort()) {

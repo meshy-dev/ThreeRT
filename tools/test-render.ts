@@ -2,7 +2,7 @@
 // against a known answer (physics, a converged render or UE) and passes, fails or is unsupported. One warm renderer
 // process runs them all; each is sized to ~300 ms; the layer stays under a minute.
 //
-//   node tools/test-render.ts [filter] [--assets DIR] [--json out.json]
+//   node tools/test-render.ts [filter] [--assets DIR] [--json out.json] [--out DIR (default out/tests/render)]
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -16,7 +16,7 @@ const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) 
 const filter = args.find((a) => !a.startsWith("--") && !args[args.indexOf(a) - 1]?.startsWith("--"));
 const assets = resolve(flag("--assets", repoRoot));
 const dir = join(repoRoot, "tests/render");
-const out = join(repoRoot, "out/tests/render");
+const out = resolve(flag("--out", join(repoRoot, "out/tests/render")));
 mkdirSync(out, { recursive: true });
 // Its renders would skew another run's timings: wait for the GPU lock (tools/lib/bench.ts) and hold it.
 await waitGpuLock("test-render");
