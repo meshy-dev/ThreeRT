@@ -1,5 +1,6 @@
 use crate::bounding_volume::{Aabb, BoundingVolume};
 use crate::math::{Pose, Real, Vector};
+use crate::partitioning::BvhNode;
 use crate::query::sweep_toi::{sweep_time_of_impact, Sweep, SweepToiStatus, ToiProxy};
 use crate::query::{NonlinearRigidMotion, QueryDispatcher, ShapeCastHit};
 use crate::shape::{Cuboid, Shape, Voxels};
@@ -38,9 +39,9 @@ where
     //
     // 1. The walk: the shape's box at the start (in the voxel shape's frame), grown by how far the turn can take any
     //    of its points (the turn over the times times the farthest point's distance from the motion's centre of
-    //    rotation) and a margin, moves with the shape's velocity in the voxel shape's frame. Row by row along the axis
-    //    it moves most along, the cells of the row it overlaps while it is in the row are walked: every cell it
-    //    overlaps at some time, once.
+    //    rotation) and a margin, moves with the shape's velocity in the voxel shape's frame. In each chunk it passes
+    //    over, row by row along the axis it moves most along, the cells of the row it overlaps while it is in the row
+    //    are walked: every cell it overlaps at some time, once.
     // 2. A cell is culled against the shape's own box (its local AABB) oriented as at the start and grown on every
     //    side by how far any of its points can move (the linear speed times the time, plus the turn's reach): the
     //    shape is inside it all the while, so a cell outside it (by a face axis of either box) is never touched.
@@ -135,37 +136,38 @@ where
     // (Each cell: its first bound, its place in the walk, and its centre.)
     let mut candidates: Vec<(Real, usize, Vector)> = Vec::new();
 
-    // The walk.
+    // The walk (the chunks the shape's box passes over found once; in each, its rows).
     let moved = |t: Real| Aabb::new(box0.mins + linvel2_1 * t, box0.maxs + linvel2_1 * t);
     let axis = linvel2_1.abs().max_position();
     let speed = linvel2_1[axis];
     let size = g1.voxel_size()[axis];
-    let [domain_mins, domain_maxs] = g1.domain();
     let [rows_mins, rows_maxs] = g1.voxel_range_intersecting_local_aabb(&moved(0.0).merged(&moved(span)));
-    for row in rows_mins[axis].max(domain_mins[axis])..rows_maxs[axis].min(domain_maxs[axis]) {
-        // (When the box is in the row, within the times.)
-        let (row_mins, row_maxs) = (row as Real * size, (row + 1) as Real * size);
-        let (enter, leave) = if speed > 0.0 {
-            ((row_mins - box0.maxs[axis]) / speed, (row_maxs - box0.mins[axis]) / speed)
-        } else if speed < 0.0 {
-            ((row_maxs - box0.mins[axis]) / speed, (row_mins - box0.maxs[axis]) / speed)
-        } else {
-            (0.0, span)
-        };
-        let (enter, leave) = (enter.clamp(0.0, span), leave.clamp(0.0, span));
-        let [mut mins, mut maxs] = g1.voxel_range_intersecting_local_aabb(&moved(enter).merged(&moved(leave)));
-        mins[axis] = row;
-        maxs[axis] = row + 1;
-        for vox in g1.voxels_in_range(mins, maxs) {
-            if vox.state.is_empty() {
-                continue;
-            }
-            let center = g1.voxel_center(vox.grid_coords);
-            if culled(center) {
-                continue;
-            }
-            if let Some(enter) = meets(center) {
-                candidates.push((start_time + enter * span, candidates.len(), center));
+    let range_aabb = Aabb::new(g1.voxel_center(rows_mins), g1.voxel_center(rows_maxs));
+    for chunk_id in g1.chunk_bvh().leaves(|node: &BvhNode| node.aabb().intersects(&range_aabb)) {
+        let chunk = g1.chunk_ref(chunk_id);
+        let [chunk_mins, chunk_maxs] = chunk.domain();
+        for row in rows_mins[axis].max(chunk_mins[axis])..rows_maxs[axis].min(chunk_maxs[axis]) {
+            // (When the box is in the row, within the times.)
+            let (row_mins, row_maxs) = (row as Real * size, (row + 1) as Real * size);
+            let (enter, leave) = if speed > 0.0 {
+                ((row_mins - box0.maxs[axis]) / speed, (row_maxs - box0.mins[axis]) / speed)
+            } else if speed < 0.0 {
+                ((row_maxs - box0.mins[axis]) / speed, (row_mins - box0.maxs[axis]) / speed)
+            } else {
+                (0.0, span)
+            };
+            let (enter, leave) = (enter.clamp(0.0, span), leave.clamp(0.0, span));
+            let [mut mins, mut maxs] = g1.voxel_range_intersecting_local_aabb(&moved(enter).merged(&moved(leave)));
+            mins[axis] = row;
+            maxs[axis] = row + 1;
+            for vox in chunk.voxels_in_range(mins, maxs) {
+                let center = g1.voxel_center(vox.grid_coords);
+                if culled(center) {
+                    continue;
+                }
+                if let Some(enter) = meets(center) {
+                    candidates.push((start_time + enter * span, candidates.len(), center));
+                }
             }
         }
     }
