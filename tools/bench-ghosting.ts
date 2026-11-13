@@ -19,7 +19,11 @@
 //           history reprojects exactly, so what is left is the history's own blur, lag or doubling;
 //   strafe: 2.5 m to the left (3 m to the right) in 0.4 s, hold, back (parallax, disocclusion, reflections moving
 //           against their surface);
-//   stop:   8 m/s forward for 0.5 s, then still (what the history drags into the first frames after a sudden stop).
+//   stop:   8 m/s forward for 0.5 s, then still (what the history drags into the first frames after a sudden stop);
+//   orbit:  the play window's left drag (view.rs `Orbit`: about a point ahead of the camera as far as the camera is
+//           from the origin, held to 1-50 m), 27.5 deg in 0.4 s, hold, back: rotation and translation at once, a
+//           degree a frame, where a feature finer than a pixel that the samples miss reprojects with what is behind
+//           it (a second copy of a lamp, 2026-11-13). Reported, not yet guarded.
 // Shots: each move's midpoint going out (vs the converged midpoint); the start pose 0.1 / 0.5 / 2 s after returning (counted in frames at 60 fps, not wall-clock time);
 // the stop pose 0 / 0.1 / 0.3 s after stopping. Per region (the wet street, where reflections are; the sign band;
 // the facades): mean dE, p95, p99, trail_px (p95 over rows of the longest horizontal run of pixels off by dE > 10) and
@@ -144,6 +148,17 @@ function pose(yaw: number, side = 0, fwd = 0) {
   return { pos, target: pos.map((p, i) => p + dir[i] * 10) as V3, tan: view.tan };
 }
 const turn = (f: number) => pose(view.turn * f);
+/** The play window's orbit (view.rs `Orbit::from_camera`): about the point `dist` along the start pose's view, `dist`
+ *  the start position's distance from the origin held to 1..50 m, `ORBIT_DEG` degrees at f = 1. */
+const ORBIT_DEG = 27.5;
+function orbit(f: number) {
+  const p = pose(0);
+  const dir = p.target.map((t, i) => (t - p.pos[i]) / 10);
+  const n = Math.hypot(...dir), dist = Math.min(Math.max(Math.hypot(...view.p0), 1), 50);
+  const c = p.pos.map((x, i) => x + (dir[i] / n) * dist) as V3;
+  const a = (ORBIT_DEG * f * Math.PI) / 180, ox = p.pos[0] - c[0], oz = p.pos[2] - c[2];
+  return { pos: [c[0] + ox * Math.cos(a) + oz * Math.sin(a), p.pos[1], c[2] - ox * Math.sin(a) + oz * Math.cos(a)] as V3, target: c, tan: view.tan };
+}
 const strafe = (f: number) => pose(0, view.strafe * f);
 const dolly = (f: number) => pose(0, 0, 4 * f);
 
@@ -190,7 +205,7 @@ async function start(s: string) {
 
 // References: converged frames (history reset, then accumulated) at every pose a shot is taken at.
 const refFile = (n: string) => join(refs, `${n}.png`);
-const refPoses: Record<string, ReturnType<typeof pose>> = { start: pose(0), "turn-mid": turn(0.5), "strafe-mid": strafe(0.5), stop: dolly(1) };
+const refPoses: Record<string, ReturnType<typeof pose>> = { start: pose(0), "turn-mid": turn(0.5), "strafe-mid": strafe(0.5), "orbit-mid": orbit(0.5), stop: dolly(1) };
 if (!Object.keys(refPoses).every((n) => existsSync(refFile(n)))) {
   console.log(`rendering converged references (${refFrames} frames each at ${refScale})…`);
   const live = await start(refScale);
@@ -227,7 +242,7 @@ async function sweep(at: (f: number) => ReturnType<typeof pose>, f0: number, f1:
 for (rep = 0; rep < repeats; rep++) {
   if (rep === 0) await shot("settled", "start", 240, pose(0));
   else await live.step(240, pose(0));
-  for (const [name, at, n] of [["turn", turn, 30], ["strafe", strafe, 24]] as const) {
+  for (const [name, at, n] of [["turn", turn, 30], ["strafe", strafe, 24], ["orbit", orbit, 24]] as const) {
     await sweep(at, 0, 1, n, `${name}-mid`);
     await live.frames(30);
     await sweep(at, 1, 0, n);
@@ -299,11 +314,11 @@ const tag = (sceneName === "kabukicho" ? "" : `${sceneName}-`) + (quick ? "ghost
 summary(`${tag} turn-mid ground excess`, value["turn-mid/ground"].mean, { unit: " dE" });
 summary(`${tag} turn-mid ground trail`, value["turn-mid/ground"].trail, { unit: " px", digits: 0 });
 summary(`${tag} strafe-return+0.5s excess`, value["strafe-return+0.5s/all"].mean, { unit: " dE" });
-for (const m of ["turn", "strafe"]) {
+for (const m of ["turn", "strafe", "orbit"]) {
   execFileSync(bin, ["montage", join(out, `${m}.jpg`), "--width", "640", join(out, `${m}-mid.png`), refFile(`${m}-mid`), join(out, `${m}-return+0.1s.png`), refFile("start")]);
 }
 execFileSync(bin, ["montage", join(out, "stop.jpg"), "--width", "640", join(out, "stop+0.png"), join(out, "stop+0.1s.png"), refFile("stop")]);
-console.log(`${out}/{turn,strafe,stop}.jpg (shot | converged)`);
+console.log(`${out}/{turn,strafe,orbit,stop}.jpg (shot | converged)`);
 if (args.includes("--check") && failed) {
   console.error(`ghosting: ${failed} guarded value(s) over the limit`);
   process.exit(1);

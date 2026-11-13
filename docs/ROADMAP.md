@@ -2107,6 +2107,16 @@ traced pixel that the fast mean's buffer had free:
   locked lettering of a still sign comes back from a motion's blur by the blend alone (the 0.2 on Kabukichō's
   signs); a lamp that comes on arrives over a quarter of a second.
 
+**The measurements into the repo (2026-11-13, after the cleanup).** What the window's quality work of these weeks was
+measured by lived in scratch scripts; now `tools/bench-window.ts` (the still frames, the Bistro slice, Tokyo at dusk,
+Tokyo turning and orbiting as the play window's left drag does, each against offline), `tools/render-identity.ts`
+(the byte gate for changes that must not change a picture) and an orbit move in `bench-ghosting` (reported, not yet
+guarded). On the way: the moving lamps test (`upscale/lamps-in-motion-live`) never exercised the motion clamp. Its
+lamps float before the black sky, a sliding camera does not move the sky, and a lamp no sample hit takes the
+velocity of what is behind it: the upscaler saw no motion. Before a black wall 1 cm behind, the lamps keep 0.045 of
+their 0.1 in motion as merged (no clamp at all: 0.105; before the lock: 0.014). The test changes with the fix of its
+cause (a missed lamp reprojected by its own depth), so that main does not carry a failing test meanwhile.
+
 **Cleanup: experiments and switches that outlived their measurement (2026-11-13, after it).** Removed, each off by
 default, so nothing a scene shows changes:
 
