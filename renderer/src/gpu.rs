@@ -368,7 +368,7 @@ fn grid_texture(d: &wgpu::Device, label: &str, dims: [u32; 3], written: bool) ->
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: GRID_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | if written { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::empty() },
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC | if written { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::empty() },
         view_formats: &[],
     })
 }
@@ -394,10 +394,14 @@ struct GridGpu {
     node: u32,
     dims: [u32; 3],
     z0: u32,
+    /// `world::DensityGrid::made`: the grid it was built from.
+    made: u32,
     sim: Option<GridSim>,
 }
 
 struct GridSim {
+    /// Field B, the program's own (its state with field A in the atlas; A' and B' are each frame's scratch).
+    b: wgpu::Texture,
     program: u32,
     params: [f32; 32],
     steps: [(wgpu::Buffer, wgpu::BindGroup); 2],
@@ -1670,7 +1674,8 @@ impl Gpu {
                     }
                     let sim = g.program.map(|program| {
                         let tex = |label: &str| grid_texture(d, label, g.dims, true).create_view(&Default::default());
-                        let (a2, b, b2) = (tex("grid A'"), tex("grid B"), tex("grid B'"));
+                        let field_b = grid_texture(d, "grid B", g.dims, true);
+                        let (a2, b, b2) = (tex("grid A'"), field_b.create_view(&Default::default()), tex("grid B'"));
                         let sources = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid sources"), size: (crate::world::GRID_MAX_SOURCES * 48) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                         let step = |src_a: &wgpu::TextureView, src_b: &wgpu::TextureView, dst_a: &wgpu::TextureView, dst_b: &wgpu::TextureView| {
                             let u = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid step"), size: std::mem::size_of::<GridStepGpu>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -1694,9 +1699,9 @@ impl Gpu {
                         };
                         let steps = [step(&atlas_view, &b, &a2, &b2), step(&a2, &b2, &atlas_view, &b)];
                         let m = &scene.media[g.medium as usize];
-                        GridSim { program, params: g.params, steps, sources, placed: std::cell::Cell::new((m.w, m.c)) }
+                        GridSim { b: field_b, program, params: g.params, steps, sources, placed: std::cell::Cell::new((m.w, m.c)) }
                     });
-                    GridGpu { id: g.id, node: g.node, dims: g.dims, z0: g.z0, sim }
+                    GridGpu { id: g.id, node: g.node, dims: g.dims, z0: g.z0, made: g.made, sim }
                 })
                 .collect::<Vec<_>>();
             let pipeline = grids.iter().any(|g| g.sim.is_some()).then(|| {
@@ -2324,6 +2329,29 @@ impl Gpu {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(dims[0] * 8), rows_per_image: Some(dims[1]) },
             wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] },
         );
+    }
+
+    /// What the grid programs have simulated, from the scene before a rebuild into the one after: for each grid with a
+    /// program that is the same grid still (`world::DensityGrid::made`, its size), its field A (the atlas's layers)
+    /// and field B copied on the GPU, and the programs' step count. Without it a rebuild started every simulated grid
+    /// again from its data: any structural change in a game (an object hidden, a texture) wiped its smoke.
+    pub fn carry_grids(&self, old: &Uploaded, new: &Uploaded) {
+        let (Some(from), Some(to)) = (&old.grids, &new.grids) else { return };
+        let mut e = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("carry grids") });
+        let mut any = false;
+        for g in &to.grids {
+            let Some(sim) = &g.sim else { continue };
+            let Some((o, osim)) = from.grids.iter().find(|o| o.id == g.id && o.made == g.made && o.dims == g.dims).and_then(|o| o.sim.as_ref().map(|s| (o, s))) else { continue };
+            let size = wgpu::Extent3d { width: g.dims[0], height: g.dims[1], depth_or_array_layers: g.dims[2] };
+            let at = |texture, z| wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z }, aspect: wgpu::TextureAspect::All };
+            e.copy_texture_to_texture(at(&from.atlas, o.z0), at(&to.atlas, g.z0), size);
+            e.copy_texture_to_texture(at(&osim.b, 0), at(&sim.b, 0), size);
+            any = true;
+        }
+        if any {
+            to.step.set(from.step.get());
+            self.queue.submit([e.finish()]);
+        }
     }
 
     /// A density grid's new data (the game's: `World::set_grid`), uploaded in place.

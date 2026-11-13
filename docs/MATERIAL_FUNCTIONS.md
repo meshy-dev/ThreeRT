@@ -432,7 +432,8 @@ cloud.scale.set(8, 8, 8);
     a program that adds what a source gives adds it once). At most 64 a frame.
   - Offline, a still at scene time t runs the program for round(t × 60) frames (at most 36,000) from the setup's
     sources, then renders.
-  - A rebuild of the scene starts the grid again from its data.
+  - A rebuild of the live scene keeps what the program has simulated, while the grid is the same grid: its size and
+    its program (new parameters keep it). A new size or another program starts it again from its data.
 
 ```ts
 // The whole of an advection: each cell takes what was upstream of it.
@@ -471,8 +472,7 @@ Layer A:
 - `volume/grid-smoke`: `SimulatedSmoke`'s puff rises (a regression value).
 
 Not done: collision of the smoke with scene geometry or voxels; grids in sphere volumes; reflection, GI and shadow
-rays through grid media live (as for every medium but the homogeneous ones). A live rebuild (any structural change) starts every
-simulated grid again from its data: the smoke there vanishes (ROADMAP § 6 step 10 b, Open).
+rays through grid media live (as for every medium but the homogeneous ones).
 
 ### Water
 

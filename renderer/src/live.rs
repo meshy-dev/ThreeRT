@@ -3516,6 +3516,8 @@ impl LiveCore {
         if s.scene_camera != self.sc.scene_camera {
             self.cam = s.scene_camera;
         }
+        // What the grid programs had simulated goes with the grids that are still the same.
+        self.g.carry_grids(&self.sc.up, &s.up);
         self.sc = s;
         self.spark_lights = self.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         self.restir_prev = None;
