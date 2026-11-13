@@ -14,6 +14,12 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
+    /// The kernel's bounded tables are uniform buffers (`GpuOptions::uniform_tables`; merged.rs `uniform_tables`).
+    pub uniform_tables: bool,
+    /// The kernel's switches this device was opened with (`KernelSwitches`): they are in `source`.
+    pub switches: KernelSwitches,
+    /// Compiled pipelines kept between runs (`GpuOptions::pipeline_cache`), where the backend has such a cache.
+    pipeline_cache: Option<crate::pipeline_cache::PipelineCache>,
     /// Kernel source (hardware or software traversal spliced in); scenes with material functions get their own module.
     source: String,
     /// The kernel as written (none in the merged layout: its sources are written for their arrays' lengths).
@@ -181,6 +187,33 @@ impl Uploaded {
     }
 }
 
+/// The uniform tables' buffers among the seven (`table_buffers`), in merged.rs `UNIFORM_TABLES`' order.
+fn uniform_sources(tables: [&wgpu::Buffer; 7]) -> [&wgpu::Buffer; 4] {
+    crate::merged::UNIFORM_TABLES.map(|k| tables[k])
+}
+
+/// A note for each uniform table that a scene has more entries of (`used`, merged.rs `UNIFORM_TABLES`' order) than
+/// its array holds: the kernel reads the last entry for the rest.
+pub(crate) fn uniform_overflow(used: [u64; 4]) -> Vec<String> {
+    use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
+    (0..4)
+        .filter(|&k| used[k] > UNIFORM_LEN[k] as u64)
+        .map(|k| format!("uniform tables: the scene has {} entries of `{}`, a uniform buffer holds {} (the rest read as the last one; THREERT_UNIFORM_TABLES=0 binds storage buffers)", used[k], TABLES[UNIFORM_TABLES[k]].name, UNIFORM_LEN[k]))
+        .collect()
+}
+
+/// The bytes of a table that its uniform copy takes: what both hold, in whole words (a copy's unit).
+fn uniform_copy_bytes(table: u64, copy: u64) -> u64 {
+    table.min(copy) & !3
+}
+
+/// A scene bind group's entries with the uniform tables' copies in their tables' places.
+fn bind_uniform_tables<'a>(entries: &mut Vec<wgpu::BindGroupEntry<'a>>, copies: &'a [wgpu::Buffer; 4]) {
+    let bindings = crate::merged::UNIFORM_TABLES.map(|k| MERGED_TABLE_BINDINGS[k]);
+    entries.retain(|e| !bindings.contains(&e.binding));
+    entries.extend(copies.iter().zip(bindings).map(|(b, binding)| wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }));
+}
+
 /// What the scene bind group holds besides `Uploaded`'s buffers (`Gpu::rebind_scene` makes it again).
 pub struct BindParts {
     pub nodes: wgpu::Buffer,
@@ -199,6 +232,9 @@ pub struct Uploaded {
     /// The merged layout (merged.rs): the buffer of the kernel's `MergedTables`, the seven tables below as its arrays
     /// (`Gpu::sync_tables` copies them there each frame; their lengths: `kernel.caps`).
     pub tables: Option<wgpu::Buffer>,
+    /// The uniform tables (`Gpu::uniform_tables`): the uniform buffers the kernel reads `bg_parts.texinfo`, `objects`,
+    /// `instances` and `media` from (merged.rs `UNIFORM_TABLES`' order; `Gpu::sync_tables` copies them there each frame).
+    pub uniform: Option<[wgpu::Buffer; 4]>,
     pub accum: wgpu::Buffer,
     pub params: wgpu::Buffer,
     pub width: u32,
@@ -794,6 +830,158 @@ fn guard_room(hwrt: bool) -> bool {
     loop_guard_of(!hwrt).is_some()
 }
 
+/// What a host decides about a device before it is opened (`Gpu::new_with`). `Gpu::new` takes it from the environment
+/// (`from_env`), where every platform but Android gets `default()`: the device, its layout and its kernels as they
+/// are without any of this. What a phone's GPU needed and why: docs/RUNTIME.md "Android (Adreno)".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GpuOptions {
+    /// The kernel's bounded tables (texture pages, objects, instances, media) as uniform buffers instead of storage
+    /// buffers (merged.rs `uniform_tables`). None: where a driver needs it, which is Android. Never with the merged
+    /// layout, whose tables are one buffer of its own.
+    pub uniform_tables: Option<bool>,
+    /// A directory to keep compiled pipelines in between runs (pipeline_cache.rs). None: nothing is kept.
+    pub pipeline_cache: Option<std::path::PathBuf>,
+    pub kernel: KernelSwitches,
+}
+
+impl GpuOptions {
+    /// THREERT_UNIFORM_TABLES=1|0, THREERT_PIPELINE_CACHE=<directory>, and the kernel's switches
+    /// (`KernelSwitches::from_env`).
+    pub fn from_env() -> GpuOptions {
+        Self::from_vars(&|name| std::env::var(name).ok(), cfg!(target_os = "android"))
+    }
+
+    /// `from_env`, of these variables on this platform.
+    fn from_vars(var: &dyn Fn(&str) -> Option<String>, android: bool) -> GpuOptions {
+        GpuOptions {
+            uniform_tables: var("THREERT_UNIFORM_TABLES").map(|v| v == "1"),
+            pipeline_cache: var("THREERT_PIPELINE_CACHE").filter(|d| !d.is_empty()).map(std::path::PathBuf::from),
+            kernel: KernelSwitches::from_vars(var, android),
+        }
+    }
+
+    /// Whether the device has the uniform tables: as asked, else on Android; not in the merged layout.
+    fn uniform_tables_on(&self, merged: bool, android: bool) -> bool {
+        !merged && self.uniform_tables.unwrap_or(android)
+    }
+}
+
+/// The kernel's switches: changes to its source for a GPU that the source as written is wrong or too slow on. Each
+/// is a patch of pathtrace.wgsl, trace_hw.wgsl or translucent.wgsl (`kernel_switches`, as `kernel_source` patches
+/// for a scene's features); with none set the source is the files, which is every platform's default but Android's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KernelSwitches {
+    /// THREERT_KERNEL_STRICT=1|0 (Android: 1). The kernel gives the driver nothing undefined to act on:
+    ///  - a ray query whose ray is not finite (origin, direction) or whose length is negative or NaN is not made: the
+    ///    ray misses. Such a description is undefined behaviour; on Adreno 740 the odd one faulted the GPU's MMU
+    ///    thousands of times a second and doubled the trace. (naga's `ray_query_initialization_tracking` would do
+    ///    it with bookkeeping around every ray-query call.)
+    ///  - `env_pdf` no longer forms the index before the first entry (`select` evaluates both sides: `y - 1` at
+    ///    y = 0 is 0xffffffff, read and then not used).
+    pub strict: bool,
+    /// THREERT_CUTOUT_LITE=0|1|2 (Android: 1). Hardware traversal: 1 = shadow rays and the other any-hit rays take
+    /// alpha cutouts as opaque; 2 = camera rays also step through at most 4 cutouts (16 as written). Alpha-tested
+    /// traversal is what costs most on Adreno 740 (a map with cutout foliage: the trace 235 ms, 41 ms without).
+    pub cutout_lite: u32,
+    /// THREERT_LAST_DIRECT=1|0 (Android: 1). The path's last vertex (past the camera hit, at the bounce limit) still
+    /// takes its direct light. A device that affords one bounce and no radiance cache otherwise lights that bounce
+    /// by sky and emitters alone: sunlit ground lit nothing, interiors were black.
+    pub last_direct: bool,
+    /// THREERT_LIGHT_PICK=1|0 (off everywhere unless set). Past the camera hit, `direct_light` takes the directional
+    /// lights and one of the other kinds a scene has (local lights, emitters, the sky), weighted by their number,
+    /// instead of all of them: two shadow rays a vertex instead of four. Unbiased; the indirect light is noisier.
+    pub light_pick: bool,
+}
+
+impl KernelSwitches {
+    pub fn from_env() -> KernelSwitches {
+        Self::from_vars(&|name| std::env::var(name).ok(), cfg!(target_os = "android"))
+    }
+
+    fn from_vars(var: &dyn Fn(&str) -> Option<String>, android: bool) -> KernelSwitches {
+        let num = |name: &str, default: u32| var(name).and_then(|v| v.parse::<u32>().ok()).unwrap_or(default);
+        let on = android as u32;
+        KernelSwitches { strict: num("THREERT_KERNEL_STRICT", on) != 0, cutout_lite: num("THREERT_CUTOUT_LITE", on), last_direct: num("THREERT_LAST_DIRECT", on) != 0, light_pick: num("THREERT_LIGHT_PICK", 0) != 0 }
+    }
+}
+
+/// The kernel's source (`kernel_base`) with a device's switches. Each anchor must be there once; hardware traversal's
+/// are looked for only in its source.
+fn kernel_switches(src: String, k: &KernelSwitches, hwrt: bool) -> String {
+    let mut s = src;
+    let mut patch = |anchor: &str, with: &str| {
+        assert_eq!(s.matches(anchor).count(), 1, "kernel_switches: {anchor:?}");
+        s = s.replace(anchor, with);
+    };
+    if k.strict {
+        patch("    let row_p = env_cdf[y] - select(0.0, env_cdf[y - 1u], y > 0u);\n", "    let row_p = env_cdf[y] - select(0.0, env_cdf[max(y, 1u) - 1u], y > 0u);\n");
+        patch("    let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + x - 1u], x > 0u);\n", "    let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + max(x, 1u) - 1u], x > 0u);\n");
+    }
+    if k.strict && hwrt {
+        let miss = "    if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }\n";
+        let any = "    var rq: ray_query;\n    rayQueryInitialize(&rq, acc, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, mask, 0.0, tmax_in, o, d));\n";
+        patch(any, &format!("{miss}{any}"));
+        let opaque = "    var rq: ray_query;\n    let flags = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);\n";
+        patch(opaque, &format!("{miss}{opaque}"));
+        // The translucency pass's query (its camera ray): a ray of no length in its place.
+        patch(
+            "    rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, tmax, o, d));\n",
+            "    let tbad = ray_bad(o, d, tmax);\n    rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, select(tmax, 0.0, tbad), select(o, vec3<f32>(0.0), tbad), select(d, vec3<f32>(0.0, 0.0, 1.0), tbad)));\n",
+        );
+        s += "\n// gpu.rs `KernelSwitches::strict`: a ray a ray query must not be given (not finite, or a length that is negative or NaN).\nfn ray_bad(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {\n    let tb = bitcast<u32>(tmax);\n    return non_finite(o) || non_finite(d) || (tb & 0x80000000u) != 0u || (tb & 0x7fffffffu) > 0x7f800000u;\n}\n";
+    }
+    let mut patch = |anchor: &str, with: &str| {
+        assert_eq!(s.matches(anchor).count(), 1, "kernel_switches: {anchor:?}");
+        s = s.replace(anchor, with);
+    };
+    if k.cutout_lite >= 1 && hwrt {
+        patch(
+            "    if (cutouts_opaque() || mode == TRACE_ANY_OPAQUE) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }\n",
+            "    if (cutouts_opaque() || mode != TRACE_CLOSEST) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }\n",
+        );
+    }
+    if k.cutout_lite >= 2 && hwrt {
+        patch("    let steps = select(16u, 64u, mode != TRACE_CLOSEST);\n", "    let steps = 4u;\n");
+    }
+    if k.last_direct {
+        patch(
+            "        if (s.card) { break; }\n        if (depth == P.counts.z) { break; }\n",
+            "        if (s.card) { break; }\n        if (depth == P.counts.z) {\n            // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.\n            if (depth > 0u) {\n                var dz = thr * direct_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);\n                let lum = luminance(dz);\n                if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }\n                radiance += dz;\n            }\n            break;\n        }\n",
+        );
+    }
+    if k.light_pick {
+        // One of the three kinds of light below the directional ones, drawn among those the scene has.
+        patch(
+            "    sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (P.counts.y > 0u && restir_here()) {\n",
+            "    // gpu.rs `KernelSwitches::light_pick`.\n    let has_local = P.counts.x > P.counts2.x;\n    let has_emit = P.counts.y > 0u;\n    let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);\n    var take_local = true;\n    var take_emit = true;\n    var take_env = true;\n    var pick_w = 1.0;\n    let kinds = u32(has_local) + u32(has_emit) + u32(has_env);\n    if (cur_depth > 0u && kinds > 1u) {\n        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);\n        take_local = has_local && k == 0u;\n        if (has_local) { k -= 1u; }\n        take_emit = has_emit && k == 0u;\n        if (has_emit) { k -= 1u; }\n        take_env = has_env && k == 0u;\n        pick_w = f32(kinds);\n    }\n    let sum_sun = sum;\n    let spec_sun = dl_spec;\n    if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (!take_emit) {\n    } else if (P.counts.y > 0u && restir_here()) {\n",
+        );
+        patch(
+            "    // Environment\n    if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {\n        let l = sample_env();\n        let f = eval_bsdf(s, lb, v, l);\n",
+            "    // Environment\n    if (take_env && has_env) {\n        let l = sample_env();\n        let f = eval_bsdf(s, lb, v, l);\n",
+        );
+        patch(
+            "                dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;\n            }\n        }\n    }\n    return sum;\n}\n",
+            "                dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;\n            }\n        }\n    }\n    if (pick_w > 1.0) {\n        sum = sum_sun + (sum - sum_sun) * pick_w;\n        dl_spec = spec_sun + (dl_spec - spec_sun) * pick_w;\n    }\n    return sum;\n}\n",
+        );
+    }
+    s
+}
+
+/// The kernel's runtime checks: none (all indices come from our own BVH / scene builder). THREERT_CHECKED turns naga's
+/// on to diagnose a driver: 1 = every check, else a mask (2 bounds, 4 loop bounding, 8 ray-query initialization
+/// tracking).
+fn kernel_checks() -> wgpu::ShaderRuntimeChecks {
+    let v: u32 = std::env::var("THREERT_CHECKED").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if v == 1 {
+        return wgpu::ShaderRuntimeChecks::checked();
+    }
+    let mut c = wgpu::ShaderRuntimeChecks::unchecked();
+    c.bounds_checks = v & 2 != 0;
+    c.force_loop_bounding = v & 4 != 0;
+    c.ray_query_initialization_tracking = v & 8 != 0;
+    c
+}
+
 /// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
 /// software one's place and the translucency pass after it.
 pub fn kernel_base(hwrt: bool) -> String {
@@ -1239,8 +1427,19 @@ impl Gpu {
         pollster::block_on(Self::new_async())
     }
 
+    /// `new`, with a host's own options instead of the environment's.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with(options: GpuOptions) -> Result<Gpu> {
+        pollster::block_on(Self::new_async_with(options))
+    }
+
     /// The adapter and the device come from futures: a browser resolves them from its event loop.
     pub async fn new_async() -> Result<Gpu> {
+        Self::new_async_with(GpuOptions::from_env()).await
+    }
+
+    /// `new_async`, with a host's own options instead of the environment's.
+    pub async fn new_async_with(options: GpuOptions) -> Result<Gpu> {
         let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = backends;
@@ -1275,6 +1474,9 @@ impl Gpu {
         if timestamps {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
+        // Compiled pipelines kept between runs, where a host gave a directory and the backend has a cache.
+        let cache_feature = options.pipeline_cache.as_ref().and_then(|_| crate::pipeline_cache::PipelineCache::feature(&adapter, &adapter_info));
+        features |= cache_feature.unwrap_or(wgpu::Features::empty());
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("threert"),
             required_features: features,
@@ -1283,12 +1485,16 @@ impl Gpu {
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
         }).await?;
-        let src = kernel_base(hwrt);
+        let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
+        let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
+        let switches = options.kernel;
+        let src = kernel_switches(kernel_base(hwrt), &switches, hwrt);
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
+            let src = if uniform_tables { crate::merged::uniform_tables(&src) } else { src.clone() };
             device.create_shader_module_trusted(
                 wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false, false).into()) },
-                wgpu::ShaderRuntimeChecks::unchecked(),
+                kernel_checks(),
             )
         });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
@@ -1303,6 +1509,8 @@ impl Gpu {
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         };
+        // (The uniform tables: these four bindings hold uniform buffers; merged.rs `UNIFORM_TABLES`.)
+        let table = |binding: u32| if uniform_tables { uniform(binding) } else { storage(binding, true) };
         let mut entries = vec![
                 uniform(0),
                 storage(1, true),
@@ -1327,11 +1535,11 @@ impl Gpu {
                 storage(10, true),
                 storage(11, false),
                 uniform(12),
-                storage(14, true),
-                storage(15, true),
+                table(14),
+                table(15),
                 storage(16, true),
-                storage(17, true),
-                storage(18, true),
+                table(17),
+                table(18),
                 // The density grids' atlas (F_GRID; a 1-cell texture in scenes without grids, whose kernel does not read it).
                 wgpu::BindGroupLayoutEntry {
                     binding: 19,
@@ -1417,12 +1625,26 @@ impl Gpu {
         } else {
             (None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, switches, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
     pub fn guard_room(&self) -> bool {
         guard_room(self.hwrt)
+    }
+
+    /// The pipeline cache for the descriptor of a pipeline about to be made (None: nothing is kept between runs).
+    pub fn cache(&self) -> Option<&wgpu::PipelineCache> {
+        self.pipeline_cache.as_ref().map(|c| c.for_pipeline())
+    }
+
+    /// The pipelines made since the last call, to the cache's file (pipeline_cache.rs: nothing when none was made, or
+    /// the cache already had them). The renderer calls it after it compiles a kernel variant, a scene's passes and
+    /// the live passes; a host that makes pipelines of its own with `cache` calls it after them.
+    pub fn save_pipeline_cache(&self) {
+        if let Some(c) = &self.pipeline_cache {
+            c.save();
+        }
     }
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
@@ -1433,14 +1655,16 @@ impl Gpu {
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", if live { 1.0 } else { 0.0 }), ("FEAT", k.features as f64)];
-                self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(if live { "pathtrace-live" } else { "pathtrace" }),
                     layout: Some(&self.pipeline_layout),
                     module: &module,
                     entry_point: Some("main"),
                     compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                    cache: None,
-                })
+                    cache: self.cache(),
+                });
+                self.save_pipeline_cache();
+                p
             })
             .clone()
     }
@@ -1467,10 +1691,13 @@ impl Gpu {
                 let src = splice(&splice(&splice(&base, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
                 // The merged layout: the same source, its buffers merged for this kernel's arrays (merged.rs).
                 let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
+                // The uniform tables (never with the merged layout): the same source, four tables' declarations and
+                // indices rewritten.
+                let src = if self.uniform_tables { crate::merged::uniform_tables(&src) } else { src };
                 unsafe {
                     self.device.create_shader_module_trusted(
                         wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged, patches & F_UNITS != 0).into()) },
-                        wgpu::ShaderRuntimeChecks::unchecked(),
+                        kernel_checks(),
                     )
                 }
             })
@@ -1486,14 +1713,16 @@ impl Gpu {
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", 1.0), ("FEAT", k.features as f64)];
-                self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
                     layout: Some(&self.pipeline_layout),
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                    cache: None,
-                })
+                    cache: self.cache(),
+                });
+                self.save_pipeline_cache();
+                p
             })
             .clone()
     }
@@ -1513,10 +1742,12 @@ impl Gpu {
                         module: &module,
                         entry_point: Some(entry),
                         compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                        cache: None,
+                        cache: self.cache(),
                     })
                 };
-                TranslucentPipelines { draw: make("translucent"), train: make("volume_train"), up: make("translucent_up") }
+                let made = TranslucentPipelines { draw: make("translucent"), train: make("volume_train"), up: make("translucent_up") };
+                self.save_pipeline_cache();
+                made
             })
             .clone()
     }
@@ -1541,14 +1772,16 @@ impl Gpu {
             (None, Some((_, live))) => self.kernel_module(&Kernel::plain(crate::merged::Caps { tables: crate::merged::TABLE_MIN, live: *live })),
             (None, None) => unreachable!("the merged layout's group 1 is one buffer"),
         };
-        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("cache resolve"),
             layout: Some(&self.pipeline_layout),
             module: &module,
             entry_point: Some("cache_resolve"),
             compilation_options: Default::default(),
-            cache: None,
-        })
+            cache: self.cache(),
+        });
+        self.save_pipeline_cache();
+        p
     }
 
     /// Texture pages for the scene's texture set (see `texpack`), cached across uploads of the same set.
@@ -1585,8 +1818,8 @@ impl Gpu {
             }
         }
         let view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        // (The merged layout copies it into the tables' buffer, `sync_tables`.)
-        let info = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tex_info"), contents: bytemuck::cast_slice(&packed.info), usage: if self.merged { wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::STORAGE } });
+        // (The merged layout copies it into the tables' buffer, the uniform tables into its uniform copy: `sync_tables`.)
+        let info = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tex_info"), contents: bytemuck::cast_slice(&packed.info), usage: if self.merged || self.uniform_tables { wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::STORAGE } });
         timings.push(("texture_pages_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
         *cache = Some((key, view.clone(), info.clone()));
         (view, info)
@@ -1707,7 +1940,7 @@ impl Gpu {
             let pipeline = grids.iter().any(|g| g.sim.is_some()).then(|| {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grid sim"), source: wgpu::ShaderSource::Wgsl(grid_sim_source(scene).into()) });
                 let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("grid sim"), bind_group_layouts: &[Some(&self.grid_layout)], immediate_size: 0 });
-                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("grid sim"), layout: Some(&layout), module: &module, entry_point: Some("grid_sim"), compilation_options: Default::default(), cache: None })
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("grid sim"), layout: Some(&layout), module: &module, entry_point: Some("grid_sim"), compilation_options: Default::default(), cache: self.cache() })
             });
             GridsGpu { atlas, pipeline, grids, step: std::cell::Cell::new(0) }
         });
@@ -1958,10 +2191,23 @@ impl Gpu {
             bg_entries.push(wgpu::BindGroupEntry { binding: 13, resource: a.tlas.as_binding() });
         }
         // The merged layout: the tables' one buffer in their place (merged.rs).
-        let tables = self.merged.then(|| self.tables_buffer([&b_mats, &b_lights, &b_emit, &b_texinfo, &b_objects, &b_instances, &b_media]));
+        let all_tables = [&b_mats, &b_lights, &b_emit, &b_texinfo, &b_objects, &b_instances, &b_media];
+        let tables = self.merged.then(|| self.tables_buffer(all_tables));
         if let Some((t, _)) = &tables {
             bg_entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
             bg_entries.push(e(crate::merged::TABLES_BINDING, t));
+        }
+        // The uniform tables: four tables' uniform copies in their place (merged.rs `uniform_tables`).
+        let uniform = self.uniform_tables.then(|| {
+            // What the scene has of each, against what its array holds (the buffers have the edits' room after it).
+            let used = [b_texinfo.size() / 16, scene.objects.len() as u64, records.len() as u64, scene.media.len() as u64];
+            for note in uniform_overflow(used) {
+                eprintln!("threert: {note}");
+            }
+            self.uniform_copies(uniform_sources(all_tables))
+        });
+        if let Some(u) = &uniform {
+            bind_uniform_tables(&mut bg_entries, u);
         }
         let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &bg_entries });
         let mut kernel = Kernel::new(scene, groups);
@@ -1996,9 +2242,9 @@ impl Gpu {
         let particles = match &accel {
             Some(a) if !scene.particles.is_empty() => {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("particles"), source: wgpu::ShaderSource::Wgsl(particle_source(scene).into()) });
-                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("particles"), layout: None, module: &module, entry_point: Some("particles"), compilation_options: Default::default(), cache: None });
+                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("particles"), layout: None, module: &module, entry_point: Some("particles"), compilation_options: Default::default(), cache: self.cache() });
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
-                let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: None });
+                let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 // The stamps depend on what is rebuilt last: the translucent TLAS when there is one.
                 let (sv, stl) = translucent.as_ref().map_or((&a.verts, &a.tlas), |t| (&t.verts, &t.tlas));
                 let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, sv), wgpu::BindGroupEntry { binding: 1, resource: stl.as_binding() }] });
@@ -2038,7 +2284,7 @@ impl Gpu {
         let gpu_particles = match &accel {
             Some(a) if !scene.gpu_particles.is_empty() => {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("gpu particles"), source: wgpu::ShaderSource::Wgsl(gpu_particle_source(scene).into()) });
-                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("gpu particles"), layout: None, module: &module, entry_point: Some("gpu_particles"), compilation_options: Default::default(), cache: None });
+                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("gpu particles"), layout: None, module: &module, entry_point: Some("gpu_particles"), compilation_options: Default::default(), cache: self.cache() });
                 let systems: Vec<GpuParticleSystemGpu> = scene
                     .gpu_particles
                     .iter()
@@ -2069,7 +2315,7 @@ impl Gpu {
                 });
                 let host = scene.gpu_particles.iter().map(|ps| (0u32, 0.0f32, ps.rate)).collect();
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
-                let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: None });
+                let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &a.verts), wgpu::BindGroupEntry { binding: 1, resource: a.tlas.as_binding() }] });
                 Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n })
             }
@@ -2079,7 +2325,9 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
-        Ok(Uploaded { bg, bg_parts, tables, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        // (The scene's own pipelines, made above: particles, grid programs.)
+        self.save_pipeline_cache();
+        Ok(Uploaded { bg, bg_parts, tables, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2675,6 +2923,10 @@ impl Gpu {
             entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
             entries.push(e(crate::merged::TABLES_BINDING, t));
         }
+        // The uniform tables: the same copies (their size does not follow a table's: merged.rs `UNIFORM_LEN`).
+        if let Some(u) = &up.uniform {
+            bind_uniform_tables(&mut entries, u);
+        }
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries });
         drop(entries);
         up.bg = bg;
@@ -2707,10 +2959,39 @@ impl Gpu {
         (self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("merged tables"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), caps)
     }
 
+    /// The uniform tables' buffers for these four tables (merged.rs `UNIFORM_TABLES`' order), filled from them as they
+    /// are now.
+    fn uniform_copies(&self, tables: [&wgpu::Buffer; 4]) -> [wgpu::Buffer; 4] {
+        use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
+        let copies: [wgpu::Buffer; 4] = std::array::from_fn(|k| {
+            let m = &TABLES[UNIFORM_TABLES[k]];
+            // (COPY_SRC: read back by the test that holds them to the tables, and by whoever diagnoses a driver.)
+            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(m.name), size: m.stride * UNIFORM_LEN[k] as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
+        });
+        let mut e = self.device.create_command_encoder(&Default::default());
+        Self::copy_uniform(&mut e, tables, &copies);
+        self.queue.submit([e.finish()]);
+        copies
+    }
+
+    fn copy_uniform(e: &mut wgpu::CommandEncoder, tables: [&wgpu::Buffer; 4], copies: &[wgpu::Buffer; 4]) {
+        for (src, dst) in tables.into_iter().zip(copies) {
+            let bytes = uniform_copy_bytes(src.size(), dst.size());
+            if bytes > 0 {
+                e.copy_buffer_to_buffer(src, 0, dst, 0, bytes);
+            }
+        }
+    }
+
     /// The merged layout: the tables as they are now, copied into the struct's buffer. The renderer writes the tables
     /// where it always did; the passes that read the scene read this copy, so it is made in their encoder, before
-    /// them, each frame (the tables are small: a few copies of kilobytes).
+    /// them, each frame (the tables are small: a few copies of kilobytes). The uniform tables: the same, into the
+    /// four uniform buffers. After whatever writes a table on the GPU in that encoder (the particle passes write
+    /// their objects' entries).
     pub fn sync_tables(&self, up: &Uploaded, e: &mut wgpu::CommandEncoder) {
+        if let Some(u) = &up.uniform {
+            Self::copy_uniform(e, uniform_sources(up.table_buffers()), u);
+        }
         let (Some(t), Some(caps)) = (&up.tables, &up.kernel.caps) else { return };
         let (at, _) = crate::merged::offsets(&crate::merged::TABLES, &caps.tables);
         for (k, src) in up.table_buffers().into_iter().enumerate() {
@@ -3105,6 +3386,149 @@ mod tests {
         // Hardware traversal's source has neither anchor.
         let hw = kernel_base(true);
         assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));
+    }
+
+    /// With nothing set, every platform but Android opens the device as it was before the options existed: no
+    /// uniform tables, no pipeline cache, the kernel's source the files (`the_default_sources_are_untouched` has its
+    /// hashes). Android's defaults are the uniform tables and the switches its GPUs needed; the environment overrides
+    /// either way, and the merged layout never has the uniform tables.
+    #[test]
+    fn the_options_default_to_the_device_as_written() {
+        let vars = |set: &'static [(&'static str, &'static str)]| move |name: &str| set.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
+        let desktop = GpuOptions::from_vars(&vars(&[]), false);
+        assert_eq!(desktop, GpuOptions::default());
+        assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, light_pick: false });
+        assert!(!desktop.uniform_tables_on(false, false));
+        for hwrt in [false, true] {
+            assert_eq!(kernel_switches(kernel_base(hwrt), &desktop.kernel, hwrt), kernel_base(hwrt));
+        }
+        let android = GpuOptions::from_vars(&vars(&[]), true);
+        assert_eq!(android.kernel, KernelSwitches { strict: true, cutout_lite: 1, last_direct: true, light_pick: false });
+        assert_eq!((android.uniform_tables, android.pipeline_cache.clone()), (None, None));
+        assert!(android.uniform_tables_on(false, true) && !android.uniform_tables_on(true, true));
+        // Set: what is asked, on either platform.
+        let off = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "0"), ("THREERT_KERNEL_STRICT", "0"), ("THREERT_CUTOUT_LITE", "0"), ("THREERT_LAST_DIRECT", "0")]), true);
+        assert_eq!((off.kernel, off.uniform_tables_on(false, true)), (KernelSwitches::default(), false));
+        let on = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "1"), ("THREERT_CUTOUT_LITE", "2"), ("THREERT_LIGHT_PICK", "1"), ("THREERT_PIPELINE_CACHE", "/data/cache/pipelines")]), false);
+        assert!(on.uniform_tables_on(false, false) && !on.uniform_tables_on(true, false));
+        assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, light_pick: true });
+        assert_eq!(on.pipeline_cache.as_deref(), Some(std::path::Path::new("/data/cache/pipelines")));
+        assert_eq!(GpuOptions::from_vars(&vars(&[("THREERT_PIPELINE_CACHE", "")]), true).pipeline_cache, None);
+        // (And the environment map's light sampling, which is the scene's preparation's: lib.rs `env_nee_on`.)
+        assert_eq!([crate::env_nee_of(None, false), crate::env_nee_of(None, true), crate::env_nee_of(Some("1"), true), crate::env_nee_of(Some("0"), false)], [true, false, true, false]);
+    }
+
+    /// Each switch finds its anchors, alone and with the others, under both traversals, and what comes out is valid
+    /// WGSL (naga, wgpu's front end), with the uniform tables too. Strict guards every ray query the hardware kernel
+    /// makes; software traversal's source has none and takes only `env_pdf`'s index.
+    #[test]
+    fn the_kernel_switches_find_their_anchors() {
+        let valid = |src: &str| {
+            let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        };
+        let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true };
+        let each = [
+            KernelSwitches { strict: true, ..Default::default() },
+            KernelSwitches { cutout_lite: 1, ..Default::default() },
+            KernelSwitches { cutout_lite: 2, ..Default::default() },
+            KernelSwitches { last_direct: true, ..Default::default() },
+            KernelSwitches { light_pick: true, ..Default::default() },
+            all,
+        ];
+        for hwrt in [false, true] {
+            let base = kernel_base(hwrt);
+            for k in &each {
+                let src = kernel_switches(base.clone(), k, hwrt);
+                // (The cutout switches are hardware traversal's: software traversal's source is the file with them.)
+                assert_eq!(src == base, !hwrt && k.cutout_lite > 0 && *k == KernelSwitches { cutout_lite: k.cutout_lite, ..Default::default() }, "{k:?} hwrt={hwrt}");
+                valid(&src);
+                // A scene's features patch the source after the switches, and the uniform tables after them.
+                valid(&crate::merged::uniform_tables(&kernel_source(&src, F_SOURCE & !F_UNITS)));
+            }
+            let strict = kernel_switches(base.clone(), &each[0], hwrt);
+            let queries = strict.matches("rayQueryInitialize(").count();
+            assert_eq!(queries, if hwrt { 3 } else { 0 });
+            assert_eq!(strict.matches("ray_bad(o, d, tmax").count(), queries, "every ray query is guarded");
+            assert_eq!(strict.matches("fn ray_bad(").count(), hwrt as usize);
+            assert!(!strict.contains("env_cdf[y - 1u]") && !strict.contains("env_cdf[base + x - 1u]") && base.contains("env_cdf[y - 1u]"));
+            let lit = kernel_switches(base.clone(), &all, hwrt);
+            assert_eq!(lit.matches("radiance += dz;").count(), 1);
+            assert_eq!(lit.matches("if (take_env && has_env) {").count(), 1);
+            assert_eq!(lit.contains("let steps = 4u;"), hwrt);
+        }
+    }
+
+    /// The uniform tables' buffers: each array fits a uniform binding of 64 KiB, the media's holds every medium a
+    /// scene may have, and the four are at their tables' bindings. A copy takes what the table and its uniform buffer
+    /// both hold, in whole words; a scene with more entries than an array is said, by name.
+    #[test]
+    fn the_uniform_tables_fit_their_bindings() {
+        use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
+        let bindings = UNIFORM_TABLES.map(|k| MERGED_TABLE_BINDINGS[k]);
+        assert_eq!(bindings, [14, 15, 17, 18]);
+        for (k, &t) in UNIFORM_TABLES.iter().enumerate() {
+            let m = &TABLES[t];
+            assert!(m.decl.starts_with(&format!("@group(0) @binding({}) var<storage, read> {}:", bindings[k], m.name)), "{}", m.decl);
+            let bytes = m.stride * UNIFORM_LEN[k] as u64;
+            assert!(bytes <= 65536 && bytes % 16 == 0, "{}: {bytes} bytes", m.name);
+        }
+        assert_eq!(UNIFORM_TABLES.map(|t| TABLES[t].name), ["tex_info", "objects", "instances", "media"]);
+        assert_eq!(UNIFORM_LEN[3] as usize, crate::scene::MAX_MEDIA);
+        assert_eq!(UNIFORM_LEN[2] as u64, 65536 / TABLES[5].stride);
+        // A table shorter than its array, one with the edits' room past it, one whose size is not the array's multiple.
+        assert_eq!([uniform_copy_bytes(512, 65536), uniform_copy_bytes(1 << 20, 65536), uniform_copy_bytes(65600, 65440), uniform_copy_bytes(0, 7168), uniform_copy_bytes(7, 64)], [512, 65536, 65440, 0, 4]);
+        assert!(uniform_overflow([4096, 4096, 409, 32]).is_empty());
+        let notes = uniform_overflow([4096, 4099, 1024, 32]);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("4099 entries of `objects`") && notes[0].contains("holds 4096") && notes[1].contains("1024 entries of `instances`"), "{notes:?}");
+    }
+
+    /// The order of a layout's entries and of a bind group's is not the device's to see: wgpu puts both in binding
+    /// order before its backend gets them (wgpu-core 30: `bgl::EntryMap::from_entries` sorts a layout's, and
+    /// `create_bind_group` its entries), and takes two layouts of the same entries as one. So the kernel's layout,
+    /// whose acceleration structure (binding 13) is pushed last, needs no sorting here for a driver that minds the
+    /// order. Held on this machine's GPU: a bind group made of one order runs with a pipeline laid out in another,
+    /// without a validation error, and each binding reads its own buffer. (Skipped without a GPU.)
+    #[test]
+    fn wgpu_takes_bind_group_entries_in_any_order() {
+        let g = match Gpu::new_with(GpuOptions::default()) {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let d = &g.device;
+        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None };
+        let (uni, read, write) = (entry(0, wgpu::BufferBindingType::Uniform), entry(5, wgpu::BufferBindingType::Storage { read_only: true }), entry(9, wgpu::BufferBindingType::Storage { read_only: false }));
+        let scope = d.push_error_scope(wgpu::ErrorFilter::Validation);
+        let ordered = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[uni, read, write] });
+        let shuffled = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[write, uni, read] });
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl("@group(0) @binding(0) var<uniform> a: vec4<u32>;\n@group(0) @binding(5) var<storage, read> b: array<u32>;\n@group(0) @binding(9) var<storage, read_write> c: array<u32>;\n@compute @workgroup_size(1) fn main() { c[0] = a.x; c[1] = b[0]; }\n".into()),
+        });
+        let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&ordered)], immediate_size: 0 });
+        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: None, layout: Some(&layout), module: &module, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let buf = |words: [u32; 4], usage| d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&words), usage });
+        let (a, b, c) = (buf([11, 0, 0, 0], wgpu::BufferUsages::UNIFORM), buf([22, 0, 0, 0], wgpu::BufferUsages::STORAGE), buf([0; 4], wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
+        fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+        }
+        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &shuffled, entries: &[e(9, &c), e(5, &b), e(0, &a)] });
+        let out = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut enc = d.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&c, 0, &out, 0, 16);
+        g.queue.submit([enc.finish()]);
+        assert!(pollster::block_on(scope.pop()).is_none(), "a layout's entries in another order are another layout to wgpu");
+        out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let words: Vec<u32> = bytemuck::cast_slice(&out.slice(..).get_mapped_range().unwrap()).to_vec();
+        assert_eq!(words[..2], [11, 22]);
     }
 
     #[test]
