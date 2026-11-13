@@ -180,6 +180,16 @@ test("input: mouse buttons are keys, the pointer, capture, a stick", () => {
   assert.deepEqual(i.move, { x: 0.3 / Math.hypot(0.3, 1), y: -1 / Math.hypot(0.3, 1) });
   i.apply({ t: "input", move: null });
   assert.deepEqual(i.move, { x: -1, y: 0 });
+  // A message that leaves the stick out says the same as null: the stick of a message before is not kept. A frame
+  // without a message keeps what the last one said.
+  i.apply({ t: "input", move: [0, 1] });
+  i.endFrame();
+  assert.deepEqual(i.move, { x: 0, y: 1 }, "the stick, while no message says otherwise");
+  i.apply({ t: "input", dx: 0.1 });
+  assert.deepEqual(i.move, { x: -1, y: 0 }, "left out: no stick, the keys drive `move`");
+  i.apply({ t: "input", move: [5, 0], keys: [] });
+  i.apply({ t: "input", keys: ["W"] });
+  assert.deepEqual(i.move, { x: 0, y: 1 });
   // Numbers that are not numbers are nothing.
   i.endFrame();
   i.apply({ t: "input", dx: Number.NaN, wheel: "x" as never, keys: [7 as never, "B"] });
