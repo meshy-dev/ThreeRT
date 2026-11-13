@@ -16,11 +16,11 @@ export const test: TestMeta = {
 
 const SIZE = 0.012, PITCH = 0.1;
 /** The field (12 m by 2.4 m, at z = 0) and a camera 6 m in front of it, 1.5 m left of its middle. */
-export function lampField() {
+export function lampField(lastColumn = 70) {
   const scene = sceneWithSky(0);
   const lamp = new MeshStandardMaterial({ name: "lamp", color: new Color(0, 0, 0), emissive: new Color(1, 1, 1), emissiveIntensity: 0.1 / (SIZE / PITCH) ** 2, roughness: 1 });
   const boxes: { min: [number, number, number]; max: [number, number, number] }[] = [];
-  for (let j = -12; j <= 12; j++) for (let i = -70; i <= 70; i++) boxes.push({ min: [i * PITCH, j * PITCH, -0.0005], max: [i * PITCH + SIZE, j * PITCH + SIZE, 0] });
+  for (let j = -12; j <= 12; j++) for (let i = -70; i <= lastColumn; i++) boxes.push({ min: [i * PITCH, j * PITCH, -0.0005], max: [i * PITCH + SIZE, j * PITCH + SIZE, 0] });
   const field = new ProceduralMesh(proceduralBoxes(boxes), lamp);
   field.name = "field";
   return result(scene, camera(scene, [-1.5, 0, 6], [-1.5, 0, 0]), [field]);

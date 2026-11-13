@@ -1447,7 +1447,7 @@ impl Gpu {
         // layout with more does not validate).
         let merged = cfg!(target_arch = "wasm32") || std::env::var("THREERT_MERGED").is_ok_and(|v| v == "1");
         limits.max_storage_buffers_per_shader_stage = if merged { crate::merged::STORAGE_BUFFERS } else { al.max_storage_buffers_per_shader_stage.min(31) };
-        // Storage + uniform buffers together (the kernel binds 19 storage buffers, the live passes 24, each beside its
+        // Storage + uniform buffers together (the kernel binds 19 storage buffers, the live passes 25, each beside its
         // uniforms; Metal allows 31).
         limits.max_buffers_and_acceleration_structures_per_shader_stage = al.max_buffers_and_acceleration_structures_per_shader_stage.min(31);
         limits.max_acceleration_structures_per_shader_stage = al.max_acceleration_structures_per_shader_stage;

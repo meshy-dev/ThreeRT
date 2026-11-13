@@ -49,10 +49,11 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 //   diffuse_mom   its luminance moments: mean, mean square, the fast mean's luminance, 1 where written (`dtemporal`)
 //   diffuse_fast  its fast mean in colour, f16 rgb (`dtemporal`; `fast_load`: ReBLUR's fast history)
 //   spec_hist     the specular history: rgb, frames (`stemporal`)
-//   gbuffer       octahedral normal, view depth (0 = sky), roughness (`stemporal`; `GB`)
+//   gbuffer       octahedral normal, view depth (0 = sky), roughness (`stemporal`; `GB`); once the temporal passes
+//                 have read the previous half, `lock_carry` puts its locks' depths into it (`judge` reads it)
 //   color_hist    the output grid's colour history: rgb, samples (`upscale`)
-//   up_state      the upscaler's state per traced sample (`compose`): x, y `Flicker`; z `Lock` (its life, f16; the
-//                 other half free); w free
+//   up_state      the upscaler's state per traced sample (`compose`): x, y `Flicker`; z, w `Lock` (its life and the
+//                 view depth of what it is for; where in the traced pixel that is, f16 each)
 // What lives within a frame shares buffers whose uses do not overlap (the passes run in live/targets.rs `Passes` order):
 //   sample_vel    per traced sample: screen velocity (output pixels this frame), view depth, animated shading
 //                 (`compose`; `judge`, `upscale`, depth of field and motion blur read it)
@@ -67,6 +68,8 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 //                 then in slot 0 `reject`'s verdict
 //   lumq          depth of field's tiles (`dof_tiles`, `dof`), then the quarter-resolution log2 luminance
 //                 (`lum_down`, `lum_blur`)
+//   lock_fwd      per traced sample: the previous frame's lock that lands on it (`lock_carry` writes, `compose` reads
+//                 and clears it for the next frame)
 @group(0) @binding(2) var<storage, read_write> diffuse_hist: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> color_hist: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> gbuffer: array<vec2<u32>>;
@@ -98,6 +101,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 // Directional lights' direct light (the sun: nearly deterministic) at camera hits per traced pixel: no denoiser
 // (`compose` adds it as it is, UE lights directly).
 @group(0) @binding(26) var<storage, read> direct_in: array<vec4<f32>>;
+@group(0) @binding(27) var<storage, read_write> lock_fwd: array<atomic<u32>>;
 
 // Element i of this frame's half of a lasting buffer, and of the previous frame's.
 fn this_half(i: u32) -> u32 { return L.state.x * L.size.x * L.size.y + i; }
@@ -342,6 +346,27 @@ fn prev_pixel(p: vec3<f32>) -> vec3<f32> {
     let px = dot(d, L.prev.right.xyz) / (z * L.prev.pos.w * L.prev.fwd.w);
     let py = dot(d, L.prev.up.xyz) / (z * L.prev.pos.w);
     return vec3<f32>((px * 0.5 + 0.5) * f32(L.size.x) - 0.5, (0.5 - py * 0.5) * f32(L.size.y) - 0.5, z);
+}
+
+// The same in this frame.
+fn cur_pixel(p: vec3<f32>) -> vec3<f32> {
+    let d = p - L.cur.pos.xyz;
+    let z = dot(d, L.cur.fwd.xyz);
+    if (z <= 1e-4) { return vec3<f32>(-1.0, -1.0, 0.0); }
+    let px = dot(d, L.cur.right.xyz) / (z * L.cur.pos.w * L.cur.fwd.w);
+    let py = dot(d, L.cur.up.xyz) / (z * L.cur.pos.w);
+    return vec3<f32>((px * 0.5 + 0.5) * f32(L.size.x) - 0.5, (0.5 - py * 0.5) * f32(L.size.y) - 0.5, z);
+}
+
+fn camera_moves() -> bool {
+    return any(L.cur.pos != L.prev.pos) || any(L.cur.fwd != L.prev.fwd) || any(L.cur.right != L.prev.right) || any(L.cur.up != L.prev.up);
+}
+
+// The world point camera c sees at output position e (pixel edges: sample_pos's) at view depth z (0: the sky, as far
+// as compose puts it).
+fn view_point(c: Cam, e: vec2<f32>, z: f32) -> vec3<f32> {
+    let dir = ray_dir(c, e.x, e.y);
+    return c.pos.xyz + dir * select(1.0e6, z / max(dot(dir, c.fwd.xyz), 1e-6), z > 0.0);
 }
 
 // ------------------------------------------------------------------------------------------------ diffuse, traced grid
@@ -896,8 +921,7 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     var vel = vec2<f32>(0.0);
     let mv = motion_in[q];
     let object_moves = mv.w > 0.5 && t > 0.0;
-    let camera_moves = any(L.cur.pos != L.prev.pos) || any(L.cur.fwd != L.prev.fwd) || any(L.cur.right != L.prev.right) || any(L.cur.up != L.prev.up);
-    if (L.size.w == 0u && (camera_moves || object_moves)) {
+    if (L.size.w == 0u && (camera_moves() || object_moves)) {
         let pv = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, object_moves));
         if (pv.z > 0.0) { vel = clamp(sp - 0.5 - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0)); }
     }
@@ -906,13 +930,11 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     // How much this sample flickers (`Flicker`), from where its surface was in the previous frame's traced grid.
     let now = min(lum(shown), 6.0e4);
     var f = Flicker(vec2<f32>(0.0), 0.0, 0.0);
-    var lock_was = 0.0;
     let ps = vec2<i32>(L.isz.zw);
     if (L.size.w == 0u && ps.x > 0) {
         let pc = vec2<i32>(floor((sp - vel) * vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y))));
         if (pc.x >= 0 && pc.y >= 0 && pc.x < ps.x && pc.y < ps.y) {
             f = flicker_at(u32(pc.y * ps.x + pc.x));
-            lock_was = unpack2x16float(up_state[last_half(u32(pc.y * ps.x + pc.x))].z).x;
         }
     }
     let still = 1.0 - clamp(length(vel) / UP_SPEED, 0.0, 1.0);
@@ -921,8 +943,8 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
         let bend = min(abs(now - 2.0 * f.last.x + f.last.y) / max(max(now, max(f.last.x, f.last.y)), 1e-9), UP_ONSET * max(f.sd, 0.01));
         sd = sqrt(mix(f.sd * f.sd, bend * bend / 6.0, still / min(f.n - 1.0, 8.0)));
     }
-    // The thin feature's lock here (`Lock`): new where this sample's emission is one, else a frame older, from where
-    // the surface was.
+    // The thin feature's lock here (`Lock`): new where this sample's emission is one, else the one `lock_carry` brought
+    // here, a frame older.
     let floor_l = 0.01 / exposure_scale();
     var e9: array<f32, 9>;
     var like = 0u;
@@ -942,8 +964,20 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let thin = across && (like & 27u) != 27u && (like & 54u) != 54u && (like & 216u) != 216u && (like & 432u) != 432u;
     // (None on animated shading: it shows this frame's picture, and its history is not kept for it to stand by.)
     let reactive = max(select(0.0, 1.0, px.albedo.w > 1.5), clamp(medium_share(q) / UP_MEDIUM, 0.0, 1.0));
-    let life = select(max(lock_was - 1.0 / jitter_phases(), 0.0), 1.0, thin) * (1.0 - reactive);
-    up_state[this_half(q)] = vec4<u32>(pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0))), pack2x16float(vec2<f32>(sd * still, min(max(f.n + still, 1.0), 9.0))), pack2x16float(vec2<f32>(life, 0.0)), 0u);
+    let fw = atomicLoad(&lock_fwd[q]);
+    atomicStore(&lock_fwd[q], 0u);
+    var was = Carried(0.0, 0.0, vec2<f32>(0.0), false);
+    if (fw != 0u && L.size.w == 0u && ps.x > 0) { was = carry((fw & 0x1ffffffu) - 1u); }
+    var life = max(was.life - 1.0 / jitter_phases(), 0.0);
+    var lz = was.depth;
+    var at = clamp(was.at - vec2<f32>(f32(gid.x), f32(gid.y)), vec2<f32>(0.0), vec2<f32>(0.999));
+    if (thin) {
+        life = 1.0;
+        lz = depth;
+        at = L.jit.xy;
+    }
+    life *= 1.0 - reactive;
+    up_state[this_half(q)] = vec4<u32>(pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0))), pack2x16float(vec2<f32>(sd * still, min(max(f.n + still, 1.0), 9.0))), pack2x16float(vec2<f32>(life, min(lz, 6.0e4))), pack2x16float(at));
     sample_vel[q] = vec4<f32>(vel, depth, reactive);
 }
 
@@ -1028,32 +1062,85 @@ const UP_STALE: f32 = 0.05;
 // brighter or darker than all those unlike it, a single line's rule: of lamps strung a pixel apart, in several colours,
 // most have a brighter neighbour, and Tokyo Tower's legs went unlocked. A slope is above one neighbour and below the
 // other in every direction and stays out.) The rules that hold the history to this frame's samples stand back for a
-// locked pixel: its history is clamped into the nine samples in motion only in part (`upscale`, LOCK_RELAX: the lamp no
-// sample hit this frame is still there; Tokyo Tower in a turn lost a quarter of its light and its legs), and its
+// locked pixel: at the locked thing its history is not clamped into the nine samples in motion (`upscale`, LOCK_REACH:
+// the lamp no sample hit this frame is still there; Tokyo Tower in a turn lost a quarter of its light and its legs), and its
 // sample's distance from the history's range is no finding (`judge`: a hit lies above the range, a miss within it, and
 // the corrections went one way); nor is a lamp the samples miss this frame something gone from in front (`judge`'s
-// depth test). `compose` carries the lock with the surface. UE's TSR loosens its clamp the same way where it detects
-// thin geometry.
+// depth test). UE's TSR loosens its clamp the same way where it detects thin geometry.
+// A lock moves with what it is for, not with the surface the sample behind it hit: it keeps that thing's view depth
+// (in z's other half: the lamp's, the sample's that hit it) and where in its traced pixel it was (w: the sample's
+// jitter then), and the next frame `lock_carry` takes that point to where it is now, by the two cameras alone (a lamp
+// that moves itself is found again when a sample next hits it), onto the traced sample whose pixel it falls in. And
+// it moves the history there: in `judge` a locked lamp is a candidate for the nearest surface among the nine, with the
+// motion of its own depth. (Before, a lamp no sample hit this frame went with what was behind it: its lock drifted
+// over the background in a parallax, and its history was read where the background had been, a second copy of the
+// lamp where something else had been one; the clamp in motion, spared only in part over the nine samples around a
+// lock, bounded that copy.)
 // The test runs on what the camera ray saw directly (the sample's emission: lamps, windows, signs), which has no noise:
 // FSR 2's test is made for a rasterised frame, and on the composed sample of a traced one (short histories in motion,
 // reflections without a spatial filter: more than 5 % from sample to sample) it called most of Kabukichō thin; the
 // clamp was then off everywhere and the reflections on the wet street trailed 78 pixels in a strafe for 53.
 const THIN_LIKE: f32 = 1.05;
-// How much of a locked pixel's history the clamp spares in motion, a frame (a relaxation weight: TSR caps its own
-// loosening for thin geometry, r.TSR.ThinGeometryDetection.Coverage.MaxRelaxationWeight). A lamp no sample hit this
-// frame stays, and what no sample supports fades by a quarter a frame instead of staying a jitter sequence: drawn
-// where the background's motion took it (a lamp the samples missed reprojects with what is behind it), a spared
-// history was a second copy of the lamp. Tokyo Tower in a quick orbit of the play window (a degree a frame, about a
-// point 50 m ahead) against offline, ΔE / luminance: spared whole 4.86 / 1.20, its beacon doubled; 0.75: 4.25 / 0.82;
-// 0.5: 4.47 / 0.69; not spared (main) 5.06 / 0.71. In a slow turn (0.25 degrees a frame) 2.23 / 1.05, 2.17 / 0.80,
-// main 2.81 / 0.77.
-const LOCK_RELAX: f32 = 0.75;
+// How far from the locked thing (output pixels, from where in its traced pixel it is: `Lock`) the lock spares the
+// history from the clamp in motion, in full; half a pixel further, not at all. The reconstruction's own reach (a
+// sample's weight a pixel away is 3 %, UP_SHARP). Nearer, the lamp's own light is cut; further, the halo that
+// resampling the history spreads around it every frame is kept. Tokyo Tower in a quick orbit of the play window (1.146
+// degrees a frame about a point 50 m ahead) against offline, the last moving frame, ΔE / luminance: 0.5 pixel
+// 4.31 / 0.73, 1 pixel 3.90 / 0.97, 1.5 pixels 4.17 / 1.17; before (every output pixel of the nine traced samples
+// around a lock spared by 0.75) 4.30 / 0.99. In a turn (0.25 degrees a frame) 2.29 / 0.69, 2.01 / 0.92, 2.13 / 1.06;
+// before 2.12 / 0.84. (Spared in full over the nine, the tower was too bright even in the turn, where nothing moves
+// against what is behind it: 1.10.)
+const LOCK_REACH: f32 = 1.0;
 // The frames of the jitter sequence (live/frame.rs: 8 at full resolution, as many more as an output pixel has fewer samples).
 fn jitter_phases() -> f32 {
     return clamp(round(8.0 * f32(L.size.x) * f32(L.size.y) / (f32(L.isz.x) * f32(L.isz.y))), 8.0, 512.0);
 }
 // (In full for the first half of its life, fading over the second.)
 fn locked(q: u32) -> f32 { return clamp(2.0 * unpack2x16float(up_state[this_half(q)].z).x, 0.0, 1.0); }
+
+// The previous frame's lock at its traced sample p (`Lock`): its life and depth, and where what it is for is now, in
+// this frame's traced coordinates (sample q sits at q + L.jit.xy); `ahead`: in front of the camera.
+struct Carried { life: f32, depth: f32, at: vec2<f32>, ahead: bool };
+fn carry(p: u32) -> Carried {
+    let ps = vec2<f32>(L.isz.zw);
+    let v = up_state[last_half(p)];
+    let lz = unpack2x16float(v.z);
+    let was = (vec2<f32>(f32(p % L.isz.z), f32(p / L.isz.z)) + unpack2x16float(v.w)) * vec2<f32>(f32(L.size.x), f32(L.size.y)) / ps;
+    let c = cur_pixel(view_point(L.prev, was, lz.y));
+    return Carried(lz.x, lz.y, (c.xy + 0.5) * vec2<f32>(f32(L.isz.x), f32(L.isz.y)) / vec2<f32>(f32(L.size.x), f32(L.size.y)), c.z > 0.0);
+}
+
+// Each lock of the previous frame onto the traced sample its point falls in now (`Lock`), the longest-lived where two
+// fall in one (the later sample where they tie): an atomic max of (life in 7 bits, the sample + 1 in 25: an 8K grid),
+// which `compose` reads. And the previous frame's g-buffer learns what was locked there: the nearest thing in that
+// traced pixel was the lamp, which its sample most frames missed (`judge`'s test for something gone from in front
+// reads it: the sky a lamp has passed over keeps the lamp in its history otherwise, which no sample there contradicts,
+// since the history's pixels around a sparse lamp are dark too). Over the previous frame's traced grid (live/frame.rs).
+@compute @workgroup_size(8, 8, 1)
+fn lock_carry(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (L.size.w != 0u || gid.x >= L.isz.z || gid.y >= L.isz.w) { return; }
+    let p = gid.y * L.isz.z + gid.x;
+    let c = carry(p);
+    let g = gb_unpack(gbuffer[last_half(p)]);
+    if (c.life > 0.0 && c.depth > 0.0 && (g.depth <= 0.0 || c.depth < g.depth)) {
+        gbuffer[last_half(p)].y = pack2x16float(vec2<f32>(min(c.depth, 6.0e4), g.rough));
+    }
+    if (c.life * jitter_phases() <= 1.0 || !c.ahead) { return; }
+    let q = vec2<i32>(floor(c.at));
+    if (q.x < 0 || q.y < 0 || q.x >= i32(L.isz.x) || q.y >= i32(L.isz.y)) { return; }
+    atomicMax(&lock_fwd[u32(q.y) * L.isz.x + u32(q.x)], ((u32(c.life * 126.0) + 1u) << 25u) | (p + 1u));
+}
+
+// The motion of the lock at traced sample j (`Lock`) by its own depth: from where its point was the previous frame
+// to where it is (output pixels, as `compose`'s).
+fn lock_vel(j: u32) -> vec2<f32> {
+    let v = up_state[this_half(j)];
+    let up = vec2<f32>(f32(L.size.x), f32(L.size.y)) / vec2<f32>(f32(L.isz.x), f32(L.isz.y));
+    let e = (vec2<f32>(f32(j % L.isz.x), f32(j / L.isz.x)) + unpack2x16float(v.w)) * up;
+    let pv = prev_pixel(view_point(L.cur, e, unpack2x16float(v.z).y));
+    if (pv.z <= 0.0) { return vec2<f32>(0.0); }
+    return clamp(e - 0.5 - pv.xy, vec2<f32>(-2048.0), vec2<f32>(2048.0));
+}
 
 struct Flicker { last: vec2<f32>, sd: f32, n: f32 };
 fn flicker_at(q: u32) -> Flicker {
@@ -1081,15 +1168,26 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
     let q = gid.y * L.isz.x + gid.x;
     var near = 1.0e30;
     var vel = vec2<f32>(0.0);
+    // (A lock's depth among them, for the motion only: a lamp the samples missed moves the history by its own.)
+    var vnear = 1.0e30;
+    let parallax = L.size.w == 0u && camera_moves();
     for (var k = 0; k < 9; k++) {
         let qx = i32(gid.x) + k % 3 - 1;
         let qy = i32(gid.y) + k / 3 - 1;
         if (qx < 0 || qy < 0 || qx >= iw || qy >= ih) { continue; }
-        let mv = sample_vel[u32(qy * iw + qx)];
+        let j = u32(qy * iw + qx);
+        let mv = sample_vel[j];
         let z = select(1.0e29, mv.z, mv.z > 0.0);
-        if (z < near) {
-            near = z;
+        near = min(near, z);
+        if (z < vnear) {
+            vnear = z;
             vel = mv.xy;
+        }
+        let lz = unpack2x16float(up_state[this_half(j)].z);
+        // (Not the lamp this sample hit: its own depth, to f16's rounding, and its own motion, the lamp's if it moves.)
+        if (parallax && lz.x > 0.0 && lz.y > 0.0 && lz.y < vnear && lz.y < 0.98 * z) {
+            vnear = lz.y;
+            vel = lock_vel(j);
         }
     }
     var d = vec3<f32>(0.0);
@@ -1148,8 +1246,9 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (was_near < 1.0e29 && now_near > was_near * (1.0 + UP_GONE) + 0.01) {
                     var clo = vec3<f32>(1.0e30);
                     var chi = vec3<f32>(-1.0e30);
-                    // (And no thin feature's lock among the nine: a lamp the samples miss this frame is not gone.)
-                    var lock = 0.0;
+                    // (And no thin feature's lock alive among the nine: a lamp the samples miss this frame is not gone.
+                    // The lock is where the lamp is now, `lock_carry`; one that has gone on leaves its last place.)
+                    var alive = 0.0;
                     for (var k = 0; k < 9; k++) {
                         let qx = i32(gid.x) + k % 3 - 1;
                         let qy = i32(gid.y) + k / 3 - 1;
@@ -1158,10 +1257,10 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let cq = fb[j].rgb;
                         clo = min(clo, cq);
                         chi = max(chi, cq);
-                        lock = max(lock, locked(j));
+                        alive = max(alive, unpack2x16float(up_state[this_half(j)].z).x);
                     }
                     let hm = hsum / hn;
-                    gone = lock < 0.5 && lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale();
+                    gone = alive <= 0.0 && lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale();
                 }
             }
         }
@@ -1279,9 +1378,10 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     var wsum = 0.0;
     var xlo = vec3<f32>(1.0e30);
     var xhi = vec3<f32>(-1.0e30);
-    // (The lock of any of the nine: a lock is kept by the traced pixel, carried to the nearest, and the lamp it is for
-    // may be a pixel to the side by now.)
+    // (A lock spares the output pixels at the thing it is for: where in its traced pixel that is, `Lock`; full within
+    // LOCK_REACH output pixels, none half a pixel further.)
     var lock = 0.0;
+    let centre = vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5;
     for (var k = 0; k < 9; k++) {
         let qx = bc.x + k % 3 - 1;
         let qy = bc.y + k / 3 - 1;
@@ -1293,7 +1393,9 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
         wsum += wt;
         xlo = min(xlo, c);
         xhi = max(xhi, c);
-        lock = max(lock, locked(u32(qy * iw + qx)));
+        let j = u32(qy * iw + qx);
+        let at = (vec2<f32>(f32(qx), f32(qy)) + unpack2x16float(up_state[this_half(j)].w)) * up;
+        lock = max(lock, locked(j) * clamp(LOCK_REACH + 0.5 - length(at - centre), 0.0, 1.0));
     }
     let cur = select(fb[u32(bc.y * iw + bc.x)].rgb, sum / wsum, wsum > 1e-9);
     let conf = min(wsum, 1.0);
@@ -1333,7 +1435,7 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     let kept = hist.w * (1.0 - verdict.w);
     if (kept > 0.0) {
         var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
-        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - LOCK_RELAX * lock));
+        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - lock));
         let most = min(mix(UP_SAMPLES, UP_MOVING, moving), mix(UP_SAMPLES, UP_REACTIVE, clamp(sample_vel[u32(bc.y * iw + bc.x)].w, 0.0, 1.0)));
         count = min(kept + conf, most);
         let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);
