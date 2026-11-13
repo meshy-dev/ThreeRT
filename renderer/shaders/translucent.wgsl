@@ -14,29 +14,29 @@
 // Live, it runs on the composed HDR image after the temporal filter (no history: nothing to leave trails); offline it
 // accumulates (colour, transmittance) per sample, laid over the converged image.
 
-struct TP {
+@if(hwrt) struct TP {
     size: vec4<u32>, // output width, height, first translucent triangle, mode (0 offline: accumulate; 1 live: over the image)
     view: vec4<u32>, // live: traced width, height (the opaque first hits); training budget (points per frame); 1 = at the traced resolution
     misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, 1 = train only (THREERT_TL_HIDE: what is behind), -, -
 };
 
-@group(2) @binding(0) var tacc: acceleration_structure;
-@group(2) @binding(1) var<uniform> TPS: TP;
+@if(hwrt) @group(2) @binding(0) var tacc: acceleration_structure;
+@if(hwrt) @group(2) @binding(1) var<uniform> TPS: TP;
 // Live: the composed image (in place; w kept). Offline: per-pixel sums of (colour, transmittance).
-@group(2) @binding(2) var<storage, read_write> timg: array<vec4<f32>>;
+@if(hwrt) @group(2) @binding(2) var<storage, read_write> timg: array<vec4<f32>>;
 // Volume training points of this frame (live) and their count.
-@group(2) @binding(3) var<storage, read_write> vpts: array<vec4<f32>>;
-@group(2) @binding(4) var<storage, read_write> vcount: array<atomic<u32>>;
+@if(hwrt) @group(2) @binding(3) var<storage, read_write> vpts: array<vec4<f32>>;
+@if(hwrt) @group(2) @binding(4) var<storage, read_write> vcount: array<atomic<u32>>;
 // Live at a reduced render scale: (colour, transmittance) per traced pixel, laid over the image by translucent_up.
-@group(2) @binding(5) var<storage, read_write> tlow: array<vec4<f32>>;
+@if(hwrt) @group(2) @binding(5) var<storage, read_write> tlow: array<vec4<f32>>;
 
-const TL_LAYERS: u32 = 4u;
+@if(hwrt) const TL_LAYERS: u32 = 4u;
 
 // Volume voxels (cache_point, point_radiance): pathtrace.wgsl, shared with participating media.
 
 // Live: the nearest opaque first hit around output pixel (x, y): of the 2 x 2 traced pixels under it, the nearest
 // (sky = none), so nothing shows through at an edge.
-fn opaque_depth(x: u32, y: u32) -> f32 {
+@if(hwrt) fn opaque_depth(x: u32, y: u32) -> f32 {
     let iw = TPS.view.x;
     let ih = TPS.view.y;
     let fx = (f32(x) + 0.5) * f32(iw) / f32(TPS.size.x) - 0.5;
@@ -56,7 +56,7 @@ fn opaque_depth(x: u32, y: u32) -> f32 {
 
 // Material of a translucent particle at triangle ti (barycentrics b): colour, opacity and emission after maps and its
 // material function.
-fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
+@if(hwrt) fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
     let a = attrs[ti];
     let m = materials[bitcast<u32>(a.uv.w)];
     let uv = mesh_uv(a, m, b.x, b.y);
@@ -74,7 +74,7 @@ fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut
     return r;
 }
 
-@compute @workgroup_size(8, 8, 1)
+@if(hwrt) @compute @workgroup_size(8, 8, 1)
 fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let live = TPS.size.w == 1u;
     // Live below full resolution the particles are drawn per traced pixel (as UE draws translucency at the screen
@@ -113,7 +113,9 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     var lb: array<vec2<f32>, TL_LAYERS>;
     var n = 0u;
     var rq: ray_query;
-    rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, tmax, o, d));
+    @if(!strict) rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, tmax, o, d));
+    @if(strict) let tbad = ray_bad(o, d, tmax);
+    @if(strict) rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, select(tmax, 0.0, tbad), select(o, vec3<f32>(0.0), tbad), select(d, vec3<f32>(0.0, 0.0, 1.0), tbad)));
     while (rayQueryProceed(&rq)) {
         let c = rayQueryGetCandidateIntersection(&rq);
         if (n == TL_LAYERS && c.t >= lt[TL_LAYERS - 1u]) { continue; }
@@ -174,7 +176,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Live, after `translucent` at the traced resolution: its (colour, transmittance) bilinearly up to each output pixel,
 // over the image.
-@compute @workgroup_size(8, 8, 1)
+@if(hwrt) @compute @workgroup_size(8, 8, 1)
 fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = TPS.size.x;
     let h = TPS.size.y;
@@ -197,7 +199,7 @@ fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // Live, after `translucent`: one fresh estimate per training point into its volume voxels (both levels). The points
 // are capped per frame (TPS.view.z), so the cost is bounded whatever the particles cover.
-@compute @workgroup_size(64, 1, 1)
+@if(hwrt) @compute @workgroup_size(64, 1, 1)
 fn volume_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     if (k >= min(atomicLoad(&vcount[0]), TPS.view.z)) { return; }

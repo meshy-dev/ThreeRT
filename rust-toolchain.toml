@@ -1,0 +1,6 @@
+# The Rust every build of this repository uses: CI's and every machine's the same, so a build and the determinism
+# checks' recorded hashes (tools/physics-determinism.ts, tools/voxel-determinism.ts) do not change with whatever stable
+# a machine happens to have. A newer one is a PR of its own (or of the change that needs it), with those checks run.
+[toolchain]
+channel = "1.100.0"
+targets = ["wasm32-unknown-unknown"]

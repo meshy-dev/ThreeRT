@@ -2,9 +2,9 @@
 // mask 2; opaque groups never report candidates, alpha-cutout groups are confirmed by `alpha_pass`.
 // instance_custom_data holds the instance's first global triangle index, or in scenes where a group starts beyond
 // 2^24 triangles (F_HUGE: custom data has 24 bits) its traversal group, whose first triangle is in P.group_first.
-@group(0) @binding(13) var acc: acceleration_structure;
+@if(hwrt) @group(0) @binding(13) var acc: acceleration_structure;
 
-fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
+@if(hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     // Ray tracing off (pathtrace.wgsl `rays_off`): past the camera ray, every ray misses.
     if (rays_off) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     let mask = select(0xffu, 1u, mode == TRACE_SHADOW);
@@ -14,7 +14,8 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     }
     // Live secondary rays, and live emitter shadow rays (TRACE_ANY_OPAQUE): cutouts opaque (pathtrace.wgsl
     // `cutouts_opaque`, `occluded_emitter`).
-    if (cutouts_opaque() || mode == TRACE_ANY_OPAQUE) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }
+    @if(!cutout_lite) if (cutouts_opaque() || mode == TRACE_ANY_OPAQUE) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }
+    @if(cutout_lite) if (cutouts_opaque() || mode != TRACE_CLOSEST) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }
     // Alpha-cutout triangles: every query forces opacity, and a cutout hit that fails its alpha test is stepped
     // through. The ray query's own candidate loop (non-opaque traversal) lost hits on Metal: ~0.1 % of rays near
     // cutout foliage missed even the opaque ground behind it or found it unlit (black pixels on the ground; the
@@ -36,7 +37,8 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     // In order, each query starting past the last cutout hit its alpha let through. Shadow rays take up to 64 of them
     // and count as blocked past that: with 16, as closest hits take, the rest counted as unblocked (light through dense
     // foliage: Bistro's offline render up to 2.3 % bright in a region against the software BVH).
-    let steps = select(16u, 64u, mode != TRACE_CLOSEST);
+    @if(!cutout_lite2) let steps = select(16u, 64u, mode != TRACE_CLOSEST);
+    @if(cutout_lite2) let steps = 4u;
     var t0 = 0.0;
     for (var k = 0u; k < steps; k++) {
         let h = trace_opaque(o + d * t0, d, tmax_in - t0, mask, false);
@@ -51,7 +53,8 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
 
 // One query, not forced opaque; each cutout candidate that passes its alpha test is confirmed, which ends it (as does any
 // opaque triangle). Live only (see `trace`).
-fn trace_any_cutout(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32) -> Hit {
+@if(hwrt) fn trace_any_cutout(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32) -> Hit {
+    @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     var rq: ray_query;
     rayQueryInitialize(&rq, acc, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, mask, 0.0, tmax_in, o, d));
     var pg = GOut(-1.0, vec3<f32>(0.0, 1.0, 0.0), 0u, vec2<f32>(0.0));
@@ -80,7 +83,8 @@ fn trace_any_cutout(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32) -> Hit 
 }
 
 // The closest (or with `any`, the first found) hit, every triangle opaque.
-fn trace_opaque(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32, any: bool) -> Hit {
+@if(hwrt) fn trace_opaque(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32, any: bool) -> Hit {
+    @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     var rq: ray_query;
     let flags = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);
     rayQueryInitialize(&rq, acc, RayDesc(flags, mask, 0.0, tmax_in, o, d));
@@ -120,20 +124,20 @@ fn trace_opaque(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32, any: bool) 
 
 // An alpha-cutout triangle: its material has an alpha test (as the build flags TRI_MASKED; model instances' pool
 // triangles carry no flags).
-fn cutout(ti: u32) -> bool {
+@if(hwrt) fn cutout(ti: u32) -> bool {
     return materials[bitcast<u32>(attrs[ti].uv.w)].uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
-fn hit_inst(custom: u32) -> u32 {
+@if(hwrt) fn hit_inst(custom: u32) -> u32 {
     return select(NO_INST, custom & (INSTANCE_BIT - 1u), has(F_INST) && (custom & INSTANCE_BIT) != 0u);
 }
 
-const INSTANCE_BIT: u32 = 0x800000u;
+@if(hwrt) const INSTANCE_BIT: u32 = 0x800000u;
 
 // Global triangle of a hit: a model instance's pool triangle (its cutout geometry 1 after the opaque one), or a
 // traversal group's.
-fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
+@if(hwrt) fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
     if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) {
         let r = instances[custom & (INSTANCE_BIT - 1u)].info;
         return r.x + select(0u, r.w, geometry == 1u) + prim;
@@ -141,7 +145,13 @@ fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
     return group_tri(custom, prim);
 }
 
-fn group_tri(custom: u32, prim: u32) -> u32 {
+@if(hwrt) fn group_tri(custom: u32, prim: u32) -> u32 {
     if (has(F_HUGE)) { return P.group_first[custom >> 2u][custom & 3u] + prim; }
     return custom + prim;
+}
+
+// gpu.rs `KernelSwitches::strict`: a ray a ray query must not be given (not finite, or a length that is negative or NaN).
+@if(hwrt && strict) fn ray_bad(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {
+    let tb = bitcast<u32>(tmax);
+    return non_finite(o) || non_finite(d) || (tb & 0x80000000u) != 0u || (tb & 0x7fffffffu) > 0x7f800000u;
 }

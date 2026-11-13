@@ -140,7 +140,7 @@ impl Drop for Lent<'_> {
         let took = self.1.elapsed().as_micros() as u64;
         let give = took.min(LEND_US.saturating_sub(self.0.lent.load(Ordering::Relaxed)));
         // (0: no deadline is set, and none is made.)
-        if give > 0 && self.0.deadline.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| (d != 0).then_some(d + give)).is_ok() {
+        if give > 0 && self.0.deadline.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| (d != 0).then_some(d + give)).is_ok() {
             self.0.lent.fetch_add(give, Ordering::Relaxed);
         }
     }

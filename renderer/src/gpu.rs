@@ -27,7 +27,7 @@ pub struct Gpu {
     /// The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers. Natively with
     /// THREERT_MERGED=1 (software traversal, the device held to eight too).
     pub merged: bool,
-    /// By (material-function code hash, the source-patching features: `kernel_source`, the merged layout's lengths).
+    /// By (material-function code hash, the features that change the source: `kernel_flags`, the merged layout's lengths).
     modules: std::sync::Mutex<std::collections::HashMap<(u64, u32, Option<crate::merged::Caps>), wgpu::ShaderModule>>,
     pipeline_layout: wgpu::PipelineLayout,
     /// Kernel variants by (feature mask, material-function code hash, LIVE): `FEAT` compiles out the features a scene
@@ -114,7 +114,7 @@ pub struct Params {
     /// The sky's aerial perspective (F_AERIAL; `scene::aerial_params`): density multiple, Rayleigh scale, Mie scale, -.
     pub aerial: [f32; 4],
     /// three.js `scene.background` (F_BACKGROUND): its radiance, 1. Last, and read only by the kernel patched for it
-    /// (`kernel_source`): every other kernel's `Params` ends before it.
+    /// (`kernel_flags`): every other kernel's `Params` ends before it.
     pub background: [f32; 4],
 }
 
@@ -698,81 +698,66 @@ pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
     }
 }
 
-/// The kernel source for features that change it rather than switch code in it (`F_SOURCE`). Kept out of
-/// pathtrace.wgsl so that every scene without them runs the file as it is; each anchor must be there once.
-///  - F_TINT, instance colours (`scene::object_stride`): object entries of 4 vec4s, the 4th the instance colour, which
-///    multiplies the base colour of surfaces, procedural surfaces and glass (three.js `instanceColor`).
-///  - F_UNLIT, three.js MeshBasicMaterial (`scene::MAT_UNLIT`): its colour (x map, x tint) is emission seen by camera
-///    rays and mirror-like paths only, its albedo 0: lit by nothing, lighting nothing (it is in no emitter list).
-///  - F_BACKGROUND, three.js `scene.background`: camera rays that miss, and paths bent straight on through glass (the
-///    rays `sky_mis` gets with pdf 0), see `Params::background`, which `Params` ends with in this kernel only.
-///  - F_GRID, density grids (`scene::GridBuild`): the grid atlas at binding 19 (a texture: the buffers are at Metal's
-///    limit), `VIn::grid` and `vgrid` for volume functions.
-///  - F_VCOLOR, three.js `vertexColors` (`scene::tri_colors`): three sRGB 8-bit colours per triangle after the
+/// The kernel's files, one module in this order (pathtrace.wgsl's head says what each holds and names the `@if` flags).
+const KERNEL_FILES: [&str; 4] = [
+    include_str!("../shaders/pathtrace.wgsl"),
+    include_str!("../shaders/trace_units.wgsl"),
+    include_str!("../shaders/trace_hw.wgsl"),
+    include_str!("../shaders/translucent.wgsl"),
+];
+
+/// The kernel's source: its files as one WESL module, every device's and scene's variant in it under `@if`.
+pub fn kernel_template() -> String {
+    KERNEL_FILES.join("\n")
+}
+
+/// The flags of the kernel's conditional translation (pathtrace.wgsl's head): a device's traversal and switches, and
+/// a scene's features that change the kernel's declarations (`F_SOURCE`; the others switch code under `override FEAT`).
+///  - vcolor (F_VCOLOR), three.js `vertexColors` (`scene::tri_colors`): three sRGB 8-bit colours per triangle after the
 ///    previous vertices in `prev_verts` (from vec4 `Params::procs.w`; the kernel has no binding to spare), interpolated
 ///    in linear at the hit, multiply the base colour of surfaces and glass (white for triangles without them).
-pub fn kernel_source(src: &str, features: u32) -> String {
-    let mut s = src.to_string();
-    let mut patch = |anchor: &str, with: &str| {
-        assert_eq!(s.matches(anchor).count(), 1, "kernel_source: {anchor:?}");
-        s = s.replace(anchor, with);
-    };
-    if features & F_VCOLOR != 0 {
-        patch(
-            "@group(0) @binding(18) var<storage, read> media: array<Medium>;\n",
-            "@group(0) @binding(18) var<storage, read> media: array<Medium>;\n// Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle, after the previous\n// vertices in `prev_verts` from vec4 P.procs.w.\nfn vcolor_word(k: u32) -> u32 { return bitcast<u32>(prev_verts[P.procs.w + k / 4u][k % 4u]); }\nfn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {\n    let c0 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u)).rgb);\n    let c1 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 1u)).rgb);\n    let c2 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 2u)).rgb);\n    return c0 * (1.0 - u - v) + c1 * u + c2 * v;\n}\n",
-        );
-        patch("    s.card = m.tex1.z == MAT_EMITTER_CARD;\n    var base = m.base_color.rgb;\n", "    s.card = m.tex1.z == MAT_EMITTER_CARD;\n    var base = m.base_color.rgb * vcolor(i, h.u, h.v);\n");
-        patch("    g.tint = m.base_color.rgb;\n", "    g.tint = m.base_color.rgb * vcolor(h.tri, h.u, h.v);\n");
+///  - grid (F_GRID), density grids (`scene::GridBuild`): the grid atlas at binding 19 (a texture: the buffers are at
+///    Metal's limit), `VIn::grid` and `vgrid` for volume functions.
+///  - tint (F_TINT), instance colours (`scene::object_stride`): object entries of 4 vec4s, the 4th the instance colour,
+///    which multiplies the base colour of surfaces, procedural surfaces and glass (three.js `instanceColor`).
+///  - unlit (F_UNLIT), three.js MeshBasicMaterial (`scene::MAT_UNLIT`): its colour (x map, x tint) is emission seen by
+///    camera rays and mirror-like paths only, its albedo 0: lit by nothing, lighting nothing (in no emitter list).
+///  - units (F_UNITS), software traversal's second level (trace_units.wgsl): the still scene's walk hands its hit to
+///    the units' and has no stack of its own (the module's, set to zero once an invocation and not once a ray).
+///  - background (F_BACKGROUND), three.js `scene.background`: camera rays that miss, and paths bent straight on through
+///    glass (the rays `sky_mis` gets with pdf 0), see `Params::background`, which `Params` ends with in this kernel only.
+pub fn kernel_flags(hwrt: bool, k: &KernelSwitches, features: u32) -> [(&'static str, bool); 12] {
+    let f = |bit: u32| features & bit != 0;
+    [
+        ("hwrt", hwrt),
+        ("strict", k.strict),
+        ("cutout_lite", k.cutout_lite >= 1),
+        ("cutout_lite2", k.cutout_lite >= 2),
+        ("last_direct", k.last_direct),
+        ("light_pick", k.light_pick),
+        ("vcolor", f(F_VCOLOR)),
+        ("grid", f(F_GRID)),
+        ("tint", f(F_TINT)),
+        ("unlit", f(F_UNLIT)),
+        ("units", f(F_UNITS)),
+        ("background", f(F_BACKGROUND)),
+    ]
+}
+
+/// A kernel's WGSL: `src` (the template, with what is put into its text first: the scene's functions, the merged
+/// layout, the uniform tables, the loop guard) through WESL's conditional translation for `flags` (wesl-rs, WESL's
+/// reference compiler in Rust). Every flag the source names must be given: one that is not is an error, not off.
+pub fn kernel_wgsl(src: &str, flags: &[(&str, bool)]) -> String {
+    use wesl::{resolver::VirtualResolver, syntax::ModulePath, CompileOptions, Feature, Features};
+    let path: ModulePath = "package::kernel".parse().expect("a module path");
+    let mut resolver = VirtualResolver::new();
+    resolver.add_module(path.clone(), std::borrow::Cow::Borrowed(src));
+    let mut features = Features { default: Feature::Error, ..Default::default() };
+    for &(name, on) in flags {
+        features.set(name, on);
     }
-    if features & F_GRID != 0 {
-        patch(
-            "@group(0) @binding(18) var<storage, read> media: array<Medium>;\n",
-            "@group(0) @binding(18) var<storage, read> media: array<Medium>;\n// Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z.\n@group(0) @binding(19) var grid_tex: texture_3d<f32>;\n",
-        );
-        patch(
-            "    custom: vec4<f32>, // the node's customData\n};\n\nstruct VOut {\n",
-            "    custom: vec4<f32>, // the node's customData\n    grid: vec2<u32>,   // the node's density grid: its first layer in the atlas, its cells (10 bits an axis; 0: none)\n};\n\nstruct VOut {\n",
-        );
-        patch(
-            "// @volume-functions-begin\n",
-            "// The node's density grid at `lp` (the volume's own space, the box [-0.5, 0.5]^3): field A's four numbers, trilinear\n// between cell centres, the border cells' beyond them; zeros for a node without a grid.\nfn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32> {\n    if (i.grid.y == 0u) { return vec4<f32>(0.0); }\n    let n = vec3<f32>(vec3<u32>(i.grid.y & 1023u, (i.grid.y >> 10u) & 1023u, (i.grid.y >> 20u) & 1023u));\n    let c = clamp((lp + 0.5) * n, vec3<f32>(0.5), n - 0.5) + vec3<f32>(0.0, 0.0, f32(i.grid.x));\n    return textureSampleLevel(grid_tex, samp, c / vec3<f32>(textureDimensions(grid_tex)), 0.0);\n}\n\n// @volume-functions-begin\n",
-        );
-        patch("    i.custom = m.c;\n    var r = volume_function(m.a.x, i, m.p);\n", "    i.custom = m.c;\n    i.grid = vec2<u32>(bitcast<u32>(m.b.z), bitcast<u32>(m.b.w));\n    var r = volume_function(m.a.x, i, m.p);\n");
-    }
-    if features & F_TINT != 0 {
-        patch(
-            "const OBJECT_STRIDE: u32 = 3u;\n",
-            "const OBJECT_STRIDE: u32 = 4u;\n// An instanced object's instance colour (three.js `instanceColor`), white for every other object.\nfn obj_tint(oi: u32) -> vec3<f32> { return objects[oi * OBJECT_STRIDE + 3u].rgb; }\n",
-        );
-        // (Anchored before the line's end: with F_VCOLOR the vertex colour follows.)
-        patch("    s.card = m.tex1.z == MAT_EMITTER_CARD;\n    var base = m.base_color.rgb", "    s.card = m.tex1.z == MAT_EMITTER_CARD;\n    var base = m.base_color.rgb * obj_tint(object_of(a))");
-        patch("    s.card = false;\n    var base = m.base_color.rgb;\n", "    s.card = false;\n    var base = m.base_color.rgb * obj_tint(oi);\n");
-        patch("    g.tint = m.base_color.rgb", "    g.tint = m.base_color.rgb * obj_tint(object_of(a))");
-    }
-    if features & F_UNLIT != 0 {
-        patch("const MAT_EMITTER_CARD: i32 = 2;\n", "const MAT_EMITTER_CARD: i32 = 2;\nconst MAT_UNLIT: i32 = 4;\n");
-        patch(
-            "    s.emissive = emission(m, uv, lod) * obj_power(a);\n",
-            "    s.emissive = emission(m, uv, lod) * obj_power(a);\n    // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.\n    if (m.tex1.z == MAT_UNLIT) {\n        s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);\n        base = vec3<f32>(0.0);\n        spec = 0.0;\n        metal = 0.0;\n    }\n",
-        );
-    }
-    if features & F_UNITS != 0 {
-        // The still scene's walk ends by handing its hit to the units' (then to the procedural objects', as before).
-        // And it has no stack of its own here: the name is then the module's, which the units' file declares, set to
-        // zero once an invocation and not once a ray (shaders/trace_units.wgsl says what that is worth).
-        patch(STILL_STACK, STILL_STACK_GONE);
-        patch(
-            "    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
-            "    hit = trace_units(o, d, inv_d, hit, mode);\n    if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }\n    return hit;\n}\n",
-        );
-        patch("\n// @trace-end\n", &format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl")));
-    }
-    if features & F_BACKGROUND != 0 {
-        patch("    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n};\n", "    aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -\n    background: vec4<f32>, // three.js scene.background (radiance), 1\n};\n");
-        patch("fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {\n", "fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {\n    // three.js scene.background: what camera rays (and paths bent straight through glass) see where nothing is.\n    if (pdf <= 0.0) { return P.background.rgb; }\n");
-    }
-    s
+    let options = CompileOptions { imports: false, condcomp: true, strip: false, validate: false, sourcemap: false, mangler: wesl::ManglerKind::None, features, ..Default::default() };
+    wesl::compile(&path, &options, &resolver).unwrap_or_else(|e| panic!("the kernel's WESL: {e}")).to_string()
 }
 
 /// The loop guard's limit for every kernel, if one is set (merged.rs `guard`: every loop of a kernel bounded, so a
@@ -781,11 +766,6 @@ pub fn kernel_source(src: &str, features: u32) -> String {
 pub fn loop_guard() -> Option<u32> {
     loop_guard_of(false)
 }
-
-/// pathtrace.wgsl's `trace` declares its stack (software traversal); in a kernel with units it does not
-/// (`kernel_source`).
-const STILL_STACK: &str = "\n    var stack: array<u32, 48>;\n    var sp = 0u;\n    var node = 0u;\n";
-const STILL_STACK_GONE: &str = "\n    var sp = 0u;\n    var node = 0u;\n";
 
 /// The loop guard's limit for a kernel with units or without (`F_UNITS`). A kernel with units has the guard natively
 /// too, at the browser's limit, unless THREERT_LOOP_GUARD=0: its second level is the traversal that has run least,
@@ -862,8 +842,9 @@ impl GpuOptions {
 }
 
 /// The kernel's switches: changes to its source for a GPU that the source as written is wrong or too slow on. Each
-/// is a patch of pathtrace.wgsl, trace_hw.wgsl or translucent.wgsl (`kernel_switches`, as `kernel_source` patches
-/// for a scene's features); with none set the source is the files, which is every platform's default but Android's.
+/// is a flag of the kernel's conditional translation (`kernel_flags`; pathtrace.wgsl, trace_hw.wgsl and
+/// translucent.wgsl say where, under `@if`); with none set the kernel is as written, every platform's default but
+/// Android's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KernelSwitches {
     /// THREERT_KERNEL_STRICT=1|0 (Android: 1). The kernel gives the driver nothing undefined to act on:
@@ -900,68 +881,6 @@ impl KernelSwitches {
     }
 }
 
-/// The kernel's source (`kernel_base`) with a device's switches. Each anchor must be there once; hardware traversal's
-/// are looked for only in its source.
-fn kernel_switches(src: String, k: &KernelSwitches, hwrt: bool) -> String {
-    let mut s = src;
-    let mut patch = |anchor: &str, with: &str| {
-        assert_eq!(s.matches(anchor).count(), 1, "kernel_switches: {anchor:?}");
-        s = s.replace(anchor, with);
-    };
-    if k.strict {
-        patch("    let row_p = env_cdf[y] - select(0.0, env_cdf[y - 1u], y > 0u);\n", "    let row_p = env_cdf[y] - select(0.0, env_cdf[max(y, 1u) - 1u], y > 0u);\n");
-        patch("    let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + x - 1u], x > 0u);\n", "    let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + max(x, 1u) - 1u], x > 0u);\n");
-    }
-    if k.strict && hwrt {
-        let miss = "    if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }\n";
-        let any = "    var rq: ray_query;\n    rayQueryInitialize(&rq, acc, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, mask, 0.0, tmax_in, o, d));\n";
-        patch(any, &format!("{miss}{any}"));
-        let opaque = "    var rq: ray_query;\n    let flags = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);\n";
-        patch(opaque, &format!("{miss}{opaque}"));
-        // The translucency pass's query (its camera ray): a ray of no length in its place.
-        patch(
-            "    rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, tmax, o, d));\n",
-            "    let tbad = ray_bad(o, d, tmax);\n    rayQueryInitialize(&rq, tacc, RayDesc(0u, 0xffu, 0.0, select(tmax, 0.0, tbad), select(o, vec3<f32>(0.0), tbad), select(d, vec3<f32>(0.0, 0.0, 1.0), tbad)));\n",
-        );
-        s += "\n// gpu.rs `KernelSwitches::strict`: a ray a ray query must not be given (not finite, or a length that is negative or NaN).\nfn ray_bad(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {\n    let tb = bitcast<u32>(tmax);\n    return non_finite(o) || non_finite(d) || (tb & 0x80000000u) != 0u || (tb & 0x7fffffffu) > 0x7f800000u;\n}\n";
-    }
-    let mut patch = |anchor: &str, with: &str| {
-        assert_eq!(s.matches(anchor).count(), 1, "kernel_switches: {anchor:?}");
-        s = s.replace(anchor, with);
-    };
-    if k.cutout_lite >= 1 && hwrt {
-        patch(
-            "    if (cutouts_opaque() || mode == TRACE_ANY_OPAQUE) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }\n",
-            "    if (cutouts_opaque() || mode != TRACE_CLOSEST) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }\n",
-        );
-    }
-    if k.cutout_lite >= 2 && hwrt {
-        patch("    let steps = select(16u, 64u, mode != TRACE_CLOSEST);\n", "    let steps = 4u;\n");
-    }
-    if k.last_direct {
-        patch(
-            "        if (s.card) { break; }\n        if (depth == P.counts.z) { break; }\n",
-            "        if (s.card) { break; }\n        if (depth == P.counts.z) {\n            // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.\n            if (depth > 0u) {\n                var dz = thr * direct_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);\n                let lum = luminance(dz);\n                if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }\n                radiance += dz;\n            }\n            break;\n        }\n",
-        );
-    }
-    if k.light_pick {
-        // One of the three kinds of light below the directional ones, drawn among those the scene has.
-        patch(
-            "    sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (P.counts.y > 0u) {\n",
-            "    // gpu.rs `KernelSwitches::light_pick`.\n    let has_local = P.counts.x > P.counts2.x;\n    let has_emit = P.counts.y > 0u;\n    let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);\n    var take_local = true;\n    var take_emit = true;\n    var take_env = true;\n    var pick_w = 1.0;\n    let kinds = u32(has_local) + u32(has_emit) + u32(has_env);\n    if (cur_depth > 0u && kinds > 1u) {\n        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);\n        take_local = has_local && k == 0u;\n        if (has_local) { k -= 1u; }\n        take_emit = has_emit && k == 0u;\n        if (has_emit) { k -= 1u; }\n        take_env = has_env && k == 0u;\n        pick_w = f32(kinds);\n    }\n    let sum_sun = sum;\n    let spec_sun = dl_spec;\n    if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }\n    // Emissive triangles (incl. rect lights)\n    mis_x = o;\n    mis_n = s.n;\n    if (!take_emit) {\n    } else if (P.counts.y > 0u) {\n",
-        );
-        patch(
-            "    // Environment\n    if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {\n        let l = sample_env();\n        let f = eval_bsdf(s, lb, v, l);\n",
-            "    // Environment\n    if (take_env && has_env) {\n        let l = sample_env();\n        let f = eval_bsdf(s, lb, v, l);\n",
-        );
-        patch(
-            "                dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;\n            }\n        }\n    }\n    return sum;\n}\n",
-            "                dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;\n            }\n        }\n    }\n    if (pick_w > 1.0) {\n        sum = sum_sun + (sum - sum_sun) * pick_w;\n        dl_spec = spec_sun + (dl_spec - spec_sun) * pick_w;\n    }\n    return sum;\n}\n",
-        );
-    }
-    s
-}
-
 /// The kernel's runtime checks: none (all indices come from our own BVH / scene builder). THREERT_CHECKED turns naga's
 /// on to diagnose a driver: 1 = every check, else a mask (2 bounds, 4 loop bounding, 8 ray-query initialization
 /// tracking).
@@ -975,19 +894,6 @@ fn kernel_checks() -> wgpu::ShaderRuntimeChecks {
     c.force_loop_bounding = v & 4 != 0;
     c.ray_query_initialization_tracking = v & 8 != 0;
     c
-}
-
-/// The kernel's source for a traversal: pathtrace.wgsl as it is (software), or with the hardware traversal in the
-/// software one's place and the translucency pass after it.
-pub fn kernel_base(hwrt: bool) -> String {
-    let base = include_str!("../shaders/pathtrace.wgsl");
-    if hwrt {
-        let (head, rest) = base.split_once("// @trace-begin").unwrap();
-        let (_, tail) = rest.split_once("// @trace-end").unwrap();
-        format!("enable wgpu_ray_query;\n{head}{}{tail}{}", include_str!("../shaders/trace_hw.wgsl"), include_str!("../shaders/translucent.wgsl"))
-    } else {
-        base.to_string()
-    }
 }
 
 /// A kernel source as it is compiled: with the loop guard if it has one (`loop_guard_of`: `units`, whether the source
@@ -1269,14 +1175,14 @@ pub const F_HMEDIA: u32 = 131072;
 /// Procedural geometry (`ProceduralMesh`; pathtrace.wgsl `proc_*`): AABB candidates in every ray query, its hits'
 /// own surface path. Compiled out where no scene has any (`THREERT_FEATURES_ON` forces it in, to measure that cost).
 pub const F_PROC: u32 = 262144;
-/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th (`kernel_source`;
+/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th (`kernel_flags`;
 /// `scene::object_stride`).
 pub const F_TINT: u32 = 524288;
-/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing (`kernel_source`).
+/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing (`kernel_flags`).
 pub const F_UNLIT: u32 = 1 << 20;
-/// three.js `scene.background`: camera rays that miss see `Params::background` (`kernel_source`).
+/// three.js `scene.background`: camera rays that miss see `Params::background` (`kernel_flags`).
 pub const F_BACKGROUND: u32 = 1 << 21;
-/// The features that patch the kernel's source (`kernel_source`) rather than switch code in it.
+/// The features that change the kernel's declarations (`kernel_flags`, `@if` in its source) rather than switch code in it.
 /// three.js `vertexColors` (`scene::tri_colors`): a colour per triangle vertex multiplies the base colour (F_SOURCE).
 pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions (F_SOURCE). (Bit
@@ -1474,14 +1380,12 @@ impl Gpu {
         let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
         let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
         let switches = options.kernel;
-        let src = kernel_switches(kernel_base(hwrt), &switches, hwrt);
+        let src = kernel_template();
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
             let src = if uniform_tables { crate::merged::uniform_tables(&src) } else { src.clone() };
-            device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(guarded(&src, false, false).into()) },
-                kernel_checks(),
-            )
+            let wgsl = kernel_wgsl(&guarded(&src, false, false), &kernel_flags(hwrt, &switches, 0));
+            device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1672,19 +1576,15 @@ impl Gpu {
                     let (_, tail) = rest.split_once(&format!("// @{marker}-end")).unwrap();
                     format!("{head}{code}{tail}")
                 };
-                let base = kernel_source(&self.source, patches);
-                let src = splice(&splice(&splice(&base, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
+                let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
                 // The merged layout: the same source, its buffers merged for this kernel's arrays (merged.rs).
                 let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
                 // The uniform tables (never with the merged layout): the same source, four tables' declarations and
                 // indices rewritten.
                 let src = if self.uniform_tables { crate::merged::uniform_tables(&src) } else { src };
-                unsafe {
-                    self.device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(guarded(&src, self.merged, patches & F_UNITS != 0).into()) },
-                        kernel_checks(),
-                    )
-                }
+                // The loop guard, then the variant: this device's traversal and switches, this scene's features.
+                let wgsl = kernel_wgsl(&guarded(&src, self.merged, patches & F_UNITS != 0), &kernel_flags(self.hwrt, &self.switches, patches));
+                unsafe { self.device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks()) }
             })
             .clone()
     }
@@ -3283,36 +3183,44 @@ mod tests {
         }
     }
 
-    /// The source-patching features (`kernel_source`) find their anchors in pathtrace.wgsl, once each, alone and all
-    /// together; no feature leaves the source as it is.
-    /// The native default (no merged layout, no loop guard): what is handed to wgpu is the source as it was before
-    /// either existed. `guarded` gives a kernel back untouched; the live passes are their file. Prints the sources'
-    /// SHA-256 (`--nocapture`), which docs/WORKFLOW.md's gate compares with main's (PR #13).
+    fn naga_valid(src: &str) {
+        let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+    }
+
+    /// The native default (no merged layout, no loop guard): `guarded` gives the kernel back untouched and the live
+    /// passes are their file. Every variant the kernel's flags make is valid WGSL (naga, wgpu's front end): each
+    /// traversal with no switch, each alone and all of them, by no scene feature, each alone and all of them (units are
+    /// software traversal's), and with the uniform tables. Prints the default variants' SHA-256 (`--nocapture`).
     #[test]
-    fn the_default_sources_are_untouched() {
+    fn every_kernel_variant_is_valid() {
         use sha2::{Digest, Sha256};
         if std::env::var("THREERT_LOOP_GUARD").is_ok() {
             return;
         }
         assert_eq!(loop_guard(), None);
         let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
-        let live = include_str!("../shaders/live.wgsl");
-        assert_eq!(crate::live::live_source(), live);
-        println!("source live {}", sha(&crate::live::live_source()));
+        assert_eq!(crate::live::live_source(), include_str!("../shaders/live.wgsl"));
+        let template = kernel_template();
+        assert_eq!(guarded(&template, false, false), template);
+        let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true };
+        let switches = [
+            KernelSwitches::default(),
+            KernelSwitches { strict: true, ..Default::default() },
+            KernelSwitches { cutout_lite: 1, ..Default::default() },
+            KernelSwitches { cutout_lite: 2, ..Default::default() },
+            KernelSwitches { last_direct: true, ..Default::default() },
+            KernelSwitches { light_pick: true, ..Default::default() },
+            all,
+        ];
         for hwrt in [false, true] {
-            let base = kernel_base(hwrt);
-            assert_eq!(guarded(&base, false, false), base);
-            println!("source kernel hwrt={hwrt} {}", sha(&guarded(&base, false, false)));
-            // Every combination of the features that patch the source (`kernel_source`), each as compiled.
-            let bits = [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID];
-            let mut all = Sha256::new();
-            for m in 0..32u32 {
-                let f = bits.iter().enumerate().filter(|(k, _)| m >> k & 1 == 1).fold(0, |a, (_, b)| a | b);
-                let src = kernel_source(&base, f);
-                assert_eq!(guarded(&src, false, false), src);
-                all.update(guarded(&src, false, false).as_bytes());
+            println!("source kernel hwrt={hwrt} {}", sha(&kernel_wgsl(&template, &kernel_flags(hwrt, &KernelSwitches::default(), 0))));
+            for k in &switches {
+                for f in [0, F_VCOLOR, F_GRID, F_TINT, F_UNLIT, F_UNITS, F_BACKGROUND, F_SOURCE] {
+                    naga_valid(&kernel_wgsl(&template, &kernel_flags(hwrt, k, if hwrt { f & !F_UNITS } else { f })));
+                }
+                naga_valid(&kernel_wgsl(&crate::merged::uniform_tables(&template), &kernel_flags(hwrt, k, F_SOURCE & !F_UNITS)));
             }
-            println!("source kernel hwrt={hwrt} x32 features {}", all.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
         }
     }
 
@@ -3334,43 +3242,32 @@ mod tests {
         }
         // As compiled: the source with units has every loop bounded and the count's buffer; hardware traversal, which
         // never has units, has room for the count only when a limit is set.
-        let src = kernel_source(&kernel_base(false), F_UNITS);
+        let src = kernel_template();
         let g = guarded(&src, false, true);
         assert!(g.contains("return LOOP_GUARD_N > 65536u;") && g.contains(&crate::merged::guard_decl()), "the guard and its count");
-        // (That it bounds every loop: merged.rs `the_guard_bounds_every_loop`. The unit walk's are among them.)
-        let stops = |s: &str| s.matches("if (loop_guard()) { break; }").count();
-        let flat = crate::merged::guard(&format!("{}\n{}", kernel_base(false), crate::merged::guard_decl()), 65536, crate::merged::GUARD_TRIPS.name);
-        assert!(stops(&g) > stops(&flat) && stops(&flat) > 40);
         assert_eq!(guarded(&src, false, false), src, "units told to have no guard: the source as written");
-        // What a native session with units compiles with nothing set, to naga (wgpu's front end).
-        let m = naga::front::wgsl::parse_str(&g).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&g)));
+        // What a native session with units compiles with nothing set, to naga (wgpu's front end); the unit walk's loops
+        // are bounded too (that every loop is: merged.rs `the_guard_bounds_every_loop`).
+        let wgsl = kernel_wgsl(&g, &kernel_flags(false, &KernelSwitches::default(), F_UNITS));
+        naga_valid(&wgsl);
+        let walk = &wgsl[wgsl.find("fn trace_units(").expect("the unit walk")..];
+        assert!(walk[..walk[1..].find("\nfn ").unwrap_or(walk.len() - 1)].contains("loop_guard()"));
         assert!(guard_room(false) && !guard_room(true));
     }
 
-    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS): the source without the
-    /// feature is the file; with it, the still scene's walk hands its hit to `trace_units`, whose text is there once,
-    /// inside the software traversal (the part hardware traversal's source replaces, which therefore cannot have it).
+    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS, `units`): without, the still
+    /// walk keeps its stack and there is no unit walk; with, the still walk hands its hit to `trace_units` and its stack
+    /// is the module's (the procedural objects' walk keeps its own). Hardware traversal has neither software walk.
     #[test]
-    fn units_are_spliced_into_software_traversal_only() {
-        let base = kernel_base(false);
-        assert!(!base.contains("trace_units"));
-        let u = kernel_source(&base, F_UNITS);
-        assert_eq!(u.matches("fn trace_units(").count(), 1);
-        assert_eq!(u.matches("hit = trace_units(o, d, inv_d, hit, mode);").count(), 1);
-        let (begin, end, at) = (u.find("// @trace-begin").unwrap(), u.find("// @trace-end").unwrap(), u.find("fn trace_units(").unwrap());
-        assert!(begin < at && at < end);
-        // One stack an invocation, the module's: the still walk declares none (the procedural objects' walk keeps
-        // its own), and the name it uses is the one the units' file declares.
-        assert_eq!((base.matches(STILL_STACK).count(), u.matches(STILL_STACK).count()), (1, 0));
-        assert_eq!((u.matches("var<private> stack: array<u32, 64>;").count(), u.matches("var stack: array<u32").count(), base.matches("var stack: array<u32").count()), (1, 1, 2));
-        // Taking the units out again gives the file back: nothing else was touched.
-        let call = "    hit = trace_units(o, d, inv_d, hit, mode);\n";
-        let body = format!("\n{}\n// @trace-end\n", include_str!("../shaders/trace_units.wgsl"));
-        assert_eq!(u.replacen(call, "", 1).replacen(&body, "\n// @trace-end\n", 1).replacen(STILL_STACK_GONE, STILL_STACK, 1), base);
-        // Hardware traversal's source has neither anchor.
-        let hw = kernel_base(true);
-        assert!(!hw.contains("// @trace-end") && !hw.contains("return trace_procs(o, d, hit, mode);"));
+    fn units_are_software_traversals_only() {
+        let t = kernel_template();
+        let sw = kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), 0));
+        let u = kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), F_UNITS));
+        let hw = kernel_wgsl(&t, &kernel_flags(true, &KernelSwitches::default(), 0));
+        assert!(!sw.contains("trace_units") && !hw.contains("trace_units") && !hw.contains("fn trace_procs("));
+        assert_eq!((u.matches("fn trace_units(").count(), u.matches("trace_units(o, d, inv_d, hit, mode)").count()), (1, 1));
+        let stacks = |s: &str| (s.matches("var<private> stack: array<u32, 64>").count(), s.matches("var stack: array<u32, 48>").count());
+        assert_eq!((stacks(&sw), stacks(&u)), ((0, 2), (1, 1)));
     }
 
     /// With nothing set, every platform but Android opens the device as it was before the options existed: no
@@ -3385,7 +3282,7 @@ mod tests {
         assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, light_pick: false });
         assert!(!desktop.uniform_tables_on(false, false));
         for hwrt in [false, true] {
-            assert_eq!(kernel_switches(kernel_base(hwrt), &desktop.kernel, hwrt), kernel_base(hwrt));
+            assert!(kernel_flags(hwrt, &desktop.kernel, 0).iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
         }
         let android = GpuOptions::from_vars(&vars(&[]), true);
         assert_eq!(android.kernel, KernelSwitches { strict: true, cutout_lite: 1, last_direct: true, light_pick: false });
@@ -3403,44 +3300,37 @@ mod tests {
         assert_eq!([crate::env_nee_of(None, false), crate::env_nee_of(None, true), crate::env_nee_of(Some("1"), true), crate::env_nee_of(Some("0"), false)], [true, false, true, false]);
     }
 
-    /// Each switch finds its anchors, alone and with the others, under both traversals, and what comes out is valid
-    /// WGSL (naga, wgpu's front end), with the uniform tables too. Strict guards every ray query the hardware kernel
-    /// makes; software traversal's source has none and takes only `env_pdf`'s index.
+    /// The other shader files are WGSL as the specification writes it: wesl's parser is as strict as a browser's
+    /// (Chrome's Tint) where naga is not. naga took `a * b ^ c`, which WGSL's grammar forbids (a bitwise operator's
+    /// operands are unary expressions): the scene library's surface materials and both particle passes would not
+    /// compile in a browser until 2026-11-14. (The kernel's files: `every_kernel_variant_is_valid`.)
     #[test]
-    fn the_kernel_switches_find_their_anchors() {
-        let valid = |src: &str| {
-            let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
-        };
-        let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true };
-        let each = [
-            KernelSwitches { strict: true, ..Default::default() },
-            KernelSwitches { cutout_lite: 1, ..Default::default() },
-            KernelSwitches { cutout_lite: 2, ..Default::default() },
-            KernelSwitches { last_direct: true, ..Default::default() },
-            KernelSwitches { light_pick: true, ..Default::default() },
-            all,
-        ];
+    fn the_other_shaders_are_wgsl_as_the_specification_writes_it() {
+        for src in [include_str!("../shaders/live.wgsl"), include_str!("../shaders/particles.wgsl"), include_str!("../shaders/gpu_particles.wgsl"), include_str!("../shaders/grid_sim.wgsl")] {
+            kernel_wgsl(src, &[]);
+        }
+    }
+
+    /// Each switch changes what it says, under both traversals (that every combination is valid WGSL:
+    /// `every_kernel_variant_is_valid`). Strict guards every ray query the hardware kernel makes; software traversal
+    /// has none and takes only `env_pdf`'s index; the cutout switches are hardware traversal's.
+    #[test]
+    fn the_kernel_switches_change_what_they_say() {
+        let t = kernel_template();
+        let v = |hwrt: bool, k: KernelSwitches| kernel_wgsl(&t, &kernel_flags(hwrt, &k, 0));
         for hwrt in [false, true] {
-            let base = kernel_base(hwrt);
-            for k in &each {
-                let src = kernel_switches(base.clone(), k, hwrt);
-                // (The cutout switches are hardware traversal's: software traversal's source is the file with them.)
-                assert_eq!(src == base, !hwrt && k.cutout_lite > 0 && *k == KernelSwitches { cutout_lite: k.cutout_lite, ..Default::default() }, "{k:?} hwrt={hwrt}");
-                valid(&src);
-                // A scene's features patch the source after the switches, and the uniform tables after them.
-                valid(&crate::merged::uniform_tables(&kernel_source(&src, F_SOURCE & !F_UNITS)));
-            }
-            let strict = kernel_switches(base.clone(), &each[0], hwrt);
+            let plain = v(hwrt, KernelSwitches::default());
+            let strict = v(hwrt, KernelSwitches { strict: true, ..Default::default() });
             let queries = strict.matches("rayQueryInitialize(").count();
             assert_eq!(queries, if hwrt { 3 } else { 0 });
             assert_eq!(strict.matches("ray_bad(o, d, tmax").count(), queries, "every ray query is guarded");
             assert_eq!(strict.matches("fn ray_bad(").count(), hwrt as usize);
-            assert!(!strict.contains("env_cdf[y - 1u]") && !strict.contains("env_cdf[base + x - 1u]") && base.contains("env_cdf[y - 1u]"));
-            let lit = kernel_switches(base.clone(), &all, hwrt);
+            assert!(!strict.contains("env_cdf[y - 1u]") && !strict.contains("env_cdf[base + x - 1u]") && plain.contains("env_cdf[y - 1u]"));
+            let lit = v(hwrt, KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true });
             assert_eq!(lit.matches("radiance += dz;").count(), 1);
-            assert_eq!(lit.matches("if (take_env && has_env) {").count(), 1);
+            assert_eq!(lit.matches("env_on = take_env && has_env;").count(), 1);
             assert_eq!(lit.contains("let steps = 4u;"), hwrt);
+            assert_eq!(v(hwrt, KernelSwitches { cutout_lite: 2, ..Default::default() }) == plain, !hwrt);
         }
     }
 
@@ -3516,25 +3406,23 @@ mod tests {
         assert_eq!(words[..2], [11, 22]);
     }
 
+    /// Each feature that changes the kernel's declarations (`kernel_flags`) changes what it says, and nothing of it
+    /// is in a kernel without it.
     #[test]
-    fn kernel_source_finds_its_anchors() {
-        let base = include_str!("../shaders/pathtrace.wgsl");
-        assert_eq!(kernel_source(base, 0), base);
-        let t = kernel_source(base, F_TINT);
-        assert!(t.contains("const OBJECT_STRIDE: u32 = 4u;") && !t.contains("const OBJECT_STRIDE: u32 = 3u;"));
-        assert_eq!(t.matches("* obj_tint(").count(), 3);
-        assert!(kernel_source(base, F_UNLIT).contains("if (m.tex1.z == MAT_UNLIT)"));
-        assert!(kernel_source(base, F_BACKGROUND).contains("background: vec4<f32>"));
-        let v = kernel_source(base, F_VCOLOR);
-        assert!(v.contains("fn vcolor(") && v.matches("* vcolor(").count() == 2 && !base.contains("vcolor"));
-        let gr = kernel_source(base, F_GRID);
-        assert!(gr.contains("@group(0) @binding(19) var grid_tex: texture_3d<f32>;") && gr.contains("fn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32>") && gr.contains("    grid: vec2<u32>,") && gr.contains("i.grid = vec2<u32>(") && !base.contains("grid_tex"));
-        assert_eq!(gr.matches("// @volume-functions-begin").count(), 1);
-        let all = kernel_source(base, F_SOURCE);
-        assert!(all.contains("obj_tint(object_of(a))") && all.contains("MAT_UNLIT") && all.contains("P.background.rgb"));
-        assert!(all.contains("var base = m.base_color.rgb * obj_tint(object_of(a)) * vcolor(i, h.u, h.v);") && all.contains("g.tint = m.base_color.rgb * obj_tint(object_of(a)) * vcolor(h.tri, h.u, h.v);"));
-        assert!(t.contains("var base = m.base_color.rgb * obj_tint(object_of(a));\n") && t.contains("g.tint = m.base_color.rgb * obj_tint(object_of(a));\n"), "F_TINT alone as before");
+    fn the_source_features_change_what_they_say() {
+        let t = kernel_template();
+        let v = |f: u32| kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), f));
+        let base = v(0);
+        let tint = v(F_TINT);
+        assert!(tint.contains("const OBJECT_STRIDE: u32 = 4u;") && !tint.contains("const OBJECT_STRIDE: u32 = 3u;"));
+        assert_eq!(tint.matches("*= obj_tint(").count(), 3);
         assert!(base.contains("const OBJECT_STRIDE: u32 = 3u;") && !base.contains("obj_tint"));
+        assert!(v(F_UNLIT).contains("MAT_UNLIT") && !base.contains("MAT_UNLIT"));
+        assert!(v(F_BACKGROUND).contains("P.background.rgb") && !base.contains("background"));
+        let vc = v(F_VCOLOR);
+        assert!(vc.contains("fn vcolor(") && vc.matches("*= vcolor(").count() == 2 && !base.contains("vcolor"));
+        let gr = v(F_GRID);
+        assert!(gr.contains("var grid_tex: texture_3d<f32>") && gr.contains("fn vgrid(") && gr.contains("i.grid = ") && !base.contains("grid_tex") && !base.contains("vgrid"));
     }
 
     /// Structural features other than F_INST (opaque particles, media) do not make a scene count as instanced: a group

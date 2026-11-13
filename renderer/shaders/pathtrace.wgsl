@@ -4,6 +4,18 @@
 // Material / atmosphere extensions (docs/PARITY.md): texture pages with ray-cone LOD, alpha cutout, world mapping,
 // wetness / puddles / ripples / grime, procedural facade windows, emissive animation, RIS many-light sampling, height
 // fog with volumetric single scattering. Each is compiled out when the scene does not use it (FEAT).
+//
+// The kernel is this file and trace_units.wgsl, trace_hw.wgsl and translucent.wgsl after it (gpu.rs `KERNEL_FILES`),
+// compiled for a device and a scene by WESL's conditional translation (`@if`, gpu.rs `kernel_wgsl`): a declaration
+// or a statement under `@if(x)` is there only where x holds. The flags:
+//   hwrt                  hardware traversal (ray queries) in the software BVH walk's place, and the translucency pass
+//   strict, cutout_lite, cutout_lite2, last_direct, light_pick
+//                         a device's switches (gpu.rs `KernelSwitches`: what a GPU the kernel as written is wrong or
+//                         too slow on needs)
+//   vcolor, grid, tint, unlit, units, background
+//                         a scene's features that change the kernel's declarations rather than switch code in it
+//                         (gpu.rs `F_SOURCE`; the others are `FEAT`, a pipeline-overridable constant)
+@if(hwrt) enable wgpu_ray_query;
 
 const PI: f32 = 3.14159265358979;
 const INF: f32 = 3.0e38;
@@ -33,6 +45,7 @@ const EMIT_RIS_M: u32 = 6u;
 const VOL_RATE_MASK: u32 = 1u;
 const MAT_DOUBLE_SIDED: i32 = 1;
 const MAT_EMITTER_CARD: i32 = 2;
+@if(unlit) const MAT_UNLIT: i32 = 4;
 // Live (real-time) mode: write this frame's 1-spp sample + first-hit distance instead of accumulating.
 override LIVE: bool = false;
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
@@ -79,6 +92,7 @@ struct Params {
     ltree: vec4<f32>,      // light tree (ltree.rs): first node in `emitters` (bits), its entry count (bits: the moving emitters' first), P(pick a moving one), candidates at camera hits (0 = off)
     procs: vec4<u32>,      // procedural geometry (F_PROC): its data's first word in env_cdf, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
+    @if(background) background: vec4<f32>, // three.js scene.background (radiance), 1
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -127,6 +141,17 @@ struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1
 // simulated grid), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
 struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: vec4<f32>, c: vec4<f32>, p: array<vec4<f32>, 8> };
 @group(0) @binding(18) var<storage, read> media: array<Medium>;
+// Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z.
+@if(grid) @group(0) @binding(19) var grid_tex: texture_3d<f32>;
+// Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle, after the previous
+// vertices in `prev_verts` from vec4 P.procs.w.
+@if(vcolor) fn vcolor_word(k: u32) -> u32 { return bitcast<u32>(prev_verts[P.procs.w + k / 4u][k % 4u]); }
+@if(vcolor) fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
+    let c0 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u)).rgb);
+    let c1 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 1u)).rgb);
+    let c2 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 2u)).rgb);
+    return c0 * (1.0 - u - v) + c1 * u + c2 * v;
+}
 
 
 fn inst_vec(r: Instance, v: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(r.m0.xyz, v), dot(r.m1.xyz, v), dot(r.m2.xyz, v)); }
@@ -470,9 +495,9 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
     return Hit(dot(e2, q) * inv, ti, clamp(u, 0.0, 1.0), clamp(dot(d, q) * inv, 0.0, 1.0), NO_INST);
 }
 
-// @trace-begin (software BVH; replaced by a ray-query implementation when hardware RT is available)
+// The software BVH walk (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
 
-fn ray_aabb(o: vec3<f32>, inv_d: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>, tmax: f32) -> f32 {
+@if(!hwrt) fn ray_aabb(o: vec3<f32>, inv_d: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>, tmax: f32) -> f32 {
     let t0 = (bmin - o) * inv_d;
     let t1 = (bmax - o) * inv_d;
     let tmin_v = min(t0, t1);
@@ -482,7 +507,7 @@ fn ray_aabb(o: vec3<f32>, inv_d: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>, tm
     return select(INF, tn, tn <= tf);
 }
 
-fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
+@if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
     let v0 = tri_verts[i * 3u].xyz;
     let e1 = tri_verts[i * 3u + 1u].xyz;
     let e2 = tri_verts[i * 3u + 2u].xyz;
@@ -502,11 +527,11 @@ fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
 }
 
 // mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface).
-fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
+@if(!hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
     if (rays_off) { return hit; }
     let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
-    var stack: array<u32, 48>;
+    @if(!units) var stack: array<u32, 48>;
     var sp = 0u;
     var node = 0u;
     loop {
@@ -553,6 +578,7 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
             sp++;
         }
     }
+    @if(units) hit = trace_units(o, d, inv_d, hit, mode);
     if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }
     return hit;
 }
@@ -560,7 +586,7 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
 // Procedural geometry, software traversal (the reference the hardware one is checked against): each object's bounds,
 // then its boxes through the object's BVH (scene::ProcLayout with `sw`: nodes as bvh::GpuNode words, and the box of
 // each leaf slot, so the geometry function gets the box's own index).
-fn trace_procs(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
+@if(!hwrt) fn trace_procs(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     var hit = hit_in;
     let first = P.procs.z;
     for (var k = 0u; k < P.procs.y; k++) {
@@ -623,7 +649,6 @@ fn trace_procs(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
     return hit;
 }
 
-// @trace-end
 
 // Shadow rays of the analytic lights: objects that cast no shadow (castShadow = false, glass) let them through.
 fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {
@@ -719,6 +744,8 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     var tr = clamp(m.layer.x, 0.0, 1.0) * (1.0 - clamp(m.params.x, 0.0, 1.0));
     if (tr <= 0.0) { return g; }
     g.tint = m.base_color.rgb;
+    @if(tint) g.tint *= obj_tint(object_of(a));
+    @if(vcolor) g.tint *= vcolor(h.tri, h.u, h.v);
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
         var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
@@ -969,7 +996,10 @@ fn emissive_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> Ma
 fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
 // vec4s per object (scene.rs OBJECT_STRIDE): (pivot, power), (bounds size, time of the last power edit), per-instance
 // data (`MatIn.custom`).
-const OBJECT_STRIDE: u32 = 3u;
+@if(!tint) const OBJECT_STRIDE: u32 = 3u;
+@if(tint) const OBJECT_STRIDE: u32 = 4u;
+// An instanced object's instance colour (three.js `instanceColor`), white for every other object.
+@if(tint) fn obj_tint(oi: u32) -> vec3<f32> { return objects[oi * OBJECT_STRIDE + 3u].rgb; }
 // Instance power (UE material "Power", scripts animate it): scales the emission of everything the node draws.
 fn obj_power(a: TriAttr) -> f32 { return objects[object_of(a) * OBJECT_STRIDE].w; }
 
@@ -1061,6 +1091,8 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     s.front = front;
     s.card = m.tex1.z == MAT_EMITTER_CARD;
     var base = m.base_color.rgb;
+    @if(tint) base *= obj_tint(object_of(a));
+    @if(vcolor) base *= vcolor(i, h.u, h.v);
     var rough = m.params.y;
     var metal = m.params.x;
     var spec = m.params.z;
@@ -1070,6 +1102,13 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         if (m.tex0.w >= 0) { metal *= tex(m.tex0.w, uv, lod).b; }
     }
     s.emissive = emission(m, uv, lod) * obj_power(a);
+    // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.
+    @if(unlit) if (m.tex1.z == MAT_UNLIT) {
+        s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);
+        base = vec3<f32>(0.0);
+        spec = 0.0;
+        metal = 0.0;
+    }
     // Power just changed by a script / gameplay (objects[1].w = scene time of the edit): short history.
     s.anim = P.time.x - objects[object_of(a) * OBJECT_STRIDE + 1u].w < 0.5;
     // Detail that only matters where it is seen directly or in mirror-like reflections (puddles, glass, chrome).
@@ -1141,6 +1180,7 @@ fn surface_proc(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     s.front = front;
     s.card = false;
     var base = m.base_color.rgb;
+    @if(tint) base *= obj_tint(oi);
     var rough = m.params.y;
     var metal = m.params.x;
     var spec = m.params.z;
@@ -1384,9 +1424,11 @@ fn env_pdf(d: vec3<f32>) -> f32 {
     let uv = env_uv(d);
     let x = min(u32(uv.x * f32(w)), w - 1u);
     let y = min(u32(uv.y * f32(h)), h - 1u);
-    let row_p = env_cdf[y] - select(0.0, env_cdf[y - 1u], y > 0u);
+    @if(!strict) let row_p = env_cdf[y] - select(0.0, env_cdf[y - 1u], y > 0u);
+    @if(strict) let row_p = env_cdf[y] - select(0.0, env_cdf[max(y, 1u) - 1u], y > 0u);
     let base = h + y * w;
-    let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + x - 1u], x > 0u);
+    @if(!strict) let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + x - 1u], x > 0u);
+    @if(strict) let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + max(x, 1u) - 1u], x > 0u);
     let sin_t = sin((f32(y) + 0.5) / f32(h) * PI);
     return row_p * col_p * f32(w) * f32(h) / (2.0 * PI * PI * max(sin_t, 1e-4));
 }
@@ -1439,6 +1481,8 @@ fn offset_origin(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // What a BSDF-sampled ray (solid-angle pdf `pdf`; 0 = the camera ray, no MIS) that left the scene brings back: the
 // environment and the directional lights' disks, MIS-weighted against their sampling in `direct_light`.
 fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
+    // three.js scene.background: what camera rays (and paths bent straight through glass) see where nothing is.
+    @if(background) if (pdf <= 0.0) { return P.background.rgb; }
     var wgt = 1.0;
     if (pdf > 0.0 && P.counts2.y != 0u) {
         wgt = power_heuristic(pdf, env_pdf(d));
@@ -1846,11 +1890,35 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         dl_det += sum;
         dl_det_spec += dl_spec;
     }
-    sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));
+    // gpu.rs `KernelSwitches::light_pick`: past the camera hit, the directional lights and one of the other kinds a
+    // scene has (local lights, emitters, the sky), weighted by their number.
+    @if(light_pick) let has_local = P.counts.x > P.counts2.x;
+    @if(light_pick) let has_emit = P.counts.y > 0u;
+    @if(light_pick) let has_env = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);
+    @if(light_pick) var take_local = true;
+    @if(light_pick) var take_emit = true;
+    @if(light_pick) var take_env = true;
+    @if(light_pick) var pick_w = 1.0;
+    @if(light_pick) let kinds = u32(has_local) + u32(has_emit) + u32(has_env);
+    @if(light_pick) if (cur_depth > 0u && kinds > 1u) {
+        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);
+        take_local = has_local && k == 0u;
+        if (has_local) { k -= 1u; }
+        take_emit = has_emit && k == 0u;
+        if (has_emit) { k -= 1u; }
+        take_env = has_env && k == 0u;
+        pick_w = f32(kinds);
+    }
+    @if(light_pick) let sum_sun = sum;
+    @if(light_pick) let spec_sun = dl_spec;
+    @if(!light_pick) sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));
+    @if(light_pick) if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }
     // Emissive triangles (incl. rect lights)
     mis_x = o;
     mis_n = s.n;
-    if (P.counts.y > 0u) {
+    var emitters = P.counts.y;
+    @if(light_pick) if (!take_emit) { emitters = 0u; }
+    if (emitters > 0u) {
         var es: ES;
         // With the light tree its candidates are already near the point: P.ltree.y of them at camera hits, one elsewhere.
         if (lt_on()) { es = sample_emitter_ris(o, s.n, select(1u, u32(P.ltree.w), cur_depth == 0u), s, lb, v); } else if (seen_directly()) { es = sample_emitter_ris(o, s.n, select(EMIT_RIS_M / 2u, EMIT_RIS_M, cur_depth == 0u), s, lb, v); } else if (P.light_lod.w > 0.0) { es = sample_emitter_ris(o, s.n, 2u, s, lb, v); } else { es = sample_emitter(o, s.n); }
@@ -1865,7 +1933,9 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         }
     }
     // Environment
-    if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {
+    var env_on = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);
+    @if(light_pick) env_on = take_env && has_env;
+    if (env_on) {
         let l = sample_env();
         let f = eval_bsdf(s, lb, v, l);
         if (any(f > vec3<f32>(0.0))) {
@@ -1877,6 +1947,10 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
                 dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;
             }
         }
+    }
+    @if(light_pick) if (pick_w > 1.0) {
+        sum = sum_sun + (sum - sum_sun) * pick_w;
+        dl_spec = spec_sun + (dl_spec - spec_sun) * pick_w;
     }
     return sum;
 }
@@ -1989,6 +2063,7 @@ struct VIn {
     lp: vec3<f32>,     // position in the volume's own space: the box [-0.5, 0.5]^3 / the sphere of radius 0.5
     time: f32,         // scene time, s
     custom: vec4<f32>, // the node's customData
+    @if(grid) grid: vec2<u32>, // the node's density grid: its first layer in the atlas, its cells (10 bits an axis; 0: none)
 };
 
 struct VOut {
@@ -1996,6 +2071,15 @@ struct VOut {
     albedo: vec3<f32>,  // scattering / extinction
     emission: vec3<f32>, // emitted radiance per metre (absorption x emitted radiance)
 };
+
+// The node's density grid at `lp` (the volume's own space, the box [-0.5, 0.5]^3): field A's four numbers, trilinear
+// between cell centres, the border cells' beyond them; zeros for a node without a grid.
+@if(grid) fn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32> {
+    if (i.grid.y == 0u) { return vec4<f32>(0.0); }
+    let n = vec3<f32>(vec3<u32>(i.grid.y & 1023u, (i.grid.y >> 10u) & 1023u, (i.grid.y >> 20u) & 1023u));
+    let c = clamp((lp + 0.5) * n, vec3<f32>(0.5), n - 0.5) + vec3<f32>(0.0, 0.0, f32(i.grid.x));
+    return textureSampleLevel(grid_tex, samp, c / vec3<f32>(textureDimensions(grid_tex)), 0.0);
+}
 
 // @volume-functions-begin
 fn volume_function(f: u32, i: VIn, p: array<vec4<f32>, 8>) -> VOut { return VOut(0.0, vec3<f32>(1.0), vec3<f32>(0.0)); }
@@ -2034,6 +2118,7 @@ fn medium_eval(k: u32, x: vec3<f32>) -> VOut {
     i.lp = medium_local(m, x);
     i.time = P.time.x;
     i.custom = m.c;
+    @if(grid) i.grid = vec2<u32>(bitcast<u32>(m.b.z), bitcast<u32>(m.b.w));
     var r = volume_function(m.a.x, i, m.p);
     r.extinction = clamp(r.extinction, 0.0, m.b.x);
     return r;
@@ -3068,7 +3153,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             radiance += c;
         }
         if (s.card) { break; }
-        if (depth == P.counts.z) { break; }
+        @if(!last_direct) if (depth == P.counts.z) { break; }
+        @if(last_direct) if (depth == P.counts.z) {
+            // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.
+            if (depth > 0u) {
+                var dz = thr * direct_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
+                let lum = luminance(dz);
+                if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }
+                radiance += dz;
+            }
+            break;
+        }
         // Live: the path ends in the radiance cache at its first bounce. Surfaces seen in mirror-like reflections
         // (specular lobe below roughness 0.4, where UE traces reflections) get exact direct light, as UE's hit
         // lighting does, and the cache's indirect part; others reflect the cache's total. Rotating tiles train the

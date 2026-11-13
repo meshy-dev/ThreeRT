@@ -908,11 +908,10 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   waited at every unit for the slowest of its group (1.5 ms of the voxel level's 6.8). The top tree's root's box is
   tested first: a ray that meets no unit reads one node, and a scene of one unit has no tree to walk. The hit it
   returns is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
-- **`pathtrace.wgsl` is not edited.** The unit walk is `shaders/trace_units.wgsl`, put into the source by
-  `kernel_source` for scenes that have units under software traversal (`F_UNITS`, a source feature, as vertex
-  colours are): the file's text, a call at the end of the still walk, and the still walk's stack declaration taken
-  out ("The stack"). A scene without units is handed the source it was handed before, byte for byte; hardware
-  traversal's source never contains it.
+- **The unit walk is `shaders/trace_units.wgsl`**, in the kernel under `@if(units)` (`F_UNITS`, a source feature,
+  as vertex colours are; gpu.rs `kernel_flags`): the file's walk, a call at the end of the still walk, and the still
+  walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
+  kernel never does.
 - Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
   of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
   goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
@@ -949,8 +948,7 @@ not yet used, and a tree given back, hold leaves that end (`units::FILL`), not z
 whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
 
 **The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module,
-which the still walk uses too (`kernel_source` takes its own declaration out of the source for such a kernel; the
-file is not edited). Why not a walk's own: an array a function declares is set to zero each time the function is
+which the still walk uses too (its own declaration is under `@if(!units)`). Why not a walk's own: an array a function declares is set to zero each time the function is
 entered, whatever the ray then meets, and a ray's walk is entered many times a pixel. The unit walk's own 64 words
 cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55; the still walk's own 48 cost them 0.36,
 1.1 and 1.5 more, **and cost every flattened scene the same** (a kernel without units is the file as it is, so it
@@ -1171,6 +1169,35 @@ the CPU's update of the instances, not the trace.
 main; `cargo test --release` whole (79 pass); the atomic tests under hardware traversal (170 pass) and the 29 with
 units under software traversal; hello world natively and in Chrome (every check, the guard 0, no frame rebuilt).
 
+## The kernel's source
+
+The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `trace_units.wgsl`, `trace_hw.wgsl` and
+`translucent.wgsl` (gpu.rs `KERNEL_FILES`), every device's and scene's variant in it under WESL's conditional
+translation (`@if(flag)` on a declaration or a statement). wesl-rs (WESL's compiler in Rust, natively and in a
+browser alike) makes a kernel's WGSL from the flags (gpu.rs `kernel_flags`, `kernel_wgsl`): the traversal
+(`hwrt`), a device's switches (`strict`, `cutout_lite`, `cutout_lite2`, `last_direct`, `light_pick`) and a scene's
+features that change declarations (`vcolor`, `grid`, `tint`, `unlit`, `units`, `background`; the other features switch
+code under the pipeline-overridable constant `FEAT`). pathtrace.wgsl's head names them; each is said where it changes
+something, and a flag the source names that a kernel is not given is an error.
+- Before that, still as text: a scene's material, volume and geometry functions between their markers in
+  pathtrace.wgsl, the merged layout (merged.rs `kernel`, the browser), the uniform tables (merged.rs `uniform_tables`,
+  Android) and the loop guard (merged.rs `guard`).
+- Until 2026-11-14 the variants were patches of the source at anchors, whole lines of code found and replaced (gpu.rs
+  `kernel_base`, `kernel_switches`, `kernel_source`). For every combination of the flags, 2,304, the Metal source naga
+  wrote from the patched kernel and from the one with `@if` was the same, two rewrites allowed for: the light pick's
+  emitters and environment take their conditions from a local (a statement is under `@if` whole, and those blocks are
+  long), and vertex and instance colours multiply the base colour in turn rather than in one expression (the same
+  products, in the same order).
+- WESL's parser is the specification's grammar, as strict as a browser's (Chrome's Tint); naga, wgpu's front end, is
+  not. Through it the scene library's surface materials did not compile: their hash read `a * b ^ c * d`, which WGSL
+  forbids (a bitwise operator's operands are unary expressions) and which naga took. The same in the particle passes.
+  So they never compiled in a browser either; fixed 2026-11-14 with the parentheses in the order naga read them, and
+  the shader files outside the kernel are held to the grammar by a unit test (gpu.rs
+  `the_other_shaders_are_wgsl_as_the_specification_writes_it`). A scene's own functions go through WESL with the
+  kernel: WGSL a browser would refuse is refused natively too.
+- The repository's Rust is pinned (`rust-toolchain.toml`, 1.100.0): wesl-rs 0.6 asks for 1.97.1 or newer, and the
+  determinism checks' recorded hashes are of one compiler.
+
 ## Android (Adreno): what a phone's Vulkan driver needed
 
 The engine's library builds for `aarch64-linux-android` and runs under an Android client on Vulkan with ray queries.
@@ -1214,7 +1241,7 @@ on the device", and differs where it says so.
   Two of these are what a device run should look at first: `prev_verts` is the one storage buffer left after the
   acceleration structure's binding (13) and feeds the motion vectors of moving objects and the vertex colours;
   `env_cdf` also holds the procedural geometry (voxel worlds).
-- **The kernel's switches** (`gpu::KernelSwitches`; patches of the kernel's source, as a scene's features are):
+- **The kernel's switches** (`gpu::KernelSwitches`; flags of the kernel's conditional translation, `@if` in its source, as a scene's features are: "The kernel's source" below):
 
   | switch | default | what it does | on the device |
   |---|---|---|---|

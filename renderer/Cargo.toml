@@ -9,6 +9,8 @@ license = "MIT"
 voxel-core = { path = "voxel-core" }
 physics-core = { path = "physics-core" }
 wgpu = "30"
+# The kernel's variants (gpu.rs `kernel_wgsl`): WESL's conditional translation, by wesl-rs (WESL's compiler in Rust).
+wesl = { version = "0.6", features = ["naga-ext"] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
