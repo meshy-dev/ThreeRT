@@ -1,4 +1,4 @@
-// In-place edits past the room reserved at upload (live.rs `edit_geometry`; ROADMAP § 6 step 5): at frame 3 the frame
+// In-place edits past the room reserved at upload (live/edits.rs `edit_geometry`; ROADMAP § 6 step 5): at frame 3 the frame
 // script adds 1,100 `dynamicGeometry` specks far away (more records and object entries than the room's 1,024) and a
 // 72,200-triangle plane across the centre (more triangles than its 65,536). The room grows (buffers and the TLAS
 // doubled, copied on the GPU), nothing rebuilds, and the plane reads 0.5: Lambert 0.5 under a uniform 1-nit sky.

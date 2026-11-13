@@ -1,4 +1,4 @@
-// An InstancedMesh removed in place (live.rs `edit_geometry`; ROADMAP § 6 step 5): its two planes (Lambert 0.2) hide a
+// An InstancedMesh removed in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 5): its two planes (Lambert 0.2) hide a
 // `dynamicGeometry` plane (Lambert 0.5) behind them; at frame 3 the InstancedMesh is removed, its TLAS instances taken
 // out without a rebuild, and the centre shows the plane behind: 0.5 under a uniform 1-nit sky.
 import { InstancedMesh, Matrix4, Mesh, PlaneGeometry } from "@threert/scene";

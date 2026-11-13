@@ -1,6 +1,6 @@
 //! The merged binding layout: the engine's shaders with at most eight storage buffers a stage, WebGPU's default limit
 //! (`maxStorageBuffersPerShaderStage`). The kernel binds 19 as it is written and the live passes 24: more than a
-//! browser gives a page. There is one source: pathtrace.wgsl and live.wgsl, and the bindings gpu.rs and live.rs make for
+//! browser gives a page. There is one source: pathtrace.wgsl and live.wgsl, and the bindings gpu.rs and live/targets.rs make for
 //! them, are what the native renderer runs, unchanged. This module writes the browser's from them, as text (as
 //! `gpu::kernel_source` patches the kernel for a scene's features), and gives the Rust side the numbers that go with
 //! it. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the renderer

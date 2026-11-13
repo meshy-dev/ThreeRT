@@ -2140,6 +2140,28 @@ Not done here: filters sized by hit distance, which is what would let a short hi
 Playground and the page still open a 1280 × 720 view; the live buffers are sized by the output (about 1.7 GB at
 2560 × 1440), though the traced grid rarely fills it.
 
+**The live passes' buffers by what they hold, and `live.rs` in files (2026-11-13, after it).** The live passes' state
+had grown by reuse: a pair of buffers named `alb` held the diffuse fast mean, the upscaler's flicker and lock and
+`judge`'s findings over one another; the output colour history sat behind the traced grid's diffuse history in one
+buffer; velocity had a ping-pong partner nothing read; the g-buffer was allocated at twice what it holds; every pair
+was swapped by binding the other of two bind groups. Now what lasts from one frame to the next has a buffer of its
+own, named for what it holds, in two halves (this frame's and the last; `LiveParams.state` says which is which):
+`diffuse_hist`, `diffuse_mom`, `diffuse_fast`, `spec_hist`, `gbuffer`, `up_state`, `color_hist`; the transients that
+share a buffer are listed at the top of `live.wgsl` with who uses each when. The upscaler's state is one `vec4<u32>`
+a pixel with half of z and all of w free: the lock's depth (the fix the moving lamps wait for, above) goes there.
+Storage bindings 28 → 24, one bind group, 16 bytes a pixel less (59 MB at 1440p); the merged layout binds 21 live
+buffers. `live.rs` (4,931 lines) is now `live/`: `mod.rs` (`LiveCore`, its settings, camera, governor, readbacks),
+`targets.rs` (pipelines, buffers, bind group), `load.rs` (a scene loaded, the sky's and emitters' workers),
+`edits.rs` (edits in place), `frame.rs` (one frame), `session.rs` (the headless runner); no code changed by the move.
+
+Checks: `render-identity`, native and `THREERT_MERGED=1`, two runs a side and four on what it flagged: nothing
+changed, by the buffers or by the move. `bench-window` (still-bistro, tokyo-turn): within a run's spread with the
+radiance cache on; with it off 0.03 ΔE between frames against main's 0.01 to itself (a shader compiled from other
+source rounds differently). The live passes 6.27 → 6.13 ms (Bistro, 1440p at 0.375). On the way: `render-identity`
+confirms what it flags on four more runs a side, and leaves out a confirming run without an output (the
+`geometry/grow-live` test sometimes fails before its picture: its frame script, adding 1,100 objects, runs past the
+script's time).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

@@ -1,4 +1,4 @@
-// Emitting geometry removed in place (live.rs `edit_geometry`; ROADMAP § 6 step 3): a `dynamicGeometry` panel of an
+// Emitting geometry removed in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 3): a `dynamicGeometry` panel of an
 // emissive material lights a white Lambert floor; after a few frames the frame script removes it. Its emitter entries
 // go in place (no rebuild): the floor turns black, against an unlit patch of colour 1 beside it (MeshBasicMaterial,
 // lighting nothing): floor / patch = 0.

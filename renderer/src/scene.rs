@@ -160,7 +160,7 @@ pub const PROC_HEADER: usize = 16;
 
 /// Procedural object `id` (a `Kind::Procedural`) as the build places it at world matrix `m` with object-table index
 /// `object`, or None when its geometry has no boxes (nothing drawn). The build and the live view's in-place edits
-/// (live.rs `edit_geometry`) both make it here. Its geometry function's index is its place among the world's geometry
+/// (live/edits.rs `edit_geometry`) both make it here. Its geometry function's index is its place among the world's geometry
 /// functions (the kernel's dispatch order).
 pub fn proc_object(w: &World, id: u32, m: Mat4, object: u32, materials: &HashMap<u32, u32>, assets: &Path) -> Result<Option<ProcObject>> {
     let n = &w.objects[&id];
@@ -543,15 +543,15 @@ pub struct Retained {
     pub pose_groups: Vec<PoseGroup>,
     pub pose_member: HashMap<u32, u32>,
     /// `own_blas` meshes placed as instances (hardware RT): object -> its instance; (geometry, GPU material) -> the
-    /// shared mesh (objects with the same geometry and material share its BLAS). live.rs `edit_geometry` keeps both.
+    /// shared mesh (objects with the same geometry and material share its BLAS). live/edits.rs `edit_geometry` keeps both.
     pub own_instance: HashMap<u32, u32>,
     pub own_mesh: HashMap<(u32, u32), u32>,
     /// Emitting `own_blas` meshes (`InstMesh::emits`): object -> its mesh (its own, in world space).
     pub emitter_mesh: HashMap<u32, u32>,
-    /// Instanced objects (`Kind::Instanced`) placed as instances -> where (live.rs `update_instanced`).
+    /// Instanced objects (`Kind::Instanced`) placed as instances -> where (live/edits.rs `update_instanced`).
     pub instanced: HashMap<u32, InstancedPlace>,
     /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
-    /// place is another instance of one (live.rs `edit_geometry`).
+    /// place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
 }
 
@@ -1141,7 +1141,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if emits_only(&materials[mat as usize]) && !n.driven {
                     // An emitting material: its own BLAS too, but its triangles in world space (placed at identity,
                     // never shared), so they are light-sampled as flattened triangles are and can be edited in place
-                    // (live.rs `edit_geometry`; ROADMAP § 6 step 3).
+                    // (live/edits.rs `edit_geometry`; ROADMAP § 6 step 3).
                     let oi = (objects.len() / stride) as u32;
                     let (t, a) = emitter_mesh_tris(g, m, mat, oi);
                     if !t.is_empty() {
@@ -1171,7 +1171,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             }
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {
                 // Copies of one geometry: one shared mesh (one BLAS), an instance and an object entry per copy, the
-                // copies' records and entries contiguous (live.rs `update_instanced` rewrites them in place).
+                // copies' records and entries contiguous (live/edits.rs `update_instanced` rewrites them in place).
                 // Glass, emissive and function materials and mirrored copies are flattened instead, each copy its
                 // own triangles, as `own_blas` meshes are; changing their instances rebuilds.
                 let empty = world::InstanceTable::default();
@@ -2053,7 +2053,7 @@ pub fn put_colors(dst: &mut Vec<[u32; 3]>, at: usize, c: Option<Vec<[u32; 3]>>) 
 }
 
 /// An `own_blas` mesh's triangles in model space and their attributes, as the pool holds them. The build and the live
-/// view's in-place edits (live.rs `edit_geometry`) both make them here, so either path gives the same data.
+/// view's in-place edits (live/edits.rs `edit_geometry`) both make them here, so either path gives the same data.
 pub fn own_mesh_tris(g: &world::Geometry, mat: u32) -> (Vec<[Vec3A; 3]>, Vec<GpuTriAttr>) {
     let (mut tris, mut flags, mut attrs) = (vec![], vec![], vec![]);
     append_arrays(g, Mat4::IDENTITY, mat, 0, None, &mut tris, &mut flags, &mut attrs);

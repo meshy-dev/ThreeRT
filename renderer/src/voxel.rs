@@ -6,7 +6,7 @@
 //! Two routes, one switch for the whole level:
 //! - meshes: each object's exposed faces greedy-meshed (`voxel_core::greedy_mesh`), one `own_blas` mesh per palette
 //!   material; an edit meshes the touched objects again (and the terrain tiles beside them) and replaces their
-//!   geometry in place (live.rs `edit_geometry`);
+//!   geometry in place (live/edits.rs `edit_geometry`);
 //! - boxes: each object one procedural geometry with one box (`VOXEL_BRICKS`); an edit lays the touched objects out
 //!   again and replaces their data in place.
 //!

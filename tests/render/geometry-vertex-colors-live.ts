@@ -1,4 +1,4 @@
-// Vertex colours on geometry added in place (live.rs `edit_geometry`; F_VCOLOR): a scene with vertex colours from the
+// Vertex colours on geometry added in place (live/edits.rs `edit_geometry`; F_VCOLOR): a scene with vertex colours from the
 // start (a coloured speck far away, `dynamicGeometry`) gets material/vertex-colors' quad at frame 3, in place; its
 // colours are written into the edit room with its triangles, and its centre reads 0.5 as when built. (A plain mesh far
 // below too: in a scene whose TLAS held one instance, an object added in place is not drawn; ROADMAP Known issues.)

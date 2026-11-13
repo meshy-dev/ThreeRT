@@ -46,7 +46,7 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
 | Engine API | `packages/scene/src/engine.ts` (`Engine`), `renderer/src/script.rs` (`__engine` natives) | Handles (u32) for geometries (typed arrays), textures (asset path, encoded image or RGBA8 pixels), material-function code, materials, objects (group / mesh / model / light / camera) and their transform, visibility, power, light / camera parameters; the environment and render settings. Descriptors are JSON-shaped (`renderer/src/desc.rs`). |
 | Scene binding | `packages/scene/src/engine.ts` `SceneBinding` | Keeps the engine in step with a DSL scene. Objects report their own changes (core.ts change tracking: transforms, visibility, power, shadow flag, mesh geometry / material, add / remove), so a sync visits only what changed. Lights, cameras and materials are compared against what was last sent. |
 | World | `renderer/src/world.rs` | The engine's objects, resources, environment and settings, and what changed since the last commit: parameter changes (power, light / material parameters, environment, camera) or structural ones. Asset paths must stay inside the asset root (game code is untrusted on nodes). |
-| Live commit | `renderer/src/live.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera), and so does hiding or showing a volume, a light without a card or a particle system that is not light-sampled by its own `visible`. Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
+| Live commit | `renderer/src/live/edits.rs` `LiveCore::commit`, `tables.rs` | Parameter changes rewrite GPU table entries in place (materials, lights, object power, emitter CDF, wetness / rain / fog, camera), and so does hiding or showing a volume, a light without a card or a particle system that is not light-sampled by its own `visible`. Anything structural rebuilds the GPU scene from the world, in memory; history survives, validated per pixel. |
 | Scene runtime | `renderer/src/script.rs` `ScriptHost` | QuickJS (rquickjs) with no I/O (no fs, network or timers; what needs the outside is asked of the app, "The host channel"). Loads a bundle (one script) or ES modules (`game.js` + `threert-runtime.js`, the cloud layout). Memory capped at 1 GiB. Time budgets: setup 120 s, event 1 s, frame 50 ms; the interrupt handler aborts overruns. Every entry ends by running the promise jobs it left, inside its budget ("Promises", below). The time the engine spends inside a voxel call (`voxelExplode`, `voxelEdit`, `voxelFrame`) is the engine's, not the script's: the deadline moves by it as measured, up to 250 ms an entry; past that it counts against the script, and a voxel call made after the deadline throws "interrupted" at once. A prelude adds `TextEncoder`, `structuredClone`, `atob` and `console`. |
 | Node host | `packages/gameplay/src/node-host.ts` | `globalThis.__threert`: `setup(room, seed)`, `event(type, payload, ts)` (local authority: execute + commit), `commit(writes, seq)` / `setState(state, seq)` (room authority), `state()`, `frame(dt, now)`, `hostMessages(list, ts)` (the app's messages), `sync()` (the engine follows the scene once more: after an entry's promise jobs), and the editor's `outline()`, `inspect(name)`, `edit(name, path, value)`. |
 | World handlers | `packages/gameplay/src/world.ts` | `on[type](world, ev)`: an event handled on this node, changing the scene at once. `WorldContext`: `scene`, `camera`, read-only `state`, `object(id)`, `time`, `now`, `random()`, `emit(type, payload)`. |
@@ -421,7 +421,7 @@ The apps in this repository:
 | app | input | `net.*` | `launch` | HUD |
 | --- | --- | --- | --- | --- |
 | `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'` | not drawn; `--hud-log` prints each description |
-| `threert-render live` (`live.rs`) | whatever the driver sends | none: the driver is the app | `--launch` | on stdout with every other post |
+| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch` | on stdout with every other post |
 | the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`) | DOM over the canvas |
 
 - `live` speaks the channel as JSON lines, so a game's use of it is testable without a window: on stdin
@@ -918,7 +918,7 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   step (the A/B).
 
 **Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
-its BLASes, or the units), so the engine's path is the same under both traversals (`live.rs` `move_instances`,
+its BLASes, or the units), so the engine's path is the same under both traversals (`live/edits.rs` `move_instances`,
 `update_instanced`, `edit_geometry`):
 
 | edit | under software traversal with units |
@@ -1245,7 +1245,7 @@ on the device", and differs where it says so.
   (a tenth of the rays an iPhone 15 Pro traces). This source does not reach it: the trace costs 0.42 to 0.65 µs a
   traced pixel at one bounce whatever the scene, which is 249 × 140 to 333 × 187 traced at 30 fps ("Checked on the
   device").
-- **Dynamic resolution by the clock** (`THREERT_GOVERN_CLOCK=1|0`, default on Android; `live.rs`
+- **Dynamic resolution by the clock** (`THREERT_GOVERN_CLOCK=1|0`, default on Android; `live/mod.rs`
   `govern_resolution`). The render scale was governed in frames (a check every 30th, the urgent one after the first
   120), which is twice a second and 2 s only at 60 frames a second. A scene opens at its full scale, on this GPU at
   about 6 frames a second, so it was a slide show for 25 s. With the clock it is at its frame rate 3 s after its

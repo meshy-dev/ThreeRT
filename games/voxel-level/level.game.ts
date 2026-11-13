@@ -30,7 +30,7 @@ function heightfield(phase: number): BufferGeometry {
 }
 
 /**
- * `edits` (ROADMAP § 6 step 2c-4, live.rs `edit_geometry`): every half second, one object's geometry is replaced: with
+ * `edits` (ROADMAP § 6 step 2c-4, live/edits.rs `edit_geometry`): every half second, one object's geometry is replaced: with
  * box representations, the procedural tile under the camera's start swaps between its own voxels and its neighbour's;
  * with the mesh, a `dynamicGeometry` heightfield there swaps between two shapes. The frame log's `edit` / `rebuild`
  * time it (tools/bench-voxel.ts --edits).

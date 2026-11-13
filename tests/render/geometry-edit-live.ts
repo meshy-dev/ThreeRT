@@ -1,4 +1,4 @@
-// Geometry edits applied in place (live.rs `edit_geometry`; ROADMAP § 6 step 2c-4): after a few frames the frame script
+// Geometry edits applied in place (live/edits.rs `edit_geometry`; ROADMAP § 6 step 2c-4): after a few frames the frame script
 // removes a procedural box that hid the centre, swaps a `dynamicGeometry` mesh's tiny plane for a 4 m one across the
 // centre, and adds a procedural box and a `dynamicGeometry` mesh behind it (with the materials already in the scene: a
 // new material rebuilds the scene). The centre then shows the swapped plane:

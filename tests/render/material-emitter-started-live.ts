@@ -1,4 +1,4 @@
-// A material that starts emitting in place (tables.rs `can_emit`, live.rs `add_material_emitters`; ROADMAP § 6
+// A material that starts emitting in place (tables.rs `can_emit`, live/edits.rs `add_material_emitters`; ROADMAP § 6
 // step 3): a panel 1 m above a Lambert 0.5 floor, filling its hemisphere, of a black material that emits nothing at
 // first; after a few frames the frame script sets its emission to 1 nit. Its triangles get emitter entries in place
 // (no rebuild), and the floor reads 0.5.

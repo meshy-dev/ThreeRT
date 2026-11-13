@@ -160,7 +160,7 @@ export function sceneFor(id: string) {
       win.name = `windows ${t.x} ${t.z} ${g}`;
       scene.add(win);
       // A group switches on every tile in the same frame: any power change costs the live view's commit ~13 ms (the
-      // emitter CDF and the light tree rebuilt over all 1.4 M emitters, renderer/src/live.rs write_emitters), so fewer
+      // emitter CDF and the light tree rebuilt over all 1.4 M emitters, renderer/src/live/edits.rs write_emitters), so fewer
       // switching frames is better until that is incremental.
       lamps.push({ name: win.name, at: windowSwitchAt(g) });
     }

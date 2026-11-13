@@ -8,7 +8,7 @@
 //!                         [--hdr out.raw] [--signals PREFIX] (linear RGB f32: the image; its diffuse / specular /
 //!                         emission apart, PREFIX-{diffuse,specular,emission}.raw)
 //!   threert-render serve [--presets DIR]      # JSON-lines jobs on stdin, keeps the GPU device and game runtimes warm
-//!   threert-render play | live <bundle.js>    # native window / headless real-time (view.rs, live.rs)
+//!   threert-render play | live <bundle.js>    # native window / headless real-time (view.rs, live/)
 //!   threert-render setup <bundle.js>          # setup cost in the embedded runtime
 //!   threert-render edit-check <bundle.js> --events '[{"type":..,"payload":..}]'
 //!   threert-render info                       # print adapter info

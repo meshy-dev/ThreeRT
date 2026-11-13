@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live.rs `live_lighting`), -
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live/mod.rs `live_lighting`), -
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
@@ -43,7 +43,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 // ---- The live passes' buffers, by what they hold and how long.
 //
 // What lasts from one frame to the next has a buffer of its own, in two halves: this frame's, which the passes write
-// (`this_half`), and the previous frame's, which they read (`last_half`); live.rs alternates them (`L.state.x`). A half
+// (`this_half`), and the previous frame's, which they read (`last_half`); live/frame.rs alternates them (`L.state.x`). A half
 // is L.size.x * L.size.y elements, indexed by traced sample (by output pixel: `color_hist`).
 //   diffuse_hist  the diffuse irradiance's history: rgb, frames (`dtemporal`; the à-trous passes read its length)
 //   diffuse_mom   its luminance moments: mean, mean square, the fast mean's luminance, 1 where written (`dtemporal`)
@@ -53,7 +53,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 //   color_hist    the output grid's colour history: rgb, samples (`upscale`)
 //   up_state      the upscaler's state per traced sample (`compose`): x, y `Flicker`; z `Lock` (its life, f16; the
 //                 other half free); w free
-// What lives within a frame shares buffers whose uses do not overlap (the passes run in live.rs `Passes` order):
+// What lives within a frame shares buffers whose uses do not overlap (the passes run in live/targets.rs `Passes` order):
 //   sample_vel    per traced sample: screen velocity (output pixels this frame), view depth, animated shading
 //                 (`compose`; `judge`, `upscale`, depth of field and motion blur read it)
 //   judged        `judge`'s findings per traced sample (`Judged`), in up_state's previous half: `compose` has read it
@@ -88,7 +88,7 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(20) var<storage, read_write> bloom_b: array<vec4<f32>>;    // horizontal blur scratch
 @group(0) @binding(21) var<storage, read_write> spec_pp: array<vec2<u32>>;
 @group(0) @binding(22) var<storage, read_write> sb: array<vec4<f32>>;
-// What the trace leaves (the kernel's group 1, live.rs `Targets::kernel`). Reflection resolve: the specular-lobe rays,
+// What the trace leaves (the kernel's group 1, live/targets.rs `Targets::kernel`). Reflection resolve: the specular-lobe rays,
 // 2 per traced pixel ((radiance back, lobe pdf; 0 = none), (specular albedo E, octahedral direction)), and the
 // resolved specular reflection per traced pixel (`refl`).
 @group(0) @binding(23) var<storage, read> refl_in: array<vec4<f32>>;
@@ -479,7 +479,7 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    // How long the history may be at most is the frame's (`misc.y`: live.rs HISTORY_LIVE while the scene's lighting
+    // How long the history may be at most is the frame's (`misc.y`: live/mod.rs HISTORY_LIVE while the scene's lighting
     // changes, far longer once it has settled); within it, each pixel's own: less where it moves (until 2026-11-12 the
     // whole frame's was held to 48 while the camera moved), a few frames on animated shading, and anti-lag below.
     let cap = mix(select(L.misc.y, min(L.misc.y, 4.0), anim), min(L.misc.y, select(HIST_MOVING, 4.0, anim)), clamp(speed, 0.0, 1.0));
@@ -1048,7 +1048,7 @@ const THIN_LIKE: f32 = 1.05;
 // 0.5: 4.47 / 0.69; not spared (main) 5.06 / 0.71. In a slow turn (0.25 degrees a frame) 2.23 / 1.05, 2.17 / 0.80,
 // main 2.81 / 0.77.
 const LOCK_RELAX: f32 = 0.75;
-// The frames of the jitter sequence (live.rs: 8 at full resolution, as many more as an output pixel has fewer samples).
+// The frames of the jitter sequence (live/frame.rs: 8 at full resolution, as many more as an output pixel has fewer samples).
 fn jitter_phases() -> f32 {
     return clamp(round(8.0 * f32(L.size.x) * f32(L.size.y) / (f32(L.isz.x) * f32(L.isz.y))), 8.0, 512.0);
 }

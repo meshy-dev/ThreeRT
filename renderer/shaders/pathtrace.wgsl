@@ -2503,7 +2503,7 @@ fn oct_enc(n: vec3<f32>) -> u32 {
 // bounce); each vertex's estimate is added. Sums are fixed point with stochastic rounding (`cache_acc`);
 // `cache_resolve` folds them into `cache_val` once per frame.
 
-const CACHE_SIZE: u32 = 262144u;     // entries, a power of two (live.rs CACHE_SIZE)
+const CACHE_SIZE: u32 = 262144u;     // entries, a power of two (gpu.rs CACHE_SIZE)
 const CACHE_PROBE: u32 = 8u;         // linear probing window
 const CACHE_ANGLE: f32 = 0.02;       // voxel size / distance to the camera
 const CACHE_MIN_VOXEL: f32 = 0.0625; // m
@@ -2839,7 +2839,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
     let raster = LIVE && P.raster.x > 0.5 && P.cam_right.w <= 0.0;
-    // Live: one sub-pixel jitter a frame for the whole image (live.rs: Halton 2, 3), which the temporal upscaler
+    // Live: one sub-pixel jitter a frame for the whole image (live/frame.rs: Halton 2, 3), which the temporal upscaler
     // resolves (live.wgsl `upscale`) and the raster pass draws at. Offline, every sample draws its own.
     var jx = rnd();
     var jy = rnd();
@@ -3072,7 +3072,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Live: the path ends in the radiance cache at its first bounce. Surfaces seen in mirror-like reflections
         // (specular lobe below roughness 0.4, where UE traces reflections) get exact direct light, as UE's hit
         // lighting does, and the cache's indirect part; others reflect the cache's total. Rotating tiles train the
-        // cache. For the first frames after a reset or a camera cut (live.rs COLD_FALLBACK_FRAMES; flag 1 later),
+        // cache. For the first frames after a reset or a camera cut (live/mod.rs COLD_FALLBACK_FRAMES; flag 1 later),
         // pixels that find their voxel cold trace a fresh estimate and use it meanwhile, without inserting the voxel:
         // the low-sample entries they inserted kept later frames slower until evicted (the crowd's square ~2 ms).
         let cfl = u32(P.cache.w);

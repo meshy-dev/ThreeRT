@@ -112,7 +112,7 @@ async function measure(configs: Config[], what: string) {
 }
 
 if (args.includes("--edits")) {
-  // One object's geometry replaced every half second (tools/perf/voxel-level*-edits.game.ts), in place (live.rs
+  // One object's geometry replaced every half second (tools/perf/voxel-level*-edits.game.ts), in place (live/edits.rs
   // `edit_geometry`) against a scene rebuild (THREERT_EDIT_REBUILD=1), alternated; camera still at the path's start.
   // Per edit frame from the frame log: the edit's CPU ms (in place) or the rebuild's, and that frame's interval.
   const b = branchBuild(rendererBin);

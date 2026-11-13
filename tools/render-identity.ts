@@ -7,7 +7,9 @@
 // round differently: 2e-6 is what removing unused kernel code did, 2026-11-13); it is reported apart. Exit 1 when a test
 // differs beyond these or its output is missing on one side. Two runs a side under-read the spread of a few tests
 // (2026-11-13: a skinning test that repeats itself twice and then differs by 2 %), so what is flagged is run again,
-// alone, `--confirm` times a side (default 4), and judged on those runs.
+// alone, `--confirm` times a side (default 4), and judged on those runs. A confirming run that leaves no output (a
+// test that fails before its picture: geometry/grow-live's frame script sometimes runs past its time, 2026-11-13) is
+// left out and counted; the test is judged on the runs that left one, and is changed if a side has none.
 //
 //   node tools/render-identity.ts --a <threert-render> --b <threert-render> [--runs 2] [--confirm 4] [--tolerance 0]
 //                                 [--env K=V,K=V] [--filter id] [--out out/render-identity/<tag>]
@@ -36,8 +38,9 @@ const extra = Object.fromEntries(flag("--env").split(",").filter(Boolean).map((k
 const filter = flag("--filter");
 const out = resolve(flag("--out", join(repoRoot, "out/render-identity", new Date().toISOString().replace(/[:.]/g, "-"))));
 /** One test-render run on `bin` (the tests `only` names, else all / `--filter`), its outputs in `dir` (its own:
- *  nothing else writes there). */
-function run(bin: string, dir: string, only = filter) {
+ *  nothing else writes there). Whether it left an output; a run of the gate's own (not confirming) that leaves none
+ *  is an error. */
+function run(bin: string, dir: string, only = filter, confirming = false): boolean {
   rmSync(dir, { recursive: true, force: true });
   try {
     execFileSync("node", [join(repoRoot, "tools/test-render.ts"), ...(only ? [only] : []), "--out", dir], { env: { ...process.env, ...extra, THREERT_BIN: bin }, stdio: ["ignore", "ignore", "inherit"] });
@@ -45,10 +48,11 @@ function run(bin: string, dir: string, only = filter) {
     // (Failing tests still leave their outputs; what is compared here is the pictures, not the verdicts.)
   }
   const n = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".raw")).length : 0;
-  if (n === 0) {
+  if (n === 0 && !confirming) {
     console.error(`render-identity: test-render left no outputs in ${dir} (${bin})`);
     process.exit(2);
   }
+  return n > 0;
 }
 
 const dirs = { a: [] as string[], b: [] as string[] };
@@ -103,15 +107,19 @@ for (const f of [...names].sort()) {
     const test = f.replace(/\.raw$/, "");
     console.log(`render-identity: ${f} flagged (${j.why}); ${confirmRuns} more runs a side of it alone`);
     const again = { a: [] as string[], b: [] as string[] };
+    let lost = 0;
     for (const side of ["a", "b"] as const) {
       for (let k = 0; k < confirmRuns; k++) {
         const dir = join(out, "confirm", test, `${side}${k + 1}`);
-        run(side === "a" ? a : b, dir, test);
-        again[side].push(dir);
+        if (run(side === "a" ? a : b, dir, test, true)) again[side].push(dir);
+        else lost++;
       }
     }
-    j = judge(f, again.a, again.b);
-    if (j.verdict !== "changed") j.why = `confirmed on ${confirmRuns} runs a side: ${j.why || "byte-identical"}`;
+    const left = lost ? ` (${lost} of ${2 * confirmRuns} runs left no output)` : "";
+    if (!again.a.length || !again.b.length) j = { verdict: "changed", why: `no output on side ${again.a.length ? "b" : "a"} in ${confirmRuns} runs` };
+    else j = judge(f, again.a, again.b);
+    if (j.verdict !== "changed") j.why = `confirmed on ${again.a.length} / ${again.b.length} runs${left}: ${j.why || "byte-identical"}`;
+    else j.why += left;
   }
   count[j.verdict]++;
   if (j.verdict === "rounding" || (j.verdict === "within" && j.why.startsWith("confirmed"))) console.log(`  ${f}: ${j.why}`);

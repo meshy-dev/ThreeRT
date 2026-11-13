@@ -123,7 +123,7 @@ pub struct Texture {
 pub enum Kind {
     Group,
     /// `own_blas` (scene code's `dynamicGeometry`): instanced with its own BLAS, so replacing its geometry, creating or
-    /// removing it is applied in place (live.rs `edit_geometry`) instead of rebuilding the scene; otherwise its
+    /// removing it is applied in place (live/edits.rs `edit_geometry`) instead of rebuilding the scene; otherwise its
     /// triangles are flattened into the shared groups.
     /// `materials`: one per geometry group (three.js's material array; empty: `material` for every triangle).
     Mesh { geometry: u32, material: u32, own_blas: bool, materials: Vec<u32> },
@@ -153,7 +153,7 @@ pub enum Kind {
     /// Copies of one geometry (scene code's `InstancedMesh`): triangle geometry `geometry` drawn with `materials[0]`,
     /// or procedural geometry (`procedural`) with `materials` as a `Procedural` has them. `capacity` instances, whose
     /// transforms (relative to the node), colours and per-instance data are its `World::instanced` table; one BLAS for
-    /// all, one TLAS instance each, so the table changes in place (live.rs `update_instanced`), never a rebuild.
+    /// all, one TLAS instance each, so the table changes in place (live/edits.rs `update_instanced`), never a rebuild.
     Instanced { geometry: u32, procedural: bool, materials: Vec<u32>, capacity: u32 },
 }
 
@@ -276,7 +276,7 @@ impl Default for Settings {
 #[derive(Default, Debug, Clone)]
 pub struct Changes {
     pub structural: bool,
-    /// Objects shown or hidden by their own `visible` whose build can take it in place (live.rs `commit`): particle
+    /// Objects shown or hidden by their own `visible` whose build can take it in place (live/edits.rs `commit`): particle
     /// systems that are not light-sampled (gpu.rs `set_particles_hidden`), volumes (their medium: `set_medium_hidden`)
     /// and lights without a card (their table entry goes black). A rebuild where the build left the object out.
     pub shown: HashSet<u32>,
@@ -305,7 +305,7 @@ pub struct Changes {
     /// Objects created (or re-created) in this batch: the rebuild builds them where they are, so setting their
     /// transform is not a move.
     pub created: HashSet<u32>,
-    /// Geometry edits the live view can apply in place (live.rs `edit_geometry`), when nothing else is structural:
+    /// Geometry edits the live view can apply in place (live/edits.rs `edit_geometry`), when nothing else is structural:
     /// geometries replaced, objects created (or re-created with other geometry or materials) and objects removed,
     /// whose objects carry their own BLAS (procedural meshes, `own_blas` meshes). The live view falls back to a
     /// rebuild for what it cannot apply.
@@ -313,12 +313,12 @@ pub struct Changes {
     pub added: BTreeSet<u32>,
     pub removed: BTreeSet<u32>,
     /// Instanced objects whose instances changed (table, node transform, power, customData): rewritten in place
-    /// (live.rs `update_instanced`).
+    /// (live/edits.rs `update_instanced`).
     pub instanced: HashSet<u32>,
     /// Density grids created in this batch (their volume objects may not exist yet: `World::set_grid` keeps them).
     pub grids_new: BTreeSet<u32>,
     /// Materials created in this batch that bring no texture and no material function: the live view adds them in
-    /// place (live.rs `add_materials`; a rebuild for one it cannot take), so an object added while the game runs may
+    /// place (live/edits.rs `add_materials`; a rebuild for one it cannot take), so an object added while the game runs may
     /// come with a material of its own.
     pub new_materials: BTreeSet<u32>,
 }
@@ -538,7 +538,7 @@ impl World {
         // rebuilds.
         // (Movable as the build sees it: the object or any ancestor, `movable`.)
         let static_parent = parent.is_none_or(|p| !self.objects.contains_key(&p) || !self.movable(p));
-        // A new instanced mesh or static model is placed in place too (ROADMAP § 6 step 5; live.rs `edit_geometry`
+        // A new instanced mesh or static model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
         // says when it cannot); changing one still rebuilds.
         let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
         let fresh = (own_blas(&kind) || placed_new)
@@ -583,7 +583,7 @@ impl World {
     }
 
     /// A rigid body drives object `id` from now on: it is movable, built as an instance where it can be (a rebuild,
-    /// once; none for an object this batch adds in place, which is placed as one: live.rs `edit_geometry`).
+    /// once; none for an object this batch adds in place, which is placed as one: live/edits.rs `edit_geometry`).
     pub fn set_driven(&mut self, id: u32) -> Result<()> {
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         if !o.driven {
@@ -654,7 +654,7 @@ impl World {
 
     /// Records that an object's transform changed: in place where it can be, otherwise a rebuild.
     fn note_move(&mut self, id: u32) {
-        // An object added in place in this batch is placed where it is then (live.rs `edit_geometry`).
+        // An object added in place in this batch is placed where it is then (live/edits.rs `edit_geometry`).
         if self.changes.added.contains(&id) {
             return;
         }
@@ -683,7 +683,7 @@ impl World {
         } else if light && !sun && self.leaf(id) {
             self.changes.lights.insert(id);
         } else if sun && self.leaf(id) {
-            // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live.rs `move_sun`).
+            // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live/edits.rs `move_sun`).
             self.changes.sun = true;
         } else {
             // Fixed geometry moved: from now on it is movable. This move rebuilds once, to set its triangles apart.
@@ -818,7 +818,7 @@ impl World {
     /// An instanced object's instances: `count` drawn, `matrices` (16 numbers each), optionally `colors` (3 each) and
     /// per-instance data (4 each), all for its whole capacity; None keeps what it had. Game code is untrusted: sizes
     /// are checked, colours and data made finite (colours >= 0); a matrix that is not finite or not invertible hides
-    /// its instance (live.rs, scene.rs). Colours appearing or going rebuild (a kernel feature); the rest is in place.
+    /// its instance (live/edits.rs, scene.rs). Colours appearing or going rebuild (a kernel feature); the rest is in place.
     pub fn set_instances(&mut self, id: u32, count: u32, matrices: Option<Vec<f32>>, colors: Option<Vec<f32>>, custom: Option<Vec<f32>>) -> Result<()> {
         let o = self.objects.get(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         let Kind::Instanced { capacity, .. } = o.kind else { return Err(anyhow!("object {}: not an instanced mesh", o.name)) };
@@ -929,7 +929,7 @@ impl World {
             k += 1;
         }
         // A lone object with its own BLAS, an instanced mesh or a static model is removed in place (or never added, if it
-        // came in this batch; live.rs `edit_geometry` rebuilds for what it cannot take out).
+        // came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot take out).
         if let [only] = doomed[..] {
             if self.objects.get(&only).is_some_and(|o| own_blas(&o.kind) || matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. })) {
                 self.instanced.remove(&only);
