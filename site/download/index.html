@@ -3,25 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Download ThreeRT — macOS and iPhone</title>
-<meta name="description" content="ThreeRT for macOS and for iPhone and iPad: the clients that open ThreeRT apps and games, from threert.app or your own dev server, and path-trace them on your own GPU.">
+<title>Download ThreeRT — macOS, iPhone, Steam Deck and Android</title>
+<meta name="description" content="ThreeRT for macOS, iPhone and iPad, Steam Deck and Linux, and Android: the free clients that open ThreeRT apps and games, from threert.app or your own dev server, and path-trace them on your own GPU.">
 <link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../css/threert.css">
 <style>
-  .dl { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: stretch; }
-  .dl .card { display: grid; grid-template-rows: auto auto 1fr auto; gap: 22px; }
+  /* Four cards, two a row. A card's three parts (what it is, three lines, the button) sit on rows the two cards of a
+     row share, so the buttons are level whatever the lines above them wrap to. */
+  .dl { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .dl .card { display: grid; grid-template-rows: auto 1fr auto; row-gap: 22px; }
+  @supports (grid-template-rows: subgrid) { .dl .card { grid-row: span 3; grid-template-rows: subgrid; } }
   .dl .top { display: flex; align-items: center; gap: 16px; min-height: 76px; }
   .dl .glyph { flex: none; width: 52px; height: 52px; border-radius: 14px; border: 1px solid var(--line-2); display: grid; place-items: center; color: var(--bone); background: var(--ink-2); }
   .dl h2 { font: 600 28px/1.1 var(--font-sans); letter-spacing: -0.035em; }
-  .dl .req { display: block; margin-top: 6px; font: 500 12px var(--font-mono); color: var(--mute); }
-  .dl .act { display: grid; gap: 14px; justify-items: start; padding-top: 22px; border-top: 1px solid var(--line); }
+  .dl .req { display: block; margin-top: 6px; font: 500 12px/1.45 var(--font-mono); color: var(--mute); }
+  .dl .act { display: grid; gap: 14px; justify-items: start; align-content: start; padding-top: 22px; border-top: 1px solid var(--line); min-width: 0; }
   .dl .act .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; }
   .dl details { font: 400 12px/1.6 var(--font-mono); color: var(--mute); max-width: 100%; }
   .dl details summary { cursor: pointer; }
+  .dl details summary span { white-space: nowrap; }
   .dl details p { margin-top: 6px; overflow-wrap: anywhere; color: var(--bone-2); }
   .dl .top .qr { margin-left: auto; width: 76px; height: 76px; padding: 5px; border-radius: 10px; }
   .dl .top .qr[hidden] { display: none; }
   .dl .act > .fine, .dl .act > details:not([open]) { min-height: 22px; line-height: 22px; }
+  /* The Deck's two commands: a block to copy. */
+  .dl .cmd { position: relative; justify-self: stretch; min-width: 0; }
+  .dl .cmd pre { margin: 0; padding: 11px 14px; border-radius: 12px; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .dl .cmd button { position: absolute; bottom: 8px; right: 8px; height: 26px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--ink-2); color: var(--bone-2); font: 500 11.5px/1 var(--font-mono); cursor: pointer; }
+  .dl .cmd button:hover { color: var(--bone); border-color: var(--bone-2); }
   .how .lede { max-width: 62ch; }
   .term { margin-top: 44px; display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; align-items: stretch; }
   .term pre { margin: 0; font-size: 12.5px; line-height: 1.75; }
@@ -32,8 +41,12 @@
   .any { margin-top: 56px; padding-top: 36px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: end; }
   .any h3 { font: 620 clamp(26px, 3vw, 40px)/1.08 var(--font-sans); letter-spacing: -0.04em; }
   .any p { color: var(--bone-2); font-size: 16px; }
-  @media (max-width: 1100px) { .dl, .term, .any { grid-template-columns: 1fr; } .any { gap: 18px; } }
-  @media (max-width: 520px) { .term .scan { grid-template-columns: 1fr; } .dl .top .qr, .dl .on-mac { display: none; } }
+  @media (max-width: 1100px) { .term, .any { grid-template-columns: 1fr; } .any { gap: 18px; } }
+  /* The QR codes are for a desk: below it the cards are too narrow to hold one beside a requirement line. */
+  @media (max-width: 1240px) { .dl .top { min-height: 0; } .dl .top .qr, .dl .on-desk { display: none; } }
+  @media (max-width: 1180px) { .dl h2 { font-size: 24px; } .dl .req, .dl .cmd pre { font-size: 11.5px; } }
+  @media (max-width: 1020px) { .dl { grid-template-columns: 1fr; } .dl h2 { font-size: 28px; } .dl .req, .dl .cmd pre { font-size: 12px; } }
+  @media (max-width: 520px) { .term .scan { grid-template-columns: 1fr; } .dl h2 { font-size: 21px; } }
 </style>
 </head>
 <body>
@@ -59,24 +72,23 @@
       <div class="card lit" id="mac">
         <div class="top">
           <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="4.5" y="5" width="17" height="11.5" rx="1.6"/><path d="M2 20.5h22"/></svg></div>
-          <div><h2>ThreeRT for macOS</h2><span class="req">macOS 14 or later · Apple silicon</span></div>
+          <div><h2>ThreeRT for macOS</h2><span class="req">macOS&nbsp;14 or&nbsp;later · Apple&nbsp;silicon</span></div>
         </div>
         <ul class="ticks">
           <li>Everything on <a href="https://threert.app/" rel="noopener">threert.app</a>, traced on your Mac</li>
           <li>Hardware ray tracing on M3 and later</li>
           <li>Includes the <code>threert</code> command line; updates itself</li>
         </ul>
-        <span></span>
         <div class="act" id="macAct">
           <p class="fine">Looking for the build on this host…</p>
-          <noscript><p class="fine">The download link is filled in by a script. With scripts off, the build is at <a href="../releases/latest.json">releases/latest.json</a>.</p></noscript>
+          <noscript><p class="fine">The download links are filled in by a script. With scripts off, the builds are named in <a href="../releases/latest.json">releases/latest.json</a>.</p></noscript>
         </div>
       </div>
 
       <div class="card" id="ios">
         <div class="top">
           <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="7.5" y="2.5" width="11" height="21" rx="2.6"/><path d="M11.5 5.2h3"/></svg></div>
-          <div><h2>ThreeRT for iPhone</h2><span class="req">iOS 17 or later · iPhone and iPad</span></div>
+          <div><h2>ThreeRT for iPhone</h2><span class="req">iOS&nbsp;17 or&nbsp;later · iPhone and&nbsp;iPad</span></div>
           <div class="qr" id="iosQr" hidden></div>
         </div>
         <ul class="ticks">
@@ -84,8 +96,38 @@
           <li>Hardware ray tracing on iPhone 15 Pro and later</li>
           <li>Reloads on every save of your project</li>
         </ul>
-        <span></span>
         <div class="act" id="iosAct">
+          <p class="fine">Looking for the build on this host…</p>
+        </div>
+      </div>
+
+      <div class="card" id="deck">
+        <div class="top">
+          <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="1.5" y="7" width="23" height="12" rx="3.2"/><rect x="8" y="9.6" width="10" height="6.8" rx="0.8"/><circle cx="4.8" cy="11.4" r="1.1"/><circle cx="21.2" cy="14.6" r="1.1"/></svg></div>
+          <div><h2>ThreeRT for Steam Deck</h2><span class="req">SteamOS&nbsp;3 · Linux&nbsp;x86_64 · Vulkan&nbsp;ray&nbsp;queries</span></div>
+        </div>
+        <ul class="ticks">
+          <li>Everything on <a href="https://threert.app/" rel="noopener">threert.app</a>, in Game Mode</li>
+          <li>Hardware ray tracing on the Deck’s own GPU</li>
+          <li>Tested on a Steam Deck; untested on desktop Linux</li>
+        </ul>
+        <div class="act" id="deckAct">
+          <p class="fine">Looking for the build on this host…</p>
+        </div>
+      </div>
+
+      <div class="card" id="android">
+        <div class="top">
+          <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"><rect x="2.5" y="7.5" width="21" height="11" rx="2.4"/><circle cx="5.6" cy="13" r="0.5"/><path d="M20.4 11v4"/></svg></div>
+          <div><h2>ThreeRT for Android</h2><span class="req">Android&nbsp;10 or&nbsp;later · arm64 · Vulkan&nbsp;ray&nbsp;queries</span></div>
+          <div class="qr" id="androidQr" hidden></div>
+        </div>
+        <ul class="ticks">
+          <li>Everything on <a href="https://threert.app/" rel="noopener">threert.app</a>, with a controller or touch</li>
+          <li>For flagship chips with hardware ray tracing</li>
+          <li>Verified on a Snapdragon 8 Gen 2 handheld</li>
+        </ul>
+        <div class="act" id="androidAct">
           <p class="fine">Looking for the build on this host…</p>
         </div>
       </div>
@@ -139,55 +181,91 @@
       <p class="legal">A research project from <a href="https://meshy.ai/" rel="noopener">MeshyAI</a> · © 2026 MeshyAI · <a href="../privacy/">Privacy</a></p>
     </div>
     <div class="note">
-      <p>ThreeRT for macOS and ThreeRT for iPhone are free to use. The engine they run is open source: <a href="https://github.com/meshy-dev/ThreeRT" rel="noopener">meshy-dev/ThreeRT</a>.</p>
-      <p>Mac, macOS, iPhone, iPad and TestFlight are trademarks of Apple Inc.</p>
+      <p>The ThreeRT clients are free to use. The engine they run is open source: <a href="https://github.com/meshy-dev/ThreeRT" rel="noopener">meshy-dev/ThreeRT</a>.</p>
+      <p>Mac, macOS, iPhone, iPad and TestFlight are trademarks of Apple Inc. Steam Deck and SteamOS are trademarks of Valve Corporation. Android is a trademark of Google LLC.</p>
     </div>
   </div>
 </footer>
 
 <script type="module">
-  import { guard, release, macUrl, megabytes, qrTiles, qrSvg, platform } from "../js/site.js";
+  import { guard, release, clientUrl, megabytes, qrTiles, qrSvg, platform } from "../js/site.js";
 
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   const DL = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v9M4.2 7 8 10.8 11.8 7M2 14.5h12"/></svg>`;
+  const $ = (q) => document.querySelector(q);
+
+  // The visitor's own client first, and lit; the one for a device like it beside it. Before anything is fetched, so
+  // nothing moves afterwards.
+  const here = platform();
+  const order = { ios: ["ios", "mac", "deck", "android"], linux: ["deck", "android", "mac", "ios"], android: ["android", "deck", "mac", "ios"] }[here];
+  if (order) {
+    $(".dl").append(...order.map((id) => document.getElementById(id)));
+    for (const card of $(".dl").children) card.classList.toggle("lit", card.id === order[0]);
+  }
 
   guard("qr", () => qrTiles());
 
   guard("release", async () => {
     const r = await release();
-    const mac = document.querySelector("#macAct"), ios = document.querySelector("#iosAct");
+    // One button a card, its version and size beside it.
+    const row = (href, label, a, b, attrs = "download") => `<div class="row"><a class="btn primary" href="${esc(href)}" ${attrs}>${DL}<span>${label}</span></a>
+      <span class="kv"><span><b>${esc(a)}</b></span><span>${esc(b)}</span></span></div>`;
+    const sha = (e) => `<details><summary>${esc(e.file)} · <span>SHA-256</span></summary><p>${esc(e.sha256 ?? "")}</p></details>`;
+    const none = (name) => `<div class="row"><span class="btn off" aria-disabled="true">No build on this host</span></div>
+      <p class="fine">No ${name} build is published on this host yet.</p>`;
+    const version = (e) => e.version ?? r.version;
 
-    // macOS: the disk image this host carries.
+    // macOS: the disk image. Signed with a Developer ID and notarized (the deploy refuses anything else): it opens
+    // like any app.
     const m = r?.macos;
-    if (m?.file) {
-      // Signed with a Developer ID and notarized (the deploy refuses anything else): it opens like any app.
-      mac.innerHTML = `
-        <div class="row"><a class="btn primary" href="${esc(macUrl(m))}" download>${DL}<span>Download for macOS</span></a>
-          <span class="kv"><span><b>${esc(r.version)}</b></span><span>${megabytes(m.size)}</span></span></div>
-        <details><summary>${esc(m.file)} · SHA-256</summary><p>${esc(m.sha256 ?? "")}</p></details>`;
-    } else {
-      mac.innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">No build on this host</span></div>
-        <p class="fine">No macOS build is published on this host yet.</p>`;
-    }
+    $("#macAct").innerHTML = m?.file ? row(clientUrl(m), "Download for macOS", version(m), megabytes(m.size)) + sha(m) : none("macOS");
 
     // iPhone: a link once the beta is open; until then, say so.
     const i = r?.ios;
     if (i?.url) {
       const where = i.channel === "appstore" ? "the App Store" : "TestFlight";
-      ios.innerHTML = `
-        <div class="row"><a class="btn primary" href="${esc(i.url)}" rel="noopener">${DL}<span>Get it on ${where}</span></a>
-          <span class="kv"><span><b>${i.channel === "appstore" ? esc(r.version) : "Beta"}</b></span><span>Free</span></span></div>
-        <p class="fine on-mac">On a Mac? Point the iPhone’s camera at the code above.</p>`;
-      const qr = document.querySelector("#iosQr");
-      qr.innerHTML = await qrSvg(i.url, `ThreeRT for iPhone on ${where}`);
-      qr.hidden = false;
+      $("#iosAct").innerHTML = row(i.url, `Get it on ${where}`, i.channel === "appstore" ? version(i) : "Beta", "Free", `rel="noopener"`) +
+        (here === "ios" ? "" : `<p class="fine on-desk">Point the iPhone’s camera at the code above.</p>`);
+      if (here !== "ios") {
+        $("#iosQr").innerHTML = await qrSvg(i.url, `ThreeRT for iPhone on ${where}`);
+        $("#iosQr").hidden = false;
+      }
     } else {
-      ios.innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">TestFlight beta not open yet</span></div>
+      $("#iosAct").innerHTML = `<div class="row"><span class="btn off" aria-disabled="true">TestFlight beta not open yet</span></div>
         <p class="fine">The iPhone app has no public build yet. Its TestFlight link will be on this page when the beta opens.</p>`;
     }
 
-    // Lead with the visitor's own platform.
-    if (platform() === "ios") document.querySelector(".dl").prepend(document.querySelector("#ios"));
+    // Steam Deck and Linux: the tarball, and the two commands that install it (the file a browser saves is in
+    // ~/Downloads; install.sh adds a shortcut to Steam, so ThreeRT is in the library in Game Mode).
+    const l = r?.linux;
+    if (l?.file) {
+      const commands = `tar xzf ~/Downloads/${l.file}\nThreeRT/install.sh`;
+      $("#deckAct").innerHTML = row(clientUrl(l), "Download for Steam Deck", version(l), megabytes(l.size)) +
+        `<div class="cmd"><pre class="code">${esc(commands)}</pre><button type="button" aria-label="Copy the two commands">Copy</button></div>
+        <p class="fine">Run in Desktop Mode’s Konsole. Adds ThreeRT to your Steam library.</p>` + sha(l);
+      const copy = $("#deckAct .cmd button");
+      copy.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(commands + "\n");
+          copy.textContent = "Copied";
+        } catch {
+          // No clipboard (an insecure context, a refusal): select the lines, to copy by hand.
+          getSelection().selectAllChildren($("#deckAct .cmd pre"));
+        }
+        setTimeout(() => (copy.textContent = "Copy"), 1600);
+      });
+    } else $("#deckAct").innerHTML = none("Steam Deck");
+
+    // Android: the APK. Signed with the release key (the deploy refuses anything else).
+    const a = r?.android;
+    if (a?.file) {
+      $("#androidAct").innerHTML = row(clientUrl(a), "Download for Android", version(a), megabytes(a.size)) +
+        `<p class="fine">Open the file and allow installs from your browser.</p>` + sha(a);
+      if (here !== "android") {
+        $("#androidQr").innerHTML = await qrSvg(clientUrl(a), "ThreeRT for Android: the APK");
+        $("#androidQr").hidden = false;
+      }
+    } else $("#androidAct").innerHTML = none("Android");
   });
 </script>
 </body>

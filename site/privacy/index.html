@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy — ThreeRT</title>
-<meta name="description" content="What ThreeRT for macOS, ThreeRT for iPhone and iPad, and threert.dev do with your data: no accounts, no analytics, nothing collected.">
+<meta name="description" content="What the ThreeRT clients (macOS, iPhone and iPad, Steam Deck and Linux, Android) and threert.dev do with your data: no accounts, no analytics, nothing collected.">
 <link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../css/threert.css">
 <style>
@@ -29,7 +29,7 @@
   <div class="wrap">
     <span class="eyebrow">Privacy</span>
     <h1 class="h-1">Nothing to sign up for.<br><span class="mute">Nothing collected.</span></h1>
-    <p class="lede">ThreeRT for macOS, ThreeRT for iPhone and iPad, and this site have no accounts, no analytics and no advertising. This page says what they do touch.</p>
+    <p class="lede">The ThreeRT clients (macOS, iPhone and iPad, Steam Deck and Linux, Android) and this site have no accounts, no analytics and no advertising. This page says what they do touch.</p>
   </div>
 </header>
 
@@ -40,11 +40,12 @@
   <ul>
     <li><b>Games you open.</b> The apps download a game from the address you give them: a <code>threert dev</code> server on your own network, threert.dev, or a link you open. That server sees the request, as any web server does.</li>
     <li><b>Logs back to your dev server.</b> A game opened from a <code>threert dev</code> server sends its console output back to that server, so it shows in your terminal. Nothing else receives it.</li>
-    <li><b>Showcase.</b> ThreeRT for macOS reads the list of apps and games and their pictures from threert.app (versions before 0.4.0: from threert.dev). Playing one from there tells threert.app that it was played, with a random number the app made up on this device, so one device counts once a day. The number says nothing about you and is kept two days.</li>
+    <li><b>The store.</b> ThreeRT for macOS, for Steam Deck and for Android read the list of apps and games and their pictures from threert.app (versions before 0.4.0: from threert.dev). Playing one from there tells threert.app that it was played, with a random number the app made up on this device, so one device counts once a day. The number says nothing about you and is kept two days.</li>
     <li><b>Multiplayer rooms.</b> A game that plays in a room connects to it on threert.app and sends what the game needs: the name you chose, a random player number kept on this device, and your moves. A room keeps them while it is open and no longer.</li>
+    <li><b>Updates.</b> ThreeRT for macOS, for Steam Deck and for Android ask threert.dev which version is current. The request carries nothing about you.</li>
     <li><b>Sharing a Mac's GPU</b> (ThreeRT for macOS, only when you turn it on): the frames and input go through the relay you set in Settings, by default one on your own machine.</li>
   </ul>
-  <p>Playing needs no account. There is no advertising identifier, no crash or usage reporting, and no third-party SDK in either app.</p>
+  <p>Playing needs no account. There is no advertising identifier, no crash or usage reporting, and no third-party SDK in any of the apps.</p>
 
   <h2>threert.app</h2>
   <p>Browsing and playing on threert.app need no account. Publishing does: you sign in with GitHub, and threert.app keeps your GitHub user number, login, display name and avatar address. It does not ask GitHub for your e-mail address or for access to your repositories.</p>

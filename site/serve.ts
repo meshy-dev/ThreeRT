@@ -24,6 +24,7 @@ const TYPES: Record<string, string> = {
   ".json": "application/json", ".ts": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
   ".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".bin": "application/octet-stream", ".hdr": "application/octet-stream", ".exr": "application/octet-stream", ".ktx2": "image/ktx2",
   ".mp4": "video/mp4", ".dmg": "application/x-apple-diskimage", ".zip": "application/zip",
+  ".apk": "application/vnd.android.package-archive", ".gz": "application/gzip",
 };
 
 for (const f of Object.values(VENDOR)) if (!existsSync(f)) console.warn(`missing ${f}: run npm install at the repo root`);
@@ -58,6 +59,8 @@ Bun.serve({
     const headers: Record<string, string> = { "cache-control": "no-cache", "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" };
     // Packages are fetched by native clients and by pages on other origins (a playground, a game's own site).
     if (rel.startsWith("play/")) headers["access-control-allow-origin"] = "*";
+    // The clients' files are downloads, as the Worker serves them.
+    if (/^releases\/[^/]+\.(dmg|tar\.gz|apk)$/.test(rel)) headers["content-disposition"] = `attachment; filename="${rel.slice("releases/".length)}"`;
     return new Response(Bun.file(file), { headers });
   },
 });

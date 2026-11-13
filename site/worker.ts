@@ -1,11 +1,12 @@
 // The site on Cloudflare Workers: static assets (out/site, built by site/tools/build.ts) on threert.dev, the clients'
-// disk images from R2, and byte ranges for the clips (media/**.mp4), which the assets alone do not answer.
+// files from R2, and byte ranges for the clips (media/**.mp4), which the assets alone do not answer.
 // www.threert.dev redirects to the apex, and the old Showcase page to threert.app.
 //
-// Why R2: the disk image (releases/ThreeRT-<version>-macos-arm64.dmg, about 32 MiB with the `threert` command line in
+// Why R2: the disk image (releases/ThreeRT-<version>-macos-arm64.dmg, about 34 MiB with the `threert` command line in
 // it) is over the 25 MiB a file that static assets take, and the client is closed source, so it has no public
-// repository whose releases could carry it. The bucket holds the images under their file names; this Worker serves
-// them at the same URL the Download page already links, /releases/<file>, with ranges (a resumed download).
+// repository whose releases could carry it. The bucket holds every client's file under its name (the disk image, the
+// Linux tarball, the Android APK); this Worker serves them at the URL the Download page links, /releases/<file>, as
+// downloads (a phone's browser saves an APK instead of trying to show it), with ranges (a resumed download).
 interface R2Range {
   offset?: number;
   length?: number;
@@ -29,15 +30,24 @@ interface Env {
   RELEASES: R2Bucket;
 }
 
-/** /releases/<name>.dmg -> the bucket key (the file name), or null for everything else. */
-export function imageKey(pathname: string): string | null {
-  return /^\/releases\/([A-Za-z0-9][A-Za-z0-9._-]*\.dmg)$/.exec(pathname)?.[1] ?? null;
+/** What a client's file is served as, by its ending (site/tools/deploy.ts stores it with the same type). */
+const CLIENT_TYPES: Record<string, string> = {
+  ".dmg": "application/x-apple-diskimage",
+  ".tar.gz": "application/gzip",
+  ".apk": "application/vnd.android.package-archive",
+};
+
+/** /releases/<name>.dmg, .tar.gz or .apk -> the bucket key (the file name) and its type, or null for everything else. */
+export function clientFile(pathname: string): { key: string; type: string } | null {
+  const m = /^\/releases\/([A-Za-z0-9][A-Za-z0-9._-]*?(\.dmg|\.tar\.gz|\.apk))$/.exec(pathname);
+  return m ? { key: m[1], type: CLIENT_TYPES[m[2]] } : null;
 }
 
-async function image(request: Request, env: Env, key: string): Promise<Response> {
+async function file(request: Request, env: Env, key: string, type: string): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
   const headers = new Headers({
-    "content-type": "application/x-apple-diskimage",
+    "content-type": type,
+    // Always a download: an APK or a tarball a browser tried to show would be a page of bytes.
     "content-disposition": `attachment; filename="${key}"`,
     "accept-ranges": "bytes",
     // An hour, then revalidated by ETag: a build may be replaced under its name before its version is final.
@@ -115,7 +125,9 @@ async function clip(request: Request, env: Env): Promise<Response> {
  * catalogue there. Only the page: showcase/community.json stays an asset, because clients before 0.4.0 read it.
  */
 export const isShowcase = (pathname: string) => /^\/showcase(\/(index\.html)?)?$/.test(pathname);
-export const PLATFORM = "https://threert.app/";
+// (Not exported: the runtime takes a module's named exports for handlers, and `wrangler dev` refuses to start a
+// Worker that exports a string.)
+const PLATFORM = "https://threert.app/";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -125,8 +137,8 @@ export default {
       return Response.redirect(url.toString(), 301);
     }
     if (isShowcase(url.pathname)) return Response.redirect(PLATFORM, 301);
-    const key = imageKey(url.pathname);
-    if (key) return image(request, env, key);
+    const client = clientFile(url.pathname);
+    if (client) return file(request, env, client.key, client.type);
     if (isClip(url.pathname)) return clip(request, env);
     return env.ASSETS.fetch(request);
   },

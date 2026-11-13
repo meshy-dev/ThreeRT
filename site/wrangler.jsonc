@@ -8,11 +8,13 @@
   "assets": {
     "directory": "../out/site",
     "binding": "ASSETS",
-    // The worker runs first: www redirects, /releases/*.dmg comes from R2, every other request goes to the assets.
+    // The worker runs first: www redirects, the clients' files under /releases/ come from R2, every other request
+    // goes to the assets.
     "run_worker_first": true
   },
-  // The clients' disk images (over the 25 MiB a file that static assets take): site/tools/deploy.ts uploads
-  // site/releases/*.dmg here, worker.ts serves them at /releases/<file>. Create it once:
+  // The clients' files (the disk image is over the 25 MiB a file that static assets take; the tarball and the APK
+  // go the same way, served as downloads): site/tools/deploy.ts uploads the files site/releases/latest.json names
+  // here, worker.ts serves them at /releases/<file>. Create it once:
   //   bunx wrangler@4 r2 bucket create threert-releases
   "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "threert-releases" }],
   "routes": [
