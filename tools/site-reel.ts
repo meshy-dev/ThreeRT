@@ -1,7 +1,7 @@
 // The landing page's reel: short clips of the repository's demos, every one drawn by the live renderer (ray traced,
 // nothing compared against), for site/tools/reel.ts to lay out as one grid and encode.
 //
-//   node tools/site-reel.ts <clip>[,<clip>...] | all  [--probe] [--force] [--width 960] [--height 540]
+//   node tools/site-reel.ts <clip>[,<clip>...] | all  [--probe] [--force] [--width 1280] [--height 720]
 //
 // A clip is a game or scene of this repository, how it is set going (room, events), what happens while it runs (events
 // at times) and where the camera goes. It is recorded in lockstep at 60 fps, a PNG a frame: every frame of a clip is
@@ -31,7 +31,8 @@ interface Clip {
   seconds?: number;
   /** Seconds of the scene's clock before the recording starts (the first frames' history; default 4). */
   settle?: number;
-  /** Render scale (a recording cannot use dynamic resolution: its pauses read as headroom). */
+  /** Render scale (default 0.75: at 1280 x 720, 960 x 540 rays, upscaled by the live frame's temporal upscaler). A
+   *  recording cannot use dynamic resolution: its pauses read as headroom. */
   scale?: number;
   bounces?: number;
   /** Sent once, before settling. */
@@ -55,8 +56,8 @@ const bistro = (t: number) => (bistroPath ??= gltfCameraPath(join(root, BISTRO),
 
 const CLIPS: Record<string, Clip> = {
   crowd: {
-    what: "Bistro night with a crowd and traffic: 150 walkers, 60 vans with their lights on",
-    src: "games/bistro-crowd/bistro-crowd.game.ts", scale: 0.7,
+    what: "Bistro night with a crowd: 150 walkers, the lanterns swinging (no traffic: moving headlights still read noisy)",
+    src: "games/bistro-crowd/bistro-crowd.game.ts", room: "w150-v0", scale: 0.5,
     camera: (t) => bistro(0.4 + 0.22 * t),
   },
   tokyo: {
@@ -65,12 +66,12 @@ const CLIPS: Record<string, Clip> = {
     src: "games/tokyo/tokyo-tod.game.ts", room: "shiba-15.6-17.7-10.5-r1600", settle: 2,
   },
   voxels: {
-    what: "The voxel level under explosions: what is cut loose falls",
-    src: "games/voxel-level/level-destruction.game.ts", at: [[0.3, ev("show")]],
+    what: "The voxel level under explosions, each with its fireball and light: what is cut loose falls",
+    src: "games/voxel-level/level-destruction-fire.game.ts", at: [[0.3, ev("show")]],
   },
   kabukicho: {
     what: "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
-    src: "games/kabukicho/kabukicho.game.ts", scale: 0.7, before: [ev("traffic")],
+    src: "games/kabukicho/kabukicho.game.ts", scale: 0.5, before: [ev("traffic")],
   },
   home: {
     what: "Daylight Home: golden hour, night with the lamps on, then the morning sun",
@@ -101,7 +102,7 @@ const CLIPS: Record<string, Clip> = {
 const args = process.argv.slice(2);
 const opt = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 const probe = args.includes("--probe");
-const width = Number(opt("--width", "960")), height = Number(opt("--height", "540"));
+const width = Number(opt("--width", "1280")), height = Number(opt("--height", "720"));
 const ids = !args[0] || args[0].startsWith("-") ? [] : args[0] === "all" ? Object.keys(CLIPS) : args[0].split(",");
 if (!ids.length) {
   console.log(Object.entries(CLIPS).map(([id, c]) => `${id.padEnd(10)} ${c.what}`).join("\n"));
@@ -119,8 +120,8 @@ for (const id of ids) {
   const bundle = join(root, "out/bundles", `reel-${id}.js`);
   await bundleGame(join(root, c.src), bundle);
   const frameLog = join(dir, "frames.jsonl");
-  const seconds = c.seconds ?? 8, n = Math.round((seconds + TAIL) * FPS), scale = c.scale ?? 1;
-  const live = startLive({ bin: rendererBin, assets: root, presets: join(root, "presets"), bundles: join(root, "out/bundles"), label: `reel ${id}` }, bundle, { scale: String(scale), frameLog, width, height, bounces: c.bounces, room: c.room });
+  const seconds = c.seconds ?? 8, n = Math.round((seconds + TAIL) * FPS), scale = Number(opt("--scale", "0")) || (c.scale ?? 0.75);
+  const live = startLive({ bin: rendererBin, assets: root, presets: join(root, "presets"), bundles: join(root, "out/bundles"), label: `reel ${id}` }, bundle, { scale: String(scale), frameLog, width, height, bounces: c.bounces, room: opt("--room", "") || c.room });
   try {
     await live.firstFrame;
     for (const cmd of c.before ?? []) live.send(cmd);

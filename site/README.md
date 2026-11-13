@@ -144,7 +144,7 @@ region and object granularity, the Kabukichō assets), then laid out and encoded
 
 ```bash
 node tools/site-reel.ts <clip> --probe   # one frame a second, to compose a clip
-node tools/site-reel.ts all              # every clip, 8.5 s at 960 x 540, in lockstep at 60 fps -> out/site-reel/<clip>/
+node tools/site-reel.ts all              # every clip, 8.5 s at 1280 x 720 (render scale 0.5-0.75), in lockstep at 60 fps -> out/site-reel/<clip>/
 bun site/tools/reel.ts                   # out/site-reel -> site/media/reel/reel*.mp4, reel*.webp, reel.json
 ```
 
@@ -154,22 +154,35 @@ is not in this one; its maps are Counter-Strike's, brought by whoever builds it)
 (`OPENSTRIKE_RECORD=<dir> OPENSTRIKE_RECORD_FRAMES=4500 OPENSTRIKE_SCALE=0.8 openstrike-mac --headless --play
 --autopilot --squad 6 --skill 2 --map <map> --size 960x540`); 510 consecutive frames of each (the stretch with the
 most shooting; for de_dust2 the opening run) go to `out/site-reel/os-<map>/` with a `meta.json` like the others'.
+The committed ones are still the 2026-11-12 recordings (OpenStrike's renderer before #30): on 2d4e88a the same
+match at 1280 x 720, scale 0.6, boiled in large blotches on the walls and the ground at every muzzle flash and blast.
 
 The Bistro comparison clip on Showcase is recorded apart (it needs Bistro in the asset store: `bun scripts/orca.ts
 bistro`, and ffmpeg):
 
 ```bash
-node tools/site-hero.ts --probe --width 1600 --height 900 --reach 2.2 --scale auto   # the scale 60 fps holds here
-node tools/site-hero.ts --width 1600 --height 900 --reach 2.2 --scale 0.5            # record at that scale, fixed
-node tools/site-hero.ts --probe --width 1600 --height 900 --reach 2.2 --scale 0.5    # its GPU times, back to back
+node tools/site-hero.ts --probe --width 1920 --height 1080 --reach 2.2 --scale auto   # the scale 60 fps holds here
+node tools/site-hero.ts --width 1920 --height 1080 --reach 2.2 --scale 0.5            # record at that scale, fixed
+node tools/site-hero.ts --probe --width 1920 --height 1080 --reach 2.2 --scale 0.5    # its GPU times, back to back
 bun site/tools/hero.ts             # out/site-hero -> site/media/bistro/hero*.mp4, hero-*.webp, hero.json
 ```
 
 Every frame of the clip is one frame the live renderer drew, in lockstep at 60 fps; the probe draws the same move
 back to back, as on screen, with nothing else on the GPU, and `media/bistro/hero.json` keeps what it measured. The
 Showcase's footnote quotes that file (machine, size, scale, GPU ms): change the footnote when the clip changes.
-The one committed was recorded on an Apple M3 Max: 1600 × 900 at render scale 0.5 (1920 × 1080 does not hold 60 fps
-there: 22 ms a frame at the lowest scale), a slow 2.2 s stretch of the scene's camera move taken in 6 s.
+The one committed was recorded on an Apple M3 Max at 2d4e88a: 1920 × 1080 at render scale 0.5, 14.4 / 14.9 ms p50 / p95
+(before the live frame's temporal upscaler, #30, the same size took 22 ms there), a slow 2.2 s stretch of the scene's
+camera move taken in 6 s.
+
+The reel's Bistro clip has the crowd without traffic (room `w150-v0`): with the vans (`--room w150-v60`) their roofs
+and the street round them still show blotches on 2d4e88a.
 
 The numbers behind the rest of the page (Apple M5, 1280 × 720, 2026-11-08) are in [`docs/COMPARE.md`](../docs/COMPARE.md).
+On 2026-11-13 ThreeRT's side of those images was drawn again on an Apple M3 Max at 2d4e88a (after the temporal
+upscaler, #30): `bistro/live.webp`, `bistro/move/rt-*.webp` (the same poses, 6 frames a pose in lockstep) and
+`hello/{material-grid,glb-asset}-rt.webp`, with `node tools/compare/strongest.ts --steps ours`,
+`node tools/compare/hello.ts --steps ours` and the same encodings as `site/tools/media.ts`. three.js's side, the
+offline references and every number on the page are still the M5 run's. Kept from the M5 run, because the new frames
+were not plainly better: `hello/sun-room-rt.webp` (its walls read more mottled on 2d4e88a) and all of Zero-Day
+(sharper on 2d4e88a, but more orange fireflies in its dark floor and walls).
 Amazon Lumberyard Bistro and Zero-Day are from NVIDIA's ORCA (CC BY 4.0); the credits are in the page's footer.
