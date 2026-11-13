@@ -66,10 +66,17 @@ highest tier any of its changes needs.
 |---|---|---|
 | **D** docs | only `docs/`, READMEs, comments | CI |
 | **T** tools / TypeScript | `tools/`, `tests/` harness, `ue5/` scripts, `packages/*` without effect on what the renderer draws | `npm run typecheck`, `npm test`; `npm run test:render` if `packages/scene`, `packages/gameplay` or `tests/render` changed |
-| **R1** renderer, existing scenes unchanged | new kernel / live code behind a feature bit, new DSL features, new passes that only run when a scene uses them | T, plus `cargo test --release`, `test:render` (no new failures against main), byte-identity of the catalog scenes (offline, software traversal), **perf smoke**, crops of the new feature |
-| **R2** renderer, existing scenes change | anything that changes what existing scenes render, or the live passes they run (denoising, temporal, reflections, post) | R1 without byte-identity, plus `node tools/bench-ghosting.ts --quick --check` (Bistro) and `--scene kabukicho` (wet signs: the reflection stress case), `test:layer-b`, crops before / after |
+| **R1** renderer, existing scenes unchanged | new kernel / live code behind a feature bit, new DSL features, new passes that only run when a scene uses them | T, plus `cargo test --release`, `test:render` (no new failures against main), byte-identity of the catalog scenes (offline, software traversal) and of every `test:render` output (`node tools/render-identity.ts --a <main> --b <branch>`: live tests included), **perf smoke**, crops of the new feature |
+| **R2** renderer, existing scenes change | anything that changes what existing scenes render, or the live passes they run (denoising, temporal, reflections, post) | R1 without byte-identity, plus `node tools/bench-ghosting.ts --quick --check` (Bistro) and `--scene kabukicho` (wet signs: the reflection stress case), `test:layer-b`, crops before / after; a change to the live passes also `node tools/bench-window.ts` on main and the branch (the play window against offline: still, the Bistro slice, Tokyo at dusk and in motion) |
 | **R3** hot path or perf claim | the PR claims a speed-up, or changes the cost of work existing scenes do every frame (trace loop, light sampling, filter passes, resolution control) | R2, plus **full A/B timing** (Bistro night still and moving and the 3 × 3 Bistro district along its camera path at the 0.5 floor, main and branch alternated: `node tools/bench-district.ts`) |
 
+- **render-identity** (R1, and any change that says it changes no picture): test-render whole, twice on each build,
+  every HDR output compared byte for byte. A test one build does not repeat to the byte (asynchronous builds,
+  physics, the radiance cache's training order: about 18 of 190) passes when the builds differ by no more than twice
+  their own run-to-run spread. `--env THREERT_MERGED=1` runs the browser's binding layout natively.
+- **bench-window** (R2 for the live passes): the shots the window's quality work of 2026-11 was measured by, each
+  against an offline render of the same moment (cached in `out/cache/window-truth`), or for the dusk against the
+  same moment held. The Tokyo shots need the city (`tools/tokyo`); without it they are reported as not run.
 - **Perf smoke** (R1, R2):
   - Bistro night (`scenes/bistro.ts`) live at the fixed 0.5 floor, after warm-up: about 15 s still at its camera
     and 15 s on a scripted move (2.5 m down the street with 12° of yaw, ping-pong), GPU timestamps. Until 2026-11-08
