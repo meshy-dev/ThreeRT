@@ -13,6 +13,9 @@
 //   batch returns. `world.emit(type, payload)` starts a state transaction.
 // - A listener that throws does not stop the batch: the next listener and the next message run all the same, and
 //   the error is logged.
+// - A listener returns no promise (an `async` function as one is an error). What it starts with promises goes on when
+//   the batch's entry is over, or the later entry that settles what it waits for (docs/RUNTIME.md "Promises"): a
+//   request wrapped as a promise that the app's answer resolves is awaited that way.
 // - An app may implement none of it. A post nobody takes is dropped (`post` returns false when no app is there),
 //   and a game must not wait for an answer in order to go on.
 // - The same object is `globalThis.__threert_host`, for a library that does not import this package.

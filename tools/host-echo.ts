@@ -5,6 +5,8 @@
 //      (`{"host":[...]}`), and answered on its stdin (`{"cmd":"host","messages":[...]}`). Checked: the order of the
 //      game's posts (net.open, net.send x 3, net.close; net.fetch), that a batch of messages reaches its listeners,
 //      that what they emit is committed (the state's count is in the HUD), and that the HUD is posted as it changes.
+//      The game awaits its page as a promise the app's answer resolves: that its line is logged at all says the
+//      script host ran the code after the await (it has no event loop: renderer/src/script.rs `run_jobs`).
 //   2. `threert-render play` (a window, for about three seconds), which is an app itself: the same game against a
 //      WebSocket and HTTP server on this machine, through the binary's own sockets. Checked: the server got the
 //      game's three messages in order, the game got the three answers, the close and the page.

@@ -24,7 +24,8 @@
 // - A frame without an input message: what was held stays held, nothing is pressed or released, `look` and `wheel`
 //   are 0.
 
-/** The app's input message: everything optional but `t`; a field left out keeps (state) or is 0 (deltas). */
+/** The app's input message: everything optional but `t`; a field left out keeps (state) or is 0 (deltas), except
+ *  `move`: a message without it says there is no stick. */
 export interface InputMessage {
   t: "input";
   /** Every key and mouse button held now (the names above). */
@@ -133,7 +134,8 @@ export class InputState implements Input {
     this.wheel += finite(m.wheel);
     if (m.u !== undefined || m.v !== undefined) this.pointer = { u: finite(m.u, this.pointer.u), v: finite(m.v, this.pointer.v) };
     if (m.captured !== undefined) this.captured = m.captured === true;
-    if (m.move !== undefined) this.stick = Array.isArray(m.move) ? [Math.max(-1, Math.min(1, finite(m.move[0]))), Math.max(-1, Math.min(1, finite(m.move[1])))] : null;
+    // (Null or left out: no stick, and `move` is the keys'. An app with a stick sends it in every message.)
+    this.stick = Array.isArray(m.move) ? [Math.max(-1, Math.min(1, finite(m.move[0]))), Math.max(-1, Math.min(1, finite(m.move[1])))] : null;
   }
 
   /** A frame script ran: what was pressed, released, turned and scrolled is over. */
