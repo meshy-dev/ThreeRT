@@ -362,9 +362,10 @@ impl LiveCore {
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
-            if let Some((row, at, size)) = self.light_tiles {
+            if let Some((row, at, size, cam)) = self.light_tiles {
                 (p.ltile[0], p.ltile[1], p.ltile[2]) = (lists, row, at);
                 p.ltile2 = [size.0, size.1, 0, 0];
+                p.lt_cam = cam;
             }
             // Software traversal's units as edits left them: the top tree's root and how many it holds (trace_units.wgsl).
             if let Some(u) = &self.sc.up.units {
@@ -677,7 +678,8 @@ impl LiveCore {
         self.prev_cam = cam;
         self.shown_spp = spp.max(1);
         self.prev_isz = (iw, ih);
-        self.light_tiles = tiles_on.then_some((layout::light_tiles(iw), tile_at.0 | tile_at.1 << 16, (iw, ih)));
+        let cu = cam.uniform(self.aspect);
+        self.light_tiles = tiles_on.then_some((layout::light_tiles(iw), tile_at.0 | tile_at.1 << 16, (iw, ih), [cu.pos, cu.fwd, cu.right, cu.up]));
         self.reset = false;
         self.frame = self.frame.wrapping_add(1);
     }

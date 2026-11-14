@@ -745,6 +745,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         procs,
         ltile: [0; 4],
         ltile2: [0; 4],
+        lt_cam: [[0.0; 4]; 4],
     };
     let mut params = params;
     let mut first = 0u32;

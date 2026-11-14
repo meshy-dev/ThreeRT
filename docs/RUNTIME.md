@@ -1287,9 +1287,10 @@ frame found (pathtrace.wgsl "Light tiles", live.wgsl `light_tiles`):
   component).
 - `light_tiles`, the live passes' first, makes each 8 x 8 tile's reports a list: the lights reported, each once,
   ascending, after the direct buffer's pixels (64 vec4s a tile). The tile grid shifts by a pixel offset each frame.
-- The next frame's paths take 2 candidates from their pixel's list at a vertex the camera sees and 1 past it, spread
-  over the list without repeats, beside the uniform candidates (8 and 3), which then stand for the lights the list
-  lacks. Each candidate is weighed by the lights it stands for: the estimate is the same sum whatever a list holds.
+- The next frame's paths read the list of the tile their camera hit was seen in then (its point, moved back by its
+  motion, through that frame's camera; the nearest tile's when it was off screen). They take 2 candidates from it at
+  a vertex the camera sees and 1 past it, spread over the list without repeats, beside the uniform candidates (8 and
+  3), which then stand for the lights the list lacks. Each candidate is weighed by the lights it stands for: the estimate is the same sum whatever a list holds.
 
 ## What the kernel trusts
 

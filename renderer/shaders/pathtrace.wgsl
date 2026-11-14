@@ -110,6 +110,7 @@ struct Params {
     background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
     ltile: vec4<u32>,      // live light tiles (`lt_list_start`): the lists' first vec4 in direct_out (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
+    lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -1691,10 +1692,11 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // resampled shadow ray found (direct_out's w: `lt_fb`, a light-table index; LT_NONE: none), live.wgsl `light_tiles`
 // makes each 8 x 8 tile's reports a list after the kernel's own data in direct_out (the lights found, each once:
 // index, reports; ascending; the last vec4 their number), and the next frame's paths take resampling candidates
-// from their pixel's tile's list as well, spread over it without repeats (all of it when it is short). The
-// candidates drawn uniformly, as before, then stand for the lights the list lacks (`lt_in_list`). A list is a
-// guide: whatever it holds the estimate is the same sum, so one gone stale (the table reordered, the camera moved
-// on) costs noise, not light. Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS).
+// from the list of the tile their camera hit was seen in then (`lt_list_start`: where the point was, through that
+// frame's camera), spread over it without repeats (all of it when it is short). The candidates drawn uniformly, as
+// before, then stand for the lights the list lacks (`lt_in_list`). A list is a guide: whatever it holds the estimate
+// is the same sum, so one gone stale (the table reordered, a surface newly in view) costs noise, not light.
+// Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS).
 const LT_TILE: u32 = 8u;
 const LT_LIST: u32 = 64u;
 const LT_NONE: u32 = 0xf0000000u;
@@ -1702,12 +1704,17 @@ var<private> lt_list: u32;
 var<private> lt_list_n: u32;
 var<private> lt_fb: u32;
 
-// The list of the tile pixel `px` was in when the lists were built, and how many lights it holds.
-fn lt_list_start(px: vec2<u32>) {
+// The list of the tile that point `p` (the camera hit, where it was when the lists were built) was seen in then, and
+// how many lights it holds: the nearest tile's when it was off screen, none when it was behind the camera.
+fn lt_list_start(p: vec3<f32>) {
     lt_list_n = 0u;
-    lt_fb = LT_NONE;
     if (!LIVE || P.ltile.x == 0u) { return; }
-    let q = min(vec2<u32>(vec2<f32>(px) * vec2<f32>(P.ltile2.xy) / vec2<f32>(P.size.xy)), P.ltile2.xy - 1u);
+    let d = p - P.lt_cam[0].xyz;
+    let z = dot(d, P.lt_cam[1].xyz);
+    if (z <= 1e-4) { return; }
+    let ndc = vec2<f32>(dot(d, P.lt_cam[2].xyz) / (z * P.lt_cam[0].w * P.lt_cam[1].w), dot(d, P.lt_cam[3].xyz) / (z * P.lt_cam[0].w));
+    let uv = clamp(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+    let q = min(vec2<u32>(uv * vec2<f32>(P.ltile2.xy)), P.ltile2.xy - 1u);
     let c = q + vec2<u32>(P.ltile.z & 0xffffu, P.ltile.z >> 16u);
     lt_list = P.ltile.x + ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
     if (lt_list + LT_LIST > direct_len()) { return; }
@@ -3159,7 +3166,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
     if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, bitcast<f32>(LT_NONE), has(F_LISTS)))); }
-    if (has(F_LISTS)) { lt_list_start(gid.xy); }
+    if (has(F_LISTS)) { lt_fb = LT_NONE; }
     rng_start(gid.xy, P.size.z, P.size.w, 0u);
     cur_depth = 0u;
     let cam = rng4(rng_dim(D_CAMERA));
@@ -3373,6 +3380,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let pp = prev_verts[kp].xyz + prev_verts[kp + 1u].xyz * hit.u + prev_verts[kp + 2u].xyz * hit.v;
                 mv = vec4<f32>(pp - s.p, 1.0);
             }
+            if (has(F_LISTS)) { lt_list_start(s.p + mv.xyz); }
             albedo = select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
             normal = s.n;
             anim = s.anim;

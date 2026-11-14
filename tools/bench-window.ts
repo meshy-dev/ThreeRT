@@ -3,7 +3,8 @@
 // its frames with an offline render of the same moment (rendered once and kept: out/cache/window-truth, keyed by the
 // bundle and the shot; --fresh-truth renders them again), or, for the dusk, with the same moment held.
 //
-//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,slice,tokyo-dusk,tokyo-turn,tokyo-orbit]
+//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,still-rooms-wide,rooms-turn,slice,
+//                               tokyo-dusk,tokyo-turn,tokyo-orbit]
 //                              [--tag NAME] [--fresh-truth]
 //
 // Shots (the bin is THREERT_BIN, else the release build):
@@ -13,6 +14,8 @@
 //   still-rooms, still-rooms-wide  the same for scenes/lamp-rooms.ts and lamp-rooms-wide.ts (96 and 768 shadow-casting
 //       lamps, most behind walls; scale 0.5; offline at 4096 samples): where a light sampler has to find the lamps a
 //       point can see, and what its noise does as they multiply.
+//   rooms-turn  lamp-rooms-wide, the camera turning 2 degrees a frame for 24 frames into the scene's view, then still:
+//       the last moving frame and 1, 6, 30 and 150 frames after it against the same offline render.
 //   slice  the Bistro slice half a second after its explosion (40.5 s, from the start in lockstep, scale 0.375, 1440p):
 //       the same four numbers against offline at 40.5 s.
 //   tokyo-dusk  the Tokyo time-of-day reel's room (16:00 to 17:42 in 10.5 s), the camera still, at 6, 7, 8 s: the frame
@@ -34,7 +37,7 @@ import { startLive, type Build, type Live } from "./lib/live.ts";
 
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
+const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "rooms-turn", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
 const shots = flag("--shots", ALL.join(",")).split(",");
 const tag = flag("--tag", new Date().toISOString().replace(/[:.]/g, "-"));
 const freshTruth = args.includes("--fresh-truth");
@@ -125,6 +128,34 @@ async function still(name: string, src: string, scale: string, env: Record<strin
   rows.push({ shot: name, frame: "held", region: "all", detail: r3(await detail(ref, a)), dE: m.mean_delta_e, p99: m.p99_delta_e, ssim: m.ssim, lum: m.luminance_ratio, flicker: r3(await flicker(a, c)) });
 }
 
+/** lamp-rooms-wide, the camera turning into the scene's own view, then still: what guides a light sampler by the last
+ *  frame has to follow the picture. (The view: scenes/lamp-rooms.ts's camera for 12 x 8 rooms of 5.2 m.) */
+async function roomsTurn(name: string) {
+  const dir = join(out, name);
+  mkdirSync(dir, { recursive: true });
+  const b = await bundle("scenes/lamp-rooms-wide.ts");
+  const ref = truth(b, { width: 2560, height: 1440, spp: 4096 });
+  const P = 5.2, cx = (i: number) => (i - 5.5) * P, cz = (j: number) => (j - 3.5) * P;
+  const pos = [cx(1) - 1.9, 1.5, cz(1) + 1.9], D = [cx(2) + 0.6 - pos[0], 1.1 - pos[1], cz(0) + 1.2 - pos[2]];
+  const cam = (deg: number) => {
+    const c = Math.cos((deg * Math.PI) / 180), s = Math.sin((deg * Math.PI) / 180);
+    return { pos, target: [pos[0] + D[0] * c + D[2] * s, pos[1] + D[1], pos[2] - D[0] * s + D[2] * c], tan: 0 };
+  };
+  const live = await session(b, { width: 2560, height: 1440, scale: "0.5", env: { THREERT_FREEZE_TIME: "1" } });
+  const f = (n: string) => join(dir, `${n}.png`);
+  await frames(live, 120, undefined, cam(-48));
+  for (let k = 1; k <= 24; k++) await frames(live, 1, k === 24 ? f("last") : undefined, cam(-48 + 2 * k));
+  await frames(live, 1, f("stop1"));
+  await frames(live, 5, f("stop6"));
+  await frames(live, 24, f("stop30"));
+  await frames(live, 120, f("settled"));
+  await live.quit();
+  for (const n of ["last", "stop1", "stop6", "stop30", "settled"]) {
+    const m = compare(ref, f(n));
+    rows.push({ shot: name, frame: n, region: "all", dE: m.mean_delta_e, p99: m.p99_delta_e, ssim: m.ssim, lum: m.luminance_ratio });
+  }
+}
+
 const TOKYO = "games/tokyo/tokyo-tod.game.ts", TOKYO_ROOM = "shiba-15.6-17.7-10.5-r1600", TOKYO_SETTLE = 2;
 const tokyoMissing = () => !existsSync(join(repoRoot, "assets/city/glb/shiba"));
 
@@ -207,6 +238,7 @@ for (const s of shots) {
   else if (s === "still-kabukicho") await still(s, "games/kabukicho/kabukicho.game.ts", "0.375", { THREERT_NO_GRAIN: "1" });
   else if (s === "still-rooms") await still(s, "scenes/lamp-rooms.ts", "0.5", {}, 4096);
   else if (s === "still-rooms-wide") await still(s, "scenes/lamp-rooms-wide.ts", "0.5", {}, 4096);
+  else if (s === "rooms-turn") await roomsTurn(s);
   else if (s === "slice") await slice();
   else if (s === "tokyo-dusk") await tokyoDusk();
   else if (s === "tokyo-turn") await tokyoMove(s, false);

@@ -121,6 +121,9 @@ pub struct Params {
     pub ltile: [u32; 4],
     /// The traced size the lists were built at, -, -.
     pub ltile2: [u32; 4],
+    /// The camera the lists were built under (the last frame's): position (w = tan(fov / 2)), forward (w = aspect),
+    /// right, up. A camera hit reads the list of the tile it was seen in then.
+    pub lt_cam: [[f32; 4]; 4],
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:

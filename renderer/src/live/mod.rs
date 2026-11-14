@@ -351,10 +351,10 @@ pub struct LiveCore {
     inst_moved: bool,
     /// The previous frame's traced size (its traced-grid diffuse history; 0 before the first frame).
     prev_isz: (u32, u32),
-    /// The light tiles' lists as the last frame built them (pathtrace.wgsl `Params::ltile`'s y, z and `ltile2`'s
-    /// size): what this frame's paths take candidates from. None: no lists (the first frame, after a reset, a scene
-    /// whose local lights are summed exactly).
-    light_tiles: Option<(u32, u32, (u32, u32))>,
+    /// The light tiles' lists as the last frame built them (pathtrace.wgsl `Params::ltile`'s y, z, `ltile2`'s size
+    /// and `lt_cam`, that frame's camera): what this frame's paths take candidates from. None: no lists (the first
+    /// frame, after a reset, a scene whose local lights are summed exactly).
+    light_tiles: Option<(u32, u32, (u32, u32), [[f32; 4]; 4])>,
     /// Frame of the last lighting edit (power, light / material parameters, environment): the temporal pass looks
     /// for changed lighting (anti-lag) only shortly after one.
     lit_changed: u32,
