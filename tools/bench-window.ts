@@ -3,13 +3,16 @@
 // its frames with an offline render of the same moment (rendered once and kept: out/cache/window-truth, keyed by the
 // bundle and the shot; --fresh-truth renders them again), or, for the dusk, with the same moment held.
 //
-//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,slice,tokyo-dusk,tokyo-turn,tokyo-orbit]
+//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,slice,tokyo-dusk,tokyo-turn,tokyo-orbit]
 //                              [--tag NAME] [--fresh-truth]
 //
 // Shots (the bin is THREERT_BIN, else the release build):
 //   still-bistro, still-kabukicho  the scene held still at 2560 x 1440 (render scale 0.5, 0.375), animation frozen,
 //       300 frames, then two consecutive frames: detail (the gradients' regression on offline's: 1 keeps every edge),
 //       ΔE, SSIM against offline (512 samples), and the RMS change of luma from one frame to the next (flicker).
+//   still-rooms, still-rooms-wide  the same for scenes/lamp-rooms.ts and lamp-rooms-wide.ts (96 and 768 shadow-casting
+//       lamps, most behind walls; scale 0.5; offline at 4096 samples): where a light sampler has to find the lamps a
+//       point can see, and what its noise does as they multiply.
 //   slice  the Bistro slice half a second after its explosion (40.5 s, from the start in lockstep, scale 0.375, 1440p):
 //       the same four numbers against offline at 40.5 s.
 //   tokyo-dusk  the Tokyo time-of-day reel's room (16:00 to 17:42 in 10.5 s), the camera still, at 6, 7, 8 s: the frame
@@ -31,7 +34,7 @@ import { startLive, type Build, type Live } from "./lib/live.ts";
 
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const ALL = ["still-bistro", "still-kabukicho", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
+const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
 const shots = flag("--shots", ALL.join(",")).split(",");
 const tag = flag("--tag", new Date().toISOString().replace(/[:.]/g, "-"));
 const freshTruth = args.includes("--fresh-truth");
@@ -108,11 +111,11 @@ async function session(b: string, o: { width: number; height: number; scale: str
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 
 /** Held still: 300 frames, then two consecutive frames, against offline. */
-async function still(name: string, src: string, scale: string, env: Record<string, string>) {
+async function still(name: string, src: string, scale: string, env: Record<string, string>, spp = 512) {
   const dir = join(out, name);
   mkdirSync(dir, { recursive: true });
   const b = await bundle(src);
-  const ref = truth(b, { width: 2560, height: 1440, spp: 512 });
+  const ref = truth(b, { width: 2560, height: 1440, spp });
   const live = await session(b, { width: 2560, height: 1440, scale, env: { THREERT_FREEZE_TIME: "1", ...env } });
   const [a, c] = [join(dir, "a.png"), join(dir, "b.png")];
   await frames(live, 300, a);
@@ -202,6 +205,8 @@ for (const s of shots) {
   }
   if (s === "still-bistro") await still(s, "scenes/bistro.ts", "0.5", {});
   else if (s === "still-kabukicho") await still(s, "games/kabukicho/kabukicho.game.ts", "0.375", { THREERT_NO_GRAIN: "1" });
+  else if (s === "still-rooms") await still(s, "scenes/lamp-rooms.ts", "0.5", {}, 4096);
+  else if (s === "still-rooms-wide") await still(s, "scenes/lamp-rooms-wide.ts", "0.5", {}, 4096);
   else if (s === "slice") await slice();
   else if (s === "tokyo-dusk") await tokyoDusk();
   else if (s === "tokyo-turn") await tokyoMove(s, false);
