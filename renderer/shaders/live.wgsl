@@ -247,7 +247,8 @@ const RESOLVE_N: u32 = 8u;
 // ---- The light tiles: each 8 x 8 tile's pixels' reports made its list (pathtrace.wgsl "Light tiles": the lights
 // reported, each once: index, reports; ascending; the 64th vec4 holds their number, 63 at most). A workgroup is a
 // tile: the grid is the traced one shifted by L.lt.xy, another offset each frame, so tile borders do not stay put.
-const LT_NONE: u32 = 0xf0000000u;
+// (Float values, not integers' bits: pathtrace.wgsl LT_NONE says why.)
+const LT_NONE: u32 = 16777216u;
 var<workgroup> lt_keys: array<u32, 64>;
 var<workgroup> lt_first: array<u32, 64>;
 
@@ -256,7 +257,7 @@ fn light_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     let px = vec2<i32>(gid.xy) - vec2<i32>(L.lt.xy);
     var key = LT_NONE;
     if (px.x >= 0 && px.y >= 0 && px.x < i32(L.isz.x) && px.y < i32(L.isz.y)) {
-        key = min(bitcast<u32>(light_rw[u32(px.y) * L.isz.x + u32(px.x)].w), LT_NONE);
+        key = min(u32(light_rw[u32(px.y) * L.isz.x + u32(px.x)].w), LT_NONE);
     }
     lt_keys[li] = key;
     workgroupBarrier();
@@ -282,8 +283,8 @@ fn light_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     }
     let list = L.lt.z + (wg.y * L.lt.w + wg.x) * 64u;
     let at = less.x + less.y + less.z + less.w;
-    if (first && at < 63u) { light_rw[list + at] = vec4<f32>(bitcast<f32>(key), bitcast<f32>(same.x + same.y + same.z + same.w), 0.0, 0.0); }
-    if (li == 0u) { light_rw[list + 63u] = vec4<f32>(bitcast<f32>(min(all.x + all.y + all.z + all.w, 63u)), 0.0, 0.0, 0.0); }
+    if (first && at < 63u) { light_rw[list + at] = vec4<f32>(f32(key), f32(same.x + same.y + same.z + same.w), 0.0, 0.0); }
+    if (li == 0u) { light_rw[list + 63u] = vec4<f32>(f32(min(all.x + all.y + all.z + all.w, 63u)), 0.0, 0.0, 0.0); }
 }
 
 @compute @workgroup_size(8, 8, 1)
