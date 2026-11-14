@@ -2311,6 +2311,13 @@ changed in each (171-175 byte-identical, the rest within their run-to-run spread
 pass. The district's tree builds in 333 ms against main's 321 (one load each; an earlier load of the same build
 338). No shader changed.
 
+**A scene's features as `FEAT` bits (2026-11-14, after it).** Vertex colours, density grids, instance colours, unlit
+materials and the background were `@if` flags: each combination another kernel source. They are now bits of `FEAT`
+(the pipeline-overridable constant the other features use), their bindings and fields always declared, and
+`OBJECT_STRIDE` an override from F_TINT. Only units still change the source. render-identity against main (native,
+merged, uniform tables, guarded and not): 0 of 190 changed; web-hello passes; Bistro's trace the same natively and
+merged.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

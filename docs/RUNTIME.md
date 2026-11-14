@@ -1237,11 +1237,10 @@ The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `trace_units.
 translation (`@if(flag)` on a declaration or a statement, `@if(flag) { .. } @else { .. }` on a block of
 declarations). wesl-rs (WESL's compiler in Rust, natively and in a browser alike) makes a kernel's WGSL from a
 variant (gpu.rs `KernelVariant`, `kernel_wgsl`): the traversal (`hwrt`), a device's switches (`strict`,
-`cutout_lite`, `cutout_lite2`, `last_direct`, `light_pick`), a scene's features that change declarations (`vcolor`,
-`grid`, `tint`, `unlit`, `units`, `background`; the other features switch code under the pipeline-overridable constant
-`FEAT`), the binding layout (`merged`, the browser's; `uniform_tables`, Android's) and the loop guard (`guard`).
-pathtrace.wgsl's head names them; each is said where it changes something, and a flag the source names that a
-kernel is not given is an error.
+`cutout_lite`, `cutout_lite2`, `last_direct`, `light_pick`), software traversal's units (`units`), the binding layout (`merged`, the browser's; `uniform_tables`, Android's) and the loop guard (`guard`).
+pathtrace.wgsl's head names them; a flag the source names that a kernel is not given is an error. A scene's other
+features are bits of `FEAT`, a pipeline-overridable constant: one kernel source for all of them (`OBJECT_STRIDE`
+too is an override, from F_TINT).
 - The numbers a variant is compiled for are WESL constants, which the source imports (`import constants::..`; gpu.rs
   `KernelVariant::constants`): the merged layout's array lengths, the uniform tables', the loop guard's limit. One
   the source imports and is not given is an error.

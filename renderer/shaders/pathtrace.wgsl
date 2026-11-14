@@ -12,9 +12,8 @@
 //   strict, cutout_lite, cutout_lite2, last_direct, light_pick
 //                         a device's switches (gpu.rs `KernelSwitches`: what a GPU the kernel as written is wrong or
 //                         too slow on needs)
-//   vcolor, grid, tint, unlit, units, background
-//                         a scene's features that change the kernel's declarations rather than switch code in it
-//                         (gpu.rs `F_SOURCE`; the others are `FEAT`, a pipeline-overridable constant)
+//   units                 software traversal's second level (gpu.rs `F_UNITS`); a scene's other features are bits
+//                         of `FEAT`, a pipeline-overridable constant
 //   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
 //   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
@@ -55,7 +54,7 @@ const EMIT_RIS_M: u32 = 6u;
 const VOL_RATE_MASK: u32 = 1u;
 const MAT_DOUBLE_SIDED: i32 = 1;
 const MAT_EMITTER_CARD: i32 = 2;
-@if(unlit) const MAT_UNLIT: i32 = 4;
+const MAT_UNLIT: i32 = 4;
 // Live (real-time) mode: write this frame's 1-spp sample + first-hit distance instead of accumulating.
 override LIVE: bool = false;
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
@@ -74,6 +73,11 @@ const F_PEMIT: u32 = 65536u; // opaque particles: their emitter handling (nomina
 const F_HMEDIA: u32 = 131072u; // homogeneous media (water): live attenuation of paths and shadow rays (media_homogeneous)
 const F_AERIAL: u32 = 16777216u; // the sky's aerial perspective (aerial_tr) on segments ending on a surface
 const F_PROC: u32 = 262144u; // procedural geometry (ProceduralMesh): AABB candidates in every query, `surface_proc`
+const F_TINT: u32 = 524288u; // instance colours: OBJECT_STRIDE 4, `obj_tint`
+const F_UNLIT: u32 = 1048576u; // MeshBasicMaterial (MAT_UNLIT)
+const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
+const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
+const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
 struct Params {
@@ -102,7 +106,7 @@ struct Params {
     ltree: vec4<f32>,      // light tree (ltree.rs): first node in `emitters` (bits), its entry count (bits: the moving emitters' first), P(pick a moving one), candidates at camera hits (0 = off)
     procs: vec4<u32>,      // procedural geometry (F_PROC): its data's first word in env_cdf, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
-    @if(background) background: vec4<f32>, // three.js scene.background (radiance), 1
+    background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -199,12 +203,12 @@ struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: ve
         fn medium_at(i: u32) -> Medium { return media[i]; }
     }
 }
-// Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z.
-@if(grid) @group(0) @binding(19) var grid_tex: texture_3d<f32>;
+// Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z; one cell in scenes without.
+@group(0) @binding(19) var grid_tex: texture_3d<f32>;
 // Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle, after the previous
 // vertices in `prev_verts` from vec4 P.procs.w.
-@if(vcolor) fn vcolor_word(k: u32) -> u32 { return bitcast<u32>(prev_verts[P.procs.w + k / 4u][k % 4u]); }
-@if(vcolor) fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
+fn vcolor_word(k: u32) -> u32 { return bitcast<u32>(prev_verts[P.procs.w + k / 4u][k % 4u]); }
+fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
     let c0 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u)).rgb);
     let c1 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 1u)).rgb);
     let c2 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 2u)).rgb);
@@ -802,8 +806,8 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     var tr = clamp(m.layer.x, 0.0, 1.0) * (1.0 - clamp(m.params.x, 0.0, 1.0));
     if (tr <= 0.0) { return g; }
     g.tint = m.base_color.rgb;
-    @if(tint) g.tint *= obj_tint(object_of(a));
-    @if(vcolor) g.tint *= vcolor(h.tri, h.u, h.v);
+    if (has(F_TINT)) { g.tint *= obj_tint(object_of(a)); }
+    if (has(F_VCOLOR)) { g.tint *= vcolor(h.tri, h.u, h.v); }
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
         var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
@@ -1054,10 +1058,9 @@ fn emissive_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> Ma
 fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
 // vec4s per object (scene.rs OBJECT_STRIDE): (pivot, power), (bounds size, time of the last power edit), per-instance
 // data (`MatIn.custom`).
-@if(!tint) const OBJECT_STRIDE: u32 = 3u;
-@if(tint) const OBJECT_STRIDE: u32 = 4u;
+override OBJECT_STRIDE: u32 = select(3u, 4u, (FEAT & F_TINT) != 0u);
 // An instanced object's instance colour (three.js `instanceColor`), white for every other object.
-@if(tint) fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rgb; }
+fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rgb; }
 // Instance power (UE material "Power", scripts animate it): scales the emission of everything the node draws.
 fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
@@ -1149,8 +1152,8 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     s.front = front;
     s.card = m.tex1.z == MAT_EMITTER_CARD;
     var base = m.base_color.rgb;
-    @if(tint) base *= obj_tint(object_of(a));
-    @if(vcolor) base *= vcolor(i, h.u, h.v);
+    if (has(F_TINT)) { base *= obj_tint(object_of(a)); }
+    if (has(F_VCOLOR)) { base *= vcolor(i, h.u, h.v); }
     var rough = m.params.y;
     var metal = m.params.x;
     var spec = m.params.z;
@@ -1161,7 +1164,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     }
     s.emissive = emission(m, uv, lod) * obj_power(a);
     // three.js MeshBasicMaterial: its colour to camera rays and mirror-like paths, lit by nothing, lighting nothing.
-    @if(unlit) if (m.tex1.z == MAT_UNLIT) {
+    if (has(F_UNLIT) && m.tex1.z == MAT_UNLIT) {
         s.emissive = select(vec3<f32>(0.0), base, cur_depth == 0u || mirror_path);
         base = vec3<f32>(0.0);
         spec = 0.0;
@@ -1238,7 +1241,7 @@ fn surface_proc(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     s.front = front;
     s.card = false;
     var base = m.base_color.rgb;
-    @if(tint) base *= obj_tint(oi);
+    if (has(F_TINT)) { base *= obj_tint(oi); }
     var rough = m.params.y;
     var metal = m.params.x;
     var spec = m.params.z;
@@ -1540,7 +1543,7 @@ fn offset_origin(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // environment and the directional lights' disks, MIS-weighted against their sampling in `direct_light`.
 fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     // three.js scene.background: what camera rays (and paths bent straight through glass) see where nothing is.
-    @if(background) if (pdf <= 0.0) { return P.background.rgb; }
+    if (has(F_BACKGROUND) && pdf <= 0.0) { return P.background.rgb; }
     var wgt = 1.0;
     if (pdf > 0.0 && P.counts2.y != 0u) {
         wgt = power_heuristic(pdf, env_pdf(d));
@@ -2121,7 +2124,7 @@ struct VIn {
     lp: vec3<f32>,     // position in the volume's own space: the box [-0.5, 0.5]^3 / the sphere of radius 0.5
     time: f32,         // scene time, s
     custom: vec4<f32>, // the node's customData
-    @if(grid) grid: vec2<u32>, // the node's density grid: its first layer in the atlas, its cells (10 bits an axis; 0: none)
+    grid: vec2<u32>, // the node's density grid: its first layer in the atlas, its cells (10 bits an axis; 0: none)
 };
 
 struct VOut {
@@ -2132,7 +2135,7 @@ struct VOut {
 
 // The node's density grid at `lp` (the volume's own space, the box [-0.5, 0.5]^3): field A's four numbers, trilinear
 // between cell centres, the border cells' beyond them; zeros for a node without a grid.
-@if(grid) fn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32> {
+fn vgrid(i: VIn, lp: vec3<f32>) -> vec4<f32> {
     if (i.grid.y == 0u) { return vec4<f32>(0.0); }
     let n = vec3<f32>(vec3<u32>(i.grid.y & 1023u, (i.grid.y >> 10u) & 1023u, (i.grid.y >> 20u) & 1023u));
     let c = clamp((lp + 0.5) * n, vec3<f32>(0.5), n - 0.5) + vec3<f32>(0.0, 0.0, f32(i.grid.x));
@@ -2176,7 +2179,7 @@ fn medium_eval(k: u32, x: vec3<f32>) -> VOut {
     i.lp = medium_local(m, x);
     i.time = P.time.x;
     i.custom = m.c;
-    @if(grid) i.grid = vec2<u32>(bitcast<u32>(m.b.z), bitcast<u32>(m.b.w));
+    i.grid = vec2<u32>(bitcast<u32>(m.b.z), bitcast<u32>(m.b.w));
     var r = volume_function(m.a.x, i, m.p);
     r.extinction = clamp(r.extinction, 0.0, m.b.x);
     return r;
