@@ -15,6 +15,16 @@
 //   vcolor, grid, tint, unlit, units, background
 //                         a scene's features that change the kernel's declarations rather than switch code in it
 //                         (gpu.rs `F_SOURCE`; the others are `FEAT`, a pipeline-overridable constant)
+//   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
+//   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
+//   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
+// The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
+// merged layout's array lengths, the uniform tables', the loop guard's limit.
+@if(merged) import constants::{MT_MATERIALS, MT_LIGHTS, MT_EMITTERS, MT_TEX_INFO, MT_OBJECTS, MT_INSTANCES, MT_MEDIA,
+    ML_CACHE_KEYS, ML_CACHE_ACC, ML_CACHE_VAL, ML_REFL, ML_MOTION_OUT, ML_DIRECT_OUT};
+@if(uniform_tables) import constants::{UT_TEX_INFO, UT_OBJECTS, UT_INSTANCES, UT_MEDIA};
+@if(merged || guard) import constants::GUARD_WORDS;
+@if(guard) import constants::LOOP_GUARD_LIMIT;
 @if(hwrt) enable wgpu_ray_query;
 
 const PI: f32 = 3.14159265358979;
@@ -114,11 +124,6 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(1) var<storage, read> tri_verts: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> attrs: array<TriAttr>;
 @group(0) @binding(3) var<storage, read> nodes: array<Node>;
-@group(0) @binding(4) var<storage, read> materials: array<Material>;
-@group(0) @binding(5) var<storage, read> lights: array<Light>;
-// emitters[i] = (triangle index bits, cumulative weight (normalized), weight, area) for i < counts.y, then the guide
-// table: EMITTER_GUIDE + 1 entry indices (bits), four per vec4 (lib.rs emitter_cdf).
-@group(0) @binding(6) var<storage, read> emitters: array<vec4<f32>>;
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
@@ -127,20 +132,73 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
 // GGX energy LUT (E.x, E.y) for 32 roughness x 32 NoV, packed 2 per vec4
 @group(0) @binding(12) var<uniform> energy_lut: array<vec4<f32>, 512>;
-// Per texture: (u0, v0, du, dv) of its rect in the page, (layer, wrap, width, height). See texpack.rs.
-@group(0) @binding(14) var<storage, read> tex_info: array<vec4<f32>>;
-// Per object (scene node): pivot (world position), world bounds size (UE ObjectPositionWS / ObjectBounds).
-@group(0) @binding(15) var<storage, read> objects: array<vec4<f32>>;
 // The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
 @group(0) @binding(16) var<storage, read> prev_verts: array<vec4<f32>>;
 // Model instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, LOD offset bits, -).
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
-@group(0) @binding(17) var<storage, read> instances: array<Instance>;
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
 // (volume function, shape: 0 box / 1 sphere / 2 none while its node is hidden, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
 // simulated grid), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
 struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: vec4<f32>, c: vec4<f32>, p: array<vec4<f32>, 8> };
-@group(0) @binding(18) var<storage, read> media: array<Medium>;
+
+// The scene's tables, read through `material_at`, `light_at`, `emitter_at`, `tex_info_at`, `object_at`, `instance_at`
+// and `medium_at` in every layout:
+//  - materials (scene::GpuMaterial), lights (scene::GpuLight);
+//  - emitters: (triangle index bits, cumulative weight (normalized), weight, area) for i < counts.y, then the guide
+//    table: EMITTER_GUIDE + 1 entry indices (bits), four per vec4 (lib.rs emitter_cdf), then the light tree;
+//  - tex_info, per texture: (u0, v0, du, dv) of its rect in the page, (layer, wrap, width, height). See texpack.rs;
+//  - objects, per object (scene node): pivot (world position), world bounds size (UE ObjectPositionWS /
+//    ObjectBounds), then what `OBJECT_STRIDE` says;
+//  - instances (Instance), media (Medium).
+@if(merged) {
+    // The merged layout (merged.rs): the seven as the arrays of one struct in one buffer, their lengths the renderer's
+    // (`merged::Caps`: each a power of two, so a scene that grows compiles a kernel again only when a table doubles).
+    struct MergedTables {
+        materials: array<Material, MT_MATERIALS>,
+        lights: array<Light, MT_LIGHTS>,
+        emitters: array<vec4<f32>, MT_EMITTERS>,
+        tex_info: array<vec4<f32>, MT_TEX_INFO>,
+        objects: array<vec4<f32>, MT_OBJECTS>,
+        instances: array<Instance, MT_INSTANCES>,
+        media: array<Medium, MT_MEDIA>,
+    };
+    @group(0) @binding(4) var<storage, read> MT: MergedTables;
+    fn material_at(i: u32) -> Material { return MT.materials[i]; }
+    fn light_at(i: u32) -> Light { return MT.lights[i]; }
+    fn emitter_at(i: u32) -> vec4<f32> { return MT.emitters[i]; }
+    fn tex_info_at(i: u32) -> vec4<f32> { return MT.tex_info[i]; }
+    fn object_at(i: u32) -> vec4<f32> { return MT.objects[i]; }
+    fn instance_at(i: u32) -> Instance { return MT.instances[i]; }
+    fn medium_at(i: u32) -> Medium { return MT.media[i]; }
+} @else {
+    @group(0) @binding(4) var<storage, read> materials: array<Material>;
+    @group(0) @binding(5) var<storage, read> lights: array<Light>;
+    @group(0) @binding(6) var<storage, read> emitters: array<vec4<f32>>;
+    fn material_at(i: u32) -> Material { return materials[i]; }
+    fn light_at(i: u32) -> Light { return lights[i]; }
+    fn emitter_at(i: u32) -> vec4<f32> { return emitters[i]; }
+    @if(uniform_tables) {
+        // The uniform tables (merged.rs `UNIFORM_TABLES`): sized uniform arrays, every index held to the array (a
+        // scene with more entries than one holds reads the last for the rest; nothing outside the buffer is read).
+        @group(0) @binding(14) var<uniform> tex_info: array<vec4<f32>, UT_TEX_INFO>;
+        @group(0) @binding(15) var<uniform> objects: array<vec4<f32>, UT_OBJECTS>;
+        @group(0) @binding(17) var<uniform> instances: array<Instance, UT_INSTANCES>;
+        @group(0) @binding(18) var<uniform> media: array<Medium, UT_MEDIA>;
+        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[min(i, UT_TEX_INFO - 1u)]; }
+        fn object_at(i: u32) -> vec4<f32> { return objects[min(i, UT_OBJECTS - 1u)]; }
+        fn instance_at(i: u32) -> Instance { return instances[min(i, UT_INSTANCES - 1u)]; }
+        fn medium_at(i: u32) -> Medium { return media[min(i, UT_MEDIA - 1u)]; }
+    } @else {
+        @group(0) @binding(14) var<storage, read> tex_info: array<vec4<f32>>;
+        @group(0) @binding(15) var<storage, read> objects: array<vec4<f32>>;
+        @group(0) @binding(17) var<storage, read> instances: array<Instance>;
+        @group(0) @binding(18) var<storage, read> media: array<Medium>;
+        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
+        fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
+        fn instance_at(i: u32) -> Instance { return instances[i]; }
+        fn medium_at(i: u32) -> Medium { return media[i]; }
+    }
+}
 // Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z.
 @if(grid) @group(0) @binding(19) var grid_tex: texture_3d<f32>;
 // Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle, after the previous
@@ -221,7 +279,7 @@ fn rnd() -> f32 {
 const EMITTER_GUIDE: u32 = 65536u;
 
 fn emitter_guide(k: u32) -> u32 {
-    return bitcast<u32>(emitters[P.counts.y + k / 4u][k % 4u]);
+    return bitcast<u32>(emitter_at(P.counts.y + k / 4u)[k % 4u]);
 }
 
 // One emitter CDF entry: the first whose cumulative weight is not below u. The guide table bounds the binary search to
@@ -237,9 +295,9 @@ fn emitter_pick_u(u: f32) -> vec4<f32> {
     var hi = emitter_guide(k + 1u);
     while (lo < hi) {
         let mid = (lo + hi) / 2u;
-        if (emitters[mid].y < u) { lo = mid + 1u; } else { hi = mid; }
+        if (emitter_at(mid).y < u) { lo = mid + 1u; } else { hi = mid; }
     }
-    return emitters[min(lo, P.counts.y - 1u)];
+    return emitter_at(min(lo, P.counts.y - 1u));
 }
 
 // Light tree (ltree.rs): nodes after the CDF in `emitters`, one vec4 each: pack2x16float(centre x, y),
@@ -254,7 +312,7 @@ const LT_FAR: f32 = 120.0;
 
 fn lt_on() -> bool { return P.ltree.w > 0.5; }
 
-fn lt_node(i: u32) -> vec4<f32> { return emitters[bitcast<u32>(P.ltree.x) + i]; }
+fn lt_node(i: u32) -> vec4<f32> { return emitter_at(bitcast<u32>(P.ltree.x) + i); }
 
 // Importance of a tree node seen from x on a surface with normal n (n = 0: no hemisphere, a fog point): power x the
 // best cosine any point of its sphere can have at x / max(distance², radius²).
@@ -282,17 +340,17 @@ fn lt_imp(nd: vec4<f32>, x: vec3<f32>, n: vec3<f32>) -> f32 {
 
 // A CDF entry by power within entries [lo, hi) (cumulative p0 .. p1): one guide-table lookup.
 fn emitter_pick_range(lo: u32, hi: u32) -> vec4<f32> {
-    let p0 = select(0.0, emitters[max(lo, 1u) - 1u].y, lo > 0u);
-    let p1 = emitters[hi - 1u].y;
+    let p0 = select(0.0, emitter_at(max(lo, 1u) - 1u).y, lo > 0u);
+    let p1 = emitter_at(hi - 1u).y;
     let u = min(p0 + rnd() * (p1 - p0), p1);
     let k = min(u32(u * f32(EMITTER_GUIDE)), EMITTER_GUIDE - 1u);
     var l = emitter_guide(k);
     var h = emitter_guide(k + 1u);
     while (l < h) {
         let mid = (l + h) / 2u;
-        if (emitters[mid].y < u) { l = mid + 1u; } else { h = mid; }
+        if (emitter_at(mid).y < u) { l = mid + 1u; } else { h = mid; }
     }
-    return emitters[clamp(l, lo, hi - 1u)];
+    return emitter_at(clamp(l, lo, hi - 1u));
 }
 
 // An emitter entry for a point x (normal n), its selection probability `p` and its weight `w` (area x luminance x
@@ -325,11 +383,11 @@ fn emitter_draw(x: vec3<f32>, n: vec3<f32>) -> EPick {
     let lo = w & 0x1fffffffu;
     let hi = lo + ((w >> 29u) & 3u) + 1u;
     var wsum = 0.0;
-    for (var j = lo; j < hi; j++) { wsum += emitters[j].z; }
+    for (var j = lo; j < hi; j++) { wsum += emitter_at(j).z; }
     var t = rnd() * wsum;
-    var e = emitters[hi - 1u];
+    var e = emitter_at(hi - 1u);
     for (var j = lo; j < hi; j++) {
-        let c = emitters[j];
+        let c = emitter_at(j);
         if (t < c.z) { e = c; break; }
         t -= c.z;
     }
@@ -345,7 +403,7 @@ fn emitter_sel(ti: u32, x: vec3<f32>, n: vec3<f32>) -> f32 {
         if (P.misc.y <= 0.0 || (has(F_PEMIT) && a.x.z < 0.0)) { return 0.0; }
         var area = 0.5 * length(cross(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz));
         if (has(F_PEMIT) && a.x.z > 0.0) { area = a.x.z; }
-        return luminance(materials[bitcast<u32>(a.uv.w)].emissive.rgb) * obj_power(a) * area / P.misc.y;
+        return luminance(material_at(bitcast<u32>(a.uv.w)).emissive.rgb) * obj_power(a) * area / P.misc.y;
     }
     let depth = (code >> LT_PATH_BITS) - 1u;
     var p = 1.0 - P.ltree.z;
@@ -365,7 +423,7 @@ fn emitter_sel(ti: u32, x: vec3<f32>, n: vec3<f32>) -> f32 {
     var wsum = 0.0;
     var we = 0.0;
     for (var j = lo; j < hi; j++) {
-        let c = emitters[j];
+        let c = emitter_at(j);
         wsum += c.z;
         if (bitcast<u32>(c.x) == ti) { we = c.z; }
     }
@@ -440,11 +498,11 @@ fn proc_point(r: Instance, p: vec3<f32>) -> vec3<f32> { return proc_dir(r, p - v
 
 // Box `prim` of record `rec` against the object-space ray: the geometry function's hit in (tmin, tmax), else t = -1.
 fn proc_box(rec: u32, prim: u32, o: vec3<f32>, d: vec3<f32>, tmin: f32, tmax: f32) -> GOut {
-    let info = instances[rec].info;
+    let info = instance_at(rec).info;
     let b = pword(info.x + 1u) + prim * 6u;
     gdata_first = pword(info.x + 2u);
     gdata_count = pword(info.x + 11u);
-    let g = geometry_function(info.z, GIn(o, d, tmin, tmax, prim, proc_vec(b), proc_vec(b + 3u), gdata_first, gdata_count, objects[info.y * OBJECT_STRIDE + 2u], P.time.x));
+    let g = geometry_function(info.z, GIn(o, d, tmin, tmax, prim, proc_vec(b), proc_vec(b + 3u), gdata_first, gdata_count, object_at(info.y * OBJECT_STRIDE + 2u), P.time.x));
     if (!(g.t > tmin && g.t < tmax)) { return GOut(-1.0, g.normal, 0u, g.attr); }
     return g;
 }
@@ -472,7 +530,7 @@ fn proc_attr(h: Hit) -> vec2<f32> {
 
 // A procedural hit's world normal (geometric = shading) through its record's normal rows.
 fn proc_normal(h: Hit) -> vec3<f32> {
-    let r = instances[h.inst];
+    let r = instance_at(h.inst);
     let p = proc_bits(h.u);
     let n = proc_unoct(vec2<f32>(f32(p & 0x7fffu), f32(p >> 15u)) / 32767.0 * 2.0 - 1.0);
     return normalize(vec3<f32>(dot(r.n0.xyz, n), dot(r.n1.xyz, n), dot(r.n2.xyz, n)));
@@ -591,7 +649,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
     let first = P.procs.z;
     for (var k = 0u; k < P.procs.y; k++) {
         let rec = first + k;
-        let r = instances[rec];
+        let r = instance_at(rec);
         if (mode == TRACE_SHADOW && r.info.w == 0u) { continue; }
         let lo = proc_point(r, o);
         let ld = proc_dir(r, d);
@@ -734,12 +792,12 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     var e1 = tri_verts[h.tri * 3u + 1u].xyz;
     var e2 = tri_verts[h.tri * 3u + 2u].xyz;
     if (has(F_INST) && h.inst != NO_INST) {
-        let r = instances[h.inst];
+        let r = instance_at(h.inst);
         e1 = inst_vec(r, e1);
         e2 = inst_vec(r, e2);
         a = inst_attr(r, a);
     }
-    let m = materials[bitcast<u32>(a.uv.w)];
+    let m = material_at(bitcast<u32>(a.uv.w));
     var g = GlassAt(normalize(cross(e1, e2)), 0.0, false, vec3<f32>(1.0));
     var tr = clamp(m.layer.x, 0.0, 1.0) * (1.0 - clamp(m.params.x, 0.0, 1.0));
     if (tr <= 0.0) { return g; }
@@ -749,7 +807,7 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
         var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-        if (has(F_INST) && h.inst != NO_INST) { lod += bitcast<f32>(instances[h.inst].info.z); }
+        if (has(F_INST) && h.inst != NO_INST) { lod += bitcast<f32>(instance_at(h.inst).info.z); }
         if (m.tex0.x >= 0) { g.tint *= srgb_to_linear(tex(m.tex0.x, uv, lod).rgb); }
         if (m.uv.z > 0.5) { tr *= tex(i32(m.uv.z) - 1, uv, lod).r; }
     }
@@ -787,7 +845,7 @@ fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> Marc
     if (!light) {
         // Transmittance alone: the media's product, in any order.
         for (var k = 0u; k < n; k++) {
-            let m = media[k];
+            let m = medium_at(k);
             if (m.a.z == 0u) { continue; }
             let sp = medium_span(m, o, d);
             let a = max(sp.x, 0.0);
@@ -806,7 +864,7 @@ fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> Marc
         var end = tmax;
         var inside = false;
         for (var k = 0u; k < n; k++) {
-            let m = media[k];
+            let m = medium_at(k);
             if (m.a.z == 0u) { continue; }
             let sp = medium_span(m, o, d);
             let a = max(sp.x, 0.0);
@@ -903,14 +961,14 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 // Texture pages: `lod` is log2 of the ray footprint in texture-UV units; the mip level adds the texture's resolution.
 fn tex_level(id: i32, uv: vec2<f32>, level: f32) -> vec4<f32> {
-    let a = tex_info[u32(id) * 2u];
-    let b = tex_info[u32(id) * 2u + 1u];
+    let a = tex_info_at(u32(id) * 2u);
+    let b = tex_info_at(u32(id) * 2u + 1u);
     let f = select(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), fract(uv), b.y > 0.5);
     return textureSampleLevel(textures, samp, a.xy + f * a.zw, i32(b.x), clamp(level, 0.0, TEX_MAX_LEVEL));
 }
 
 fn tex(id: i32, uv: vec2<f32>, lod: f32) -> vec4<f32> {
-    let b = tex_info[u32(id) * 2u + 1u];
+    let b = tex_info_at(u32(id) * 2u + 1u);
     return tex_level(id, uv, lod + 0.5 * log2(b.z * b.w));
 }
 
@@ -999,23 +1057,23 @@ fn object_of(a: TriAttr) -> u32 { return bitcast<u32>(a.x.y); }
 @if(!tint) const OBJECT_STRIDE: u32 = 3u;
 @if(tint) const OBJECT_STRIDE: u32 = 4u;
 // An instanced object's instance colour (three.js `instanceColor`), white for every other object.
-@if(tint) fn obj_tint(oi: u32) -> vec3<f32> { return objects[oi * OBJECT_STRIDE + 3u].rgb; }
+@if(tint) fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rgb; }
 // Instance power (UE material "Power", scripts animate it): scales the emission of everything the node draws.
-fn obj_power(a: TriAttr) -> f32 { return objects[object_of(a) * OBJECT_STRIDE].w; }
+fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
 fn mat_in_at(ti: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
     let a = attrs[ti];
-    let m = materials[bitcast<u32>(a.uv.w)];
+    let m = material_at(bitcast<u32>(a.uv.w));
     let w = 1.0 - u - v;
     let p = tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * u + tri_verts[ti * 3u + 2u].xyz * v;
     let ng = normalize(cross(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz));
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
     let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
-    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(a, m), view, objects[oi * OBJECT_STRIDE].xyz, objects[oi * OBJECT_STRIDE + 1u].xyz,
-                 P.time.x, P.time.y, P.time.z, lod, cur_depth, objects[oi * OBJECT_STRIDE].w, cur_depth == 0u || mirror_path,
-                 objects[oi * OBJECT_STRIDE + 2u]);
+    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(a, m), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
+                 P.time.x, P.time.y, P.time.z, lod, cur_depth, object_at(oi * OBJECT_STRIDE).w, cur_depth == 0u || mirror_path,
+                 object_at(oi * OBJECT_STRIDE + 2u));
 }
 
 fn mat_base(m: Material) -> MatOut {
@@ -1036,10 +1094,10 @@ fn cutouts_opaque() -> bool {
 // the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
 fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
     let a = attrs[ti];
-    let m = materials[bitcast<u32>(a.uv.w)];
+    let m = material_at(bitcast<u32>(a.uv.w));
     var alpha = m.base_color.a;
     var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-    if (has(F_INST) && inst != NO_INST) { lod += bitcast<f32>(instances[inst].info.z); }
+    if (has(F_INST) && inst != NO_INST) { lod += bitcast<f32>(instance_at(inst).info.z); }
     if (has(F_TEX) && m.tex0.x >= 0) {
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
@@ -1068,7 +1126,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     var e2 = tri_verts[i * 3u + 2u].xyz;
     var a = attrs[i];
     if (has(F_INST) && h.inst != NO_INST) {
-        let r = instances[h.inst];
+        let r = instance_at(h.inst);
         e1 = inst_vec(r, e1);
         e2 = inst_vec(r, e2);
         a = inst_attr(r, a);
@@ -1077,7 +1135,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     var ng = normalize(cross(e1, e2));
     var n = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v);
     let mi = bitcast<u32>(a.uv.w);
-    let m = materials[mi];
+    let m = material_at(mi);
     let front = dot(ng, d) < 0.0;
     if (!front) { ng = -ng; }
     if (dot(n, ng) < 0.0) { n = -n; }
@@ -1110,7 +1168,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         metal = 0.0;
     }
     // Power just changed by a script / gameplay (objects[1].w = scene time of the edit): short history.
-    s.anim = P.time.x - objects[object_of(a) * OBJECT_STRIDE + 1u].w < 0.5;
+    s.anim = P.time.x - object_at(object_of(a) * OBJECT_STRIDE + 1u).w < 0.5;
     // Detail that only matters where it is seen directly or in mirror-like reflections (puddles, glass, chrome).
     let near = cur_depth == 0u || mirror_path;
     if (has(F_TEX) && m.tex0.y >= 0 && near) {
@@ -1128,9 +1186,9 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         var t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
         let nv = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v) * select(-1.0, 1.0, front || dot(a.n0.xyz, ng) > 0.0);
         let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_lod(a, m), -d,
-                      objects[oi * OBJECT_STRIDE].xyz, objects[oi * OBJECT_STRIDE + 1u].xyz, P.time.x, P.time.y, P.time.z,
-                      log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth, objects[oi * OBJECT_STRIDE].w, near,
-                      objects[oi * OBJECT_STRIDE + 2u]);
+                      object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz, P.time.x, P.time.y, P.time.z,
+                      log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth, object_at(oi * OBJECT_STRIDE).w, near,
+                      object_at(oi * OBJECT_STRIDE + 2u));
         let r = material_function(m.tex1.w - 1, i, m, MatOut(base, rough, metal, spec, s.emissive, n, m.base_color.a, false));
         base = r.base;
         rough = r.roughness;
@@ -1165,10 +1223,10 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
 // two-sided), the object's power and customData. No textures (no uv: material functions get uv 0 and can work from
 // `i.wp`), no transmission.
 fn surface_proc(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
-    let r = instances[h.inst];
+    let r = instance_at(h.inst);
     let hd = r.info.x;
     let mi = pword(pword(hd + 7u) + min((h.tri >> 23u) & 0xffu, pword(hd + 3u) - 1u));
-    let m = materials[mi];
+    let m = material_at(mi);
     let oi = r.info.y;
     var ng = proc_normal(h);
     let front = dot(ng, d) < 0.0;
@@ -1184,15 +1242,15 @@ fn surface_proc(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     var rough = m.params.y;
     var metal = m.params.x;
     var spec = m.params.z;
-    s.emissive = m.emissive.rgb * objects[oi * OBJECT_STRIDE].w;
-    s.anim = P.time.x - objects[oi * OBJECT_STRIDE + 1u].w < 0.5;
+    s.emissive = m.emissive.rgb * object_at(oi * OBJECT_STRIDE).w;
+    s.anim = P.time.x - object_at(oi * OBJECT_STRIDE + 1u).w < 0.5;
     if (has(F_FUNC) && m.tex1.w > 0) {
         let near = cur_depth == 0u || mirror_path;
         let a = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9);
         let t = normalize(cross(a, n));
-        let i = MatIn(p, n, ng, t, cross(n, t), proc_attr(h), 0.0, -d, objects[oi * OBJECT_STRIDE].xyz, objects[oi * OBJECT_STRIDE + 1u].xyz,
+        let i = MatIn(p, n, ng, t, cross(n, t), proc_attr(h), 0.0, -d, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
                       P.time.x, P.time.y, P.time.z, log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth,
-                      objects[oi * OBJECT_STRIDE].w, near, objects[oi * OBJECT_STRIDE + 2u]);
+                      object_at(oi * OBJECT_STRIDE).w, near, object_at(oi * OBJECT_STRIDE + 2u));
         let f = material_function(m.tex1.w - 1, i, m, MatOut(base, rough, metal, spec, s.emissive, n, m.base_color.a, false));
         base = f.base;
         rough = f.roughness;
@@ -1492,7 +1550,7 @@ fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     // BSDF rays that fall inside a directional light's cone see its disk (MIS vs cone sampling).
     if (pdf > 0.0) {
         for (var i = 0u; i < P.counts2.x; i++) {
-            let li = lights[i];
+            let li = light_at(i);
             if (dot(d, -li.dir.xyz) >= li.dir.w) {
                 let omega = 2.0 * PI * (1.0 - li.dir.w);
                 c += (li.color.rgb / omega) * power_heuristic(pdf, 1.0 / omega);
@@ -1522,7 +1580,7 @@ fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
     let area = 0.5 * length(cr);
     let cos_l = abs(dot(normalize(cr), d));
     let ha = attrs[hit.tri];
-    let mat = materials[bitcast<u32>(ha.uv.w)];
+    let mat = material_at(bitcast<u32>(ha.uv.w));
     let pdf_a = luminance(mat.emissive.rgb) * obj_power(ha) / P.emit_power.x;
     let pdf_w = pdf_a * hit.t * hit.t / max(cos_l, 1e-6);
     if (!has(F_PEMIT) || ha.x.z == 0.0) { return power_heuristic(pdf, pdf_w); }
@@ -1642,14 +1700,14 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
         var i = nd;
         loop {
             if (i >= end) { break; }
-            let gs = lights[P.counts.x + (i - nd) / LIGHT_GROUP].pos;
+            let gs = light_at(P.counts.x + (i - nd) / LIGHT_GROUP).pos;
             let gend = min(i + LIGHT_GROUP, end);
             if (distance(x, gs.xyz) > gs.w) {
                 i = gend;
                 continue;
             }
             for (; i < gend; i++) {
-                let li = lights[i];
+                let li = light_at(i);
                 // Cheap rejects before sampling the light: black (off, or hidden), beyond its attenuation range (the
                 // window is zero there), or entirely behind the surface.
                 if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
@@ -1681,9 +1739,9 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     var pick_ls: LS;
     for (var k = 0u; k < m_cand; k++) {
         let idx = first + min(u32(rnd() * f32(count)), count - 1u);
-        let ls = local_light(lights[idx], x);
+        let ls = local_light(light_at(idx), x);
         var ph = luminance(ls.c);
-        if (vol) { ph *= lights[idx].x.x; } else { ph *= max(dot(s.n, ls.l), 0.0) + 0.05 * max(dot(s.ng, ls.l), 0.0); }
+        if (vol) { ph *= light_at(idx).x.x; } else { ph *= max(dot(s.n, ls.l), 0.0) + 0.05 * max(dot(s.ng, ls.l), 0.0); }
         if (ph <= 0.0) { continue; }
         wsum += ph;
         if (rnd() * wsum < ph) {
@@ -1694,10 +1752,10 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     }
     if (pick_ph > 0.0) {
         var c: vec3<f32>;
-        let lk = lights[pick].x;
+        let lk = light_at(pick).x;
         if (vol) { c = pick_ls.c * hg_phase(P.vol.y, dot(pick_ls.l, d)) * lk.x; } else { c = pick_ls.c * eval_bsdf_k(s, lb, v, pick_ls.l, lk.y); }
         if (any(c > vec3<f32>(0.0))) {
-            let vis = light_vis(lights[pick].ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999);
+            let vis = light_vis(light_at(pick).ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999);
             if (any(vis > vec3<f32>(0.0))) {
                 let r = c * gtint(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
                 sum += r;
@@ -1716,7 +1774,7 @@ struct ES { le: vec3<f32>, l: vec3<f32>, dist: f32, pdf_w: f32, w: f32 };
 fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
     let a = attrs[ti];
     let mi = bitcast<u32>(a.uv.w);
-    let m = materials[mi];
+    let m = material_at(mi);
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
     var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
@@ -1797,7 +1855,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    let m_card = materials[bitcast<u32>(attrs[ti].uv.w)].tex1.z == MAT_EMITTER_CARD;
+    let m_card = material_at(bitcast<u32>(attrs[ti].uv.w)).tex1.z == MAT_EMITTER_CARD;
     if (!m_card) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0) { return r; }
     r.le = emitter_radiance(ti, pick_b.x, pick_b.y, l);
@@ -1833,7 +1891,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>) -> ES {
     let l = dl / dist;
     let a = attrs[ti];
     let mi = bitcast<u32>(a.uv.w);
-    let m = materials[mi];
+    let m = material_at(mi);
     var cos_l = dot(ln, -l);
     if (m.tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0 || (has(F_PEMIT) && !(cos_l > 0.0))) { return r; } // also a particle not shown (no area: NaN)
@@ -1863,7 +1921,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     let o = offset_origin(s.p, s.ng);
     // Directional lights: uniformly sampled cone (soft shadows), MIS against BSDF sampling.
     for (var i = 0u; i < P.counts2.x; i++) {
-        let li = lights[i];
+        let li = light_at(i);
         let cos_max = li.dir.w;
         let to_light = -li.dir.xyz;
         let cos_t = 1.0 - rnd() * (1.0 - cos_max);
@@ -2011,7 +2069,7 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f3
     let x = o + d * (t0 + clamp(t, 0.0, t1 - t0));
     var ls = vec3<f32>(0.0);
     for (var i = 0u; i < P.counts2.x; i++) {
-        let li = lights[i];
+        let li = light_at(i);
         let l = -li.dir.xyz;
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         if (li.ext.w < 0.5 || !occluded(x, l, INF)) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
@@ -2112,7 +2170,7 @@ fn medium_span(m: Medium, o: vec3<f32>, d: vec3<f32>) -> vec2<f32> {
 }
 
 fn medium_eval(k: u32, x: vec3<f32>) -> VOut {
-    let m = media[k];
+    let m = medium_at(k);
     var i: VIn;
     i.p = x;
     i.lp = medium_local(m, x);
@@ -2141,7 +2199,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
         var mj = 0.0;
         var end = tmax;
         for (var k = 0u; k < n; k++) {
-            let sp = medium_span(media[k], o, d);
+            let sp = medium_span(medium_at(k), o, d);
             let a = max(sp.x, 0.0);
             let b = min(sp.y, tmax);
             if (a >= b) { continue; }
@@ -2149,7 +2207,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
                 end = min(end, a);
             } else if (b > t) {
                 mask |= 1u << k;
-                mj += media[k].b.x;
+                mj += medium_at(k).b.x;
                 end = min(end, b);
             }
         }
@@ -2167,7 +2225,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
                     // The medium a collision here is in: each by its extinction (the first without a draw).
                     if (v.extinction > 0.0 && (st <= v.extinction || rnd() * st < v.extinction)) {
                         r.albedo = v.albedo;
-                        r.g = media[k].b.y;
+                        r.g = medium_at(k).b.y;
                     }
                 }
                 r.emission += em / mj;
@@ -2190,9 +2248,9 @@ fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> f32 {
     var tr = 1.0;
     let n = min(u32(P.time.w), 32u);
     for (var k = 0u; k < n; k++) {
-        let sp = medium_span(media[k], o, d);
+        let sp = medium_span(medium_at(k), o, d);
         let b = min(sp.y, tmax);
-        let mj = media[k].b.x;
+        let mj = medium_at(k).b.x;
         if (max(sp.x, 0.0) >= b || mj <= 0.0) { continue; }
         var t = max(sp.x, 0.0);
         loop {
@@ -2233,7 +2291,7 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
         var dt = 1.0e30;
         var gridded = false;
         for (var k = 0u; k < n; k++) {
-            let sp = medium_span(media[k], o, d);
+            let sp = medium_span(medium_at(k), o, d);
             let a = max(sp.x, 0.0);
             let b = min(sp.y, tmax);
             if (a >= b) { continue; }
@@ -2242,7 +2300,7 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
             } else if (b > t) {
                 mask |= 1u << k;
                 end = min(end, b);
-                let grid = bitcast<u32>(media[k].b.w) != 0u;
+                let grid = bitcast<u32>(medium_at(k).b.w) != 0u;
                 gridded = gridded || grid;
                 dt = min(dt, (b - a) / (per * select(1.0, 8.0, grid)));
             }
@@ -2265,7 +2323,7 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
                     st += v.extinction;
                     sc += v.albedo * v.extinction;
                     em += v.emission;
-                    if (media[k].a.w != 0u) {
+                    if (medium_at(k).a.w != 0u) {
                         st_m += v.extinction;
                         sc_m += v.albedo * v.extinction;
                         em_m += v.emission;
@@ -2315,7 +2373,7 @@ fn sample_hg(d: vec3<f32>, g: f32) -> vec3<f32> {
 fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < P.counts2.x; i++) {
-        let li = lights[i];
+        let li = light_at(i);
         let cos_max = li.dir.w;
         let cos_t = 1.0 - rnd() * (1.0 - cos_max);
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
@@ -2337,7 +2395,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
         var pick_ls: LS;
         for (var k = 0u; k < 3u; k++) {
             let idx = nd + min(u32(rnd() * f32(nl)), nl - 1u);
-            let ls = local_light(lights[idx], x);
+            let ls = local_light(light_at(idx), x);
             let wk = luminance(ls.c) * hg_phase(g, dot(ls.l, d));
             if (wk <= 0.0) { continue; }
             wsum += wk;
@@ -2348,7 +2406,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
             }
         }
         if (pick_w > 0.0) {
-            let vis = light_vis(lights[pick].ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999);
+            let vis = light_vis(light_at(pick).ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999);
             if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * gtint(vis) * hg_phase(g, dot(pick_ls.l, d)) * (wsum * f32(nl) / (3.0 * pick_w)); }
         }
     }
@@ -2395,11 +2453,11 @@ fn cache_key_point(p: vec3<f32>, coarser: f32) -> vec2<u32> {
 fn cache_point(p: vec3<f32>) -> vec4<f32> {
     let f = cache_find(cache_key_point(p, VOLUME_FINE), false);
     var v = vec4<f32>(0.0);
-    if (f != 0xffffffffu) { v = cache_val[f * 2u]; }
+    if (f != 0xffffffffu) { v = cache_val_load(f * 2u); }
     if (v.w >= CACHE_WARM) { return v; }
     let c = cache_find(cache_key_point(p, VOLUME_COARSE), false);
     if (c != 0xffffffffu) {
-        let cv = cache_val[c * 2u];
+        let cv = cache_val_load(c * 2u);
         if (cv.w > v.w) { return cv; }
     }
     return v;
@@ -2412,7 +2470,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
     let ph = 1.0 / (4.0 * PI);
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < P.counts2.x; i++) {
-        let li = lights[i];
+        let li = light_at(i);
         let cos_max = li.dir.w;
         let cos_t = 1.0 - rnd() * (1.0 - cos_max);
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
@@ -2430,7 +2488,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
         var pick_ls: LS;
         for (var k = 0u; k < 3u; k++) {
             let idx = nd + min(u32(rnd() * f32(nl)), nl - 1u);
-            let ls = local_light(lights[idx], x);
+            let ls = local_light(light_at(idx), x);
             let wk = luminance(ls.c);
             if (wk <= 0.0) { continue; }
             wsum += wk;
@@ -2440,7 +2498,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
                 pick_ls = ls;
             }
         }
-        if (pick_w > 0.0 && (lights[pick].ext.w < 0.5 || !occluded(x, pick_ls.sl, pick_ls.dist * 0.999))) {
+        if (pick_w > 0.0 && (light_at(pick).ext.w < 0.5 || !occluded(x, pick_ls.sl, pick_ls.dist * 0.999))) {
             sum += pick_ls.c * ph * (wsum * f32(nl) / (3.0 * pick_w));
         }
     }
@@ -2551,17 +2609,87 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 // ------------------------------------------------------------------------------------------------
 // What a live trace leaves the live passes (live.wgsl).
 
-// Reflection resolve inputs (live; live.wgsl `refl`), 2 per traced pixel: the camera hit's specular-lobe ray
-// (radiance it brought back, its lobe pdf; pdf 0 = the pixel sampled another lobe), (specular albedo E at the hit,
-// octahedral ray direction). Neighbours reuse each other's rays weighted by their own BRDF (Lumen / SSSR).
-@group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;
-// Live motion vectors per traced pixel: where the camera hit was the previous frame, as a world-space offset (w = 1:
-// on a moving triangle).
-@group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;
-// Live deterministic direct light per traced pixel (`dl_det` at the camera hit).
-@group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;
+// Group 1, the buffers the kernel writes, used through the functions below in every layout:
+//  - refl: reflection resolve inputs (live; live.wgsl `refl`), 2 per traced pixel: the camera hit's specular-lobe ray
+//    (radiance it brought back, its lobe pdf; pdf 0 = the pixel sampled another lobe), (specular albedo E at the hit,
+//    octahedral ray direction). Neighbours reuse each other's rays weighted by their own BRDF (Lumen / SSSR);
+//  - motion_out: live motion vectors per traced pixel: where the camera hit was the previous frame, as a world-space
+//    offset (w = 1: on a moving triangle);
+//  - direct_out: live deterministic direct light per traced pixel (`dl_det` at the camera hit);
+//  - cache_keys, cache_acc, cache_val: the radiance cache (below, at `cache_on`);
+//  - loop_guard_trips: the loop guard's count (first word: the invocations a loop of which was stopped).
+@if(merged) {
+    // The merged layout (merged.rs `KERNEL_LIVE`): the arrays of one struct, one buffer they are ranges of
+    // (gpu.rs `KernelBufs`). What the live passes read of it starts at a multiple of 256 bytes: they bind those
+    // ranges as buffers of their own (WebGPU's `minStorageBufferOffsetAlignment`). The loop guard's count is always
+    // there, written only by a kernel with the guard.
+    struct MergedLive {
+        cache_keys: array<atomic<u32>, ML_CACHE_KEYS>,
+        cache_acc: array<atomic<u32>, ML_CACHE_ACC>,
+        cache_val: array<vec4<f32>, ML_CACHE_VAL>,
+        @align(256) refl: array<vec4<f32>, ML_REFL>,
+        @align(256) motion_out: array<vec4<f32>, ML_MOTION_OUT>,
+        @align(256) direct_out: array<vec4<f32>, ML_DIRECT_OUT>,
+        loop_guard_trips: array<atomic<u32>, GUARD_WORDS>,
+    };
+    @group(1) @binding(1) var<storage, read_write> ML: MergedLive;
+    fn refl_len() -> u32 { return ML_REFL; }
+    fn refl_store(i: u32, v: vec4<f32>) { ML.refl[i] = v; }
+    fn motion_len() -> u32 { return ML_MOTION_OUT; }
+    fn motion_store(i: u32, v: vec4<f32>) { ML.motion_out[i] = v; }
+    fn direct_len() -> u32 { return ML_DIRECT_OUT; }
+    fn direct_load(i: u32) -> vec4<f32> { return ML.direct_out[i]; }
+    fn direct_store(i: u32, v: vec4<f32>) { ML.direct_out[i] = v; }
+    fn cache_key_load(i: u32) -> u32 { return atomicLoad(&ML.cache_keys[i]); }
+    fn cache_key_claim(i: u32, k: u32) -> bool { let r = atomicCompareExchangeWeak(&ML.cache_keys[i], 0u, k); return r.exchanged || r.old_value == k; }
+    fn cache_key_clear(i: u32) { atomicStore(&ML.cache_keys[i], 0u); }
+    fn cache_acc_add(i: u32, v: u32) -> u32 { return atomicAdd(&ML.cache_acc[i], v); }
+    fn cache_acc_load(i: u32) -> u32 { return atomicLoad(&ML.cache_acc[i]); }
+    fn cache_acc_clear(i: u32) { atomicStore(&ML.cache_acc[i], 0u); }
+    fn cache_val_load(i: u32) -> vec4<f32> { return ML.cache_val[i]; }
+    fn cache_val_store(i: u32, v: vec4<f32>) { ML.cache_val[i] = v; }
+    @if(guard) fn loop_guard_stopped() { atomicAdd(&ML.loop_guard_trips[0], 1u); }
+} @else {
+    @group(1) @binding(1) var<storage, read_write> cache_keys: array<atomic<u32>>;
+    @group(1) @binding(2) var<storage, read_write> cache_acc: array<atomic<u32>>;
+    @group(1) @binding(3) var<storage, read_write> cache_val: array<vec4<f32>>;
+    @group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;
+    @group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;
+    @group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;
+    fn refl_len() -> u32 { return arrayLength(&refl); }
+    fn refl_store(i: u32, v: vec4<f32>) { refl[i] = v; }
+    fn motion_len() -> u32 { return arrayLength(&motion_out); }
+    fn motion_store(i: u32, v: vec4<f32>) { motion_out[i] = v; }
+    fn direct_len() -> u32 { return arrayLength(&direct_out); }
+    fn direct_load(i: u32) -> vec4<f32> { return direct_out[i]; }
+    fn direct_store(i: u32, v: vec4<f32>) { direct_out[i] = v; }
+    fn cache_key_load(i: u32) -> u32 { return atomicLoad(&cache_keys[i]); }
+    fn cache_key_claim(i: u32, k: u32) -> bool { let r = atomicCompareExchangeWeak(&cache_keys[i], 0u, k); return r.exchanged || r.old_value == k; }
+    fn cache_key_clear(i: u32) { atomicStore(&cache_keys[i], 0u); }
+    fn cache_acc_add(i: u32, v: u32) -> u32 { return atomicAdd(&cache_acc[i], v); }
+    fn cache_acc_load(i: u32) -> u32 { return atomicLoad(&cache_acc[i]); }
+    fn cache_acc_clear(i: u32) { atomicStore(&cache_acc[i], 0u); }
+    fn cache_val_load(i: u32) -> vec4<f32> { return cache_val[i]; }
+    fn cache_val_store(i: u32, v: vec4<f32>) { cache_val[i] = v; }
+    @if(guard) {
+        @group(1) @binding(8) var<storage, read_write> loop_guard_trips: array<atomic<u32>, GUARD_WORDS>;
+        fn loop_guard_stopped() { atomicAdd(&loop_guard_trips[0], 1u); }
+    }
+}
 
-fn resolve_bound() -> bool { return LIVE && arrayLength(&refl) >= 2u * P.size.x * P.size.y; }
+// The loop guard (gpu.rs `loop_guard_of`; docs/RUNTIME.md "The engine in a browser"): every loop of the kernel, the
+// scene's functions' too, begins with `if (loop_guard()) { break; }` (gpu.rs `guard_loops`, a pass over the variant's
+// syntax tree). The kernel's traversals follow indices they read from buffers and end only on sound data; with the
+// guard a dispatch always ends: an invocation's iterations are counted over all its loops together, past
+// LOOP_GUARD_LIMIT it leaves them, and the invocations stopped are counted for the renderer to read back.
+@if(guard) var<private> LOOP_GUARD_N: u32 = 0u;
+@if(guard) fn loop_guard() -> bool {
+    LOOP_GUARD_N += 1u;
+    if (LOOP_GUARD_N == LOOP_GUARD_LIMIT + 1u) { loop_guard_stopped(); }
+    return LOOP_GUARD_N > LOOP_GUARD_LIMIT;
+}
+
+fn resolve_bound() -> bool { return LIVE && refl_len() >= 2u * P.size.x * P.size.y; }
 // THREERT_CACHE_FLAGS bit 16 turns the resolve off (rays then stay in their pixel's specular, the resolve reads zeros).
 fn resolve_on() -> bool { return resolve_bound() && (u32(P.cache.w) & 16u) == 0u; }
 
@@ -2602,9 +2730,7 @@ const CACHE_EVICT: f32 = 120.0;      // frames without samples before an entry i
 // cache_keys[i]: checksum of the voxel key (0 = free). cache_acc[8i ..]: this frame's sums (fixed point) of the total
 // r, g, b, of its indirect part r, g, b, and the sample count. cache_val[2i] = (irradiance / π, history samples),
 // cache_val[2i + 1] = (its indirect part: all but the voxel's own direct light, frames since the last sample).
-@group(1) @binding(1) var<storage, read_write> cache_keys: array<atomic<u32>>;
-@group(1) @binding(2) var<storage, read_write> cache_acc: array<atomic<u32>>;
-@group(1) @binding(3) var<storage, read_write> cache_val: array<vec4<f32>>;
+// (Declared with the trace's outputs, group 1, above `resolve_bound`.)
 
 fn cache_on() -> bool { return LIVE && P.cache.x > 0.5; }
 
@@ -2632,13 +2758,12 @@ fn cache_find(k: vec2<u32>, insert: bool) -> u32 {
     var free = 0xffffffffu;
     for (var i = 0u; i < CACHE_PROBE; i++) {
         let s = (k.x + i) & (CACHE_SIZE - 1u);
-        let c = atomicLoad(&cache_keys[s]);
+        let c = cache_key_load(s);
         if (c == k.y) { return s; }
         if (c == 0u && free == 0xffffffffu) { free = s; }
     }
     if (!insert || free == 0xffffffffu) { return 0xffffffffu; }
-    let r = atomicCompareExchangeWeak(&cache_keys[free], 0u, k.y);
-    if (r.exchanged || r.old_value == k.y) { return free; }
+    if (cache_key_claim(free, k.y)) { return free; }
     return 0xffffffffu;
 }
 
@@ -2660,8 +2785,8 @@ fn cache_get(s: Surface, indirect: bool) -> vec4<f32> {
 fn cache_entry(k: vec2<u32>, indirect: bool) -> vec4<f32> {
     let i = cache_find(k, false);
     if (i == 0xffffffffu) { return vec4<f32>(0.0); }
-    let v = cache_val[i * 2u];
-    if (indirect) { return vec4<f32>(cache_val[i * 2u + 1u].rgb, v.w); }
+    let v = cache_val_load(i * 2u);
+    if (indirect) { return vec4<f32>(cache_val_load(i * 2u + 1u).rgb, v.w); }
     return v;
 }
 
@@ -2672,15 +2797,15 @@ fn cache_fixed(e: vec3<f32>) -> vec3<u32> {
 
 fn cache_add(i: u32, total: vec3<f32>, indirect: vec3<f32>) {
     if (i == 0xffffffffu || non_finite(total) || non_finite(indirect)) { return; }
-    if (atomicAdd(&cache_acc[i * 8u + 6u], 1u) >= CACHE_FRAME_CAP) { return; }
+    if (cache_acc_add(i * 8u + 6u, 1u) >= CACHE_FRAME_CAP) { return; }
     let a = cache_fixed(total);
     let b = cache_fixed(indirect);
-    atomicAdd(&cache_acc[i * 8u], a.x);
-    atomicAdd(&cache_acc[i * 8u + 1u], a.y);
-    atomicAdd(&cache_acc[i * 8u + 2u], a.z);
-    atomicAdd(&cache_acc[i * 8u + 3u], b.x);
-    atomicAdd(&cache_acc[i * 8u + 4u], b.y);
-    atomicAdd(&cache_acc[i * 8u + 5u], b.z);
+    cache_acc_add(i * 8u, a.x);
+    cache_acc_add(i * 8u + 1u, a.y);
+    cache_acc_add(i * 8u + 2u, a.z);
+    cache_acc_add(i * 8u + 3u, b.x);
+    cache_acc_add(i * 8u + 4u, b.y);
+    cache_acc_add(i * 8u + 5u, b.z);
 }
 
 // White Lambertian lobes: lighting gathered with them is irradiance / π, and a cosine-sampled ray has weight 1.
@@ -2824,16 +2949,16 @@ fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = min(u32(P.time.w), 32u);
     var total = 0.0;
     for (var k = 0u; k < n; k++) {
-        let sp = medium_span(media[k], o, d);
-        total += max(min(sp.y, select(tmax, tmax_h, media[k].a.z != 0u)) - max(sp.x, 0.0), 0.0);
+        let sp = medium_span(medium_at(k), o, d);
+        total += max(min(sp.y, select(tmax, tmax_h, medium_at(k).a.z != 0u)) - max(sp.x, 0.0), 0.0);
     }
     if (total <= 0.0) { return; }
     var u = rnd() * total;
     var x = o;
     for (var k = 0u; k < n; k++) {
-        let sp = medium_span(media[k], o, d);
+        let sp = medium_span(medium_at(k), o, d);
         let a = max(sp.x, 0.0);
-        let len = max(min(sp.y, select(tmax, tmax_h, media[k].a.z != 0u)) - a, 0.0);
+        let len = max(min(sp.y, select(tmax, tmax_h, medium_at(k).a.z != 0u)) - a, 0.0);
         if (u < len) {
             x = o + d * (a + u);
             break;
@@ -2876,7 +3001,7 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     px.normal = vec4<f32>(px.normal.xyz, floor(clamp(share, 0.0, 1.0) * 255.0) + 0.5 * clamp(mm.tr, 0.0, 1.0));
     px.emit = vec4<f32>(px.emit.rgb * mm.tr + mm.light * samples, px.emit.w);
     accum[pix] = px;
-    if (arrayLength(&direct_out) >= w * h) { direct_out[pix] = vec4<f32>(direct_out[pix].rgb * mm.tr, direct_out[pix].w); }
+    if (direct_len() >= w * h) { direct_store(pix, vec4<f32>(direct_load(pix).rgb * mm.tr, direct_load(pix).w)); }
 }
 
 // Once per frame after the trace: folds the frame's training sums into each entry (history capped at P.cache.y
@@ -2884,29 +3009,29 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(256, 1, 1)
 fn cache_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
-    if (i >= CACHE_SIZE || atomicLoad(&cache_keys[i]) == 0u) { return; }
-    let n = min(atomicLoad(&cache_acc[i * 8u + 6u]), CACHE_FRAME_CAP);
-    var v = cache_val[i * 2u];
-    var ind = cache_val[i * 2u + 1u];
+    if (i >= CACHE_SIZE || cache_key_load(i) == 0u) { return; }
+    let n = min(cache_acc_load(i * 8u + 6u), CACHE_FRAME_CAP);
+    var v = cache_val_load(i * 2u);
+    var ind = cache_val_load(i * 2u + 1u);
     if (n > 0u) {
         var sum: array<f32, 6>;
-        for (var c = 0u; c < 6u; c++) { sum[c] = f32(atomicLoad(&cache_acc[i * 8u + c])) * (P.misc.x / 2097152.0) / f32(n); }
+        for (var c = 0u; c < 6u; c++) { sum[c] = f32(cache_acc_load(i * 8u + c)) * (P.misc.x / 2097152.0) / f32(n); }
         let hist = min(v.w + f32(n), P.cache.y);
         // The frame cap counts frames, also those without samples since the last update (sparse voxels).
         let a = max(f32(n) / hist, min((ind.w + 1.0) / P.cache.z, 1.0));
         v = vec4<f32>(mix(v.rgb, vec3<f32>(sum[0], sum[1], sum[2]), a), hist);
         ind = vec4<f32>(mix(ind.rgb, vec3<f32>(sum[3], sum[4], sum[5]), a), 0.0);
-        for (var c = 0u; c < 8u; c++) { atomicStore(&cache_acc[i * 8u + c], 0u); }
+        for (var c = 0u; c < 8u; c++) { cache_acc_clear(i * 8u + c); }
     } else {
         ind.w += 1.0;
         if (ind.w > CACHE_EVICT) {
-            atomicStore(&cache_keys[i], 0u);
+            cache_key_clear(i);
             v = vec4<f32>(0.0);
             ind = vec4<f32>(0.0);
         }
     }
-    cache_val[i * 2u] = v;
-    cache_val[i * 2u + 1u] = ind;
+    cache_val_store(i * 2u, v);
+    cache_val_store(i * 2u + 1u, ind);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2919,7 +3044,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = gid.y * w + gid.x;
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
-    if (LIVE && P.misc.w < 0.5 && arrayLength(&direct_out) >= w * h) { direct_out[pix] = vec4<f32>(0.0); }
+    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0)); }
     rng_state = pcg(pix ^ pcg(P.size.z * 9781u + P.size.w * 6271u));
 
     // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
@@ -3113,7 +3238,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let kp = (ti - P.group_first[1].x) * 3u;
             if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
                 // Procedural geometry: its object-space hit point through the previous frame's rows.
-                let r = instances[hit.inst];
+                let r = instance_at(hit.inst);
                 if (any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
                     let lp = vec4<f32>(proc_point(r, s.p), 1.0);
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
@@ -3121,7 +3246,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if (LIVE && P.motion.x > 0.5 && has(F_INST) && hit.inst != NO_INST) {
                 // A movable instance: its model-space hit point (the previous pose's for a deforming mesh) through the
                 // previous frame's transform (p rows; the same as m when it did not move).
-                let r = instances[hit.inst];
+                let r = instance_at(hit.inst);
                 if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
                     var lp = vec4<f32>(tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * hit.u + tri_verts[ti * 3u + 2u].xyz * hit.v, 1.0);
                     if (deforms) { lp = vec4<f32>(prev_verts[kp].xyz + prev_verts[kp + 1u].xyz * hit.u + prev_verts[kp + 2u].xyz * hit.v, 1.0); }
@@ -3206,10 +3331,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Live: the deterministic direct light leaves the radiance (and its specular part the specular) for a signal of
         // its own, written here so nothing more stays live through the path. It carries the transmittance to the camera
         // (fog, media) as the radiance did: left out, the diffuse signal's clamp at 0 dropped the attenuation.
-        if (LIVE && depth == 0u && arrayLength(&direct_out) >= P.size.x * P.size.y && !non_finite(dl_det) && !non_finite(dl_det_spec)) {
+        if (LIVE && depth == 0u && direct_len() >= P.size.x * P.size.y && !non_finite(dl_det) && !non_finite(dl_det_spec)) {
             radiance -= thr * dl_det;
             dl_spec = max(dl_spec - dl_det_spec, vec3<f32>(0.0));
-            if (P.misc.w < 0.5) { direct_out[gid.y * P.size.x + gid.x] = vec4<f32>(thr * dl_det, 0.0); }
+            if (P.misc.w < 0.5) { direct_store(gid.y * P.size.x + gid.x, vec4<f32>(thr * dl_det, 0.0)); }
         }
 
         let l = sample_bsdf(s, lb, v);
@@ -3288,8 +3413,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (non_finite(dropped)) { dropped = vec3<f32>(0.0); }
         spec = clamp(spec, vec3<f32>(0.0), max(radiance - e0, vec3<f32>(0.0)));
         let diff = max(radiance - e0 - spec - dropped, vec3<f32>(0.0));
-        if (P.misc.w < 0.5 && arrayLength(&motion_out) >= w * h) {
-            motion_out[pix] = select(vec4<f32>(0.0), mv, !non_finite(mv.xyz));
+        if (P.misc.w < 0.5 && motion_len() >= w * h) {
+            motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz)));
         }
         if (resolve_bound() && P.misc.w < 0.5) {
             // Radiance along the specular ray: what the path gathered after it, over the ray's weight.
@@ -3301,8 +3426,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // A sample that took the diffuse lobe leaves its specular share (dropped) for the resolve to return when no
             // specular-lobe ray around it can stand in (w = -1 marks it).
             if (resolve && !(refl_pdf > 0.0)) { li = dropped; }
-            refl[pix * 2u] = vec4<f32>(li, select(select(0.0, -1.0, resolve), min(refl_pdf, 1e6), resolve && refl_pdf > 0.0));
-            refl[pix * 2u + 1u] = vec4<f32>(select(vec3<f32>(0.0), refl_e, resolve), bitcast<f32>(oct_enc(select(vec3<f32>(0.0, 0.0, 1.0), refl_l, refl_pdf > 0.0))));
+            refl_store(pix * 2u, vec4<f32>(li, select(select(0.0, -1.0, resolve), min(refl_pdf, 1e6), resolve && refl_pdf > 0.0)));
+            refl_store(pix * 2u + 1u, vec4<f32>(select(vec3<f32>(0.0), refl_e, resolve), bitcast<f32>(oct_enc(select(vec3<f32>(0.0, 0.0, 1.0), refl_l, refl_pdf > 0.0)))));
         }
         // misc.w = index of this sample within the frame: the first one also writes the g-buffer.
         if (P.misc.w < 0.5) {

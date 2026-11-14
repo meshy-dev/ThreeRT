@@ -743,25 +743,32 @@ tree (ROADMAP § 6).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
   kernel binds 19. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
   uses, `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit
-  test's check; a page binds them as natively.) There is one source: the browser's kernel is written from
-  `pathtrace.wgsl` as text when a module is compiled, and the native one is untouched.
-  - The kernel's seven tables become the arrays of one struct in one buffer; their lengths are in the source, each a
-    power of two above a floor, so a kernel is compiled again only when a table doubles. The renderer keeps writing
-    its own buffers and a frame copies them into the struct's.
+  test's check; a page binds them as natively.) There is one source: pathtrace.wgsl declares the kernel's tables and
+  its group-1 buffers in an `@if(merged) { .. } @else { .. }` block each (WESL's conditional translation, "The
+  kernel's source"), and the kernel reads and writes them only through functions each block declares
+  (`material_at`, `cache_acc_add`, `refl_store`, ...).
+  - The kernel's seven tables become the arrays of one struct in one buffer; their lengths are WESL constants the
+    source imports (gpu.rs `KernelVariant::constants`), each a power of two above a floor, so a kernel is compiled
+    again only when a table doubles. The renderer keeps writing its own buffers and a frame copies them into the
+    struct's.
   - The kernel's six group-1 buffers (the radiance cache, what the live passes read of a trace) are ranges of one
     buffer, the arrays of a second struct; what the live passes read of it starts at multiples of 256 bytes, so they
     bind those ranges as buffers of their own.
-  - A use of a merged name the generator does not know, a declaration not found exactly once, a name it would add
-    that is taken: each stops the renderer, with the line. Locals that shadow a name are followed through their
-    scopes. A test reads the result with naga: valid WGSL, 8 storage buffers for the kernel (19 as written), the
-    structs' arrays where the Rust side puts them.
+  - The merged block declares none of the buffers by its own name, so a read or write that goes past the functions
+    does not compile in it (naga names the line). A test reads the merged variants with naga: valid WGSL, 8 storage
+    buffers for the kernel (19 as written), the structs' arrays where the Rust side puts them.
+  - Until 2026-11-14 the browser's kernel was written from the native one as text: a scanner of WGSL in merged.rs
+    found every use of the thirteen names, followed the locals that shadowed them through their scopes, and rewrote
+    each use (the uniform tables and the loop guard were made the same way).
   - `THREERT_MERGED=1` runs it natively (software traversal, the device held to 8).
-- **The loop guard** (`merged::guard`). The kernel's traversals follow indices they read from buffers and end only on
+- **The loop guard** (`@if(guard)` in pathtrace.wgsl, gpu.rs `guard_loops`). The kernel's traversals follow indices they read from buffers and end only on
   sound data. On 2026-11-11 two dispatches that did not return took this machine's display down (WindowServer's
   watchdog; software traversal under the atomic tests, at two scenes without a triangle; the cause below is likely,
   not confirmed). A page's shader runs on the
   player's GPU beside everything else, so **a browser's kernel always has the guard**: every loop body counts the
-  invocation's iterations and leaves past a limit (65,536; a page can set it). No formula changes, but the image is
+  invocation's iterations and leaves past a limit (65,536; a page can set it). The count is put at the start of
+  every loop body, the scene's functions' too, by a pass over the variant's syntax tree (WESL's, as a compiler
+  instruments code); its declarations and the limit (a WESL constant) are in the source. No formula changes, but the image is
   not bit-identical to the kernel's without the guard: the compiler arranges the arithmetic of the functions it is in
   differently (hello world, one sample: 354 of 43,200 numbers differ, by at most 2 × 10⁻⁷ of their value). What it
   stops it counts: the count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
@@ -962,7 +969,7 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   tested first: a ray that meets no unit reads one node, and a scene of one unit has no tree to walk. The hit it
   returns is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
 - **The unit walk is `shaders/trace_units.wgsl`**, in the kernel under `@if(units)` (`F_UNITS`, a source feature,
-  as vertex colours are; gpu.rs `kernel_flags`): the file's walk, a call at the end of the still walk, and the still
+  as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk, a call at the end of the still walk, and the still
   walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
   kernel never does.
 - Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
@@ -1042,7 +1049,7 @@ to it.
   kernel without units is the source it was (`a_kernel_with_units_has_the_loop_guard`; naga validates the guarded
   kernel with units as written).
 
-**The loop guard.** A browser's kernel always has it (`merged::guard`). **Natively a kernel with units has it with
+**The loop guard.** A browser's kernel always has it (gpu.rs `guard_loops`). **Natively a kernel with units has it with
 nothing set** (65,536 iterations an invocation; `THREERT_LOOP_GUARD=0` takes it out, `=<limit>` sets another): what
 hung on 2026-11-11 is not confirmed, the unit walk is new, and no kernel with units has run without it. A native
 kernel without units has none unless `THREERT_LOOP_GUARD` says so, as before (its source and every existing byte
@@ -1226,15 +1233,22 @@ units under software traversal; hello world natively and in Chrome (every check,
 
 The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `trace_units.wgsl`, `trace_hw.wgsl` and
 `translucent.wgsl` (gpu.rs `KERNEL_FILES`), every device's and scene's variant in it under WESL's conditional
-translation (`@if(flag)` on a declaration or a statement). wesl-rs (WESL's compiler in Rust, natively and in a
-browser alike) makes a kernel's WGSL from the flags (gpu.rs `kernel_flags`, `kernel_wgsl`): the traversal
-(`hwrt`), a device's switches (`strict`, `cutout_lite`, `cutout_lite2`, `last_direct`, `light_pick`) and a scene's
-features that change declarations (`vcolor`, `grid`, `tint`, `unlit`, `units`, `background`; the other features switch
-code under the pipeline-overridable constant `FEAT`). pathtrace.wgsl's head names them; each is said where it changes
-something, and a flag the source names that a kernel is not given is an error.
-- Before that, still as text: a scene's material, volume and geometry functions between their markers in
-  pathtrace.wgsl, the merged layout (merged.rs `kernel`, the browser), the uniform tables (merged.rs `uniform_tables`,
-  Android) and the loop guard (merged.rs `guard`).
+translation (`@if(flag)` on a declaration or a statement, `@if(flag) { .. } @else { .. }` on a block of
+declarations). wesl-rs (WESL's compiler in Rust, natively and in a browser alike) makes a kernel's WGSL from a
+variant (gpu.rs `KernelVariant`, `kernel_wgsl`): the traversal (`hwrt`), a device's switches (`strict`,
+`cutout_lite`, `cutout_lite2`, `last_direct`, `light_pick`), a scene's features that change declarations (`vcolor`,
+`grid`, `tint`, `unlit`, `units`, `background`; the other features switch code under the pipeline-overridable constant
+`FEAT`), the binding layout (`merged`, the browser's; `uniform_tables`, Android's) and the loop guard (`guard`).
+pathtrace.wgsl's head names them; each is said where it changes something, and a flag the source names that a
+kernel is not given is an error.
+- The numbers a variant is compiled for are WESL constants, which the source imports (`import constants::..`; gpu.rs
+  `KernelVariant::constants`): the merged layout's array lengths, the uniform tables', the loop guard's limit. One
+  the source imports and is not given is an error.
+- The kernel reads its tables and its group-1 buffers only through functions (`material_at`, `instance_at`,
+  `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
+  nothing else of the kernel knows which it is in.
+- The loop guard's count goes into every loop by a pass over the variant's syntax tree (gpu.rs `guard_loops`).
+- Still as text: a scene's material, volume and geometry functions, between their markers in pathtrace.wgsl.
 - Until 2026-11-14 the variants were patches of the source at anchors, whole lines of code found and replaced (gpu.rs
   `kernel_base`, `kernel_switches`, `kernel_source`). For every combination of the flags, 2,304, the Metal source naga
   wrote from the patched kernel and from the one with `@if` was the same, two rewrites allowed for: the light pick's
@@ -1268,9 +1282,9 @@ on the device", and differs where it says so.
 - **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android; never with the
   merged layout). The driver gave the kernel other buffers' contents for four of its read-only storage buffers:
   `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18). As uniform buffers they read right.
-  - The kernel's source is rewritten when a module is compiled, as the merged layout's is (`merged::uniform_tables`):
-    the four declarations become sized uniform arrays at the same bindings, and every index into them is held to the
-    array (`min(u32(i), last)`), so nothing is read outside a uniform buffer.
+  - The kernel's source has them under `@if(uniform_tables)` (pathtrace.wgsl): the four declarations as sized
+    uniform arrays at the same bindings (their lengths WESL constants, merged.rs `UNIFORM_LEN`), and their accessors
+    hold every index to the array (`min(i, last)`), so nothing is read outside a uniform buffer.
   - The renderer keeps writing its storage buffers. `Gpu::sync_tables` copies the four into their uniform buffers in
     a frame's encoder, after the particle passes (which write their objects' entries on the GPU) and before the trace.
   - A uniform binding holds 64 KiB, so the arrays are bounded: 2,048 textures, 4,096 object entries (1,365 objects;

@@ -16,7 +16,7 @@
 //   --cold              a fresh browser profile: the shaders compiled again (the first visit's times)
 //
 // A GPU job that does not end takes this machine's display with it (2026-11-11), and a page's shader runs on the same
-// GPU as everything else. So: the kernel in the page has the loop guard (renderer/src/merged.rs `guard`), and its
+// GPU as everything else. So: the kernel in the page has the loop guard (renderer/src/gpu.rs `guard_loops`), and its
 // count is a check here (0, or the frames are wrong); the first step is small; every wait on the page has a timeout;
 // and a timeout stops the run where it is: nothing is retried, no second page is opened (exit 3; see the message).
 // The GPU lock is held.

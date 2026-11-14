@@ -363,7 +363,7 @@ pub struct LiveCore {
     pub cpu_wait_ms: f32,
     /// The cloud cover the sky and the sun light were made with (`move_sun`).
     sky_cover: f32,
-    /// The loop guard (merged.rs `guard`), if a kernel of this session may have it: the invocations it has stopped at
+    /// The loop guard (gpu.rs `guard_loops`), if a kernel of this session may have it: the invocations it has stopped at
     /// its limit since the view was made, as last read back (a frame or two behind, without waiting). Above zero:
     /// frames with wrong pixels, a traversal that did not end on the scene's data. None without the guard.
     pub guard_trips: Option<u32>,

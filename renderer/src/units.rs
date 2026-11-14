@@ -1220,7 +1220,7 @@ mod tests {
                 "stack[sp] = far;",
                 "continue;",
                 "} else if (rec == NO_INST) {",
-                "let u = instances[n.left_or_first];",
+                "let u = instance_at(n.left_or_first);",
                 "if (mode != TRACE_SHADOW || bitcast<u32>(u.n1.w) != 0u) {",
                 "rec = n.left_or_first;",
                 "ro = o - vec3<f32>(u.m0.w, u.m1.w, u.m2.w);",

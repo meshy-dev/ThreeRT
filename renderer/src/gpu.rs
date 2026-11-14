@@ -14,7 +14,7 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
-    /// The kernel's bounded tables are uniform buffers (`GpuOptions::uniform_tables`; merged.rs `uniform_tables`).
+    /// The kernel's bounded tables are uniform buffers (`GpuOptions::uniform_tables`; merged.rs `UNIFORM_TABLES`).
     pub uniform_tables: bool,
     /// The kernel's switches this device was opened with (`KernelSwitches`): they are in `source`.
     pub switches: KernelSwitches,
@@ -27,7 +27,7 @@ pub struct Gpu {
     /// The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers. Natively with
     /// THREERT_MERGED=1 (software traversal, the device held to eight too).
     pub merged: bool,
-    /// By (material-function code hash, the features that change the source: `kernel_flags`, the merged layout's lengths).
+    /// By (material-function code hash, the features that change the source: `KernelVariant::flags`, the merged layout's lengths).
     modules: std::sync::Mutex<std::collections::HashMap<(u64, u32, Option<crate::merged::Caps>), wgpu::ShaderModule>>,
     pipeline_layout: wgpu::PipelineLayout,
     /// Kernel variants by (feature mask, material-function code hash, LIVE): `FEAT` compiles out the features a scene
@@ -114,7 +114,7 @@ pub struct Params {
     /// The sky's aerial perspective (F_AERIAL; `scene::aerial_params`): density multiple, Rayleigh scale, Mie scale, -.
     pub aerial: [f32; 4],
     /// three.js `scene.background` (F_BACKGROUND): its radiance, 1. Last, and read only by the kernel patched for it
-    /// (`kernel_flags`): every other kernel's `Params` ends before it.
+    /// (`KernelVariant::flags`): every other kernel's `Params` ends before it.
     pub background: [f32; 4],
 }
 
@@ -711,56 +711,182 @@ pub fn kernel_template() -> String {
     KERNEL_FILES.join("\n")
 }
 
-/// The flags of the kernel's conditional translation (pathtrace.wgsl's head): a device's traversal and switches, and
-/// a scene's features that change the kernel's declarations (`F_SOURCE`; the others switch code under `override FEAT`).
-///  - vcolor (F_VCOLOR), three.js `vertexColors` (`scene::tri_colors`): three sRGB 8-bit colours per triangle after the
-///    previous vertices in `prev_verts` (from vec4 `Params::procs.w`; the kernel has no binding to spare), interpolated
-///    in linear at the hit, multiply the base colour of surfaces and glass (white for triangles without them).
-///  - grid (F_GRID), density grids (`scene::GridBuild`): the grid atlas at binding 19 (a texture: the buffers are at
-///    Metal's limit), `VIn::grid` and `vgrid` for volume functions.
-///  - tint (F_TINT), instance colours (`scene::object_stride`): object entries of 4 vec4s, the 4th the instance colour,
-///    which multiplies the base colour of surfaces, procedural surfaces and glass (three.js `instanceColor`).
-///  - unlit (F_UNLIT), three.js MeshBasicMaterial (`scene::MAT_UNLIT`): its colour (x map, x tint) is emission seen by
-///    camera rays and mirror-like paths only, its albedo 0: lit by nothing, lighting nothing (in no emitter list).
-///  - units (F_UNITS), software traversal's second level (trace_units.wgsl): the still scene's walk hands its hit to
-///    the units' and has no stack of its own (the module's, set to zero once an invocation and not once a ray).
-///  - background (F_BACKGROUND), three.js `scene.background`: camera rays that miss, and paths bent straight on through
-///    glass (the rays `sky_mis` gets with pdf 0), see `Params::background`, which `Params` ends with in this kernel only.
-pub fn kernel_flags(hwrt: bool, k: &KernelSwitches, features: u32) -> [(&'static str, bool); 12] {
-    let f = |bit: u32| features & bit != 0;
-    [
-        ("hwrt", hwrt),
-        ("strict", k.strict),
-        ("cutout_lite", k.cutout_lite >= 1),
-        ("cutout_lite2", k.cutout_lite >= 2),
-        ("last_direct", k.last_direct),
-        ("light_pick", k.light_pick),
-        ("vcolor", f(F_VCOLOR)),
-        ("grid", f(F_GRID)),
-        ("tint", f(F_TINT)),
-        ("unlit", f(F_UNLIT)),
-        ("units", f(F_UNITS)),
-        ("background", f(F_BACKGROUND)),
-    ]
+/// What a kernel is compiled for (pathtrace.wgsl's head names the flags): the device's traversal, switches, binding
+/// layout and loop guard, and the scene's features that change the kernel's declarations (`F_SOURCE`; the others
+/// switch code under `override FEAT`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KernelVariant {
+    pub hwrt: bool,
+    pub switches: KernelSwitches,
+    /// The scene's features: `F_SOURCE`'s are flags.
+    pub features: u32,
+    /// The merged layout (merged.rs), with its arrays' lengths.
+    pub merged: Option<crate::merged::Caps>,
+    /// Four tables in uniform buffers (merged.rs `UNIFORM_TABLES`; `GpuOptions::uniform_tables`). Never with `merged`.
+    pub uniform_tables: bool,
+    /// The loop guard's limit, in a kernel with the guard (`loop_guard_of`, `guard_loops`).
+    pub guard: Option<u32>,
 }
 
-/// A kernel's WGSL: `src` (the template, with what is put into its text first: the scene's functions, the merged
-/// layout, the uniform tables, the loop guard) through WESL's conditional translation for `flags` (wesl-rs, WESL's
-/// reference compiler in Rust). Every flag the source names must be given: one that is not is an error, not off.
-pub fn kernel_wgsl(src: &str, flags: &[(&str, bool)]) -> String {
-    use wesl::{resolver::VirtualResolver, syntax::ModulePath, CompileOptions, Feature, Features};
-    let path: ModulePath = "package::kernel".parse().expect("a module path");
-    let mut resolver = VirtualResolver::new();
-    resolver.add_module(path.clone(), std::borrow::Cow::Borrowed(src));
+impl KernelVariant {
+    /// A device's traversal and switches, a scene's features; the layout as written, no guard.
+    pub fn new(hwrt: bool, switches: KernelSwitches, features: u32) -> KernelVariant {
+        KernelVariant { hwrt, switches, features, ..Default::default() }
+    }
+
+    /// The flags of the kernel's conditional translation. A scene's:
+    ///  - vcolor (F_VCOLOR), three.js `vertexColors` (`scene::tri_colors`): three sRGB 8-bit colours per triangle after
+    ///    the previous vertices in `prev_verts` (from vec4 `Params::procs.w`; the kernel has no binding to spare),
+    ///    interpolated in linear at the hit, multiply the base colour of surfaces and glass (white for triangles
+    ///    without them).
+    ///  - grid (F_GRID), density grids (`scene::GridBuild`): the grid atlas at binding 19 (a texture: the buffers are
+    ///    at Metal's limit), `VIn::grid` and `vgrid` for volume functions.
+    ///  - tint (F_TINT), instance colours (`scene::object_stride`): object entries of 4 vec4s, the 4th the instance
+    ///    colour, which multiplies the base colour of surfaces, procedural surfaces and glass (three.js `instanceColor`).
+    ///  - unlit (F_UNLIT), three.js MeshBasicMaterial (`scene::MAT_UNLIT`): its colour (x map, x tint) is emission seen
+    ///    by camera rays and mirror-like paths only, its albedo 0: lit by nothing, lighting nothing (in no emitter list).
+    ///  - units (F_UNITS), software traversal's second level (trace_units.wgsl): the still scene's walk hands its hit
+    ///    to the units' and has no stack of its own (the module's, set to zero once an invocation and not once a ray).
+    ///  - background (F_BACKGROUND), three.js `scene.background`: camera rays that miss, and paths bent straight on
+    ///    through glass (the rays `sky_mis` gets with pdf 0), see `Params::background`, which `Params` ends with in
+    ///    this kernel only.
+    pub fn flags(&self) -> [(&'static str, bool); 15] {
+        let (k, f) = (&self.switches, |bit: u32| self.features & bit != 0);
+        [
+            ("hwrt", self.hwrt),
+            ("strict", k.strict),
+            ("cutout_lite", k.cutout_lite >= 1),
+            ("cutout_lite2", k.cutout_lite >= 2),
+            ("last_direct", k.last_direct),
+            ("light_pick", k.light_pick),
+            ("vcolor", f(F_VCOLOR)),
+            ("grid", f(F_GRID)),
+            ("tint", f(F_TINT)),
+            ("unlit", f(F_UNLIT)),
+            ("units", f(F_UNITS)),
+            ("background", f(F_BACKGROUND)),
+            ("merged", self.merged.is_some()),
+            ("uniform_tables", self.uniform_tables),
+            ("guard", self.guard.is_some()),
+        ]
+    }
+
+    /// The numbers the variant is compiled for, WESL constants (`import constants::`): the merged layout's array
+    /// lengths (`MT_<table>`, `ML_<buffer>`), the uniform tables' (`UT_<table>`), the loop guard's count's words and
+    /// its limit.
+    pub fn constants(&self) -> Vec<(String, u32)> {
+        use crate::merged::{GUARD_WORDS, KERNEL_LIVE, TABLES, UNIFORM_LEN, UNIFORM_TABLES};
+        let mut out = vec![];
+        if let Some(c) = &self.merged {
+            out.extend(TABLES.iter().zip(c.tables).map(|(m, n)| (format!("MT_{}", m.name.to_uppercase()), n)));
+            out.extend(KERNEL_LIVE.iter().zip(c.live).map(|(m, n)| (format!("ML_{}", m.name.to_uppercase()), n)));
+        }
+        if self.uniform_tables {
+            out.extend(UNIFORM_TABLES.iter().zip(UNIFORM_LEN).map(|(&k, n)| (format!("UT_{}", TABLES[k].name.to_uppercase()), n)));
+        }
+        if self.merged.is_some() || self.guard.is_some() {
+            out.push(("GUARD_WORDS".into(), GUARD_WORDS));
+        }
+        if let Some(n) = self.guard {
+            out.push(("LOOP_GUARD_LIMIT".into(), n));
+        }
+        out
+    }
+}
+
+/// A kernel's WGSL: `src` (the template, the scene's functions spliced in) for a variant: WESL's conditional
+/// translation for its flags, with its constants, then the loop guard if it has one (`guard_loops`).
+pub fn kernel_wgsl(src: &str, v: &KernelVariant) -> String {
+    assert!(!(v.merged.is_some() && v.uniform_tables), "the uniform tables are never in the merged layout");
+    let mut out = wesl_wgsl(src, &v.flags(), &v.constants());
+    if v.guard.is_some() {
+        guard_loops(&mut out);
+    }
+    out.to_string()
+}
+
+/// `src` through wesl-rs (WESL's reference compiler in Rust): conditional translation for `flags`, imports of the
+/// `constants` package from `constants`. Every flag the source names must be given (one that is not is an error, not
+/// off), and every constant it imports.
+pub fn wesl_wgsl(src: &str, flags: &[(&str, bool)], constants: &[(String, u32)]) -> wesl::syntax::TranslationUnit {
+    use wesl::{syntax::ModulePath, CompileOptions, Feature, Features};
     let mut features = Features { default: Feature::Error, ..Default::default() };
     for &(name, on) in flags {
         features.set(name, on);
     }
-    let options = CompileOptions { imports: false, condcomp: true, strip: false, validate: false, sourcemap: false, mangler: wesl::ManglerKind::None, features, ..Default::default() };
-    wesl::compile(&path, &options, &resolver).unwrap_or_else(|e| panic!("the kernel's WESL: {e}")).to_string()
+    let constants = constants.iter().map(|(name, n)| format!("public const {name} = {n}u;\n")).collect();
+    let resolver = KernelResolver { src, constants };
+    let options = CompileOptions { imports: true, condcomp: true, strip: false, validate: false, sourcemap: false, mangler: wesl::ManglerKind::None, features, ..Default::default() };
+    let path: ModulePath = "package::kernel".parse().expect("a module path");
+    wesl::compile(&path, &options, &resolver).unwrap_or_else(|e| panic!("the kernel's WESL: {e}")).syntax
 }
 
-/// The loop guard's limit for every kernel, if one is set (merged.rs `guard`: every loop of a kernel bounded, so a
+/// The modules a kernel's WESL sees: itself, and WESL's `constants` package (`wesl_wgsl`).
+struct KernelResolver<'a> {
+    src: &'a str,
+    constants: String,
+}
+
+impl wesl::resolver::Resolver for KernelResolver<'_> {
+    fn resolve_source<'a>(&'a self, path: &wesl::syntax::ModulePath) -> Result<std::borrow::Cow<'a, str>, wesl::error::ResolveError> {
+        use wesl::syntax::PathOrigin;
+        match &path.origin {
+            PathOrigin::Package(p) if p == "constants" => Ok(std::borrow::Cow::Borrowed(&self.constants)),
+            PathOrigin::Absolute if path.components == ["kernel"] => Ok(std::borrow::Cow::Borrowed(self.src)),
+            _ => Err(wesl::error::ResolveError::ModuleNotFound(path.clone(), "the kernel imports nothing but `constants`".into())),
+        }
+    }
+}
+
+/// The loop guard (docs/RUNTIME.md "The engine in a browser"): every `loop`, `for` and `while` of a variant, the
+/// scene's functions' too, begins with `if (loop_guard()) { break; }` (pathtrace.wgsl declares `loop_guard`, under
+/// `@if(guard)`). A pass over the variant's syntax tree, as a compiler instruments code: the tree knows what a loop
+/// and its body are, so nothing the text says (comments, strings, a loop without braces) can mislead it.
+pub fn guard_loops(tu: &mut wesl::syntax::TranslationUnit) {
+    use wesl::syntax::{CompoundStatement, GlobalDeclaration, Statement, StatementNode};
+    fn body(b: &mut CompoundStatement, guard: &StatementNode) {
+        for s in b.statements.iter_mut() {
+            statement(s, guard);
+        }
+    }
+    fn opened(b: &mut CompoundStatement, guard: &StatementNode) {
+        body(b, guard);
+        b.statements.insert(0, guard.clone());
+    }
+    fn statement(s: &mut StatementNode, guard: &StatementNode) {
+        match s.node_mut() {
+            Statement::Compound(c) => body(c, guard),
+            Statement::If(i) => {
+                body(&mut i.if_clause.body, guard);
+                for e in i.else_if_clauses.iter_mut() {
+                    body(&mut e.body, guard);
+                }
+                if let Some(e) = i.else_clause.as_mut() {
+                    body(&mut e.body, guard);
+                }
+            }
+            Statement::Switch(sw) => sw.clauses.iter_mut().for_each(|c| body(&mut c.body, guard)),
+            Statement::Loop(l) => {
+                opened(&mut l.body, guard);
+                if let Some(c) = l.continuing.as_mut() {
+                    body(&mut c.body, guard);
+                }
+            }
+            Statement::For(f) => opened(&mut f.body, guard),
+            Statement::While(w) => opened(&mut w.body, guard),
+            _ => {}
+        }
+    }
+    let guard: Statement = "if (loop_guard()) { break; }".parse().expect("the guard's statement");
+    let guard = StatementNode::from(guard);
+    for d in tu.global_declarations.iter_mut() {
+        if let GlobalDeclaration::Function(f) = d.node_mut() {
+            body(&mut f.body, &guard);
+        }
+    }
+}
+
+/// The loop guard's limit for every kernel, if one is set (`guard_loops`: every loop of a kernel bounded, so a
 /// dispatch ends whatever the data): THREERT_LOOP_GUARD=<iterations an invocation> natively, where a kernel is
 /// otherwise as written; always in a browser, where a dispatch that does not end is the player's whole GPU.
 pub fn loop_guard() -> Option<u32> {
@@ -811,7 +937,7 @@ fn guard_room(hwrt: bool) -> bool {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuOptions {
     /// The kernel's bounded tables (texture pages, objects, instances, media) as uniform buffers instead of storage
-    /// buffers (merged.rs `uniform_tables`). None: where a driver needs it, which is Android. Never with the merged
+    /// buffers (merged.rs `UNIFORM_TABLES`). None: where a driver needs it, which is Android. Never with the merged
     /// layout, whose tables are one buffer of its own.
     pub uniform_tables: Option<bool>,
     /// A directory to keep compiled pipelines in between runs (pipeline_cache.rs). None: nothing is kept.
@@ -842,7 +968,7 @@ impl GpuOptions {
 }
 
 /// The kernel's switches: changes to its source for a GPU that the source as written is wrong or too slow on. Each
-/// is a flag of the kernel's conditional translation (`kernel_flags`; pathtrace.wgsl, trace_hw.wgsl and
+/// is a flag of the kernel's conditional translation (`KernelVariant::flags`; pathtrace.wgsl, trace_hw.wgsl and
 /// translucent.wgsl say where, under `@if`); with none set the kernel is as written, every platform's default but
 /// Android's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -894,17 +1020,6 @@ fn kernel_checks() -> wgpu::ShaderRuntimeChecks {
     c.force_loop_bounding = v & 4 != 0;
     c.ray_query_initialization_tracking = v & 8 != 0;
     c
-}
-
-/// A kernel source as it is compiled: with the loop guard if it has one (`loop_guard_of`: `units`, whether the source
-/// has the unit walk), its count in `MergedLive` (the merged layout) or in a buffer of its own (group 1,
-/// `merged::GUARD_BINDING`).
-fn guarded(src: &str, merged: bool, units: bool) -> String {
-    match loop_guard_of(units) {
-        None => src.to_string(),
-        Some(n) if merged => crate::merged::guard(src, n, "ML.loop_guard_trips"),
-        Some(n) => crate::merged::guard(&format!("{src}\n{}", crate::merged::guard_decl()), n, crate::merged::GUARD_TRIPS.name),
-    }
 }
 
 pub fn tlas_rows(w: glam::Mat4) -> [f32; 12] {
@@ -975,7 +1090,7 @@ pub struct KernelBufs {
     pub refl: Buf,
     pub motion: Buf,
     pub direct: Buf,
-    /// The loop guard's count (merged.rs `guard`: its first word, the invocations a loop of which was stopped): with
+    /// The loop guard's count (`guard_loops`: its first word, the invocations a loop of which was stopped): with
     /// the guard, and always in the merged layout (the last array of `MergedLive`).
     pub guard: Option<Buf>,
     /// The merged layout: the one buffer, and its arrays' lengths.
@@ -1175,14 +1290,14 @@ pub const F_HMEDIA: u32 = 131072;
 /// Procedural geometry (`ProceduralMesh`; pathtrace.wgsl `proc_*`): AABB candidates in every ray query, its hits'
 /// own surface path. Compiled out where no scene has any (`THREERT_FEATURES_ON` forces it in, to measure that cost).
 pub const F_PROC: u32 = 262144;
-/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th (`kernel_flags`;
+/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th (`KernelVariant::flags`;
 /// `scene::object_stride`).
 pub const F_TINT: u32 = 524288;
-/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing (`kernel_flags`).
+/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing (`KernelVariant::flags`).
 pub const F_UNLIT: u32 = 1 << 20;
-/// three.js `scene.background`: camera rays that miss see `Params::background` (`kernel_flags`).
+/// three.js `scene.background`: camera rays that miss see `Params::background` (`KernelVariant::flags`).
 pub const F_BACKGROUND: u32 = 1 << 21;
-/// The features that change the kernel's declarations (`kernel_flags`, `@if` in its source) rather than switch code in it.
+/// The features that change the kernel's declarations (`KernelVariant::flags`, `@if` in its source) rather than switch code in it.
 /// three.js `vertexColors` (`scene::tri_colors`): a colour per triangle vertex multiplies the base colour (F_SOURCE).
 pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions (F_SOURCE). (Bit
@@ -1383,8 +1498,7 @@ impl Gpu {
         let src = kernel_template();
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = (!merged).then(|| unsafe {
-            let src = if uniform_tables { crate::merged::uniform_tables(&src) } else { src.clone() };
-            let wgsl = kernel_wgsl(&guarded(&src, false, false), &kernel_flags(hwrt, &switches, 0));
+            let wgsl = kernel_wgsl(&src, &KernelVariant { uniform_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
@@ -1577,13 +1691,10 @@ impl Gpu {
                     format!("{head}{code}{tail}")
                 };
                 let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
-                // The merged layout: the same source, its buffers merged for this kernel's arrays (merged.rs).
-                let src = k.caps.as_ref().map_or(src.clone(), |c| crate::merged::kernel(&src, c));
-                // The uniform tables (never with the merged layout): the same source, four tables' declarations and
-                // indices rewritten.
-                let src = if self.uniform_tables { crate::merged::uniform_tables(&src) } else { src };
-                // The loop guard, then the variant: this device's traversal and switches, this scene's features.
-                let wgsl = kernel_wgsl(&guarded(&src, self.merged, patches & F_UNITS != 0), &kernel_flags(self.hwrt, &self.switches, patches));
+                // The variant: this device's traversal, switches, layout (the merged one with this kernel's arrays'
+                // lengths) and loop guard, this scene's features.
+                let v = KernelVariant { merged: k.caps, uniform_tables: self.uniform_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
+                let wgsl = kernel_wgsl(&src, &v);
                 unsafe { self.device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks()) }
             })
             .clone()
@@ -2082,7 +2193,7 @@ impl Gpu {
             bg_entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
             bg_entries.push(e(crate::merged::TABLES_BINDING, t));
         }
-        // The uniform tables: four tables' uniform copies in their place (merged.rs `uniform_tables`).
+        // The uniform tables: four tables' uniform copies in their place (merged.rs `UNIFORM_TABLES`).
         let uniform = self.uniform_tables.then(|| {
             // What the scene has of each, against what its array holds (the buffers have the edits' room after it).
             let used = [b_texinfo.size() / 16, scene.objects.len() as u64, records.len() as u64, scene.media.len() as u64];
@@ -3188,10 +3299,10 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
     }
 
-    /// The native default (no merged layout, no loop guard): `guarded` gives the kernel back untouched and the live
-    /// passes are their file. Every variant the kernel's flags make is valid WGSL (naga, wgpu's front end): each
-    /// traversal with no switch, each alone and all of them, by no scene feature, each alone and all of them (units are
-    /// software traversal's), and with the uniform tables. Prints the default variants' SHA-256 (`--nocapture`).
+    /// The native default has no loop guard, and the live passes are their file. Every variant the kernel's flags
+    /// make is valid WGSL (naga, wgpu's front end): each traversal with no switch, each alone and all of them, by no
+    /// scene feature, each alone and all of them (units are software traversal's), with the uniform tables, and with
+    /// the loop guard. (The merged layout's: merged.rs.) Prints the default variants' SHA-256 (`--nocapture`).
     #[test]
     fn every_kernel_variant_is_valid() {
         use sha2::{Digest, Sha256};
@@ -3202,7 +3313,6 @@ mod tests {
         let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(crate::live::live_source(), include_str!("../shaders/live.wgsl"));
         let template = kernel_template();
-        assert_eq!(guarded(&template, false, false), template);
         let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true };
         let switches = [
             KernelSwitches::default(),
@@ -3214,12 +3324,14 @@ mod tests {
             all,
         ];
         for hwrt in [false, true] {
-            println!("source kernel hwrt={hwrt} {}", sha(&kernel_wgsl(&template, &kernel_flags(hwrt, &KernelSwitches::default(), 0))));
-            for k in &switches {
+            println!("source kernel hwrt={hwrt} {}", sha(&kernel_wgsl(&template, &KernelVariant::new(hwrt, KernelSwitches::default(), 0))));
+            for &k in &switches {
                 for f in [0, F_VCOLOR, F_GRID, F_TINT, F_UNLIT, F_UNITS, F_BACKGROUND, F_SOURCE] {
-                    naga_valid(&kernel_wgsl(&template, &kernel_flags(hwrt, k, if hwrt { f & !F_UNITS } else { f })));
+                    naga_valid(&kernel_wgsl(&template, &KernelVariant::new(hwrt, k, if hwrt { f & !F_UNITS } else { f })));
                 }
-                naga_valid(&kernel_wgsl(&crate::merged::uniform_tables(&template), &kernel_flags(hwrt, k, F_SOURCE & !F_UNITS)));
+                let all_features = KernelVariant::new(hwrt, k, if hwrt { F_SOURCE & !F_UNITS } else { F_SOURCE });
+                naga_valid(&kernel_wgsl(&template, &KernelVariant { uniform_tables: true, ..all_features }));
+                naga_valid(&kernel_wgsl(&template, &KernelVariant { guard: Some(1 << 16), ..all_features }));
             }
         }
     }
@@ -3242,13 +3354,12 @@ mod tests {
         }
         // As compiled: the source with units has every loop bounded and the count's buffer; hardware traversal, which
         // never has units, has room for the count only when a limit is set.
-        let src = kernel_template();
-        let g = guarded(&src, false, true);
-        assert!(g.contains("return LOOP_GUARD_N > 65536u;") && g.contains(&crate::merged::guard_decl()), "the guard and its count");
-        assert_eq!(guarded(&src, false, false), src, "units told to have no guard: the source as written");
+        let v = KernelVariant { guard: loop_guard_of(true), ..KernelVariant::new(false, KernelSwitches::default(), F_UNITS) };
+        assert_eq!((v.guard, loop_guard_of(false)), (Some(65536), None), "units told to have no guard: the source as written");
         // What a native session with units compiles with nothing set, to naga (wgpu's front end); the unit walk's loops
         // are bounded too (that every loop is: merged.rs `the_guard_bounds_every_loop`).
-        let wgsl = kernel_wgsl(&g, &kernel_flags(false, &KernelSwitches::default(), F_UNITS));
+        let wgsl = kernel_wgsl(&kernel_template(), &v);
+        assert!(wgsl.contains("const LOOP_GUARD_LIMIT = 65536u;") && wgsl.contains("var<storage, read_write> loop_guard_trips: array<atomic<u32>, GUARD_WORDS>;"), "the guard and its count");
         naga_valid(&wgsl);
         let walk = &wgsl[wgsl.find("fn trace_units(").expect("the unit walk")..];
         assert!(walk[..walk[1..].find("\nfn ").unwrap_or(walk.len() - 1)].contains("loop_guard()"));
@@ -3261,9 +3372,9 @@ mod tests {
     #[test]
     fn units_are_software_traversals_only() {
         let t = kernel_template();
-        let sw = kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), 0));
-        let u = kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), F_UNITS));
-        let hw = kernel_wgsl(&t, &kernel_flags(true, &KernelSwitches::default(), 0));
+        let sw = kernel_wgsl(&t, &KernelVariant::new(false, KernelSwitches::default(), 0));
+        let u = kernel_wgsl(&t, &KernelVariant::new(false, KernelSwitches::default(), F_UNITS));
+        let hw = kernel_wgsl(&t, &KernelVariant::new(true, KernelSwitches::default(), 0));
         assert!(!sw.contains("trace_units") && !hw.contains("trace_units") && !hw.contains("fn trace_procs("));
         assert_eq!((u.matches("fn trace_units(").count(), u.matches("trace_units(o, d, inv_d, hit, mode)").count()), (1, 1));
         let stacks = |s: &str| (s.matches("var<private> stack: array<u32, 64>").count(), s.matches("var stack: array<u32, 48>").count());
@@ -3282,7 +3393,7 @@ mod tests {
         assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, light_pick: false });
         assert!(!desktop.uniform_tables_on(false, false));
         for hwrt in [false, true] {
-            assert!(kernel_flags(hwrt, &desktop.kernel, 0).iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
+            assert!(KernelVariant::new(hwrt, desktop.kernel, 0).flags().iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
         }
         let android = GpuOptions::from_vars(&vars(&[]), true);
         assert_eq!(android.kernel, KernelSwitches { strict: true, cutout_lite: 1, last_direct: true, light_pick: false });
@@ -3307,7 +3418,7 @@ mod tests {
     #[test]
     fn the_other_shaders_are_wgsl_as_the_specification_writes_it() {
         for src in [include_str!("../shaders/live.wgsl"), include_str!("../shaders/particles.wgsl"), include_str!("../shaders/gpu_particles.wgsl"), include_str!("../shaders/grid_sim.wgsl")] {
-            kernel_wgsl(src, &[]);
+            wesl_wgsl(src, &[], &[]);
         }
     }
 
@@ -3317,7 +3428,7 @@ mod tests {
     #[test]
     fn the_kernel_switches_change_what_they_say() {
         let t = kernel_template();
-        let v = |hwrt: bool, k: KernelSwitches| kernel_wgsl(&t, &kernel_flags(hwrt, &k, 0));
+        let v = |hwrt: bool, k: KernelSwitches| kernel_wgsl(&t, &KernelVariant::new(hwrt, k, 0));
         for hwrt in [false, true] {
             let plain = v(hwrt, KernelSwitches::default());
             let strict = v(hwrt, KernelSwitches { strict: true, ..Default::default() });
@@ -3344,7 +3455,7 @@ mod tests {
         assert_eq!(bindings, [14, 15, 17, 18]);
         for (k, &t) in UNIFORM_TABLES.iter().enumerate() {
             let m = &TABLES[t];
-            assert!(m.decl.starts_with(&format!("@group(0) @binding({}) var<storage, read> {}:", bindings[k], m.name)), "{}", m.decl);
+            assert!(kernel_template().contains(&format!("@group(0) @binding({}) var<uniform> {}: array<", bindings[k], m.name)), "{}", m.name);
             let bytes = m.stride * UNIFORM_LEN[k] as u64;
             assert!(bytes <= 65536 && bytes % 16 == 0, "{}: {bytes} bytes", m.name);
         }
@@ -3406,12 +3517,12 @@ mod tests {
         assert_eq!(words[..2], [11, 22]);
     }
 
-    /// Each feature that changes the kernel's declarations (`kernel_flags`) changes what it says, and nothing of it
+    /// Each feature that changes the kernel's declarations (`KernelVariant::flags`) changes what it says, and nothing of it
     /// is in a kernel without it.
     #[test]
     fn the_source_features_change_what_they_say() {
         let t = kernel_template();
-        let v = |f: u32| kernel_wgsl(&t, &kernel_flags(false, &KernelSwitches::default(), f));
+        let v = |f: u32| kernel_wgsl(&t, &KernelVariant::new(false, KernelSwitches::default(), f));
         let base = v(0);
         let tint = v(F_TINT);
         assert!(tint.contains("const OBJECT_STRIDE: u32 = 4u;") && !tint.contains("const OBJECT_STRIDE: u32 = 3u;"));
