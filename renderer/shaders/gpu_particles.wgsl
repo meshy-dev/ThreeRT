@@ -73,7 +73,7 @@ struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: 
 @group(0) @binding(9) var<storage, read> spawns: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read> grid: array<u32>;
 
-const OBJECT_STRIDE: u32 = 3u; // scene.rs OBJECT_STRIDE (particles' objects; no instance colours with them)
+const OBJECT_STRIDE: u32 = 3u; // scene.rs `object_stride`: gpu.rs writes 4 here in a scene with instance colours
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;

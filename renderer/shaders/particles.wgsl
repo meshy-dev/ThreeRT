@@ -60,7 +60,7 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>
 // The translucent particles' BLAS input (gpu.rs `Translucent`).
 @group(0) @binding(8) var<storage, read_write> tblas: array<f32>;
 
-const OBJECT_STRIDE: u32 = 3u; // scene.rs OBJECT_STRIDE
+const OBJECT_STRIDE: u32 = 3u; // scene.rs `object_stride`: gpu.rs writes 4 here in a scene with instance colours
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
