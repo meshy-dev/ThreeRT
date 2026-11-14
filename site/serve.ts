@@ -9,6 +9,7 @@ import { existsSync, statSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { extname, join, normalize, resolve } from "node:path";
 import { VENDOR } from "./tools/vendor.ts";
+import { clientFile } from "./worker.ts";
 
 const root = resolve(import.meta.dir);
 const args = process.argv.slice(2);
@@ -60,7 +61,11 @@ Bun.serve({
     // Packages are fetched by native clients and by pages on other origins (a playground, a game's own site).
     if (rel.startsWith("play/")) headers["access-control-allow-origin"] = "*";
     // The clients' files are downloads, as the Worker serves them.
-    if (/^releases\/[^/]+\.(dmg|tar\.gz|apk)$/.test(rel)) headers["content-disposition"] = `attachment; filename="${rel.slice("releases/".length)}"`;
+    const client = clientFile(`/${rel}`);
+    if (client) {
+      headers["content-type"] = client.type;
+      headers["content-disposition"] = `attachment; filename="${client.key}"`;
+    }
     return new Response(Bun.file(file), { headers });
   },
 });

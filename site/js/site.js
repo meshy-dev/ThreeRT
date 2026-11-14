@@ -9,10 +9,10 @@ export const ROOT = new URL("..", import.meta.url);
 export const GITHUB = "https://github.com/meshy-dev/ThreeRT";
 
 /** The clients there are, as a visitor knows the device each is for. */
-export const CLIENTS = { macos: "macOS", ios: "iPhone", linux: "Steam Deck", android: "Android" };
+export const CLIENTS = { macos: "macOS", windows: "Windows", ios: "iPhone", linux: "Steam Deck", android: "Android" };
 
 /**
- * "macos" | "ios" | "android" | "linux" | "other": the client a visitor's device takes. An iPad asks for the desktop
+ * "macos" | "windows" | "ios" | "android" | "linux" | "other": the client a visitor's device takes. An iPad asks for the desktop
  * site as a Mac with a touch screen. An Android browser says Linux too, so it is asked first. "linux" is x86_64
  * alone, what the tarball is built for: a Steam Deck's browsers say "X11; Linux x86_64", in Desktop Mode and in Game
  * Mode alike.
@@ -20,6 +20,7 @@ export const CLIENTS = { macos: "macOS", ios: "iPhone", linux: "Steam Deck", and
 export function platform(ua = navigator.userAgent, touchPoints = navigator.maxTouchPoints) {
   if (/iPhone|iPod|iPad/.test(ua) || (/Macintosh/.test(ua) && touchPoints > 1)) return "ios";
   if (/Android/.test(ua)) return "android";
+  if (/Windows NT/.test(ua)) return "windows";
   if (/Macintosh|Mac OS X/.test(ua)) return "macos";
   if (/Linux x86_64/.test(ua)) return "linux";
   return "other";
@@ -31,7 +32,7 @@ export function platform(ua = navigator.userAgent, touchPoints = navigator.maxTo
  */
 export function downloadButtons(root = document) {
   const p = platform();
-  const text = { macos: "Download for macOS", ios: "Get ThreeRT for iPhone", linux: "Download for Steam Deck", android: "Download for Android", other: "Download" }[p];
+  const text = { macos: "Download for macOS", windows: "Download for Windows", ios: "Get ThreeRT for iPhone", linux: "Download for Steam Deck", android: "Download for Android", other: "Download" }[p];
   for (const a of root.querySelectorAll("a[data-dl]")) {
     const label = a.querySelector("span") ?? a;
     label.textContent = text;
@@ -51,10 +52,11 @@ async function json(rel) {
 }
 
 /**
- * The clients released on this host, or null: {version, date, macos, ios, linux, android}, an entry a client, each
+ * The clients released on this host, or null: {version, date, macos, ios, linux, android, windows}, an entry a client, each
  * with its own `version` (clients are released on different days; an entry without one has the top-level version):
  * macos {file, url, size, sha256, minOS, arch, signed, notarized}, ios {url, channel, minOS},
- * linux {file, url, size, sha256, arch, needs}, android {file, url, size, sha256, arch, minOS, signed}.
+ * linux {file, url, size, sha256, arch, needs}, android {file, url, size, sha256, arch, minOS, signed},
+ * windows {file, size, sha256, arch, minOS, signed, channel, portable, checksums}.
  * A client without an entry is not published here.
  */
 export const release = () => json("releases/latest.json");

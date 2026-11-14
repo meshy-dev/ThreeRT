@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Download ThreeRT — macOS, iPhone, Steam Deck and Android</title>
-<meta name="description" content="ThreeRT for macOS, iPhone and iPad, Steam Deck and Linux, and Android: the free clients that open ThreeRT apps and games, from threert.app or your own dev server, and path-trace them on your own GPU.">
+<title>Download ThreeRT — Windows, macOS, iPhone, Steam Deck and Android</title>
+<meta name="description" content="ThreeRT for Windows, macOS, iPhone and iPad, Steam Deck and Linux, and Android: free clients that open ThreeRT apps and games from threert.app or your own dev server and path-trace them on your GPU.">
 <link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../css/threert.css">
 <style>
-  /* Four cards, two a row. A card's three parts (what it is, three lines, the button) sit on rows the two cards of a
+  /* Client cards, two a row. A card's three parts (what it is, three lines, the button) sit on rows the two cards of a
      row share, so the buttons are level whatever the lines above them wrap to. */
   .dl { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   .dl .card { display: grid; grid-template-rows: auto 1fr auto; row-gap: 22px; }
@@ -82,6 +82,21 @@
         <div class="act" id="macAct">
           <p class="fine">Looking for the build on this host…</p>
           <noscript><p class="fine">The download links are filled in by a script. With scripts off, the builds are named in <a href="../releases/latest.json">releases/latest.json</a>.</p></noscript>
+        </div>
+      </div>
+
+      <div class="card" id="windows">
+        <div class="top">
+          <div class="glyph" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3 4h9v9H3zM15 4h8v9h-8zM3 16h9v7H3zM15 16h8v7h-8z"/></svg></div>
+          <div><h2>ThreeRT for Windows</h2><span class="req">Windows&nbsp;10&nbsp;(2004)+ or&nbsp;11 · x64 · DirectX&nbsp;12</span></div>
+        </div>
+        <ul class="ticks">
+          <li>Apps and games from <a href="https://threert.app/" rel="noopener">threert.app</a>, in a native Windows client</li>
+          <li>For GPUs with DirectX 12 ray queries</li>
+          <li>Includes the <code>threert</code> command line; installs for your account</li>
+        </ul>
+        <div class="act" id="windowsAct">
+          <p class="fine">Looking for the build on this host…</p>
         </div>
       </div>
 
@@ -197,7 +212,7 @@
   // The visitor's own client first, and lit; the one for a device like it beside it. Before anything is fetched, so
   // nothing moves afterwards.
   const here = platform();
-  const order = { ios: ["ios", "mac", "deck", "android"], linux: ["deck", "android", "mac", "ios"], android: ["android", "deck", "mac", "ios"] }[here];
+  const order = { windows: ["windows", "mac", "deck", "android", "ios"], ios: ["ios", "mac", "windows", "deck", "android"], linux: ["deck", "windows", "android", "mac", "ios"], android: ["android", "deck", "windows", "mac", "ios"] }[here];
   if (order) {
     $(".dl").append(...order.map((id) => document.getElementById(id)));
     for (const card of $(".dl").children) card.classList.toggle("lit", card.id === order[0]);
@@ -219,6 +234,15 @@
     // like any app.
     const m = r?.macos;
     $("#macAct").innerHTML = m?.file ? row(clientUrl(m), "Download for macOS", version(m), megabytes(m.size)) + sha(m) : none("macOS");
+
+    const w = r?.windows;
+    if (w?.file) {
+      $("#windowsAct").innerHTML = row(clientUrl(w), "Download for Windows", `${version(w)} · Preview`, megabytes(w.size)) +
+        `<p class="fine">Open the installer. To update, run the newer installer.</p>` +
+        (w.signed === false ? `<p class="fine">Unsigned preview. Windows SmartScreen may warn that this app is unrecognized. Verify the download source before proceeding.</p>` : "") +
+        `<div class="row">${w.portable?.file ? `<a href="${esc(clientUrl(w.portable))}" download>Portable ZIP · ${megabytes(w.portable.size)}</a>` : ""}
+        ${w.checksums?.file ? `<a href="${esc(clientUrl(w.checksums))}" download>SHA-256 checksums</a>` : ""}</div>` + sha(w);
+    } else $("#windowsAct").innerHTML = none("Windows");
 
     // iPhone: a link once the beta is open; until then, say so.
     const i = r?.ios;

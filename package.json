@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "typecheck": "tsc -p packages/scene && tsc -p packages/gameplay && tsc -p packages/voxel && tsc -p games && tsc -p tools && tsc -p tests && tsc -p renderer/web/www",
-    "test": "node --test packages/*/test/*.test.ts tools/*/test/*.test.ts",
+    "test": "node --test packages/*/test/*.test.ts tools/*/test/*.test.ts site/*.test.ts",
     "scenes": "node tools/build-scenes.ts",
     "test:render": "node tools/test-render.ts",
     "test:layer-b": "node tools/test-layer-b.ts",
@@ -27,7 +27,8 @@
     "qrcode-generator": "^2.0.4",
     "sharp": "^0.35.5",
     "three": "^0.187.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wrangler": "4.160.1"
   },
   "allowScripts": {
     "esbuild": true

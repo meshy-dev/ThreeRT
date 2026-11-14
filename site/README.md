@@ -106,6 +106,7 @@ disclosure. **Keep it that terse**: a card that grows a paragraph stops matching
 
 | Card | From `latest.json` | Under the button |
 |---|---|---|
+| ThreeRT for Windows | `windows`: the per-user EXE installer (x64) | unsigned preview notice, portable ZIP, SHA-256 file and installer digest |
 | ThreeRT for macOS | `macos`: the disk image | SHA-256 |
 | ThreeRT for iPhone | `ios.url`: TestFlight or the App Store | the link as a QR code in the card's corner |
 | ThreeRT for Steam Deck | `linux`: the tarball (x86_64; Linux is in the requirement line) | the two commands that install it, in a block with a Copy button (`tar xzf ~/Downloads/<file>`, `ThreeRT/install.sh`: what the tarball's README says, with the place a browser saves to), one line on what they do, SHA-256 |
@@ -286,3 +287,17 @@ offline references and every number on the page are still the M5 run's. Kept fro
 were not plainly better: `hello/sun-room-rt.webp` (its walls read more mottled on 2d4e88a) and all of Zero-Day
 (sharper on 2d4e88a, but more orange fireflies in its dark floor and walls).
 Amazon Lumberyard Bistro and Zero-Day are from NVIDIA's ORCA (CC BY 4.0); the credits are in the page's footer.
+
+### Windows preview releases
+
+Windows is distributed directly as an unsigned preview; a Microsoft Store account or paid signing service is not required for this channel. SmartScreen may warn on first use. The page states this without asking people to disable protection. Windows 10 2004+ or Windows 11 x64 and a DirectX 12 GPU with ray queries are required. The installer runs per-user and updates an existing install; the ZIP is a portable alternative.
+
+`latest.json.windows` has the installer `file`, `size`, `sha256`, `version`, `date`, `arch`, `minOS`, `signed: false`, and `channel: "preview"`. Its `portable` and `checksums` objects each have `file`, `size`, and `sha256`. All three files are checked, uploaded to R2, and served as attachments with HEAD and range support. The shared release script carries them over when another platform releases.
+
+From the client checkout, after Windows installation and runtime acceptance:
+
+```sh
+bun tools/release.ts --no-macos --windows-file dist/ThreeRT-<version>-windows-x64-setup.exe --site <site-checkout>/site
+```
+
+The matching ZIP must be beside the installer. The release script computes the checksums and preserves other platforms and the live macOS appcast. In this checkout run `bun test site/worker.test.ts`, `bun site/tools/build.ts --require-release`, `bunx wrangler deploy --dry-run --config site/wrangler.jsonc`, then `bun site/tools/deploy.ts`. Wrangler is pinned in package-lock.json. Before publishing from a separate checkout, refresh the release drop from the current live manifest so another platform's newer release is retained.
