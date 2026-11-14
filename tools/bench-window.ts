@@ -12,7 +12,8 @@
 //       ΔE, SSIM against offline (512 samples), and the RMS change of luma from one frame to the next (flicker).
 //   still-rooms, still-rooms-wide  the same for scenes/lamp-rooms.ts and lamp-rooms-wide.ts (96 and 768 shadow-casting
 //       lamps, most behind walls; scale 0.5; offline at 4096 samples): where a light sampler has to find the lamps a
-//       point can see, and what its noise does as they multiply.
+//       point can see, and what its noise does as they multiply. (The offline render chooses among the lamps
+//       uniformly: with 768 its 4096 samples are still noisy, a floor under every reading of the wide shot.)
 //   slice  the Bistro slice half a second after its explosion (40.5 s, from the start in lockstep, scale 0.375, 1440p):
 //       the same four numbers against offline at 40.5 s.
 //   tokyo-dusk  the Tokyo time-of-day reel's room (16:00 to 17:42 in 10.5 s), the camera still, at 6, 7, 8 s: the frame
