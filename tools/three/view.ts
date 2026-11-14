@@ -10,12 +10,13 @@
 //
 // A game is played, not only looked at: its frame script runs every frame, its `keys` run their handlers, a click is
 // its `click` event (the object under it, the view ray), and the page is the app of its host channel
-// (docs/RUNTIME.md "The host channel"; tools/three/host.ts, hud.ts): `net.*` on the browser's WebSocket and fetch,
-// `launch` from the page's query (`?room=K7Q4MZ&name=Ada`), the HUD drawn as DOM over the canvas. A game that reads
-// input (`pointer` in its definition) has the keys, the pointer and the camera to itself: no orbit controls, and
-// with `pointer: "look"` a click takes the pointer lock (Esc lets go). With `physics=<the module's path>` the page
-// loads the engine's own physics (tools/three/physics.ts; tools/three/open.ts builds it and adds the parameter), so
-// bodies move and the physics queries answer as in the renderer.
+// (docs/RUNTIME.md "The host channel"; tools/three/host.ts, hud.ts, audio.ts): `net.*` on the browser's WebSocket and
+// fetch, `audio.*` on Web Audio by the native mixer's rules, `launch` from the page's query (`?room=K7Q4MZ&name=Ada`),
+// the HUD drawn as DOM over the canvas. A game that reads input (`pointer` in its definition) has the keys, the pointer
+// and the camera to itself: no orbit controls, and with `pointer: "look"` a click takes the pointer lock (Esc lets go).
+// With `physics=<the module's path>` the page loads the engine's own physics (tools/three/physics.ts;
+// tools/three/open.ts builds it and adds the parameter), so bodies move and the physics queries answer as in the
+// renderer.
 //
 // URL parameters: ev100 (auto-exposure cameras), autoLights (the adapter's cap; 0 = none), width / height (a fixed
 // canvas instead of the window), check (after 120 frames publish `window.__result`: the overlay text and the frame as a
@@ -30,6 +31,7 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { defineGame, installNodeHost, type GameDefinition, type HostMessage, type Hud } from "@threert/gameplay";
 import { ThreeEngine } from "./engine.ts";
+import { PageAudio } from "./audio.ts";
 import { launchMessage, PageInput, PageNet } from "./host.ts";
 import { HudOverlay } from "./hud.ts";
 import { VignetteShader } from "./page.ts";
@@ -65,11 +67,12 @@ export async function run(mod: SceneModule): Promise<void> {
     const posts: HostMessage[] = [];
     (globalThis as { __host_post?: (text: string) => void }).__host_post = (text) => void posts.push(JSON.parse(text) as HostMessage);
     const net = new PageNet();
+    const sound = new PageAudio();
     let hud: HudOverlay | null = null;
     const flush = () => {
       for (const m of posts.splice(0)) {
         if (m.t === "hud") (hud ??= new HudOverlay()).set((m.hud ?? {}) as Hud);
-        else net.post(m);
+        else if (!sound.post(m)) net.post(m);
       }
     };
     // The engine's physics, when the page was opened with it.
@@ -227,6 +230,13 @@ export async function run(mod: SceneModule): Promise<void> {
         }
       }
       controls.update();
+      // The ears are the camera the frame is drawn from.
+      {
+        const c = scenePass.camera as THREE.Camera;
+        const p = c.getWorldPosition(new THREE.Vector3()), f = c.getWorldDirection(new THREE.Vector3());
+        const r = new THREE.Vector3().crossVectors(f, c.up).normalize();
+        sound.setListener([p.x, p.y, p.z], [f.x, f.y, f.z], [r.x, r.y, r.z]);
+      }
       let qy: WebGLQuery | null = null;
       if (ext && pending.length < 4) {
         qy = gl.createQuery();
