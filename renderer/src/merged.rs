@@ -255,29 +255,43 @@ mod tests {
         assert_eq!(table_cap(2, 512), 1024);
     }
 
-    /// The loop guard opens every loop of the kernel, the scene's functions' too, in the layout as written and in the
-    /// merged one (its count a buffer of its own, or in `MergedLive`), and what comes out is valid WGSL.
+    /// The loop guard opens every loop of the kernel but counted ones (`for (var i = N; i < M; i++)`, literals), the
+    /// scene's functions' too, in the layout as written and in the merged one (its count a buffer of its own, or in
+    /// `MergedLive`), and what comes out is valid WGSL.
     #[test]
     fn the_guard_bounds_every_loop() {
+        let counted = |s: &str| {
+            s.lines()
+                .filter_map(|l| l.trim().strip_prefix("for (var "))
+                .filter(|l| {
+                    let parts: Vec<&str> = l.split(';').map(str::trim).collect();
+                    let name = parts[0].split([' ', ':']).next().unwrap_or("");
+                    let lit = |t: &str| t.trim_end_matches(['u', 'i']).bytes().all(|c| c.is_ascii_digit());
+                    parts.len() == 3 && parts[0].rsplit('=').next().is_some_and(|v| lit(v.trim())) && parts[1].strip_prefix(name).is_some_and(|r| lit(r.trim().trim_start_matches(['<', '=']).trim())) && parts[2].starts_with(&format!("{name}++"))
+                })
+                .count()
+        };
         let loops = |s: &str| s.matches("loop {").count() + s.matches("for (").count() + s.matches("while (").count();
         for merged in [None, Some(caps())] {
             let v = KernelVariant { merged, ..KernelVariant::new(false, Default::default(), crate::gpu::F_SOURCE) };
             let plain = kernel_wgsl(&kernel_template(), &v);
             let g = kernel_wgsl(&kernel_template(), &KernelVariant { guard: Some(1 << 16), ..v });
-            assert!(loops(&plain) > 40, "the kernel's loops");
-            assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain));
+            assert!(loops(&plain) > 40 && counted(&plain) > 3, "the kernel's loops: {} counted of {}", counted(&plain), loops(&plain));
+            assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain) - counted(&plain));
             let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
             // (As written: one buffer more, where the device has room. Merged: still eight.)
             assert_eq!(declared as u32, if merged.is_some() { STORAGE_BUFFERS } else { 20 }, "{used:?}");
         }
-        // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`.
-        let mut tu = crate::gpu::wesl_wgsl("fn f() {\n    for (var i = 0u; i < 2u; i++) { // {\n        loop { if (a) { break; } continuing { while (b) { } } }\n    }\n    if (c) { while (d) { } } else { x(); }\n}\n", &[], &[]);
+        // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`; a
+        // counted loop left alone, one bounded by a variable or assigning its counter guarded.
+        let mut tu = crate::gpu::wesl_wgsl("fn f() {\n    for (var i = 0u; i < n; i++) { // {\n        loop { if (a) { break; } continuing { while (b) { } } }\n    }\n    if (c) { while (d) { } } else { x(); }\n    for (var k = 0u; k < 16u; k++) { if (e) { break; } y(); }\n    for (var j = 0u; j <= 3u; j++) { j += 2u; }\n}\n", &[], &[]);
         crate::gpu::guard_loops(&mut tu);
         let g = tu.to_string();
-        assert_eq!(g.matches("if (loop_guard()) {").count(), 4, "{g}");
+        assert_eq!(g.matches("if (loop_guard()) {").count(), 5, "{g}");
         let first = |w: &str| g[g.find(w).unwrap()..].split('\n').nth(1).unwrap().trim().to_string();
-        assert_eq!([first("for ("), first("loop {"), first("while (b)"), first("while (d)")], ["if (loop_guard()) {"; 4], "{g}");
+        assert_eq!([first("for (var i"), first("loop {"), first("while (b)"), first("while (d)"), first("for (var j")], ["if (loop_guard()) {"; 5], "{g}");
+        assert_eq!(first("for (var k"), "if (e) {", "{g}");
     }
 
     /// The constants a variant imports are the ones it is given, by name: a merged kernel's lengths, a guard's limit.

@@ -2318,6 +2318,13 @@ materials and the background were `@if` flags: each combination another kernel s
 merged, uniform tables, guarded and not): 0 of 190 changed; web-hello passes; Bistro's trace the same natively and
 merged.
 
+**The sampler: Owen-scrambled Sobol (2026-11-14, after it).** The kernel drew white noise from one PCG stream, its
+draws' order set by the path's branches. Now shuffled, Owen-scrambled Sobol (Burley 2020, as Cycles), each decision a
+dimension id (docs/RUNTIME.md "Random numbers"). Offline every draw is Sobol: RMSE x0.29-0.46 at 16-256 spp on the
+Cornell box, Light Room and Bistro, means within 0.01 %. Live only the camera path's first vertex, a hash elsewhere
+(as RTXPT; all-Sobol cost 2.1 ms of an 8.4 ms trace): cost and the live shots (bench-window) unchanged. The loop guard
+now skips counted loops. Next: blue-noise pixel distribution (Cycles 4.2), its own PR.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
