@@ -2337,6 +2337,12 @@ branch: main's offline chooses among the 768 lamps uniformly and is noisy at 409
 dE 0.90 -> 0.71.) Scenes without more than 8 shadow-casting local lights compile and run as before (Bistro,
 Kabukichō: picture and cost unchanged).
 
+**The lists follow the camera (2026-11-15, after it).** A camera hit read the list at its own pixel: with the camera
+turning, another part of the scene's. Now it reads the list of the tile it was seen in when the lists were built
+(its point, moved back by its motion, through that frame's camera). bench-window `rooms-turn` (lamp-rooms-wide, the
+camera turning 2 degrees a frame), the last moving frame, dE / p99: 2.00 / 8.57 without lists, 0.86 / 4.82 with
+them at the pixel, 0.80 / 3.54 now; 0.19 ms of a list scene's trace (3.57 -> 3.76 on lamp-rooms).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
