@@ -239,7 +239,7 @@
     if (w?.file) {
       $("#windowsAct").innerHTML = row(clientUrl(w), "Download for Windows", `${version(w)} · Preview`, megabytes(w.size)) +
         `<p class="fine">Open the installer. To update, run the newer installer.</p>` +
-        (w.signed === false ? `<p class="fine">Unsigned preview. Windows SmartScreen may warn that this app is unrecognized. Verify the download source before proceeding.</p>` : "") +
+        (w.signed === false ? `<p class="fine">Unsigned preview. Windows SmartScreen may warn that this app is unrecognized. Verify the download source before proceeding. Physical GPU validation is still pending; virtual and software graphics adapters are not supported.</p>` : "") +
         `<div class="row">${w.portable?.file ? `<a href="${esc(clientUrl(w.portable))}" download>Portable ZIP · ${megabytes(w.portable.size)}</a>` : ""}
         ${w.checksums?.file ? `<a href="${esc(clientUrl(w.checksums))}" download>SHA-256 checksums</a>` : ""}</div>` + sha(w);
     } else $("#windowsAct").innerHTML = none("Windows");
