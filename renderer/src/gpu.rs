@@ -735,7 +735,7 @@ impl KernelVariant {
     }
 
     /// The flags of the kernel's conditional translation (pathtrace.wgsl's head).
-    pub fn flags(&self) -> [(&'static str, bool); 10] {
+    pub fn flags(&self) -> [(&'static str, bool); 11] {
         let (k, f) = (&self.switches, |bit: u32| self.features & bit != 0);
         [
             ("hwrt", self.hwrt),
@@ -743,6 +743,7 @@ impl KernelVariant {
             ("cutout_lite", k.cutout_lite >= 1),
             ("cutout_lite2", k.cutout_lite >= 2),
             ("last_direct", k.last_direct),
+            ("last_sun", k.last_sun),
             ("light_pick", k.light_pick),
             ("units", f(F_UNITS)),
             ("merged", self.merged.is_some()),
@@ -1030,6 +1031,12 @@ pub struct KernelSwitches {
     /// takes its direct light. A device that affords one bounce and no radiance cache otherwise lights that bounce
     /// by sky and emitters alone: sunlit ground lit nothing, interiors were black.
     pub last_direct: bool,
+    /// THREERT_LAST_DIRECT=sun (off everywhere unless set; the ThreeRT clients set it for a budget of one bounce on
+    /// Linux). The path's last vertex takes the directional lights' direct light alone (one shadow ray a light): what
+    /// one bounce indoors lacks most (sunlit floor lighting the ceiling: Daylight Home's ceiling was black on a Steam
+    /// Deck), at a fraction of `last_direct`'s cost where a scene has many local lights (OpenStrikeRT's Foundry on the
+    /// Deck: +1 ms a frame, `last_direct` +8). `last_direct` includes it.
+    pub last_sun: bool,
     /// THREERT_LIGHT_PICK=1|0 (off everywhere unless set). Past the camera hit, `direct_light` takes the directional
     /// lights and one of the other kinds a scene has (local lights, emitters, the sky), weighted by their number,
     /// instead of all of them: two shadow rays a vertex instead of four. Unbiased; the indirect light is noisier.
@@ -1044,7 +1051,8 @@ impl KernelSwitches {
     fn from_vars(var: &dyn Fn(&str) -> Option<String>, android: bool) -> KernelSwitches {
         let num = |name: &str, default: u32| var(name).and_then(|v| v.parse::<u32>().ok()).unwrap_or(default);
         let on = android as u32;
-        KernelSwitches { strict: num("THREERT_KERNEL_STRICT", on) != 0, cutout_lite: num("THREERT_CUTOUT_LITE", on), last_direct: num("THREERT_LAST_DIRECT", on) != 0, light_pick: num("THREERT_LIGHT_PICK", 0) != 0 }
+        let sun = var("THREERT_LAST_DIRECT").is_some_and(|v| v.trim() == "sun");
+        KernelSwitches { strict: num("THREERT_KERNEL_STRICT", on) != 0, cutout_lite: num("THREERT_CUTOUT_LITE", on), last_direct: !sun && num("THREERT_LAST_DIRECT", on) != 0, last_sun: sun, light_pick: num("THREERT_LIGHT_PICK", 0) != 0 }
     }
 }
 
@@ -3388,13 +3396,14 @@ mod tests {
         let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(crate::live::live_source(), include_str!("../shaders/live.wgsl"));
         let template = kernel_template();
-        let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true };
+        let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, last_sun: false, light_pick: true };
         let switches = [
             KernelSwitches::default(),
             KernelSwitches { strict: true, ..Default::default() },
             KernelSwitches { cutout_lite: 1, ..Default::default() },
             KernelSwitches { cutout_lite: 2, ..Default::default() },
             KernelSwitches { last_direct: true, ..Default::default() },
+            KernelSwitches { last_sun: true, ..Default::default() },
             KernelSwitches { light_pick: true, ..Default::default() },
             all,
         ];
@@ -3465,13 +3474,16 @@ mod tests {
         let vars = |set: &'static [(&'static str, &'static str)]| move |name: &str| set.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
         let desktop = GpuOptions::from_vars(&vars(&[]), false);
         assert_eq!(desktop, GpuOptions::default());
-        assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, light_pick: false });
+        assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, last_sun: false, light_pick: false });
         assert!(!desktop.uniform_tables_on(false, false));
         for hwrt in [false, true] {
             assert!(KernelVariant::new(hwrt, desktop.kernel, 0).flags().iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
         }
         let android = GpuOptions::from_vars(&vars(&[]), true);
-        assert_eq!(android.kernel, KernelSwitches { strict: true, cutout_lite: 1, last_direct: true, light_pick: false });
+        assert_eq!(android.kernel, KernelSwitches { strict: true, cutout_lite: 1, last_direct: true, last_sun: false, light_pick: false });
+        // `sun`: the directional lights alone at the last vertex, in place of all of them, on either platform.
+        let sun = GpuOptions::from_vars(&vars(&[("THREERT_LAST_DIRECT", "sun")]), true);
+        assert_eq!((sun.kernel.last_direct, sun.kernel.last_sun), (false, true));
         assert_eq!((android.uniform_tables, android.pipeline_cache.clone()), (None, None));
         assert!(android.uniform_tables_on(false, true) && !android.uniform_tables_on(true, true));
         // Set: what is asked, on either platform.
@@ -3479,7 +3491,7 @@ mod tests {
         assert_eq!((off.kernel, off.uniform_tables_on(false, true)), (KernelSwitches::default(), false));
         let on = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "1"), ("THREERT_CUTOUT_LITE", "2"), ("THREERT_LIGHT_PICK", "1"), ("THREERT_PIPELINE_CACHE", "/data/cache/pipelines")]), false);
         assert!(on.uniform_tables_on(false, false) && !on.uniform_tables_on(true, false));
-        assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, light_pick: true });
+        assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, last_sun: false, light_pick: true });
         assert_eq!(on.pipeline_cache.as_deref(), Some(std::path::Path::new("/data/cache/pipelines")));
         assert_eq!(GpuOptions::from_vars(&vars(&[("THREERT_PIPELINE_CACHE", "")]), true).pipeline_cache, None);
         // (And the environment map's light sampling, which is the scene's preparation's: lib.rs `env_nee_on`.)
@@ -3512,8 +3524,12 @@ mod tests {
             assert_eq!(strict.matches("ray_bad(o, d, tmax").count(), queries, "every ray query is guarded");
             assert_eq!(strict.matches("fn ray_bad(").count(), hwrt as usize);
             assert!(!strict.contains("env_cdf[y - 1u]") && !strict.contains("env_cdf[base + x - 1u]") && plain.contains("env_cdf[y - 1u]"));
-            let lit = v(hwrt, KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, light_pick: true });
+            let lit = v(hwrt, KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, last_sun: false, light_pick: true });
             assert_eq!(lit.matches("radiance += dz;").count(), 1);
+            assert!(!lit.contains("fn sun_light("), "last_direct takes the directional lights already");
+            let sun = v(hwrt, KernelSwitches { last_sun: true, ..Default::default() });
+            assert_eq!((sun.matches("radiance += dz;").count(), sun.matches("fn sun_light(").count(), sun.matches("sun_light(s, lobes(").count()), (1, 1, 1));
+            assert!(!plain.contains("sun_light"));
             assert_eq!(lit.matches("env_on = take_env && has_env;").count(), 1);
             assert_eq!(lit.contains("let steps = 4u;"), hwrt);
             assert_eq!(v(hwrt, KernelSwitches { cutout_lite: 2, ..Default::default() }) == plain, !hwrt);
