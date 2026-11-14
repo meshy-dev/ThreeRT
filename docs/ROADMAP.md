@@ -2325,6 +2325,16 @@ Cornell box, Light Room and Bistro, means within 0.01 %. Live only the camera pa
 (as RTXPT; all-Sobol cost 2.1 ms of an 8.4 ms trace): cost and the live shots (bench-window) unchanged. The loop guard
 now skips counted loops. Next: blue-noise pixel distribution (Cycles 4.2), its own PR.
 
+**Local lights guided by light tiles (2026-11-15, after it).** The live kernel chose among shadow-casting local
+lights uniformly: with many of them, most behind walls, few candidates found a light that reaches the point. Now each
+camera pixel reports the light its shadow ray found, a pass makes each 8 x 8 tile's reports a list, and the next
+frame's paths take candidates from their tile's list beside the uniform ones (docs/RUNTIME.md "Light tiles"; the
+scheme MegaLights and RTXPT guide their draws by). Unbiased whatever a list holds. Measured on two new shots
+(`scenes/lamp-rooms.ts`, 96 lamps in 12 rooms; `lamp-rooms-wide.ts`, 768; bench-window `still-rooms`,
+`still-rooms-wide`), dE / flicker: 0.67 / 0.138 -> 0.63 / 0.069 and 1.01 / 0.126 -> 0.58 / 0.081, for 0.65 ms of
+trace and a 0.22 ms pass (of 9.2 ms a frame). Scenes without more than 8 shadow-casting local lights compile and
+run as before (Bistro, Kabukichō: picture and cost unchanged).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

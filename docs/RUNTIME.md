@@ -1279,6 +1279,19 @@ offline, the frame live; 16 bits), ids are uncorrelated.
   shader against itself on the GPU.
 - The loop guard leaves counted loops (`for (var i = N; i < M; i++)`, literals) alone, as Tint does.
 
+## Light tiles
+
+Live, a scene with more than 8 shadow-casting local lights (`gpu::F_LISTS`) guides their resampling by what the last
+frame found (pathtrace.wgsl "Light tiles", live.wgsl `light_tiles`):
+- A camera hit's resampled shadow ray that reaches its light reports the light (the direct buffer's fourth
+  component).
+- `light_tiles`, the live passes' first, makes each 8 x 8 tile's reports a list: the lights reported, each once,
+  ascending, after the direct buffer's pixels (64 vec4s a tile). The tile grid shifts by a pixel offset each frame.
+- The next frame's paths take 2 candidates from their pixel's list at a vertex the camera sees and 1 past it, spread
+  over the list without repeats, beside the uniform candidates (8 and 3), which then stand for the lights the list
+  lacks. Each candidate is weighed by the lights it stands for: the estimate is the same sum whatever a list holds.
+- THREERT_LT_LIST=n: the list candidates (0: none), for A/B.
+
 ## What the kernel trusts
 
 The kernel follows indices it reads from buffers and loops over counts it is given; it checks none of them (a
