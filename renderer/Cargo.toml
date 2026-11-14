@@ -50,6 +50,16 @@ tungstenite = { version = "0.30", optional = true, default-features = false, fea
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls", "gzip"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 
+# Sound (the `audio` feature): the decoders, pure Rust (WAV, Ogg Vorbis, MP3, FLAC).
+symphonia = { version = "0.5", optional = true, default-features = false, features = ["wav", "pcm", "ogg", "vorbis", "mp3", "flac"] }
+
+# The sound device (the `audio` feature, src/audio/out.rs): Core Audio and WASAPI through cpal; ALSA and AAudio are
+# loaded at run time (no sound library to link on Linux or Android).
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))'.dependencies]
+cpal = { version = "0.17", optional = true }
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libloading = { version = "0.8", optional = true }
+
 # The performance cores' count (src/physics.rs: the physics' threads).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
@@ -74,7 +84,11 @@ name = "physics_scene"
 crate-type = ["cdylib"]
 
 [features]
-default = ["net"]
+default = ["net", "audio"]
+# Sound for games (src/audio: the `audio.*` messages of the host channel, docs/RUNTIME.md "Sound"): decoding, placing
+# and mixing in Rust on every platform; the device by cpal (macOS, iOS, Windows), ALSA (Linux) or AAudio (Android),
+# the last two loaded at run time. The clients turn it on with the library (`features = ["audio"]`).
+audio = ["dep:symphonia", "dep:cpal", "dep:libloading"]
 # WebSockets and HTTP in `threert-render play` (above). Without it the window answers every `net.*` request with a
 # failure that says so.
 net = ["dep:tungstenite", "dep:ureq", "dep:rustls"]

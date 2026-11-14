@@ -8,6 +8,8 @@ export { host } from "./host.ts";
 export type { Host, HostEvents, HostListener, HostMessage, LaunchParams, NetPost } from "./host.ts";
 export { InputState } from "./input.ts";
 export type { Input, InputMessage } from "./input.ts";
+export { audio } from "./audio.ts";
+export type { Audio, AudioPoint, AudioPost, PlayOptions } from "./audio.ts";
 export { hud } from "./hud.ts";
 export type { Hud, HudAnchor, HudBar, HudCrosshair, HudFlash, HudItem, HudLine, HudList, HudMessage, HudState, HudTable, HudText, HudTone } from "./hud.ts";
 export { runWorldHandler } from "./world.ts";

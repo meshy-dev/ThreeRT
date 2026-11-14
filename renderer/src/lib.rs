@@ -2,6 +2,8 @@
 //! `threert-render` CLI and by the native playground client).
 
 pub mod api;
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+pub mod audio;
 pub mod bvh;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compare;

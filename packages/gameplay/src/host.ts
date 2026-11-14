@@ -21,8 +21,8 @@
 // - The same object is `globalThis.__threert_host`, for a library that does not import this package.
 //
 // The message families an app may implement are in docs/RUNTIME.md ("The host channel"): `net.*` (sockets and HTTP
-// the app owns), `hud` (hud.ts), `launch` (how the game was opened), and `input` (input.ts), which the node host
-// takes itself.
+// the app owns), `hud` (hud.ts), `audio.*` (audio.ts: played by the engine's mixer), `launch` (how the game was
+// opened), and `input` (input.ts), which the node host takes itself.
 
 import type { WorldContext } from "./world.ts";
 
