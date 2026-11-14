@@ -131,6 +131,15 @@ struct LiveParams {
     jit: [f32; 4],
     /// Which half of the lasting buffers is this frame's (live.wgsl `this_half`; the other the previous frame's), -.
     state: [u32; 4],
+    /// The light tiles (live.wgsl `light_tiles`): this frame's grid offset x, y, the lists' first vec4 in the kernel's
+    /// direct buffer, tiles a row.
+    lt: [u32; 4],
+}
+
+/// Resampling candidates a vertex the camera sees takes from its pixel's light tile, beside the kernel's RIS_M
+/// uniform ones (`Params::ltile.w`; THREERT_LT_LIST overrides: A/B, 0 = none).
+pub(super) fn list_candidates() -> u32 {
+    std::env::var("THREERT_LT_LIST").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
 }
 
 /// Auto / local exposure settings of the loaded scene (UE PostProcessVolume semantics).
@@ -344,6 +353,10 @@ pub struct LiveCore {
     inst_moved: bool,
     /// The previous frame's traced size (its traced-grid diffuse history; 0 before the first frame).
     prev_isz: (u32, u32),
+    /// The light tiles' lists as the last frame built them (pathtrace.wgsl `Params::ltile`'s y, z and `ltile2`'s
+    /// size): what this frame's paths take candidates from. None: no lists (the first frame, after a reset, a scene
+    /// whose local lights are summed exactly).
+    light_tiles: Option<(u32, u32, (u32, u32))>,
     /// Frame of the last lighting edit (power, light / material parameters, environment): the temporal pass looks
     /// for changed lighting (anti-lag) only shortly after one.
     lit_changed: u32,
@@ -536,7 +549,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, prev_span: None, reposed: false, emitters_moved: false, cold_frames: 0, pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, sky_cover: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.sky_cover = core.sc.tables.cloud_cover;
         core.apply_post(&pp);

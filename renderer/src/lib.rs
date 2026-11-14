@@ -743,6 +743,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         lod_view: [0.0; 4],
         ltree: ltree_param,
         procs,
+        ltile: [0; 4],
+        ltile2: [0; 4],
     };
     let mut params = params;
     let mut first = 0u32;

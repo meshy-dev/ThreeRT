@@ -36,6 +36,8 @@ pub(super) enum Res {
     KernelRefl,
     KernelMotion,
     KernelDirect,
+    /// The kernel's direct buffer, to write (`light_tiles`: the light tiles' lists after its per-pixel data).
+    KernelLights,
     /// The tonemap LUT and its sampler.
     Lut,
     LutSampler,
@@ -83,6 +85,7 @@ pub(super) const RESOURCES: &[(&str, Res)] = &[
     ("refl_res", Res::Own(Count::Pixels(1))),
     ("motion_in", Res::KernelMotion),
     ("direct_in", Res::KernelDirect),
+    ("light_rw", Res::KernelLights),
     ("lock_fwd", Res::Own(Count::Pixels(1))),
 ];
 
@@ -99,12 +102,15 @@ pub(super) enum Grid {
     Quarter,
     /// Its 16 x 16 tiles.
     Tiles16,
+    /// The light tiles' entries (`light_tiles`: a workgroup a tile, of a grid one tile wider than the traced one).
+    LightTiles,
     /// One workgroup.
     One,
 }
 
 /// The passes, in the order a frame runs them (live.wgsl's buffer table says which share a buffer when).
 pub(super) const PASSES: &[(&str, Grid)] = &[
+    ("light_tiles", Grid::LightTiles),
     ("refl", Grid::Traced),
     ("dtemporal", Grid::Traced),
     ("atrous0", Grid::Traced),
@@ -155,6 +161,9 @@ pub(super) const PASSES: &[(&str, Grid)] = &[
 /// per-pass profile times an empty pass for each, to keep its timestamps in `PASSES`' order).
 pub(super) const VIEW_MODE_PASSES: &[&str] = &["view_raw", "view_hdr", "view_sample"];
 
+/// The light tiles' pass: run only in a scene whose local lights are resampled (more than the kernel sums exactly).
+pub(super) const LIGHT_TILES_PASS: &str = "light_tiles";
+
 impl Grid {
     /// Invocations, for an output of `out`, a traced grid of `traced` and the previous frame's `prev`.
     pub(super) fn size(self, out: (u32, u32), traced: (u32, u32), prev: (u32, u32)) -> (u32, u32) {
@@ -164,9 +173,15 @@ impl Grid {
             Grid::Output => out,
             Grid::Quarter => (out.0.div_ceil(4), out.1.div_ceil(4)),
             Grid::Tiles16 => (out.0.div_ceil(16), out.1.div_ceil(16)),
+            Grid::LightTiles => (light_tiles(traced.0) * 8, light_tiles(traced.1) * 8),
             Grid::One => (8, 8),
         }
     }
+}
+
+/// Light tiles across `n` traced pixels: 8 pixels each, and one more for the grid's offset.
+pub(super) fn light_tiles(n: u32) -> u32 {
+    n.div_ceil(8) + 1
 }
 
 /// The binding live.wgsl gives `name`.
@@ -203,6 +218,7 @@ pub(super) fn check() {
         let fits = match (res, &b.kind) {
             (Res::Params, Kind::Uniform) | (Res::Lut, Kind::Texture(_)) | (Res::LutSampler, Kind::Sampler) => true,
             (Res::Samples | Res::KernelRefl | Res::KernelMotion | Res::KernelDirect, Kind::Storage { read_only, .. }) => *read_only,
+            (Res::KernelLights, Kind::Storage { read_only, .. }) => !*read_only,
             (Res::Own(Count::Declared), Kind::Storage { len, .. }) => *len > 0,
             (Res::Own(_), Kind::Storage { len, .. }) => *len == 0,
             _ => false,

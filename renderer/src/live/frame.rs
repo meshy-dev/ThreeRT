@@ -351,8 +351,21 @@ impl LiveCore {
         let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
         let quant = |v: f32| (v * 4095.0).round() / 4095.0;
         let jitter = (quant(halton(self.frame % phases + 1, 2)), quant(halton(self.frame % phases + 1, 3)));
+        // The light tiles (pathtrace.wgsl "Light tiles"), in a scene whose local lights are resampled (more than the
+        // kernel's RIS_EXACT, 8): the lists the last frame built, for this frame's paths (none after a reset: its
+        // reports were another view's), and this frame's grid offset, a pixel of 8 x 8.
+        let tiles_on = self.sc.base.counts[0] - self.sc.base.counts2[0] > 8;
+        if self.reset || !tiles_on {
+            self.light_tiles = None;
+        }
+        let lists = (self.targets.kernel.direct.size / 16) as u32 - layout::light_tiles(w) * layout::light_tiles(h) * 64;
+        let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
+            if let Some((row, at, size)) = self.light_tiles {
+                (p.ltile[0], p.ltile[1], p.ltile[2]) = (lists, row, at);
+                p.ltile2 = [size.0, size.1, 0, 0];
+            }
             // Software traversal's units as edits left them: the top tree's root and how many it holds (trace_units.wgsl).
             if let Some(u) = &self.sc.up.units {
                 (p.motion[2], p.motion[3]) = (f32::from_bits(u.layout.top_first), f32::from_bits(u.count));
@@ -503,6 +516,7 @@ impl LiveCore {
             dof: dof_params(self.sc.dof.as_ref(), cam.tan_half_fov, w, h),
             jit: [jitter.0, jitter.1, 0.0, 0.0],
             state: [1 - self.frame % 2, 0, 0, 0],
+            lt: [tile_at.0, tile_at.1, lists, layout::light_tiles(iw)],
         };
         g.queue.write_buffer(&self.targets.params, 0, bytemuck::bytes_of(&lp));
         // Translucent particles: drawn over the upscaled image right after `upscale` (in sb when depth of field / motion
@@ -556,7 +570,7 @@ impl LiveCore {
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 let q = (k as u32 + 1) * 2;
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
-                if self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name) {
+                if (self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name)) && (tiles_on || *name != layout::LIGHT_TILES_PASS) {
                     pass.set_pipeline(pipe);
                     pass.set_bind_group(0, &self.sc.bgs[k], &[]);
                     let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
@@ -578,7 +592,7 @@ impl LiveCore {
             let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
             let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw });
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
-                if self.view_mode == 0 && layout::VIEW_MODE_PASSES.contains(name) {
+                if (self.view_mode == 0 && layout::VIEW_MODE_PASSES.contains(name)) || (!tiles_on && *name == layout::LIGHT_TILES_PASS) {
                     continue;
                 }
                 pass.set_pipeline(pipe);
@@ -663,6 +677,7 @@ impl LiveCore {
         self.prev_cam = cam;
         self.shown_spp = spp.max(1);
         self.prev_isz = (iw, ih);
+        self.light_tiles = tiles_on.then_some((layout::light_tiles(iw), tile_at.0 | tile_at.1 << 16, (iw, ih)));
         self.reset = false;
         self.frame = self.frame.wrapping_add(1);
     }

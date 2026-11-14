@@ -115,6 +115,12 @@ pub struct Params {
     pub aerial: [f32; 4],
     /// three.js `scene.background` (F_BACKGROUND): its radiance, 1.
     pub background: [f32; 4],
+    /// The live light tiles (pathtrace.wgsl "Light tiles"; live/frame.rs): the lists' first vec4 in the direct
+    /// buffer (0: none this frame), tiles a row, the grid's offset when they were built (x | y << 16), candidates a
+    /// vertex the camera sees takes from its list beside the uniform ones (`live::list_candidates`; half past it).
+    pub ltile: [u32; 4],
+    /// The traced size the lists were built at, -, -.
+    pub ltile2: [u32; 4],
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
