@@ -1101,7 +1101,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     // Instanced objects' shared meshes by (geometry, GPU material); their flattened instances' triangle ranges.
     let mut inst_mesh_of: HashMap<(u32, u32), u32> = HashMap::new();
     let mut tri_instances: Vec<(u32, u32, u32)> = vec![];
-    // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT (gpu.rs `tinted_source`).
+    // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT.
     let tinted = w.instanced.iter().any(|(id, t)| t.colors.is_some() && w.shown(*id) && matches!(w.objects.get(id).map(|o| &o.kind), Some(Kind::Instanced { .. })));
     let stride = object_stride(tinted);
     for id in &order {
