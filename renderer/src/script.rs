@@ -161,6 +161,11 @@ type Rejected = Rc<RefCell<Rejections>>;
 const MAX_REJECTIONS: usize = 8;
 const MAX_TRACKED: usize = 4096;
 
+/// A line of the engine's about the game (a scene that does not compile as written): to the game's log, as `console.*`.
+pub fn engine_log(level: &str, msg: &str) {
+    game_log(level, msg);
+}
+
 /// A game log line (`console.*`, an unhandled rejection): stderr, and the sink if there is one.
 fn game_log(level: &str, msg: &str) {
     eprintln!("[game{}] {msg}", if level == "info" { String::new() } else { format!(" {level}") });
