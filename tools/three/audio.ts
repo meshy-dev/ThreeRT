@@ -5,7 +5,7 @@
 // mix.rs `place` and `pan_gains`. The output goes through the same limiter.
 //
 // A browser plays nothing before the person has touched the page: the context resumes on the first key or click.
-// Files are fetched from the page's root (`/assets/sounds/shot.ogg`), as the scene's are (engine.ts).
+// Files are fetched relative to the page (`assets/sounds/shot.ogg`), so a package hosted under a path finds them.
 import type { HostMessage } from "@threert/gameplay";
 
 export const DEFAULT_FALLOFF = 2;
@@ -64,7 +64,7 @@ export class PageAudio {
   private readonly off: (() => void)[] = [];
   private readonly base: string;
 
-  constructor(base = "/") {
+  constructor(base = "") {
     this.base = base;
     const resume = () => void this.context().resume();
     for (const t of ["keydown", "pointerdown"] as const) {
