@@ -5,7 +5,7 @@
 // wetness / puddles / ripples / grime, procedural facade windows, emissive animation, RIS many-light sampling, height
 // fog with volumetric single scattering. Each is compiled out when the scene does not use it (FEAT).
 //
-// The kernel is this file and trace_units.wgsl, trace_hw.wgsl and translucent.wgsl after it (gpu.rs `KERNEL_FILES`),
+// The kernel is this file and sample.wgsl, trace_units.wgsl, trace_hw.wgsl and translucent.wgsl after it (gpu.rs `KERNEL_FILES`),
 // compiled for a device and a scene by WESL's conditional translation (`@if`, gpu.rs `kernel_wgsl`): a declaration
 // or a statement under `@if(x)` is there only where x holds. The flags:
 //   hwrt                  hardware traversal (ray queries) in the software BVH walk's place, and the translucency pass
@@ -234,7 +234,6 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
 // ------------------------------------------------------------------------------------------------
 // RNG
 
-var<private> rng_state: u32;
 // Path vertex index of the current shading point (cheaper procedural detail / fewer candidates past the first hit).
 var<private> cur_depth: u32;
 // Live "ray tracing off" (P.raster.w, LiveCore::rays): set once the camera's own ray has found its surface. From then
@@ -274,10 +273,6 @@ fn pcg(v: u32) -> u32 {
     return (w >> 22u) ^ w;
 }
 
-fn rnd() -> f32 {
-    rng_state = pcg(rng_state);
-    return f32(rng_state >> 8u) * (1.0 / 16777216.0);
-}
 
 // Buckets of the emitter CDF's guide table (lib.rs EMITTER_GUIDE).
 const EMITTER_GUIDE: u32 = 65536u;
@@ -289,10 +284,6 @@ fn emitter_guide(k: u32) -> u32 {
 // One emitter CDF entry: the first whose cumulative weight is not below u. The guide table bounds the binary search to
 // u's bucket (u * EMITTER_GUIDE is exact for the 24-bit u), which holds the same entry a search over the whole CDF
 // finds. Requires counts.y > 0.
-fn emitter_pick() -> vec4<f32> {
-    return emitter_pick_u(rnd());
-}
-
 fn emitter_pick_u(u: f32) -> vec4<f32> {
     let k = min(u32(u * f32(EMITTER_GUIDE)), EMITTER_GUIDE - 1u);
     var lo = emitter_guide(k);
@@ -343,10 +334,10 @@ fn lt_imp(nd: vec4<f32>, x: vec3<f32>, n: vec3<f32>) -> f32 {
 }
 
 // A CDF entry by power within entries [lo, hi) (cumulative p0 .. p1): one guide-table lookup.
-fn emitter_pick_range(lo: u32, hi: u32) -> vec4<f32> {
+fn emitter_pick_range(lo: u32, hi: u32, r: f32) -> vec4<f32> {
     let p0 = select(0.0, emitter_at(max(lo, 1u) - 1u).y, lo > 0u);
     let p1 = emitter_at(hi - 1u).y;
-    let u = min(p0 + rnd() * (p1 - p0), p1);
+    let u = min(p0 + r * (p1 - p0), p1);
     let k = min(u32(u * f32(EMITTER_GUIDE)), EMITTER_GUIDE - 1u);
     var l = emitter_guide(k);
     var h = emitter_guide(k + 1u);
@@ -363,16 +354,18 @@ fn emitter_pick_range(lo: u32, hi: u32) -> vec4<f32> {
 // total).
 struct EPick { e: vec4<f32>, p: f32, w: f32 };
 
-fn emitter_draw(x: vec3<f32>, n: vec3<f32>) -> EPick {
+fn emitter_draw(x: vec3<f32>, n: vec3<f32>, rd: u32) -> EPick {
+    let r3 = rng3(rd);
     if (!lt_on()) {
-        let e = emitter_pick();
+        let e = emitter_pick_u(r3.x);
         return EPick(e, e.z / P.misc.y, e.z);
     }
-    if (rnd() < P.ltree.z) {
-        let e = emitter_pick_range(bitcast<u32>(P.ltree.y), P.counts.y);
+    if (r3.x < P.ltree.z) {
+        let e = emitter_pick_range(bitcast<u32>(P.ltree.y), P.counts.y, r3.y);
         return EPick(e, e.z / P.misc.y, e.z);
     }
     var p = 1.0 - P.ltree.z;
+    var u = r3.y;
     var w = bitcast<u32>(lt_node(0u).w);
     for (var k = 0u; k <= LT_PATH_BITS && (w & LT_LEAF) == 0u; k++) {
         let l = lt_node(w);
@@ -381,14 +374,15 @@ fn emitter_draw(x: vec3<f32>, n: vec3<f32>) -> EPick {
         let ir = lt_imp(r, x, n);
         if (!(il + ir > 0.0)) { return EPick(vec4<f32>(0.0), 0.0, 0.0); }
         let pl = il / (il + ir);
-        if (rnd() < pl) { w = bitcast<u32>(l.w); p *= pl; } else { w = bitcast<u32>(r.w); p *= 1.0 - pl; }
+        if (u < pl) { w = bitcast<u32>(l.w); p *= pl; u = u / pl; } else { w = bitcast<u32>(r.w); p *= 1.0 - pl; u = (u - pl) / (1.0 - pl); }
+        u = clamp(u, 0.0, 0.99999994);
     }
     if ((w & LT_LEAF) == 0u) { return EPick(vec4<f32>(0.0), 0.0, 0.0); }
     let lo = w & 0x1fffffffu;
     let hi = lo + ((w >> 29u) & 3u) + 1u;
     var wsum = 0.0;
     for (var j = lo; j < hi; j++) { wsum += emitter_at(j).z; }
-    var t = rnd() * wsum;
+    var t = r3.z * wsum;
     var e = emitter_at(hi - 1u);
     for (var j = lo; j < hi; j++) {
         let c = emitter_at(j);
@@ -713,14 +707,14 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 
 
 // Shadow rays of the analytic lights: objects that cast no shadow (castShadow = false, glass) let them through.
-fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {
+fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
     if (trace(o, d, tmax, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, tmax, false)) { return true; }
+    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, tmax, false, rd)) { return true; }
     // Through media: blocked with probability 1 - transmittance (an unbiased estimate of it, ratio tracking).
-    if (media_shadows()) { return rnd() >= media_tr(o, d, tmax); }
+    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
     // Live: homogeneous media (water) analytically.
-    return LIVE && has(F_HMEDIA) && rnd() >= media_homogeneous(o, d, tmax, false).tr;
+    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
 }
 
 // Offline: what the glass a shadow ray crosses lets through (it has passed every opaque caster). At each glass surface
@@ -755,10 +749,10 @@ fn glass_tr(o_in: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool) -> vec3<f32> {
 // The colour a shadow ray's light keeps past glass (glass_tr), drawn as a single decision: blocked with probability
 // 1 - p, p its largest channel; passing, `shadow_tint` = the colour / p (unbiased; light_vis hands it to the caller).
 var<private> shadow_tint: vec3<f32> = vec3<f32>(1.0);
-fn glass_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool) -> bool {
+fn glass_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool, rd: u32) -> bool {
     let t = glass_tr(o, d, tmax, sky);
     let p = max(t.r, max(t.g, t.b));
-    if (rnd() >= p) { return true; }
+    if (rng1(rng_sub(rd, 0x67u)) >= p) { return true; }
     shadow_tint = t / p;
     return false;
 }
@@ -772,9 +766,9 @@ fn gtint(v: vec3<f32>) -> vec3<f32> {
 
 // What reaches a lit point from a light along a shadow ray: 0 when occluded, else 1 or the tint of the glass it passed
 // (offline). `shadows` false (a light that casts none): 1, no ray.
-fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32) -> vec3<f32> {
+fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> vec3<f32> {
     if (!shadows) { return vec3<f32>(1.0); }
-    if (occluded(o, d, tmax)) { return vec3<f32>(0.0); }
+    if (occluded(o, d, tmax, rd)) { return vec3<f32>(0.0); }
     return shadow_tint;
 }
 
@@ -830,12 +824,12 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
 // Shadow rays toward the environment: as `occluded`, but glass that bends the ray (an odd number of glass surfaces:
 // a water surface, the shading point inside a glass solid) blocks it. The sky there is the refracted paths' (the
 // path loop counts it in full past such glass), which find it where it is (Snell's window from under water).
-fn occluded_sky(o: vec3<f32>, d: vec3<f32>) -> bool {
+fn occluded_sky(o: vec3<f32>, d: vec3<f32>, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
     if (trace(o, d, INF, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, INF, true)) { return true; }
-    if (media_shadows()) { return rnd() >= media_tr(o, d, INF); }
-    return LIVE && has(F_HMEDIA) && rnd() >= media_homogeneous(o, d, INF, false).tr;
+    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, INF, true, rd)) { return true; }
+    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, INF, rd); }
+    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, INF, false, rd).tr;
 }
 
 // Live homogeneous media (VolumeMesh `homogeneous`: constant coefficients, Coeff = albedo rgb + extinction, Emission rgb,
@@ -843,7 +837,7 @@ fn occluded_sky(o: vec3<f32>, d: vec3<f32>) -> bool {
 // `light` the emission and the in-scattering from the volume voxels at each crossing's middle. The live megakernel's
 // only media code: water and other constant media attenuate reflection, refraction and shadow rays; other media are
 // the camera rays' alone (media_composite).
-fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> March {
+fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool, rd: u32) -> March {
     var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
     if (!light) {
@@ -891,8 +885,9 @@ fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool) -> Marc
             // the first, ...): one lookup in the middle lit a deep crossing with its dimmer depth.
             var lin = vec3<f32>(0.0);
             if (cache_on()) {
+                let u2 = rng2(rng_sub(rd, 0x100u + s));
                 for (var j = 0u; j < 2u; j++) {
-                    let q = (f32(j) + rnd()) * 0.5 * (1.0 - tr);
+                    let q = (f32(j) + u2[j]) * 0.5 * (1.0 - tr);
                     let tt = select(-log(1.0 - q) / st, (f32(j) + 0.5) * 0.5 * len, st <= 1e-6);
                     lin += 0.5 * cache_point(o + d * (t + tt)).rgb;
                 }
@@ -924,16 +919,16 @@ fn media_shadows() -> bool { return (!LIVE || media_voxels) && has(F_MEDIA) && P
 // image under foliage ~1.7 % of its light (static Bistro at 25 s along its path; layer B Bistro ΔE 3.23 -> 3.30).
 // Removing the bias without the cost (an opacity micromap, or these rays compacted into a pass of their own) is a
 // follow-up item (ROADMAP § 0). Offline rendering always tests.
-fn occluded_emitter(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {
+fn occluded_emitter(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, LIVE)).tri != 0xffffffffu) { return true; }
-    if (media_shadows()) { return rnd() >= media_tr(o, d, tmax); }
-    return LIVE && has(F_HMEDIA) && rnd() >= media_homogeneous(o, d, tmax, false).tr;
+    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
+    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
 }
 
-fn occluded_any(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> bool {
+fn occluded_any(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     if (trace(o, d, tmax, TRACE_ANY).tri != 0xffffffffu) { return true; }
-    if (media_shadows()) { return rnd() >= media_tr(o, d, tmax); }
-    return LIVE && has(F_HMEDIA) && rnd() >= media_homogeneous(o, d, tmax, false).tr;
+    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
+    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1437,32 +1432,33 @@ fn sample_vndf(v: vec3<f32>, tbn: mat3x3<f32>, alpha: f32, u1: f32, u2: f32) -> 
 
 fn sample_bsdf(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     let tbn = basis(s.n);
+    let r = rng4(rng_dim(D_BSDF));
     sampled_trans = false;
     if (has(F_COAT) || has(F_GLASS)) {
-        let u = rnd();
+        let u = r.x;
         if (u < lb.p_coat) {
             sampled_spec = true;
-            return reflect(-v, sample_vndf(v, tbn, lb.coat_alpha, rnd(), rnd()));
+            return reflect(-v, sample_vndf(v, tbn, lb.coat_alpha, r.z, r.w));
         }
         if (u < lb.p_coat + lb.p_trans) {
             // Refraction through a microfacet normal (Walter et al. 2007; smooth glass: the shading normal).
             sampled_trans = true;
             sampled_spec = false;
             var h = s.n;
-            if (s.roughness > 0.05) { h = sample_vndf(v, tbn, s.roughness * s.roughness, rnd(), rnd()); }
+            if (s.roughness > 0.05) { h = sample_vndf(v, tbn, s.roughness * s.roughness, r.z, r.w); }
             let t = refract(-v, h, select(s.ior, 1.0 / s.ior, s.front));
             // Total internal reflection: the ray stays inside.
             return select(t, reflect(-v, h), all(t == vec3<f32>(0.0)));
         }
     }
-    sampled_spec = rnd() < lb.p_spec;
+    sampled_spec = r.y < lb.p_spec;
     if (sampled_spec) {
-        let h = sample_vndf(v, tbn, s.roughness * s.roughness, rnd(), rnd());
+        let h = sample_vndf(v, tbn, s.roughness * s.roughness, r.z, r.w);
         return reflect(-v, h);
     }
-    let r = sqrt(rnd());
-    let phi = 2.0 * PI * rnd();
-    return tbn * vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
+    let rr = sqrt(r.z);
+    let phi = 2.0 * PI * r.w;
+    return tbn * vec3<f32>(rr * cos(phi), rr * sin(phi), sqrt(max(0.0, 1.0 - rr * rr)));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1504,18 +1500,19 @@ fn lower_bound(start: u32, count: u32, x: f32) -> u32 {
     return min(lo, count - 1u);
 }
 
-fn sample_env() -> vec3<f32> {
+fn sample_env(rd: u32) -> vec3<f32> {
+    let u4 = rng4(rd);
     if (P.env.x < 0.5) {
-        let z = 1.0 - 2.0 * rnd();
+        let z = 1.0 - 2.0 * u4.x;
         let r = sqrt(max(0.0, 1.0 - z * z));
-        let phi = 2.0 * PI * rnd();
+        let phi = 2.0 * PI * u4.y;
         return vec3<f32>(r * cos(phi), z, r * sin(phi));
     }
     let w = u32(P.env.y); let h = u32(P.env.z);
-    let y = lower_bound(0u, h, rnd());
-    let x = lower_bound(h + y * w, w, rnd());
-    let u = (f32(x) + rnd()) / f32(w);
-    let v = (f32(y) + rnd()) / f32(h);
+    let y = lower_bound(0u, h, u4.x);
+    let x = lower_bound(h + y * w, w, u4.y);
+    let u = (f32(x) + u4.z) / f32(w);
+    let v = (f32(y) + u4.w) / f32(h);
     let theta = v * PI;
     let phi = (u - 0.5) * 2.0 * PI;
     return vec3<f32>(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
@@ -1629,14 +1626,14 @@ struct LS { c: vec3<f32>, l: vec3<f32>, sl: vec3<f32>, dist: f32 };
 
 // Point / spot light seen from x: punctual intensity x attenuation (unshadowed), direction to the light centre `l`,
 // and a shadow ray toward a point sampled on the light's sphere (soft shadows).
-fn local_light(li: Light, x: vec3<f32>) -> LS {
+fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
     if (u32(li.pos.w) == 3u) {
         // Rect (UE RectLight): uniform point on the rectangle; luminance x area x cos_light / d^2 (Lambertian),
         // cut beyond the barn-door angle.
         let n = li.dir.xyz;
         let ux = li.ext.xyz;
         let uy = normalize(cross(n, ux)) * li.dir.w;
-        let lp = li.pos.xyz + ux * (2.0 * rnd() - 1.0) + uy * (2.0 * rnd() - 1.0);
+        let lp = li.pos.xyz + ux * (2.0 * u.x - 1.0) + uy * (2.0 * u.y - 1.0);
         let dl = lp - x;
         let d2 = max(dot(dl, dl), 1e-8);
         let dist = sqrt(d2);
@@ -1658,9 +1655,9 @@ fn local_light(li: Light, x: vec3<f32>) -> LS {
     var lp = li.pos.xyz;
     let radius = li.dir.w;
     if (radius > 0.0) {
-        let z = 1.0 - 2.0 * rnd();
+        let z = 1.0 - 2.0 * u.x;
         let r = sqrt(max(0.0, 1.0 - z * z));
-        let phi = 2.0 * PI * rnd();
+        let phi = 2.0 * PI * u.y;
         lp += radius * vec3<f32>(r * cos(phi), r * sin(phi), z);
     }
     let dl = li.pos.xyz - x;
@@ -1687,7 +1684,7 @@ fn local_light(li: Light, x: vec3<f32>) -> LS {
 // ones too when there are few (one shadow ray each). Otherwise: resampled importance sampling (Talbot 2005) of RIS_M
 // uniform candidates by unshadowed contribution, then one shadow ray. `vol` = in-scattering in the fog (phase
 // function) instead of the surface BSDF. Surface results add their specular part to `dl_spec`.
-fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>, vol: bool, d: vec3<f32>) -> vec3<f32> {
+fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>, vol: bool, d: vec3<f32>, rd: u32) -> vec3<f32> {
     let nd = P.counts2.x;
     let nl = P.counts.x - nd;
     if (nl == 0u) { return vec3<f32>(0.0); }
@@ -1718,11 +1715,11 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
                 let reach = li.color.w + select(li.dir.w, length(li.ext.xyz) + li.dir.w, u32(li.pos.w) == 3u);
                 if (li.color.w > 0.0 && dot(dc, dc) > reach * reach) { continue; }
                 if (u32(li.pos.w) != 3u && dot(dc, s.ng) < -li.dir.w) { continue; } // eval_bsdf rejects it anyway
-                let ls = local_light(li, x);
+                let ls = local_light(li, x, rng2(rng_sub(rd, i)));
                 if (all(ls.c <= vec3<f32>(0.0))) { continue; }
                 let f = eval_bsdf_k(s, lb, v, ls.l, li.x.y);
                 if (any(f > vec3<f32>(0.0))) {
-                    let vis = light_vis(li.ext.w >= 0.5, o, ls.sl, ls.dist * 0.999);
+                    let vis = light_vis(li.ext.w >= 0.5, o, ls.sl, ls.dist * 0.999, rng_sub(rd ^ 0x40000000u, i));
                     if (any(vis > vec3<f32>(0.0))) {
                         sum += ls.c * f * gtint(vis);
                         dl_spec += ls.c * f * gtint(vis) * split_frac;
@@ -1741,13 +1738,14 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     var pick_ph = 0.0;
     var pick_ls: LS;
     for (var k = 0u; k < m_cand; k++) {
-        let idx = first + min(u32(rnd() * f32(count)), count - 1u);
-        let ls = local_light(light_at(idx), x);
+        let r4 = rng4(rng_sub(rd ^ 0x80000000u, k));
+        let idx = first + min(u32(r4.x * f32(count)), count - 1u);
+        let ls = local_light(light_at(idx), x, r4.yz);
         var ph = luminance(ls.c);
         if (vol) { ph *= light_at(idx).x.x; } else { ph *= max(dot(s.n, ls.l), 0.0) + 0.05 * max(dot(s.ng, ls.l), 0.0); }
         if (ph <= 0.0) { continue; }
         wsum += ph;
-        if (rnd() * wsum < ph) {
+        if (r4.w * wsum < ph) {
             pick = idx;
             pick_ph = ph;
             pick_ls = ls;
@@ -1758,7 +1756,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
         let lk = light_at(pick).x;
         if (vol) { c = pick_ls.c * hg_phase(P.vol.y, dot(pick_ls.l, d)) * lk.x; } else { c = pick_ls.c * eval_bsdf_k(s, lb, v, pick_ls.l, lk.y); }
         if (any(c > vec3<f32>(0.0))) {
-            let vis = light_vis(light_at(pick).ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999);
+            let vis = light_vis(light_at(pick).ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0xffffffffu));
             if (any(vis > vec3<f32>(0.0))) {
                 let r = c * gtint(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
                 sum += r;
@@ -1801,7 +1799,7 @@ fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
 // same with or without light LOD. With light LOD every surface vertex samples this way (deeper ones with 2
 // candidates): a single draw from the LOD'd CDF would make far emitters rare and heavy, which the radiance cache's
 // clamps cut.
-fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes, v: vec3<f32>) -> ES {
+fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes, v: vec3<f32>, rd: u32) -> ES {
     var r = ES(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 0.0, 0.0);
     var wsum = 0.0;
     var pick_ti = 0u;
@@ -1810,10 +1808,12 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     var pick_e = vec4<f32>(0.0);
     var pick_sel = 0.0;
     for (var k = 0u; k < m; k++) {
-        let pk = emitter_draw(x, n);
+        let dk = rng_sub(rd, k);
+        let pk = emitter_draw(x, n, dk);
         let e = pk.e;
-        var b1 = rnd();
-        var b2 = rnd();
+        let bb = rng3(rng_sub(dk, 1u));
+        var b1 = bb.x;
+        var b2 = bb.y;
         if (pk.p <= 0.0) { continue; }
         if (b1 + b2 > 1.0) { b1 = 1.0 - b1; b2 = 1.0 - b2; }
         let ti = bitcast<u32>(e.x);
@@ -1839,7 +1839,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
         }
         if (w <= 0.0) { continue; }
         wsum += w;
-        if (rnd() * wsum < w) {
+        if (bb.z * wsum < w) {
             pick_ti = ti;
             pick_b = vec2<f32>(b1, b2);
             pick_ph = pk.w / (abs(e.w) * lk) * g;
@@ -1872,17 +1872,18 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
 
 // One emissive triangle point by the emitter CDF (area x emissive-factor luminance); radiance includes the emissive
 // map (coarse mip) and animation, so signs spill their own colours.
-fn sample_emitter(x: vec3<f32>, n: vec3<f32>) -> ES {
+fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     var r = ES(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 0.0, 0.0);
-    let pk = emitter_draw(x, n);
+    let pk = emitter_draw(x, n, rd);
     let e = pk.e;
     if (pk.p <= 0.0) { return r; } // switched off (power 0)
     let ti = bitcast<u32>(e.x);
     let v0 = tri_verts[ti * 3u].xyz;
     let e1 = tri_verts[ti * 3u + 1u].xyz;
     let e2 = tri_verts[ti * 3u + 2u].xyz;
-    var b1 = rnd();
-    var b2 = rnd();
+    let bb = rng2(rng_sub(rd, 1u));
+    var b1 = bb.x;
+    var b2 = bb.y;
     if (b1 + b2 > 1.0) { b1 = 1.0 - b1; b2 = 1.0 - b2; }
     let lp = v0 + e1 * b1 + e2 * b2;
     let cr = cross(e1, e2);
@@ -1927,17 +1928,17 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         let li = light_at(i);
         let cos_max = li.dir.w;
         let to_light = -li.dir.xyz;
-        let cos_t = 1.0 - rnd() * (1.0 - cos_max);
+        let u = rng2(rng_sub(rng_dim(D_SUN), i));
+        let cos_t = 1.0 - u.x * (1.0 - cos_max);
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
-        let phi = 2.0 * PI * rnd();
+        let phi = 2.0 * PI * u.y;
         let tb = basis(to_light);
         let l = tb * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
-        // A light gone black (a moon that has set, the sun at night) costs neither its BSDF nor its shadow ray. (After
-        // the cone's random numbers: every other light sees the same ones as before.)
+        // A light gone black (a moon that has set, the sun at night) costs neither its BSDF nor its shadow ray.
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
         let f = eval_bsdf_k(s, lb, v, l, li.x.y);
         if (any(f > vec3<f32>(0.0))) {
-            let vis = light_vis(li.ext.w >= 0.5, o, l, INF);
+            let vis = light_vis(li.ext.w >= 0.5, o, l, INF, rng_sub(rng_dim(D_SUN_VIS), i));
             if (any(vis > vec3<f32>(0.0))) {
                 let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
                 let frac = split_frac;
@@ -1962,7 +1963,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     @if(light_pick) var pick_w = 1.0;
     @if(light_pick) let kinds = u32(has_local) + u32(has_emit) + u32(has_env);
     @if(light_pick) if (cur_depth > 0u && kinds > 1u) {
-        var k = min(u32(rnd() * f32(kinds)), kinds - 1u);
+        var k = min(u32(rng1(rng_dim(D_PICK)) * f32(kinds)), kinds - 1u);
         take_local = has_local && k == 0u;
         if (has_local) { k -= 1u; }
         take_emit = has_emit && k == 0u;
@@ -1972,8 +1973,8 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     }
     @if(light_pick) let sum_sun = sum;
     @if(light_pick) let spec_sun = dl_spec;
-    @if(!light_pick) sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0));
-    @if(light_pick) if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0)); }
+    @if(!light_pick) sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0), rng_dim(D_LOCAL));
+    @if(light_pick) if (take_local) { sum += local_lights(s, lb, v, o, s.p, false, vec3<f32>(0.0), rng_dim(D_LOCAL)); }
     // Emissive triangles (incl. rect lights)
     mis_x = o;
     mis_n = s.n;
@@ -1982,10 +1983,10 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     if (emitters > 0u) {
         var es: ES;
         // With the light tree its candidates are already near the point: P.ltree.y of them at camera hits, one elsewhere.
-        if (lt_on()) { es = sample_emitter_ris(o, s.n, select(1u, u32(P.ltree.w), cur_depth == 0u), s, lb, v); } else if (seen_directly()) { es = sample_emitter_ris(o, s.n, select(EMIT_RIS_M / 2u, EMIT_RIS_M, cur_depth == 0u), s, lb, v); } else if (P.light_lod.w > 0.0) { es = sample_emitter_ris(o, s.n, 2u, s, lb, v); } else { es = sample_emitter(o, s.n); }
+        if (lt_on()) { es = sample_emitter_ris(o, s.n, select(1u, u32(P.ltree.w), cur_depth == 0u), s, lb, v, rng_dim(D_EMIT)); } else if (seen_directly()) { es = sample_emitter_ris(o, s.n, select(EMIT_RIS_M / 2u, EMIT_RIS_M, cur_depth == 0u), s, lb, v, rng_dim(D_EMIT)); } else if (P.light_lod.w > 0.0) { es = sample_emitter_ris(o, s.n, 2u, s, lb, v, rng_dim(D_EMIT)); } else { es = sample_emitter(o, s.n, rng_dim(D_EMIT)); }
         if (es.pdf_w > 0.0) {
             let f = eval_bsdf(s, lb, v, es.l);
-            if (any(f > vec3<f32>(0.0)) && !occluded_emitter(o, es.l, es.dist * 0.999)) {
+            if (any(f > vec3<f32>(0.0)) && !occluded_emitter(o, es.l, es.dist * 0.999, rng_dim(D_EMIT_VIS))) {
                 let frac = split_frac;
                 let wgt = power_heuristic(es.pdf_w, pdf_bsdf(s, lb, v, es.l));
                 sum += es.le * f * wgt * es.w;
@@ -1997,11 +1998,11 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     var env_on = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);
     @if(light_pick) env_on = take_env && has_env;
     if (env_on) {
-        let l = sample_env();
+        let l = sample_env(rng_dim(D_ENV));
         let f = eval_bsdf(s, lb, v, l);
         if (any(f > vec3<f32>(0.0))) {
             let pdf_e = env_pdf(l);
-            if (pdf_e > 0.0 && !occluded_sky(o, l)) {
+            if (pdf_e > 0.0 && !occluded_sky(o, l, rng_dim(D_ENV_VIS))) {
                 let frac = split_frac;
                 let wgt = power_heuristic(pdf_e, pdf_bsdf(s, lb, v, l));
                 sum += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint);
@@ -2061,10 +2062,11 @@ fn fog_depth(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32) -> f32 {
 
 // Single scattering along a camera ray segment: one distance sampled by optical depth, then lights (RIS), one
 // emissive point and the directional lights, each with a shadow ray. `tr` = segment transmittance.
-fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f32> {
+fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32, rd: u32) -> vec3<f32> {
+    let r2 = rng2(rd);
     let pe = 1.0 - tr;
     if (pe < 1e-4) { return vec3<f32>(0.0); }
-    let tau = -log(max(1.0 - rnd() * pe, 1e-8));
+    let tau = -log(max(1.0 - r2.x * pe, 1e-8));
     let a = fog_base(o, d, t0) * max(P.vol.z, 1e-3);
     let k = P.fog.y * d.y;
     var t = tau / max(a, 1e-12);
@@ -2075,13 +2077,13 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f3
         let li = light_at(i);
         let l = -li.dir.xyz;
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
-        if (li.ext.w < 0.5 || !occluded(x, l, INF)) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
+        if (li.ext.w < 0.5 || !occluded(x, l, INF, rng_sub(rd, 0x30u + i))) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
     }
     // One shadow ray: either the local lights (RIS) or one emissive point, chosen with equal odds when both exist.
     let has_l = P.counts.x > P.counts2.x;
     let has_e = P.counts.y > 0u;
     let both = has_l && has_e;
-    let use_e = has_e && (!has_l || rnd() < 0.5);
+    let use_e = has_e && (!has_l || r2.y < 0.5);
     let wk = select(1.0, 2.0, both);
     if (use_e) {
         // Emitters picked by global power are mostly far away from a fog point: resample 4 candidates by their
@@ -2092,24 +2094,24 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32) -> vec3<f3
         for (var c = 0u; c < 4u; c++) {
             mis_x = x;
             mis_n = vec3<f32>(0.0);
-            let es = sample_emitter(x, vec3<f32>(0.0));
+            let es = sample_emitter(x, vec3<f32>(0.0), rng_sub(rd, 0x10u + c));
             if (es.pdf_w <= 0.0) { continue; }
             let t = luminance(es.le) * hg_phase(P.vol.y, dot(es.l, d));
             let w = t / es.pdf_w;
             if (w <= 0.0) { continue; }
             wsum += w;
-            if (rnd() * wsum < w) {
+            if (rng1(rng_sub(rd, 0x20u + c)) * wsum < w) {
                 pick = es;
                 pick_t = t;
             }
         }
-        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999)) {
+        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x40u))) {
             ls += wk * pick.le * hg_phase(P.vol.y, dot(pick.l, d)) * (wsum / (4.0 * pick_t));
         }
     } else if (has_l) {
         var dummy_s: Surface;
         var dummy_l: Lobes;
-        ls += wk * local_lights(dummy_s, dummy_l, -d, x, x, true, d);
+        ls += wk * local_lights(dummy_s, dummy_l, -d, x, x, true, d, rng_sub(rd, 0x50u));
     }
     return P.vol.x * P.vol2.rgb * pe * ls;
 }
@@ -2193,7 +2195,8 @@ struct Track { t: f32, albedo: vec3<f32>, g: f32, emission: vec3<f32> };
 // majorants and their coefficients summed (media may overlap). A collision is one of theirs, by extinction.
 // (Until 2026-11-13 each medium was tracked whole, in the order the ray entered them: a collision in the first hid
 // what a medium inside it emitted or scattered before that point: a fire inside smoke was drawn behind the smoke.)
-fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
+fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> Track {
+    var stp = 0u;
     var r = Track(-1.0, vec3<f32>(1.0), 0.0, vec3<f32>(0.0));
     let n = min(u32(P.time.w), 32u);
     var t = 0.0;
@@ -2216,7 +2219,9 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
         }
         if (mask != 0u && mj > 0.0) {
             loop {
-                t -= log(1.0 - rnd()) / mj;
+                let r3 = rng_hash3(rng_sub(rd, stp));
+                stp++;
+                t -= log(1.0 - r3.x) / mj;
                 if (t >= end) { break; }
                 var st = 0.0;
                 var em = vec3<f32>(0.0);
@@ -2226,13 +2231,13 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
                     st += v.extinction;
                     em += v.emission;
                     // The medium a collision here is in: each by its extinction (the first without a draw).
-                    if (v.extinction > 0.0 && (st <= v.extinction || rnd() * st < v.extinction)) {
+                    if (v.extinction > 0.0 && (st <= v.extinction || rng_hash(rng_sub(rng_sub(rd, stp), k), 0u) * st < v.extinction)) {
                         r.albedo = v.albedo;
                         r.g = medium_at(k).b.y;
                     }
                 }
                 r.emission += em / mj;
-                if (rnd() * mj < st) {
+                if (r3.z * mj < st) {
                     r.t = t;
                     return r;
                 }
@@ -2247,7 +2252,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Track {
 }
 
 // Transmittance through the media along o + d t, t < tmax (ratio tracking; an unbiased estimate).
-fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> f32 {
+fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> f32 {
     var tr = 1.0;
     let n = min(u32(P.time.w), 32u);
     for (var k = 0u; k < n; k++) {
@@ -2256,8 +2261,10 @@ fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32) -> f32 {
         let mj = medium_at(k).b.x;
         if (max(sp.x, 0.0) >= b || mj <= 0.0) { continue; }
         var t = max(sp.x, 0.0);
+        var step = 0u;
         loop {
-            t -= log(1.0 - rnd()) / mj;
+            t -= log(1.0 - rng_hash(rng_sub(rd, (k << 24u) + step), 0u)) / mj;
+            step++;
             if (t >= b) { break; }
             tr *= 1.0 - medium_eval(k, o + d * t).extinction / mj;
             if (tr < 1e-4) { return 0.0; }
@@ -2278,10 +2285,10 @@ const MEDIA_TRAIN_POINTS: u32 = 4096u;
 // time alone (their transmittance, their light's luminance).
 struct March { tr: f32, light: vec3<f32>, moving: vec2<f32> };
 
-fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
+fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool, rd: u32) -> March {
     var r = March(1.0, vec3<f32>(0.0), vec2<f32>(1.0, 0.0));
     let n = min(u32(P.time.w), 32u);
-    let u = rnd();
+    let u = rng1(rd);
     let per = f32(select(MEDIA_STEPS_INDIRECT, MEDIA_STEPS, camera));
     let lw = vec3<f32>(0.2126, 0.7152, 0.0722);
     // A stretch at a time, between the points where the ray enters or leaves a medium (as `media_track`): the media
@@ -2343,7 +2350,7 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
                     // then the voxel of the point itself. Near the boundary that lost light, at every scattering order
                     // through the training's feedback (volume/furnace-live 0.931 of 1 without the emission clamp).
                     let vs = exp2(floor(log2(max(length(x - P.cam_pos.xyz) * CACHE_ANGLE, CACHE_MIN_VOXEL))) + VOLUME_FINE);
-                    let jv = cache_point(x + (vec3<f32>(rnd(), rnd(), rnd()) - 0.5) * vs);
+                    let jv = cache_point(x + (rng3(rng_sub(rd, (s << 16u) + j)) - 0.5) * vs);
                     lin = jv.rgb;
                     if (jv.w < CACHE_WARM) { lin = cache_point(x).rgb; }
                 }
@@ -2360,31 +2367,33 @@ fn media_march(o: vec3<f32>, d: vec3<f32>, tmax: f32, camera: bool) -> March {
 
 // A direction scattered from `d` by the Henyey-Greenstein phase function (its pdf: hg_phase(g, dot(d, result))).
 fn sample_hg(d: vec3<f32>, g: f32) -> vec3<f32> {
-    let u = rnd();
+    let r = rng2(rng_dim(D_PHASE));
+    let u = r.x;
     var ct = 1.0 - 2.0 * u;
     if (abs(g) > 1e-3) {
         let q = (1.0 - g * g) / (1.0 - g + 2.0 * g * u);
         ct = (1.0 + g * g - q * q) / (2.0 * g);
     }
     let st = sqrt(max(0.0, 1.0 - ct * ct));
-    let phi = 2.0 * PI * rnd();
+    let phi = 2.0 * PI * r.y;
     return basis(d) * vec3<f32>(st * cos(phi), st * sin(phi), ct);
 }
 
 // Direct light scattered at x along a path travelling in direction d (phase function HG g; shadow rays through the
 // media), MIS against phase sampling where the light can also be hit: directional disks, emitters, the environment.
-fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
+fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32, rd: u32) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < P.counts2.x; i++) {
         let li = light_at(i);
         let cos_max = li.dir.w;
-        let cos_t = 1.0 - rnd() * (1.0 - cos_max);
+        let u = rng2(rng_sub(rd, i));
+        let cos_t = 1.0 - u.x * (1.0 - cos_max);
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
-        let phi = 2.0 * PI * rnd();
+        let phi = 2.0 * PI * u.y;
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
         let ph = hg_phase(g, dot(l, d));
-        let vis = light_vis(li.ext.w >= 0.5, x, l, INF);
+        let vis = light_vis(li.ext.w >= 0.5, x, l, INF, rng_sub(rd, 0x100u + i));
         if (any(vis > vec3<f32>(0.0))) {
             sum += li.color.rgb * gtint(vis) * ph * power_heuristic(1.0 / (2.0 * PI * (1.0 - cos_max)), ph);
         }
@@ -2397,35 +2406,36 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32) -> vec3<f32> {
         var pick_w = 0.0;
         var pick_ls: LS;
         for (var k = 0u; k < 3u; k++) {
-            let idx = nd + min(u32(rnd() * f32(nl)), nl - 1u);
-            let ls = local_light(light_at(idx), x);
+            let r4 = rng4(rng_sub(rd, 0x200u + k));
+            let idx = nd + min(u32(r4.x * f32(nl)), nl - 1u);
+            let ls = local_light(light_at(idx), x, r4.yz);
             let wk = luminance(ls.c) * hg_phase(g, dot(ls.l, d));
             if (wk <= 0.0) { continue; }
             wsum += wk;
-            if (rnd() * wsum < wk) {
+            if (r4.w * wsum < wk) {
                 pick = idx;
                 pick_w = wk;
                 pick_ls = ls;
             }
         }
         if (pick_w > 0.0) {
-            let vis = light_vis(light_at(pick).ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999);
+            let vis = light_vis(light_at(pick).ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0x300u));
             if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * gtint(vis) * hg_phase(g, dot(pick_ls.l, d)) * (wsum * f32(nl) / (3.0 * pick_w)); }
         }
     }
     if (P.counts.y > 0u) {
         mis_x = x;
         mis_n = vec3<f32>(0.0);
-        let es = sample_emitter(x, vec3<f32>(0.0));
-        if (es.pdf_w > 0.0 && !occluded_any(x, es.l, es.dist * 0.999)) {
+        let es = sample_emitter(x, vec3<f32>(0.0), rng_sub(rd, 0x400u));
+        if (es.pdf_w > 0.0 && !occluded_any(x, es.l, es.dist * 0.999, rng_sub(rd, 0x401u))) {
             let ph = hg_phase(g, dot(es.l, d));
             sum += es.le * ph * power_heuristic(es.pdf_w, ph) * es.w;
         }
     }
     if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {
-        let l = sample_env();
+        let l = sample_env(rng_sub(rd, 0x500u));
         let pdf_e = env_pdf(l);
-        if (pdf_e > 0.0 && !occluded_sky(x, l)) {
+        if (pdf_e > 0.0 && !occluded_sky(x, l, rng_sub(rd, 0x501u))) {
             let ph = hg_phase(g, dot(l, d));
             sum += env_radiance(l) * ph * power_heuristic(pdf_e, ph) / pdf_e * gtint(shadow_tint);
         }
@@ -2469,18 +2479,19 @@ fn cache_point(p: vec3<f32>) -> vec4<f32> {
 // Direct light at a point for an isotropic receiver (phase 1 / 4π): the directional lights (cone), the local lights
 // and the sampled emitters (each resampled from a few candidates, one shadow ray). The environment and emission that
 // no light sampling covers come from the sphere ray of `point_radiance`.
-fn point_direct(x: vec3<f32>) -> vec3<f32> {
+fn point_direct(x: vec3<f32>, rd: u32) -> vec3<f32> {
     let ph = 1.0 / (4.0 * PI);
     var sum = vec3<f32>(0.0);
     for (var i = 0u; i < P.counts2.x; i++) {
         let li = light_at(i);
         let cos_max = li.dir.w;
-        let cos_t = 1.0 - rnd() * (1.0 - cos_max);
+        let u = rng2(rng_sub(rd, i));
+        let cos_t = 1.0 - u.x * (1.0 - cos_max);
         let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
-        let phi = 2.0 * PI * rnd();
+        let phi = 2.0 * PI * u.y;
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
-        if (li.ext.w < 0.5 || !occluded(x, l, INF)) { sum += li.color.rgb * ph; }
+        if (li.ext.w < 0.5 || !occluded(x, l, INF, rng_sub(rd, 0x100u + i))) { sum += li.color.rgb * ph; }
     }
     let nd = P.counts2.x;
     let nl = P.counts.x - nd;
@@ -2490,18 +2501,19 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
         var pick_w = 0.0;
         var pick_ls: LS;
         for (var k = 0u; k < 3u; k++) {
-            let idx = nd + min(u32(rnd() * f32(nl)), nl - 1u);
-            let ls = local_light(light_at(idx), x);
+            let r4 = rng4(rng_sub(rd, 0x200u + k));
+            let idx = nd + min(u32(r4.x * f32(nl)), nl - 1u);
+            let ls = local_light(light_at(idx), x, r4.yz);
             let wk = luminance(ls.c);
             if (wk <= 0.0) { continue; }
             wsum += wk;
-            if (rnd() * wsum < wk) {
+            if (r4.w * wsum < wk) {
                 pick = idx;
                 pick_w = wk;
                 pick_ls = ls;
             }
         }
-        if (pick_w > 0.0 && (light_at(pick).ext.w < 0.5 || !occluded(x, pick_ls.sl, pick_ls.dist * 0.999))) {
+        if (pick_w > 0.0 && (light_at(pick).ext.w < 0.5 || !occluded(x, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0x300u)))) {
             sum += pick_ls.c * ph * (wsum * f32(nl) / (3.0 * pick_w));
         }
     }
@@ -2512,18 +2524,18 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
         for (var c = 0u; c < 4u; c++) {
             mis_x = x;
             mis_n = vec3<f32>(0.0);
-            let es = sample_emitter(x, vec3<f32>(0.0));
+            let es = sample_emitter(x, vec3<f32>(0.0), rng_sub(rd, 0x400u + c));
             if (es.pdf_w <= 0.0) { continue; }
             let t = luminance(es.le);
             let w = t / es.pdf_w;
             if (w <= 0.0) { continue; }
             wsum += w;
-            if (rnd() * wsum < w) {
+            if (rng1(rng_sub(rd, 0x410u + c)) * wsum < w) {
                 pick = es;
                 pick_t = t;
             }
         }
-        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999)) {
+        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x420u))) {
             sum += pick.le * ph * (wsum / (4.0 * pick_t));
         }
     }
@@ -2535,7 +2547,7 @@ fn point_direct(x: vec3<f32>) -> vec3<f32> {
 // that surface's cached irradiance when warm, else its direct light).
 fn point_radiance(x: vec3<f32>) -> vec3<f32> {
     cur_depth = 2u;
-    let e = point_direct(x);
+    let e = point_direct(x, rng_dim(D_VOL_LIGHT));
     return e + point_sphere(x, false);
 }
 
@@ -2544,7 +2556,7 @@ fn point_radiance(x: vec3<f32>) -> vec3<f32> {
 // (volume/box-sun-scatter-live: 1000 lux at EV100 0 read 21 % low).
 fn point_radiance_train(x: vec3<f32>, clamp_v: f32) -> vec3<f32> {
     cur_depth = 2u;
-    let e = point_direct(x);
+    let e = point_direct(x, rng_dim(D_VOL_LIGHT));
     // Scattering orders past the first only when the scene allows bounces (max bounces 0: direct light only).
     var r = point_sphere(x, media_voxels && P.counts.z > 0u);
     let lum = luminance(r);
@@ -2557,9 +2569,10 @@ fn point_radiance_train(x: vec3<f32>, clamp_v: f32) -> vec3<f32> {
 // scattering order, so the voxels converge to multiple scattering (a lamp inside a sphere of albedo-0.9 medium read 22 %
 // of the offline reference with single scattering alone).
 fn point_sphere(x: vec3<f32>, media: bool) -> vec3<f32> {
-    let z = 1.0 - 2.0 * rnd();
+    let r2 = rng2(rng_dim(D_VOXEL));
+    let z = 1.0 - 2.0 * r2.x;
     let r = sqrt(max(0.0, 1.0 - z * z));
-    let phi = 2.0 * PI * rnd();
+    let phi = 2.0 * PI * r2.y;
     var l = vec3<f32>(r * cos(phi), r * sin(phi), z);
     var o = x;
     var light = vec3<f32>(0.0);
@@ -2567,7 +2580,7 @@ fn point_sphere(x: vec3<f32>, media: bool) -> vec3<f32> {
     for (var k = 0u; k < 4u; k++) {
         let hit = trace(o, l, INF, TRACE_CLOSEST);
         if (media) {
-            let mm = media_march(o, l, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true);
+            let mm = media_march(o, l, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true, rng_sub(rng_dim(D_VOXEL), 0x20u + k));
             light += tr * mm.light;
             tr *= mm.tr;
         }
@@ -2578,7 +2591,7 @@ fn point_sphere(x: vec3<f32>, media: bool) -> vec3<f32> {
             let g = glass_hit(hit, l, hit.t);
             if (g.share > 0.0) {
                 let p = o + l * hit.t;
-                if (g.tir || rnd() >= g.share) { l = reflect(l, g.ng); }
+                if (g.tir || rng1(rng_sub(rng_dim(D_VOXEL), 0x10u + k)) >= g.share) { l = reflect(l, g.ng); }
                 o = offset_origin(p, select(g.ng, -g.ng, dot(g.ng, l) < 0.0));
                 continue;
             }
@@ -2794,15 +2807,15 @@ fn cache_entry(k: vec2<u32>, indirect: bool) -> vec4<f32> {
 }
 
 // Fixed point: 2^21 units per firefly clamp, so 255 samples of up to 4 clamps per channel fit 32 bits.
-fn cache_fixed(e: vec3<f32>) -> vec3<u32> {
-    return vec3<u32>(min(e, vec3<f32>(4.0 * P.misc.x)) * (2097152.0 / P.misc.x) + vec3<f32>(rnd(), rnd(), rnd()));
+fn cache_fixed(e: vec3<f32>, rd: u32) -> vec3<u32> {
+    return vec3<u32>(min(e, vec3<f32>(4.0 * P.misc.x)) * (2097152.0 / P.misc.x) + rng3(rd));
 }
 
 fn cache_add(i: u32, total: vec3<f32>, indirect: vec3<f32>) {
     if (i == 0xffffffffu || non_finite(total) || non_finite(indirect)) { return; }
     if (cache_acc_add(i * 8u + 6u, 1u) >= CACHE_FRAME_CAP) { return; }
-    let a = cache_fixed(total);
-    let b = cache_fixed(indirect);
+    let a = cache_fixed(total, rng_sub(rng_dim(D_CACHE), i * 2u));
+    let b = cache_fixed(indirect, rng_sub(rng_dim(D_CACHE), i * 2u + 1u));
     cache_acc_add(i * 8u, a.x);
     cache_acc_add(i * 8u + 1u, a.y);
     cache_acc_add(i * 8u + 2u, a.z);
@@ -2844,6 +2857,7 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
     var gather: array<vec3<f32>, CACHE_DEPTH>;
     var refl: array<vec3<f32>, CACHE_DEPTH>;
     let wl = white_lobes();
+    RNG_PATH = 1u;
     var s = s0;
     var d = d0;
     var cone = cone0;
@@ -2878,7 +2892,7 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
         // Homogeneous media (water) on the segment, as on the paths: without them the voxels under water gathered
         // their surroundings unattenuated (a canal bed read 2.4x the offline image).
         if (LIVE && has(F_HMEDIA)) {
-            let mh = media_homogeneous(o, l, select(hit.t, 1.0e30, miss), true);
+            let mh = media_homogeneous(o, l, select(hit.t, 1.0e30, miss), true, rng_sub(rng_dim(D_MEDIA), 1u));
             g += tr * mh.light;
             tr *= mh.tr;
         }
@@ -2930,13 +2944,15 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
 fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!has(F_MEDIA) || !cache_on() || P.time.w < 0.5 || gid.x >= MEDIA_TRAIN_POINTS) { return; }
     media_voxels = true; // the voxels' light is shadowed by the media
-    rng_state = pcg(gid.x ^ pcg(P.size.z * 6151u + P.size.w * 3079u + 0x2545f491u));
+    rng_start(vec2<u32>(gid.x, 0u), P.size.z, P.size.w ^ 0x2545f491u, 2u);
+    cur_depth = 0u;
+    let r4 = rng4(rng_dim(D_CAMERA));
     mirror_path = false;
     let w = P.size.x;
     let h = P.size.y;
-    let px = min(u32(rnd() * f32(w)), w - 1u);
-    let py = min(u32(rnd() * f32(h)), h - 1u);
-    let ndc = vec2<f32>((f32(px) + rnd()) / f32(w) * 2.0 - 1.0, 1.0 - (f32(py) + rnd()) / f32(h) * 2.0);
+    let px = min(u32(r4.x * f32(w)), w - 1u);
+    let py = min(u32(r4.y * f32(h)), h - 1u);
+    let ndc = vec2<f32>((f32(px) + r4.z) / f32(w) * 2.0 - 1.0, 1.0 - (f32(py) + r4.w) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let o = P.cam_pos.xyz;
     let fd = accum[py * w + px].color.w;
@@ -2956,7 +2972,7 @@ fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
         total += max(min(sp.y, select(tmax, tmax_h, medium_at(k).a.z != 0u)) - max(sp.x, 0.0), 0.0);
     }
     if (total <= 0.0) { return; }
-    var u = rnd() * total;
+    var u = rng1(rng_dim(D_MEDIA)) * total;
     var x = o;
     for (var k = 0u; k < n; k++) {
         let sp = medium_span(medium_at(k), o, d);
@@ -2989,13 +3005,14 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = P.size.y;
     if (!has(F_MEDIA) || P.time.w < 0.5 || gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
-    rng_state = pcg(pix ^ pcg(P.size.z * 9781u + P.size.w * 6271u + 0x51ed27u));
+    rng_start(gid.xy, P.size.z, P.size.w ^ 0x51ed27u, 3u);
+    cur_depth = 0u;
     mirror_path = false;
     var px = accum[pix];
     let ndc = vec2<f32>((f32(gid.x) + P.raster.y) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.raster.z) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let ft = px.color.w;
-    let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true);
+    let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true, rng_dim(D_MEDIA));
     if (mm.tr >= 1.0 && all(mm.light == vec3<f32>(0.0))) { return; }
     let samples = P.misc.w + 1.0; // this dispatch runs with the frame's last sample's parameters
     let lw = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -3048,14 +3065,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
     if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0)); }
-    rng_state = pcg(pix ^ pcg(P.size.z * 9781u + P.size.w * 6271u));
+    rng_start(gid.xy, P.size.z, P.size.w, 0u);
+    cur_depth = 0u;
+    let cam = rng4(rng_dim(D_CAMERA));
 
     // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
     let raster = LIVE && P.raster.x > 0.5 && P.cam_right.w <= 0.0;
     // Live: one sub-pixel jitter a frame for the whole image (live/frame.rs: Halton 2, 3), which the temporal upscaler
     // resolves (live.wgsl `upscale`) and the raster pass draws at. Offline, every sample draws its own.
-    var jx = rnd();
-    var jy = rnd();
+    var jx = cam.x;
+    var jy = cam.y;
     if (LIVE) {
         jx = P.raster.y;
         jy = P.raster.z;
@@ -3065,8 +3084,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var o = P.cam_pos.xyz;
     if (P.cam_right.w > 0.0) {
         let focus = o + d * (P.cam_up.w / dot(d, P.cam_fwd.xyz));
-        let r = sqrt(rnd()) * P.cam_right.w;
-        let phi = 2.0 * PI * rnd();
+        let r = sqrt(cam.z) * P.cam_right.w;
+        let phi = 2.0 * PI * cam.w;
         o += P.cam_right.xyz * (r * cos(phi)) + P.cam_up.xyz * (r * sin(phi));
         d = normalize(focus - o);
     }
@@ -3155,7 +3174,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // a quarter of the pixels at 4x weight; the low-frequency fog converges in the accumulation.
             if (has(F_VOLUME) && depth == 0u && P.vol.x > 0.0 && (((gid.x >> 3u) + 2u * (gid.y >> 2u) + pcg(P.size.z)) & VOL_RATE_MASK) == 0u) {
                 // Firefly clamp: a fog point next to a bright sign is rare and huge; haze is a few nits.
-                var fs = f32(VOL_RATE_MASK + 1u) * fog_scatter(o, d, t0, max(tv, t0), trv);
+                var fs = f32(VOL_RATE_MASK + 1u) * fog_scatter(o, d, t0, max(tv, t0), trv, rng_dim(D_FOG));
                 let fl = luminance(fs);
                 let fmax = 0.02 * clamp_v;
                 if (fl > fmax) { fs *= fmax / fl; }
@@ -3176,13 +3195,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Live media are composited after the trace (media_composite); past the camera ray, homogeneous ones (water)
         // attenuate and light the path here. Offline paths track every medium.
         if (LIVE && has(F_HMEDIA) && depth > 0u) {
-            let mh = media_homogeneous(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true);
+            let mh = media_homogeneous(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true, rng_sub(rng_dim(D_MEDIA), 1u));
             radiance += thr * mh.light;
             thr *= mh.tr;
         }
         if (!LIVE && has(F_MEDIA) && P.time.w > 0.5) {
             // Media on this segment: emission on the way; a real collision scatters the path there.
-            let tk = media_track(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu));
+            let tk = media_track(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), rng_dim(D_MEDIA));
             radiance += thr * tk.emission;
             if (tk.t >= 0.0) {
                 let x = o + d * tk.t;
@@ -3192,7 +3211,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     albedo = tk.albedo;
                     normal = -d;
                 }
-                var c = thr * phase_direct(x, d, tk.g);
+                var c = thr * phase_direct(x, d, tk.g, rng_dim(D_VOL_LIGHT));
                 if (depth > 0u && !straight) {
                     let lum = luminance(c);
                     if (lum > clamp_v) { c *= clamp_v / lum; }
@@ -3210,7 +3229,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 cone_a += 2.0;
                 if (depth >= P.counts.w) {
                     let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
-                    if (rnd() > q) { break; }
+                    if (rng1(rng_dim(D_RR)) > q) { break; }
                     thr /= q;
                 }
                 o = x;
@@ -3309,6 +3328,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (train || e.w < CACHE_WARM) {
                 // Training tiles trace deep (coherent: whole SIMD groups); scattered cold pixels one vertex.
                 let fresh = cache_train(s, d, vec2<f32>(width, cone_a), select(1u, CACHE_DEPTH, train), train);
+                RNG_PATH = 0u;
                 if (e.w < CACHE_WARM) { e = vec4<f32>(select(fresh.total, fresh.total - fresh.direct, hit_light), 1.0); }
             }
             cur_depth = depth;
@@ -3390,7 +3410,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         mirror_path = (depth == 0u || mirror_path) && s.roughness < 0.3 && (sampled_spec || through);
         if (depth >= P.counts.w) {
             let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
-            if (rnd() > q) { break; }
+            if (rng1(rng_dim(D_RR)) > q) { break; }
             thr /= q;
         }
         o = offset_origin(s.p, select(s.ng, -s.ng, dot(l, s.ng) < 0.0));

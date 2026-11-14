@@ -23,6 +23,7 @@ pub mod scene;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod script;
 pub mod skin;
+pub mod sample;
 pub mod sky;
 pub mod tables;
 pub mod units;

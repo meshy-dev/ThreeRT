@@ -1265,6 +1265,20 @@ too is an override, from F_TINT).
 - The repository's Rust is pinned (`rust-toolchain.toml`, 1.100.0): wesl-rs 0.6 asks for 1.97.1 or newer, and the
   determinism checks' recorded hashes are of one compiler.
 
+## Random numbers
+
+`shaders/sample.wgsl`: shuffled, Owen-scrambled Sobol (Burley 2020; Cycles' Sobol-Burley), four dimensions padded by
+dimension ids. Each decision at a path vertex has an id (`rng_dim`: path, vertex, slot `D_*`; `rng_sub`: a loop's
+iteration or a light), which seeds the scramble: one id's samples are stratified over the sample index (the sample
+offline, the frame live; 16 bits), ids are uncorrelated.
+- Offline: Sobol for every draw. Live: only the camera path's first vertex; loops, later vertices and the training
+  paths use a hash, as NVIDIA's RTXPT (all-Sobol cost 2.1 ms of Bistro's 8.4 ms live trace; this costs nothing
+  measurable).
+- Offline RMSE against the other sampler at 4096 spp (320 x 180, no denoiser): x0.29-0.46 at 16-256 spp (Cornell
+  box, Light Room, Bistro), x1 at 1 spp; means within 0.01 %. `sample.rs` checks the (0, m, 2)-net property and the
+  shader against itself on the GPU.
+- The loop guard leaves counted loops (`for (var i = N; i < M; i++)`, literals) alone, as Tint does.
+
 ## What the kernel trusts
 
 The kernel follows indices it reads from buffers and loops over counts it is given; it checks none of them (a

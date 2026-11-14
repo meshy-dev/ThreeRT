@@ -84,15 +84,16 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = select(TPS.size.y, TPS.view.y, low);
     if (gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
-    rng_state = pcg(pix ^ pcg(P.size.z * 9781u + P.size.w * 6271u + 0x5bd1e995u));
+    rng_start(gid.xy, P.size.z, P.size.w ^ 0x5bd1e995u, 4u);
     cur_depth = 0u;
+    let cam = rng2(rng_dim(D_CAMERA));
     mirror_path = false;
     // Live: the pixel centre (stable streaks; the image has passed the temporal filter). Offline: a random point in it.
     var jx = 0.5;
     var jy = 0.5;
     if (!live) {
-        jx = rnd();
-        jy = rnd();
+        jx = cam.x;
+        jy = cam.y;
     }
     let ndc = vec2<f32>((f32(gid.x) + jx) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + jy) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
@@ -140,7 +141,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Front to back.
     var col = vec3<f32>(0.0);
     var tr = 1.0;
-    var train = live && rnd() < TPS.misc.x;
+    var train = live && rng1(rng_dim(D_CACHE)) < TPS.misc.x;
     let foot = 2.0 * P.cam_pos.w / f32(h);
     for (var k = 0u; k < n; k++) {
         let ti = TPS.size.z + lp[k];
@@ -203,7 +204,7 @@ fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn volume_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     if (k >= min(atomicLoad(&vcount[0]), TPS.view.z)) { return; }
-    rng_state = pcg(k ^ pcg(P.size.z * 7919u + P.size.w * 104729u + 0x68e31da4u));
+    rng_start(vec2<u32>(k, 0u), P.size.z, P.size.w ^ 0x68e31da4u, 5u);
     mirror_path = false;
     let x = vpts[k].xyz;
     let e = point_radiance_train(x, P.misc.x);

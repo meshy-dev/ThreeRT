@@ -698,8 +698,9 @@ pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
 }
 
 /// The kernel's files, one module in this order (pathtrace.wgsl's head says what each holds and names the `@if` flags).
-const KERNEL_FILES: [&str; 4] = [
+const KERNEL_FILES: [&str; 5] = [
     include_str!("../shaders/pathtrace.wgsl"),
+    include_str!("../shaders/sample.wgsl"),
     include_str!("../shaders/trace_units.wgsl"),
     include_str!("../shaders/trace_hw.wgsl"),
     include_str!("../shaders/translucent.wgsl"),
@@ -821,6 +822,34 @@ impl wesl::resolver::Resolver for KernelResolver<'_> {
 /// scene's functions' too, begins with `if (loop_guard()) { break; }` (pathtrace.wgsl declares `loop_guard`, under
 /// `@if(guard)`). A pass over the variant's syntax tree, as a compiler instruments code: the tree knows what a loop
 /// and its body are, so nothing the text says (comments, strings, a loop without braces) can mislead it.
+/// A `for` loop that ends by its own count: `for (var i = N; i < M; i++)` (or `<=`), N and M integer literals, whose
+/// body does not assign `i`. The guard leaves it out, as Tint's PreventInfiniteLoops leaves loops it can prove finite.
+fn counted(f: &wesl::syntax::ForStatement) -> bool {
+    let (Some(init), Some(cond), Some(update)) = (&f.initializer, &f.condition, &f.update) else { return false };
+    let lit = |t: &str| {
+        let t = t.trim().trim_end_matches(['u', 'i']);
+        !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit())
+    };
+    let init = init.to_string();
+    let Some((name, start)) = init.trim().trim_end_matches(';').strip_prefix("var ").and_then(|r| r.split_once('=')) else { return false };
+    let name = name.split(':').next().unwrap_or("").trim();
+    let cond = cond.to_string();
+    let bound = cond.trim().trim_start_matches('(').trim_end_matches(')').strip_prefix(name).map(str::trim_start).and_then(|r| r.strip_prefix("<=").or_else(|| r.strip_prefix('<')));
+    if name.is_empty() || !lit(start) || !bound.is_some_and(lit) || update.to_string().trim().trim_end_matches(';') != format!("{name}++") {
+        return false;
+    }
+    // Not assigned in the body: `name` as an identifier followed by `=` (not `==`), `op=`, `++` or `--`.
+    let b = f.body.to_string();
+    let bytes = b.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    !b.match_indices(name).any(|(k, _)| {
+        let before = k.checked_sub(1).map(|p| bytes[p]);
+        let after = b[k + name.len()..].trim_start();
+        before.is_none_or(|c| !ident(c) && c != b'.') && !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && (after.starts_with("++") || after.starts_with("--") || (after.starts_with('=') && !after.starts_with("==")) || ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="].iter().any(|op| after.starts_with(op)))
+    })
+}
+
 pub fn guard_loops(tu: &mut wesl::syntax::TranslationUnit) {
     use wesl::syntax::{CompoundStatement, GlobalDeclaration, Statement, StatementNode};
     fn body(b: &mut CompoundStatement, guard: &StatementNode) {
@@ -851,6 +880,7 @@ pub fn guard_loops(tu: &mut wesl::syntax::TranslationUnit) {
                     body(&mut c.body, guard);
                 }
             }
+            Statement::For(f) if counted(f) => body(&mut f.body, guard),
             Statement::For(f) => opened(&mut f.body, guard),
             Statement::While(w) => opened(&mut w.body, guard),
             _ => {}
