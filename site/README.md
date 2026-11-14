@@ -57,7 +57,7 @@ The markup is repeated in each page; change it in all of them (the privacy page 
 | Page | What is on it |
 |---|---|
 | `index.html` | The landing page (below). |
-| `download/` | The four clients, a card each (below), then how a client loads a game: `threert dev`, scan, traced and live. |
+| `download/` | The five clients, a card each (below), then how a client loads a game: `threert dev`, scan, traced and live. |
 | `docs/` | Getting started: install the client, open an example, write a scene, the dev loop with the `threert` CLI, the package format and publishing to threert.app, links to the reference documents in `docs/` on GitHub. |
 | `privacy/` | What the apps and the site do with data, including the requests the pages make to other services (below). |
 | `showcase/` | Gone as a page: what it listed is published on threert.app. The Worker answers `/showcase`, `/showcase/` and `/showcase/index.html` with a 301 to `https://threert.app/` (old links: the npm packages' READMEs, the pages of packages built before, earlier apps); `showcase/index.html` is what is left for a host without the Worker, a page that sends the reader on. `showcase/community.json` stays where it is, served as before: ThreeRT for macOS before 0.4.0 reads it (and `play/index.json`) for its Showcase. Nothing is added to it any more: people publish with `threert publish`. |
