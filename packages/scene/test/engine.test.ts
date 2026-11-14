@@ -389,6 +389,8 @@ test("volume functions: one that reads the time is animated, unless it says othe
   assert.deepEqual([still, drift, helper, custom, held].map((f) => f.animated), [false, true, true, true, false]);
   const scene = new Scene();
   scene.add(new VolumeMesh({ volume: still.with(), majorant: 1 }), new VolumeMesh({ volume: drift.with(), majorant: 1 }));
+  // (Delta tracking steps by -ln(1 - u) / majorant: an infinite one would never step.)
+  for (const bad of [Infinity, NaN, 0, -1]) assert.throws(() => new VolumeMesh({ volume: still.with(), majorant: bad }), /finite number > 0/);
   const cam = new PerspectiveCamera();
   scene.add(cam);
   const { calls } = bind(scene, cam);

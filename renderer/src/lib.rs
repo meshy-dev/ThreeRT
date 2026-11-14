@@ -434,9 +434,11 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let bvh = if hwrt {
         let mut order: Vec<u32> = (0..sc.tris.len() as u32).collect();
         order.sort_by_key(|&i| group_of(sc.tri_flags[i as usize]));
-        bvh::Bvh { nodes: vec![bvh::GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 0 }], order }
+        bvh::Bvh { nodes: vec![bvh::GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 0 }], order, depth: 0 }
     } else {
-        bvh::build(&sc.tris)
+        let b = bvh::build(&sc.tris);
+        timings.push(("bvh_depth".into(), b.depth as f64));
+        b
     };
     let mut groups = [0usize; GROUPS];
     for f in &sc.tri_flags {

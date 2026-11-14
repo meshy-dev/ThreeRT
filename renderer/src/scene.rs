@@ -189,6 +189,20 @@ pub fn proc_object(w: &World, id: u32, m: Mat4, object: u32, materials: &HashMap
     Ok(Some(ProcObject { node: id, name: n.name.clone(), world: m, object, func, blob, materials, cast_shadow: n.cast_shadow, lo, hi, sub: None, hidden: false }))
 }
 
+/// A triangle as the hardware traversal's acceleration structures take it: as it is, or, with a vertex that is not
+/// finite, three vertices at the origin. DXR and Vulkan leave a non-finite vertex undefined behaviour (only NaN in x
+/// is defined, as an inactive primitive), and a degenerate triangle is one they define as never hit; the triangle
+/// keeps its index. World positions are finite where they enter (world.rs: geometry checked, `world_matrix` and
+/// `instance_world` place what is not at a point): this is for what overflows on the way (docs/RUNTIME.md "What the
+/// kernel trusts"). Software traversal's tree leaves such a triangle out by itself (bvh.rs `build_tris`).
+pub fn blas_tri(t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    if t.iter().flatten().all(|v| v.is_finite()) {
+        t
+    } else {
+        [[0.0; 3]; 3]
+    }
+}
+
 /// Instance `i` of an instanced object at node matrix `m`: its world matrix and whether it is hidden: past the drawn
 /// `count`, or a matrix that is not finite or not invertible (three.js code hides instances by scaling them to 0). A
 /// hidden instance is placed at a point (scale 1e-6, at its translation when finite), so it costs the trace nothing,

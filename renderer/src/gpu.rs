@@ -1985,7 +1985,7 @@ impl Gpu {
                 .chunks(3)
                 .flat_map(|t| {
                     let v0 = [t[0][0], t[0][1], t[0][2]];
-                    [v0, [v0[0] + t[1][0], v0[1] + t[1][1], v0[2] + t[1][2]], [v0[0] + t[2][0], v0[1] + t[2][1], v0[2] + t[2][2]]]
+                    crate::scene::blas_tri([v0, [v0[0] + t[1][0], v0[1] + t[1][1], v0[2] + t[1][2]], [v0[0] + t[2][0], v0[1] + t[2][1], v0[2] + t[2][2]]])
                 })
                 .collect();
             let vbuf = buf_room("blas_verts", bytemuck::cast_slice(&verts), room.tris * 36, wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE);

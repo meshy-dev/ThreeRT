@@ -2288,6 +2288,29 @@ orders): native hardware traversal equal (Bistro 8.28-8.97 ms against 8.30-8.96,
 one-field accessors nor main's parameter order moved the merged +0.2, which comes and goes with the layout: the
 compiler's arrangement around the accessors, +-0.5 %.
 
+**What the kernel trusts, held by the data (2026-11-14, after it).** The kernel follows indices from buffers and
+checks none; the loop guard was the only thing between bad data and a dispatch that never ends. Researched against
+pbrt-v4, Embree, Cycles, three-mesh-bvh, Falcor, the DXR and Vulkan specs and wgpu: they hold the invariants in the
+builders (children after the parent, a depth cap tied to the stack, forced or median leaves), clean the input where
+it enters (Embree and Cycles drop non-finite primitives; DXR makes them inactive), and keep the structural checks to
+debug builds and tests; none checks a tree before every upload, none caps a walk's iterations. The same here:
+- bvh.rs: no deeper than the kernel's stack (48; where the levels left could not finish a split, the median);
+  items whose box is not finite in no leaf, after every leaf's range; `check_tree` (the units' check, moved here)
+  on every tree in tests and debug builds; each build reports its depth (`bvh_depth`). Bistro 18, Kabukichō 26, the
+  district 33: no tree of today's scenes changes.
+- ltree.rs: `LightTree::check` (children after the parent, leaves inside the entries, every entry's code to its
+  leaf) after every build, growth and refit in tests and debug builds.
+- Where data enters: geometry positions finite (`World::set_geometry`), a volume's majorant a finite number > 0 (Rust
+  and packages/scene: `Infinity` passed both and its delta tracking never stepped), a world matrix that is not finite
+  places its object at a point (as a hidden instance), the hardware acceleration structures' vertices finite
+  (`scene::blas_tri`).
+- Garbage-input tests for each builder (NaN, infinite and huge values, coincident and collinear items).
+docs/RUNTIME.md "What the kernel trusts" has the table. Checks: `cargo test --release` with the loop guard, 138 passed;
+render-identity against main, guarded natively, merged and in software traversal, then native without it: 0 of 190
+changed in each (171-175 byte-identical, the rest within their run-to-run spread); `tools/web-hello.ts` in Chrome:
+pass. The district's tree builds in 333 ms against main's 321 (one load each; an earlier load of the same build
+338). No shader changed.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

@@ -1126,7 +1126,7 @@ impl LiveCore {
                 let (e1, e2) = (pw[1] - pw[0], pw[2] - pw[0]);
                 verts[k * 3..k * 3 + 3].copy_from_slice(&[[pw[0].x, pw[0].y, pw[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
                 attrs[k] = scene::GpuTriAttr { x: [a.x[0], f32::from_bits(d.object), a.x[2], attrs[k].x[3]], ..a };
-                blas[k * 3..k * 3 + 3].copy_from_slice(&pw.map(|v| v.to_array()));
+                blas[k * 3..k * 3 + 3].copy_from_slice(&scene::blas_tri(pw.map(|v| v.to_array())));
                 self.sc.tris[(d.first + j as u32) as usize] = pw.map(glam::Vec3A::from);
                 (lo, hi) = (lo.min(k), hi.max(k + 1));
             }
@@ -1240,7 +1240,7 @@ impl LiveCore {
                     // The flag word keeps TRI_DYNAMIC: the kernel takes a deforming mesh's motion from `prev_verts`.
                     v.extend_from_slice(&[[q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC)], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
                     at.push(scene::tri_attr(q.p, q.n, q.uv, q.tangent, mat));
-                    b.extend(q.p.map(|p| p.to_array()));
+                    b.extend(scene::blas_tri(q.p.map(|p| p.to_array())));
                     t.push(q.p.map(glam::Vec3A::from));
                 }
                 Ok(Some((v, at, b, t)))
@@ -1429,7 +1429,7 @@ impl LiveCore {
                     v[j * 3..j * 3 + 3].copy_from_slice(&[[p[0].x, p[0].y, p[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
                     // (x.w: an emitter's light-tree code, which stays with its triangle.)
                     a[j] = scene::GpuTriAttr { x: [at.x[0], f32::from_bits(d.object), at.x[2], a[j].x[3]], ..at };
-                    b[j * 3..j * 3 + 3].copy_from_slice(&p.map(|q| q.to_array()));
+                    b[j * 3..j * 3 + 3].copy_from_slice(&scene::blas_tri(p.map(|q| q.to_array())));
                     t[j] = p.map(glam::Vec3A::from);
                 }
                 Ok(true)
@@ -1451,7 +1451,7 @@ impl LiveCore {
                 let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
                 verts[k * 3..k * 3 + 3].copy_from_slice(&[[p[0].x, p[0].y, p[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
                 attrs[k] = scene::GpuTriAttr { x: [a.x[0], f32::from_bits(d.object), a.x[2], attrs[k].x[3]], ..a };
-                blas[k * 3..k * 3 + 3].copy_from_slice(&p.map(|v| v.to_array()));
+                blas[k * 3..k * 3 + 3].copy_from_slice(&scene::blas_tri(p.map(|v| v.to_array())));
                 sc.tris[(d.first + j as u32) as usize] = p.map(glam::Vec3A::from);
                 (lo, hi) = (lo.min(k), hi.max(k + 1));
             }
