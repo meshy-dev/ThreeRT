@@ -9,7 +9,7 @@
 // compiled for a device and a scene by WESL's conditional translation (`@if`, gpu.rs `kernel_wgsl`): a declaration
 // or a statement under `@if(x)` is there only where x holds. The flags:
 //   hwrt                  hardware traversal (ray queries) in the software BVH walk's place, and the translucency pass
-//   strict, cutout_lite, cutout_lite2, last_direct, light_pick
+//   strict, cutout_lite, cutout_lite2, last_direct, last_sun, light_pick
 //                         a device's switches (gpu.rs `KernelSwitches`: what a GPU the kernel as written is wrong or
 //                         too slow on needs)
 //   units                 software traversal's second level (gpu.rs `F_UNITS`); a scene's other features are bits
@@ -1919,6 +1919,33 @@ fn hg_phase(g: f32, c: f32) -> f32 {
     return (1.0 - g * g) / (4.0 * PI * d * sqrt(d));
 }
 
+// gpu.rs `KernelSwitches::last_sun`: the directional lights alone, as `direct_light` takes them (one shadow ray a
+// light), for the path's last vertex.
+@if(last_sun && !last_direct) fn sun_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    let o = offset_origin(s.p, s.ng);
+    for (var i = 0u; i < P.counts2.x; i++) {
+        let li = light_at(i);
+        if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; }
+        let cos_max = li.dir.w;
+        let to_light = -li.dir.xyz;
+        let u = rng2(rng_sub(rng_dim(D_SUN), i));
+        let cos_t = 1.0 - u.x * (1.0 - cos_max);
+        let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t));
+        let phi = 2.0 * PI * u.y;
+        let l = basis(to_light) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+        let f = eval_bsdf_k(s, lb, v, l, li.x.y);
+        if (any(f > vec3<f32>(0.0))) {
+            let vis = light_vis(li.ext.w >= 0.5, o, l, INF, rng_sub(rng_dim(D_SUN_VIS), i));
+            if (any(vis > vec3<f32>(0.0))) {
+                let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
+                sum += li.color.rgb * f * power_heuristic(pdf_l, pdf_bsdf(s, lb, v, l)) * gtint(vis);
+            }
+        }
+    }
+    return sum;
+}
+
 fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     dl_spec = vec3<f32>(0.0);
@@ -3300,7 +3327,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             radiance += c;
         }
         if (s.card) { break; }
-        @if(!last_direct) if (depth == P.counts.z) { break; }
+        @if(!last_direct && !last_sun) if (depth == P.counts.z) { break; }
+        @if(last_sun && !last_direct) if (depth == P.counts.z) {
+            // gpu.rs `KernelSwitches::last_sun`: the last vertex's light from the directional lights alone.
+            if (depth > 0u) {
+                var dz = thr * sun_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
+                let lum = luminance(dz);
+                if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }
+                radiance += dz;
+            }
+            break;
+        }
         @if(last_direct) if (depth == P.counts.z) {
             // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.
             if (depth > 0u) {
