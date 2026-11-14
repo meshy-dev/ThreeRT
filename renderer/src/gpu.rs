@@ -1359,8 +1359,9 @@ pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions. (Bit 24 is
 /// F_AERIAL's.)
 pub const F_GRID: u32 = 1 << 25;
-/// More local lights than the kernel sums exactly (pathtrace.wgsl RIS_EXACT): they are resampled, guided live by the
-/// light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass runs for such a scene).
+/// More shadow-casting local lights than the kernel sums exactly at a camera hit (pathtrace.wgsl RIS_EXACT): they
+/// are resampled, guided live by the light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass
+/// runs for such a scene).
 pub const F_LISTS: u32 = 1 << 27;
 /// The features that change the kernel's source (an `@if` flag) rather than switch code in it (`FEAT`).
 pub const F_SOURCE: u32 = F_UNITS;
@@ -1397,7 +1398,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
     let media = if scene.media.is_empty() { 0 } else { F_MEDIA } | if scene.media.iter().any(|m| m.a[2] != 0) { F_HMEDIA } else { 0 } | if grid { F_GRID } else { 0 };
-    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.background.is_some() { F_BACKGROUND } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0).count() > 8 { F_LISTS } else { 0 };
+    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.background.is_some() { F_BACKGROUND } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > 8 { F_LISTS } else { 0 };
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }

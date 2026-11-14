@@ -245,9 +245,8 @@ const RESOLVE_N: u32 = 8u;
 // reprojection. A pixel's own ray is one random direction of the lobe (or none, when it took the diffuse lobe), so
 // its distance alone put the mirror image anywhere along the ray.
 // ---- The light tiles: each 8 x 8 tile's pixels' reports made its list (pathtrace.wgsl "Light tiles": the lights
-// reported, each once: index, reports; ascending; the 64th vec4 holds their number, 63 at most, and a 64-bit mask of
-// their indices' low 6 bits). A workgroup is a tile: the grid is the traced one shifted by L.lt.xy, another offset
-// each frame, so tile borders do not stay put.
+// reported, each once: index, reports; ascending; the 64th vec4 holds their number, 63 at most). A workgroup is a
+// tile: the grid is the traced one shifted by L.lt.xy, another offset each frame, so tile borders do not stay put.
 const LT_NONE: u32 = 0xf0000000u;
 var<workgroup> lt_keys: array<u32, 64>;
 var<workgroup> lt_first: array<u32, 64>;
@@ -284,13 +283,7 @@ fn light_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     let list = L.lt.z + (wg.y * L.lt.w + wg.x) * 64u;
     let at = less.x + less.y + less.z + less.w;
     if (first && at < 63u) { light_rw[list + at] = vec4<f32>(bitcast<f32>(key), bitcast<f32>(same.x + same.y + same.z + same.w), 0.0, 0.0); }
-    if (li == 0u) {
-        var mask = vec2<u32>(0u);
-        for (var j = 0u; j < 64u; j++) {
-            if (lt_first[j] != 0u) { mask[(lt_keys[j] >> 5u) & 1u] |= 1u << (lt_keys[j] & 31u); }
-        }
-        light_rw[list + 63u] = vec4<f32>(bitcast<f32>(min(all.x + all.y + all.z + all.w, 63u)), bitcast<f32>(mask.x), bitcast<f32>(mask.y), 0.0);
-    }
+    if (li == 0u) { light_rw[list + 63u] = vec4<f32>(bitcast<f32>(min(all.x + all.y + all.z + all.w, 63u)), 0.0, 0.0, 0.0); }
 }
 
 @compute @workgroup_size(8, 8, 1)

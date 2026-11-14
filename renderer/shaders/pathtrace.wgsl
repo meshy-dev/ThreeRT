@@ -78,7 +78,7 @@ const F_UNLIT: u32 = 1048576u; // MeshBasicMaterial (MAT_UNLIT)
 const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
-const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose local lights are resampled
+const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
 struct Params {
@@ -1690,18 +1690,16 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // Light tiles (live; what guides MegaLights' draws and RTXPT's): each camera pixel reports the local light its
 // resampled shadow ray found (direct_out's w: `lt_fb`, a light-table index; LT_NONE: none), live.wgsl `light_tiles`
 // makes each 8 x 8 tile's reports a list after the kernel's own data in direct_out (the lights found, each once:
-// index, reports; ascending; the last vec4 their number and a mask of their indices' low 6 bits), and the next
-// frame's paths take resampling candidates from their pixel's tile's list as well, spread over it without repeats
-// (all of it when it is short). The candidates drawn uniformly, as before, then stand for the lights the list lacks
-// (`lt_in_list`). Compiled in for scenes whose local lights are resampled (F_LISTS). A list is a guide:
-// whatever it holds the estimate is the same sum, so one gone stale (the table reordered, the camera moved on)
-// costs noise, not light.
+// index, reports; ascending; the last vec4 their number), and the next frame's paths take resampling candidates
+// from their pixel's tile's list as well, spread over it without repeats (all of it when it is short). The
+// candidates drawn uniformly, as before, then stand for the lights the list lacks (`lt_in_list`). A list is a
+// guide: whatever it holds the estimate is the same sum, so one gone stale (the table reordered, the camera moved
+// on) costs noise, not light. Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS).
 const LT_TILE: u32 = 8u;
 const LT_LIST: u32 = 64u;
 const LT_NONE: u32 = 0xf0000000u;
 var<private> lt_list: u32;
 var<private> lt_list_n: u32;
-var<private> lt_mask: vec2<u32>;
 var<private> lt_fb: u32;
 
 // The list of the tile pixel `px` was in when the lists were built, and how many lights it holds.
@@ -1713,14 +1711,11 @@ fn lt_list_start(px: vec2<u32>) {
     let c = q + vec2<u32>(P.ltile.z & 0xffffu, P.ltile.z >> 16u);
     lt_list = P.ltile.x + ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
     if (lt_list + LT_LIST > direct_len()) { return; }
-    let last = direct_load(lt_list + LT_LIST - 1u);
-    lt_list_n = min(bitcast<u32>(last.x), LT_LIST - 1u);
-    lt_mask = vec2<u32>(bitcast<u32>(last.y), bitcast<u32>(last.z));
+    lt_list_n = min(bitcast<u32>(direct_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
 }
 
-// Whether the pixel's list holds light `i` (the mask says no for most that it does not, without a search).
+// Whether the pixel's list holds light `i`.
 fn lt_in_list(i: u32) -> bool {
-    if (((lt_mask[(i >> 5u) & 1u] >> (i & 31u)) & 1u) == 0u) { return false; }
     var lo = 0u;
     var hi = lt_list_n;
     for (var k = 0u; k < 7u; k++) {
