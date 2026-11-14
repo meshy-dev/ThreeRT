@@ -12,7 +12,9 @@
 // from R2.
 import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { VENDOR } from "./vendor.ts";
+import { releaseArtifacts } from "./releases.ts";
 
 const site = resolve(import.meta.dir, "..");
 const args = process.argv.slice(2);
@@ -33,7 +35,7 @@ for (const [rel, file] of Object.entries(VENDOR)) {
 
 // The clients' release.
 /** A client's file: never a static asset here (worker.ts serves it from R2), whatever its size. */
-const CLIENT_FILE = /\.(dmg|tar\.gz|apk)$/;
+const CLIENT_FILE = /(?:\.(?:dmg|tar\.gz|apk|exe|zip)|-SHA256SUMS\.txt)$/;
 const latest = join(site, "releases/latest.json");
 if (existsSync(latest)) {
   const r = JSON.parse(readFileSync(latest, "utf8"));
@@ -43,8 +45,7 @@ if (existsSync(latest)) {
   // plain file host without that limit.
   const withImage = args.includes("--with-image");
   const said: string[] = [];
-  for (const [key, name, required] of [["macos", "macOS", true], ["linux", "Linux", false], ["android", "Android", false]] as const) {
-    const e = r[key];
+  for (const { key, name, required, entry: e } of releaseArtifacts(r)) {
     if (!e && !required) {
       said.push(`${name} not published`);
       continue;
@@ -54,6 +55,8 @@ if (existsSync(latest)) {
       if (!/^https:\/\//.test(e.url)) problems.push(`site/releases/latest.json: ${key}.url is not an https URL (${e.url})`);
     } else if (!file || !existsSync(file)) problems.push(`site/releases/latest.json names ${e?.file ?? `no ${name} file`}, which is not in site/releases/`);
     else if (statSync(file).size !== e.size) problems.push(`site/releases/${e.file} is ${statSync(file).size} bytes, latest.json says ${e.size}`);
+    else if (!/^[a-f0-9]{64}$/.test(e.sha256 ?? "") || createHash("sha256").update(readFileSync(file)).digest("hex") !== e.sha256)
+      problems.push(`site/releases/${e.file}: SHA-256 does not match latest.json`);
     said.push(`${name} ${e?.version ?? r.version} ${e?.url ?? e?.file ?? "no file"}`);
   }
   // A public build opens like any app: never one that asks the user to get past Gatekeeper.

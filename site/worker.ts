@@ -35,11 +35,14 @@ const CLIENT_TYPES: Record<string, string> = {
   ".dmg": "application/x-apple-diskimage",
   ".tar.gz": "application/gzip",
   ".apk": "application/vnd.android.package-archive",
+  ".exe": "application/vnd.microsoft.portable-executable",
+  ".zip": "application/zip",
+  "-SHA256SUMS.txt": "text/plain; charset=utf-8",
 };
 
-/** /releases/<name>.dmg, .tar.gz or .apk -> the bucket key (the file name) and its type, or null for everything else. */
+/** A client download under /releases/ -> the bucket key and MIME type, or null for everything else. */
 export function clientFile(pathname: string): { key: string; type: string } | null {
-  const m = /^\/releases\/([A-Za-z0-9][A-Za-z0-9._-]*?(\.dmg|\.tar\.gz|\.apk))$/.exec(pathname);
+  const m = /^\/releases\/([A-Za-z0-9][A-Za-z0-9._-]*?(\.dmg|\.tar\.gz|\.apk|\.exe|\.zip|-SHA256SUMS\.txt))$/.exec(pathname);
   return m ? { key: m[1], type: CLIENT_TYPES[m[2]] } : null;
 }
 
