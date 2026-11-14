@@ -134,6 +134,11 @@ const D_CACHE: u32 = 16u;    // the cache's fixed-point dither
 fn rng_white(d: u32) -> bool { return LIVE && (cur_depth > 0u || RNG_PATH != 0u || d >= 0x80000000u); }
 fn white(d: u32, c: u32) -> f32 { return f32(hash_hp(rng_seed(d) ^ (RNG_INDEX * 0x9e3779b9u + c * 0x85ebca6bu)) >> 8u) * (1.0 / 16777216.0); }
 
+// A hash, always: for loops of no fixed length (delta tracking's steps), where a new Sobol dimension a step is QMC's
+// worst case (as pbrt-v4, which draws its majorant tracking from a hashed RNG).
+fn rng_hash(d: u32, c: u32) -> f32 { return white(d, c); }
+fn rng_hash3(d: u32) -> vec3<f32> { return vec3<f32>(white(d, 0u), white(d, 1u), white(d, 2u)); }
+
 // Dimension id `d`'s scramble seed; the shuffled index, 16 bits (65,536 samples, then it repeats; Cycles' index mask).
 fn rng_seed(d: u32) -> u32 { return RNG_SEED ^ hash_hp(d); }
 fn rng_index(salt: u32) -> u32 { return owen_rev(reverseBits(RNG_INDEX), salt) & 0xffff0000u; }
@@ -162,9 +167,10 @@ fn rng4(d: u32) -> vec4<f32> {
     return vec4<f32>(sobol_owen(i, 0u, s ^ 0x39468210u), sobol_owen(i, 1u, s ^ 0xe9d8a845u), sobol_owen(i, 2u, s ^ 0x5f32b482u), sobol_owen(i, 3u, s ^ 0x1524cc56u));
 }
 
-// Starts sample `index` of a pixel (the sample offline, the frame live) on path `path`.
-fn rng_start(pix: vec2<u32>, index: u32, stream: u32, path: u32) {
-    RNG_SEED = hash_hp(pix.x ^ hash_hp(pix.y ^ hash_hp(stream)));
+// Starts sample `index` of a pixel (the sample offline, the frame live) on path `path`; `seed`: the render's
+// (THREERT_SEED offline) and the stream's.
+fn rng_start(pix: vec2<u32>, index: u32, seed: u32, path: u32) {
+    RNG_SEED = hash_hp(pix.x ^ hash_hp(pix.y ^ hash_hp(seed)));
     RNG_INDEX = index;
     RNG_PATH = path;
 }

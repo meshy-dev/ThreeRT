@@ -2219,7 +2219,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> Track {
         }
         if (mask != 0u && mj > 0.0) {
             loop {
-                let r3 = rng3(rng_sub(rd, stp));
+                let r3 = rng_hash3(rng_sub(rd, stp));
                 stp++;
                 t -= log(1.0 - r3.x) / mj;
                 if (t >= end) { break; }
@@ -2231,7 +2231,7 @@ fn media_track(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> Track {
                     st += v.extinction;
                     em += v.emission;
                     // The medium a collision here is in: each by its extinction (the first without a draw).
-                    if (v.extinction > 0.0 && (st <= v.extinction || rng1(rng_sub(rng_sub(rd, stp), k)) * st < v.extinction)) {
+                    if (v.extinction > 0.0 && (st <= v.extinction || rng_hash(rng_sub(rng_sub(rd, stp), k), 0u) * st < v.extinction)) {
                         r.albedo = v.albedo;
                         r.g = medium_at(k).b.y;
                     }
@@ -2263,7 +2263,7 @@ fn media_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> f32 {
         var t = max(sp.x, 0.0);
         var step = 0u;
         loop {
-            t -= log(1.0 - rng1(rng_sub(rd, (k << 24u) + step))) / mj;
+            t -= log(1.0 - rng_hash(rng_sub(rd, (k << 24u) + step), 0u)) / mj;
             step++;
             if (t >= b) { break; }
             tr *= 1.0 - medium_eval(k, o + d * t).extinction / mj;
@@ -2944,7 +2944,7 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
 fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!has(F_MEDIA) || !cache_on() || P.time.w < 0.5 || gid.x >= MEDIA_TRAIN_POINTS) { return; }
     media_voxels = true; // the voxels' light is shadowed by the media
-    rng_start(vec2<u32>(gid.x, 0u), P.size.z, 0x2545f491u, 2u);
+    rng_start(vec2<u32>(gid.x, 0u), P.size.z, P.size.w ^ 0x2545f491u, 2u);
     cur_depth = 0u;
     let r4 = rng4(rng_dim(D_CAMERA));
     mirror_path = false;
@@ -3005,7 +3005,7 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = P.size.y;
     if (!has(F_MEDIA) || P.time.w < 0.5 || gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
-    rng_start(gid.xy, P.size.z, 0x51ed27u, 3u);
+    rng_start(gid.xy, P.size.z, P.size.w ^ 0x51ed27u, 3u);
     cur_depth = 0u;
     mirror_path = false;
     var px = accum[pix];
@@ -3065,7 +3065,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
     if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0)); }
-    rng_start(gid.xy, P.size.z, 0u, 0u);
+    rng_start(gid.xy, P.size.z, P.size.w, 0u);
     cur_depth = 0u;
     let cam = rng4(rng_dim(D_CAMERA));
 

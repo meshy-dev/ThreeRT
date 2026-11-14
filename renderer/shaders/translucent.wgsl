@@ -84,7 +84,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = select(TPS.size.y, TPS.view.y, low);
     if (gid.x >= w || gid.y >= h) { return; }
     let pix = gid.y * w + gid.x;
-    rng_start(gid.xy, P.size.z, 0x5bd1e995u, 4u);
+    rng_start(gid.xy, P.size.z, P.size.w ^ 0x5bd1e995u, 4u);
     cur_depth = 0u;
     let cam = rng2(rng_dim(D_CAMERA));
     mirror_path = false;
@@ -204,7 +204,7 @@ fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn volume_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = gid.x;
     if (k >= min(atomicLoad(&vcount[0]), TPS.view.z)) { return; }
-    rng_start(vec2<u32>(k, 0u), P.size.z, 0x68e31da4u, 5u);
+    rng_start(vec2<u32>(k, 0u), P.size.z, P.size.w ^ 0x68e31da4u, 5u);
     mirror_path = false;
     let x = vpts[k].xyz;
     let e = point_radiance_train(x, P.misc.x);

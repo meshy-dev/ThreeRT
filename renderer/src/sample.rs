@@ -124,8 +124,8 @@ mod tests {
         }
     }
 
-    /// sample.wgsl on the GPU gives these numbers (to the last place: a u32's conversion to f32 may round either way).
-    /// (Skipped without a GPU.)
+    /// sample.wgsl on the GPU gives these numbers, offline (`LIVE` false; to the last place: a u32's conversion to f32
+    /// may round either way). (Skipped without a GPU.)
     #[test]
     fn the_shader_is_this() {
         use wgpu::util::DeviceExt;
@@ -135,7 +135,7 @@ mod tests {
         };
         let d = &g.device;
         let seeds = [0u32, 0x1234_5678, hash_hp(99)];
-        let src = format!("{}\nvar<private> cur_depth: u32;\n@group(0) @binding(0) var<storage, read_write> out: array<u32>;\nconst SEEDS = array<u32, 3>({}u, {}u, {}u);\n@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n    let i = id.x;\n    RNG_SEED = SEEDS[i % 3u];\n    RNG_INDEX = i;\n    let r = rng4(7u + i % 5u);\n    for (var k = 0u; k < 4u; k++) {{ out[i * 4u + k] = bitcast<u32>(r[k]); }}\n}}\n", include_str!("../shaders/sample.wgsl"), seeds[0], seeds[1], seeds[2]);
+        let src = format!("{}\noverride LIVE: bool = false;\nvar<private> cur_depth: u32;\n@group(0) @binding(0) var<storage, read_write> out: array<u32>;\nconst SEEDS = array<u32, 3>({}u, {}u, {}u);\n@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n    let i = id.x;\n    RNG_SEED = SEEDS[i % 3u];\n    RNG_INDEX = i;\n    let r = rng4(7u + i % 5u);\n    for (var k = 0u; k < 4u; k++) {{ out[i * 4u + k] = bitcast<u32>(r[k]); }}\n}}\n", include_str!("../shaders/sample.wgsl"), seeds[0], seeds[1], seeds[2]);
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(src.into()) });
         let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: None, layout: None, module: &module, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
         let n = 256u32;
