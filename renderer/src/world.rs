@@ -444,6 +444,10 @@ impl World {
         if g.groups.iter().any(|&[start, count, _]| start % 3 != 0 || count % 3 != 0 || start as u64 + count as u64 > g.indices.len() as u64) {
             return Err(anyhow!("geometry {id}: groups must be whole triangles within the indices"));
         }
+        // (What the kernel's traversals are built from: docs/RUNTIME.md "What the kernel trusts".)
+        if g.positions.iter().any(|v| !v.is_finite()) {
+            return Err(anyhow!("geometry {id}: a position is not finite"));
+        }
         // A geometry only meshes with their own BLAS use is replaced in place; one a flattened mesh uses rebuilds. A new
         // id no object uses yet: nothing to look for (the scan over every object cost ~40 µs a geometry at 10 k objects).
         let new = self.geometries.insert(id, Arc::new(g)).is_none();
@@ -522,6 +526,13 @@ impl World {
     pub fn set_object(&mut self, id: u32, name: String, parent: Option<u32>, mut kind: Kind, cast_shadow: bool, movable: bool) -> Result<()> {
         if let Kind::Model { uri, .. } = &kind {
             check_uri(uri)?;
+        }
+        // Delta tracking steps by -ln(1 - u) / majorant (pathtrace.wgsl `media_track`, `media_tr`): an infinite one never
+        // steps, and the walk through the volume would not end.
+        if let Kind::Volume { majorant, .. } = &kind {
+            if !(majorant.is_finite() && *majorant > 0.0) {
+                return Err(anyhow!("object {name}: a volume's majorant must be a finite number > 0 (1/m), not {majorant}"));
+            }
         }
         // A mesh given another geometry: promoted to its own BLAS if it was not (this swap rebuilds once, the next apply
         // in place); a promotion stays.
@@ -978,7 +989,22 @@ impl World {
 
     // ------------------------------------------------------------------------------------------ queries
 
+    /// Object `id`'s world matrix: its transform and its parents'. One that is not finite (a NaN or infinite position,
+    /// rotation or scale anywhere up the chain, as a script may set) places the object at a point, scale 1e-6 at its
+    /// translation where that is finite, as `scene::instance_world` places a hidden instance: what it draws is not
+    /// seen, and nothing built from it (the acceleration structures, the software traversal's trees, the light tree)
+    /// is given a number that is not finite (docs/RUNTIME.md "What the kernel trusts").
     pub fn world_matrix(&self, id: u32) -> Mat4 {
+        let m = self.world_matrix_as_set(id);
+        if m.is_finite() {
+            return m;
+        }
+        let at = if m.w_axis.is_finite() { m.w_axis.truncate() } else { Vec3::ZERO };
+        Mat4::from_scale_rotation_translation(Vec3::splat(1e-6), Quat::IDENTITY, at)
+    }
+
+    /// The product of the transforms as they were set, finite or not.
+    fn world_matrix_as_set(&self, id: u32) -> Mat4 {
         let mut m = Mat4::IDENTITY;
         let mut cur = Some(id);
         let mut guard = 0;
@@ -1174,6 +1200,34 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+    /// What the kernel's traversals are built from is finite where it enters (docs/RUNTIME.md "What the kernel
+    /// trusts"): a geometry's positions and a volume's majorant are checked; a transform is kept as set, and an object
+    /// whose world matrix is not finite (its own or a parent's) is placed at a point, at its translation where that is
+    /// finite, as a hidden instance is.
+    #[test]
+    fn what_the_kernel_walks_is_finite_where_it_enters() {
+        let mut w = World::default();
+        let tri = |x: f32| Geometry { positions: vec![x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], normals: vec![0.0; 9], uvs: vec![0.0; 6], indices: vec![0, 1, 2], groups: vec![], colors: vec![] };
+        assert!(w.set_geometry(1, tri(f32::NAN)).unwrap_err().to_string().contains("not finite"));
+        assert!(w.set_geometry(1, tri(f32::INFINITY)).is_err());
+        w.set_geometry(1, tri(0.0)).unwrap();
+        let volume = |majorant: f32| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant, g: 0.0, homogeneous: false, animated: false, grid: None };
+        for bad in [f32::INFINITY, f32::NAN, 0.0, -1.0] {
+            assert!(w.set_object(2, "fog".into(), None, volume(bad), false, false).is_err(), "majorant {bad}");
+        }
+        w.set_object(2, "fog".into(), None, volume(0.5), false, false).unwrap();
+        w.set_object(3, "parent".into(), None, Kind::Group, false, true).unwrap();
+        w.set_object(4, "child".into(), Some(3), Kind::Group, false, true).unwrap();
+        w.set_transform(4, Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+        assert_eq!(w.world_matrix(4).w_axis.truncate(), Vec3::new(1.0, 2.0, 3.0));
+        w.set_transform(3, Vec3::ZERO, Quat::IDENTITY, Vec3::new(f32::NAN, 1.0, 1.0)).unwrap();
+        let m = w.world_matrix(4);
+        assert!(m.is_finite() && m.x_axis.length() < 1e-5, "a NaN scale up the chain: a point ({m})");
+        w.set_transform(4, Vec3::new(f32::INFINITY, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+        assert!(w.world_matrix(4).is_finite());
+        assert_eq!(w.objects[&4].position.x, f32::INFINITY, "the transform kept as set");
+    }
+
     /// Density grids: sizes and data are checked; a new grid, another size or another program rebuilds the scene, new
     /// data for the same grid is uploaded in place (a grid sent again without data keeps what it had); sources go only
     /// to volumes with a grid, 12 finite floats each, at most GRID_MAX_SOURCES pending.

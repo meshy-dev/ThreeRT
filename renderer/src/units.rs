@@ -23,7 +23,7 @@
 //! is not balanced: its tree over 5.86 M triangles (the catalog's largest model) is 42 deep, twice a balanced one's
 //! 21, and over 30 k to 500 k triangles 17 to 22. The still scene's walk uses 48 entries for its one tree, as before.
 
-use crate::bvh::{self, GpuNode};
+use crate::bvh::{self, check_tree, GpuNode};
 use crate::scene::GpuInstance;
 use glam::{Mat4, Vec3A};
 
@@ -31,7 +31,7 @@ use glam::{Mat4, Vec3A};
 /// levels, and used by the still walk before them.
 pub const STACK: usize = 64;
 /// The still walk's stack in a kernel without units, and how much of the module's the still walk uses in one with.
-pub const STILL_STACK: usize = 48;
+pub const STILL_STACK: usize = bvh::STACK;
 /// The deepest top tree (levels below the root): a built tree is no deeper than 18, whatever its units' boxes
 /// (`build_sah`), and the top tree is one, or a root over two (`Kept`).
 pub const TOP_DEPTH: usize = 19;
@@ -54,51 +54,6 @@ pub struct MeshTree {
     pub depth: usize,
     pub lo: Vec3A,
     pub hi: Vec3A,
-}
-
-fn finite(n: &GpuNode) -> bool {
-    n.bmin.iter().chain(&n.bmax).all(|v| v.is_finite()) && (0..3).all(|k| n.bmin[k] <= n.bmax[k])
-}
-
-/// Checks that `nodes` is a tree the kernel's walk ends on, from node 0: every interior node's children are the two
-/// nodes at `left` and `left + 1`, `left` greater than the node's own index (so nothing is entered twice) and inside
-/// the tree; every node is reached exactly once; every box is finite; every leaf passes `leaf(first, count)`; nothing
-/// is deeper than `max_depth`. Returns the depth (levels below the root).
-fn check_tree(nodes: &[GpuNode], max_depth: usize, leaf: impl Fn(u32, u32) -> Result<(), String>) -> Result<usize, String> {
-    if nodes.is_empty() {
-        return Err("a tree without nodes".into());
-    }
-    let mut seen = vec![false; nodes.len()];
-    let mut stack = vec![(0usize, 0usize)];
-    let (mut deepest, mut reached) = (0, 0);
-    while let Some((i, depth)) = stack.pop() {
-        if std::mem::replace(&mut seen[i], true) {
-            return Err(format!("node {i} is reached twice"));
-        }
-        reached += 1;
-        deepest = deepest.max(depth);
-        let n = &nodes[i];
-        if n.count > 0 {
-            leaf(n.left_or_first, n.count).map_err(|e| format!("leaf {i}: {e}"))?;
-            continue;
-        }
-        if !finite(n) {
-            return Err(format!("node {i}'s box is not finite"));
-        }
-        let l = n.left_or_first as usize;
-        if l <= i || l + 1 >= nodes.len() {
-            return Err(format!("node {i}'s children {l}, {} are not after it and inside the tree's {} nodes", l + 1, nodes.len()));
-        }
-        if depth + 1 > max_depth {
-            return Err(format!("deeper than {max_depth}"));
-        }
-        stack.push((l, depth + 1));
-        stack.push((l + 1, depth + 1));
-    }
-    if reached != nodes.len() {
-        return Err(format!("{} of {} nodes are not reached", nodes.len() - reached, nodes.len()));
-    }
-    Ok(deepest)
 }
 
 /// A mesh tree over `tris` triangles, as the kernel may walk it: `check_tree`, leaves of 1 to `MAX_LEAF` triangles

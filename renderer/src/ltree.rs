@@ -151,6 +151,73 @@ fn union_sphere((c1, r1): ([f32; 3], f32), (c2, r2): ([f32; 3], f32)) -> [f32; 2
 }
 
 impl LightTree {
+    /// Checks the tree as the kernel reads it (pathtrace.wgsl `emitter_draw`, `emitter_sel`): from node 0, every
+    /// interior node's children are the nodes at its child word and the next, after it and inside the tree; every
+    /// node is reached exactly once, no deeper than `PATH_BITS`; every leaf's 1 to 4 entries (its word) are its range
+    /// (`ranges`) and inside the entries, the leaves together holding every entry once (the empty slot of emitters
+    /// added in place, a leaf of power 0 over nothing, apart); and every entry's code leads from the root, level by
+    /// level, to the leaf that holds it (what `emitter_sel` follows). Returns the depth. Run in tests and debug
+    /// builds after every build, growth and refit (refits keep the topology: what they could break is the numbers).
+    pub fn check(&self) -> Result<usize, String> {
+        let (nodes, entries) = (self.nodes.len(), self.order.len());
+        if nodes == 0 || self.ranges.len() != nodes || self.code.len() != entries {
+            return Err(format!("{nodes} nodes, {} ranges, {entries} entries, {} codes", self.ranges.len(), self.code.len()));
+        }
+        let word = |i: usize| self.nodes[i][3].to_bits();
+        let leaf = |w: u32| (w & LEAF != 0).then(|| (w & 0x1fff_ffff, ((w >> 29) & 3) + 1));
+        let (mut seen, mut held) = (vec![false; nodes], vec![0u8; entries]);
+        let (mut stack, mut deepest) = (vec![(0usize, 0u32)], 0);
+        while let Some((i, depth)) = stack.pop() {
+            if std::mem::replace(&mut seen[i], true) {
+                return Err(format!("node {i} is reached twice"));
+            }
+            if depth > PATH_BITS {
+                return Err(format!("node {i} is deeper than {PATH_BITS}"));
+            }
+            deepest = deepest.max(depth);
+            let (lo, hi) = self.ranges[i];
+            match leaf(word(i)) {
+                Some(_) if lo == hi => {}
+                Some((first, count)) => {
+                    if (first, first + count) != (lo, hi) || hi as usize > entries {
+                        return Err(format!("leaf {i}: entries {first}..{} in its word, {lo}..{hi} in its range, of {entries}", first + count));
+                    }
+                    (lo..hi).for_each(|k| held[k as usize] += 1);
+                }
+                None => {
+                    let l = word(i) as usize;
+                    if l <= i || l + 1 >= nodes {
+                        return Err(format!("node {i}'s children {l}, {} are not after it and inside the tree's {nodes} nodes", l + 1));
+                    }
+                    stack.extend([(l, depth + 1), (l + 1, depth + 1)]);
+                }
+            }
+        }
+        if let Some(i) = seen.iter().position(|s| !s) {
+            return Err(format!("node {i} is not reached"));
+        }
+        if let Some(k) = held.iter().position(|&h| h != 1) {
+            return Err(format!("entry {k} is in {} leaves", held[k]));
+        }
+        for (k, &c) in self.code.iter().enumerate() {
+            let depth = (c >> PATH_BITS).wrapping_sub(1);
+            if depth > PATH_BITS {
+                return Err(format!("entry {k}'s code {c:#x}: depth {depth}"));
+            }
+            let mut i = 0usize;
+            for level in 0..depth {
+                if leaf(word(i)).is_some() {
+                    return Err(format!("entry {k}'s code goes past leaf {i}"));
+                }
+                i = word(i) as usize + ((c >> level) & 1) as usize;
+            }
+            if !matches!(leaf(word(i)), Some((first, count)) if (first..first + count).contains(&(k as u32))) {
+                return Err(format!("entry {k}'s code leads to node {i}, not its leaf"));
+            }
+        }
+        Ok(deepest as usize)
+    }
+
     /// Node powers again from the entries' weights (power / material edits; `weight(k)` of entry k = position in
     /// `order`): same topology, sums bottom-up (children come after their parent).
     pub fn refit(&mut self, weight: &dyn Fn(usize) -> f32) {
@@ -164,6 +231,7 @@ impl LightTree {
             };
         }
         self.power = self.nodes.first().map_or(0.0, |b| b[2]);
+        self.checked();
     }
 
     /// The moving emitters moved: their leaves' spheres from their triangles now (`verts(k)`: entry k's vertices),
@@ -192,6 +260,15 @@ impl LightTree {
             self.nodes[i][0] = s[0];
             self.nodes[i][1] = s[1];
         }
+        self.checked();
+    }
+
+    /// `check` in tests and debug builds (bvh.rs `build_tris` says why not always).
+    fn checked(&self) {
+        #[cfg(any(test, debug_assertions))]
+        if let Err(e) = self.check() {
+            panic!("light tree: {e}");
+        }
     }
 
     /// The subtree of emitters added in place grown again over `items` (`build_slotted`; none: empty, power 0):
@@ -216,6 +293,7 @@ impl LightTree {
         }
         self.nodes[0][2] = self.nodes[1][2] + self.nodes[2][2];
         self.power = self.nodes[0][2];
+        self.checked();
     }
 
     /// Grows a subtree over `items` (entries `first..first + items.len()`, in the order it leaves them) from node
@@ -326,6 +404,7 @@ fn build_with(tris: &[EmitterTri], tri_verts: &[[f32; 4]], weight: &dyn Fn(usize
         tree.ranges[0] = (0, (ns + nm) as u32);
     }
     tree.power = tree.nodes[0][2];
+    tree.checked();
     Some(tree)
 }
 
@@ -335,6 +414,31 @@ mod tests {
 
     fn tri(i: u32, x: f32) -> (EmitterTri, [[f32; 4]; 3]) {
         (EmitterTri { tri: i, mat: 0, obj: 0, area: 0.5, c: [x + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false }, [[x, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    }
+
+    /// Garbage in: emitters whose triangles are not finite, that coincide, or carry weights near f32's limit make a
+    /// tree `check` passes (the builder checks itself in tests), with and without the slot for emitters added in
+    /// place and moving ones, and the slot grown over garbage too.
+    #[test]
+    fn garbage_in_makes_a_tree_the_kernel_reads() {
+        let n = 700u32;
+        let (mut tris, verts): (Vec<EmitterTri>, Vec<[[f32; 4]; 3]>) = (0..n).map(|i| tri(i, (i % 50) as f32)).unzip();
+        let mut verts: Vec<[f32; 4]> = verts.into_iter().flatten().collect();
+        for k in (0..n as usize).step_by(9) {
+            verts[k * 3][k % 3] = if k % 2 == 0 { f32::NAN } else { f32::INFINITY };
+            tris[k].c = [f32::NAN, 0.0, 0.0];
+        }
+        for k in (0..n as usize).step_by(13) {
+            tris[k].moves = k % 26 == 0;
+        }
+        let w = |i: usize| if i % 11 == 0 { 3.0e38 } else { 1.0 };
+        for slot in [false, true] {
+            let mut t = build_with(&tris, &verts, &w, slot).expect("a tree");
+            t.check().unwrap();
+            t.refit(&|k| if k % 5 == 0 { f32::NAN } else { 2.0 });
+            t.set_dynamic((0..300).map(|k| DynItem { e: k, lo: [f32::NAN; 3], hi: [0.0; 3], c: [(k % 3) as f32, f32::INFINITY, 0.0], w: 1.0 }).collect());
+            t.check().unwrap();
+        }
     }
 
     #[test]

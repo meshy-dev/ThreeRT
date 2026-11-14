@@ -772,7 +772,8 @@ tree (ROADMAP § 6).
   not bit-identical to the kernel's without the guard: the compiler arranges the arithmetic of the functions it is in
   differently (hello world, one sample: 354 of 43,200 numbers differ, by at most 2 × 10⁻⁷ of their value). What it
   stops it counts: the count is read back without waiting (`LiveCore::guard_trips`, the page's `guardTrips()`, the frame log), an offline
-  render in which it moved is an error, and anything but 0 means wrong pixels. Natively `THREERT_LOOP_GUARD=<limit>`
+  render in which it moved is an error, and anything but 0 means wrong pixels, and a bug in what the kernel was given
+  (the guarantee is the data's: "What the kernel trusts"). Natively `THREERT_LOOP_GUARD=<limit>`
   sets it; with nothing set a kernel with units has it (65,536; `THREERT_LOOP_GUARD=0` takes it out) and every other
   kernel has none, as before ("Software traversal with units"). The live passes need none: their loops are counted
   loops over constants and clamped parameters.
@@ -1264,6 +1265,43 @@ kernel is not given is an error.
   kernel: WGSL a browser would refuse is refused natively too.
 - The repository's Rust is pinned (`rust-toolchain.toml`, 1.100.0): wesl-rs 0.6 asks for 1.97.1 or newer, and the
   determinism checks' recorded hashes are of one compiler.
+
+## What the kernel trusts
+
+The kernel follows indices it reads from buffers and loops over counts it is given; it checks none of them (a
+check on every read would cost the trace, and naga's and Tint's own guards do not help: a clamped index can land on
+a real node and close a cycle, and their loop bound is 2^64 iterations). That a walk ends and reads only what is
+there is the data's to guarantee, as in the references (pbrt-v4, Embree, Cycles, three-mesh-bvh, Falcor; DXR and
+Vulkan for what a driver is given): the builders hold the invariants by how they build, what enters the engine is
+made finite where it enters, and the structural checks run in tests and debug builds. The loop guard ("The engine
+in a browser") is the last line, not the guarantee: a count above zero is a bug in what follows here.
+
+| what the kernel walks | built by | what holds it |
+|---|---|---|
+| the still scene's tree (software traversal), a procedural object's boxes' tree | bvh.rs `build_tris`, `build_boxes` | children after their parent and inside the tree (so a walk that goes down and pops what it pushed reaches each node at most once and ends, whatever the boxes say); every node reached once; leaves of 1 to 16 items inside the items; boxes finite (an item whose box is not is in no leaf, after every leaf's range, its index kept); no deeper than the kernel's stack (48: where the levels left could not finish the split the surface-area heuristic wants, the median); `check_tree` in tests and debug builds |
+| the units' trees, the top tree | units.rs | the same, checked at every build and edit (an incremental path, cheap per unit) |
+| the light tree | ltree.rs | children after their parent; median splits, so the depth is log2 of the entries, within the path codes' 26 bits; leaves of 1 to 4 entries (the child word's two bits); every entry's code leads to its leaf; `LightTree::check` after every build, growth and refit in tests and debug builds. Its walks end by their bounds whatever the data (`LT_PATH_BITS`, the code's depth, four entries) |
+| the emitter CDF's searches | lib.rs | binary searches end on any data (the interval shrinks); the guide table's entries are the CDF's |
+| counts (lights, emitters, directional lights, media, procedural objects, bounces) | lib.rs `prepare`, live/edits.rs | the lengths of the arrays uploaded with them; media at most `MAX_MEDIA` |
+| a medium's delta tracking | world.rs `set_object`, packages/scene `VolumeMesh` | the majorant a finite number > 0 (an infinite one never steps: the walk through the volume would not end) |
+
+Where what is built from enters, it is finite:
+- **geometry**: `World::set_geometry` refuses positions that are not finite (as it refuses indices out of range);
+  procedural boxes must be finite with min <= max (procasset.rs `check_boxes`); density grids and their sources
+  finite (as before);
+- **transforms** are kept as set (a script may set NaN), and a world matrix that is not finite places its object at
+  a point (`World::world_matrix`), as a hidden instance is placed (`scene::instance_world`): what it draws is not
+  seen, and nothing built from it gets a number that is not finite;
+- **the hardware acceleration structures' vertices**: a triangle with a vertex that is not finite (what overflows on
+  the way) is given to them as three vertices at the origin (`scene::blas_tri`): DXR and Vulkan leave such a vertex
+  undefined behaviour and define a degenerate triangle as never hit; its index stays.
+
+Measured (2026-11-14, software traversal's still tree, `bvh_depth` in a session's load line): Bistro 18 levels,
+Kabukichō 26, the Kabukichō district 33: the stack's 48 changes none of them. A tree of boxes spaced in powers of two
+is as deep as SAH makes it unheld, and no deeper than asked held (bvh.rs `a_tree_is_no_deeper_than_its_stack`).
+Garbage in (NaN and infinite vertices, values near f32's limit, a thousand copies of one triangle, a needle;
+emitters likewise) makes trees the checks pass and the kernel's walk ends on (`garbage_in_makes_a_tree_the_kernel_walks`,
+`garbage_in_makes_a_tree_the_kernel_reads`).
 
 ## Android (Adreno): what a phone's Vulkan driver needed
 

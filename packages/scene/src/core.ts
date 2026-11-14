@@ -1560,7 +1560,7 @@ export class VolumeMesh extends Object3D {
   }
   constructor(o: { shape?: "box" | "sphere"; volume: VolumeBinding; majorant: number; anisotropy?: number; homogeneous?: boolean; grid?: DensityGrid | null }) {
     super();
-    if (!(o.majorant > 0)) throw new Error("VolumeMesh: majorant must be > 0 (1/m)");
+    if (!(o.majorant > 0 && Number.isFinite(o.majorant))) throw new Error("VolumeMesh: majorant must be a finite number > 0 (1/m)");
     this.grid = o.grid ?? null;
     if (this.grid) {
       if ((o.shape ?? "box") !== "box") throw new Error("VolumeMesh: a density grid needs a box volume");
