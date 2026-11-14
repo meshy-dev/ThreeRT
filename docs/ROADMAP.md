@@ -2332,8 +2332,10 @@ frame's paths take candidates from their tile's list beside the uniform ones (do
 scheme MegaLights and RTXPT guide their draws by). Unbiased whatever a list holds. Measured on two new shots
 (`scenes/lamp-rooms.ts`, 96 lamps in 12 rooms; `lamp-rooms-wide.ts`, 768; bench-window `still-rooms`,
 `still-rooms-wide`), dE / flicker: 0.67 / 0.138 -> 0.63 / 0.069 and 1.01 / 0.126 -> 0.58 / 0.081, for 0.65 ms of
-trace and a 0.22 ms pass (of 9.2 ms a frame). Scenes without more than 8 shadow-casting local lights compile and
-run as before (Bistro, Kabukichō: picture and cost unchanged).
+trace and a 0.22 ms pass (of 9.2 ms a frame). (The wide shot's reference was rendered with a light tree, on another
+branch: main's offline chooses among the 768 lamps uniformly and is noisy at 4096 samples. Against main's own:
+dE 0.90 -> 0.71.) Scenes without more than 8 shadow-casting local lights compile and run as before (Bistro,
+Kabukichō: picture and cost unchanged).
 
 ## 2. Temporal fixes
 

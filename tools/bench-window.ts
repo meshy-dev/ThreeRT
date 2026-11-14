@@ -13,7 +13,8 @@
 //       ΔE, SSIM against offline (512 samples), and the RMS change of luma from one frame to the next (flicker).
 //   still-rooms, still-rooms-wide  the same for scenes/lamp-rooms.ts and lamp-rooms-wide.ts (96 and 768 shadow-casting
 //       lamps, most behind walls; scale 0.5; offline at 4096 samples): where a light sampler has to find the lamps a
-//       point can see, and what its noise does as they multiply.
+//       point can see, and what its noise does as they multiply. (The offline render chooses among the lamps
+//       uniformly: with 768 its 4096 samples are still noisy, a floor under every reading of the wide shot.)
 //   rooms-turn  lamp-rooms-wide, the camera turning 2 degrees a frame for 24 frames into the scene's view, then still:
 //       the last moving frame and 1, 6, 30 and 150 frames after it against the same offline render.
 //   slice  the Bistro slice half a second after its explosion (40.5 s, from the start in lockstep, scale 0.375, 1440p):

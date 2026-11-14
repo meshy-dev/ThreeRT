@@ -1699,7 +1699,9 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS).
 const LT_TILE: u32 = 8u;
 const LT_LIST: u32 = 64u;
-const LT_NONE: u32 = 0xf0000000u;
+// (Indices and counts are stored as float values, not as their bits: a small integer's bits are a denormal float,
+// which a driver may flush to zero. So a light-table index stays below LT_NONE, 2^24.)
+const LT_NONE: u32 = 16777216u;
 var<private> lt_list: u32;
 var<private> lt_list_n: u32;
 var<private> lt_fb: u32;
@@ -1718,7 +1720,7 @@ fn lt_list_start(p: vec3<f32>) {
     let c = q + vec2<u32>(P.ltile.z & 0xffffu, P.ltile.z >> 16u);
     lt_list = P.ltile.x + ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
     if (lt_list + LT_LIST > direct_len()) { return; }
-    lt_list_n = min(bitcast<u32>(direct_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
+    lt_list_n = min(u32(direct_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
 }
 
 // Whether the pixel's list holds light `i`.
@@ -1728,7 +1730,7 @@ fn lt_in_list(i: u32) -> bool {
     for (var k = 0u; k < 7u; k++) {
         if (lo >= hi) { break; }
         let mid = (lo + hi) / 2u;
-        let km = bitcast<u32>(direct_load(lt_list + mid).x);
+        let km = u32(direct_load(lt_list + mid).x);
         if (km == i) { return true; }
         if (km < i) { lo = mid + 1u; } else { hi = mid; }
     }
@@ -1806,7 +1808,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
             idx = first + min(u32(r4.x * f32(count)), count - 1u);
         } else {
             r4 = rng4(rng_sub(rd ^ 0x80000000u, 0x1000u + k));
-            idx = bitcast<u32>(direct_load(lt_list + min(u32((f32(k - m_cand) + at) * step), lt_list_n - 1u)).x);
+            idx = u32(direct_load(lt_list + min(u32((f32(k - m_cand) + at) * step), lt_list_n - 1u)).x);
             if (idx < first || idx >= first + count) { continue; }
             stands = listed;
         }
@@ -3165,7 +3167,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = gid.y * w + gid.x;
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
-    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, bitcast<f32>(LT_NONE), has(F_LISTS)))); }
+    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, f32(LT_NONE), has(F_LISTS)))); }
     if (has(F_LISTS)) { lt_fb = LT_NONE; }
     rng_start(gid.xy, P.size.z, P.size.w, 0u);
     cur_depth = 0u;
@@ -3470,7 +3472,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (LIVE && depth == 0u && direct_len() >= P.size.x * P.size.y && !non_finite(dl_det) && !non_finite(dl_det_spec)) {
             radiance -= thr * dl_det;
             dl_spec = max(dl_spec - dl_det_spec, vec3<f32>(0.0));
-            if (P.misc.w < 0.5) { direct_store(gid.y * P.size.x + gid.x, vec4<f32>(thr * dl_det, select(0.0, bitcast<f32>(lt_fb), has(F_LISTS)))); }
+            if (P.misc.w < 0.5) { direct_store(gid.y * P.size.x + gid.x, vec4<f32>(thr * dl_det, select(0.0, f32(lt_fb), has(F_LISTS)))); }
         }
 
         let l = sample_bsdf(s, lb, v);
