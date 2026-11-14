@@ -387,6 +387,7 @@ Messages a game posts:
 | `net.close` | `id`, `code?`, `reason?` | closes it (1000 unless `code` is 3000–4999); answers `net.closed` |
 | `net.fetch` | `id`, `url`, `method?`, `headers?`, `body?` | one HTTP request (`GET` unless `method`); answers `net.fetched` |
 | `hud` | `hud` | draws the HUD it describes ("HUD", below). `hud.set` posts it; a game does not post it by hand |
+| `audio.*` | below | plays sound ("Sound", below), with the engine's `audio` module. `audio.play` and the rest post them |
 
 Messages an app sends:
 
@@ -418,11 +419,11 @@ a binary WebSocket frame is dropped. Which addresses a game may reach is the app
 
 The apps in this repository:
 
-| app | input | `net.*` | `launch` | HUD |
-| --- | --- | --- | --- | --- |
-| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'` | not drawn; `--hud-log` prints each description |
-| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch` | on stdout with every other post |
-| the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`) | DOM over the canvas |
+| app | input | `net.*` | `launch` | HUD | sound |
+| --- | --- | --- | --- | --- | --- |
+| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'` | not drawn; `--hud-log` prints each description | played (`audio` feature) |
+| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch` | on stdout with every other post | on stdout: the driver's |
+| the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`) | DOM over the canvas | Web Audio by the same rules (`audio.ts`) |
 
 - `live` speaks the channel as JSON lines, so a game's use of it is testable without a window: on stdin
   `{"cmd":"host","messages":[{"t":"net.opened","id":"room"}, ...]}`, on stdout one line `{"host":[...]}` with what
@@ -552,6 +553,58 @@ hud.flash("damage", 1.2);        // the player was hit from 1.2 rad clockwise of
 - **Tones** say what a value means, for the app to colour: `default`, `good`, `warn`, `bad`, `accent`, `dim`.
 - **Text is text.** An app shows a game's strings as they are, never as markup.
 - A scene built anew in the same runtime posts its first description whatever the last one was.
+
+### Sound
+
+Unlike the HUD, sound is not left to each app: a shot is to sound the same in ThreeRT for macOS, on a Steam Deck and
+on an Android handheld. The game names a file and a place (`packages/gameplay/src/audio.ts`); the engine's library
+decodes, places and mixes it (`renderer/src/audio`, the `audio` feature, on by default and in the clients), and an
+app only hands it the messages and the camera. The device is the one part that differs a platform.
+
+```ts
+import { audio } from "@threert/gameplay";
+
+setup() { audio.preload(["assets/sounds/shot.ogg"]); ... }       // decoded ahead, off the frame
+frame(f) {
+  if (fired) audio.play("assets/sounds/shot.ogg", { at: muzzle, gain: 0.9, pitch: 0.97 + 0.06 * rng(), falloff: 8 });
+  audio.play("assets/sounds/tick.wav");                            // no `at`: in the player's head
+  audio.play("assets/sounds/fire.ogg", { at: brazier, loop: true, key: "brazier" });   // then audio.move / audio.stop
+}
+```
+
+- **Messages** (script → app; nothing comes back):
+
+  | `t` | fields | |
+  | --- | --- | --- |
+  | `audio.play` | `sound`, `at?` `[x, y, z]`, `gain?` (0..4, 1), `pitch?` (0.25..4, 1), `loop?`, `key?`, `falloff?` (m, 2) | starts a sound |
+  | `audio.stop` | `key?`, `fade?` (s, 0.05) | fades out the sounds of `key`, or all of them |
+  | `audio.move` | `key`, `at` | moves the sounds of `key` |
+  | `audio.preload` | `sounds` | decodes these files on a thread of their own |
+- **Files.** A sound is a file of the game, named as the scene names its files (`assets/sounds/shot.ogg`, relative to
+  the package; nothing outside it): WAV (PCM or float), Ogg Vorbis, MP3, FLAC, at any rate, one or two channels, at
+  most ten minutes. A package carries everything under `assets/`. Decoded once (by Symphonia: the same samples on
+  every platform), kept until the game closes; a file that is missing or unreadable is said once in the log and then
+  plays nothing.
+- **The listener** is the camera the frame was drawn from: its position, forward and right. A game sends nothing for
+  it.
+- **Placing** (`renderer/src/audio/mix.rs`): a sound at `at` keeps its level out to `falloff` metres, then falls as
+  falloff / distance (−6 dB a doubling) and fades out between 100 and 120 m. It is panned by its direction from the
+  listener's forward, with equal power and never more than 80 % to one side, and comes back towards the middle within
+  `falloff`. Far and behind it is duller: a one-pole low pass from 18 kHz, divided by 1 + distance / 40 m, halved
+  behind. Without `at` a sound is in the middle at its own gain.
+- **Limits:** 32 plays a frame (more are dropped), 48 voices at once (the quietest one-shot goes), 8 of one file (its
+  oldest goes). Levels ramp over each block; a stop fades. The app's volume, then a soft limiter above −2 dB.
+- **Presentation only.** Play sounds from the frame script and from host listeners, never from a handler: handlers
+  are replayed and verified, and a sound is not state. A node with no app (a test, a render node) drops the posts.
+- **Apps:** each message the game posts goes to `audio::Audio::post` (it answers false for what is not `audio.*`), and
+  once a frame `Audio::listener(camera)`. The device opens on the first sound and closes with the game (`close`) or
+  while the app is in the background (`set_paused`; loops go on where they were, one-shots in between are dropped);
+  `set_volume` is the app's own control. Devices (`renderer/src/audio/out.rs`): Core Audio and WASAPI by cpal, ALSA's
+  `default` on Linux and AAudio on Android, both loaded at run time, so a Linux or Android build links no sound
+  library and is silent, not broken, where there is none. `threert-render play` plays a game's sound the same way.
+  The three.js view plays it on Web Audio by the same numbers (`tools/three/audio.ts`, held to mix.rs by
+  `tools/three/test/audio.test.ts`; its low pass is a biquad, the one difference), resumed on the page's first key or
+  click as browsers require. The engine's library in a browser (wasm32) has no `audio` module.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 

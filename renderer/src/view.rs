@@ -11,7 +11,8 @@
 //! Esc. With `pointer: "look"` a click captures the pointer (its motion is the game's look), Esc lets go of it, and
 //! Esc again quits. The window is the app of the host channel: `--launch '{"room":"K7Q4MZ"}'` is the `launch`
 //! message, `--sensitivity 1.5` scales the look, `--hud-log` prints the HUD the game describes (the window draws
-//! none), and the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs).
+//! none), the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs), and its `audio.*` messages are
+//! played (src/audio, the `audio` feature: the ears are the camera of each frame).
 //!
 //! Controls: left-drag orbit · right/shift-drag pan · wheel zoom · WASD/QE fly · R reset camera · 1/2/4/8 cap spp,
 //! 0 adaptive · P snapshot · Esc quit. Scripted over stdio:
@@ -111,6 +112,9 @@ struct State {
     input: Option<InputTracker>,
     /// `pointer: "look"`: a click captures the pointer.
     look: bool,
+    /// The game's sound (the `audio.*` messages; the ears are the camera of the frame).
+    #[cfg(feature = "audio")]
+    audio: crate::audio::Audio,
 }
 
 impl State {
@@ -274,6 +278,12 @@ impl App {
             game,
             input: pointer.is_some().then(InputTracker::new),
             look: pointer.as_deref() == Some("look"),
+            #[cfg(feature = "audio")]
+            audio: {
+                let mut au = crate::audio::Audio::new();
+                au.open(&a.assets);
+                au
+            },
         });
         Ok(())
     }
@@ -552,6 +562,10 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
     // Game to app: what the game posted in this frame's entries (events among them).
     let posts = s.game.take_posts();
     for p in &posts {
+        #[cfg(feature = "audio")]
+        if s.audio.post(p) {
+            continue;
+        }
         services.post(p);
         if args.hud_log && p["t"] == "hud" {
             eprintln!("hud: {}", p["hud"]);
@@ -565,6 +579,14 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
     if s.input.is_none() {
         follow_game_camera(s, cam);
         s.core.set_camera(s.orbit.camera(s.tan));
+    }
+    #[cfg(feature = "audio")]
+    {
+        let c = s.core.cam;
+        s.audio.listener(c.pos, c.fwd, c.right);
+        for (level, text) in s.audio.take_log() {
+            eprintln!("audio: {level}: {text}");
+        }
     }
 
     let tex = match s.surface.get_current_texture() {
