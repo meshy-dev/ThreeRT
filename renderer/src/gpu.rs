@@ -776,18 +776,50 @@ impl KernelVariant {
 /// A kernel's WGSL: `src` (the template, the scene's functions spliced in) for a variant: WESL's conditional
 /// translation for its flags, with its constants, then the loop guard if it has one (`guard_loops`).
 pub fn kernel_wgsl(src: &str, v: &KernelVariant) -> String {
+    try_kernel_wgsl(src, v).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `kernel_wgsl`, saying what did not compile instead of panicking (a scene's own functions are a game's code).
+pub fn try_kernel_wgsl(src: &str, v: &KernelVariant) -> Result<String, String> {
     assert!(!(v.merged.is_some() && v.uniform_tables), "the uniform tables are never in the merged layout");
-    let mut out = wesl_wgsl(src, &v.flags(), &v.constants());
+    let mut out = try_wesl_wgsl(src, &v.flags(), &v.constants())?;
     if v.guard.is_some() {
         guard_loops(&mut out);
     }
-    out.to_string()
+    Ok(out.to_string())
+}
+
+/// A scene's functions as packages built before the kernel was WESL (#70) carry them: the scene library's hash
+/// (packages/scene/src/materials.ts `std_hash`, `std_hash3`) was `a * b ^ c * d`, which naga took and WESL, by the
+/// specification's grammar (a bitwise operator's operands are unary), does not. Those packages keep the old library
+/// in their bundles, so the two expressions are parenthesised here as the library now writes them, in the order naga
+/// read them: the same hash, the same picture. Anything else is left as it is.
+pub fn legacy_wgsl(code: String) -> String {
+    const OLD: [(&str, &str); 2] = [
+        (
+            "std_pcg(bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u)",
+            "std_pcg((bitcast<u32>(x) * 73856093u) ^ (bitcast<u32>(y) * 19349663u) ^ (bitcast<u32>(z) * 83492791u))",
+        ),
+        (
+            "let v = bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u;",
+            "let v = (bitcast<u32>(x) * 73856093u) ^ (bitcast<u32>(y) * 19349663u) ^ (bitcast<u32>(z) * 83492791u);",
+        ),
+    ];
+    if !OLD.iter().any(|(old, _)| code.contains(old)) {
+        return code;
+    }
+    OLD.iter().fold(code, |c, (old, new)| c.replace(old, new))
 }
 
 /// `src` through wesl-rs (WESL's reference compiler in Rust): conditional translation for `flags`, imports of the
 /// `constants` package from `constants`. Every flag the source names must be given (one that is not is an error, not
 /// off), and every constant it imports.
 pub fn wesl_wgsl(src: &str, flags: &[(&str, bool)], constants: &[(String, u32)]) -> wesl::syntax::TranslationUnit {
+    try_wesl_wgsl(src, flags, constants).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `wesl_wgsl`, with what did not compile as an error.
+pub fn try_wesl_wgsl(src: &str, flags: &[(&str, bool)], constants: &[(String, u32)]) -> Result<wesl::syntax::TranslationUnit, String> {
     use wesl::{syntax::ModulePath, CompileOptions, Feature, Features};
     let mut features = Features { default: Feature::Error, ..Default::default() };
     for &(name, on) in flags {
@@ -797,7 +829,7 @@ pub fn wesl_wgsl(src: &str, flags: &[(&str, bool)], constants: &[(String, u32)])
     let resolver = KernelResolver { src, constants };
     let options = CompileOptions { imports: true, condcomp: true, strip: false, validate: false, sourcemap: false, mangler: wesl::ManglerKind::None, features, ..Default::default() };
     let path: ModulePath = "package::kernel".parse().expect("a module path");
-    wesl::compile(&path, &options, &resolver).unwrap_or_else(|e| panic!("the kernel's WESL: {e}")).syntax
+    wesl::compile(&path, &options, &resolver).map(|r| r.syntax).map_err(|e| format!("the kernel's WESL: {e}"))
 }
 
 /// The modules a kernel's WESL sees: itself, and WESL's `constants` package (`wesl_wgsl`).
@@ -1221,6 +1253,8 @@ impl Kernel {
             }
             geometry_functions.push_str("        default { return GOut(-1.0, vec3<f32>(0.0, 1.0, 0.0), 0u, vec2<f32>(0.0)); }\n    }\n}\n");
         }
+        // (Functions from a package built before the kernel was WESL, as WESL reads them: `legacy_wgsl`.)
+        let (functions, volume_functions, geometry_functions) = (legacy_wgsl(functions), legacy_wgsl(volume_functions), legacy_wgsl(geometry_functions));
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         functions.hash(&mut h);
@@ -1673,7 +1707,17 @@ impl Gpu {
                 // The variant: this device's traversal, switches, layout (the merged one with this kernel's arrays'
                 // lengths) and loop guard, this scene's features.
                 let v = KernelVariant { merged: k.caps, uniform_tables: self.uniform_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
-                let wgsl = kernel_wgsl(&src, &v);
+                // A scene's functions that do not compile (a game's own WGSL) cost the game its functions, not the
+                // app its renderer: the kernel is made without them, and the game's log says why. (A panic here took
+                // the engine down, and ThreeRT for Android then took the device for one without a renderer.)
+                let wgsl = try_kernel_wgsl(&src, &v).unwrap_or_else(|e| {
+                    let msg = format!("this scene's material, volume or geometry functions do not compile, so it is drawn without them: {e}");
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::script::engine_log("error", &msg);
+                    #[cfg(target_arch = "wasm32")]
+                    eprintln!("{msg}");
+                    kernel_wgsl(&self.source, &v)
+                });
                 unsafe { self.device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks()) }
             })
             .clone()
@@ -3234,6 +3278,28 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+
+    /// A package built before the kernel was WESL carries the scene library's old hash (`a * b ^ c * d`): as it is,
+    /// WESL refuses it (Daylight Home on ThreeRT 0.4.2: the engine panicked); through `legacy_wgsl` it compiles.
+    #[test]
+    fn a_package_with_the_old_scene_library_still_compiles() {
+        let old = "fn std_pcg(v: u32) -> u32 {\n    let s = v * 747796405u + 2891336453u;\n    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;\n    return (w >> 22u) ^ w;\n}\nfn std_hashi(x: i32, y: i32, z: i32) -> f32 {\n    return f32(std_pcg(bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u) >> 8u) * (1.0 / 16777216.0);\n}\nfn std_hash3(x: f32, y: f32, z: f32) -> f32 {\n    let v = bitcast<u32>(x) * 73856093u ^ bitcast<u32>(y) * 19349663u ^ bitcast<u32>(z) * 83492791u;\n    return f32(std_pcg(v) >> 8u) * (1.0 / 16777216.0);\n}\n";
+        let slot = "fn material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }\nfn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }\nfn alpha_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }\nfn emissive_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut { return base; }\n";
+        let template = kernel_template();
+        let with = |functions: &str| {
+            let (head, rest) = template.split_once("// @material-functions-begin").unwrap();
+            let (_, tail) = rest.split_once("// @material-functions-end").unwrap();
+            format!("{head}{functions}{slot}{tail}")
+        };
+        let v = KernelVariant::new(false, KernelSwitches::default(), 0);
+        assert!(try_kernel_wgsl(&with(old), &v).is_err(), "WESL takes the old hash as written: the shim is no longer needed");
+        let fixed = legacy_wgsl(old.to_string());
+        assert!(!fixed.contains("73856093u ^ "), "{fixed}");
+        let wgsl = try_kernel_wgsl(&with(&fixed), &v).expect("the old library, parenthesised, compiles");
+        naga_valid(&wgsl);
+        // What is not the old library is left alone.
+        assert_eq!(legacy_wgsl("fn f() -> u32 { return 1u ^ 2u; }".into()), "fn f() -> u32 { return 1u ^ 2u; }");
+    }
     #[test]
     fn material_functions_by_the_fields_they_write() {
         let f = |body: &str| format!("fn mf_x(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n{body}\n    return o;\n}}\n");
