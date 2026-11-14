@@ -351,10 +351,10 @@ impl LiveCore {
         let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
         let quant = |v: f32| (v * 4095.0).round() / 4095.0;
         let jitter = (quant(halton(self.frame % phases + 1, 2)), quant(halton(self.frame % phases + 1, 3)));
-        // The light tiles (pathtrace.wgsl "Light tiles"), in a scene whose local lights are resampled (more than the
-        // kernel's RIS_EXACT, 8): the lists the last frame built, for this frame's paths (none after a reset: its
-        // reports were another view's), and this frame's grid offset, a pixel of 8 x 8.
-        let tiles_on = self.sc.base.counts[0] - self.sc.base.counts2[0] > 8;
+        // The light tiles (pathtrace.wgsl "Light tiles"), in a scene whose local lights are resampled (gpu::F_LISTS):
+        // the lists the last frame built, for this frame's paths (none after a reset: its reports were another
+        // view's), and this frame's grid offset, a pixel of 8 x 8.
+        let tiles_on = self.sc.up.kernel.features & gpu::F_LISTS != 0;
         if self.reset || !tiles_on {
             self.light_tiles = None;
         }

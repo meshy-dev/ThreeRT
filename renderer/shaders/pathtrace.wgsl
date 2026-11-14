@@ -78,6 +78,7 @@ const F_UNLIT: u32 = 1048576u; // MeshBasicMaterial (MAT_UNLIT)
 const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
+const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
 struct Params {
@@ -1689,9 +1690,10 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // Light tiles (live; what guides MegaLights' draws and RTXPT's): each camera pixel reports the local light its
 // resampled shadow ray found (direct_out's w: `lt_fb`, a light-table index; LT_NONE: none), live.wgsl `light_tiles`
 // makes each 8 x 8 tile's reports a list after the kernel's own data in direct_out (the lights found, each once:
-// index, reports; ascending; the last vec4 their number), and the next frame's paths take resampling candidates
-// from their pixel's tile's list as well, spread over it without repeats (all of it when it is short). The
-// candidates drawn uniformly, as before, then stand for the lights the list lacks (`lt_in_list`). A list is a guide:
+// index, reports; ascending; the last vec4 their number and a mask of their indices' low 6 bits), and the next
+// frame's paths take resampling candidates from their pixel's tile's list as well, spread over it without repeats
+// (all of it when it is short). The candidates drawn uniformly, as before, then stand for the lights the list lacks
+// (`lt_in_list`). Compiled in for scenes whose local lights are resampled (F_LISTS). A list is a guide:
 // whatever it holds the estimate is the same sum, so one gone stale (the table reordered, the camera moved on)
 // costs noise, not light.
 const LT_TILE: u32 = 8u;
@@ -1699,6 +1701,7 @@ const LT_LIST: u32 = 64u;
 const LT_NONE: u32 = 0xf0000000u;
 var<private> lt_list: u32;
 var<private> lt_list_n: u32;
+var<private> lt_mask: vec2<u32>;
 var<private> lt_fb: u32;
 
 // The list of the tile pixel `px` was in when the lists were built, and how many lights it holds.
@@ -1710,11 +1713,14 @@ fn lt_list_start(px: vec2<u32>) {
     let c = q + vec2<u32>(P.ltile.z & 0xffffu, P.ltile.z >> 16u);
     lt_list = P.ltile.x + ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
     if (lt_list + LT_LIST > direct_len()) { return; }
-    lt_list_n = min(bitcast<u32>(direct_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
+    let last = direct_load(lt_list + LT_LIST - 1u);
+    lt_list_n = min(bitcast<u32>(last.x), LT_LIST - 1u);
+    lt_mask = vec2<u32>(bitcast<u32>(last.y), bitcast<u32>(last.z));
 }
 
-// Whether the pixel's list holds light `i`.
+// Whether the pixel's list holds light `i` (the mask says no for most that it does not, without a search).
 fn lt_in_list(i: u32) -> bool {
+    if (((lt_mask[(i >> 5u) & 1u] >> (i & 31u)) & 1u) == 0u) { return false; }
     var lo = 0u;
     var hi = lt_list_n;
     for (var k = 0u; k < 7u; k++) {
@@ -1779,7 +1785,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     // With the pixel's list (light tiles), `nt` candidates more come from it, one in each `step` of its lights, and
     // the uniform ones keep the lights it lacks; each weighed by how many lights it stands for.
     var nt = 0u;
-    if (!vol && lt_list_n > 0u) { nt = min(select(P.ltile.w / 2u, P.ltile.w, seen_directly()), lt_list_n); }
+    if (has(F_LISTS) && !vol && lt_list_n > 0u) { nt = min(select(P.ltile.w / 2u, P.ltile.w, seen_directly()), lt_list_n); }
     let step = f32(lt_list_n) / f32(max(nt, 1u));
     let each = select(1.0, f32(count) / f32(m_cand), nt > 0u);
     var at = 0.0;
@@ -1826,7 +1832,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
                 sum += r;
                 if (!vol) { dl_spec += r * split_frac; }
                 // The light tiles' report: the light the camera hit's ray found.
-                if (!vol && cur_depth == 0u) { lt_fb = pick; }
+                if (has(F_LISTS) && !vol && cur_depth == 0u) { lt_fb = pick; }
             }
         }
     }
@@ -3157,8 +3163,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = gid.y * w + gid.x;
     // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
     // turned to sky must not keep what a surface left there.
-    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, bitcast<f32>(LT_NONE))); }
-    lt_list_start(gid.xy);
+    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, bitcast<f32>(LT_NONE), has(F_LISTS)))); }
+    if (has(F_LISTS)) { lt_list_start(gid.xy); }
     rng_start(gid.xy, P.size.z, P.size.w, 0u);
     cur_depth = 0u;
     let cam = rng4(rng_dim(D_CAMERA));
@@ -3461,7 +3467,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (LIVE && depth == 0u && direct_len() >= P.size.x * P.size.y && !non_finite(dl_det) && !non_finite(dl_det_spec)) {
             radiance -= thr * dl_det;
             dl_spec = max(dl_spec - dl_det_spec, vec3<f32>(0.0));
-            if (P.misc.w < 0.5) { direct_store(gid.y * P.size.x + gid.x, vec4<f32>(thr * dl_det, bitcast<f32>(lt_fb))); }
+            if (P.misc.w < 0.5) { direct_store(gid.y * P.size.x + gid.x, vec4<f32>(thr * dl_det, select(0.0, bitcast<f32>(lt_fb), has(F_LISTS)))); }
         }
 
         let l = sample_bsdf(s, lb, v);
