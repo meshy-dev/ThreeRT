@@ -241,7 +241,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     if base.ltree[3] > 0.5 {
         base.ltree[3] = crate::ltree::live_candidates() as f32;
     }
-    base.ltile[3] = super::list_candidates();
+    base.ltile[3] = super::LIST_CANDIDATES;
     base.cam_fwd[3] = w as f32 / h as f32;
     let bgs = targets.bind_groups(&g.device, passes, &up.accum);
     let exposure_settings = ExposureSettings::new(&sc.camera.exposure, &sc.preset.post);

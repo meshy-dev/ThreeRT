@@ -358,7 +358,7 @@ impl LiveCore {
         if self.reset || !tiles_on {
             self.light_tiles = None;
         }
-        let lists = (self.targets.kernel.direct.size / 16) as u32 - layout::light_tiles(w) * layout::light_tiles(h) * 64;
+        let lists = layout::light_lists(w, h).0;
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;

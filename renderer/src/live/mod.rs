@@ -137,10 +137,8 @@ struct LiveParams {
 }
 
 /// Resampling candidates a vertex the camera sees takes from its pixel's light tile, beside the kernel's RIS_M
-/// uniform ones (`Params::ltile.w`; THREERT_LT_LIST overrides: A/B, 0 = none).
-pub(super) fn list_candidates() -> u32 {
-    std::env::var("THREERT_LT_LIST").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
-}
+/// uniform ones (`Params::ltile.w`; half past the camera hit). 2 read as 4, 8 and 16 on the lamp-rooms shots.
+pub(super) const LIST_CANDIDATES: u32 = 2;
 
 /// Auto / local exposure settings of the loaded scene (UE PostProcessVolume semantics).
 #[derive(Clone, Copy, Default)]

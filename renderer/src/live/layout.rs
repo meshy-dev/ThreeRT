@@ -184,6 +184,12 @@ pub(super) fn light_tiles(n: u32) -> u32 {
     n.div_ceil(8) + 1
 }
 
+/// The light tiles' lists in the kernel's direct buffer, for an output of `w` x `h`: after its vec4 a pixel, 64 vec4s
+/// a tile. Their first vec4 and how many they are.
+pub(super) fn light_lists(w: u32, h: u32) -> (u32, u32) {
+    (w * h, light_tiles(w) * light_tiles(h) * 64)
+}
+
 /// The binding live.wgsl gives `name`.
 pub(super) fn binding(name: &str) -> &'static Binding {
     BINDINGS.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("live.wgsl binds no `{name}`"))

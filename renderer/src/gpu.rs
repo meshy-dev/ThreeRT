@@ -117,7 +117,7 @@ pub struct Params {
     pub background: [f32; 4],
     /// The live light tiles (pathtrace.wgsl "Light tiles"; live/frame.rs): the lists' first vec4 in the direct
     /// buffer (0: none this frame), tiles a row, the grid's offset when they were built (x | y << 16), candidates a
-    /// vertex the camera sees takes from its list beside the uniform ones (`live::list_candidates`; half past it).
+    /// vertex the camera sees takes from its list beside the uniform ones (`live::LIST_CANDIDATES`; half past it).
     pub ltile: [u32; 4],
     /// The traced size the lists were built at, -, -.
     pub ltile2: [u32; 4],
@@ -1359,10 +1359,12 @@ pub const F_VCOLOR: u32 = 1 << 22;
 /// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions. (Bit 24 is
 /// F_AERIAL's.)
 pub const F_GRID: u32 = 1 << 25;
-/// More shadow-casting local lights than the kernel sums exactly at a camera hit (pathtrace.wgsl RIS_EXACT): they
-/// are resampled, guided live by the light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass
-/// runs for such a scene).
+/// More shadow-casting local lights than the kernel sums exactly at a camera hit (`RIS_EXACT`): they are resampled,
+/// guided live by the light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass runs for such a
+/// scene).
 pub const F_LISTS: u32 = 1 << 27;
+/// Local lights the kernel sums exactly (pathtrace.wgsl `RIS_EXACT`; the test below holds the two together).
+pub const RIS_EXACT: usize = 8;
 /// The features that change the kernel's source (an `@if` flag) rather than switch code in it (`FEAT`).
 pub const F_SOURCE: u32 = F_UNITS;
 /// Software traversal's units (units.rs; shaders/trace_units.wgsl): the second level's walk, spliced into the
@@ -1398,7 +1400,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
     let media = if scene.media.is_empty() { 0 } else { F_MEDIA } | if scene.media.iter().any(|m| m.a[2] != 0) { F_HMEDIA } else { 0 } | if grid { F_GRID } else { 0 };
-    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.background.is_some() { F_BACKGROUND } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > 8 { F_LISTS } else { 0 };
+    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.background.is_some() { F_BACKGROUND } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > RIS_EXACT { F_LISTS } else { 0 };
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
@@ -3379,6 +3381,7 @@ mod tests {
             seen |= bit;
         }
         let wgsl = include_str!("../shaders/pathtrace.wgsl");
+        assert!(wgsl.contains(&format!("const RIS_EXACT: u32 = {RIS_EXACT}u;")), "RIS_EXACT: pathtrace.wgsl and gpu.rs differ");
         for line in wgsl.lines().filter(|l| l.starts_with("const F_")) {
             let name = &line[6..line.find(':').unwrap()];
             let value: u32 = line[line.find('=').unwrap() + 1..line.find("u;").unwrap()].trim().parse().unwrap();

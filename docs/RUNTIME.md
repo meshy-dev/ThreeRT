@@ -1290,7 +1290,6 @@ frame found (pathtrace.wgsl "Light tiles", live.wgsl `light_tiles`):
 - The next frame's paths take 2 candidates from their pixel's list at a vertex the camera sees and 1 past it, spread
   over the list without repeats, beside the uniform candidates (8 and 3), which then stand for the lights the list
   lacks. Each candidate is weighed by the lights it stands for: the estimate is the same sum whatever a list holds.
-- THREERT_LT_LIST=n: the list candidates (0: none), for A/B.
 
 ## What the kernel trusts
 

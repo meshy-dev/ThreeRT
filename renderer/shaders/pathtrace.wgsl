@@ -1778,11 +1778,12 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     // Target: unshadowed intensity x cosine (cheap; the full BSDF / phase is applied to the chosen light only).
     let m_cand = select(3u, RIS_M, seen_directly());
     // With the pixel's list (light tiles), `nt` candidates more come from it, one in each `step` of its lights, and
-    // the uniform ones keep the lights it lacks; each weighed by how many lights it stands for.
+    // the uniform ones keep the lights it lacks. A uniform candidate stands for count / m_cand lights (weight 1 here,
+    // the factor applied at the end, as without a list), one of the list's for `step` (`listed`, relative to that).
     var nt = 0u;
     if (has(F_LISTS) && !vol && lt_list_n > 0u) { nt = min(select(P.ltile.w / 2u, P.ltile.w, seen_directly()), lt_list_n); }
     let step = f32(lt_list_n) / f32(max(nt, 1u));
-    let each = select(1.0, f32(count) / f32(m_cand), nt > 0u);
+    let listed = step * f32(m_cand) / f32(count);
     var at = 0.0;
     if (nt > 0u) { at = rng1(rng_sub(rd ^ 0x80000000u, 0x2000u)); }
     var wsum = 0.0;
@@ -1792,7 +1793,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
     for (var k = 0u; k < m_cand + nt; k++) {
         var r4: vec4<f32>;
         var idx: u32;
-        var stands = each;
+        var stands = 1.0;
         if (k < m_cand) {
             r4 = rng4(rng_sub(rd ^ 0x80000000u, k));
             idx = first + min(u32(r4.x * f32(count)), count - 1u);
@@ -1800,7 +1801,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
             r4 = rng4(rng_sub(rd ^ 0x80000000u, 0x1000u + k));
             idx = bitcast<u32>(direct_load(lt_list + min(u32((f32(k - m_cand) + at) * step), lt_list_n - 1u)).x);
             if (idx < first || idx >= first + count) { continue; }
-            stands = step;
+            stands = listed;
         }
         let ls = local_light(light_at(idx), x, r4.yz);
         var ph = luminance(ls.c);
@@ -1822,8 +1823,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
         if (any(c > vec3<f32>(0.0))) {
             let vis = light_vis(light_at(pick).ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0xffffffffu));
             if (any(vis > vec3<f32>(0.0))) {
-                var r = c * gtint(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
-                if (nt > 0u) { r = c * gtint(vis) * (wsum / pick_ph); }
+                let r = c * gtint(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
                 sum += r;
                 if (!vol) { dl_spec += r * split_frac; }
                 // The light tiles' report: the light the camera hit's ray found.
