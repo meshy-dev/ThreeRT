@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 pub const MAT_DOUBLE_SIDED: i32 = 1;
 pub const MAT_EMITTER_CARD: i32 = 2;
-/// three.js MeshBasicMaterial (`desc::Material::unlit`; the kernel's F_UNLIT, `@if(unlit)`: gpu.rs `KernelVariant::flags`).
+/// three.js MeshBasicMaterial (`desc::Material::unlit`; the kernel's F_UNLIT).
 pub const MAT_UNLIT: i32 = 4;
 pub const TRI_NO_SHADOW: u32 = 1;
 /// Alpha-tested triangle (cutout material): traversal runs an any-hit test.

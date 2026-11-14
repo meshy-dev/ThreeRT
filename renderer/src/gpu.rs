@@ -113,8 +113,7 @@ pub struct Params {
     pub procs: [u32; 4],
     /// The sky's aerial perspective (F_AERIAL; `scene::aerial_params`): density multiple, Rayleigh scale, Mie scale, -.
     pub aerial: [f32; 4],
-    /// three.js `scene.background` (F_BACKGROUND): its radiance, 1. Last, and read only by the kernel patched for it
-    /// (`KernelVariant::flags`): every other kernel's `Params` ends before it.
+    /// three.js `scene.background` (F_BACKGROUND): its radiance, 1.
     pub background: [f32; 4],
 }
 
@@ -734,23 +733,8 @@ impl KernelVariant {
         KernelVariant { hwrt, switches, features, ..Default::default() }
     }
 
-    /// The flags of the kernel's conditional translation. A scene's:
-    ///  - vcolor (F_VCOLOR), three.js `vertexColors` (`scene::tri_colors`): three sRGB 8-bit colours per triangle after
-    ///    the previous vertices in `prev_verts` (from vec4 `Params::procs.w`; the kernel has no binding to spare),
-    ///    interpolated in linear at the hit, multiply the base colour of surfaces and glass (white for triangles
-    ///    without them).
-    ///  - grid (F_GRID), density grids (`scene::GridBuild`): the grid atlas at binding 19 (a texture: the buffers are
-    ///    at Metal's limit), `VIn::grid` and `vgrid` for volume functions.
-    ///  - tint (F_TINT), instance colours (`scene::object_stride`): object entries of 4 vec4s, the 4th the instance
-    ///    colour, which multiplies the base colour of surfaces, procedural surfaces and glass (three.js `instanceColor`).
-    ///  - unlit (F_UNLIT), three.js MeshBasicMaterial (`scene::MAT_UNLIT`): its colour (x map, x tint) is emission seen
-    ///    by camera rays and mirror-like paths only, its albedo 0: lit by nothing, lighting nothing (in no emitter list).
-    ///  - units (F_UNITS), software traversal's second level (trace_units.wgsl): the still scene's walk hands its hit
-    ///    to the units' and has no stack of its own (the module's, set to zero once an invocation and not once a ray).
-    ///  - background (F_BACKGROUND), three.js `scene.background`: camera rays that miss, and paths bent straight on
-    ///    through glass (the rays `sky_mis` gets with pdf 0), see `Params::background`, which `Params` ends with in
-    ///    this kernel only.
-    pub fn flags(&self) -> [(&'static str, bool); 15] {
+    /// The flags of the kernel's conditional translation (pathtrace.wgsl's head).
+    pub fn flags(&self) -> [(&'static str, bool); 10] {
         let (k, f) = (&self.switches, |bit: u32| self.features & bit != 0);
         [
             ("hwrt", self.hwrt),
@@ -759,12 +743,7 @@ impl KernelVariant {
             ("cutout_lite2", k.cutout_lite >= 2),
             ("last_direct", k.last_direct),
             ("light_pick", k.light_pick),
-            ("vcolor", f(F_VCOLOR)),
-            ("grid", f(F_GRID)),
-            ("tint", f(F_TINT)),
-            ("unlit", f(F_UNLIT)),
             ("units", f(F_UNITS)),
-            ("background", f(F_BACKGROUND)),
             ("merged", self.merged.is_some()),
             ("uniform_tables", self.uniform_tables),
             ("guard", self.guard.is_some()),
@@ -1290,20 +1269,20 @@ pub const F_HMEDIA: u32 = 131072;
 /// Procedural geometry (`ProceduralMesh`; pathtrace.wgsl `proc_*`): AABB candidates in every ray query, its hits'
 /// own surface path. Compiled out where no scene has any (`THREERT_FEATURES_ON` forces it in, to measure that cost).
 pub const F_PROC: u32 = 262144;
-/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th (`KernelVariant::flags`;
-/// `scene::object_stride`).
+/// Instance colours (`InstancedMesh.setColorAt`): object entries of 4 vec4s, the base colour times the 4th
+/// (`scene::object_stride`).
 pub const F_TINT: u32 = 524288;
-/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing (`KernelVariant::flags`).
+/// three.js MeshBasicMaterial (`scene::MAT_UNLIT`): seen by camera rays, lit by nothing, lighting nothing.
 pub const F_UNLIT: u32 = 1 << 20;
-/// three.js `scene.background`: camera rays that miss see `Params::background` (`KernelVariant::flags`).
+/// three.js `scene.background`: camera rays that miss see `Params::background`.
 pub const F_BACKGROUND: u32 = 1 << 21;
-/// The features that change the kernel's declarations (`KernelVariant::flags`, `@if` in its source) rather than switch code in it.
-/// three.js `vertexColors` (`scene::tri_colors`): a colour per triangle vertex multiplies the base colour (F_SOURCE).
+/// three.js `vertexColors` (`scene::tri_colors`): a colour per triangle vertex multiplies the base colour.
 pub const F_VCOLOR: u32 = 1 << 22;
-/// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions (F_SOURCE). (Bit
-/// 24 is F_AERIAL's.)
+/// Density grids (`scene::GridBuild`): the grid atlas (binding 19) and `vgrid` for volume functions. (Bit 24 is
+/// F_AERIAL's.)
 pub const F_GRID: u32 = 1 << 25;
-pub const F_SOURCE: u32 = F_TINT | F_UNLIT | F_BACKGROUND | F_VCOLOR | F_GRID | F_UNITS;
+/// The features that change the kernel's source (an `@if` flag) rather than switch code in it (`FEAT`).
+pub const F_SOURCE: u32 = F_UNITS;
 /// Software traversal's units (units.rs; shaders/trace_units.wgsl): the second level's walk, spliced into the
 /// software traversal after the still scene's (F_SOURCE). Never with hardware traversal.
 pub const F_UNITS: u32 = 1 << 26;
@@ -3326,7 +3305,7 @@ mod tests {
         for hwrt in [false, true] {
             println!("source kernel hwrt={hwrt} {}", sha(&kernel_wgsl(&template, &KernelVariant::new(hwrt, KernelSwitches::default(), 0))));
             for &k in &switches {
-                for f in [0, F_VCOLOR, F_GRID, F_TINT, F_UNLIT, F_UNITS, F_BACKGROUND, F_SOURCE] {
+                for f in [0, F_UNITS] {
                     naga_valid(&kernel_wgsl(&template, &KernelVariant::new(hwrt, k, if hwrt { f & !F_UNITS } else { f })));
                 }
                 let all_features = KernelVariant::new(hwrt, k, if hwrt { F_SOURCE & !F_UNITS } else { F_SOURCE });
@@ -3517,23 +3496,25 @@ mod tests {
         assert_eq!(words[..2], [11, 22]);
     }
 
-    /// Each feature that changes the kernel's declarations (`KernelVariant::flags`) changes what it says, and nothing of it
-    /// is in a kernel without it.
+    /// A scene's features other than units are `FEAT` bits, not source: the kernel's text is the same for each, and
+    /// what they switch is fixed when a pipeline sets `FEAT` (naga's override processing; `OBJECT_STRIDE` from F_TINT).
     #[test]
-    fn the_source_features_change_what_they_say() {
+    fn scene_features_are_feat_bits() {
         let t = kernel_template();
         let v = |f: u32| kernel_wgsl(&t, &KernelVariant::new(false, KernelSwitches::default(), f));
         let base = v(0);
-        let tint = v(F_TINT);
-        assert!(tint.contains("const OBJECT_STRIDE: u32 = 4u;") && !tint.contains("const OBJECT_STRIDE: u32 = 3u;"));
-        assert_eq!(tint.matches("*= obj_tint(").count(), 3);
-        assert!(base.contains("const OBJECT_STRIDE: u32 = 3u;") && !base.contains("obj_tint"));
-        assert!(v(F_UNLIT).contains("MAT_UNLIT") && !base.contains("MAT_UNLIT"));
-        assert!(v(F_BACKGROUND).contains("P.background.rgb") && !base.contains("background"));
-        let vc = v(F_VCOLOR);
-        assert!(vc.contains("fn vcolor(") && vc.matches("*= vcolor(").count() == 2 && !base.contains("vcolor"));
-        let gr = v(F_GRID);
-        assert!(gr.contains("var grid_tex: texture_3d<f32>") && gr.contains("fn vgrid(") && gr.contains("i.grid = ") && !base.contains("grid_tex") && !base.contains("vgrid"));
+        for f in [F_TINT, F_UNLIT, F_BACKGROUND, F_VCOLOR, F_GRID] {
+            assert_eq!(v(f), base, "{f:#x}");
+        }
+        assert_ne!(v(F_UNITS), base);
+        let m = naga::front::wgsl::parse_str(&base).unwrap();
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap();
+        for (feat, stride) in [(0, 3.0), (F_TINT, 4.0)] {
+            let c = naga::back::PipelineConstants::from([("LIVE".to_string(), 0.0), ("FEAT".to_string(), feat as f64)]);
+            let (m, _) = naga::back::pipeline_constants::process_overrides(&m, &info, None, &c).unwrap();
+            let (_, k) = m.constants.iter().find(|(_, k)| k.name.as_deref() == Some("OBJECT_STRIDE")).expect("OBJECT_STRIDE");
+            assert_eq!(m.global_expressions[k.init], naga::Expression::Literal(naga::Literal::U32(stride as u32)));
+        }
     }
 
     /// Structural features other than F_INST (opaque particles, media) do not make a scene count as instanced: a group
