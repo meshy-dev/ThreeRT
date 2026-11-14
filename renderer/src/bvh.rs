@@ -88,9 +88,13 @@ pub fn build_tris(tris: &[[V; 3]], max_depth: usize) -> Bvh {
     let mut boxes = Vec::with_capacity(n);
     let mut centroids = Vec::with_capacity(n);
     for t in tris {
+        // (Whether a triangle is finite is read from its vertices, not from its box: a min or max with a NaN gives the
+        // NaN on one CPU and the other number on another (NEON / SSE), so the box can hide it.)
         let mut b = Aabb::EMPTY;
-        for p in t {
-            b.grow(*p);
+        if t.iter().all(|p| p.is_finite()) {
+            for p in t {
+                b.grow(*p);
+            }
         }
         boxes.push(b);
         centroids.push((t[0] + t[1] + t[2]) / 3.0);
@@ -108,7 +112,7 @@ pub fn build_tris(tris: &[[V; 3]], max_depth: usize) -> Bvh {
 /// box that is not there): software traversal leaves objects without boxes out of what the kernel is given (lib.rs
 /// `prepare`), and boxes that are not finite are refused where they are given (world.rs `set_proc_geometry`).
 pub fn build_boxes(b: &[f32]) -> Bvh {
-    let boxes: Vec<Aabb> = b.chunks_exact(6).map(|c| Aabb { min: V::new(c[0], c[1], c[2]), max: V::new(c[3], c[4], c[5]) }).collect();
+    let boxes: Vec<Aabb> = b.chunks_exact(6).map(|c| if c.iter().all(|v| v.is_finite()) { Aabb { min: V::new(c[0], c[1], c[2]), max: V::new(c[3], c[4], c[5]) } } else { Aabb::EMPTY }).collect();
     let centroids = boxes.iter().map(|a| (a.min + a.max) * 0.5).collect();
     build_from(boxes, centroids, STACK)
 }
@@ -124,6 +128,7 @@ impl Aabb {
     }
 }
 
+/// Over `boxes`, those not finite (`Aabb::EMPTY` for an item the caller found not finite) in no leaf.
 fn build_from(boxes: Vec<Aabb>, centroids: Vec<V>, max_depth: usize) -> Bvh {
     // Items with a box that is not finite go last, in no leaf.
     let mut order: Vec<u32> = (0..boxes.len() as u32).filter(|&i| boxes[i as usize].finite()).collect();
