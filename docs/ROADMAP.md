@@ -2401,6 +2401,17 @@ access (it fails on a wrong entry: tried). The kernels' code is the same: render
 changed in four layouts, bench-window's shots as main's, the trace equal (Bistro 8.65 / 8.64 ms, lamp-rooms 3.71 /
 3.72), `tools/web-hello.ts` in Chrome passes.
 
+**The live renderer's shortcuts, named (2026-11-15, after it).** An inventory of where a live path gathers other
+light than an offline one found 16 places: the live architecture (the radiance cache, the clamps, the bounce limit,
+media marched and composited, depth of field as post), and seven shortcuts taken for speed over the months, each a
+`LIVE` check somewhere in the kernel: glass and media on shadow rays, cutouts on later rays and on emitters' shadow
+rays, the hardware shadow query, far emitters, white noise. The seven are bits of one pipeline constant now
+(`APPROX`; docs/RUNTIME.md "How live differs from offline", with what each was measured at), live taking all and
+offline none as before, and a live view can run without them (`THREERT_APPROX=0`): Bistro held still then reads ΔE
+1.67 for 1.82. No picture changes (render-identity 0 of 194 in four layouts, bench-window's shots as main's) and
+the trace is equal (Bistro 8.52 / 8.52 ms). Next: a test for each that holds the live picture without it to the offline one,
+their bias and cost measured again, and the defaults decided from that.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
