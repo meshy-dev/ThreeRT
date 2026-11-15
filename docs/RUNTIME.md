@@ -1355,12 +1355,12 @@ view, the way to hold a live picture to the offline one).
 |---|---|---|---|
 | 1 `A_GLASS_SHADOWS` | shadow rays to the analytic lights and the sky pass glass in full, untinted | light under tinted glass 4.3 x (`shadow/glass-tint`) | a glass scene +34 % (khronos-transmission 5.20 -> 6.97 ms) |
 | 2 `A_MEDIA_SHADOWS` | only homogeneous media dim shadow rays: smoke and fire cast no shadow | light behind optical depth 1: e x (`shadow/medium`) | the Bistro slice +0.84 ms (9 %), the fire scene +0.10 |
-| 4 `A_CUTOUT_PATHS` | cutouts are opaque to rays past a camera hit's own, off mirror paths | a camera hit's own light is whole (`sky/cutout-clear-live`: its samples take the share those rays cannot bring, `light_mis`); what a cutout lights sends nothing on (`sky/cutout-bounce`: black) | Bistro +1.48 ms of 9.06 |
-| 8 `A_CUTOUT_EMITTERS` | cutouts are opaque to emitters' shadow rays | an emitter behind a clear card: black (`shadow/cutout-emitter`) | Bistro +0.62 ms |
+| 4 `A_CUTOUT_PATHS` | cutouts are opaque to rays past a camera hit's own, off mirror paths | a camera hit's own light is whole (`sky/cutout-clear-live`: its samples take the share those rays cannot bring, `light_mis`); what a cutout lights sends nothing on (`sky/cutout-bounce`: black) | Bistro +1.63 ms of 8.54 |
+| 8 `A_CUTOUT_EMITTERS` | cutouts are opaque to emitters' shadow rays | an emitter behind a clear card: black (`shadow/cutout-emitter`) | Bistro +1.35 ms |
 | 16 `A_FAR_EMITTERS` | the light tree proposes no emitter beyond 120 m; without a tree, the emitter cull (60 m, 120 m in view) | panels 150 m up: 3 % of their light (`light/emitter-far`); Kabukichō's and Tokyo's shots unchanged | Tokyo from the air 4.7 -> 9.2 ms; the 3 x 3 district +0.15 |
 
-Measured 2026-11-15 with the loop guard on. Bistro held still, ΔE against the offline render: 1.82 as shipped, 1.66
-without the two cutout bits, which cost Kabukichō and Zero Day time instead (0.75 and 0.80 ms less without them).
+Measured 2026-11-15 and 16 with the loop guard on. Bistro held still, ΔE against the offline render: 1.82 as
+shipped, 1.66 without the two cutout bits (+3.5 ms; Zero Day, with few cutouts, +0.3).
 Two more were removed that day: a single-query shadow ray past cutouts (it saved nothing: Bistro 10.13 ms with it,
 10.09 without, Tokyo +0.05) and the switch for the sampler below.
 

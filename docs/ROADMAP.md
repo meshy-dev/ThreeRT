@@ -2483,6 +2483,16 @@ sky's light sample became a function). Next for the cache: its training as a pas
 (training that does not thin out with the resolution, deeper paths, a smaller kernel), and with it the table's
 size; a pass for the few pixels that go on, which is what the segment test waits for.
 
+**One ray query in the hardware trace (2026-11-16, after it).** The two cutout shortcuts made Zero Day's and
+Kabukichō's trace slower, not faster (0.4 to 0.8 ms), and nothing explained it. The cause: `trace` is inlined at
+each of its calls, and it held three ray queries, one for rays that take cutouts as opaque (the shortcuts'), one
+for a shadow ray's first hit, one in the loop of ordered steps; each one written costs every ray, taken or not.
+They are one query in one loop now (a shadow ray's first step takes any hit; a scene without cutouts keeps its
+plain query), with the same hits: render-identity 0 changed of 229, bench-window's shots as main's. The trace:
+Zero Day 9.41 -> 8.41 ms (-10.6 %), Bistro 8.57 -> 8.05 (-6.1 %) and 4.58 -> 4.36 along its camera path, the Bistro
+slice 9.00 -> 8.29, a glass scene 4.97 -> 4.60, Kabukichō 16.23 -> 14.61 guarded (-10 %); scenes without cutouts
+(lamp-rooms, the fire scene, Tokyo) as they were. The shortcuts now save Zero Day 0.3 ms where they cost it 0.4.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
