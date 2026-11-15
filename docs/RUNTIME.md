@@ -1044,8 +1044,9 @@ to it.
   (`a_top_tree_is_kept_while_units_only_move`); the random edits above run through the same rule;
 - what a ray reads, counted (`units_cost.rs`, measurements, not tests: `units_cost` over a bundle's scene with units
   and flattened; `units_pile`, pieces of debris thrown onto a scene);
-- the sources handed to wgpu for every scene without units: the hashes main has
-  (`the_default_sources_are_untouched`); the guarded, merged kernel with units is valid WGSL in 8 storage buffers;
+- the sources handed to wgpu for every scene without units: the hashes main had then (a test of that step, since
+  removed; `every_kernel_variant_is_valid` prints the default variants' hashes); the guarded, merged kernel with
+  units is valid WGSL in 8 storage buffers;
 - an offline render of a scene with instances: no unit, no `F_UNITS`, and the triangle and node bytes the flattened
   scene has, unless `THREERT_UNITS=1` (`an_offline_render_has_no_units_unless_told`);
 - the guard's default: a kernel with units has it at 65,536 with nothing set and none at `THREERT_LOOP_GUARD=0`, a
@@ -1234,8 +1235,8 @@ units under software traversal; hello world natively and in Chrome (every check,
 
 ## The kernel's source
 
-The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `trace_units.wgsl`, `trace_hw.wgsl` and
-`translucent.wgsl` (gpu.rs `KERNEL_FILES`), every device's and scene's variant in it under WESL's conditional
+The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `records.wgsl`, `sample.wgsl`,
+`trace_units.wgsl`, `trace_hw.wgsl` and `translucent.wgsl` (gpu.rs `KERNEL_FILES`), every device's and scene's variant in it under WESL's conditional
 translation (`@if(flag)` on a declaration or a statement, `@if(flag) { .. } @else { .. }` on a block of
 declarations). wesl-rs (WESL's compiler in Rust, natively and in a browser alike) makes a kernel's WGSL from a
 variant (gpu.rs `KernelVariant`, `kernel_wgsl`): the traversal (`hwrt`), a device's switches (`strict`,
@@ -1250,6 +1251,12 @@ too is an override, from F_TINT).
   `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
   nothing else of the kernel knows which it is in.
 - The loop guard's count goes into every loop by a pass over the variant's syntax tree (gpu.rs `guard_loops`).
+- What more than one shader reads or writes is declared once, in `records.wgsl`: a triangle's attributes
+  (`TriAttr`), a sample of the trace (`Pixel`), the light tiles' constants. The file is part of the kernel, of the
+  particle passes and of the live passes (build.rs reads it with live.wgsl). The particle passes take the object
+  table's stride as a pipeline constant, as the kernel does (until 2026-11-15 gpu.rs rewrote a line of their text).
+- The kernel's bind group layouts are written in one place (gpu.rs `kernel_layout_entries`), and a test holds them
+  to what every variant's source declares, kind and access (`the_kernels_layouts_are_its_declarations`).
 - Still as text: a scene's material, volume and geometry functions, between their markers in pathtrace.wgsl.
 - Until 2026-11-14 the variants were patches of the source at anchors, whole lines of code found and replaced (gpu.rs
   `kernel_base`, `kernel_switches`, `kernel_source`). For every combination of the flags, 2,304, the Metal source naga
@@ -1378,8 +1385,7 @@ On Qualcomm's Adreno 740 (Snapdragon 8 Gen 2, Android 13; an AYN Thor handheld) 
 draw correctly: a model's textures came out as another table's numbers, emissive objects lit nothing, Light Room was
 black. What follows is what fixed it there, on this engine's current source, and it has run on the device ("Checked
 on the device" below). All of it is off on every other platform unless asked for: with nothing set the device, its
-layout and its kernels' source are what they were (`gpu.rs` `the_options_default_to_the_device_as_written`,
-`the_default_sources_are_untouched`).
+layout and its kernels' source are what they were (`gpu.rs` `the_options_default_to_the_device_as_written`).
 
 **The figures in the two tables are the original author's, measured on that handheld with the engine at `b646a20`,**
 on scenes that are not all at hand. What was measured again on this source, on the same handheld, is under "Checked

@@ -1,4 +1,5 @@
-//! The live passes' bindings as `shaders/live.wgsl` declares them, read with naga (the compiler wgpu uses) when the
+//! The live passes' bindings as `shaders/live.wgsl` declares them (after `shaders/records.wgsl`, what it shares with
+//! the kernel: live/targets.rs `live_source`), read with naga (the compiler wgpu uses) when the
 //! crate is built, into `$OUT_DIR/live_layout.rs` (`src/live/layout.rs` includes it): each binding's name, number,
 //! kind and element stride, and the bindings each entry point uses. The shader is the one place they are written;
 //! what it cannot say (a buffer's size, a pass's grid) is `src/live/layout.rs`'s table. At build time, not at run
@@ -8,10 +9,12 @@ use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, 
 use std::fmt::Write;
 
 fn main() {
-    let path = "shaders/live.wgsl";
-    println!("cargo:rerun-if-changed={path}");
+    let files = ["shaders/records.wgsl", "shaders/live.wgsl"];
+    for path in files {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-changed=build.rs");
-    let src = std::fs::read_to_string(path).expect("shaders/live.wgsl");
+    let src: String = files.iter().map(|path| std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"))).collect();
     let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
     let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
         .validate(&module)

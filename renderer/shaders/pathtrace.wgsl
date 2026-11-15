@@ -5,7 +5,7 @@
 // wetness / puddles / ripples / grime, procedural facade windows, emissive animation, RIS many-light sampling, height
 // fog with volumetric single scattering. Each is compiled out when the scene does not use it (FEAT).
 //
-// The kernel is this file and sample.wgsl, trace_units.wgsl, trace_hw.wgsl and translucent.wgsl after it (gpu.rs `KERNEL_FILES`),
+// The kernel is this file and records.wgsl, sample.wgsl, trace_units.wgsl, trace_hw.wgsl and translucent.wgsl after it (gpu.rs `KERNEL_FILES`),
 // compiled for a device and a scene by WESL's conditional translation (`@if`, gpu.rs `kernel_wgsl`): a declaration
 // or a statement under `@if(x)` is there only where x holds. The flags:
 //   hwrt                  hardware traversal (ray queries) in the software BVH walk's place, and the translucency pass
@@ -115,7 +115,7 @@ struct Params {
     live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
 };
 
-struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
+// (`TriAttr`, a triangle's attributes, and `Pixel`, a sample in `accum`: records.wgsl.)
 struct Node { bmin: vec3<f32>, left_or_first: u32, bmax: vec3<f32>, count: u32 };
 // See scene::GpuMaterial for the field layout.
 struct Material {
@@ -124,11 +124,6 @@ struct Material {
 };
 // See scene::GpuLight (x = volumetric scattering scale, specular scale, rect barn-door cosine, -).
 struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>, x: vec4<f32> };
-// Live: color = diffuse lighting at the first hit (+ first-hit distance), emit = what the camera ray sees directly
-// (emission, sky; kept out of the denoiser) + first-hit roughness, spec = specular lighting at the first hit +
-// distance to what the first specular bounce hit (reprojection of reflections), normal.w = the media before the first
-// hit (`media_composite`: 0.5 = none). Offline: color / albedo / normal sums.
-struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec4<f32>, spec: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> tri_verts: array<vec4<f32>>;
@@ -1728,12 +1723,8 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // frame's camera), spread over it without repeats (all of it when it is short). The candidates drawn uniformly, as
 // before, then stand for the lights the list lacks (`lt_in_list`). A list is a guide: whatever it holds the estimate
 // is the same sum, so one gone stale (the table reordered, a surface newly in view) costs noise, not light.
-// Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS).
-const LT_TILE: u32 = 8u;
-const LT_LIST: u32 = 64u;
-// (Indices and counts are stored as float values, not as their bits: a small integer's bits are a denormal float,
-// which a driver may flush to zero. So a light-table index stays below LT_NONE, 2^24.)
-const LT_NONE: u32 = 16777216u;
+// Compiled in for scenes whose shadow-casting local lights are resampled (F_LISTS). (LT_TILE, LT_LIST, LT_NONE:
+// records.wgsl.)
 var<private> lt_list: u32;
 var<private> lt_list_n: u32;
 var<private> lt_fb: u32;

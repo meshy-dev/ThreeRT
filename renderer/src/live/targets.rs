@@ -47,10 +47,10 @@ pub(super) fn tonemap_lut(p: &crate::desc::PostPreset) -> Vec<u16> {
     out
 }
 
-/// The live passes' source: live.wgsl, natively and in a browser alike (each pass binds at most a browser's storage
-/// buffers: `layout`).
+/// The live passes' source: records.wgsl (what they share with the kernel) and live.wgsl, natively and in a browser
+/// alike (each pass binds at most a browser's storage buffers: `layout`). build.rs reads the same two.
 pub(crate) fn live_source() -> &'static str {
-    include_str!("../../shaders/live.wgsl")
+    concat!(include_str!("../../shaders/records.wgsl"), include_str!("../../shaders/live.wgsl"))
 }
 
 pub(super) struct Passes {

@@ -193,6 +193,84 @@ pub struct PendingProc {
 /// The acceleration structure's binding in the scene's group (trace_hw.wgsl `acc`): the last, after every buffer.
 const ACC_BINDING: u32 = 19;
 
+/// What the kernel's bind group layouts follow: the device's traversal and binding layout, and whether group 1 has
+/// the loop guard's count (`guard_room`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LayoutShape {
+    pub hwrt: bool,
+    pub merged: bool,
+    pub uniform_tables: bool,
+    pub guard: bool,
+}
+
+fn layout_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None }
+}
+fn storage_buffer(read_only: bool) -> wgpu::BindingType {
+    wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None }
+}
+const UNIFORM_BUFFER: wgpu::BindingType = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
+fn float_texture(view_dimension: wgpu::TextureViewDimension) -> wgpu::BindingType {
+    wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension, multisampled: false }
+}
+const ACCELERATION_STRUCTURE: wgpu::BindingType = wgpu::BindingType::AccelerationStructure { vertex_return: false };
+
+/// The entries of the kernel's bind group layouts, the one place they are written: group 0 (the scene), group 1
+/// (what the kernel writes), group 2 (the translucency pass's; hardware traversal). A test holds them to what every
+/// variant of the kernel's source declares (`the_kernels_layouts_are_its_declarations`).
+pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupLayoutEntry>; 3] {
+    use crate::merged::{GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS, UNIFORM_TABLES};
+    let LayoutShape { hwrt, merged, uniform_tables, guard } = shape;
+    let (read, write) = (storage_buffer(true), storage_buffer(false));
+    // Group 0: the parameters; triangles and their attributes; the tables' heap, the words' heap; the dynamic
+    // triangles' previous vertices; the texture pages and their sampler, the environment, the density grids' atlas
+    // (a 1-cell texture in scenes without grids, whose kernel does not read it); the accumulation buffer.
+    let mut scene = vec![
+        layout_entry(0, UNIFORM_BUFFER),
+        layout_entry(1, read),
+        layout_entry(2, read),
+        layout_entry(4, read),
+        layout_entry(5, read),
+        layout_entry(6, read),
+        layout_entry(7, float_texture(wgpu::TextureViewDimension::D2Array)),
+        layout_entry(8, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+        layout_entry(9, float_texture(wgpu::TextureViewDimension::D2)),
+        layout_entry(10, float_texture(wgpu::TextureViewDimension::D3)),
+        layout_entry(11, write),
+    ];
+    // Software traversal's trees.
+    if !hwrt {
+        scene.push(layout_entry(3, read));
+    }
+    // The tables the kernel reads at every hit or light, bound again as typed views of their sections (the merged
+    // layout has no binding for them), four of them uniform copies where a driver needs it.
+    if !merged {
+        let copied = |b: u32| uniform_tables && UNIFORM_TABLES.iter().any(|t| t.binding == b);
+        scene.extend(TABLE_VIEWS.iter().map(|&(_, b)| layout_entry(b, if copied(b) { UNIFORM_BUFFER } else { read })));
+    }
+    if hwrt {
+        scene.push(layout_entry(ACC_BINDING, ACCELERATION_STRUCTURE));
+    }
+    // Group 1: the raster pass's visibility; then, merged, the one buffer (`heap::Live`, the loop guard's count in
+    // it); as written, the radiance cache's three, the light tiles' lists, the specular rays, the motion vectors, the
+    // direct light, and the loop guard's count where a kernel of this device may have the guard (one without it does
+    // not name the binding).
+    let mut live = vec![layout_entry(0, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false })];
+    if merged {
+        live.push(layout_entry(LIVE_BINDING, write));
+    } else {
+        live.extend([1, 2, 3, 5, 6, 7].map(|b| layout_entry(b, write)));
+        live.push(layout_entry(LISTS_BINDING, read));
+        if guard {
+            live.push(layout_entry(GUARD_BINDING, write));
+        }
+    }
+    // Group 2: the translucent particles' acceleration structure, the pass's parameters, its image, the volume
+    // training points and their count, the image at reduced scale.
+    let translucent = if hwrt { vec![layout_entry(0, ACCELERATION_STRUCTURE), layout_entry(1, UNIFORM_BUFFER), layout_entry(2, write), layout_entry(3, write), layout_entry(4, write), layout_entry(5, write)] } else { vec![] };
+    [scene, live, translucent]
+}
+
 /// A note for each uniform table that a scene has more entries of (`used`, merged.rs `UNIFORM_TABLES`' order) than
 /// its array holds: the kernel reads the last entry for the rest.
 pub(crate) fn uniform_overflow(used: [u64; 4]) -> Vec<String> {
@@ -555,10 +633,7 @@ pub struct GpuParticlesGpu {
 
 /// gpu_particles.wgsl with the scene's particle programs (`fn pe_` / `pu_<name>`) and their dispatch.
 fn gpu_particle_source(scene: &Scene) -> String {
-    let stride = "const OBJECT_STRIDE: u32 = 3u;";
     let base = include_str!("../shaders/gpu_particles.wgsl");
-    assert_eq!(base.matches(stride).count(), 1, "gpu_particles.wgsl: {stride}");
-    let base = if scene.tinted { base.replace(stride, "const OBJECT_STRIDE: u32 = 4u;") } else { base.to_string() };
     let mut f = String::new();
     let mut seen = std::collections::HashSet::new();
     for (_, _, _, helpers) in &scene.particle_programs {
@@ -585,16 +660,12 @@ fn gpu_particle_source(scene: &Scene) -> String {
     f.push_str("        default { return s; }\n    }\n}\n");
     let (head, rest) = base.split_once("// @particle-programs-begin").unwrap();
     let (_, tail) = rest.split_once("// @particle-programs-end").unwrap();
-    format!("{head}{f}{tail}")
+    format!("{RECORDS}{head}{f}{tail}")
 }
 
-/// particles.wgsl with the scene's particle functions (`fn pf_<name>`) and their dispatch (object entries of 4 vec4s
-/// with instance colours: `scene::object_stride`).
+/// particles.wgsl with the scene's particle functions (`fn pf_<name>`) and their dispatch.
 fn particle_source(scene: &Scene) -> String {
-    let stride = "const OBJECT_STRIDE: u32 = 3u;";
     let base = include_str!("../shaders/particles.wgsl");
-    assert_eq!(base.matches(stride).count(), 1, "particles.wgsl: {stride}");
-    let base = if scene.tinted { base.replace(stride, "const OBJECT_STRIDE: u32 = 4u;") } else { base.to_string() };
     let mut functions = String::new();
     let mut seen = std::collections::HashSet::new();
     for (_, _, helpers) in &scene.particle_fns {
@@ -614,7 +685,7 @@ fn particle_source(scene: &Scene) -> String {
     functions.push_str("        default { return POut(i.pivot, vec3<f32>(0.0), vec3<f32>(0.0), false, vec4<f32>(0.0)); }\n    }\n}\n");
     let (head, rest) = base.split_once("// @particle-functions-begin").unwrap();
     let (_, tail) = rest.split_once("// @particle-functions-end").unwrap();
-    format!("{head}{functions}{tail}")
+    format!("{RECORDS}{head}{functions}{tail}")
 }
 
 /// Hardware acceleration structures: one BLAS per non-empty traversal group, one TLAS over them.
@@ -749,8 +820,14 @@ pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
 }
 
 /// The kernel's files, one module in this order (pathtrace.wgsl's head says what each holds and names the `@if` flags).
-const KERNEL_FILES: [&str; 5] = [
+/// What more than one shader reads or writes, declared once: a file of the kernel, of the particle passes and of
+/// the live passes (live/targets.rs `live_source`).
+const RECORDS: &str = include_str!("../shaders/records.wgsl");
+
+/// (pathtrace.wgsl first: a module's imports and directives come before its declarations.)
+const KERNEL_FILES: [&str; 6] = [
     include_str!("../shaders/pathtrace.wgsl"),
+    RECORDS,
     include_str!("../shaders/sample.wgsl"),
     include_str!("../shaders/trace_units.wgsl"),
     include_str!("../shaders/trace_hw.wgsl"),
@@ -1607,78 +1684,8 @@ impl Gpu {
             let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         };
-        let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
-            count: None,
-        };
-        let uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-            count: None,
-        };
-        let texture = |binding: u32, view_dimension: wgpu::TextureViewDimension| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension, multisampled: false },
-            count: None,
-        };
-        // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, software
-        // traversal's trees (3); the tables' heap; the words' heap; the dynamic triangles' previous vertices; the
-        // texture pages and their sampler, the environment, the density grids' atlas (a 1-cell texture in scenes
-        // without grids, whose kernel does not read it); the accumulation buffer; then what only some layouts have.
-        let mut entries = vec![
-            uniform(0),
-            storage(1, true),
-            storage(2, true),
-            storage(4, true),
-            storage(5, true),
-            storage(6, true),
-            texture(7, wgpu::TextureViewDimension::D2Array),
-            wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
-            texture(9, wgpu::TextureViewDimension::D2),
-            texture(10, wgpu::TextureViewDimension::D3),
-            storage(11, false),
-        ];
-        if !hwrt {
-            entries.push(storage(3, true));
-        }
-        // The tables the kernel reads at every hit or light, bound again as typed views of their sections (merged.rs
-        // `TABLE_VIEWS`; the merged layout has no binding for them), four of them uniform copies where a driver
-        // needs it (`UNIFORM_TABLES`).
-        if !merged {
-            let copied = |b: u32| uniform_tables && crate::merged::UNIFORM_TABLES.iter().any(|t| t.binding == b);
-            entries.extend(crate::merged::TABLE_VIEWS.iter().map(|&(_, b)| if copied(b) { uniform(b) } else { storage(b, true) }));
-        }
-        if hwrt {
-            entries.push(wgpu::BindGroupLayoutEntry { binding: ACC_BINDING, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None });
-        }
+        let [entries, vis_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, guard: guard_room(hwrt) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
-        let mut vis_entries = vec![
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                count: None,
-            },
-            storage(1, false),
-            storage(2, false),
-            storage(3, false),
-            storage(crate::merged::LISTS_BINDING, true),
-            storage(5, false),
-            storage(6, false),
-            storage(7, false),
-        ];
-        // The merged layout: group 1's buffers are one (`heap::Live`), the loop guard's count in it.
-        // As written, a kernel with the guard has the count in a buffer of its own: the binding is there whenever a
-        // kernel of this device may have the guard (`guard_room`; a kernel without it does not name the binding).
-        if merged {
-            vis_entries.truncate(2);
-        } else if guard_room(hwrt) {
-            vis_entries.push(storage(crate::merged::GUARD_BINDING, false));
-        }
         let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
         let one = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("no vis"),
@@ -1695,31 +1702,20 @@ impl Gpu {
         let grid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("grid sim"),
             entries: &[
-                uniform(0),
+                layout_entry(0, UNIFORM_BUFFER),
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: GRID_FORMAT, view_dimension: wgpu::TextureViewDimension::D3 }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: GRID_FORMAT, view_dimension: wgpu::TextureViewDimension::D3 }, count: None },
-                storage(6, true),
+                layout_entry(6, storage_buffer(true)),
             ],
         });
         let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
-            let st = |b: u32| wgpu::BindGroupLayoutEntry { binding: b, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None };
-            let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("translucent"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None },
-                    wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                    st(2),
-                    st(3),
-                    st(4),
-                    st(5),
-                ],
-            });
+            let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucent"), entries: &tl_entries });
             let tpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("translucent"), bind_group_layouts: &[Some(&layout), Some(&vis_layout), Some(&l)], immediate_size: 0 });
             (Some(l), Some(tpl))
         } else {
@@ -2294,11 +2290,13 @@ impl Gpu {
             }
             _ => None,
         };
+        // (The particle passes' pipeline constant: vec4s an object entry, 4 with instance colours.)
+        let object_stride = [("OBJECT_STRIDE", scene.object_stride() as f64)];
         // Particle systems (hardware RT: the pass writes the dynamic BLASes' input).
         let particles = match &accel {
             Some(a) if !scene.particles.is_empty() => {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("particles"), source: wgpu::ShaderSource::Wgsl(particle_source(scene).into()) });
-                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("particles"), layout: None, module: &module, entry_point: Some("particles"), compilation_options: Default::default(), cache: self.cache() });
+                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("particles"), layout: None, module: &module, entry_point: Some("particles"), compilation_options: wgpu::PipelineCompilationOptions { constants: &object_stride, ..Default::default() }, cache: self.cache() });
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
                 let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 // The stamps depend on what is rebuilt last: the translucent TLAS when there is one.
@@ -2337,7 +2335,7 @@ impl Gpu {
         let gpu_particles = match &accel {
             Some(a) if !scene.gpu_particles.is_empty() => {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("gpu particles"), source: wgpu::ShaderSource::Wgsl(gpu_particle_source(scene).into()) });
-                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("gpu particles"), layout: None, module: &module, entry_point: Some("gpu_particles"), compilation_options: Default::default(), cache: self.cache() });
+                let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("gpu particles"), layout: None, module: &module, entry_point: Some("gpu_particles"), compilation_options: wgpu::PipelineCompilationOptions { constants: &object_stride, ..Default::default() }, cache: self.cache() });
                 let systems: Vec<GpuParticleSystemGpu> = scene
                     .gpu_particles
                     .iter()
@@ -3356,6 +3354,70 @@ mod tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
     }
 
+    /// The kernel's bind group layouts are what its source declares, in every layout and traversal: a variant's
+    /// bindings are the layout's, each of its kind (a storage buffer's access too), but for the loop guard's count,
+    /// which a layout as written has room for and a kernel without the guard does not name.
+    #[test]
+    fn the_kernels_layouts_are_its_declarations() {
+        use naga::{AddressSpace, ImageClass, ImageDimension as Dim, ScalarKind, StorageAccess, TypeInner};
+        use wgpu::TextureViewDimension as View;
+        type Entry = (u32, u32, wgpu::BindingType);
+        let declared = |v: &KernelVariant| -> Vec<Entry> {
+            let src = kernel_wgsl(&kernel_template(), v);
+            let m = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+            let mut out: Vec<Entry> = m
+                .global_variables
+                .iter()
+                .filter_map(|(_, g)| {
+                    let b = g.binding.as_ref()?;
+                    let name = g.name.as_deref().unwrap_or("");
+                    let ty = match (g.space, &m.types[g.ty].inner) {
+                        (AddressSpace::Uniform, _) => UNIFORM_BUFFER,
+                        (AddressSpace::Storage { access }, _) => storage_buffer(!access.contains(StorageAccess::STORE)),
+                        (AddressSpace::Handle, TypeInner::Image { dim: Dim::D2, arrayed: false, class: ImageClass::Sampled { kind: ScalarKind::Uint, multi: false } }) => {
+                            wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: View::D2, multisampled: false }
+                        }
+                        (AddressSpace::Handle, TypeInner::Image { dim, arrayed, class: ImageClass::Sampled { kind: ScalarKind::Float, multi: false } }) => float_texture(match (dim, arrayed) {
+                            (Dim::D2, true) => View::D2Array,
+                            (Dim::D2, false) => View::D2,
+                            (Dim::D3, false) => View::D3,
+                            other => panic!("{name}: a {other:?} texture"),
+                        }),
+                        (AddressSpace::Handle, TypeInner::Sampler { comparison: false }) => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        (AddressSpace::Handle, TypeInner::AccelerationStructure { .. }) => ACCELERATION_STRUCTURE,
+                        (space, _) => panic!("{name}: a {space:?} binding the layouts do not know"),
+                    };
+                    Some((b.group, b.binding, ty))
+                })
+                .collect();
+            out.sort_by_key(|e| (e.0, e.1));
+            out
+        };
+        let mut checked = 0;
+        for (hwrt, merged, uniform_tables) in [(true, false, false), (true, false, true), (false, false, false), (false, false, true), (false, true, false)] {
+            for room in [false, true] {
+                let mut layout: Vec<Entry> = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, guard: room }).iter().enumerate().flat_map(|(g, es)| es.iter().map(move |e| (g as u32, e.binding, e.ty))).collect();
+                layout.sort_by_key(|e| (e.0, e.1));
+                for guard in [None, Some(1 << 16)] {
+                    // (As written, a kernel with the guard needs the room.)
+                    if guard.is_some() && !room && !merged {
+                        continue;
+                    }
+                    for features in if hwrt { vec![0] } else { vec![0, F_UNITS] } {
+                        let mut want = layout.clone();
+                        if guard.is_none() && !merged {
+                            want.retain(|e| (e.0, e.1) != (1, crate::merged::GUARD_BINDING));
+                        }
+                        let v = KernelVariant { merged, uniform_tables, guard, ..KernelVariant::new(hwrt, KernelSwitches::default(), features) };
+                        assert_eq!(declared(&v), want, "{v:?} in a layout {} room for the guard", if room { "with" } else { "without" });
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 3 + 2 * 6 + 8);
+    }
+
     /// The native default has no loop guard, and the live passes are their file. Every variant the kernel's flags
     /// make is valid WGSL (naga, wgpu's front end): each traversal with no switch, each alone and all of them, by no
     /// scene feature, each alone and all of them (units are software traversal's), with the uniform tables, and with
@@ -3368,7 +3430,7 @@ mod tests {
         }
         assert_eq!(loop_guard(), None);
         let sha = |s: &str| Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
-        assert_eq!(crate::live::live_source(), include_str!("../shaders/live.wgsl"));
+        assert_eq!(crate::live::live_source(), [RECORDS, include_str!("../shaders/live.wgsl")].concat());
         let template = kernel_template();
         let all = KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, last_sun: false, light_pick: true };
         let switches = [
@@ -3440,8 +3502,8 @@ mod tests {
     }
 
     /// With nothing set, every platform but Android opens the device as it was before the options existed: no
-    /// uniform tables, no pipeline cache, the kernel's source the files (`the_default_sources_are_untouched` has its
-    /// hashes). Android's defaults are the uniform tables and the switches its GPUs needed; the environment overrides
+    /// uniform tables, no pipeline cache, the kernel's source the files (`every_kernel_variant_is_valid` prints the
+    /// default variants' hashes). Android's defaults are the uniform tables and the switches its GPUs needed; the environment overrides
     /// either way, and the merged layout never has the uniform tables.
     #[test]
     fn the_options_default_to_the_device_as_written() {
@@ -3478,9 +3540,10 @@ mod tests {
     /// compile in a browser until 2026-11-14. (The kernel's files: `every_kernel_variant_is_valid`.)
     #[test]
     fn the_other_shaders_are_wgsl_as_the_specification_writes_it() {
-        for src in [include_str!("../shaders/live.wgsl"), include_str!("../shaders/particles.wgsl"), include_str!("../shaders/gpu_particles.wgsl"), include_str!("../shaders/grid_sim.wgsl")] {
-            wesl_wgsl(src, &[], &[]);
+        for src in [include_str!("../shaders/live.wgsl"), include_str!("../shaders/particles.wgsl"), include_str!("../shaders/gpu_particles.wgsl")] {
+            wesl_wgsl(&[RECORDS, src].concat(), &[], &[]);
         }
+        wesl_wgsl(include_str!("../shaders/grid_sim.wgsl"), &[], &[]);
     }
 
     /// Each switch changes what it says, under both traversals (that every combination is valid WGSL:

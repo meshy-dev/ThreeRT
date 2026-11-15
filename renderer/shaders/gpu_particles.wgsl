@@ -55,8 +55,7 @@ struct PP {
 // friction, -); e: (first spawn, spawned count, frame number, -); p: parameters.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, d: vec4<f32>, e: vec4<u32>, p: array<vec4<f32>, 8> };
 
-// scene.rs GpuTriAttr: normals (w: uv parts), uv parts + material, tangent + bitangent sign, (texel density, object).
-struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
+// (`TriAttr`: records.wgsl.)
 
 @group(0) @binding(0) var<uniform> PPS: PP;
 @group(0) @binding(1) var<storage, read> systems: array<System>;
@@ -73,7 +72,8 @@ struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: 
 @group(0) @binding(9) var<storage, read> spawns: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read> grid: array<u32>;
 
-const OBJECT_STRIDE: u32 = 3u; // scene.rs `object_stride`: gpu.rs writes 4 here in a scene with instance colours
+// vec4s an object in `objects` (scene.rs `object_stride`: 4 in a scene with instance colours), the pipeline's constant.
+override OBJECT_STRIDE: u32 = 3u;
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
