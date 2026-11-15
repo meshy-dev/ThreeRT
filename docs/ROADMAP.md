@@ -2372,6 +2372,25 @@ words, vertex colours) are read as integers.
   still-kabukicho as main's to the digit (the moving ones within 0.3 %); offline renders of five scenes as main's
   (three byte-identical, Bistro and Zero Day within what a build differs from itself).
 
+**The kernel's group 1 without lengths in its source (2026-11-15, after it).** In the merged layout the buffers the
+kernel writes were the arrays of a struct whose lengths were constants of the source, so each view size, and an
+offline render, compiled a kernel of its own (1.4 s in Chrome). Now the radiance cache's atomic words are at fixed
+places (its size is the kernel's own constant) and the vec4 arrays are the sections of one runtime-sized array, found
+by offsets in the parameters (`heap::Live`): one kernel for every view. The light tiles' lists, which rode after the
+direct buffer's pixels, are a buffer of their own; hardware traversal no longer binds software traversal's trees (a
+placeholder there), so the count of bindings is as it was.
+- Trace against main (1440p at 0.375, alternated, ms): hardware traversal equal (Bistro 8.64 / 8.64, lamp-rooms
+  3.71 / 3.71, Zero Day 9.60 / 9.59, Kabukichō 16.11 / 16.10); software traversal Bistro equal, lamp-rooms 4.98 ->
+  5.03; the merged layout Bistro 46.78 -> 47.12 (+0.7 %), lamp-rooms 5.00 -> 5.03.
+- In the merged layout the cache's keys and sums are always there (9 MB), with the cache off and offline too: the
+  price of plain vec4 reads beside them (all of it as atomic words would have made each vec4 four atomic loads).
+- Checks, with the loop guard: the unit tests and test-render (194); bench-window's shots as main's natively and in
+  the merged layout; `tools/web-hello.ts` in Chrome; render-identity against main: 0 of 194 changed natively, under
+  software traversal and with the uniform tables. Merged, it flagged `voxel/joint-moved`: that test has nine
+  outputs over 40 runs, main's own among them differing as much (3e-4, the same pixels), and the new build's output
+  is byte-identical to one main's binary gave; four confirming runs under-read a test whose output holds for a
+  process.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
