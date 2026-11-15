@@ -1465,11 +1465,9 @@ pub const A_GLASS_SHADOWS: u32 = 1;
 pub const A_MEDIA_SHADOWS: u32 = 2;
 pub const A_CUTOUT_PATHS: u32 = 4;
 pub const A_CUTOUT_EMITTERS: u32 = 8;
-pub const A_SHADOW_QUERY: u32 = 16;
-pub const A_FAR_EMITTERS: u32 = 32;
-pub const A_WHITE_NOISE: u32 = 64;
+pub const A_FAR_EMITTERS: u32 = 16;
 /// All of them: what a live view takes unless it asks otherwise (`GpuOptions::approx`).
-pub const A_LIVE: u32 = 127;
+pub const A_LIVE: u32 = 31;
 
 // Kernel features (`override FEAT` in pathtrace.wgsl).
 pub const F_MASKED: u32 = 1;
@@ -3379,10 +3377,7 @@ mod tests {
         }
         let wgsl = include_str!("../shaders/pathtrace.wgsl");
         // The live approximations: one bit each, the shader's the same, `A_LIVE` all of them.
-        let approx = [
-            ("A_GLASS_SHADOWS", A_GLASS_SHADOWS), ("A_MEDIA_SHADOWS", A_MEDIA_SHADOWS), ("A_CUTOUT_PATHS", A_CUTOUT_PATHS), ("A_CUTOUT_EMITTERS", A_CUTOUT_EMITTERS),
-            ("A_SHADOW_QUERY", A_SHADOW_QUERY), ("A_FAR_EMITTERS", A_FAR_EMITTERS), ("A_WHITE_NOISE", A_WHITE_NOISE),
-        ];
+        let approx = [("A_GLASS_SHADOWS", A_GLASS_SHADOWS), ("A_MEDIA_SHADOWS", A_MEDIA_SHADOWS), ("A_CUTOUT_PATHS", A_CUTOUT_PATHS), ("A_CUTOUT_EMITTERS", A_CUTOUT_EMITTERS), ("A_FAR_EMITTERS", A_FAR_EMITTERS)];
         assert_eq!(approx.iter().fold(0, |all, a| { assert!(a.1.is_power_of_two() && all & a.1 == 0, "{} = {}", a.0, a.1); all | a.1 }), A_LIVE);
         let declared: Vec<&str> = wgsl.lines().filter(|l| l.starts_with("const A_")).collect();
         assert_eq!(declared.len(), approx.len());
@@ -3391,7 +3386,7 @@ mod tests {
         }
         // (The render tests' names for them: tests/render/lib.ts `APPROX`.)
         let lib = include_str!("../../tests/render/lib.ts");
-        for (name, bit) in [("glassShadows", A_GLASS_SHADOWS), ("mediaShadows", A_MEDIA_SHADOWS), ("cutoutPaths", A_CUTOUT_PATHS), ("cutoutEmitters", A_CUTOUT_EMITTERS), ("shadowQuery", A_SHADOW_QUERY), ("farEmitters", A_FAR_EMITTERS), ("whiteNoise", A_WHITE_NOISE)] {
+        for (name, bit) in [("glassShadows", A_GLASS_SHADOWS), ("mediaShadows", A_MEDIA_SHADOWS), ("cutoutPaths", A_CUTOUT_PATHS), ("cutoutEmitters", A_CUTOUT_EMITTERS), ("farEmitters", A_FAR_EMITTERS)] {
             assert!(lib.contains(&format!("{name}: {bit},")), "{name}: tests/render/lib.ts and gpu.rs differ");
         }
         assert!(lib.contains(&format!("all: {A_LIVE},")));
@@ -3612,7 +3607,7 @@ mod tests {
             let plain = v(hwrt, KernelSwitches::default());
             let strict = v(hwrt, KernelSwitches { strict: true, ..Default::default() });
             let queries = strict.matches("rayQueryInitialize(").count();
-            assert_eq!(queries, if hwrt { 3 } else { 0 });
+            assert_eq!(queries, if hwrt { 2 } else { 0 });
             assert_eq!(strict.matches("ray_bad(o, d, tmax").count(), queries, "every ray query is guarded");
             assert_eq!(strict.matches("fn ray_bad(").count(), hwrt as usize);
             assert!(!strict.contains("env_cdf_at(y - 1u)") && !strict.contains("env_cdf_at(base + x - 1u)") && plain.contains("env_cdf_at(y - 1u)"));

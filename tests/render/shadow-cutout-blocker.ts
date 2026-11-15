@@ -8,7 +8,7 @@ import { camera, lambert, plane, result, sceneWithSky, type TestMeta } from "./l
 export const test: TestMeta = {
   id: "shadow/cutout-blocker", features: ["point-light", "alpha-test", "shadows"], reference: "analytic", temporal: false,
   metric: { kind: "ratio", a: [0.48, 0.48, 0.52, 0.52], b: [0.86, 0.48, 0.9, 0.52], expected: 0, tolerance: 0.01 },
-  note: "hardware traversal's shadow rays take two forms past a cutout (trace_hw.wgsl): both must stop at the slab",
+  note: "a shadow ray that a cutout lets through goes on in order (trace_hw.wgsl) and stops at the slab",
 };
 
 export default function () {

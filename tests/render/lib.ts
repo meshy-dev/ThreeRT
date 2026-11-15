@@ -41,10 +41,8 @@ export const APPROX = {
   mediaShadows: 2,
   cutoutPaths: 4,
   cutoutEmitters: 8,
-  shadowQuery: 16,
-  farEmitters: 32,
-  whiteNoise: 64,
-  all: 127,
+  farEmitters: 16,
+  all: 31,
 };
 
 export const SIZE = { width: 160, height: 90 };

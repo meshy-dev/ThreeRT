@@ -64,9 +64,7 @@ const A_GLASS_SHADOWS: u32 = 1u;   // shadow rays to the analytic lights and the
 const A_MEDIA_SHADOWS: u32 = 2u;   // of the media only the homogeneous ones dim shadow rays (`media_shadows`)
 const A_CUTOUT_PATHS: u32 = 4u;    // cutouts are opaque to rays past a camera hit's own, off mirror paths (`cutouts_opaque`)
 const A_CUTOUT_EMITTERS: u32 = 8u; // cutouts are opaque to emitters' shadow rays (`occluded_emitter`)
-const A_SHADOW_QUERY: u32 = 16u;   // hardware traversal: a shadow ray past a cutout is one query with a candidate loop (trace_hw.wgsl)
-const A_FAR_EMITTERS: u32 = 32u;   // the light tree proposes no emitter beyond LT_FAR (`lt_imp`; without a tree: the emitter cull)
-const A_WHITE_NOISE: u32 = 64u;    // variance only: a hash, not Sobol, past the camera hit's own decisions (sample.wgsl `rng_white`)
+const A_FAR_EMITTERS: u32 = 16u;   // the light tree proposes no emitter beyond LT_FAR (`lt_imp`; without a tree: the emitter cull)
 fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
 override FEAT: u32 = 0xffffffffu;
@@ -346,8 +344,8 @@ fn emitter_pick_u(u: f32) -> vec4<f32> {
 // them (from entry P.ltree.y).
 const LT_LEAF: u32 = 0x80000000u;
 const LT_PATH_BITS: u32 = 26u;
-// A_FAR_EMITTERS: tree nodes wholly farther than this (m) from the shading point are not proposed (never within one
-// Bistro; in the 3 x 3 district its far copies: 2.0 -> 0.5 ms).
+// A_FAR_EMITTERS: tree nodes wholly farther than this (m) from the shading point are not proposed. A city's emitters
+// are mostly that far from any one point: Tokyo's aerial view traces in 4.7 ms with the cut, 9.2 without.
 const LT_FAR: f32 = 120.0;
 
 fn lt_on() -> bool { return P.ltree.w > 0.5; }
@@ -372,7 +370,7 @@ fn lt_imp(nd: vec4<f32>, x: vec3<f32>, n: vec3<f32>) -> f32 {
         }
     }
     // A_FAR_EMITTERS: nodes wholly farther than LT_FAR from x are not proposed (their light comes by BSDF rays,
-    // emit_mis weighs them 1): shadow rays across a district cost more than the light they find.
+    // emit_mis weighs them 1): shadow rays across a city cost more than the light they find.
     if (approx(A_FAR_EMITTERS) && d2 > (LT_FAR + czr.y) * (LT_FAR + czr.y)) { return 0.0; }
     return nd.z * cb / max(d2, r2);
 }

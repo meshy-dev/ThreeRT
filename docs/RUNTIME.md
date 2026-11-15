@@ -1351,23 +1351,25 @@ two kinds.
 has all (`gpu::A_LIVE`) unless `THREERT_APPROX=<bits>` says otherwise (`0`: the offline estimator's rays in a live
 view, the way to hold a live picture to the offline one).
 
-| bit | what a live ray does | recorded when it was taken |
-|---|---|---|
-| 1 `A_GLASS_SHADOWS` | shadow rays to the analytic lights and the sky pass glass in full, untinted | dark water near the camera +11 % of its +20 %; one more trace a shadow ray in glass scenes |
-| 2 `A_MEDIA_SHADOWS` | only homogeneous media dim shadow rays: smoke and fire cast no shadow | the volume functions at every shadow ray: Kabukichō 0.4 ms with a smoke column out of view |
-| 4 `A_CUTOUT_PATHS` | cutouts are opaque to rays past a camera hit's own, off mirror paths | Bistro's frame 16.1 / 19.9 -> 14.2 / 16.0 ms; the picture 0.3 % darker |
-| 8 `A_CUTOUT_EMITTERS` | cutouts are opaque to emitters' shadow rays | 0.9 ms of the Bistro crowd's frame; 1.7 % of the light under foliage |
-| 16 `A_SHADOW_QUERY` | hardware traversal: a shadow ray past a cutout is one query with a candidate loop (it loses hits on Metal) | 1.6 ms of Bistro's trace at its worst; ΔE +0.04 |
-| 32 `A_FAR_EMITTERS` | the light tree proposes no emitter beyond 120 m; without a tree, the emitter cull (60 m, 120 m in view) | the 3 x 3 district 2.0 -> 0.5 ms; Tokyo's dusk aerials 10-12 % dark, far emitters' glow in fog lost |
-| 64 `A_WHITE_NOISE` | a hash, not Sobol, past the camera hit's own decisions (variance only) | all-Sobol: +2.1 ms of Bistro's 8.4 ms trace |
+| bit | what a live ray does | its bias (a test pair, `-live` / `-live-exact`) | exact costs the trace |
+|---|---|---|---|
+| 1 `A_GLASS_SHADOWS` | shadow rays to the analytic lights and the sky pass glass in full, untinted | light under tinted glass 4.3 x (`shadow/glass-tint`) | a glass scene +34 % (khronos-transmission 5.20 -> 6.97 ms) |
+| 2 `A_MEDIA_SHADOWS` | only homogeneous media dim shadow rays: smoke and fire cast no shadow | light behind optical depth 1: e x (`shadow/medium`) | the Bistro slice +0.84 ms (9 %), the fire scene +0.10 |
+| 4 `A_CUTOUT_PATHS` | cutouts are opaque to rays past a camera hit's own, off mirror paths | the sky under a clear card: 18 % of it (`sky/cutout-clear`) | Bistro +1.48 ms of 9.06 |
+| 8 `A_CUTOUT_EMITTERS` | cutouts are opaque to emitters' shadow rays | an emitter behind a clear card: black (`shadow/cutout-emitter`) | Bistro +0.62 ms |
+| 16 `A_FAR_EMITTERS` | the light tree proposes no emitter beyond 120 m; without a tree, the emitter cull (60 m, 120 m in view) | panels 150 m up: 3 % of their light (`light/emitter-far`); Kabukichō's and Tokyo's shots unchanged | Tokyo from the air 4.7 -> 9.2 ms; the 3 x 3 district +0.15 |
 
-Bistro held still, all of them off: ΔE against the offline render 1.82 -> 1.67 (bench-window `still-bistro`).
+Measured 2026-11-15 with the loop guard on. Bistro held still, ΔE against the offline render: 1.82 as shipped, 1.66
+without the two cutout bits, which cost Kabukichō and Zero Day time instead (0.75 and 0.80 ms less without them).
+Two more were removed that day: a single-query shadow ray past cutouts (it saved nothing: Bistro 10.13 ms with it,
+10.09 without, Tokyo +0.05) and the switch for the sampler below.
 
 **The live architecture**, not switches: the path ends in the radiance cache at its first bounce that is not through
 glass; the cache term, its training (4 x) and each sample (256) are clamped beside the kernel's own clamp; at most
 4 bounces; a camera ray's media are marched and composited after the trace with isotropic in-scatter from the
 cache's voxels, and later segments meet homogeneous media alone; depth of field is a post pass; translucent
-particles are lit from the cache's voxels.
+particles are lit from the cache's voxels; past a camera hit's own decisions the sampler is a hash, not Sobol
+(variance only).
 
 ## What the kernel trusts
 

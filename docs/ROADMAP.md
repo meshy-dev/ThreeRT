@@ -2412,6 +2412,21 @@ offline none as before, and a live view can run without them (`THREERT_APPROX=0`
 the trace is equal (Bistro 8.52 / 8.52 ms). Next: a test for each that holds the live picture without it to the offline one,
 their bias and cost measured again, and the defaults decided from that.
 
+**Each shortcut measured; two removed (2026-11-15, after it).** A pair of tests holds each approximation: the live
+view as shipped reads its bias, without the bit it reads the offline value (light under tinted glass 4.3 x, behind
+a medium e x, the sky under a clear cutout card 18 %, an emitter behind one black, panels 150 m away 3 %). Each was
+timed with its bit off, the loop guard on, in Bistro, Kabukichō, Zero Day, a glass scene, the fire scene, the
+Bistro slice, the 3 x 3 district and Tokyo (docs/RUNTIME.md's table). Two did not pay and are gone: the
+single-query shadow ray past cutouts (Bistro 10.13 ms with it, 10.09 without where its foliage is nearest; it lost
+hits on Metal) and the switch for white noise (variance only: what live does, not a bit). Two more looked removable
+on a small scene and were not on a large one: exact media shadows cost the fire scene 0.10 ms and the Bistro slice
+0.84 (9 %); the far-emitter cut saves the district 0.15 ms and Tokyo from the air half its trace (4.7 ms for 9.2).
+Both stay. Against main: the trace Bistro 8.57 / 8.50 ms, lamp-rooms 3.71 / 3.73, Zero Day 9.58 / 9.52, Kabukichō
+17.10 / 16.95 guarded, Tokyo at night 4.68 / 4.77 guarded (the query's saving there); render-identity in four
+layouts changes only the five tests that name bits (renumbered); bench-window's shots as main's, Kabukichō and
+Tokyo too. Next: a camera hit's light through a cutout loses the BSDF ray's share of its MIS weight (the 18 %);
+then the cutout bits' defaults.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
