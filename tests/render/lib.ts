@@ -24,6 +24,8 @@ export interface TestMeta {
   spp?: number;
   /** Render with the real-time renderer for this many frames (radiance cache, temporal passes) instead. */
   live?: number;
+  /** A live test's approximations (`APPROX` bits; default all of them: the live view as it ships). */
+  approx?: number;
   /** Scene time, s (animated materials; default 0). */
   time?: number;
   /** Asset files the test needs (unsupported when missing). */
@@ -31,6 +33,19 @@ export interface TestMeta {
   /** Why the expected value is what it is. */
   note?: string;
 }
+
+/** The live renderer's approximations (renderer/src/gpu.rs `A_*`; docs/RUNTIME.md "How live differs from offline"):
+ *  a live test without one of them is held to what the offline renderer gives. */
+export const APPROX = {
+  glassShadows: 1,
+  mediaShadows: 2,
+  cutoutPaths: 4,
+  cutoutEmitters: 8,
+  shadowQuery: 16,
+  farEmitters: 32,
+  whiteNoise: 64,
+  all: 127,
+};
 
 export const SIZE = { width: 160, height: 90 };
 

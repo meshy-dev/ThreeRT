@@ -19,8 +19,10 @@ pub struct Gpu {
     pub uniform_tables: bool,
     /// The kernel's switches this device was opened with (`KernelSwitches`): they are in `source`.
     pub switches: KernelSwitches,
-    /// The approximations a live view's kernel takes (`A_*`; `GpuOptions::approx`).
+    /// The approximations a live view's kernel takes (`A_*`): the options' (`GpuOptions::approx`) unless a view asked
+    /// for others (`set_approx`).
     pub approx: u32,
+    approx_default: u32,
     /// Compiled pipelines kept between runs (`GpuOptions::pipeline_cache`), where the backend has such a cache.
     pipeline_cache: Option<crate::pipeline_cache::PipelineCache>,
     /// Kernel source (hardware or software traversal spliced in); scenes with material functions get their own module.
@@ -1752,7 +1754,7 @@ impl Gpu {
         } else {
             (None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, switches, approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_pipelines: Default::default(), media_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
@@ -1772,6 +1774,11 @@ impl Gpu {
         if let Some(c) = &self.pipeline_cache {
             c.save();
         }
+    }
+
+    /// The approximations of the live views made on this device from now on (`A_*`; None: the options').
+    pub fn set_approx(&mut self, approx: Option<u32>) {
+        self.approx = approx.unwrap_or(self.approx_default) & A_LIVE;
     }
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
@@ -3382,6 +3389,12 @@ mod tests {
         for (name, bit) in approx {
             assert!(declared.iter().any(|l| l.starts_with(&format!("const {name}: u32 = {bit}u;"))), "{name}: pathtrace.wgsl and gpu.rs differ");
         }
+        // (The render tests' names for them: tests/render/lib.ts `APPROX`.)
+        let lib = include_str!("../../tests/render/lib.ts");
+        for (name, bit) in [("glassShadows", A_GLASS_SHADOWS), ("mediaShadows", A_MEDIA_SHADOWS), ("cutoutPaths", A_CUTOUT_PATHS), ("cutoutEmitters", A_CUTOUT_EMITTERS), ("shadowQuery", A_SHADOW_QUERY), ("farEmitters", A_FAR_EMITTERS), ("whiteNoise", A_WHITE_NOISE)] {
+            assert!(lib.contains(&format!("{name}: {bit},")), "{name}: tests/render/lib.ts and gpu.rs differ");
+        }
+        assert!(lib.contains(&format!("all: {A_LIVE},")));
         assert!(wgsl.contains(&format!("const RIS_EXACT: u32 = {RIS_EXACT}u;")), "RIS_EXACT: pathtrace.wgsl and gpu.rs differ");
         for line in wgsl.lines().filter(|l| l.starts_with("const F_")) {
             let name = &line[6..line.find(':').unwrap()];

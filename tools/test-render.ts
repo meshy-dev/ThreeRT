@@ -65,7 +65,7 @@ for (const { file, meta } of tests) {
   const name = file.replace(/\.ts$/, "");
   const bundle = (await bundleGame(join(dir, file), join(out, `${name}.js`))).out;
   const hdr = join(out, `${name}.raw`);
-  proc.stdin!.write(JSON.stringify({ id: ++id, game: bundle, assets, out: join(out, `${name}.png`), hdr, spp: meta.spp ?? 64, denoise: false, live: meta.live, time: meta.time }) + "\n");
+  proc.stdin!.write(JSON.stringify({ id: ++id, game: bundle, assets, out: join(out, `${name}.png`), hdr, spp: meta.spp ?? 64, denoise: false, live: meta.live, approx: meta.approx, time: meta.time }) + "\n");
   const reply = JSON.parse((await lines.next()).value as string);
   const ms = performance.now() - t;
   if (!reply.ok) {
