@@ -88,7 +88,7 @@ if (!existsSync(helmet)) {
 }
 await $`node tools/fetch-polyhaven.ts`.cwd(root);
 await $`node tools/fetch-polyhaven.ts --set kabukicho-ue --res 2k`.cwd(root);
-if (!existsSync(a("kabukicho/textures"))) await $`node tools/kabukicho-assets.ts`.cwd(root);
+if (!existsSync(a("kabukicho/textures/manifest.json"))) await $`node tools/kabukicho-assets.ts`.cwd(root);
 await $`node tools/fetch-khronos.ts`.cwd(root);
 const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 if (existsSync(chrome) || existsSync(a("quaternius/ual/UAL1_Standard.glb"))) await $`node tools/fetch-quaternius.ts`.cwd(root);
