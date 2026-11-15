@@ -741,19 +741,22 @@ tree (ROADMAP § 6).
   the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
   [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
-  kernel binds 13: seven for the scene in every layout (below, "The scene's tables"), six in group 1. (The live
-  passes need none of it: each has a layout of its own, of the bindings its entry point uses,
-  `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit test's
-  check; a page binds them as natively.) There is one source: pathtrace.wgsl declares its group-1 buffers in an
-  `@if(merged) { .. } @else { .. }` block (WESL's conditional translation, "The kernel's source"), and the kernel
-  reads and writes them only through functions each block declares (`cache_acc_add`, `refl_store`, ...).
+  kernel binds 20. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
+  uses, `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit
+  test's check; a page binds them as natively.) There is one source: pathtrace.wgsl declares the views of its
+  tables and its group-1 buffers in an `@if(merged) { .. } @else { .. }` block each (WESL's conditional
+  translation, "The kernel's source"), and the kernel reads and writes them only through functions each block
+  declares (`material_at`, `cache_acc_add`, `refl_store`, ...).
+  - The scene's tables are the sections of one buffer on every device ("The scene's tables"). Here the kernel has
+    no views of them and reads its seven tables from the buffer whole: no second copy of a table, nothing copied a
+    frame, no kernel compiled when one grows.
   - The kernel's six group-1 buffers (the radiance cache, what the live passes read of a trace) are ranges of one
     buffer, the arrays of a struct whose lengths are WESL constants the source imports (gpu.rs
     `KernelVariant::constants`); what the live passes read of it starts at multiples of 256 bytes, so they bind
     those ranges as buffers of their own.
   - The merged block declares none of the buffers by its own name, so a read or write that goes past the functions
     does not compile in it (naga names the line). A test reads the merged variants with naga: valid WGSL, 8 storage
-    buffers for the kernel (13 as written), the struct's arrays where the Rust side puts them.
+    buffers for the kernel (20 as written), the struct's arrays where the Rust side puts them.
   - Until 2026-11-14 the browser's kernel was written from the native one as text: a scanner of WGSL in merged.rs
     found every use of the thirteen names, followed the locals that shadowed them through their scopes, and rewrote
     each use (the uniform tables and the loop guard were made the same way).
@@ -1266,28 +1269,38 @@ too is an override, from F_TINT).
 
 The kernel's read-only scene data other than triangles is two storage buffers, each a row of sections
 (`renderer/src/heap.rs`):
-- `tables` (group 0, binding 4), vec4s (`Table`): materials, lights, the light groups' spheres, the emitter CDF with
-  its guide table, the light tree's nodes, the texture pages' rects, objects, instance records, media and the GGX
-  energy table. The kernel reads a record through its accessor (`material_at`, `instance_at`, ...), which makes it
-  of the record's vec4s.
+- `tables` (group 0, binding 4), vec4s (`Table`): the light tree's nodes, materials, lights, the light groups'
+  spheres, the emitter CDF with its guide table, the texture pages' rects, objects, instance records, media and the
+  GGX energy table.
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
   colours (`env_cdf_at`, `pword`, `vcolor_word`). Integers are read as integers, not through a float's bits.
 
 `Params::table_first` and `word_first` name each section's first element and are written with the parameters
-(`Uploaded::place`).
-- **One layout on every device.** The scene is seven storage buffers natively, on Android and in a browser:
-  triangles, their attributes, the software tree, the tables, the words, the previous vertices, the accumulation
-  buffer. What a scene has more of is another section, not another binding.
-- A section starts at a multiple of 256 bytes, so a pass that writes one binds it as a buffer of its own (the
-  particle passes: the objects' section, read-write).
+(`Uploaded::place`). What a scene has more of is another section, not another binding.
+- **One buffer, two ways to read it.** The renderer makes, writes and grows one tables' buffer on every device.
+  The seven tables read at every hit or light (materials, lights, the emitter CDF, texture rects, objects,
+  instances, media) are bound again as typed arrays over their sections (bindings 12 to 18; merged.rs
+  `TABLE_VIEWS`), and the kernel reads them as it would buffers of their own. In the merged layout, a browser's,
+  which has no binding for the views, the kernel reads all seven from the buffer whole: a record made of its vec4s
+  from the section's offset.
+- **Why the views.** Reading everything from the buffer whole natively cost 3 to 5 % of the trace on an Apple M5
+  (1440p at 0.375, hardware traversal; Bistro 8.57 -> 8.98 ms, Zero Day 9.52 -> 9.98, lamp-rooms 3.79 -> 3.92). By
+  timing variants: the offset fetched from the parameters before every read 0.16 ms of Bistro's 0.41 (as a pipeline
+  constant it is free, but a table that grows then compiles a pipeline; read once into private variables it is
+  not), records made of vec4s instead of read as structs 0.08, the rest not found in any one change. With the views:
+  Bistro +0.07 ms (0.8 %), Zero Day +0.04, lamp-rooms -0.08.
+- A heap's first section is at element 0 whatever grows, so it is read with no offset: the light tree and the
+  environment's CDF, the two read most that have no view (with an offset: Bistro +0.15 ms, Zero Day +0.13).
+- A section starts at a multiple of 256 bytes, so it can be bound as a buffer of its own: the views, and the
+  particle passes' objects (read-write).
 - A section that outgrows its room (materials or emitters added while the game runs, an edit's objects or records)
   gets more in a new buffer, the rest copied on the GPU (`Heap::grow`), and the bind groups that hold the buffer
   are made again (`Gpu::rebind_scene`: the kernel's and the particle passes'). No kernel is compiled for it.
-- Until 2026-11-15 each table was a buffer and a binding of its own: 22 buffers and acceleration structures a stage
-  natively, 28 of Metal's 29 with the translucency pass (now 15 and 21); the light groups rode after the lights,
-  the light tree after the emitter CDF, the procedural data after the environment's CDF and the vertex colours
-  after the previous vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second
-  copy of each made every frame, and was compiled again when a table doubled.
+- Until 2026-11-15 each table was a buffer of its own; the light groups rode after the lights, the light tree after
+  the emitter CDF, the procedural data after the environment's CDF and the vertex colours after the previous
+  vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second copy of each made
+  every frame, and was compiled again when a table doubled. The count of bindings is as it was: 22 buffers and
+  acceleration structures a stage natively, 28 of Metal's 29 with the translucency pass (29 with the loop guard's).
 
 ## Random numbers
 
@@ -1371,12 +1384,13 @@ on the device", and differs where it says so.
   merged layout). The driver gave the kernel other buffers' contents for four of its read-only storage buffers, each
   a binding of its own then: `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18), all numbered
   after the acceleration structure (13). As uniform buffers they read right.
-  - Since 2026-11-15 the four are sections of the tables' buffer (binding 4, "The scene's tables") and the
-    acceleration structure is the group's last binding (16). **Whether the driver reads them right there is not
-    known: no device has run it.** Until one has, Android keeps the uniform copies; `THREERT_UNIFORM_TABLES=0` on
-    the device is the run that decides (if it draws right, the copies and their bounds can go).
+  - Since 2026-11-15 the four are views of their sections of the tables' buffer ("The scene's tables"), still at
+    bindings of their own (15 to 18), and the acceleration structure is the group's last binding (19). **Whether
+    the driver reads them right there is not known: no device has run it.** Until one has, Android keeps the
+    uniform copies; `THREERT_UNIFORM_TABLES=0` on the device is the run that decides (if it draws right, the copies
+    and their bounds can go).
   - The kernel's source has them under `@if(uniform_tables)` (pathtrace.wgsl): four sized uniform arrays at
-    bindings 12 to 15 (merged.rs `UNIFORM_TABLES`; their lengths WESL constants), and their accessors hold every
+    bindings 15 to 18 (merged.rs `UNIFORM_TABLES`; their lengths WESL constants), and their accessors hold every
     index to the array (`min(i, last)`), so nothing is read outside a uniform buffer.
   - The renderer writes the tables' buffer. `Gpu::sync_tables` copies the four sections into their uniform buffers
     in a frame's encoder, after the particle passes (which write their objects' entries on the GPU) and before the
@@ -1384,13 +1398,13 @@ on the device", and differs where it says so.
   - A uniform binding holds 64 KiB, so the arrays are bounded: 2,048 textures, 4,096 object entries (1,365 objects;
     1,024 with instance colours), 409 instance records (model instances, procedural objects, `dynamicGeometry`
     meshes), all 32 media. A scene with more reads the last entry for the rest, and the renderer says so on stderr
-    when it uploads the scene and once when in-place edits pass a bound. `THREERT_UNIFORM_TABLES=0` reads the
-    tables' buffer.
+    when it uploads the scene and once when in-place edits pass a bound. `THREERT_UNIFORM_TABLES=0` binds the
+    views of their sections.
 - **The kernel's other storage buffers stay as they are**, each for its reason:
 
   | buffer | size | decision |
   |---|---|---|
-  | `tables` (4): materials, lights, the emitter CDF, the light tree and the rest | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers (bindings 4 to 6 then) |
+  | `tables` (4) and its views `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers (bindings 4 to 6 then) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
   | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |

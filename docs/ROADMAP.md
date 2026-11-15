@@ -2343,6 +2343,35 @@ turning, another part of the scene's. Now it reads the list of the tile it was s
 camera turning 2 degrees a frame), the last moving frame, dE / p99: 2.00 / 8.57 without lists, 0.86 / 4.82 with
 them at the pixel, 0.80 / 3.54 now; 0.19 ms of a list scene's trace (3.57 -> 3.76 on lamp-rooms).
 
+**The scene's read-only data in two buffers (2026-11-15, after it).** New scene data rode in other data's buffers,
+since the kernel had no binding to spare (28 of Metal's 29 with the translucency pass): the light tree after the
+emitter CDF, the light groups after the lights, the procedural geometry after the environment's CDF, the vertex
+colours after the previous vertices. A browser's kernel had its seven tables a second time as the sized arrays of a
+struct, copied every frame and compiled again when one doubled. Now the tables are the sections of one buffer of
+vec4s and the flat arrays the sections of one of 32-bit words (`renderer/src/heap.rs`; docs/RUNTIME.md "The scene's
+tables"), each found by an offset in the parameters: what a scene has more of is a section, a table that grows
+compiles nothing, a browser copies nothing, and the integers that were read through a float's bits (procedural
+words, vertex colours) are read as integers.
+- Read all from the one buffer, the trace was 3 to 5 % slower natively (Bistro 8.57 -> 8.98 ms): the offset fetched
+  before every read, the records' assembly, and a third no single change explains (seven timing variants). So
+  where a stage has the bindings, the seven tables read at every hit or light are bound again as typed views of
+  their sections, and the light tree and the environment's CDF are their buffers' first sections, read from
+  element 0. Trace against main (1440p at 0.375, alternated, ms): Bistro 8.58 -> 8.65, Zero Day 9.53 -> 9.57,
+  lamp-rooms 3.80 -> 3.72, Kabukichō 16.35 -> 16.10; software traversal Bistro 47.17 -> 47.48, lamp-rooms the same.
+  A browser, with no binding for the views, reads from the buffer whole: in the merged layout natively Bistro
+  47.2-47.7 -> 46.8, lamp-rooms the same. The count of bindings natively is as it was (22, 28 with the translucency
+  pass); what changed is that new data does not need one.
+- The first build passed the whole suite and render-identity (0 of 192 changed in four layouts) and still drew
+  Bistro wrong live (dE 7.12 for 1.82): the live loader gave the light tree to its tables before the upload read
+  its nodes, and no test had a tree in a live view before an edit rewrote it. What showed it was the timing: a trace
+  a third faster. Fixed, with the tests that see it (`light/emitter-tree`, `-live`: 1.4 for 73.6 without the fix).
+- Android keeps four tables' uniform copies until a device has run without them (why its driver misread them is
+  not known).
+- Checks, with the loop guard: the unit tests and test-render (194); render-identity against main natively, merged,
+  under software traversal and with the uniform tables: 0 of 194 changed in any; bench-window's five shots and
+  still-kabukicho as main's to the digit (the moving ones within 0.3 %); offline renders of five scenes as main's
+  (three byte-identical, Bistro and Zero Day within what a build differs from itself).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
