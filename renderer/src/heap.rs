@@ -22,9 +22,13 @@ pub trait Section: Copy {
     fn index(self) -> usize;
 }
 
-/// The scene's tables, in `Params::tables`' order (pathtrace.wgsl `material_at` and the others).
+/// The scene's tables, in `Params::table_first`'s order (pathtrace.wgsl `material_at` and the others). The first
+/// is at element 0 whatever grows, so the kernel reads it with no offset: the one read most that has no view of its
+/// own (merged.rs `TABLE_VIEWS`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Table {
+    /// The emitters' tree (ltree.rs), a vec4 a node.
+    LightTree,
     /// `scene::GpuMaterial`.
     Materials,
     /// `scene::GpuLight`.
@@ -33,8 +37,6 @@ pub enum Table {
     LightGroups,
     /// The emitter CDF: (triangle bits, cumulative weight, weight, area) per emissive triangle (lib.rs `emitter_cdf`).
     Emitters,
-    /// The emitters' tree (ltree.rs), a vec4 a node.
-    LightTree,
     /// Two vec4s a texture (texpack.rs).
     TexInfo,
     /// `Scene::object_stride` vec4s an object.
@@ -57,7 +59,7 @@ impl Section for Table {
 }
 
 /// The scene's flat arrays of 32-bit words, in `Params::word_first`'s order (pathtrace.wgsl `env_cdf_at`, `pword`,
-/// `vcolor_word`).
+/// `vcolor_word`). The first is at word 0 whatever grows, so the kernel reads it with no offset: the one read most.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stream {
     /// The environment's sampling CDF (floats): the rows' marginal CDF, then each row's.

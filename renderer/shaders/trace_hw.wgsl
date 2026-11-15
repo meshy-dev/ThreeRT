@@ -2,7 +2,7 @@
 // mask 2; opaque groups never report candidates, alpha-cutout groups are confirmed by `alpha_pass`.
 // instance_custom_data holds the instance's first global triangle index, or in scenes where a group starts beyond
 // 2^24 triangles (F_HUGE: custom data has 24 bits) its traversal group, whose first triangle is in P.group_first.
-@if(hwrt) @group(0) @binding(16) var acc: acceleration_structure;
+@if(hwrt) @group(0) @binding(19) var acc: acceleration_structure;
 
 @if(hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     // Ray tracing off (pathtrace.wgsl `rays_off`): past the camera ray, every ray misses.

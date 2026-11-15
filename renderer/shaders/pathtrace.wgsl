@@ -14,7 +14,7 @@
 //                         too slow on needs)
 //   units                 software traversal's second level (gpu.rs `F_UNITS`); a scene's other features are bits
 //                         of `FEAT`, a pipeline-overridable constant
-//   merged                group 1 as one buffer (merged.rs: at most eight storage buffers a stage, a browser's)
+//   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
 //   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
 // The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
@@ -110,8 +110,8 @@ struct Params {
     ltile: vec4<u32>,      // live light tiles (`lt_list_start`): the lists' first vec4 in direct_out (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
-    table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): materials, lights, light groups, emitters; light tree, tex_info, objects, instances; media, energy LUT, -, -
-    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF, procedural data, vertex colours, -
+    table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, -, -
+    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, -
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -140,7 +140,8 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 // `P.word_first` names: the environment's CDF (floats: [0, H) the rows' marginal CDF, then H rows of W conditional
 // entries; `env_cdf_at`), the procedural data (`pword`, `gdata`), the vertex colours (`vcolor_word`).
 @group(0) @binding(5) var<storage, read> words: array<u32>;
-fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[P.word_first.x + i]); }
+// (The CDF is the buffer's first section: from word 0, no offset to read.)
+fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
 // The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
@@ -151,9 +152,7 @@ struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1
 // simulated grid), (majorant 1/m, HG anisotropy, -, -), customData, parameters.
 struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: vec4<f32>, c: vec4<f32>, p: array<vec4<f32>, 8> };
 
-// The scene's tables: sections of one buffer of vec4s (heap.rs `Table`), each from the vec4 `P.table_first` names.
-// Read through `material_at`, `light_at`, `light_group_at`, `emitter_at`, `lt_node`, `tex_info_at`, `object_at`,
-// `instance_at`, `medium_at` and `energy_at`:
+// The scene's tables: sections of one buffer of vec4s (heap.rs `Table`), each from the vec4 `P.table_first` names:
 //  - materials (scene::GpuMaterial), lights (scene::GpuLight), and per LIGHT_GROUP local lights a sphere (centre,
 //    radius) holding all their light (lib.rs `light_groups`);
 //  - emitters: (triangle index bits, cumulative weight (normalized), weight, area) for i < counts.y, then the guide
@@ -163,44 +162,40 @@ struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: ve
 //    ObjectBounds), then what `OBJECT_STRIDE` says;
 //  - instances (Instance), media (Medium);
 //  - the GGX energy LUT: (E.x, E.y) for 32 roughness x 32 NoV, two per vec4.
-// (Unsigned words: a record's integers are read as they are, its floats by a bit cast.)
+// The buffer whole is `tables` in every layout (unsigned words: integers are read as they are, floats by a bit
+// cast): the light groups, the light tree and the energy LUT are read from it, and what a scene has more of is
+// another section of it, not another binding.
 @group(0) @binding(4) var<storage, read> tables: array<vec4<u32>>;
-// A record's vec4s (the tests hold them to the renderer's records, merged.rs).
-const MATERIAL_VEC4: u32 = 18u;
-const LIGHT_VEC4: u32 = 5u;
-const INSTANCE_VEC4: u32 = 10u;
-const MEDIUM_VEC4: u32 = 14u;
 fn table_f(i: u32) -> vec4<f32> { return bitcast<vec4<f32>>(tables[i]); }
 fn table_i(i: u32) -> vec4<i32> { return bitcast<vec4<i32>>(tables[i]); }
-fn material_at(i: u32) -> Material {
-    let b = P.table_first[0].x + i * MATERIAL_VEC4;
-    let t0 = table_i(b + 16u);
-    let t1 = table_i(b + 17u);
-    return Material(table_f(b), table_f(b + 1u), table_f(b + 2u), table_i(b + 3u), table_i(b + 4u), table_f(b + 5u), table_f(b + 6u), table_f(b + 7u),
-        array<vec4<f32>, 8>(table_f(b + 8u), table_f(b + 9u), table_f(b + 10u), table_f(b + 11u), table_f(b + 12u), table_f(b + 13u), table_f(b + 14u), table_f(b + 15u)),
-        array<i32, 8>(t0.x, t0.y, t0.z, t0.w, t1.x, t1.y, t1.z, t1.w));
-}
-fn light_at(i: u32) -> Light {
-    let b = P.table_first[0].y + i * LIGHT_VEC4;
-    return Light(table_f(b), table_f(b + 1u), table_f(b + 2u), table_f(b + 3u), table_f(b + 4u));
-}
-fn light_group_at(i: u32) -> vec4<f32> { return table_f(P.table_first[0].z + i); }
-fn emitter_at(i: u32) -> vec4<f32> { return table_f(P.table_first[0].w + i); }
-fn lt_node(i: u32) -> vec4<f32> { return table_f(P.table_first[1].x + i); }
+// (The light tree is the buffer's first section: from vec4 0, no offset to read.)
+fn lt_node(i: u32) -> vec4<f32> { return table_f(i); }
+fn light_group_at(i: u32) -> vec4<f32> { return table_f(P.table_first[0].w + i); }
 fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
-@if(uniform_tables) {
-    // The uniform tables (merged.rs `UNIFORM_TABLES`): these four from sized uniform arrays, copies of their
-    // sections, every index held to the array (a scene with more entries than one holds reads the last for the
-    // rest; nothing outside the buffer is read).
-    @group(0) @binding(12) var<uniform> tex_info: array<vec4<f32>, UT_TEX_INFO>;
-    @group(0) @binding(13) var<uniform> objects: array<vec4<f32>, UT_OBJECTS>;
-    @group(0) @binding(14) var<uniform> instances: array<Instance, UT_INSTANCES>;
-    @group(0) @binding(15) var<uniform> media: array<Medium, UT_MEDIA>;
-    fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[min(i, UT_TEX_INFO - 1u)]; }
-    fn object_at(i: u32) -> vec4<f32> { return objects[min(i, UT_OBJECTS - 1u)]; }
-    fn instance_at(i: u32) -> Instance { return instances[min(i, UT_INSTANCES - 1u)]; }
-    fn medium_at(i: u32) -> Medium { return media[min(i, UT_MEDIA - 1u)]; }
-} @else {
+// The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
+// `object_at`, `instance_at` and `medium_at` in every layout.
+@if(merged) {
+    // The merged layout (merged.rs: a browser's eight storage buffers): from the buffer whole, a record made of its
+    // vec4s (their counts: the tests hold them to the renderer's records). Slower than the views below where it was
+    // measured (docs/RUNTIME.md "The scene's tables"): an offset from the parameters at every read, the records'
+    // assembly.
+    const MATERIAL_VEC4: u32 = 18u;
+    const LIGHT_VEC4: u32 = 5u;
+    const INSTANCE_VEC4: u32 = 10u;
+    const MEDIUM_VEC4: u32 = 14u;
+    fn material_at(i: u32) -> Material {
+        let b = P.table_first[0].y + i * MATERIAL_VEC4;
+        let t0 = table_i(b + 16u);
+        let t1 = table_i(b + 17u);
+        return Material(table_f(b), table_f(b + 1u), table_f(b + 2u), table_i(b + 3u), table_i(b + 4u), table_f(b + 5u), table_f(b + 6u), table_f(b + 7u),
+            array<vec4<f32>, 8>(table_f(b + 8u), table_f(b + 9u), table_f(b + 10u), table_f(b + 11u), table_f(b + 12u), table_f(b + 13u), table_f(b + 14u), table_f(b + 15u)),
+            array<i32, 8>(t0.x, t0.y, t0.z, t0.w, t1.x, t1.y, t1.z, t1.w));
+    }
+    fn light_at(i: u32) -> Light {
+        let b = P.table_first[0].z + i * LIGHT_VEC4;
+        return Light(table_f(b), table_f(b + 1u), table_f(b + 2u), table_f(b + 3u), table_f(b + 4u));
+    }
+    fn emitter_at(i: u32) -> vec4<f32> { return table_f(P.table_first[1].x + i); }
     fn tex_info_at(i: u32) -> vec4<f32> { return table_f(P.table_first[1].y + i); }
     fn object_at(i: u32) -> vec4<f32> { return table_f(P.table_first[1].z + i); }
     fn instance_at(i: u32) -> Instance {
@@ -211,6 +206,37 @@ fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
         let b = P.table_first[2].x + i * MEDIUM_VEC4;
         return Medium(table_f(b), table_f(b + 1u), table_f(b + 2u), tables[b + 3u], table_f(b + 4u), table_f(b + 5u),
             array<vec4<f32>, 8>(table_f(b + 6u), table_f(b + 7u), table_f(b + 8u), table_f(b + 9u), table_f(b + 10u), table_f(b + 11u), table_f(b + 12u), table_f(b + 13u)));
+    }
+} @else {
+    // Where a stage has bindings to spare, each of the seven's section is bound again as an array of its own type
+    // (gpu.rs `Gpu::scene_bind_group`: the same buffer, from the section's first byte): a read is one typed load.
+    @group(0) @binding(12) var<storage, read> materials: array<Material>;
+    @group(0) @binding(13) var<storage, read> lights: array<Light>;
+    @group(0) @binding(14) var<storage, read> emitters: array<vec4<f32>>;
+    fn material_at(i: u32) -> Material { return materials[i]; }
+    fn light_at(i: u32) -> Light { return lights[i]; }
+    fn emitter_at(i: u32) -> vec4<f32> { return emitters[i]; }
+    @if(uniform_tables) {
+        // The uniform tables (merged.rs `UNIFORM_TABLES`): these four from sized uniform arrays, copies of their
+        // sections, every index held to the array (a scene with more entries than one holds reads the last for the
+        // rest; nothing outside the buffer is read).
+        @group(0) @binding(15) var<uniform> tex_info: array<vec4<f32>, UT_TEX_INFO>;
+        @group(0) @binding(16) var<uniform> objects: array<vec4<f32>, UT_OBJECTS>;
+        @group(0) @binding(17) var<uniform> instances: array<Instance, UT_INSTANCES>;
+        @group(0) @binding(18) var<uniform> media: array<Medium, UT_MEDIA>;
+        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[min(i, UT_TEX_INFO - 1u)]; }
+        fn object_at(i: u32) -> vec4<f32> { return objects[min(i, UT_OBJECTS - 1u)]; }
+        fn instance_at(i: u32) -> Instance { return instances[min(i, UT_INSTANCES - 1u)]; }
+        fn medium_at(i: u32) -> Medium { return media[min(i, UT_MEDIA - 1u)]; }
+    } @else {
+        @group(0) @binding(15) var<storage, read> tex_info: array<vec4<f32>>;
+        @group(0) @binding(16) var<storage, read> objects: array<vec4<f32>>;
+        @group(0) @binding(17) var<storage, read> instances: array<Instance>;
+        @group(0) @binding(18) var<storage, read> media: array<Medium>;
+        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
+        fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
+        fn instance_at(i: u32) -> Instance { return instances[i]; }
+        fn medium_at(i: u32) -> Medium { return media[i]; }
     }
 }
 // Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z; one cell in scenes without.

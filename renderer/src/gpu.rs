@@ -186,7 +186,7 @@ pub struct PendingProc {
 }
 
 /// The acceleration structure's binding in the scene's group (trace_hw.wgsl `acc`): the last, after every buffer.
-const ACC_BINDING: u32 = 16;
+const ACC_BINDING: u32 = 19;
 
 /// A note for each uniform table that a scene has more entries of (`used`, merged.rs `UNIFORM_TABLES`' order) than
 /// its array holds: the kernel reads the last entry for the rest.
@@ -1569,8 +1569,8 @@ impl Gpu {
         // layout with more does not validate).
         let merged = cfg!(target_arch = "wasm32") || std::env::var("THREERT_MERGED").is_ok_and(|v| v == "1");
         limits.max_storage_buffers_per_shader_stage = if merged { crate::merged::STORAGE_BUFFERS } else { al.max_storage_buffers_per_shader_stage.min(31) };
-        // Storage + uniform buffers and acceleration structures together (the translucency pass binds 17 storage
-        // buffers, 18 with the loop guard's, 2 uniform ones and 2 structures; Metal allows 29).
+        // Storage + uniform buffers and acceleration structures together (the translucency pass binds 24 storage
+        // buffers, 25 with the loop guard's, 2 uniform ones and 2 structures; Metal allows 29).
         limits.max_buffers_and_acceleration_structures_per_shader_stage = al.max_buffers_and_acceleration_structures_per_shader_stage.min(31);
         limits.max_acceleration_structures_per_shader_stage = al.max_acceleration_structures_per_shader_stage;
         limits.max_blas_geometry_count = al.max_blas_geometry_count;
@@ -1623,7 +1623,7 @@ impl Gpu {
         // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, the
         // software tree; the tables' heap; the words' heap; the dynamic triangles' previous vertices; the
         // texture pages and their sampler, the environment, the density grids' atlas (a 1-cell texture in scenes
-        // without grids, whose kernel does not read it); the accumulation buffer; then what only some devices have.
+        // without grids, whose kernel does not read it); the accumulation buffer; then what only some layouts have.
         let mut entries = vec![
             uniform(0),
             storage(1, true),
@@ -1638,8 +1638,12 @@ impl Gpu {
             texture(10, wgpu::TextureViewDimension::D3),
             storage(11, false),
         ];
-        if uniform_tables {
-            entries.extend(crate::merged::UNIFORM_TABLES.iter().map(|t| uniform(t.binding)));
+        // The tables the kernel reads at every hit or light, bound again as typed views of their sections (merged.rs
+        // `TABLE_VIEWS`; the merged layout has no binding for them), four of them uniform copies where a driver
+        // needs it (`UNIFORM_TABLES`).
+        if !merged {
+            let copied = |b: u32| uniform_tables && crate::merged::UNIFORM_TABLES.iter().any(|t| t.binding == b);
+            entries.extend(crate::merged::TABLE_VIEWS.iter().map(|&(_, b)| if copied(b) { uniform(b) } else { storage(b, true) }));
         }
         if hwrt {
             entries.push(wgpu::BindGroupLayoutEntry { binding: ACC_BINDING, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None });
@@ -2026,11 +2030,11 @@ impl Gpu {
         let none = [crate::scene::GpuInstance::default()];
         let spheres = crate::light_groups(&scene.lights);
         let parts: [(Table, &[u8], usize); Table::COUNT] = [
+            (Table::LightTree, bytemuck::cast_slice(light_tree), 0),
             (Table::Materials, bytemuck::cast_slice(&scene.materials), 0),
             (Table::Lights, bytemuck::cast_slice(&scene.lights), 0),
             (Table::LightGroups, bytemuck::cast_slice(&spheres), 0),
             (Table::Emitters, bytemuck::cast_slice(emitters), 0),
-            (Table::LightTree, bytemuck::cast_slice(light_tree), 0),
             (Table::TexInfo, bytemuck::cast_slice(&tex_info[..]), 0),
             (Table::Objects, bytemuck::cast_slice(&scene.objects), room.objects * scene.object_stride() * 16),
             (Table::Instances, bytemuck::cast_slice(if records.is_empty() { &none[..] } else { &records[..] }), room.records * std::mem::size_of::<crate::scene::GpuInstance>()),
@@ -2948,8 +2952,14 @@ impl Gpu {
             view(10, &p.grid_view),
             buffer_entry(11, b.accum),
         ];
-        if let Some(u) = b.uniform {
-            entries.extend(u.iter().zip(&crate::merged::UNIFORM_TABLES).map(|(copy, t)| buffer_entry(t.binding, copy)));
+        if !self.merged {
+            for &(table, binding) in &crate::merged::TABLE_VIEWS {
+                let copy = b.uniform.and_then(|u| u.iter().zip(&crate::merged::UNIFORM_TABLES).find(|(_, t)| t.binding == binding).map(|(c, _)| c));
+                entries.push(match copy {
+                    Some(c) => buffer_entry(binding, c),
+                    None => wgpu::BindGroupEntry { binding, resource: b.heap.binding(table) },
+                });
+            }
         }
         if let Some(a) = b.accel {
             entries.push(wgpu::BindGroupEntry { binding: ACC_BINDING, resource: a.tlas.as_binding() });
