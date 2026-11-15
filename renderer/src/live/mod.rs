@@ -29,7 +29,7 @@
 //! live passes, the caches' training, the GPU timing); `session` the headless runner (native only).
 
 use crate::gpu::Buf;
-use crate::heap::Table;
+use crate::heap::{Heap, Section, Stream, Table};
 use crate::world::World;
 use crate::{gpu, post, scene, tables};
 // (The headless runner, `session`, native only, is what uses all of it.)
@@ -579,7 +579,7 @@ impl LiveCore {
             });
         }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
-        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.heap.buffer, &up.cdf, &a.verts].iter().map(|b| b.size()).sum::<u64>();
+        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.heap.buffer, &up.words.buffer, &a.verts].iter().map(|b| b.size()).sum::<u64>();
         let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
         let mb = |b: f64| (b / (1 << 20) as f64 * 10.0).round() / 10.0;
         serde_json::json!({

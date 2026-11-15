@@ -447,8 +447,6 @@ pub struct Scene {
     /// The vertex colours as the GPU reads them (`prepare`): three words per triangle in GPU order, none in a scene
     /// without them (gpu.rs F_VCOLOR).
     pub gpu_vcolors: Vec<u32>,
-    /// Where they start in `prev_verts` (vec4s: the previous vertices of the dynamic tail come first; `Params::procs.w`).
-    pub vcolor_base: u32,
     pub attrs: Vec<GpuTriAttr>,
     pub materials: Vec<GpuMaterial>,
     pub textures: Vec<Texture>,
@@ -508,8 +506,8 @@ pub struct Scene {
     /// Procedural geometry (`Kind::Procedural`) and the geometry functions it runs: (name, WGSL code, helpers).
     pub procs: Vec<ProcObject>,
     pub geometry_fns: Vec<(String, String, String)>,
-    /// The kernel's procedural region and records (`prepare`: `proc_layout`, `ProcObject::gpu`); the region follows the
-    /// environment's CDF in the `env_cdf` binding (`Params::procs`), the records the model instances' in `instances`.
+    /// The kernel's procedural region and records (`prepare`: `proc_layout`, `ProcObject::gpu`); the region is a
+    /// section of the words' heap (heap.rs `Stream::Procs`), the records follow the model instances' in `instances`.
     pub proc_layout: Option<ProcLayout>,
     pub proc_records: Vec<GpuInstance>,
     /// Software traversal's units (`prepare`: the instances it keeps as instances; units.rs), None under hardware
@@ -1848,7 +1846,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         vcolors,
         pool_vcolors,
         gpu_vcolors: vec![],
-        vcolor_base: 0,
         tri_flags,
         attrs,
         materials,

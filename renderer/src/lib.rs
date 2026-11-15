@@ -671,14 +671,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         scene::SkyData::Color(c) => (gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, *c, false),
         scene::SkyData::None => (gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, Vec3::ZERO, false),
     };
-    // The procedural region rides after the environment's CDF (its binding is the kernel's one flat 32-bit array);
-    // gpu.rs `upload_procs` lays it out.
     let env_cdf = build_env_cdf(&env);
-    // (w: the vertex colours' first vec4 in `prev_verts`, after the dynamic tail's previous vertices; gpu.rs F_VCOLOR.)
-    if !sc.gpu_vcolors.is_empty() {
-        sc.vcolor_base = ((groups[4..].iter().sum::<usize>() + scene::deforming_pool(&sc.meshes)) * 3) as u32;
-    }
-    let procs = [env_cdf.len() as u32, sc.procs.len() as u32, sc.gpu_instances.len() as u32, sc.vcolor_base];
+    let procs = [0, sc.procs.len() as u32, sc.gpu_instances.len() as u32, 0];
     // Environment light sampling (one shadow ray per vertex) is skipped when the sky is negligible next to the emitters
     // (night streets): escaping BSDF rays still pick it up, with full MIS weight. The emitters as if all on: a
     // time-of-day room loaded by day decides at dusk as one loaded at night does (live/edits.rs `put_sky`).
@@ -749,6 +743,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         lt_cam: [[0.0; 4]; 4],
         // (`gpu::Uploaded::place`, with the buffers.)
         table_first: [[0; 4]; 3],
+        word_first: [0; 4],
     };
     let mut params = params;
     let mut first = 0u32;

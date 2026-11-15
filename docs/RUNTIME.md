@@ -1264,26 +1264,30 @@ too is an override, from F_TINT).
 
 ## The scene's tables
 
-The kernel's read-only scene data other than triangles is one storage buffer of vec4s, `tables` (group 0, binding
-4), a row of sections (`renderer/src/heap.rs`, `Table`): materials, lights, the light groups' spheres, the emitter
-CDF with its guide table, the light tree's nodes, the texture pages' rects, objects, instance records, media and the
-GGX energy table. `Params::table_first` names each section's first vec4 and is written with the parameters
-(`Uploaded::place`); the kernel reads a record through its accessor (`material_at`, `instance_at`, ...), which makes
-it of the record's vec4s from there.
+The kernel's read-only scene data other than triangles is two storage buffers, each a row of sections
+(`renderer/src/heap.rs`):
+- `tables` (group 0, binding 4), vec4s (`Table`): materials, lights, the light groups' spheres, the emitter CDF with
+  its guide table, the light tree's nodes, the texture pages' rects, objects, instance records, media and the GGX
+  energy table. The kernel reads a record through its accessor (`material_at`, `instance_at`, ...), which makes it
+  of the record's vec4s.
+- `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
+  colours (`env_cdf_at`, `pword`, `vcolor_word`). Integers are read as integers, not through a float's bits.
+
+`Params::table_first` and `word_first` name each section's first element and are written with the parameters
+(`Uploaded::place`).
 - **One layout on every device.** The scene is seven storage buffers natively, on Android and in a browser:
-  triangles, their attributes, the software tree, the tables, the environment's CDF, the previous vertices, the
-  accumulation buffer. What a scene has more of is another section, not another binding.
+  triangles, their attributes, the software tree, the tables, the words, the previous vertices, the accumulation
+  buffer. What a scene has more of is another section, not another binding.
 - A section starts at a multiple of 256 bytes, so a pass that writes one binds it as a buffer of its own (the
   particle passes: the objects' section, read-write).
 - A section that outgrows its room (materials or emitters added while the game runs, an edit's objects or records)
   gets more in a new buffer, the rest copied on the GPU (`Heap::grow`), and the bind groups that hold the buffer
   are made again (`Gpu::rebind_scene`: the kernel's and the particle passes'). No kernel is compiled for it.
 - Until 2026-11-15 each table was a buffer and a binding of its own: 22 buffers and acceleration structures a stage
-  natively, 28 of Metal's 29 with the translucency pass (now 15 and 21); the light groups rode after the lights and
-  the light tree after the emitter CDF; and a browser's kernel had seven tables as the sized arrays of a struct, a
-  second copy of each made every frame, and was compiled again when a table doubled.
-- Still riding in another's binding: the procedural geometry's words after the environment's CDF, the vertex
-  colours after the previous vertices.
+  natively, 28 of Metal's 29 with the translucency pass (now 15 and 21); the light groups rode after the lights,
+  the light tree after the emitter CDF, the procedural data after the environment's CDF and the vertex colours
+  after the previous vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second
+  copy of each made every frame, and was compiled again when a table doubled.
 
 ## Random numbers
 
@@ -1387,7 +1391,7 @@ on the device", and differs where it says so.
   | buffer | size | decision |
   |---|---|---|
   | `tables` (4): materials, lights, the emitter CDF, the light tree and the rest | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers (bindings 4 to 6 then) |
-  | `env_cdf` (5) | the environment's CDF, then the procedural geometry's data | storage (megabytes); its light sampling is off on Android, below |
+  | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
   | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
@@ -1395,8 +1399,8 @@ on the device", and differs where it says so.
   | the live passes (`live.wgsl`: 25 storage buffers, `ae_bins` and `ae_state` among them; at most eight a pass) | per pixel; two tiny | storage: written by the passes; the device showed their output right |
 
   Two of these are what a device run should look at first: `prev_verts` (binding 16 then, after the acceleration
-  structure's) feeds the motion vectors of moving objects and the vertex colours; `env_cdf` also holds the
-  procedural geometry (voxel worlds).
+  structure's) feeds the motion vectors of moving objects; `words` holds the procedural geometry (voxel worlds) and
+  the vertex colours.
 - **The kernel's switches** (`gpu::KernelSwitches`; flags of the kernel's conditional translation, `@if` in its source, as a scene's features are: "The kernel's source" below):
 
   | switch | default | what it does | on the device |
@@ -1472,7 +1476,7 @@ source under ThreeRT for Android 0.4.0, which sets `THREERT_PIPELINE_CACHE` and 
   149 ms and Material balls 74 against 96 are faster without ray queries; OpenStrikeRT is 336 against 146. A ray
   query has a high fixed cost on this driver; ray queries stay the default. `THREERT_RASTER=1` (raster primary
   visibility): Sunlit room 136 against 149 ms.
-- **Not looked at on the device:** voxel worlds and procedural geometry (`env_cdf`'s second half), particles, media,
+- **Not looked at on the device:** voxel worlds and procedural geometry (then `env_cdf`'s second half), particles, media,
   a map with cutout foliage (`THREERT_CUTOUT_LITE`'s figures are the author's), `THREERT_ENV_NEE=1`, and the
   motion vectors of moving objects (`prev_verts`): soldiers were looked at standing, not frame by frame in motion.
 

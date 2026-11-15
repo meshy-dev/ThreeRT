@@ -1,6 +1,6 @@
 //! Headless wgpu backend: uploads the flattened scene once, accumulates path-traced samples, reads back HDR.
 
-use crate::heap::{Heap, Section, Table};
+use crate::heap::{Heap, Section, Stream, Table};
 use crate::scene::Scene;
 use crate::GROUPS;
 use anyhow::{anyhow, Result};
@@ -109,8 +109,7 @@ pub struct Params {
     /// Light tree (`ltree`): -, its entry count (bits: the first moving emitter's entry), the probability of picking
     /// a moving emitter (their share of power), candidates at camera hits (0 = off).
     pub ltree: [f32; 4],
-    /// Procedural geometry (F_PROC; scene::proc_data): its first word in the `env_cdf` binding (after the environment's
-    /// CDF), object count, first record in `instances`, -.
+    /// Procedural geometry (F_PROC; scene::proc_data): -, object count, first record in `instances`, -.
     pub procs: [u32; 4],
     /// The sky's aerial perspective (F_AERIAL; `scene::aerial_params`): density multiple, Rayleigh scale, Mie scale, -.
     pub aerial: [f32; 4],
@@ -127,6 +126,9 @@ pub struct Params {
     pub lt_cam: [[f32; 4]; 4],
     /// Each table's first vec4 in the tables' heap (`heap::Table`'s order; `Uploaded::place`).
     pub table_first: [[u32; 4]; 3],
+    /// Each stream's first word in the words' heap (`heap::Stream`'s order): the environment's CDF, the procedural
+    /// data, the vertex colours, -.
+    pub word_first: [u32; 4],
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
@@ -219,7 +221,7 @@ struct SceneBuffers<'a> {
     verts: &'a wgpu::Buffer,
     attrs: &'a wgpu::Buffer,
     heap: &'a Heap<Table>,
-    cdf: &'a wgpu::Buffer,
+    words: &'a Heap<Stream>,
     prev_verts: &'a wgpu::Buffer,
     accum: &'a wgpu::Buffer,
     parts: &'a BindParts,
@@ -281,15 +283,16 @@ pub struct Uploaded {
     /// The density grids (the atlas the kernel reads, the grid programs' pass), when the scene has any.
     pub grids: Option<GridsGpu>,
     /// Each medium's node (the media table's order).
-    /// Vertex colours (F_VCOLOR): their byte offset in `prev_verts` (three words per triangle, room included).
-    pub vcolor_base: Option<u64>,
+    /// The scene has vertex colours (F_VCOLOR): three words per triangle in `words`, the edit room's included.
+    pub vcolors: bool,
     pub media_nodes: Vec<u32>,
     /// Per medium: its node is hidden (`set_medium_hidden`). The live view runs no media pass while all are.
     pub media_hidden: std::cell::RefCell<Vec<bool>>,
-    /// Room for in-place geometry edits (`EditRoom`), and the binding that holds the environment CDF and the
-    /// procedural region, with the CDF's length and the region's words in use (the room follows them).
+    /// Room for in-place geometry edits (`EditRoom`), and the scene's 32-bit arrays (heap.rs `Stream`: the
+    /// environment's CDF, the procedural region, the vertex colours), with the CDF's length and the region's words
+    /// in use (the room follows them).
     pub room: EditRoom,
-    pub cdf: wgpu::Buffer,
+    pub words: Heap<Stream>,
     pub cdf_words: usize,
     pub region_words: usize,
     /// The environment map (`write_env` replaces it in place when a dynamic sky's sun moves).
@@ -364,11 +367,13 @@ impl Uploaded {
         self.heap.write(q, Table::LightGroups, 0, bytemuck::cast_slice(&crate::light_groups(lights)));
     }
 
-    /// Where the kernel finds each table (`Params::table_first`): written with the parameters, every time (a
-    /// section that grew moves those after it).
+    /// Where the kernel finds each table and stream (`Params::table_first`, `word_first`): written with the
+    /// parameters, every time (a section that grew moves those after it).
     pub fn place(&self, p: &mut Params) {
         let first = self.heap.firsts();
         p.table_first = std::array::from_fn(|k| std::array::from_fn(|j| first.get(k * 4 + j).copied().unwrap_or(0)));
+        let first = self.words.firsts();
+        p.word_first = std::array::from_fn(|k| first.get(k).copied().unwrap_or(0));
     }
 }
 
@@ -1616,7 +1621,7 @@ impl Gpu {
             count: None,
         };
         // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, the
-        // software tree; the tables' heap; the environment's CDF; the dynamic triangles' previous vertices; the
+        // software tree; the tables' heap; the words' heap; the dynamic triangles' previous vertices; the
         // texture pages and their sampler, the environment, the density grids' atlas (a 1-cell texture in scenes
         // without grids, whose kernel does not read it); the accumulation buffer; then what only some devices have.
         let mut entries = vec![
@@ -1946,14 +1951,7 @@ impl Gpu {
         // The dynamic tail (groups 4..8; the instanced pool follows it, its deforming meshes first: theirs too).
         let dynamic_end: usize = groups.iter().sum::<usize>() + crate::scene::deforming_pool(&scene.meshes);
         let prev = &tri_verts[(dynamic_first * 3).min(tri_verts.len())..(dynamic_end * 3).min(tri_verts.len())];
-        // Vertex colours (F_VCOLOR) ride after the previous vertices, from vec4
-        // `Params::procs.w` on, the edit room's triangles' too (the edits write theirs). Without them: as before.
-        let b_prev = if scene.gpu_vcolors.is_empty() {
-            buf("prev verts", bytemuck::cast_slice(prev), edit)
-        } else {
-            debug_assert_eq!(prev.len(), scene.vcolor_base as usize);
-            buf_room("prev verts + vertex colours", &[bytemuck::cast_slice(prev), bytemuck::cast_slice(&scene.gpu_vcolors)].concat(), (room.tris * 12).next_multiple_of(16), edit)
-        };
+        let b_prev = buf("prev verts", bytemuck::cast_slice(prev), edit);
         // The vertex colours' bytes on the GPU (the edit room's included).
         timings.push(("vcolor_mb".into(), if scene.gpu_vcolors.is_empty() { 0.0 } else { (scene.gpu_vcolors.len() * 4 + room.tris * 12) as f64 / (1 << 20) as f64 }));
         let b_attrs = buf_room("attrs", bytemuck::cast_slice(&scene.attrs), room.tris * std::mem::size_of::<crate::scene::GpuTriAttr>(), edit);
@@ -1962,10 +1960,7 @@ impl Gpu {
         // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
         // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
         timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
-        let (b_cdf, region_words, proc_room) = match &scene.proc_layout {
-            None => (buf("env_cdf", bytemuck::cast_slice(env_cdf), st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC), 0, 0),
-            Some(l) => self.upload_procs(env_cdf, l, room.proc_words, timings)?,
-        };
+        let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, timings)?;
         let room = EditRoom { proc_words: proc_room, ..room };
         // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
         // other textures (A', B, B'), its two half steps and its sources.
@@ -2267,7 +2262,7 @@ impl Gpu {
             self.uniform_copies(&heap)
         });
         let bg_parts = BindParts { nodes: b_nodes, tex_view, env_view, sampler, grid_view };
-        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_verts, attrs: &b_attrs, heap: &heap, cdf: &b_cdf, prev_verts: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
+        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_verts, attrs: &b_attrs, heap: &heap, words: &words, prev_verts: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
         let mut kernel = Kernel::new(scene, groups);
         kernel.caps = self.no_vis_bufs.merged.as_ref().map(|m| crate::merged::Caps { live: m.1 });
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
@@ -2377,7 +2372,7 @@ impl Gpu {
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         // (The scene's own pipelines, made above: particles, grid programs.)
         self.save_pipeline_cache();
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2432,64 +2427,69 @@ impl Gpu {
         }
     }
 
-    /// The `env_cdf` binding of a scene with procedural geometry: the environment CDF, then the procedural region
-    /// (scene::ProcLayout: headers and materials, then the geometries' blobs). Written straight into the new buffer's
-    /// mapping; the blobs are copied on the GPU from the last upload when its geometries are the same.
-    /// `room`: words of edit room wanted after the region (`EditRoom`); returns the buffer, the region's words in use
-    /// and the room it got (as much as the binding limit leaves).
-    fn upload_procs(&self, env_cdf: &[f32], l: &crate::scene::ProcLayout, room: usize, timings: &mut Vec<(String, f64)>) -> Result<(wgpu::Buffer, usize, usize)> {
+    /// The scene's 32-bit arrays (heap.rs `Stream`): the environment's CDF, the procedural region (scene::ProcLayout:
+    /// headers and materials, then the geometries' blobs) and the vertex colours, each with its edit room
+    /// (`room_words` after the region, as much of it as the binding limit leaves; `room_tris` triangles' colours).
+    /// Written straight into the new buffer's mapping; the blobs are copied on the GPU from the last upload when its
+    /// geometries are the same. Returns the heap, the region's words in use and the room it got.
+    fn upload_words(&self, scene: &Scene, env_cdf: &[f32], room_words: usize, room_tris: usize, timings: &mut Vec<(String, f64)>) -> Result<(Heap<Stream>, usize, usize)> {
         let t = Instant::now();
-        let (cdf, head) = (env_cdf.len(), l.head.len());
-        let used = ((cdf + head + l.blob_words).max(1) * 4) as u64;
-        let limit = self.device.limits().max_storage_buffer_binding_size as u64;
+        let l = scene.proc_layout.as_ref();
+        let (head, blob_words) = l.map_or((0, 0), |l| (l.head.len(), l.blob_words));
+        let colors: &[u8] = bytemuck::cast_slice(&scene.gpu_vcolors);
+        let color_bytes = if colors.is_empty() { 0 } else { colors.len() + room_tris * 12 };
+        let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64];
+        let (used, limit) = (Heap::<Stream>::size_for(&sizes(0)), self.device.limits().max_storage_buffer_binding_size as u64);
         if used > limit {
             return Err(anyhow!("procedural geometry: {} MB of data, more than this device binds in one buffer ({} MB)", used >> 20, limit >> 20));
         }
-        let room = room.min(((limit - used) / 4) as usize);
-        let bytes = used + room as u64 * 4;
-        let key = l.key();
-        let blob_at = ((cdf + head) * 4) as u64;
-        let blob_bytes = (l.blob_words * 4) as u64;
+        // (A section's size is rounded up to where the next may start.)
+        let room = room_words.min(((limit - used) / 4).saturating_sub(crate::heap::ALIGN / 4) as usize);
+        let sizes = sizes(room);
+        let blob_at = (head * 4) as u64;
+        let blob_bytes = (blob_words * 4) as u64;
+        let key = l.map(|l| l.key());
         let mut cache = self.proc_cache.lock().unwrap();
-        let reuse = cache.as_ref().filter(|c| c.key == key && c.bytes == blob_bytes);
-        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let reuse = cache.as_ref().filter(|c| blob_bytes > 0 && Some(&c.key) == key.as_ref() && c.bytes == blob_bytes);
         // Reused blobs: the small parts written through the queue, the blobs copied on the GPU (a mapped buffer of the
         // whole size would be zero-filled on the CPU first: 17 ms for 256 MB). New ones: written into the mapping.
-        let b = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("env_cdf + procedural"), size: bytes, usage, mapped_at_creation: reuse.is_none() });
-        if let Some(c) = reuse {
-            self.queue.write_buffer(&b, 0, bytemuck::cast_slice(env_cdf));
-            self.queue.write_buffer(&b, (cdf * 4) as u64, bytemuck::cast_slice(&l.head));
-            if c.bytes > 0 {
+        let heap = match (reuse, l) {
+            (Some(c), Some(l)) => {
+                let heap = Heap::new(&self.device, &sizes);
+                heap.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
+                heap.write(&self.queue, Stream::Procs, 0, bytemuck::cast_slice(&l.head));
+                heap.write(&self.queue, Stream::VertexColors, 0, colors);
                 let mut e = self.device.create_command_encoder(&Default::default());
-                e.copy_buffer_to_buffer(&c.buf, c.offset, &b, blob_at, c.bytes);
+                e.copy_buffer_to_buffer(&c.buf, c.offset, &heap.buffer, heap.at(Stream::Procs) + blob_at, c.bytes);
                 self.queue.submit([e.finish()]);
+                heap
             }
-        } else {
-            {
-                let mut m = b.slice(..).get_mapped_range_mut().map_err(|e| anyhow!("procedural data: {e:?}"))?;
-                // (Mapped memory is write-only here: byte ranges written whole.)
-                let mut put = |word: usize, bytes: &[u8]| m.slice(word * 4..word * 4 + bytes.len()).copy_from_slice(bytes);
-                put(0, bytemuck::cast_slice(env_cdf));
-                put(cdf, bytemuck::cast_slice(&l.head));
+            _ => Heap::filled(&self.device, &sizes, |put| {
+                put(Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
+                put(Stream::VertexColors, 0, colors);
+                let Some(l) = l else { return };
+                put(Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 for (blob, off) in &l.blobs {
-                    let o = cdf + head + off;
-                    put(o, bytemuck::cast_slice(&blob.boxes));
-                    put(o + blob.boxes.len(), bytemuck::cast_slice(&blob.data));
+                    let mut at = blob_at + (off * 4) as u64;
+                    let mut parts: Vec<&[u8]> = vec![bytemuck::cast_slice(&blob.boxes), bytemuck::cast_slice(&blob.data)];
                     if l.sw {
                         let (nodes, order) = blob.sw_bvh();
-                        let o = o + blob.boxes.len() + blob.data.len();
-                        put(o, bytemuck::cast_slice(nodes));
-                        put(o + nodes.len(), bytemuck::cast_slice(order));
+                        parts.extend([bytemuck::cast_slice::<_, u8>(nodes), bytemuck::cast_slice(order)]);
+                    }
+                    for part in parts {
+                        put(Stream::Procs, at, part);
+                        at += part.len() as u64;
                     }
                 }
-            }
-            b.unmap();
+            }),
+        };
+        if let Some(key) = key {
+            timings.push((if reuse.is_some() { "proc_copy_ms" } else { "proc_upload_ms" }.into(), t.elapsed().as_secs_f64() * 1000.0));
+            // The procedural region's GPU bytes (headers, materials, blobs: boxes and data, once per distinct geometry).
+            timings.push(("proc_data_mb".into(), ((head + blob_words) * 4) as f64 / (1 << 20) as f64));
+            *cache = Some(ProcCache { key, buf: heap.buffer.clone(), offset: heap.at(Stream::Procs) + blob_at, bytes: blob_bytes });
         }
-        timings.push((if reuse.is_some() { "proc_copy_ms" } else { "proc_upload_ms" }.into(), t.elapsed().as_secs_f64() * 1000.0));
-        // The procedural region's GPU bytes (headers, materials, blobs: boxes and data, once per distinct geometry).
-        timings.push(("proc_data_mb".into(), ((head + l.blob_words) * 4) as f64 / (1 << 20) as f64));
-        *cache = Some(ProcCache { key, buf: b.clone(), offset: blob_at, bytes: blob_bytes });
-        Ok((b, head + l.blob_words, room))
+        Ok((heap, head + blob_words, room))
     }
 
     /// The particle pass (scene time, camera, frame time, rain, wetness), then the dynamic BLASes and the TLAS rebuilt.
@@ -2782,8 +2782,7 @@ impl Gpu {
     }
 
     /// A volume node moved or changed its customData: its medium's world -> local rows / `custom` (None: unchanged).
-    /// Replaces the environment map and its sampling CDF in place (a dynamic sky's new bake). Both keep their sizes:
-    /// the CDF heads the binding it shares with the procedural region, which follows it.
+    /// Replaces the environment map and its sampling CDF in place (a dynamic sky's new bake). Both keep their sizes.
     pub fn write_env(&self, up: &Uploaded, env: &EnvMap, cdf: &[f32]) {
         let size = up.env_tex.size();
         if (env.width, env.height) != (size.width, size.height) || cdf.len() != up.cdf_words {
@@ -2796,7 +2795,7 @@ impl Gpu {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(env.width * 8), rows_per_image: Some(env.height) },
             size,
         );
-        self.queue.write_buffer(&up.cdf, 0, bytemuck::cast_slice(cdf));
+        up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
     }
 
     /// A volume node shown or hidden by its own `visible`, in place: its media keep their place in the table with
@@ -2941,7 +2940,7 @@ impl Gpu {
             buffer_entry(2, b.attrs),
             buffer_entry(3, &p.nodes),
             buffer_entry(4, &b.heap.buffer),
-            buffer_entry(5, b.cdf),
+            buffer_entry(5, &b.words.buffer),
             buffer_entry(6, b.prev_verts),
             view(7, &p.tex_view),
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&p.sampler) },
@@ -2961,7 +2960,7 @@ impl Gpu {
     /// The bind groups that hold the scene's buffers again, from `up`'s as they are now (one that grew: the tables,
     /// live/edits.rs): the kernel's, and the particle passes'.
     pub fn rebind_scene(&self, up: &mut Uploaded) {
-        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, cdf: &up.cdf, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
+        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         let Some(a) = &up.accel else { return };
         let written = ParticleTargets { verts: &up.verts, prev_verts: &up.prev_verts, blas_verts: &a.verts, heap: &up.heap, attrs: &up.attrs };
         if let Some(p) = &mut up.particles {
@@ -3484,7 +3483,7 @@ mod tests {
             assert_eq!(queries, if hwrt { 3 } else { 0 });
             assert_eq!(strict.matches("ray_bad(o, d, tmax").count(), queries, "every ray query is guarded");
             assert_eq!(strict.matches("fn ray_bad(").count(), hwrt as usize);
-            assert!(!strict.contains("env_cdf[y - 1u]") && !strict.contains("env_cdf[base + x - 1u]") && plain.contains("env_cdf[y - 1u]"));
+            assert!(!strict.contains("env_cdf_at(y - 1u)") && !strict.contains("env_cdf_at(base + x - 1u)") && plain.contains("env_cdf_at(y - 1u)"));
             let lit = v(hwrt, KernelSwitches { strict: true, cutout_lite: 2, last_direct: true, last_sun: false, light_pick: true });
             assert_eq!(lit.matches("radiance += dz;").count(), 1);
             assert!(!lit.contains("fn sun_light("), "last_direct takes the directional lights already");

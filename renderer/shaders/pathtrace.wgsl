@@ -104,13 +104,14 @@ struct Params {
     emit_power: vec4<f32>, // x: the emitter CDF's total without light LOD (= misc.y when it is off); y: emitter cull radius (0 = off); z: its reach in the view cone
     lod_view: vec4<f32>,   // emitter cull's view cone (lib.rs EmitterCull): forward direction, cos of the half-angle
     ltree: vec4<f32>,      // light tree (ltree.rs): -, its entry count (bits: the moving emitters' first), P(pick a moving one), candidates at camera hits (0 = off)
-    procs: vec4<u32>,      // procedural geometry (F_PROC): its data's first word in env_cdf, object count, first record in `instances`, -
+    procs: vec4<u32>,      // procedural geometry (F_PROC): -, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
     background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
     ltile: vec4<u32>,      // live light tiles (`lt_list_start`): the lists' first vec4 in direct_out (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
     table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): materials, lights, light groups, emitters; light tree, tex_info, objects, instances; media, energy LUT, -, -
+    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF, procedural data, vertex colours, -
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -135,8 +136,11 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
-// [0, H): marginal row CDF, then H rows of W conditional CDF entries; then the procedural data from P.procs.x (`gdata`).
-@group(0) @binding(5) var<storage, read> env_cdf: array<f32>;
+// The scene's flat arrays, sections of one buffer of 32-bit words (heap.rs `Stream`), each from the word
+// `P.word_first` names: the environment's CDF (floats: [0, H) the rows' marginal CDF, then H rows of W conditional
+// entries; `env_cdf_at`), the procedural data (`pword`, `gdata`), the vertex colours (`vcolor_word`).
+@group(0) @binding(5) var<storage, read> words: array<u32>;
+fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[P.word_first.x + i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
 // The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
@@ -211,9 +215,8 @@ fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
 }
 // Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z; one cell in scenes without.
 @group(0) @binding(10) var grid_tex: texture_3d<f32>;
-// Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle, after the previous
-// vertices in `prev_verts` from vec4 P.procs.w.
-fn vcolor_word(k: u32) -> u32 { return bitcast<u32>(prev_verts[P.procs.w + k / 4u][k % 4u]); }
+// Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle.
+fn vcolor_word(k: u32) -> u32 { return words[P.word_first.z + k]; }
 fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
     let c0 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u)).rgb);
     let c1 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 1u)).rgb);
@@ -457,12 +460,12 @@ struct GIn { o: vec3<f32>, d: vec3<f32>, tmin: f32, tmax: f32, prim: u32, lo: ve
 struct GOut { t: f32, normal: vec3<f32>, material: u32, attr: vec2<f32> };
 
 // Procedural data (scene::proc_data): per object its header (`proc_vec`), materials, boxes (min xyz, max xyz) and the
-// game's own data, 32-bit words after the environment's CDF in env_cdf.
+// game's own data, 32-bit words.
 // `pword`: the renderer's own reads (headers, boxes, materials). `gdata`: the geometry function's, of its object's data
 // only, word i.data .. i.data + i.count - 1; anything else reads 0. The kernel is compiled without bounds checks (its
 // indices come from the scene build) and the function is game code: it must not reach past its data.
-fn pword(k: u32) -> u32 { return bitcast<u32>(env_cdf[P.procs.x + k]); }
-fn pwordf(k: u32) -> f32 { return env_cdf[P.procs.x + k]; }
+fn pword(k: u32) -> u32 { return words[P.word_first.y + k]; }
+fn pwordf(k: u32) -> f32 { return bitcast<f32>(pword(k)); }
 var<private> gdata_first: u32;
 var<private> gdata_count: u32;
 fn gdata(k: u32) -> u32 {
@@ -1486,11 +1489,11 @@ fn env_pdf(d: vec3<f32>) -> f32 {
     let uv = env_uv(d);
     let x = min(u32(uv.x * f32(w)), w - 1u);
     let y = min(u32(uv.y * f32(h)), h - 1u);
-    @if(!strict) let row_p = env_cdf[y] - select(0.0, env_cdf[y - 1u], y > 0u);
-    @if(strict) let row_p = env_cdf[y] - select(0.0, env_cdf[max(y, 1u) - 1u], y > 0u);
+    @if(!strict) let row_p = env_cdf_at(y) - select(0.0, env_cdf_at(y - 1u), y > 0u);
+    @if(strict) let row_p = env_cdf_at(y) - select(0.0, env_cdf_at(max(y, 1u) - 1u), y > 0u);
     let base = h + y * w;
-    @if(!strict) let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + x - 1u], x > 0u);
-    @if(strict) let col_p = env_cdf[base + x] - select(0.0, env_cdf[base + max(x, 1u) - 1u], x > 0u);
+    @if(!strict) let col_p = env_cdf_at(base + x) - select(0.0, env_cdf_at(base + x - 1u), x > 0u);
+    @if(strict) let col_p = env_cdf_at(base + x) - select(0.0, env_cdf_at(base + max(x, 1u) - 1u), x > 0u);
     let sin_t = sin((f32(y) + 0.5) / f32(h) * PI);
     return row_p * col_p * f32(w) * f32(h) / (2.0 * PI * PI * max(sin_t, 1e-4));
 }
@@ -1500,7 +1503,7 @@ fn lower_bound(start: u32, count: u32, x: f32) -> u32 {
     var hi = count;
     while (lo < hi) {
         let mid = (lo + hi) / 2u;
-        if (env_cdf[start + mid] < x) { lo = mid + 1u; } else { hi = mid; }
+        if (env_cdf_at(start + mid) < x) { lo = mid + 1u; } else { hi = mid; }
     }
     return min(lo, count - 1u);
 }

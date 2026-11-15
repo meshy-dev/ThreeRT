@@ -2,8 +2,8 @@
 //!
 //! `Table`s (pathtrace.wgsl `tables`, an array of vec4s): the scene's records. `Stream`s (`words`, an array of
 //! 32-bit words): its flat arrays. A section holds one of them and the room after it, and the kernel finds it by the
-//! element `Params::tables` / `Params::words` name (`Heap::firsts`), so what a scene has more of is another section,
-//! not another binding. Sections start at multiples of `ALIGN` bytes: a pass that writes one binds it as a buffer of
+//! element `Params::table_first` / `Params::word_first` name (`Heap::firsts`), so what a scene has more of is
+//! another section, not another binding. Sections start at multiples of `ALIGN` bytes: a pass that writes one binds it as a buffer of
 //! its own (`Heap::binding`), and a binding's offset is a multiple of that (WebGPU's
 //! `minStorageBufferOffsetAlignment`). One that outgrows its room is given more in a new buffer, the contents copied
 //! on the GPU (`Heap::grow`); the scene's bind group is then made again (`Gpu::rebind_scene`).
@@ -51,6 +51,27 @@ impl Section for Table {
     const COUNT: usize = 10;
     const UNIT: u64 = 16;
     const LABEL: &'static str = "tables";
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The scene's flat arrays of 32-bit words, in `Params::word_first`'s order (pathtrace.wgsl `env_cdf_at`, `pword`,
+/// `vcolor_word`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stream {
+    /// The environment's sampling CDF (floats): the rows' marginal CDF, then each row's.
+    EnvCdf,
+    /// The procedural geometry's region (scene::ProcLayout): headers and materials, then the geometries' blobs.
+    Procs,
+    /// Vertex colours: three sRGB8 words a triangle, in the triangles' GPU order.
+    VertexColors,
+}
+
+impl Section for Stream {
+    const COUNT: usize = 3;
+    const UNIT: u64 = 4;
+    const LABEL: &'static str = "words";
     fn index(self) -> usize {
         self as usize
     }
