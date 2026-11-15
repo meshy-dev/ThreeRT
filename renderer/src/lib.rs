@@ -60,13 +60,6 @@ pub const GROUPS: usize = 8;
 
 /// Everything the GPU kernels need for a loaded scene: triangle layout for the active traversal backend, emitter CDF,
 /// baked sky + its sampling CDF, and the base kernel parameters (camera from the scene).
-impl Prepared {
-    /// The light tree's nodes as the kernel reads them (none without a tree).
-    pub fn tree_nodes(&self) -> &[[f32; 4]] {
-        self.light_tree.as_ref().map_or(&[], |t| &t.nodes)
-    }
-}
-
 pub struct Prepared {
     pub tri_verts: Vec<[f32; 4]>,
     /// Triangle counts of the traversal groups, in order: shadow-casting opaque, shadow-casting cutout,

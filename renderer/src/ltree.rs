@@ -48,6 +48,11 @@ pub fn live_candidates() -> u32 {
     std::env::var("THREERT_LT_RIS").ok().and_then(|v| v.parse().ok()).unwrap_or(RIS_LIVE).max(1)
 }
 
+/// A scene's tree as the kernel reads it: its nodes (none without a tree).
+pub fn nodes_of(tree: Option<&LightTree>) -> &[[f32; 4]] {
+    tree.map_or(&[], |t| &t.nodes)
+}
+
 /// Node child word: internal nodes hold their left child (the right one follows it); leaves LEAF | (count - 1) << 29 |
 /// their first entry.
 pub const LEAF: u32 = 0x8000_0000;

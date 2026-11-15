@@ -229,7 +229,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     tables.defer_powers = emit.is_some();
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
-    let mut up = g.upload(&sc, w, h, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, prep.tree_nodes(), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
+    // (The light tree is the tables' by now: its nodes from there.)
+    let mut up = g.upload(&sc, w, h, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     // The merged layout: the kernel written for this view's group-1 buffers (merged.rs).
     if let (Some(caps), Some((_, live))) = (&mut up.kernel.caps, &targets.kernel.merged) {
         caps.live = *live;
