@@ -12,6 +12,7 @@ pub mod denoise;
 pub mod desc;
 pub mod files;
 pub mod gpu;
+pub mod heap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 pub mod live;
@@ -59,6 +60,13 @@ pub const GROUPS: usize = 8;
 
 /// Everything the GPU kernels need for a loaded scene: triangle layout for the active traversal backend, emitter CDF,
 /// baked sky + its sampling CDF, and the base kernel parameters (camera from the scene).
+impl Prepared {
+    /// The light tree's nodes as the kernel reads them (none without a tree).
+    pub fn tree_nodes(&self) -> &[[f32; 4]] {
+        self.light_tree.as_ref().map_or(&[], |t| &t.nodes)
+    }
+}
+
 pub struct Prepared {
     pub tri_verts: Vec<[f32; 4]>,
     /// Triangle counts of the traversal groups, in order: shadow-casting opaque, shadow-casting cutout,
@@ -73,7 +81,7 @@ pub struct Prepared {
     pub energy: Vec<[f32; 4]>,
     /// Emissive triangles (also those at power 0), for re-weighting `emitters` after power / material edits.
     pub emitter_tris: Vec<EmitterTri>,
-    /// The light tree over the static emitters (`ltree`), its nodes after the CDF in `emitters`.
+    /// The light tree over the static emitters (`ltree`).
     pub light_tree: Option<ltree::LightTree>,
     /// Material -> runs of its flattened static triangles (first, end in the traversal order, object), and the
     /// materials that also cover pool or dynamic triangles: a material that starts emitting gets emitter entries in
@@ -213,7 +221,7 @@ pub fn rng_seed() -> u32 {
 pub const LIGHT_GROUP: usize = 16;
 
 /// Distance beyond which a local light gives nothing (the kernel's range test in `local_lights`); f32::MAX without a
-/// range. (A black light gives nothing anywhere: `lights_with_groups` leaves it out.)
+/// range. (A black light gives nothing anywhere: `light_groups` leaves it out.)
 fn light_reach(l: &scene::GpuLight) -> f32 {
     if l.color[3] <= 0.0 {
         return f32::MAX;
@@ -260,7 +268,7 @@ fn light_class(l: &scene::GpuLight) -> u8 {
 
 /// The kernel's light order: directional lights first (it loops over them), then local lights without shadows (evaluated
 /// exactly at camera hits, like UE's deferred lights), then shadowed ones (one shadow ray each when few, else sampled);
-/// each class spatially sorted into the kernel's light groups (`lights_with_groups`).
+/// each class spatially sorted into the kernel's light groups (`light_groups`).
 pub fn light_order(lights: &[scene::GpuLight]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..lights.len()).collect();
     order.sort_by_key(|&i| light_class(&lights[i]));
@@ -272,19 +280,19 @@ pub fn light_order(lights: &[scene::GpuLight]) -> Vec<usize> {
     order
 }
 
-/// The light table as uploaded: the lights, then per group of LIGHT_GROUP local lights (counted from the first local
-/// one) an entry whose `pos` is the sphere (centre, radius) holding every point its lights reach. Black lights (off, or
-/// hidden: `scene::gpu_light_shown`) reach nothing and are in no sphere; a group of them alone has radius -1 (no point
-/// is in it). THREERT_LIGHT_GROUPS=0: unbounded spheres, every light tested (A/B).
-pub fn lights_with_groups(lights: &[scene::GpuLight]) -> Vec<scene::GpuLight> {
+/// The light groups' table: per group of LIGHT_GROUP local lights (counted from the first local one) the sphere
+/// (centre, radius) holding every point its lights reach. Black lights (off, or hidden: `scene::gpu_light_shown`)
+/// reach nothing and are in no sphere; a group of them alone has radius -1 (no point is in it).
+/// THREERT_LIGHT_GROUPS=0: unbounded spheres, every light tested (A/B).
+pub fn light_groups(lights: &[scene::GpuLight]) -> Vec<[f32; 4]> {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let off = *OFF.get_or_init(|| std::env::var("THREERT_LIGHT_GROUPS").is_ok_and(|v| v == "0"));
     let nd = lights.iter().take_while(|l| l.pos[3] == 0.0).count();
-    let mut out = lights.to_vec();
+    let mut out = vec![];
     for g in lights[nd..].chunks(LIGHT_GROUP) {
         let lit = |l: &&scene::GpuLight| l.color[..3].iter().any(|c| *c > 0.0);
         if !off && !g.iter().any(|l| lit(&l)) {
-            out.push(scene::GpuLight { pos: [0.0, 0.0, 0.0, -1.0], ..Default::default() });
+            out.push([0.0, 0.0, 0.0, -1.0]);
             continue;
         }
         let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
@@ -305,7 +313,7 @@ pub fn lights_with_groups(lights: &[scene::GpuLight]) -> Vec<scene::GpuLight> {
         if r < f32::MAX {
             r = r * (1.0 + 1e-5) + 1e-3 * (1.0 + c.abs().max_element() * 1e-3);
         }
-        out.push(scene::GpuLight { pos: [c.x, c.y, c.z, r], ..Default::default() });
+        out.push([c.x, c.y, c.z, r]);
     }
     out
 }
@@ -613,16 +621,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         // From here on an entry of the tree is its position in `emitter_tris` (the live view's refits read it so).
         t.order = (0..t.order.len() as u32).collect();
     }
-    let (mut emitters, total, _) = emitter_cdf(&emitter_tris, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
-    let ltree_param = match &light_tree {
-        Some(t) => {
-            let off = emitters.len() as u32;
-            emitters.extend_from_slice(&t.nodes);
-            // The moving emitters (after the tree's in the CDF) are picked with the probability of their share of power.
-            [f32::from_bits(off), f32::from_bits(t.order.len() as u32), if total > 0.0 { ((total - t.power) / total).max(0.0) } else { 0.0 }, ltree::RIS_OFFLINE as f32]
-        }
-        None => [0.0; 4],
-    };
+    let (emitters, total, _) = emitter_cdf(&emitter_tris, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
+    // The moving emitters (after the tree's in the CDF) are picked with the probability of their share of power.
+    let ltree_param = light_tree.as_ref().map_or([0.0; 4], |t| [0.0, f32::from_bits(t.order.len() as u32), if total > 0.0 { ((total - t.power) / total).max(0.0) } else { 0.0 }, ltree::RIS_OFFLINE as f32]);
 
     // Sky / environment.
     let t = Instant::now();
@@ -670,8 +671,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         scene::SkyData::Color(c) => (gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, *c, false),
         scene::SkyData::None => (gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, Vec3::ZERO, false),
     };
-    // The procedural region rides after the environment's CDF (its binding is the kernel's one flat 32-bit array, and
-    // the kernel has no binding to spare: Metal's 29 with the translucency pass); gpu.rs `upload_procs` lays it out.
+    // The procedural region rides after the environment's CDF (its binding is the kernel's one flat 32-bit array);
+    // gpu.rs `upload_procs` lays it out.
     let env_cdf = build_env_cdf(&env);
     // (w: the vertex colours' first vec4 in `prev_verts`, after the dynamic tail's previous vertices; gpu.rs F_VCOLOR.)
     if !sc.gpu_vcolors.is_empty() {
@@ -746,6 +747,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         ltile: [0; 4],
         ltile2: [0; 4],
         lt_cam: [[0.0; 4]; 4],
+        // (`gpu::Uploaded::place`, with the buffers.)
+        table_first: [[0; 4]; 3],
     };
     let mut params = params;
     let mut first = 0u32;
@@ -1044,20 +1047,20 @@ mod light_lod_tests {
         let sorted: Vec<_> = order.iter().map(|&i| lights[i]).collect();
         let classes: Vec<u8> = sorted.iter().map(light_class).collect();
         assert!(classes.windows(2).all(|w| w[0] <= w[1]), "classes stay in order");
-        let table = lights_with_groups(&sorted);
+        let table = light_groups(&sorted);
         let nd = 1;
-        assert_eq!(table.len(), sorted.len() + (sorted.len() - nd).div_ceil(LIGHT_GROUP));
+        assert_eq!(table.len(), (sorted.len() - nd).div_ceil(LIGHT_GROUP));
         for (i, l) in sorted.iter().enumerate().skip(nd) {
-            let g = table[sorted.len() + (i - nd) / LIGHT_GROUP].pos;
+            let g = table[(i - nd) / LIGHT_GROUP];
             let d = Vec3::new(g[0], g[1], g[2]).distance(Vec3::from_slice(&l.pos[..3]));
             assert!(d + light_reach(l) <= g[3], "light {i} reaches out of its group's sphere");
         }
         // Spatially compact: the groups' mean radius well under that of the same classes in their original order.
         let mut plain: Vec<usize> = (0..lights.len()).collect();
         plain.sort_by_key(|&i| light_class(&lights[i]));
-        let unsorted = lights_with_groups(&plain.iter().map(|&i| lights[i]).collect::<Vec<_>>());
-        let mean = |t: &[scene::GpuLight]| {
-            let r: Vec<f32> = t[sorted.len()..].iter().map(|g| g.pos[3]).filter(|r| *r < f32::MAX).collect();
+        let unsorted = light_groups(&plain.iter().map(|&i| lights[i]).collect::<Vec<_>>());
+        let mean = |t: &[[f32; 4]]| {
+            let r: Vec<f32> = t.iter().map(|g| g[3]).filter(|r| *r < f32::MAX).collect();
             r.iter().sum::<f32>() / r.len() as f32
         };
         assert!(mean(&table) < 0.5 * mean(&unsorted), "groups are compact: {} vs {}", mean(&table), mean(&unsorted));
@@ -1070,15 +1073,15 @@ mod light_lod_tests {
         let at = |x: f32, lit: bool| scene::GpuLight { pos: [x, 0.0, 0.0, 1.0], color: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 10.0], ..Default::default() };
         // 16 lit lights within 15 m and, in their group's place, one of them black 10 km away: the sphere as without it.
         let mut near: Vec<_> = (0..LIGHT_GROUP).map(|k| at(k as f32, true)).collect();
-        let lit = lights_with_groups(&near)[LIGHT_GROUP].pos;
+        let lit = light_groups(&near)[0];
         near[3] = at(-10_000.0, false);
-        let with_black = lights_with_groups(&near)[LIGHT_GROUP].pos;
+        let with_black = light_groups(&near)[0];
         assert!(with_black[3] <= lit[3] && with_black[3] > 0.0, "{with_black:?} for {lit:?}");
         // A group of black lights alone: radius -1.
         let dark: Vec<_> = (0..LIGHT_GROUP + 2).map(|k| at(k as f32, k < LIGHT_GROUP)).collect();
-        let t = lights_with_groups(&dark);
-        assert!(t[dark.len()].pos[3] > 0.0);
-        assert_eq!(t[dark.len() + 1].pos[3], -1.0);
+        let t = light_groups(&dark);
+        assert!(t[0][3] > 0.0);
+        assert_eq!(t[1][3], -1.0);
     }
 }
 

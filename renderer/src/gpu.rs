@@ -1,5 +1,6 @@
 //! Headless wgpu backend: uploads the flattened scene once, accumulates path-traced samples, reads back HDR.
 
+use crate::heap::{Heap, Section, Table};
 use crate::scene::Scene;
 use crate::GROUPS;
 use anyhow::{anyhow, Result};
@@ -48,7 +49,7 @@ pub struct Gpu {
     /// Hardware ray queries (Metal / Vulkan RT). Software BVH traversal otherwise.
     pub hwrt: bool,
     /// Last uploaded texture pages, reused while the scene's texture set is unchanged (live edits re-upload often).
-    pages: std::sync::Mutex<Option<(u64, wgpu::TextureView, wgpu::Buffer)>>,
+    pages: std::sync::Mutex<Option<(u64, wgpu::TextureView, std::sync::Arc<Vec<[f32; 4]>>)>>,
     /// The translucency pass (hardware RT): group 2's layout (translucent.wgsl), the kernel layout with it, and its
     /// pipelines (`translucent`, `volume_train`) by the kernel's variant key.
     tl_layout: Option<wgpu::BindGroupLayout>,
@@ -105,8 +106,8 @@ pub struct Params {
     /// Live emitter cull's view cone (lib.rs `EmitterCull`): the forward direction it was built for (xyz), the cosine
     /// of its half-angle (w).
     pub lod_view: [f32; 4],
-    /// Light tree (`ltree`): its first node in `emitters` (bits), its entry count (bits: the first moving emitter's
-    /// entry), the probability of picking a moving emitter (their share of power), candidates at camera hits (0 = off).
+    /// Light tree (`ltree`): -, its entry count (bits: the first moving emitter's entry), the probability of picking
+    /// a moving emitter (their share of power), candidates at camera hits (0 = off).
     pub ltree: [f32; 4],
     /// Procedural geometry (F_PROC; scene::proc_data): its first word in the `env_cdf` binding (after the environment's
     /// CDF), object count, first record in `instances`, -.
@@ -124,6 +125,8 @@ pub struct Params {
     /// The camera the lists were built under (the last frame's): position (w = tan(fov / 2)), forward (w = aspect),
     /// right, up. A camera hit reads the list of the tile it was seen in then.
     pub lt_cam: [[f32; 4]; 4],
+    /// Each table's first vec4 in the tables' heap (`heap::Table`'s order; `Uploaded::place`).
+    pub table_first: [[u32; 4]; 3],
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
@@ -180,28 +183,17 @@ pub struct PendingProc {
     size: wgpu::BlasAABBGeometrySizeDescriptor,
 }
 
-/// The kernel's bindings of the seven tables the merged layout holds in one (merged.rs `TABLES`, in its order).
-const MERGED_TABLE_BINDINGS: [u32; 7] = [4, 5, 6, 14, 15, 17, 18];
-
-impl Uploaded {
-    /// The seven tables, in merged.rs `TABLES`' order.
-    fn table_buffers(&self) -> [&wgpu::Buffer; 7] {
-        [&self.materials, &self.lights, &self.emitters, &self.bg_parts.texinfo, &self.objects, &self.instances, &self.media]
-    }
-}
-
-/// The uniform tables' buffers among the seven (`table_buffers`), in merged.rs `UNIFORM_TABLES`' order.
-fn uniform_sources(tables: [&wgpu::Buffer; 7]) -> [&wgpu::Buffer; 4] {
-    crate::merged::UNIFORM_TABLES.map(|k| tables[k])
-}
+/// The acceleration structure's binding in the scene's group (trace_hw.wgsl `acc`): the last, after every buffer.
+const ACC_BINDING: u32 = 16;
 
 /// A note for each uniform table that a scene has more entries of (`used`, merged.rs `UNIFORM_TABLES`' order) than
 /// its array holds: the kernel reads the last entry for the rest.
 pub(crate) fn uniform_overflow(used: [u64; 4]) -> Vec<String> {
-    use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
-    (0..4)
-        .filter(|&k| used[k] > UNIFORM_LEN[k] as u64)
-        .map(|k| format!("uniform tables: the scene has {} entries of `{}`, a uniform buffer holds {} (the rest read as the last one; THREERT_UNIFORM_TABLES=0 binds storage buffers)", used[k], TABLES[UNIFORM_TABLES[k]].name, UNIFORM_LEN[k]))
+    crate::merged::UNIFORM_TABLES
+        .iter()
+        .zip(used)
+        .filter(|(t, used)| *used > t.len as u64)
+        .map(|(t, used)| format!("uniform tables: the scene has {used} entries of `{}`, a uniform buffer holds {} (the rest read as the last one; THREERT_UNIFORM_TABLES=0 reads the tables' heap)", t.name, t.len))
         .collect()
 }
 
@@ -210,18 +202,10 @@ fn uniform_copy_bytes(table: u64, copy: u64) -> u64 {
     table.min(copy) & !3
 }
 
-/// A scene bind group's entries with the uniform tables' copies in their tables' places.
-fn bind_uniform_tables<'a>(entries: &mut Vec<wgpu::BindGroupEntry<'a>>, copies: &'a [wgpu::Buffer; 4]) {
-    let bindings = crate::merged::UNIFORM_TABLES.map(|k| MERGED_TABLE_BINDINGS[k]);
-    entries.retain(|e| !bindings.contains(&e.binding));
-    entries.extend(copies.iter().zip(bindings).map(|(b, binding)| wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }));
-}
 
 /// What the scene bind group holds besides `Uploaded`'s buffers (`Gpu::rebind_scene` makes it again).
 pub struct BindParts {
     pub nodes: wgpu::Buffer,
-    pub energy: wgpu::Buffer,
-    pub texinfo: wgpu::Buffer,
     pub tex_view: wgpu::TextureView,
     pub env_view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
@@ -229,14 +213,50 @@ pub struct BindParts {
     pub grid_view: wgpu::TextureView,
 }
 
+/// What the scene's bind group is made of (`Gpu::scene_bind_group`).
+struct SceneBuffers<'a> {
+    params: &'a wgpu::Buffer,
+    verts: &'a wgpu::Buffer,
+    attrs: &'a wgpu::Buffer,
+    heap: &'a Heap<Table>,
+    cdf: &'a wgpu::Buffer,
+    prev_verts: &'a wgpu::Buffer,
+    accum: &'a wgpu::Buffer,
+    parts: &'a BindParts,
+    accel: Option<&'a Accel>,
+    uniform: Option<&'a [wgpu::Buffer; 4]>,
+}
+
+/// The scene's buffers a particle pass writes (particles.wgsl, gpu_particles.wgsl: bindings 2 to 6; the objects'
+/// section of the tables as a buffer of its own). The pass's bind group holds them: one replaced, the group is made
+/// again (`Gpu::rebind_scene`).
+struct ParticleTargets<'a> {
+    verts: &'a wgpu::Buffer,
+    prev_verts: &'a wgpu::Buffer,
+    blas_verts: &'a wgpu::Buffer,
+    heap: &'a Heap<Table>,
+    attrs: &'a wgpu::Buffer,
+}
+
+fn buffer_entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+}
+
+/// A particle pass's bind group: its `own` buffers at their bindings, and the scene's it writes.
+fn particle_bind_group(d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, label: &str, own: &[(u32, &wgpu::Buffer)], t: &ParticleTargets) -> wgpu::BindGroup {
+    let mut entries: Vec<wgpu::BindGroupEntry> = own.iter().map(|(binding, b)| buffer_entry(*binding, b)).collect();
+    entries.extend([buffer_entry(2, t.verts), buffer_entry(3, t.prev_verts), buffer_entry(4, t.blas_verts), wgpu::BindGroupEntry { binding: 5, resource: t.heap.binding(Table::Objects) }, buffer_entry(6, t.attrs)]);
+    d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout: &pipeline.get_bind_group_layout(0), entries: &entries })
+}
+
 pub struct Uploaded {
     pub bg: wgpu::BindGroup,
     pub bg_parts: BindParts,
-    /// The merged layout (merged.rs): the buffer of the kernel's `MergedTables`, the seven tables below as its arrays
-    /// (`Gpu::sync_tables` copies them there each frame; their lengths: `kernel.caps`).
-    pub tables: Option<wgpu::Buffer>,
-    /// The uniform tables (`Gpu::uniform_tables`): the uniform buffers the kernel reads `bg_parts.texinfo`, `objects`,
-    /// `instances` and `media` from (merged.rs `UNIFORM_TABLES`' order; `Gpu::sync_tables` copies them there each frame).
+    /// The scene's tables (heap.rs): materials, lights, emitters, objects, instances, media and the rest, each a
+    /// section that edits write in place (`Heap::write`) and grow (`Heap::grow`, then `Gpu::rebind_scene`).
+    pub heap: Heap<Table>,
+    /// The uniform tables (`Gpu::uniform_tables`): the uniform buffers the kernel reads four tables from (merged.rs
+    /// `UNIFORM_TABLES`' order; `Gpu::sync_tables` copies their sections there each frame).
     pub uniform: Option<[wgpu::Buffer; 4]>,
     pub accum: wgpu::Buffer,
     pub params: wgpu::Buffer,
@@ -244,11 +264,6 @@ pub struct Uploaded {
     pub height: u32,
     /// Kernel specialisation for this scene (`Gpu::pipeline`).
     pub kernel: Kernel,
-    /// Tables that parameter edits rewrite in place (`patch`).
-    pub materials: wgpu::Buffer,
-    pub lights: wgpu::Buffer,
-    pub objects: wgpu::Buffer,
-    pub emitters: wgpu::Buffer,
     /// Triangle vertices / shading attributes (posed models rewrite their ranges).
     pub verts: wgpu::Buffer,
     pub attrs: wgpu::Buffer,
@@ -265,15 +280,12 @@ pub struct Uploaded {
     pub gpu_particles: Option<GpuParticlesGpu>,
     /// The density grids (the atlas the kernel reads, the grid programs' pass), when the scene has any.
     pub grids: Option<GridsGpu>,
-    /// The media table (`MediumGpu`) and each medium's node.
-    pub media: wgpu::Buffer,
+    /// Each medium's node (the media table's order).
     /// Vertex colours (F_VCOLOR): their byte offset in `prev_verts` (three words per triangle, room included).
     pub vcolor_base: Option<u64>,
     pub media_nodes: Vec<u32>,
     /// Per medium: its node is hidden (`set_medium_hidden`). The live view runs no media pass while all are.
     pub media_hidden: std::cell::RefCell<Vec<bool>>,
-    /// The model instances' kernel records (`GpuInstance`): movable ones are rewritten when they move.
-    pub instances: wgpu::Buffer,
     /// Room for in-place geometry edits (`EditRoom`), and the binding that holds the environment CDF and the
     /// procedural region, with the CDF's length and the region's words in use (the room follows them).
     pub room: EditRoom,
@@ -296,6 +308,9 @@ pub struct ParticleGpu {
     params: wgpu::Buffer,
     /// The system table (`ParticleSystemGpu`) and each system's node (pivot updates when it moves).
     table: wgpu::Buffer,
+    /// The pass's own buffers besides: the last frame's vertices, the translucent BLAS input's stand-in.
+    last: wgpu::Buffer,
+    no_trans: wgpu::Buffer,
     nodes: Vec<u32>,
     systems: u32,
     max_count: u32,
@@ -340,6 +355,21 @@ pub struct Translucent {
     pub count: wgpu::Buffer,
     /// Live below full resolution: (colour, transmittance) per traced pixel (translucent.wgsl `tlow`).
     pub low: wgpu::Buffer,
+}
+
+impl Uploaded {
+    /// The light table as it is now, and its groups' spheres (lib.rs `light_groups`).
+    pub fn put_lights(&self, q: &wgpu::Queue, lights: &[crate::scene::GpuLight]) {
+        self.heap.write(q, Table::Lights, 0, bytemuck::cast_slice(lights));
+        self.heap.write(q, Table::LightGroups, 0, bytemuck::cast_slice(&crate::light_groups(lights)));
+    }
+
+    /// Where the kernel finds each table (`Params::table_first`): written with the parameters, every time (a
+    /// section that grew moves those after it).
+    pub fn place(&self, p: &mut Params) {
+        let first = self.heap.firsts();
+        p.table_first = std::array::from_fn(|k| std::array::from_fn(|j| first.get(k * 4 + j).copied().unwrap_or(0)));
+    }
 }
 
 impl Translucent {
@@ -499,6 +529,8 @@ pub struct GpuParticlesGpu {
     bg: wgpu::BindGroup,
     params: wgpu::Buffer,
     table: wgpu::Buffer,
+    last: wgpu::Buffer,
+    state: wgpu::Buffer,
     spawns: wgpu::Buffer,
     pub grid: wgpu::Buffer,
     systems: std::cell::RefCell<Vec<GpuParticleSystemGpu>>,
@@ -762,17 +794,15 @@ impl KernelVariant {
     }
 
     /// The numbers the variant is compiled for, WESL constants (`import constants::`): the merged layout's array
-    /// lengths (`MT_<table>`, `ML_<buffer>`), the uniform tables' (`UT_<table>`), the loop guard's count's words and
-    /// its limit.
+    /// lengths (`ML_<buffer>`), the uniform tables' (`UT_<table>`), the loop guard's count's words and its limit.
     pub fn constants(&self) -> Vec<(String, u32)> {
-        use crate::merged::{GUARD_WORDS, KERNEL_LIVE, TABLES, UNIFORM_LEN, UNIFORM_TABLES};
+        use crate::merged::{GUARD_WORDS, KERNEL_LIVE, UNIFORM_TABLES};
         let mut out = vec![];
         if let Some(c) = &self.merged {
-            out.extend(TABLES.iter().zip(c.tables).map(|(m, n)| (format!("MT_{}", m.name.to_uppercase()), n)));
             out.extend(KERNEL_LIVE.iter().zip(c.live).map(|(m, n)| (format!("ML_{}", m.name.to_uppercase()), n)));
         }
         if self.uniform_tables {
-            out.extend(UNIFORM_TABLES.iter().zip(UNIFORM_LEN).map(|(&k, n)| (format!("UT_{}", TABLES[k].name.to_uppercase()), n)));
+            out.extend(UNIFORM_TABLES.iter().map(|t| (format!("UT_{}", t.name.to_uppercase()), t.len)));
         }
         if self.merged.is_some() || self.guard.is_some() {
             out.push(("GUARD_WORDS".into(), GUARD_WORDS));
@@ -1213,8 +1243,8 @@ pub struct Kernel {
     /// The scene's geometry functions and their dispatch (pathtrace.wgsl `geometry_function`), spliced like `functions`.
     pub geometry_functions: String,
     pub hash: u64,
-    /// The merged layout (merged.rs): the lengths of the merged structs' arrays this kernel's source is written for
-    /// (the tables': `Gpu::upload`; group 1's: an offline render's `no_vis`, a live view's `KernelBufs`).
+    /// The merged layout (merged.rs): the lengths of the merged struct's arrays this kernel's source is written for
+    /// (an offline render's `no_vis`, a live view's `KernelBufs`).
     pub caps: Option<crate::merged::Caps>,
 }
 
@@ -1534,8 +1564,8 @@ impl Gpu {
         // layout with more does not validate).
         let merged = cfg!(target_arch = "wasm32") || std::env::var("THREERT_MERGED").is_ok_and(|v| v == "1");
         limits.max_storage_buffers_per_shader_stage = if merged { crate::merged::STORAGE_BUFFERS } else { al.max_storage_buffers_per_shader_stage.min(31) };
-        // Storage + uniform buffers together (the kernel binds 19 storage buffers, a live pass at most 8, each beside its
-        // uniforms; Metal allows 31).
+        // Storage + uniform buffers and acceleration structures together (the translucency pass binds 17 storage
+        // buffers, 18 with the loop guard's, 2 uniform ones and 2 structures; Metal allows 29).
         limits.max_buffers_and_acceleration_structures_per_shader_stage = al.max_buffers_and_acceleration_structures_per_shader_stage.min(31);
         limits.max_acceleration_structures_per_shader_stage = al.max_acceleration_structures_per_shader_stage;
         limits.max_blas_geometry_count = al.max_blas_geometry_count;
@@ -1579,51 +1609,35 @@ impl Gpu {
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         };
-        // (The uniform tables: these four bindings hold uniform buffers; merged.rs `UNIFORM_TABLES`.)
-        let table = |binding: u32| if uniform_tables { uniform(binding) } else { storage(binding, true) };
+        let texture = |binding: u32, view_dimension: wgpu::TextureViewDimension| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension, multisampled: false },
+            count: None,
+        };
+        // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, the
+        // software tree; the tables' heap; the environment's CDF; the dynamic triangles' previous vertices; the
+        // texture pages and their sampler, the environment, the density grids' atlas (a 1-cell texture in scenes
+        // without grids, whose kernel does not read it); the accumulation buffer; then what only some devices have.
         let mut entries = vec![
-                uniform(0),
-                storage(1, true),
-                storage(2, true),
-                storage(3, true),
-                storage(4, true),
-                storage(5, true),
-                storage(6, true),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    count: None,
-                },
-                storage(10, true),
-                storage(11, false),
-                uniform(12),
-                table(14),
-                table(15),
-                storage(16, true),
-                table(17),
-                table(18),
-                // The density grids' atlas (F_GRID; a 1-cell texture in scenes without grids, whose kernel does not read it).
-                wgpu::BindGroupLayoutEntry {
-                    binding: 19,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false },
-                    count: None,
-                },
+            uniform(0),
+            storage(1, true),
+            storage(2, true),
+            storage(3, true),
+            storage(4, true),
+            storage(5, true),
+            storage(6, true),
+            texture(7, wgpu::TextureViewDimension::D2Array),
+            wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            texture(9, wgpu::TextureViewDimension::D2),
+            texture(10, wgpu::TextureViewDimension::D3),
+            storage(11, false),
         ];
-        if hwrt {
-            entries.push(wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None });
+        if uniform_tables {
+            entries.extend(crate::merged::UNIFORM_TABLES.iter().map(|t| uniform(t.binding)));
         }
-        // The merged layout: the seven tables are one binding, the first of theirs (merged.rs `TABLES`).
-        if merged {
-            entries.retain(|e| !MERGED_TABLE_BINDINGS[1..].contains(&e.binding));
+        if hwrt {
+            entries.push(wgpu::BindGroupLayoutEntry { binding: ACC_BINDING, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::AccelerationStructure { vertex_return: false }, count: None });
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
         let mut vis_entries = vec![
@@ -1838,10 +1852,10 @@ impl Gpu {
 
     /// The radiance cache's per-frame resolve (pathtrace.wgsl `cache_resolve`; kernel bind groups).
     pub fn cache_resolve_pipeline(&self, bufs: &KernelBufs) -> wgpu::ComputePipeline {
-        // (The merged layout: the kernel written for these buffers' lengths, and the least tables.)
+        // (The merged layout: the kernel written for these buffers' lengths.)
         let module = match (&self.module, &bufs.merged) {
             (Some(m), _) => m.clone(),
-            (None, Some((_, live))) => self.kernel_module(&Kernel::plain(crate::merged::Caps { tables: crate::merged::TABLE_MIN, live: *live })),
+            (None, Some((_, live))) => self.kernel_module(&Kernel::plain(crate::merged::Caps { live: *live })),
             (None, None) => unreachable!("the merged layout's group 1 is one buffer"),
         };
         let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1857,7 +1871,7 @@ impl Gpu {
     }
 
     /// Texture pages for the scene's texture set (see `texpack`), cached across uploads of the same set.
-    fn texture_pages(&self, scene: &Scene, timings: &mut Vec<(String, f64)>) -> (wgpu::TextureView, wgpu::Buffer) {
+    fn texture_pages(&self, scene: &Scene, timings: &mut Vec<(String, f64)>) -> (wgpu::TextureView, std::sync::Arc<Vec<[f32; 4]>>) {
         let key = crate::texpack::set_key(&scene.textures);
         let mut cache = self.pages.lock().unwrap();
         if let Some((k, view, info)) = cache.as_ref() {
@@ -1890,8 +1904,7 @@ impl Gpu {
             }
         }
         let view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-        // (The merged layout copies it into the tables' buffer, the uniform tables into its uniform copy: `sync_tables`.)
-        let info = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("tex_info"), contents: bytemuck::cast_slice(&packed.info), usage: if self.merged || self.uniform_tables { wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::STORAGE } });
+        let info = std::sync::Arc::new(packed.info);
         timings.push(("texture_pages_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
         *cache = Some((key, view.clone(), info.clone()));
         (view, info)
@@ -1900,10 +1913,9 @@ impl Gpu {
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
     /// bind group used by both the offline and the live kernels. `accum` holds one 80-byte Pixel per output pixel.
     #[allow(clippy::too_many_arguments)]
-    pub fn upload(&self, scene: &Scene, w: u32, h: u32, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
+    pub fn upload(&self, scene: &Scene, w: u32, h: u32, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
-        // Empty tables still bind one zeroed element (the largest is a material, 368 B).
         // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
         // triangle without area; bvh.rs `EMPTY`.)
         let buf = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
@@ -1934,7 +1946,7 @@ impl Gpu {
         // The dynamic tail (groups 4..8; the instanced pool follows it, its deforming meshes first: theirs too).
         let dynamic_end: usize = groups.iter().sum::<usize>() + crate::scene::deforming_pool(&scene.meshes);
         let prev = &tri_verts[(dynamic_first * 3).min(tri_verts.len())..(dynamic_end * 3).min(tri_verts.len())];
-        // Vertex colours (F_VCOLOR) ride after the previous vertices (the kernel has no binding to spare), from vec4
+        // Vertex colours (F_VCOLOR) ride after the previous vertices, from vec4
         // `Params::procs.w` on, the edit room's triangles' too (the edits write theirs). Without them: as before.
         let b_prev = if scene.gpu_vcolors.is_empty() {
             buf("prev verts", bytemuck::cast_slice(prev), edit)
@@ -1950,19 +1962,11 @@ impl Gpu {
         // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
         // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
         timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
-        let b_mats = buf("materials", bytemuck::cast_slice(&scene.materials), edit);
-        let b_lights = buf("lights", bytemuck::cast_slice(&crate::lights_with_groups(&scene.lights)), edit);
-        let b_emit = buf("emitters", bytemuck::cast_slice(emitters), edit);
         let (b_cdf, region_words, proc_room) = match &scene.proc_layout {
             None => (buf("env_cdf", bytemuck::cast_slice(env_cdf), st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC), 0, 0),
             Some(l) => self.upload_procs(env_cdf, l, room.proc_words, timings)?,
         };
         let room = EditRoom { proc_words: proc_room, ..room };
-        let b_energy = buf("energy", bytemuck::cast_slice(energy), wgpu::BufferUsages::UNIFORM);
-        let b_objects = buf_room("objects", bytemuck::cast_slice(&scene.objects), room.objects * scene.object_stride() * 16, edit);
-        let none = [crate::scene::GpuInstance::default()];
-        // COPY_DST: live pose / customData edits (`set_medium`).
-        let b_media = buf("media", bytemuck::cast_slice(&scene.media), edit);
         // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
         // other textures (A', B, B'), its two half steps and its sources.
         let grids = (!scene.grids.is_empty()).then(|| {
@@ -2017,14 +2021,29 @@ impl Gpu {
             GridsGpu { atlas, pipeline, grids, step: std::cell::Cell::new(0) }
         });
         let grid_view = grids.as_ref().map_or_else(|| self.no_grid_view.clone(), |g| g.atlas.create_view(&Default::default()));
-        // COPY_DST: movable instances' transforms (live moves).
-        // The procedural objects' records follow the model instances' (moved like them); records edits add follow both.
-        let b_instances = buf_room("instances", bytemuck::cast_slice(if records.is_empty() { &none[..] } else { &records[..] }), room.records * std::mem::size_of::<crate::scene::GpuInstance>(), edit);
         let accum_size = (w as u64) * (h as u64) * 80;
         let b_accum = d.create_buffer(&wgpu::BufferDescriptor { label: Some("accum"), size: accum_size, usage: st | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let b_params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: std::mem::size_of::<Params>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 
-        let (tex_view, b_texinfo) = self.texture_pages(scene, timings);
+        let (tex_view, tex_info) = self.texture_pages(scene, timings);
+        // The scene's tables, the sections of one buffer (heap.rs), written as it is made. The objects' and the
+        // records' have the edits' room after them (the procedural objects' records follow the model instances').
+        let none = [crate::scene::GpuInstance::default()];
+        let spheres = crate::light_groups(&scene.lights);
+        let parts: [(Table, &[u8], usize); Table::COUNT] = [
+            (Table::Materials, bytemuck::cast_slice(&scene.materials), 0),
+            (Table::Lights, bytemuck::cast_slice(&scene.lights), 0),
+            (Table::LightGroups, bytemuck::cast_slice(&spheres), 0),
+            (Table::Emitters, bytemuck::cast_slice(emitters), 0),
+            (Table::LightTree, bytemuck::cast_slice(light_tree), 0),
+            (Table::TexInfo, bytemuck::cast_slice(&tex_info[..]), 0),
+            (Table::Objects, bytemuck::cast_slice(&scene.objects), room.objects * scene.object_stride() * 16),
+            (Table::Instances, bytemuck::cast_slice(if records.is_empty() { &none[..] } else { &records[..] }), room.records * std::mem::size_of::<crate::scene::GpuInstance>()),
+            (Table::Media, bytemuck::cast_slice(&scene.media), 0),
+            (Table::Energy, bytemuck::cast_slice(energy), 0),
+        ];
+        assert!(parts.iter().enumerate().all(|(k, p)| p.0.index() == k), "the tables in `Table`'s order");
+        let heap = Heap::filled(d, &parts.map(|p| (p.1.len() + p.2) as u64), |put| parts.iter().for_each(|p| put(p.0, 0, p.1)));
 
         let env_tex = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("env"),
@@ -2238,53 +2257,19 @@ impl Gpu {
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
         }
-        let mut bg_entries = vec![
-                e(0, &b_params),
-                e(1, &b_verts),
-                e(2, &b_attrs),
-                e(3, &b_nodes),
-                e(4, &b_mats),
-                e(5, &b_lights),
-                e(6, &b_emit),
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&tex_view) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&env_view) },
-                e(10, &b_cdf),
-                e(11, &b_accum),
-                e(12, &b_energy),
-                e(14, &b_texinfo),
-                e(15, &b_objects),
-                e(16, &b_prev),
-                e(17, &b_instances),
-                e(18, &b_media),
-                wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(&grid_view) },
-        ];
-        if let Some(a) = &accel {
-            bg_entries.push(wgpu::BindGroupEntry { binding: 13, resource: a.tlas.as_binding() });
-        }
-        // The merged layout: the tables' one buffer in their place (merged.rs).
-        let all_tables = [&b_mats, &b_lights, &b_emit, &b_texinfo, &b_objects, &b_instances, &b_media];
-        let tables = self.merged.then(|| self.tables_buffer(all_tables));
-        if let Some((t, _)) = &tables {
-            bg_entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
-            bg_entries.push(e(crate::merged::TABLES_BINDING, t));
-        }
-        // The uniform tables: four tables' uniform copies in their place (merged.rs `UNIFORM_TABLES`).
+        // The uniform tables: four tables' sections again in uniform buffers (merged.rs `UNIFORM_TABLES`).
         let uniform = self.uniform_tables.then(|| {
-            // What the scene has of each, against what its array holds (the buffers have the edits' room after it).
-            let used = [b_texinfo.size() / 16, scene.objects.len() as u64, records.len() as u64, scene.media.len() as u64];
+            // What the scene has of each, against what its array holds (the sections have the edits' room after it).
+            let used = [tex_info.len() as u64, scene.objects.len() as u64, records.len() as u64, scene.media.len() as u64];
             for note in uniform_overflow(used) {
                 eprintln!("threert: {note}");
             }
-            self.uniform_copies(uniform_sources(all_tables))
+            self.uniform_copies(&heap)
         });
-        if let Some(u) = &uniform {
-            bind_uniform_tables(&mut bg_entries, u);
-        }
-        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &bg_entries });
+        let bg_parts = BindParts { nodes: b_nodes, tex_view, env_view, sampler, grid_view };
+        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_verts, attrs: &b_attrs, heap: &heap, cdf: &b_cdf, prev_verts: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
         let mut kernel = Kernel::new(scene, groups);
-        kernel.caps = tables.as_ref().map(|t| crate::merged::Caps { tables: t.1, live: self.no_vis_bufs.merged.as_ref().expect("merged").1 });
-        let tables = tables.map(|t| t.0);
+        kernel.caps = self.no_vis_bufs.merged.as_ref().map(|m| crate::merged::Caps { live: m.1 });
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
         let translucent = match &accel {
             Some(_) if !scene.trans_tris.is_empty() => {
@@ -2337,17 +2322,14 @@ impl Gpu {
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particle params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles last"), size: b_prev.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let no_trans = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-                let pbg = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("particles"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &[e(0, &params), e(1, &b_sys), e(2, &b_verts), e(3, &b_prev), e(4, &a.verts), e(5, &b_objects), e(6, &b_attrs), e(7, &last), e(8, translucent.as_ref().map_or(&no_trans, |t| &t.verts))],
-                });
+                let written = ParticleTargets { verts: &b_verts, prev_verts: &b_prev, blas_verts: &a.verts, heap: &heap, attrs: &b_attrs };
+                let pbg = particle_bind_group(d, &pipeline, "particles", &[(0, &params), (1, &b_sys), (7, &last), (8, translucent.as_ref().map_or(&no_trans, |t| &t.verts))], &written);
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
                 let opaque = scene.particles.iter().any(|p| !p.translucent);
                 let counts = scene.particles.iter().map(|p| p.count).collect();
                 let translucent_sys = scene.particles.iter().map(|p| p.translucent).collect();
                 let hidden = std::cell::RefCell::new(scene.particles.iter().map(|p| if p.hidden { Hidden::Idle } else { Hidden::Shown }).collect());
-                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
+                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, last, no_trans, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
             }
             _ => None,
         };
@@ -2380,26 +2362,22 @@ impl Gpu {
                 if let Some(o) = &scene.voxel_occupancy {
                     o.write().unwrap().dirty.clear();
                 }
-                let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("gpu particles"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &[e(0, &params), e(1, &table), e(2, &b_verts), e(3, &b_prev), e(4, &a.verts), e(5, &b_objects), e(6, &b_attrs), e(7, &last), e(8, &state), e(9, &spawns), e(10, &grid)],
-                });
+                let written = ParticleTargets { verts: &b_verts, prev_verts: &b_prev, blas_verts: &a.verts, heap: &heap, attrs: &b_attrs };
+                let bg = particle_bind_group(d, &pipeline, "gpu particles", &[(0, &params), (1, &table), (7, &last), (8, &state), (9, &spawns), (10, &grid)], &written);
                 let host = scene.gpu_particles.iter().map(|ps| (0u32, 0.0f32, ps.rate)).collect();
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
                 let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &a.verts), wgpu::BindGroupEntry { binding: 1, resource: a.tlas.as_binding() }] });
-                Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n })
+                Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, last, state, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n })
             }
             _ => None,
         };
         self.queue.submit([]);
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
-        let bg_parts = BindParts { nodes: b_nodes, energy: b_energy, texinfo: b_texinfo, tex_view, env_view, sampler, grid_view };
         // (The scene's own pipelines, made above: particles, grid programs.)
         self.save_pipeline_cache();
-        Ok(Uploaded { bg, bg_parts, tables, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, materials: b_mats, lights: b_lights, objects: b_objects, emitters: b_emit, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, media: b_media, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), instances: b_instances, room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolor_base: (!scene.gpu_vcolors.is_empty()).then_some(scene.vcolor_base as u64 * 16), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, cdf: b_cdf, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2832,7 +2810,7 @@ impl Gpu {
             found = true;
             hidden[k] = hide;
             let at = k * size + std::mem::offset_of!(crate::scene::MediumGpu, a) + 4;
-            self.queue.write_buffer(&up.media, at as u64, bytemuck::bytes_of(&if hide { crate::scene::MEDIUM_HIDDEN } else { shape }));
+            up.heap.write(&self.queue, Table::Media, at as u64, bytemuck::bytes_of(&if hide { crate::scene::MEDIUM_HIDDEN } else { shape }));
         }
         found
     }
@@ -2846,10 +2824,10 @@ impl Gpu {
         let size = std::mem::size_of::<crate::scene::MediumGpu>();
         for (k, _) in up.media_nodes.iter().enumerate().filter(|(_, n)| **n == node) {
             if let Some(r) = rows {
-                self.queue.write_buffer(&up.media, (k * size) as u64, bytemuck::cast_slice(&r));
+                up.heap.write(&self.queue, Table::Media, (k * size) as u64, bytemuck::cast_slice(&r));
             }
             if let Some(c) = custom {
-                self.queue.write_buffer(&up.media, (k * size + std::mem::offset_of!(crate::scene::MediumGpu, c)) as u64, bytemuck::cast_slice(&c));
+                up.heap.write(&self.queue, Table::Media, (k * size + std::mem::offset_of!(crate::scene::MediumGpu, c)) as u64, bytemuck::cast_slice(&c));
             }
         }
     }
@@ -2953,59 +2931,45 @@ impl Gpu {
         }
     }
 
-    /// The scene bind group again, from `up`'s buffers as they are now (a buffer that grew: live/edits.rs `write_emitters`).
-    pub fn rebind_scene(&self, up: &mut Uploaded) {
-        fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-            wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
-        }
-        let p = &up.bg_parts;
+    /// The scene's bind group (group 0: pathtrace.wgsl's declarations, the layout `Gpu::new` makes).
+    fn scene_bind_group(&self, b: &SceneBuffers) -> wgpu::BindGroup {
+        let view = |binding: u32, v| wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) };
+        let p = b.parts;
         let mut entries = vec![
-            e(0, &up.params),
-            e(1, &up.verts),
-            e(2, &up.attrs),
-            e(3, &p.nodes),
-            e(4, &up.materials),
-            e(5, &up.lights),
-            e(6, &up.emitters),
-            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&p.tex_view) },
+            buffer_entry(0, b.params),
+            buffer_entry(1, b.verts),
+            buffer_entry(2, b.attrs),
+            buffer_entry(3, &p.nodes),
+            buffer_entry(4, &b.heap.buffer),
+            buffer_entry(5, b.cdf),
+            buffer_entry(6, b.prev_verts),
+            view(7, &p.tex_view),
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&p.sampler) },
-            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&p.env_view) },
-            e(10, &up.cdf),
-            e(11, &up.accum),
-            e(12, &p.energy),
-            e(14, &p.texinfo),
-            e(15, &up.objects),
-            e(16, &up.prev_verts),
-            e(17, &up.instances),
-            e(18, &up.media),
-            wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(&p.grid_view) },
+            view(9, &p.env_view),
+            view(10, &p.grid_view),
+            buffer_entry(11, b.accum),
         ];
-        if let Some(a) = &up.accel {
-            entries.push(wgpu::BindGroupEntry { binding: 13, resource: a.tlas.as_binding() });
+        if let Some(u) = b.uniform {
+            entries.extend(u.iter().zip(&crate::merged::UNIFORM_TABLES).map(|(copy, t)| buffer_entry(t.binding, copy)));
         }
-        // The merged layout: the tables' buffer, a larger one if a table outgrew its array (the kernel's source then
-        // has the new lengths: compiled on its next use).
-        let now: [u32; 7] = std::array::from_fn(|k| crate::merged::table_cap(k, up.table_buffers()[k].size()));
-        let tables = match (&up.tables, &up.kernel.caps) {
-            (Some(t), Some(caps)) if now == caps.tables => Some(t.clone()),
-            (Some(_), Some(_)) => Some(self.tables_buffer(up.table_buffers()).0),
-            _ => None,
-        };
-        if let Some(t) = &tables {
-            entries.retain(|e| !MERGED_TABLE_BINDINGS.contains(&e.binding));
-            entries.push(e(crate::merged::TABLES_BINDING, t));
+        if let Some(a) = b.accel {
+            entries.push(wgpu::BindGroupEntry { binding: ACC_BINDING, resource: a.tlas.as_binding() });
         }
-        // The uniform tables: the same copies (their size does not follow a table's: merged.rs `UNIFORM_LEN`).
-        if let Some(u) = &up.uniform {
-            bind_uniform_tables(&mut entries, u);
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries })
+    }
+
+    /// The bind groups that hold the scene's buffers again, from `up`'s as they are now (one that grew: the tables,
+    /// live/edits.rs): the kernel's, and the particle passes'.
+    pub fn rebind_scene(&self, up: &mut Uploaded) {
+        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, cdf: &up.cdf, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
+        let Some(a) = &up.accel else { return };
+        let written = ParticleTargets { verts: &up.verts, prev_verts: &up.prev_verts, blas_verts: &a.verts, heap: &up.heap, attrs: &up.attrs };
+        if let Some(p) = &mut up.particles {
+            p.bg = particle_bind_group(&self.device, &p.pipeline, "particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, up.translucent.as_ref().map_or(&p.no_trans, |t| &t.verts))], &written);
         }
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries });
-        drop(entries);
-        up.bg = bg;
-        if let (Some(_), Some(caps)) = (&tables, &mut up.kernel.caps) {
-            caps.tables = now;
+        if let Some(p) = &mut up.gpu_particles {
+            p.bg = particle_bind_group(&self.device, &p.pipeline, "gpu particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, &p.state), (9, &p.spawns), (10, &p.grid)], &written);
         }
-        up.tables = tables;
     }
 
     /// The loop guard's count as the GPU has it now (None: `kernel` has no guard): the invocations it stopped since
@@ -3023,52 +2987,31 @@ impl Gpu {
         Ok(Some(n))
     }
 
-    /// The buffer of the merged layout's `MergedTables` for these seven tables (merged.rs `TABLES`' order), and its
-    /// arrays' lengths.
-    fn tables_buffer(&self, tables: [&wgpu::Buffer; 7]) -> (wgpu::Buffer, [u32; 7]) {
-        let caps: [u32; 7] = std::array::from_fn(|k| crate::merged::table_cap(k, tables[k].size()));
-        let (_, size) = crate::merged::offsets(&crate::merged::TABLES, &caps);
-        (self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("merged tables"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), caps)
-    }
-
-    /// The uniform tables' buffers for these four tables (merged.rs `UNIFORM_TABLES`' order), filled from them as they
-    /// are now.
-    fn uniform_copies(&self, tables: [&wgpu::Buffer; 4]) -> [wgpu::Buffer; 4] {
-        use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
-        let copies: [wgpu::Buffer; 4] = std::array::from_fn(|k| {
-            let m = &TABLES[UNIFORM_TABLES[k]];
+    /// The uniform tables' buffers (merged.rs `UNIFORM_TABLES`' order), filled from their sections as they are now.
+    fn uniform_copies(&self, heap: &Heap<Table>) -> [wgpu::Buffer; 4] {
+        let copies = crate::merged::UNIFORM_TABLES.each_ref().map(|t| {
             // (COPY_SRC: read back by the test that holds them to the tables, and by whoever diagnoses a driver.)
-            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(m.name), size: m.stride * UNIFORM_LEN[k] as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
+            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(t.name), size: t.stride * t.len as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
         });
         let mut e = self.device.create_command_encoder(&Default::default());
-        Self::copy_uniform(&mut e, tables, &copies);
+        Self::copy_uniform(&mut e, heap, &copies);
         self.queue.submit([e.finish()]);
         copies
     }
 
-    fn copy_uniform(e: &mut wgpu::CommandEncoder, tables: [&wgpu::Buffer; 4], copies: &[wgpu::Buffer; 4]) {
-        for (src, dst) in tables.into_iter().zip(copies) {
-            let bytes = uniform_copy_bytes(src.size(), dst.size());
-            if bytes > 0 {
-                e.copy_buffer_to_buffer(src, 0, dst, 0, bytes);
-            }
+    fn copy_uniform(e: &mut wgpu::CommandEncoder, heap: &Heap<Table>, copies: &[wgpu::Buffer; 4]) {
+        for (t, dst) in crate::merged::UNIFORM_TABLES.iter().zip(copies) {
+            e.copy_buffer_to_buffer(&heap.buffer, heap.at(t.table), dst, 0, uniform_copy_bytes(heap.cap(t.table), dst.size()));
         }
     }
 
-    /// The merged layout: the tables as they are now, copied into the struct's buffer. The renderer writes the tables
-    /// where it always did; the passes that read the scene read this copy, so it is made in their encoder, before
-    /// them, each frame (the tables are small: a few copies of kilobytes). The uniform tables: the same, into the
-    /// four uniform buffers. After whatever writes a table on the GPU in that encoder (the particle passes write
-    /// their objects' entries).
+    /// The uniform tables: their sections as they are now, copied into the four uniform buffers. The renderer writes
+    /// the tables' heap; the passes that read the scene read these copies, so they are made in their encoder, before
+    /// them, each frame, after whatever writes a table on the GPU in that encoder (the particle passes write their
+    /// objects' entries).
     pub fn sync_tables(&self, up: &Uploaded, e: &mut wgpu::CommandEncoder) {
         if let Some(u) = &up.uniform {
-            Self::copy_uniform(e, uniform_sources(up.table_buffers()), u);
-        }
-        let (Some(t), Some(caps)) = (&up.tables, &up.kernel.caps) else { return };
-        let (at, _) = crate::merged::offsets(&crate::merged::TABLES, &caps.tables);
-        for (k, src) in up.table_buffers().into_iter().enumerate() {
-            let room = crate::merged::TABLES[k].stride * caps.tables[k] as u64;
-            e.copy_buffer_to_buffer(src, 0, t, at[k], src.size().min(room));
+            Self::copy_uniform(e, &up.heap, u);
         }
     }
 
@@ -3182,6 +3125,7 @@ impl Gpu {
         for s in 0..n {
             let mut p = base;
             p.size[2] = s;
+            up.place(&mut p);
             self.queue.write_buffer(&up.params, 0, bytemuck::bytes_of(&p));
             let mut enc = d.create_command_encoder(&Default::default());
             {
@@ -3214,10 +3158,10 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     /// Render `spp` samples. `base` holds everything except the per-dispatch sample index.
     #[allow(clippy::too_many_arguments)]
-    pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
+    pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
         let d = &self.device;
         let (w, h) = (scene.width, scene.height);
-        let up = self.upload(scene, w, h, tri_verts, groups, nodes, emitters, env, env_cdf, energy, timings)?;
+        let up = self.upload(scene, w, h, tri_verts, groups, nodes, emitters, light_tree, env, env_cdf, energy, timings)?;
         let pipeline = self.pipeline(&up.kernel, false);
         // Particles: placed once, at the scene time and camera.
         if up.particles.is_some() {
@@ -3273,6 +3217,7 @@ impl Gpu {
             for k in 0..batch.min(spp - s) {
                 let mut p = base;
                 p.size[2] = s + k;
+                up.place(&mut p);
                 self.queue.write_buffer(b_params, 0, bytemuck::bytes_of(&p));
                 let mut enc = d.create_command_encoder(&Default::default());
                 {
@@ -3553,22 +3498,22 @@ mod tests {
     }
 
     /// The uniform tables' buffers: each array fits a uniform binding of 64 KiB, the media's holds every medium a
-    /// scene may have, and the four are at their tables' bindings. A copy takes what the table and its uniform buffer
-    /// both hold, in whole words; a scene with more entries than an array is said, by name.
+    /// scene may have, and the four are at their own bindings, before the acceleration structure's. A copy takes what
+    /// the table's section and its uniform buffer both hold, in whole words; a scene with more entries than an array
+    /// is said, by name.
     #[test]
     fn the_uniform_tables_fit_their_bindings() {
-        use crate::merged::{TABLES, UNIFORM_LEN, UNIFORM_TABLES};
-        let bindings = UNIFORM_TABLES.map(|k| MERGED_TABLE_BINDINGS[k]);
-        assert_eq!(bindings, [14, 15, 17, 18]);
-        for (k, &t) in UNIFORM_TABLES.iter().enumerate() {
-            let m = &TABLES[t];
-            assert!(kernel_template().contains(&format!("@group(0) @binding({}) var<uniform> {}: array<", bindings[k], m.name)), "{}", m.name);
-            let bytes = m.stride * UNIFORM_LEN[k] as u64;
-            assert!(bytes <= 65536 && bytes % 16 == 0, "{}: {bytes} bytes", m.name);
+        use crate::merged::UNIFORM_TABLES;
+        for t in &UNIFORM_TABLES {
+            assert!(kernel_template().contains(&format!("@group(0) @binding({}) var<uniform> {}: array<", t.binding, t.name)), "{}", t.name);
+            let bytes = t.stride * t.len as u64;
+            assert!(bytes <= 65536 && bytes % 16 == 0 && t.binding < ACC_BINDING, "{}: {bytes} bytes", t.name);
         }
-        assert_eq!(UNIFORM_TABLES.map(|t| TABLES[t].name), ["tex_info", "objects", "instances", "media"]);
-        assert_eq!(UNIFORM_LEN[3] as usize, crate::scene::MAX_MEDIA);
-        assert_eq!(UNIFORM_LEN[2] as u64, 65536 / TABLES[5].stride);
+        assert_eq!(UNIFORM_TABLES.each_ref().map(|t| t.table), [Table::TexInfo, Table::Objects, Table::Instances, Table::Media]);
+        assert_eq!(UNIFORM_TABLES[3].len as usize, crate::scene::MAX_MEDIA);
+        assert_eq!(UNIFORM_TABLES[2].len as u64, 65536 / UNIFORM_TABLES[2].stride);
+        assert_eq!([UNIFORM_TABLES[2].stride as usize, UNIFORM_TABLES[3].stride as usize], [std::mem::size_of::<crate::scene::GpuInstance>(), std::mem::size_of::<crate::scene::MediumGpu>()]);
+        assert!(kernel_template().contains(&format!("@group(0) @binding({ACC_BINDING}) var acc: acceleration_structure;")));
         // A table shorter than its array, one with the edits' room past it, one whose size is not the array's multiple.
         assert_eq!([uniform_copy_bytes(512, 65536), uniform_copy_bytes(1 << 20, 65536), uniform_copy_bytes(65600, 65440), uniform_copy_bytes(0, 7168), uniform_copy_bytes(7, 64)], [512, 65536, 65440, 0, 4]);
         assert!(uniform_overflow([4096, 4096, 409, 32]).is_empty());

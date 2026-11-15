@@ -15,13 +15,24 @@ impl Gather {
         self.parts.push((at, bytes.to_vec()));
     }
 
+    /// Into a table's section (offsets from its start).
+    pub(super) fn flush_table(self, q: &wgpu::Queue, heap: &crate::heap::Heap<Table>, t: Table) {
+        let end = self.parts.iter().map(|p| p.0 + p.1.len() as u64).max().unwrap_or(0);
+        assert!(end <= heap.cap(t), "{t:?}: {end} bytes written, the section holds {}", heap.cap(t));
+        self.flush_at(q, &heap.buffer, heap.at(t));
+    }
+
     pub(super) fn flush(self, q: &wgpu::Queue, b: &wgpu::Buffer) {
+        self.flush_at(q, b, 0);
+    }
+
+    fn flush_at(self, q: &wgpu::Queue, b: &wgpu::Buffer, base: u64) {
         let mut parts = self.parts;
         let mut sorted = parts.clone();
         sorted.sort_by_key(|p| p.0);
         if sorted.windows(2).any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0) {
             for (at, bytes) in parts.drain(..) {
-                q.write_buffer(b, at, &bytes);
+                q.write_buffer(b, base + at, &bytes);
             }
             return;
         }
@@ -31,14 +42,14 @@ impl Gather {
                 Some((start, data)) if *start + data.len() as u64 == at => data.extend_from_slice(&bytes),
                 _ => {
                     if let Some((start, data)) = run.take() {
-                        q.write_buffer(b, start, &data);
+                        q.write_buffer(b, base + start, &data);
                     }
                     run = Some((at, bytes));
                 }
             }
         }
         if let Some((start, data)) = run {
-            q.write_buffer(b, start, &data);
+            q.write_buffer(b, base + start, &data);
         }
     }
 }
@@ -229,31 +240,38 @@ impl Grow<'_> {
         true
     }
 
+    /// A table's section to `bytes` (heap.rs `Heap::grow`), if the device binds the buffer that makes.
+    fn table(&self, heap: &mut crate::heap::Heap<Table>, t: Table, bytes: u64) -> bool {
+        if !self.fits(&[heap.size_with(t, bytes)]) {
+            return false;
+        }
+        heap.grow(&self.g.device, &self.g.queue, t, bytes);
+        true
+    }
+
     /// Kernel records and the TLAS (a record's instance is `inst_base` + it).
-    pub(super) fn records(&self, h: &mut Holes, extra: usize, instances: &mut wgpu::Buffer, accel: &mut gpu::Accel) -> bool {
+    pub(super) fn records(&self, h: &mut Holes, extra: usize, heap: &mut crate::heap::Heap<Table>, accel: &mut gpu::Accel) -> bool {
         if !self.ok {
             return false;
         }
         let cap = Self::cap(h, extra);
-        if !self.fits(&[(cap * std::mem::size_of::<scene::GpuInstance>()) as u64]) {
+        if !self.table(heap, Table::Instances, (cap * std::mem::size_of::<scene::GpuInstance>()) as u64) {
             return false;
         }
-        *instances = self.g.grown(instances, (cap * std::mem::size_of::<scene::GpuInstance>()) as u64, "instances");
         self.g.grow_tlas(accel, accel.inst_base + cap);
         h.cap = cap;
         true
     }
 
     /// Object-table entries (`stride` vec4s each).
-    pub(super) fn objects(&self, h: &mut Holes, extra: usize, objects: &mut wgpu::Buffer, stride: usize) -> bool {
+    pub(super) fn objects(&self, h: &mut Holes, extra: usize, heap: &mut crate::heap::Heap<Table>, stride: usize) -> bool {
         if !self.ok {
             return false;
         }
         let cap = Self::cap(h, extra);
-        if !self.fits(&[(cap * stride * 16) as u64]) {
+        if !self.table(heap, Table::Objects, (cap * stride * 16) as u64) {
             return false;
         }
-        *objects = self.g.grown(objects, (cap * stride * 16) as u64, "objects");
         h.cap = cap;
         true
     }
@@ -484,7 +502,7 @@ impl LiveCore {
                     catch_up.put(i as u64 * size, bytemuck::bytes_of(r));
                 }
             }
-            catch_up.flush(&self.g.queue, &self.sc.up.instances);
+            catch_up.flush_table(&self.g.queue, &self.sc.up.heap, Table::Instances);
         }
         if rigid_ok && (dynamic.is_empty() || (!changes.structural && self.repose(world, &dynamic)?)) {
             // A new shared pose and nothing else that rebuilds the TLAS (no move): rebuild it for the meshes' new bounds.
@@ -537,10 +555,10 @@ impl LiveCore {
             if d.lights_moved {
                 e.regroup_lights();
             }
-            q.write_buffer(&up.lights, 0, bytemuck::cast_slice(&crate::lights_with_groups(&e.lights)));
+            up.put_lights(q, &e.lights);
         }
         if d.objects {
-            q.write_buffer(&up.objects, 0, bytemuck::cast_slice(&e.objects));
+            up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
         if d.materials || d.emitters {
             self.add_material_emitters();
@@ -604,7 +622,7 @@ impl LiveCore {
                     for &i in idx {
                         e.lights[i] = gl;
                     }
-                    self.g.queue.write_buffer(&self.sc.up.lights, 0, bytemuck::cast_slice(&crate::lights_with_groups(&e.lights)));
+                    self.sc.up.put_lights(&self.g.queue, &e.lights);
                 }
             }
         }
@@ -688,7 +706,7 @@ impl LiveCore {
             if merged {
                 (lo, hi) = (lo.min(i as usize), hi.max(i as usize));
             } else {
-                q.write_buffer(&self.sc.up.instances, i as u64 * size, bytemuck::bytes_of(&r));
+                self.sc.up.heap.write(q, Table::Instances, i as u64 * size, bytemuck::bytes_of(&r));
             }
             let pivot = w.transform_point3(glam::Vec3::ZERO);
             let st = self.sc.tables.stride;
@@ -699,9 +717,9 @@ impl LiveCore {
             self.inst_moving.push(i);
         }
         if merged {
-            q.write_buffer(&self.sc.up.instances, lo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[lo..=hi]));
+            self.sc.up.heap.write(q, Table::Instances, lo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[lo..=hi]));
         }
-        q.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+        self.sc.up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         self.inst_moved = true;
         match top {
             gpu::Top::Hw(accel) => {
@@ -718,16 +736,15 @@ impl LiveCore {
         }
     }
 
-    /// The material table to the GPU: written in place, or, with more materials than its buffer holds (materials added
-    /// while the game runs), into a buffer twice the size, the scene's bind group made over it.
+    /// The material table to the GPU: written in place; with more materials than its section holds (materials added
+    /// while the game runs), the section is made twice the size first and the scene's bind groups made again.
     pub(super) fn upload_materials(&mut self) {
         let bytes: &[u8] = bytemuck::cast_slice(&self.sc.tables.materials);
-        if bytes.len() as u64 > self.sc.up.materials.size() {
-            let usage = self.sc.up.materials.usage();
-            self.sc.up.materials = self.g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("materials"), size: (bytes.len() as u64 * 2).next_multiple_of(16), usage, mapped_at_creation: false });
+        if bytes.len() as u64 > self.sc.up.heap.cap(Table::Materials) {
+            self.sc.up.heap.grow(&self.g.device, &self.g.queue, Table::Materials, bytes.len() as u64 * 2);
             self.g.rebind_scene(&mut self.sc.up);
         }
-        self.g.queue.write_buffer(&self.sc.up.materials, 0, bytes);
+        self.sc.up.heap.write(&self.g.queue, Table::Materials, 0, bytes);
     }
 
     /// The record of a mesh an edit added in place that moves as an instance does (`move_instances`): one a rigid body
@@ -846,36 +863,34 @@ impl LiveCore {
         }
     }
 
-    /// The emitter CDF `em` (its total weight and the emitters' power), then the light tree's nodes, into the emitters
-    /// buffer (grown, and the scene bind group made again, when they no longer fit), and the kernel's parameters.
+    /// The emitter CDF `em` (its total weight and the emitters' power) and the light tree's nodes into their tables
+    /// (grown, and the scene's bind groups made again, when they no longer fit), and the kernel's parameters.
     pub(super) fn put_emitters(&mut self, em: &[[f32; 4]], total: f32, power: f32) {
         let g = &self.g;
         let LoadedScene { tables: e, base: b, up, .. } = &mut self.sc;
         let nodes: &[[f32; 4]] = e.light_tree.as_ref().map_or(&[], |t| &t.nodes);
-        let need = ((em.len() + nodes.len()) * 16) as u64;
-        if need > up.emitters.size() {
-            // (The usage it was made with: the merged layout copies the tables each frame, `Gpu::sync_tables`.)
-            let usage = up.emitters.usage();
-            up.emitters = g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitters"), size: need + need / 2, usage, mapped_at_creation: false });
+        let mut grew = false;
+        for (t, data) in [(Table::Emitters, em), (Table::LightTree, nodes)] {
+            let need = (data.len() * 16) as u64;
+            if need > up.heap.cap(t) {
+                up.heap.grow(&g.device, &g.queue, t, need + need / 2);
+                grew = true;
+            }
+            up.heap.write(&g.queue, t, 0, bytemuck::cast_slice(data));
+        }
+        if grew {
             g.rebind_scene(up);
         }
-        if !em.is_empty() {
-            g.queue.write_buffer(&up.emitters, 0, bytemuck::cast_slice(em));
-        }
-        if let Some(t) = e.light_tree.as_ref() {
-            g.queue.write_buffer(&up.emitters, em.len() as u64 * 16, bytemuck::cast_slice(&t.nodes));
-        }
         let _ = b;
-        self.emitter_params(em.len(), total, power);
+        self.emitter_params(total, power);
     }
 
-    /// The kernel's emitter parameters for a CDF of `entries` (its total weight; the emitters' power) and the tree.
-    pub(super) fn emitter_params(&mut self, entries: usize, total: f32, power: f32) {
+    /// The kernel's emitter parameters for a CDF of this total weight (and the emitters' power) and the tree.
+    pub(super) fn emitter_params(&mut self, total: f32, power: f32) {
         let LoadedScene { tables: e, base: b, .. } = &mut self.sc;
         b.emit_power[0] = power;
         b.misc[1] = total;
         if let Some(t) = e.light_tree.as_ref() {
-            b.ltree[0] = f32::from_bits(entries as u32);
             // The tree's entries (with the slot: the static ones and those added in place), the rest by power share.
             if t.dynamic.is_some() {
                 b.ltree[1] = f32::from_bits(t.order.len() as u32);
@@ -905,7 +920,7 @@ impl LiveCore {
             e.put_powers(&powers);
             self.sc.emit = None;
             e.defer_powers = false;
-            self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+            self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
             self.write_emitters();
             return;
         }
@@ -929,18 +944,23 @@ impl LiveCore {
         let Some(powers) = self.sc.emit.as_mut().and_then(|w| w.flight.take()) else { return };
         let e = &mut self.sc.tables;
         e.put_powers(&powers);
-        self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
+        self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         if let Some(t) = e.light_tree.as_mut() {
             for (n, &p) in t.nodes.iter_mut().zip(&r.node_powers) {
                 n[2] = p;
             }
             t.power = t.nodes.first().map_or(0.0, |n| n[2]);
         }
-        // (Same entries and nodes as the CDF the scene was loaded with: the buffer holds them.)
+        // (Same entries and nodes as the CDF the scene was loaded with: their tables hold them.)
         let mut enc = self.g.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitters") });
-        enc.copy_buffer_to_buffer(&r.staging, 0, &self.sc.up.emitters, 0, r.bytes.min(self.sc.up.emitters.size()));
+        let (heap, cdf) = (&self.sc.up.heap, r.entries as u64 * 16);
+        for (t, from, bytes) in [(Table::Emitters, 0, cdf), (Table::LightTree, cdf, r.bytes - cdf)] {
+            if bytes > 0 {
+                enc.copy_buffer_to_buffer(&r.staging, from, &heap.buffer, heap.at(t), bytes.min(heap.cap(t)));
+            }
+        }
         self.g.queue.submit([enc.finish()]);
-        self.emitter_params(r.entries, r.total, r.power);
+        self.emitter_params(r.total, r.power);
         self.lit_changed = self.frame.max(1);
     }
 
@@ -957,7 +977,7 @@ impl LiveCore {
         powers.append(&mut e.deferred);
         if !powers.is_empty() {
             e.put_powers(&powers);
-            self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&e.objects));
+            self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
             // The lighting changed (as when a result lands): `live_lighting` for the next 45 frames.
             self.lit_changed = self.frame.max(1);
         }
@@ -1030,10 +1050,10 @@ impl LiveCore {
                 top.moved(slot0 + i, wm, Some((n.cast_shadow, hidden)));
             }
             let q = &self.g.queue;
-            q.write_buffer(&sc.up.instances, (rec0 * size) as u64, bytemuck::cast_slice(&sc.gpu_instances[rec0..rec0 + cap]));
+            sc.up.heap.write(q, Table::Instances, (rec0 * size) as u64, bytemuck::cast_slice(&sc.gpu_instances[rec0..rec0 + cap]));
             let st = sc.tables.stride;
             let at = place.object as usize * st;
-            q.write_buffer(&sc.up.objects, (at * 16) as u64, bytemuck::cast_slice(&sc.tables.objects[at..at + cap * st]));
+            sc.up.heap.write(q, Table::Objects, (at * 16) as u64, bytemuck::cast_slice(&sc.tables.objects[at..at + cap * st]));
             self.inst_moving.extend(rec0 as u32..(rec0 + cap) as u32);
             sc.tables.retained.instanced.get_mut(&id).unwrap().drawn = t.count;
             done += 1;
@@ -1069,7 +1089,7 @@ impl LiveCore {
             let mut r = p.gpu(old.info[0]);
             r.p = old.m;
             self.sc.gpu_instances[i] = r;
-            self.g.queue.write_buffer(&self.sc.up.instances, i as u64 * size, bytemuck::bytes_of(&r));
+            self.sc.up.heap.write(&self.g.queue, Table::Instances, i as u64 * size, bytemuck::bytes_of(&r));
             let pivot = w.transform_point3(glam::Vec3::ZERO);
             let st = self.sc.tables.stride;
             let o = &mut self.sc.tables.objects[p.object as usize * st];
@@ -1081,7 +1101,7 @@ impl LiveCore {
             }
             self.inst_moving.push(i as u32);
         }
-        self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+        self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         if let (true, Some(accel)) = (build_tlas, self.sc.up.accel.as_ref()) {
             let mut e = self.g.device.create_command_encoder(&Default::default());
             self.g.rebuild_tlas(accel, &mut e);
@@ -1158,10 +1178,10 @@ impl LiveCore {
         }
         // A model's node instances are contiguous: one write.
         if ilo < ihi {
-            self.g.queue.write_buffer(&self.sc.up.instances, ilo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[ilo..ihi]));
+            self.sc.up.heap.write(&self.g.queue, Table::Instances, ilo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[ilo..ihi]));
         }
         self.inst_moved = true;
-        self.g.queue.write_buffer(&self.sc.up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+        self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         if lo < hi {
             // Motion vectors of the flattened triangles: the previous frame's vertices, as `repose` keeps them.
             let both = self.prev_span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi)));
@@ -1321,7 +1341,7 @@ impl LiveCore {
         q.write_buffer(&up.verts, k * 48, bytemuck::cast_slice(&verts[lo * 3..hi * 3]));
         q.write_buffer(&up.attrs, k * 96, bytemuck::cast_slice(&attrs[lo..hi]));
         q.write_buffer(&accel.verts, k * 36, bytemuck::cast_slice(&blas[lo * 3..hi * 3]));
-        q.write_buffer(&up.objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+        up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         let mut e = self.g.device.create_command_encoder(&Default::default());
         self.g.rebuild_dynamic(accel, &mut e);
         let profile_blas = std::env::var("THREERT_PROFILE_BLAS").is_ok_and(|v| v == "1");
@@ -1348,10 +1368,10 @@ impl LiveCore {
             let r = (tris[k].tri as usize - first) * 3;
             crate::ltree::tri_vertices(&verts[r..r + 3])
         });
-        let (q, up, off) = (&self.g.queue, &self.sc.up, self.sc.base.ltree[0].to_bits() as u64);
-        q.write_buffer(&up.emitters, off * 16, bytemuck::cast_slice(&t.nodes[..1]));
-        q.write_buffer(&up.emitters, (off + 2) * 16, bytemuck::cast_slice(&t.nodes[2..3]));
-        q.write_buffer(&up.emitters, (off + t.moving_nodes as u64) * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
+        let (q, heap) = (&self.g.queue, &self.sc.up.heap);
+        heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));
+        heap.write(q, Table::LightTree, 2 * 16, bytemuck::cast_slice(&t.nodes[2..3]));
+        heap.write(q, Table::LightTree, t.moving_nodes as u64 * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
     }
 
     /// Copies the GPU's current vertices of a dynamic-tail span into `prev_verts` (submitted before any write queued
@@ -1621,7 +1641,7 @@ impl LiveCore {
                 Some(&k) => k as usize,
                 None => match edit.objects.take(1) {
                     Some(k) => k,
-                    None if grow.objects(&mut edit.objects, 1, &mut up.objects, tables.stride) => {
+                    None if grow.objects(&mut edit.objects, 1, &mut up.heap, tables.stride) => {
                         edit.grows += 1;
                         edit.rebind = true;
                         edit.objects.take(1).ok_or("edit room: objects")?
@@ -1934,7 +1954,7 @@ impl LiveCore {
                         }
                         let r0 = match edit.records.take(cap) {
                             Some(r) => r,
-                            None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, cap, &mut up.instances, accel), gpu::Top::Sw(_) => false } => {
+                            None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, cap, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
                                 edit.grows += 1;
                                 edit.rebind = true;
                                 edit.records.take(cap).ok_or("edit room: records")?
@@ -1943,7 +1963,7 @@ impl LiveCore {
                         };
                         let o0 = match edit.objects.take(cap) {
                             Some(k) => k,
-                            None if grow.objects(&mut edit.objects, cap, &mut up.objects, tables.stride) => {
+                            None if grow.objects(&mut edit.objects, cap, &mut up.heap, tables.stride) => {
                                 edit.grows += 1;
                                 edit.rebind = true;
                                 edit.objects.take(cap).ok_or("edit room: objects")?
@@ -2002,7 +2022,7 @@ impl LiveCore {
                 _ => {
                     let r = match edit.records.take(1) {
                         Some(r) => r,
-                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, 1, &mut up.instances, accel), gpu::Top::Sw(_) => false } => {
+                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, 1, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
                             edit.grows += 1;
                             edit.rebind = true;
                             edit.records.take(1).ok_or("edit room: records")?
@@ -2042,8 +2062,8 @@ impl LiveCore {
             w_blas.flush(q, &accel.verts);
         }
         w_colors.flush(q, &up.prev_verts);
-        w_records.flush(q, &up.instances);
-        w_objects.flush(q, &up.objects);
+        w_records.flush_table(q, &up.heap, Table::Instances);
+        w_objects.flush_table(q, &up.heap, Table::Objects);
         split.upload += tw.elapsed().as_secs_f64() * 1e3;
         let t3 = Instant::now();
         new_meshes.sort_unstable();

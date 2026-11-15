@@ -241,7 +241,7 @@ impl LiveCore {
         self.land_powers_now();
         let (e, b) = (&self.sc.tables, &mut self.sc.base);
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
-        self.g.queue.write_buffer(&self.sc.up.emitters, 0, bytemuck::cast_slice(&em));
+        self.sc.up.heap.write(&self.g.queue, Table::Emitters, 0, bytemuck::cast_slice(&em));
         b.misc[1] = total;
         b.emit_power[0] = power;
     }
@@ -334,7 +334,7 @@ impl LiveCore {
             for i in std::mem::take(&mut self.inst_moving) {
                 let r = &mut self.sc.gpu_instances[i as usize];
                 r.p = r.m;
-                self.g.queue.write_buffer(&self.sc.up.instances, i as u64 * size, bytemuck::bytes_of(r));
+                self.sc.up.heap.write(&self.g.queue, Table::Instances, i as u64 * size, bytemuck::bytes_of(r));
             }
         }
         self.inst_moved = false;
@@ -394,6 +394,7 @@ impl LiveCore {
             p.misc[3] = k as f32;
             p.counts[2] = p.counts[2].min(self.bounces);
             p.counts[3] = p.counts[3].min(2);
+            self.sc.up.place(&mut p);
             g.queue.write_buffer(&self.sc.up.params, 0, bytemuck::bytes_of(&p));
             let mut e = g.device.create_command_encoder(&Default::default());
             // Particles: placed for this frame's time and camera, then the dynamic BLASes rebuilt (before the raster and
@@ -431,8 +432,8 @@ impl LiveCore {
                 let blas_ts = self.profile.as_ref().map(|p| (&p.queries, n * 2 + 2));
                 g.run_particles(&self.sc.up, cam.pos.to_array(), cam.fwd.to_array(), shader_time(self.time), self.frame_dt, b.time[2], b.time[1], &mut e, pass_ts, blas_ts);
             }
-            // (The merged layout and the uniform tables: the tables as this frame's edits and the particle passes above
-            // left them, where the kernel reads them; merged.rs.)
+            // (The uniform tables: their sections as this frame's edits and the particle passes above left them, where
+            // the kernel reads them; merged.rs.)
             if k == 0 {
                 g.sync_tables(&self.sc.up, &mut e);
             }

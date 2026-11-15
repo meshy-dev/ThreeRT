@@ -859,7 +859,7 @@ pub fn apply_shader(gm: &mut GpuMaterial, sh: &desc::ShaderRef, shaders: &HashMa
 /// Analytic light of a light object with world matrix `m` (rect lights with a visible card are emitter geometry
 /// instead, see `card_material`). Emission scales with the node's power.
 /// `gpu_light` of a light that may be hidden (`shown`: `World::shown`): hidden, its entry stays where it is in the
-/// table, black (the kernel skips black lights, and they are in no group's sphere: lib.rs `lights_with_groups`).
+/// table, black (the kernel skips black lights, and they are in no group's sphere: lib.rs `light_groups`).
 pub fn gpu_light_shown(l: &Light, m: Mat4, power: f32, shown: bool) -> Option<GpuLight> {
     let mut gl = gpu_light(l, m, power)?;
     if !shown {

@@ -29,6 +29,7 @@
 //! live passes, the caches' training, the GPU timing); `session` the headless runner (native only).
 
 use crate::gpu::Buf;
+use crate::heap::Table;
 use crate::world::World;
 use crate::{gpu, post, scene, tables};
 // (The headless runner, `session`, native only, is what uses all of it.)
@@ -578,7 +579,7 @@ impl LiveCore {
             });
         }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
-        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.instances, &up.objects, &up.cdf, &up.emitters, &a.verts].iter().map(|b| b.size()).sum::<u64>();
+        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.heap.buffer, &up.cdf, &a.verts].iter().map(|b| b.size()).sum::<u64>();
         let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
         let mb = |b: f64| (b / (1 << 20) as f64 * 10.0).round() / 10.0;
         serde_json::json!({
@@ -1228,7 +1229,7 @@ mod instanced_tests {
             let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
             (sc.width, sc.height) = (64, 36);
             let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, prep.tree_nodes(), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
             frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
         };
         let (a, b) = (offline(&plain), offline(&uniform));
@@ -1241,24 +1242,24 @@ mod instanced_tests {
         // Live: the uniform buffers follow the tables.
         let mut core = LiveCore::new(uniform, &w, Path::new("."), &presets, 64, 36).unwrap();
         w.take_changes();
-        let read = |core: &LiveCore, buf: &wgpu::Buffer, bytes: u64| -> Vec<u8> {
+        let read = |core: &LiveCore, buf: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
             let d = &core.g.device;
             let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             let mut e = d.create_command_encoder(&Default::default());
-            e.copy_buffer_to_buffer(buf, 0, &to, 0, bytes);
+            e.copy_buffer_to_buffer(buf, at, &to, 0, bytes);
             core.g.queue.submit([e.finish()]);
             to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
             d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
             bytes
         };
-        // Each table's bytes and its uniform copy's, over what both hold.
+        // Each table's section and its uniform copy, over what both hold.
         let pairs = |core: &LiveCore| -> Vec<(Vec<u8>, Vec<u8>)> {
             let up = &core.sc.up;
             let copies = up.uniform.as_ref().expect("the uniform tables' buffers");
-            [&up.bg_parts.texinfo, &up.objects, &up.instances, &up.media].into_iter().zip(copies).map(|(t, c)| {
-                let n = t.size().min(c.size()) & !3;
-                (read(core, t, n), read(core, c, n))
+            crate::merged::UNIFORM_TABLES.iter().zip(copies).map(|(t, c)| {
+                let n = up.heap.cap(t.table).min(c.size()) & !3;
+                (read(core, &up.heap.buffer, up.heap.at(t.table), n), read(core, c, 0, n))
             }).collect()
         };
         core.render(1, |_, _| {});
