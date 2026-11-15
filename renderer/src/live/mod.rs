@@ -132,8 +132,7 @@ struct LiveParams {
     jit: [f32; 4],
     /// Which half of the lasting buffers is this frame's (live.wgsl `this_half`; the other the previous frame's), -.
     state: [u32; 4],
-    /// The light tiles (live.wgsl `light_tiles`): this frame's grid offset x, y, the lists' first vec4 in the kernel's
-    /// direct buffer, tiles a row.
+    /// The light tiles (live.wgsl `light_tiles`): this frame's grid offset x, y, -, tiles a row.
     lt: [u32; 4],
 }
 
@@ -542,7 +541,7 @@ impl LiveCore {
         });
         let timer = (g.timestamps && profile.is_none()).then(|| FrameTimer::new(&g.device));
         let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
-        let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline(&targets.kernel) });
+        let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline() });
         let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis), &targets.kernel);
         // (Read whenever a kernel of this session may have the guard: under software traversal a scene's first unit
         // brings it, `gpu::loop_guard_of`.)

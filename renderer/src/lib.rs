@@ -737,6 +737,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         // (`gpu::Uploaded::place`, with the buffers.)
         table_first: [[0; 4]; 3],
         word_first: [0; 4],
+        // (`gpu::KernelBufs::place`, with what is traced into.)
+        live_first: [[0; 4]; 2],
+        live_len: [0; 4],
     };
     let mut params = params;
     let mut first = 0u32;

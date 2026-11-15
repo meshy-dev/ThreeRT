@@ -1,6 +1,6 @@
 //! Headless wgpu backend: uploads the flattened scene once, accumulates path-traced samples, reads back HDR.
 
-use crate::heap::{Heap, Section, Stream, Table};
+use crate::heap::{Heap, Live, Section, Stream, Table};
 use crate::scene::Scene;
 use crate::GROUPS;
 use anyhow::{anyhow, Result};
@@ -23,17 +23,17 @@ pub struct Gpu {
     pipeline_cache: Option<crate::pipeline_cache::PipelineCache>,
     /// Kernel source (hardware or software traversal spliced in); scenes with material functions get their own module.
     source: String,
-    /// The kernel as written (none in the merged layout: its sources are written for their arrays' lengths).
-    module: Option<wgpu::ShaderModule>,
+    /// The kernel as written: a scene without features that change the source or functions of its own.
+    module: wgpu::ShaderModule,
     /// The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers. Natively with
     /// THREERT_MERGED=1 (software traversal, the device held to eight too).
     pub merged: bool,
-    /// By (material-function code hash, the features that change the source: `KernelVariant::flags`, the merged layout's lengths).
-    modules: std::sync::Mutex<std::collections::HashMap<(u64, u32, Option<crate::merged::Caps>), wgpu::ShaderModule>>,
+    /// By (material-function code hash, the features that change the source: `KernelVariant::flags`).
+    modules: std::sync::Mutex<std::collections::HashMap<(u64, u32), wgpu::ShaderModule>>,
     pipeline_layout: wgpu::PipelineLayout,
     /// Kernel variants by (feature mask, material-function code hash, LIVE): `FEAT` compiles out the features a scene
     /// does not use (they cost registers even when idle); `LIVE` = one fresh sample per dispatch for the viewport.
-    pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool, Option<crate::merged::Caps>), wgpu::ComputePipeline>>,
+    pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool), wgpu::ComputePipeline>>,
     layout: wgpu::BindGroupLayout,
     /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
     /// what the live passes read of a trace (`KernelBufs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`,
@@ -56,7 +56,7 @@ pub struct Gpu {
     tl_pipeline_layout: Option<wgpu::PipelineLayout>,
     tl_pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool), TranslucentPipelines>>,
     /// The live media passes (pathtrace.wgsl `media_train`, `media_composite`) by kernel variant and entry point.
-    media_passes: std::sync::Mutex<std::collections::HashMap<(u32, u64, &'static str, Option<crate::merged::Caps>), wgpu::ComputePipeline>>,
+    media_passes: std::sync::Mutex<std::collections::HashMap<(u32, u64, &'static str), wgpu::ComputePipeline>>,
     /// The procedural blobs of the last upload (`upload_procs`).
     proc_cache: std::sync::Mutex<Option<ProcCache>>,
     /// The last upload's procedural BLASes by geometry hash (read-only once built; another upload may share them), with
@@ -115,8 +115,8 @@ pub struct Params {
     pub aerial: [f32; 4],
     /// three.js `scene.background` (F_BACKGROUND): its radiance, 1.
     pub background: [f32; 4],
-    /// The live light tiles (pathtrace.wgsl "Light tiles"; live/frame.rs): the lists' first vec4 in the direct
-    /// buffer (0: none this frame), tiles a row, the grid's offset when they were built (x | y << 16), candidates a
+    /// The live light tiles (pathtrace.wgsl "Light tiles"; live/frame.rs): 1 with the last frame's lists (0: none
+    /// this frame), tiles a row, the grid's offset when they were built (x | y << 16), candidates a
     /// vertex the camera sees takes from its list beside the uniform ones (`live::LIST_CANDIDATES`; half past it).
     pub ltile: [u32; 4],
     /// The traced size the lists were built at, -, -.
@@ -129,6 +129,11 @@ pub struct Params {
     /// Each stream's first word in the words' heap (`heap::Stream`'s order): the environment's CDF, the procedural
     /// data, the vertex colours, -.
     pub word_first: [u32; 4],
+    /// The merged layout (`KernelBufs::place`): each of group 1's vec4 sections' first vec4 in the tail of its one
+    /// buffer (the cache's values, the specular rays, the motion vectors, the direct light; the light lists), and
+    /// the last four's lengths. As written: zeros (the kernel asks the buffers).
+    pub live_first: [[u32; 4]; 2],
+    pub live_len: [u32; 4],
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
@@ -766,8 +771,8 @@ pub struct KernelVariant {
     pub switches: KernelSwitches,
     /// The scene's features: `F_SOURCE`'s are flags.
     pub features: u32,
-    /// The merged layout (merged.rs), with its arrays' lengths.
-    pub merged: Option<crate::merged::Caps>,
+    /// The merged layout (merged.rs).
+    pub merged: bool,
     /// Four tables in uniform buffers (merged.rs `UNIFORM_TABLES`; `GpuOptions::uniform_tables`). Never with `merged`.
     pub uniform_tables: bool,
     /// The loop guard's limit, in a kernel with the guard (`loop_guard_of`, `guard_loops`).
@@ -792,24 +797,21 @@ impl KernelVariant {
             ("last_sun", k.last_sun),
             ("light_pick", k.light_pick),
             ("units", f(F_UNITS)),
-            ("merged", self.merged.is_some()),
+            ("merged", self.merged),
             ("uniform_tables", self.uniform_tables),
             ("guard", self.guard.is_some()),
         ]
     }
 
-    /// The numbers the variant is compiled for, WESL constants (`import constants::`): the merged layout's array
-    /// lengths (`ML_<buffer>`), the uniform tables' (`UT_<table>`), the loop guard's count's words and its limit.
+    /// The numbers the variant is compiled for, WESL constants (`import constants::`): the uniform tables' lengths
+    /// (`UT_<table>`), the loop guard's count's words and its limit.
     pub fn constants(&self) -> Vec<(String, u32)> {
-        use crate::merged::{GUARD_WORDS, KERNEL_LIVE, UNIFORM_TABLES};
+        use crate::merged::{GUARD_WORDS, UNIFORM_TABLES};
         let mut out = vec![];
-        if let Some(c) = &self.merged {
-            out.extend(KERNEL_LIVE.iter().zip(c.live).map(|(m, n)| (format!("ML_{}", m.name.to_uppercase()), n)));
-        }
         if self.uniform_tables {
             out.extend(UNIFORM_TABLES.iter().map(|t| (format!("UT_{}", t.name.to_uppercase()), t.len)));
         }
-        if self.merged.is_some() || self.guard.is_some() {
+        if self.merged || self.guard.is_some() {
             out.push(("GUARD_WORDS".into(), GUARD_WORDS));
         }
         if let Some(n) = self.guard {
@@ -827,7 +829,7 @@ pub fn kernel_wgsl(src: &str, v: &KernelVariant) -> String {
 
 /// `kernel_wgsl`, saying what did not compile instead of panicking (a scene's own functions are a game's code).
 pub fn try_kernel_wgsl(src: &str, v: &KernelVariant) -> Result<String, String> {
-    assert!(!(v.merged.is_some() && v.uniform_tables), "the uniform tables are never in the merged layout");
+    assert!(!(v.merged && v.uniform_tables), "the uniform tables are never in the merged layout");
     let mut out = try_wesl_wgsl(src, &v.flags(), &v.constants())?;
     if v.guard.is_some() {
         guard_loops(&mut out);
@@ -1175,37 +1177,54 @@ impl CacheBuffers {
     }
 }
 
-/// The kernel's group-1 buffers: the radiance cache, and what the live passes read of a trace
-/// (live/targets.rs `Targets`): the specular-lobe rays, the motion vectors, the directional lights' direct light. In the
-/// merged layout they are ranges of one buffer, the arrays of the kernel's `MergedLive` (merged.rs `KERNEL_LIVE`).
+/// The kernel's group-1 buffers: the radiance cache, what the live passes read of a trace (live/targets.rs
+/// `Targets`: the specular-lobe rays, the motion vectors, the directional lights' direct light) and the light tiles'
+/// lists. In the merged layout they are the sections of one buffer (`heap::Live`).
 pub struct KernelBufs {
     pub cache: CacheBuffers,
     pub refl: Buf,
     pub motion: Buf,
     pub direct: Buf,
+    pub lists: Buf,
     /// The loop guard's count (`guard_loops`: its first word, the invocations a loop of which was stopped): with
-    /// the guard, and always in the merged layout (the last array of `MergedLive`).
+    /// the guard, and always in the merged layout.
     pub guard: Option<Buf>,
-    /// The merged layout: the one buffer, and its arrays' lengths.
-    pub merged: Option<(wgpu::Buffer, [u32; 6])>,
+    /// The merged layout: the one buffer.
+    pub merged: Option<Heap<Live>>,
 }
 
 impl KernelBufs {
-    /// For a cache of `entries` and the live passes' three of these bytes.
+    /// For a cache of `entries` and the live passes' four of these bytes.
     /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
-    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64) -> KernelBufs {
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
         if !merged {
             let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
             let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
-            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), guard, merged: None };
+            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), guard, merged: None };
         }
-        let bytes = [entries * 4, entries * 32, entries * 32, refl, motion, direct, crate::merged::GUARD_WORDS as u64 * 4];
-        let caps: [u32; 6] = std::array::from_fn(|k| crate::merged::live_cap(k, bytes[k]));
-        let (at, size) = crate::merged::live_layout(&caps);
-        let buffer = d.create_buffer(&wgpu::BufferDescriptor { label: Some("merged live"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let b = |k: usize| Buf { buffer: buffer.clone(), offset: at[k], size: bytes[k] };
-        KernelBufs { cache: CacheBuffers { keys: b(0), acc: b(1), val: b(2) }, refl: b(3), motion: b(4), direct: b(5), guard: Some(b(6)), merged: Some((buffer, caps)) }
+        // (The cache's keys and sums are as long as the kernel's struct says, whatever `entries`: `live_sizes`. A
+        // section's range is the bytes asked for: a pass that binds it sees an array of that length.)
+        let bytes = live_sizes(entries, refl, motion, direct, lists);
+        let heap = Heap::<Live>::new(d, &bytes);
+        let b = |s: Live| Buf { buffer: heap.buffer.clone(), offset: heap.at(s), size: bytes[s.index()] };
+        KernelBufs { cache: CacheBuffers { keys: b(Live::CacheKeys), acc: b(Live::CacheAcc), val: b(Live::CacheVal) }, refl: b(Live::Refl), motion: b(Live::Motion), direct: b(Live::Direct), lists: b(Live::Lists), guard: Some(b(Live::Guard)), merged: Some(heap) }
     }
+
+    /// Where the kernel finds the vec4 sections in the merged layout (`Params::live_first`, `live_len`): written with
+    /// the parameters of whatever is traced into these buffers.
+    pub fn place(&self, p: &mut Params) {
+        let Some(heap) = &self.merged else { return };
+        let first = |s: Live| ((heap.at(s) - heap.at(Live::CacheVal)) / 16) as u32;
+        p.live_first = [[first(Live::CacheVal), first(Live::Refl), first(Live::Motion), first(Live::Direct)], [first(Live::Lists), 0, 0, 0]];
+        p.live_len = [&self.refl, &self.motion, &self.direct, &self.lists].map(|b| (b.size / 16) as u32);
+    }
+}
+
+/// The bytes of the merged layout's group-1 buffer's sections (`heap::Live`'s order) for a cache whose values are
+/// `entries` long and the live passes' four of these bytes. The cache's keys and sums and the loop guard's count are
+/// members of the kernel's struct, of the kernel's lengths (pathtrace.wgsl `MergedLive`).
+pub(crate) fn live_sizes(entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> [u64; 8] {
+    [CACHE_SIZE * 4, CACHE_SIZE * 32, crate::merged::GUARD_WORDS as u64 * 4, entries * 32, refl, motion, direct, lists]
 }
 
 /// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache and the
@@ -1216,9 +1235,9 @@ pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &w
     }
     let tex = wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) };
     match &b.merged {
-        Some((buffer, _)) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::KERNEL_LIVE_BINDING, resource: buffer.as_entire_binding() }] }),
+        Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
         None => {
-            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
+            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
             d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &entries })
         }
@@ -1248,9 +1267,6 @@ pub struct Kernel {
     /// The scene's geometry functions and their dispatch (pathtrace.wgsl `geometry_function`), spliced like `functions`.
     pub geometry_functions: String,
     pub hash: u64,
-    /// The merged layout (merged.rs): the lengths of the merged struct's arrays this kernel's source is written for
-    /// (an offline render's `no_vis`, a live view's `KernelBufs`).
-    pub caps: Option<crate::merged::Caps>,
 }
 
 impl Kernel {
@@ -1342,18 +1358,7 @@ impl Kernel {
         functions.hash(&mut h);
         volume_functions.hash(&mut h);
         geometry_functions.hash(&mut h);
-        Kernel { features: features(scene, groups), functions, volume_functions, geometry_functions, hash: h.finish(), caps: None }
-    }
-
-    /// The kernel as written (no feature, no function of a scene's), in the merged layout for arrays of `caps`'
-    /// lengths: the radiance cache's resolve.
-    fn plain(caps: crate::merged::Caps) -> Kernel {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for _ in 0..3 {
-            String::new().hash(&mut h);
-        }
-        Kernel { features: 0, functions: String::new(), volume_functions: String::new(), geometry_functions: String::new(), hash: h.finish(), caps: Some(caps) }
+        Kernel { features: features(scene, groups), functions, volume_functions, geometry_functions, hash: h.finish() }
     }
 }
 
@@ -1598,10 +1603,10 @@ impl Gpu {
         let switches = options.kernel;
         let src = kernel_template();
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
-        let module = (!merged).then(|| unsafe {
-            let wgsl = kernel_wgsl(&src, &KernelVariant { uniform_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
+        let module = unsafe {
+            let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
-        });
+        };
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -1620,15 +1625,14 @@ impl Gpu {
             ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension, multisampled: false },
             count: None,
         };
-        // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, the
-        // software tree; the tables' heap; the words' heap; the dynamic triangles' previous vertices; the
+        // Group 0, the scene (pathtrace.wgsl's declarations): the parameters; triangles, their attributes, software
+        // traversal's trees (3); the tables' heap; the words' heap; the dynamic triangles' previous vertices; the
         // texture pages and their sampler, the environment, the density grids' atlas (a 1-cell texture in scenes
         // without grids, whose kernel does not read it); the accumulation buffer; then what only some layouts have.
         let mut entries = vec![
             uniform(0),
             storage(1, true),
             storage(2, true),
-            storage(3, true),
             storage(4, true),
             storage(5, true),
             storage(6, true),
@@ -1638,6 +1642,9 @@ impl Gpu {
             texture(10, wgpu::TextureViewDimension::D3),
             storage(11, false),
         ];
+        if !hwrt {
+            entries.push(storage(3, true));
+        }
         // The tables the kernel reads at every hit or light, bound again as typed views of their sections (merged.rs
         // `TABLE_VIEWS`; the merged layout has no binding for them), four of them uniform copies where a driver
         // needs it (`UNIFORM_TABLES`).
@@ -1659,11 +1666,12 @@ impl Gpu {
             storage(1, false),
             storage(2, false),
             storage(3, false),
+            storage(crate::merged::LISTS_BINDING, true),
             storage(5, false),
             storage(6, false),
             storage(7, false),
         ];
-        // The merged layout: group 1's six buffers are one (merged.rs `KERNEL_LIVE`), the loop guard's count in it.
+        // The merged layout: group 1's buffers are one (`heap::Live`), the loop guard's count in it.
         // As written, a kernel with the guard has the count in a buffer of its own: the binding is there whenever a
         // kernel of this device may have the guard (`guard_room`; a kernel without it does not name the binding).
         if merged {
@@ -1696,7 +1704,7 @@ impl Gpu {
                 storage(6, true),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64);
+        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout) = if hwrt {
@@ -1743,7 +1751,7 @@ impl Gpu {
     pub fn pipeline(&self, k: &Kernel, live: bool) -> wgpu::ComputePipeline {
         let mut cache = self.pipelines.lock().unwrap();
         cache
-            .entry((k.features, k.hash, live, k.caps))
+            .entry((k.features, k.hash, live))
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", if live { 1.0 } else { 0.0 }), ("FEAT", k.features as f64)];
@@ -1764,12 +1772,11 @@ impl Gpu {
     /// The kernel module for a scene: the shared one, or with its material functions spliced in.
     fn kernel_module(&self, k: &Kernel) -> wgpu::ShaderModule {
         let patches = k.features & F_SOURCE;
-        assert_eq!(self.merged, k.caps.is_some(), "a kernel of the merged layout has its arrays' lengths");
-        if let (Some(m), true) = (&self.module, patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty()) {
-            return m.clone();
+        if patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty() {
+            return self.module.clone();
         }
         let mut mods = self.modules.lock().unwrap();
-        mods.entry((k.hash, patches, k.caps))
+        mods.entry((k.hash, patches))
             .or_insert_with(|| {
                 let splice = |src: &str, marker: &str, code: &str| -> String {
                     if code.is_empty() {
@@ -1780,9 +1787,8 @@ impl Gpu {
                     format!("{head}{code}{tail}")
                 };
                 let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
-                // The variant: this device's traversal, switches, layout (the merged one with this kernel's arrays'
-                // lengths) and loop guard, this scene's features.
-                let v = KernelVariant { merged: k.caps, uniform_tables: self.uniform_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
+                // The variant: this device's traversal, switches, layout and loop guard, this scene's features.
+                let v = KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
                 // A scene's functions that do not compile (a game's own WGSL) cost the game its functions, not the
                 // app its renderer: the kernel is made without them, and the game's log says why. (A panic here took
                 // the engine down, and ThreeRT for Android then took the device for one without a renderer.)
@@ -1804,7 +1810,7 @@ impl Gpu {
     pub fn media_pipeline(&self, k: &Kernel, entry: &'static str) -> wgpu::ComputePipeline {
         let mut cache = self.media_passes.lock().unwrap();
         cache
-            .entry((k.features, k.hash, entry, k.caps))
+            .entry((k.features, k.hash, entry))
             .or_insert_with(|| {
                 let module = self.kernel_module(k);
                 let constants = [("LIVE", 1.0), ("FEAT", k.features as f64)];
@@ -1860,13 +1866,8 @@ impl Gpu {
     }
 
     /// The radiance cache's per-frame resolve (pathtrace.wgsl `cache_resolve`; kernel bind groups).
-    pub fn cache_resolve_pipeline(&self, bufs: &KernelBufs) -> wgpu::ComputePipeline {
-        // (The merged layout: the kernel written for these buffers' lengths.)
-        let module = match (&self.module, &bufs.merged) {
-            (Some(m), _) => m.clone(),
-            (None, Some((_, live))) => self.kernel_module(&Kernel::plain(crate::merged::Caps { live: *live })),
-            (None, None) => unreachable!("the merged layout's group 1 is one buffer"),
-        };
+    pub fn cache_resolve_pipeline(&self) -> wgpu::ComputePipeline {
+        let module = &self.module;
         let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("cache resolve"),
             layout: Some(&self.pipeline_layout),
@@ -2267,8 +2268,7 @@ impl Gpu {
         });
         let bg_parts = BindParts { nodes: b_nodes, tex_view, env_view, sampler, grid_view };
         let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_verts, attrs: &b_attrs, heap: &heap, words: &words, prev_verts: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
-        let mut kernel = Kernel::new(scene, groups);
-        kernel.caps = self.no_vis_bufs.merged.as_ref().map(|m| crate::merged::Caps { live: m.1 });
+        let kernel = Kernel::new(scene, groups);
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
         let translucent = match &accel {
             Some(_) if !scene.trans_tris.is_empty() => {
@@ -2942,7 +2942,6 @@ impl Gpu {
             buffer_entry(0, b.params),
             buffer_entry(1, b.verts),
             buffer_entry(2, b.attrs),
-            buffer_entry(3, &p.nodes),
             buffer_entry(4, &b.heap.buffer),
             buffer_entry(5, &b.words.buffer),
             buffer_entry(6, b.prev_verts),
@@ -2952,6 +2951,9 @@ impl Gpu {
             view(10, &p.grid_view),
             buffer_entry(11, b.accum),
         ];
+        if !self.hwrt {
+            entries.push(buffer_entry(3, &p.nodes));
+        }
         if !self.merged {
             for &(table, binding) in &crate::merged::TABLE_VIEWS {
                 let copy = b.uniform.and_then(|u| u.iter().zip(&crate::merged::UNIFORM_TABLES).find(|(_, t)| t.binding == binding).map(|(c, _)| c));
@@ -3135,6 +3137,7 @@ impl Gpu {
             let mut p = base;
             p.size[2] = s;
             up.place(&mut p);
+            self.no_vis_bufs.place(&mut p);
             self.queue.write_buffer(&up.params, 0, bytemuck::bytes_of(&p));
             let mut enc = d.create_command_encoder(&Default::default());
             {
@@ -3227,6 +3230,7 @@ impl Gpu {
                 let mut p = base;
                 p.size[2] = s + k;
                 up.place(&mut p);
+                self.no_vis_bufs.place(&mut p);
                 self.queue.write_buffer(b_params, 0, bytemuck::bytes_of(&p));
                 let mut enc = d.create_command_encoder(&Default::default());
                 {

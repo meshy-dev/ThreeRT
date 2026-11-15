@@ -18,8 +18,7 @@
 //   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
 // The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
-// merged layout's array lengths, the uniform tables', the loop guard's limit.
-@if(merged) import constants::{ML_CACHE_KEYS, ML_CACHE_ACC, ML_CACHE_VAL, ML_REFL, ML_MOTION_OUT, ML_DIRECT_OUT};
+// uniform tables' lengths, the loop guard's limit.
 @if(uniform_tables) import constants::{UT_TEX_INFO, UT_OBJECTS, UT_INSTANCES, UT_MEDIA};
 @if(merged || guard) import constants::GUARD_WORDS;
 @if(guard) import constants::LOOP_GUARD_LIMIT;
@@ -107,11 +106,13 @@ struct Params {
     procs: vec4<u32>,      // procedural geometry (F_PROC): -, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
     background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
-    ltile: vec4<u32>,      // live light tiles (`lt_list_start`): the lists' first vec4 in direct_out (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
+    ltile: vec4<u32>,      // live light tiles (`lt_list_start`): 1 with last frame's lists (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
     table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, -, -
     word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, -
+    live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, -, -, -
+    live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
 };
 
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
@@ -132,7 +133,8 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> tri_verts: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> attrs: array<TriAttr>;
-@group(0) @binding(3) var<storage, read> nodes: array<Node>;
+// (Software traversal's trees: hardware traversal has no binding for them.)
+@if(!hwrt) @group(0) @binding(3) var<storage, read> nodes: array<Node>;
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
@@ -1720,8 +1722,8 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
 // function) instead of the surface BSDF. Surface results add their specular part to `dl_spec`.
 // Light tiles (live; what guides MegaLights' draws and RTXPT's): each camera pixel reports the local light its
 // resampled shadow ray found (direct_out's w: `lt_fb`, a light-table index; LT_NONE: none), live.wgsl `light_tiles`
-// makes each 8 x 8 tile's reports a list after the kernel's own data in direct_out (the lights found, each once:
-// index, reports; ascending; the last vec4 their number), and the next frame's paths take resampling candidates
+// makes each 8 x 8 tile's reports a list in `light_lists` (the lights found, each once: index, reports; ascending;
+// the last vec4 their number), and the next frame's paths take resampling candidates
 // from the list of the tile their camera hit was seen in then (`lt_list_start`: where the point was, through that
 // frame's camera), spread over it without repeats (all of it when it is short). The candidates drawn uniformly, as
 // before, then stand for the lights the list lacks (`lt_in_list`). A list is a guide: whatever it holds the estimate
@@ -1748,9 +1750,9 @@ fn lt_list_start(p: vec3<f32>) {
     let uv = clamp(vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5), vec2<f32>(0.0), vec2<f32>(1.0));
     let q = min(vec2<u32>(uv * vec2<f32>(P.ltile2.xy)), P.ltile2.xy - 1u);
     let c = q + vec2<u32>(P.ltile.z & 0xffffu, P.ltile.z >> 16u);
-    lt_list = P.ltile.x + ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
-    if (lt_list + LT_LIST > direct_len()) { return; }
-    lt_list_n = min(u32(direct_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
+    lt_list = ((c.y / LT_TILE) * P.ltile.y + c.x / LT_TILE) * LT_LIST;
+    if (lt_list + LT_LIST > lists_len()) { return; }
+    lt_list_n = min(u32(list_load(lt_list + LT_LIST - 1u).x), LT_LIST - 1u);
 }
 
 // Whether the pixel's list holds light `i`.
@@ -1760,7 +1762,7 @@ fn lt_in_list(i: u32) -> bool {
     for (var k = 0u; k < 7u; k++) {
         if (lo >= hi) { break; }
         let mid = (lo + hi) / 2u;
-        let km = u32(direct_load(lt_list + mid).x);
+        let km = u32(list_load(lt_list + mid).x);
         if (km == i) { return true; }
         if (km < i) { lo = mid + 1u; } else { hi = mid; }
     }
@@ -1838,7 +1840,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
             idx = first + min(u32(r4.x * f32(count)), count - 1u);
         } else {
             r4 = rng4(rng_sub(rd ^ 0x80000000u, 0x1000u + k));
-            idx = u32(direct_load(lt_list + min(u32((f32(k - m_cand) + at) * step), lt_list_n - 1u)).x);
+            idx = u32(list_load(lt_list + min(u32((f32(k - m_cand) + at) * step), lt_list_n - 1u)).x);
             if (idx < first || idx >= first + count) { continue; }
             stands = listed;
         }
@@ -2764,44 +2766,48 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 //    octahedral ray direction). Neighbours reuse each other's rays weighted by their own BRDF (Lumen / SSSR);
 //  - motion_out: live motion vectors per traced pixel: where the camera hit was the previous frame, as a world-space
 //    offset (w = 1: on a moving triangle);
-//  - direct_out: live deterministic direct light per traced pixel (`dl_det` at the camera hit);
+//  - direct_out: live deterministic direct light per traced pixel (`dl_det` at the camera hit; w: the light it
+//    reports, "Light tiles");
+//  - light_lists: the light tiles' lists, 64 vec4s a tile, as the live pass `light_tiles` made them last frame;
 //  - cache_keys, cache_acc, cache_val: the radiance cache (below, at `cache_on`);
 //  - loop_guard_trips: the loop guard's count (first word: the invocations a loop of which was stopped).
 @if(merged) {
-    // The merged layout (merged.rs `KERNEL_LIVE`): the arrays of one struct, one buffer they are ranges of
-    // (gpu.rs `KernelBufs`). What the live passes read of it starts at a multiple of 256 bytes: they bind those
-    // ranges as buffers of their own (WebGPU's `minStorageBufferOffsetAlignment`). The loop guard's count is always
-    // there, written only by a kernel with the guard.
+    // The merged layout (merged.rs: a browser's eight storage buffers): one buffer (gpu.rs `KernelBufs`; heap.rs
+    // `Live` places its parts). The radiance cache's atomic words and the loop guard's count are at fixed places (the
+    // cache's size is the kernel's own constant); the vec4 arrays follow as the sections of `vecs`, each from the
+    // vec4 `P.live_first` names and as long as `P.live_len` says, so a view of another size is the same kernel. What
+    // the live passes read of it they bind as buffers of their own (a section starts at a multiple of 256 bytes).
     struct MergedLive {
-        cache_keys: array<atomic<u32>, ML_CACHE_KEYS>,
-        cache_acc: array<atomic<u32>, ML_CACHE_ACC>,
-        cache_val: array<vec4<f32>, ML_CACHE_VAL>,
-        @align(256) refl: array<vec4<f32>, ML_REFL>,
-        @align(256) motion_out: array<vec4<f32>, ML_MOTION_OUT>,
-        @align(256) direct_out: array<vec4<f32>, ML_DIRECT_OUT>,
-        loop_guard_trips: array<atomic<u32>, GUARD_WORDS>,
+        cache_keys: array<atomic<u32>, CACHE_SIZE>,
+        @align(256) cache_acc: array<atomic<u32>, CACHE_SIZE * 8u>,
+        @align(256) @size(512) loop_guard_trips: array<atomic<u32>, GUARD_WORDS>,
+        @align(256) vecs: array<vec4<f32>>,
     };
     @group(1) @binding(1) var<storage, read_write> ML: MergedLive;
-    fn refl_len() -> u32 { return ML_REFL; }
-    fn refl_store(i: u32, v: vec4<f32>) { ML.refl[i] = v; }
-    fn motion_len() -> u32 { return ML_MOTION_OUT; }
-    fn motion_store(i: u32, v: vec4<f32>) { ML.motion_out[i] = v; }
-    fn direct_len() -> u32 { return ML_DIRECT_OUT; }
-    fn direct_load(i: u32) -> vec4<f32> { return ML.direct_out[i]; }
-    fn direct_store(i: u32, v: vec4<f32>) { ML.direct_out[i] = v; }
+    fn refl_len() -> u32 { return P.live_len.x; }
+    fn refl_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].y + i] = v; }
+    fn motion_len() -> u32 { return P.live_len.y; }
+    fn motion_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].z + i] = v; }
+    fn direct_len() -> u32 { return P.live_len.z; }
+    fn direct_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].w + i]; }
+    fn direct_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].w + i] = v; }
+    fn lists_len() -> u32 { return P.live_len.w; }
+    fn list_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[1].x + i]; }
     fn cache_key_load(i: u32) -> u32 { return atomicLoad(&ML.cache_keys[i]); }
     fn cache_key_claim(i: u32, k: u32) -> bool { let r = atomicCompareExchangeWeak(&ML.cache_keys[i], 0u, k); return r.exchanged || r.old_value == k; }
     fn cache_key_clear(i: u32) { atomicStore(&ML.cache_keys[i], 0u); }
     fn cache_acc_add(i: u32, v: u32) -> u32 { return atomicAdd(&ML.cache_acc[i], v); }
     fn cache_acc_load(i: u32) -> u32 { return atomicLoad(&ML.cache_acc[i]); }
     fn cache_acc_clear(i: u32) { atomicStore(&ML.cache_acc[i], 0u); }
-    fn cache_val_load(i: u32) -> vec4<f32> { return ML.cache_val[i]; }
-    fn cache_val_store(i: u32, v: vec4<f32>) { ML.cache_val[i] = v; }
+    // (The cache's values are `vecs`' first section: from vec4 0.)
+    fn cache_val_load(i: u32) -> vec4<f32> { return ML.vecs[i]; }
+    fn cache_val_store(i: u32, v: vec4<f32>) { ML.vecs[i] = v; }
     @if(guard) fn loop_guard_stopped() { atomicAdd(&ML.loop_guard_trips[0], 1u); }
 } @else {
     @group(1) @binding(1) var<storage, read_write> cache_keys: array<atomic<u32>>;
     @group(1) @binding(2) var<storage, read_write> cache_acc: array<atomic<u32>>;
     @group(1) @binding(3) var<storage, read_write> cache_val: array<vec4<f32>>;
+    @group(1) @binding(4) var<storage, read> light_lists: array<vec4<f32>>;
     @group(1) @binding(5) var<storage, read_write> refl: array<vec4<f32>>;
     @group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;
     @group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;
@@ -2812,6 +2818,8 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     fn direct_len() -> u32 { return arrayLength(&direct_out); }
     fn direct_load(i: u32) -> vec4<f32> { return direct_out[i]; }
     fn direct_store(i: u32, v: vec4<f32>) { direct_out[i] = v; }
+    fn lists_len() -> u32 { return arrayLength(&light_lists); }
+    fn list_load(i: u32) -> vec4<f32> { return light_lists[i]; }
     fn cache_key_load(i: u32) -> u32 { return atomicLoad(&cache_keys[i]); }
     fn cache_key_claim(i: u32, k: u32) -> bool { let r = atomicCompareExchangeWeak(&cache_keys[i], 0u, k); return r.exchanged || r.old_value == k; }
     fn cache_key_clear(i: u32) { atomicStore(&cache_keys[i], 0u); }

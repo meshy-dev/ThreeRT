@@ -358,12 +358,11 @@ impl LiveCore {
         if self.reset || !tiles_on {
             self.light_tiles = None;
         }
-        let lists = layout::light_lists(w, h).0;
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
             if let Some((row, at, size, cam)) = self.light_tiles {
-                (p.ltile[0], p.ltile[1], p.ltile[2]) = (lists, row, at);
+                (p.ltile[0], p.ltile[1], p.ltile[2]) = (1, row, at);
                 p.ltile2 = [size.0, size.1, 0, 0];
                 p.lt_cam = cam;
             }
@@ -395,6 +394,7 @@ impl LiveCore {
             p.counts[2] = p.counts[2].min(self.bounces);
             p.counts[3] = p.counts[3].min(2);
             self.sc.up.place(&mut p);
+            self.targets.kernel.place(&mut p);
             g.queue.write_buffer(&self.sc.up.params, 0, bytemuck::bytes_of(&p));
             let mut e = g.device.create_command_encoder(&Default::default());
             // Particles: placed for this frame's time and camera, then the dynamic BLASes rebuilt (before the raster and
@@ -518,7 +518,7 @@ impl LiveCore {
             dof: dof_params(self.sc.dof.as_ref(), cam.tan_half_fov, w, h),
             jit: [jitter.0, jitter.1, 0.0, 0.0],
             state: [1 - self.frame % 2, 0, 0, 0],
-            lt: [tile_at.0, tile_at.1, lists, layout::light_tiles(iw)],
+            lt: [tile_at.0, tile_at.1, 0, layout::light_tiles(iw)],
         };
         g.queue.write_buffer(&self.targets.params, 0, bytemuck::bytes_of(&lp));
         // Translucent particles: drawn over the upscaled image right after `upscale` (in sb when depth of field / motion

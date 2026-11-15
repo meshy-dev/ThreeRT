@@ -79,6 +79,32 @@ impl Section for Stream {
     }
 }
 
+/// The kernel's group-1 buffers as the parts of one: the merged layout's (gpu.rs `KernelBufs`; pathtrace.wgsl
+/// `MergedLive`, whose members are where these sections are: a test holds it). The radiance cache's keys and sums
+/// and the loop guard's count, atomic words at fixed places; then the vec4 arrays, the sections of the struct's last
+/// member: the cache's values, what the live passes read of a trace (the specular-lobe rays, the motion vectors, the
+/// direct light), the light tiles' lists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Live {
+    CacheKeys,
+    CacheAcc,
+    Guard,
+    CacheVal,
+    Refl,
+    Motion,
+    Direct,
+    Lists,
+}
+
+impl Section for Live {
+    const COUNT: usize = 8;
+    const UNIT: u64 = 4;
+    const LABEL: &'static str = "live";
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// A heap: its buffer, and each section's first byte and size.
 pub struct Heap<S: Section> {
     pub buffer: wgpu::Buffer,
@@ -101,6 +127,12 @@ impl<S: Section> Heap<S> {
     /// The bytes of a heap whose sections hold `bytes` each.
     pub fn size_for(bytes: &[u64]) -> u64 {
         place(bytes).2
+    }
+
+    /// Where its sections start, and the bytes each holds.
+    pub fn starts_for(bytes: &[u64]) -> (Vec<u64>, Vec<u64>) {
+        let (at, cap, _) = place(bytes);
+        (at, cap)
     }
 
     /// A heap of zeros with sections of at least `bytes` each (`S::COUNT` of them), to be written through the queue.

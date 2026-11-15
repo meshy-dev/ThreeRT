@@ -741,7 +741,7 @@ tree (ROADMAP § 6).
   the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
   [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
-  kernel binds 20. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
+  kernel binds 21. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
   uses, `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit
   test's check; a page binds them as natively.) There is one source: pathtrace.wgsl declares the views of its
   tables and its group-1 buffers in an `@if(merged) { .. } @else { .. }` block each (WESL's conditional
@@ -750,13 +750,15 @@ tree (ROADMAP § 6).
   - The scene's tables are the sections of one buffer on every device ("The scene's tables"). Here the kernel has
     no views of them and reads its seven tables from the buffer whole: no second copy of a table, nothing copied a
     frame, no kernel compiled when one grows.
-  - The kernel's six group-1 buffers (the radiance cache, what the live passes read of a trace) are ranges of one
-    buffer, the arrays of a struct whose lengths are WESL constants the source imports (gpu.rs
-    `KernelVariant::constants`); what the live passes read of it starts at multiples of 256 bytes, so they bind
-    those ranges as buffers of their own.
+  - The kernel's seven group-1 buffers (the radiance cache, what the live passes read of a trace, the light tiles'
+    lists) are ranges of one buffer (`heap::Live`): the cache's atomic words at fixed places (its size is the
+    kernel's own constant), then the vec4 arrays as the sections of one array of the buffer's length, each found by
+    an offset in the parameters. No length is the source's: a view of another size, or an offline render, is the
+    same kernel (until 2026-11-15 the lengths were constants of the source, and each view compiled its own). What
+    the live passes read of it starts at multiples of 256 bytes, so they bind those ranges as buffers of their own.
   - The merged block declares none of the buffers by its own name, so a read or write that goes past the functions
     does not compile in it (naga names the line). A test reads the merged variants with naga: valid WGSL, 8 storage
-    buffers for the kernel (20 as written), the struct's arrays where the Rust side puts them.
+    buffers for the kernel (21 as written), the struct's members where the Rust side puts them.
   - Until 2026-11-14 the browser's kernel was written from the native one as text: a scanner of WGSL in merged.rs
     found every use of the thirteen names, followed the locals that shadowed them through their scopes, and rewrote
     each use (the uniform tables and the loop guard were made the same way).
@@ -1242,7 +1244,7 @@ pathtrace.wgsl's head names them; a flag the source names that a kernel is not g
 features are bits of `FEAT`, a pipeline-overridable constant: one kernel source for all of them (`OBJECT_STRIDE`
 too is an override, from F_TINT).
 - The numbers a variant is compiled for are WESL constants, which the source imports (`import constants::..`; gpu.rs
-  `KernelVariant::constants`): the merged layout's array lengths, the uniform tables', the loop guard's limit. One
+  `KernelVariant::constants`): the uniform tables' lengths, the loop guard's limit. One
   the source imports and is not given is an error.
 - The kernel reads its tables and its group-1 buffers only through functions (`material_at`, `instance_at`,
   `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
@@ -1301,6 +1303,8 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second copy of each made
   every frame, and was compiled again when a table doubled. The count of bindings is as it was: 22 buffers and
   acceleration structures a stage natively, 28 of Metal's 29 with the translucency pass (29 with the loop guard's).
+  (Hardware traversal no longer binds software traversal's trees, a placeholder there; the light tiles' lists took
+  the binding.)
 
 ## Random numbers
 
@@ -1323,7 +1327,8 @@ frame found (pathtrace.wgsl "Light tiles", live.wgsl `light_tiles`):
 - A camera hit's resampled shadow ray that reaches its light reports the light (the direct buffer's fourth
   component).
 - `light_tiles`, the live passes' first, makes each 8 x 8 tile's reports a list: the lights reported, each once,
-  ascending, after the direct buffer's pixels (64 vec4s a tile). The tile grid shifts by a pixel offset each frame.
+  ascending, in a buffer of their own (64 vec4s a tile; the kernel's group 1 reads it). The tile grid shifts by a
+  pixel offset each frame.
 - The next frame's paths read the list of the tile their camera hit was seen in then (its point, moved back by its
   motion, through that frame's camera; the nearest tile's when it was off screen). They take 2 candidates from it at
   a vertex the camera sees and 1 past it, spread over the list without repeats, beside the uniform candidates (8 and

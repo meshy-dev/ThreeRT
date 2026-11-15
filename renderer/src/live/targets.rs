@@ -166,8 +166,7 @@ impl Targets {
             params: d.create_buffer(&wgpu::BufferDescriptor { label: Some("live params"), size: std::mem::size_of::<LiveParams>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             bufs,
             out,
-            // (The direct buffer: a vec4 an output pixel, then the light tiles' lists: `layout::light_lists`.)
-            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, (n + layout::light_lists(w, h).1 as u64) * 16),
+            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16),
             lut_view: lut_tex.create_view(&Default::default()),
             lut_tex,
             sampler: d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
@@ -183,7 +182,8 @@ impl Targets {
         match layout::resource(b) {
             layout::Res::KernelRefl => &self.kernel.refl,
             layout::Res::KernelMotion => &self.kernel.motion,
-            layout::Res::KernelDirect | layout::Res::KernelLights => &self.kernel.direct,
+            layout::Res::KernelDirect | layout::Res::KernelReports => &self.kernel.direct,
+            layout::Res::KernelLists => &self.kernel.lists,
             layout::Res::Own(_) => &self.bufs.iter().find(|x| x.0 == b.binding).expect("an own buffer").1,
             r => panic!("`{}` is bound to {r:?}, not a buffer of the passes'", b.name),
         }

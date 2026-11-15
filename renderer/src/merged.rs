@@ -1,89 +1,43 @@
 //! The merged binding layout: the kernel with at most eight storage buffers a stage, WebGPU's default limit
-//! (`maxStorageBuffersPerShaderStage`). The kernel binds 20 as it is written: more than a browser gives a page.
+//! (`maxStorageBuffersPerShaderStage`). The kernel binds 21 as it is written: more than a browser gives a page.
 //! (The live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.)
 //!
 //! The kernel's source has both layouts: pathtrace.wgsl declares its tables' views and its group-1 buffers in an
 //! `@if(merged) { .. } @else { .. }` block each (WESL's conditional translation, `gpu::KernelVariant`), and reads and
-//! writes them only through functions declared in each (`material_at`, `cache_acc_add`, `refl_store`, ...). This
-//! module is the Rust side's half: which views a layout binds, the lengths of the merged struct's arrays (WESL
-//! constants the source imports, `gpu::KernelVariant::constants`) and where the arrays are, for the buffer the
-//! renderer makes. `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check
-//! the renderer check it too (docs/RUNTIME.md "The engine in a browser").
+//! writes them only through functions declared in each (`material_at`, `cache_acc_add`, `refl_store`, ...).
+//! `THREERT_MERGED=1` runs the same layout natively (software traversal), so the tests that check the renderer
+//! check it too (docs/RUNTIME.md "The engine in a browser").
 //!
-//! What is merged:
-//!  - The scene's tables are the sections of one buffer in every layout (heap.rs). As written the kernel binds the
-//!    seven it reads at every hit or light again, each section as a typed array (`TABLE_VIEWS`); here it binds none
-//!    of them and reads all seven from the buffer whole.
-//!  - The kernel's six group-1 buffers (`KERNEL_LIVE`: the radiance cache, what the live passes read of a trace) and
-//!    the loop guard's count become the arrays of `ML: MergedLive`, one buffer that they are ranges of
-//!    (`gpu::KernelBufs`). What the live passes read of it starts at a multiple of 256 bytes (`@align(256)`): the
-//!    passes bind those ranges as buffers of their own, and a binding's offset is a multiple of that (WebGPU's
-//!    `minStorageBufferOffsetAlignment`).
+//! What is merged, each into a buffer of sections found by offsets in the kernel's parameters (heap.rs), so no
+//! length is the source's and a scene or a view of another size is the same kernel:
+//!  - The scene's tables are the sections of one buffer in every layout. As written the kernel binds the seven it
+//!    reads at every hit or light again, each section as a typed array (`TABLE_VIEWS`); here it binds none of them
+//!    and reads all seven from the buffer whole.
+//!  - The kernel's group-1 buffers (the radiance cache, what the live passes read of a trace, the light tiles'
+//!    lists, the loop guard's count) are buffers of their own as written; here the sections of one (`heap::Live`;
+//!    `gpu::KernelBufs`), which the live passes bind as buffers of their own (a section starts at a multiple of
+//!    WebGPU's `minStorageBufferOffsetAlignment`).
 //!
-//! The tests below read every variant with naga: valid WGSL, no stage with more than `STORAGE_BUFFERS`, and the
-//! struct's arrays where `live_layout` puts them.
+//! The tests below read every variant with naga: valid WGSL, and no stage with more than `STORAGE_BUFFERS`.
 
 use crate::heap::Table;
 
 /// WebGPU's default `maxStorageBuffersPerShaderStage`: what the merged layout fits.
 pub const STORAGE_BUFFERS: u32 = 8;
 
-/// One of the kernel's buffers that becomes an array of a merged struct.
-pub struct Member {
-    pub name: &'static str,
-    /// Its element's size in a storage buffer; where its array may start in the struct: its element's alignment, or
-    /// more (`@align` in pathtrace.wgsl's struct).
-    pub stride: u64,
-    pub align: u64,
-}
-
 /// The tables the kernel as written binds again as typed arrays over their sections, and their bindings (group 0;
 /// pathtrace.wgsl `materials`, `lights`, `emitters`, `tex_info`, `objects`, `instances`, `media`).
 pub const TABLE_VIEWS: [(Table, u32); 7] = [(Table::Materials, 12), (Table::Lights, 13), (Table::Emitters, 14), (Table::TexInfo, 15), (Table::Objects, 16), (Table::Instances, 17), (Table::Media, 18)];
 
-/// The kernel's group-1 buffers, in `MergedLive`'s order (group 1, binding `KERNEL_LIVE_BINDING`).
-pub const KERNEL_LIVE: [Member; 6] = [
-    Member { name: "cache_keys", stride: 4, align: 4 },
-    Member { name: "cache_acc", stride: 4, align: 4 },
-    Member { name: "cache_val", stride: 16, align: 16 },
-    Member { name: "refl", stride: 16, align: 256 },
-    Member { name: "motion_out", stride: 16, align: 256 },
-    Member { name: "direct_out", stride: 16, align: 256 },
-];
-pub const KERNEL_LIVE_BINDING: u32 = 1;
-/// `MergedLive`'s last array, after `KERNEL_LIVE`'s: the loop guard's count (`gpu::guard_loops`; its first word: the invocations
-/// a loop of which was stopped). Always there in the merged layout, written only by a kernel with the guard.
-pub const GUARD_TRIPS: Member = Member { name: "loop_guard_trips", stride: 4, align: 4 };
-/// The same count in the layout as written, when the kernel has the guard (group 1, binding `GUARD_BINDING`).
+/// The merged layout's one group-1 buffer (group 1, binding `LIVE_BINDING`; pathtrace.wgsl `live`).
+pub const LIVE_BINDING: u32 = 1;
+/// The light tiles' lists in the layout as written (group 1, binding `LISTS_BINDING`).
+pub const LISTS_BINDING: u32 = 4;
+/// The loop guard's count (`gpu::guard_loops`; its first word: the invocations a loop of which was stopped): in the
+/// layout as written a buffer of its own when the kernel has the guard (group 1, binding `GUARD_BINDING`), in the
+/// merged layout a section (`heap::Live::Guard`), written only by a kernel with the guard.
 pub const GUARD_BINDING: u32 = 8;
 pub const GUARD_WORDS: u32 = 4;
-
-/// Where `MergedLive`'s arrays are for these lengths (bytes): `KERNEL_LIVE`'s six, then the loop guard's count; and
-/// the struct's size.
-pub fn live_layout(caps: &[u32; 6]) -> (Vec<u64>, u64) {
-    let members: Vec<&Member> = KERNEL_LIVE.iter().chain([&GUARD_TRIPS]).collect();
-    let caps: Vec<u32> = caps.iter().copied().chain([GUARD_WORDS]).collect();
-    let (mut at, mut out) = (0u64, vec![]);
-    for (m, &c) in members.iter().zip(&caps) {
-        at = at.next_multiple_of(m.align);
-        out.push(at);
-        at += m.stride * c as u64;
-    }
-    // (A struct's size is a multiple of its largest member's alignment: 256 where the live passes' ranges are.)
-    (out, at.next_multiple_of(members.iter().map(|m| m.align).max().unwrap_or(16)))
-}
-
-/// The lengths of the merged struct's arrays: what a kernel's source is written for (`gpu::Kernel::caps`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Caps {
-    pub live: [u32; 6],
-}
-
-/// A group-1 buffer's array length: its own (the kernel reads some of them, `arrayLength`).
-pub fn live_cap(k: usize, bytes: u64) -> u32 {
-    assert_eq!(bytes % KERNEL_LIVE[k].stride, 0, "merged layout: {} of {bytes} bytes", KERNEL_LIVE[k].name);
-    (bytes / KERNEL_LIVE[k].stride) as u32
-}
 
 /// The uniform tables (`gpu::GpuOptions::uniform_tables`; docs/RUNTIME.md "Android"): the tables the kernel reads
 /// from uniform buffers, copies of their sections, instead of from views of the sections. Qualcomm's Adreno 740 driver
@@ -123,15 +77,9 @@ mod tests {
 
     use crate::gpu::{kernel_template, kernel_wgsl, KernelVariant};
 
-    /// A scene's kernel (software traversal, no switch) as compiled, in the merged layout when given its lengths.
-    fn variant(features: u32, merged: Option<&Caps>) -> String {
-        kernel_wgsl(&kernel_template(), &KernelVariant { merged: merged.copied(), ..KernelVariant::new(false, Default::default(), features) })
-    }
-
-    fn caps() -> Caps {
-        // A cache of one entry, a view of 64 x 36: lengths that are not round.
-        let n = 64 * 36;
-        Caps { live: [1, 8, 2, 2 * n, n, n] }
+    /// A scene's kernel (software traversal, no switch) as compiled, as written or in the merged layout.
+    fn variant(features: u32, merged: bool) -> String {
+        kernel_wgsl(&kernel_template(), &KernelVariant { merged, ..KernelVariant::new(false, Default::default(), features) })
     }
 
     fn parse(src: &str) -> (naga::Module, naga::valid::ModuleInfo) {
@@ -157,26 +105,30 @@ mod tests {
     }
 
     /// Kernel variants in the merged layout: valid WGSL, no entry point with more than eight storage buffers, none
-    /// declared beyond them (a pipeline layout counts what is declared), and the merged struct's arrays where
-    /// `live_layout` puts them. The layout as written has 20. Because the merged blocks declare none of the views
-    /// or of group 1's buffers by their own names, a read or write of one past its accessor does not compile here
-    /// (and naga says where), whatever the other layouts take.
+    /// declared beyond them (a pipeline layout counts what is declared), no length of a view's buffer in the source,
+    /// and `MergedLive`'s members where the renderer puts their sections.
+    /// The layout as written has 21 (20 under hardware traversal, which has no trees' buffer). Because the merged
+    /// blocks declare none of the views or of group 1's buffers by their own names, a read or write of one past its
+    /// accessor does not compile here (and naga says where), whatever the other layouts take.
     #[test]
     fn the_merged_kernel_fits_eight_storage_buffers() {
-        let (m, info) = parse(&variant(0, None));
+        let (m, info) = parse(&variant(0, false));
         let (used, declared) = storage_buffers(&m, &info);
-        assert_eq!(declared, 20, "the kernel as written");
-        assert_eq!(used.iter().map(|u| u.1).max(), Some(20), "{used:?}");
-        let caps = caps();
+        assert_eq!(declared, 21, "the kernel as written");
+        assert_eq!(used.iter().map(|u| u.1).max(), Some(21), "{used:?}");
+        let hw = kernel_wgsl(&kernel_template(), &KernelVariant::new(true, Default::default(), 0));
+        assert_eq!(hw.matches("var<storage").count(), 20 + 4, "hardware traversal: no trees' buffer (and the translucency pass's four)");
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
-            let src = variant(features, Some(&caps));
-            assert!(src.contains(&format!("const ML_REFL = {}u;", caps.live[3])), "the lengths, as constants");
+            let src = variant(features, true);
+            assert!(!src.contains("arrayLength"), "the lengths are the parameters'");
             let (m, info) = parse(&src);
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
             assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "features {features:#x}: {used:?}");
             assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(8), "the trace reads all eight");
-            assert_eq!(layout(&m, "MergedLive"), live_layout(&caps.live));
+            // The struct's members are the first sections; its last, the vec4s, begins where the cache's values do.
+            let (at, _) = crate::heap::Heap::<crate::heap::Live>::starts_for(&crate::gpu::live_sizes(1, 64, 64, 64, 64));
+            assert_eq!(layout(&m, "MergedLive").0, at[..4]);
         }
     }
 
@@ -202,11 +154,11 @@ mod tests {
             out.sort_by_key(|g| g.1);
             out
         };
-        let (written, _) = parse(&variant(0, None));
+        let (written, _) = parse(&variant(0, false));
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = kernel_wgsl(&kernel_template(), &KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), features) });
             let (m, info) = parse(&src);
-            assert_eq!(storage_buffers(&m, &info).1, 16, "features {features:#x}");
+            assert_eq!(storage_buffers(&m, &info).1, 17, "features {features:#x}");
             let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P").collect();
             let want: Vec<(String, u32, u32)> = UNIFORM_TABLES.iter().map(|t| (t.name.to_string(), t.binding, (t.stride * t.len as u64) as u32)).collect();
             assert_eq!(tables, want, "features {features:#x}");
@@ -227,7 +179,7 @@ mod tests {
     #[test]
     fn the_tables_records_are_the_kernels() {
         use crate::scene::{GpuInstance, GpuLight, GpuMaterial, MediumGpu};
-        let src = variant(0, Some(&caps()));
+        let src = variant(0, true);
         let (m, _) = parse(&src);
         // (The views' bindings follow the buffer's, and are the kernel's.)
         for (k, (table, binding)) in TABLE_VIEWS.iter().enumerate() {
@@ -239,6 +191,7 @@ mod tests {
             assert_eq!(layout(&m, name).1 as usize, bytes, "{name}");
         }
         assert_eq!(<Table as crate::heap::Section>::COUNT, Table::Energy as usize + 1);
+        assert!(kernel_template().contains(&format!("const CACHE_SIZE: u32 = {}u;", crate::gpu::CACHE_SIZE)));
         // What the kernel reads with no offset is its heap's first section.
         assert_eq!((Table::LightTree as usize, crate::heap::Stream::EnvCdf as usize), (0, 0));
         assert!(kernel_template().contains("fn lt_node(i: u32) -> vec4<f32> { return table_f(i); }") && kernel_template().contains("fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }"));
@@ -246,8 +199,8 @@ mod tests {
     }
 
     /// The loop guard opens every loop of the kernel but counted ones (`for (var i = N; i < M; i++)`, literals), the
-    /// scene's functions' too, in the layout as written and in the merged one (its count a buffer of its own, or in
-    /// `MergedLive`), and what comes out is valid WGSL.
+    /// scene's functions' too, in the layout as written and in the merged one (its count a buffer of its own, or a
+    /// section of `live`), and what comes out is valid WGSL.
     #[test]
     fn the_guard_bounds_every_loop() {
         let counted = |s: &str| {
@@ -262,7 +215,7 @@ mod tests {
                 .count()
         };
         let loops = |s: &str| s.matches("loop {").count() + s.matches("for (").count() + s.matches("while (").count();
-        for merged in [None, Some(caps())] {
+        for merged in [false, true] {
             let v = KernelVariant { merged, ..KernelVariant::new(false, Default::default(), crate::gpu::F_SOURCE) };
             let plain = kernel_wgsl(&kernel_template(), &v);
             let g = kernel_wgsl(&kernel_template(), &KernelVariant { guard: Some(1 << 16), ..v });
@@ -271,7 +224,7 @@ mod tests {
             let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
             // (As written: one buffer more, where the device has room. Merged: still eight.)
-            assert_eq!(declared as u32, if merged.is_some() { STORAGE_BUFFERS } else { 21 }, "{used:?}");
+            assert_eq!(declared as u32, if merged { STORAGE_BUFFERS } else { 22 }, "{used:?}");
         }
         // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`; a
         // counted loop left alone, one bounded by a variable or assigning its counter guarded.
@@ -284,23 +237,24 @@ mod tests {
         assert_eq!(first("for (var k"), "if (e) {", "{g}");
     }
 
-    /// The constants a variant imports are the ones it is given, by name: a merged kernel's lengths, a guard's limit.
+    /// The constants a variant imports are the ones it is given, by name: a guard's limit, the uniform tables'
+    /// lengths. The merged layout has none of its own.
     #[test]
     fn the_variant_gives_what_it_imports() {
-        let v = KernelVariant { merged: Some(caps()), guard: Some(9), ..KernelVariant::new(false, Default::default(), 0) };
-        let c = v.constants();
-        assert_eq!(c.len(), 6 + 2);
-        assert!(c.contains(&("ML_DIRECT_OUT".into(), 64 * 36)) && c.contains(&("LOOP_GUARD_LIMIT".into(), 9)) && c.contains(&("GUARD_WORDS".into(), GUARD_WORDS)));
+        let v = KernelVariant { merged: true, guard: Some(9), ..KernelVariant::new(false, Default::default(), 0) };
+        assert_eq!(v.constants(), vec![("GUARD_WORDS".into(), GUARD_WORDS), ("LOOP_GUARD_LIMIT".into(), 9)]);
+        assert_eq!(KernelVariant { merged: true, ..Default::default() }.constants(), vec![("GUARD_WORDS".into(), GUARD_WORDS)]);
         let u = KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), 0) }.constants();
         assert_eq!(u, vec![("UT_TEX_INFO".into(), 4096), ("UT_OBJECTS".into(), 4096), ("UT_INSTANCES".into(), 409), ("UT_MEDIA".into(), 32)]);
         assert!(KernelVariant::default().constants().is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "ML_REFL")]
+    #[should_panic(expected = "LOOP_GUARD_LIMIT")]
     fn a_constant_the_source_imports_must_be_given() {
-        let mut c = KernelVariant { merged: Some(caps()), ..KernelVariant::new(false, Default::default(), 0) }.constants();
-        c.retain(|(n, _)| n != "ML_REFL");
-        crate::gpu::wesl_wgsl(&kernel_template(), &KernelVariant { merged: Some(caps()), ..Default::default() }.flags(), &c);
+        let v = KernelVariant { guard: Some(9), ..KernelVariant::new(false, Default::default(), 0) };
+        let mut c = v.constants();
+        c.retain(|(n, _)| n != "LOOP_GUARD_LIMIT");
+        crate::gpu::wesl_wgsl(&kernel_template(), &v.flags(), &c);
     }
 }

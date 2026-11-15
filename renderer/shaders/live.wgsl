@@ -32,7 +32,7 @@ struct LiveParams {
     dof: vec4<f32>,    // depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -
     jit: vec4<f32>,    // this frame's sub-pixel jitter (every traced sample's: x, y in 0 .. 1 of a traced pixel), -, -
     state: vec4<u32>,  // which half of the lasting buffers is this frame's (0 / 1; `this_half`), -, -, -
-    lt: vec4<u32>,     // the light tiles (`light_tiles`): this frame's grid offset x, y (traced pixels), the lists' first vec4 in `light_rw`, tiles a row
+    lt: vec4<u32>,     // the light tiles (`light_tiles`): this frame's grid offset x, y (traced pixels), -, tiles a row
 };
 // color = diffuse lighting + first-hit distance, emit = directly seen emission / sky + roughness, spec = specular lighting
 // + reflection hit distance, normal.w = the media before the first hit (`medium_tr`, `medium_share`; see pathtrace.wgsl).
@@ -108,9 +108,11 @@ struct Pixel { color: vec4<f32>, albedo: vec4<f32>, normal: vec4<f32>, emit: vec
 // (`compose` adds it as it is, UE lights directly).
 @group(0) @binding(26) var<storage, read> direct_in: array<vec4<f32>>;
 @group(0) @binding(27) var<storage, read_write> lock_fwd: array<atomic<u32>>;
-// The kernel's direct buffer again, to write (`light_tiles` alone): a vec4 a traced pixel (w: the local light its
-// camera hit's resampled shadow ray found; pathtrace.wgsl "Light tiles"), then the tiles' lists.
+// For `light_tiles` alone: the kernel's direct buffer again (w: the local light a traced pixel's camera hit's
+// resampled shadow ray found; pathtrace.wgsl "Light tiles"; read only, bound as the lists are: in the merged layout
+// both are ranges of one buffer, which a pass uses one way), and the tiles' lists it writes.
 @group(0) @binding(28) var<storage, read_write> light_rw: array<vec4<f32>>;
+@group(0) @binding(29) var<storage, read_write> light_lists: array<vec4<f32>>;
 
 // Element i of this frame's half of a lasting buffer, and of the previous frame's.
 fn this_half(i: u32) -> u32 { return L.state.x * L.size.x * L.size.y + i; }
@@ -281,10 +283,10 @@ fn light_tiles(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
         less += f * vec4<u32>(vec4<u32>(lt_keys[j], lt_keys[j + 1u], lt_keys[j + 2u], lt_keys[j + 3u]) < k0);
         all += f;
     }
-    let list = L.lt.z + (wg.y * L.lt.w + wg.x) * 64u;
+    let list = (wg.y * L.lt.w + wg.x) * 64u;
     let at = less.x + less.y + less.z + less.w;
-    if (first && at < 63u) { light_rw[list + at] = vec4<f32>(f32(key), f32(same.x + same.y + same.z + same.w), 0.0, 0.0); }
-    if (li == 0u) { light_rw[list + 63u] = vec4<f32>(f32(min(all.x + all.y + all.z + all.w, 63u)), 0.0, 0.0, 0.0); }
+    if (first && at < 63u) { light_lists[list + at] = vec4<f32>(f32(key), f32(same.x + same.y + same.z + same.w), 0.0, 0.0); }
+    if (li == 0u) { light_lists[list + 63u] = vec4<f32>(f32(min(all.x + all.y + all.z + all.w, 63u)), 0.0, 0.0, 0.0); }
 }
 
 @compute @workgroup_size(8, 8, 1)

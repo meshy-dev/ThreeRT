@@ -36,8 +36,10 @@ pub(super) enum Res {
     KernelRefl,
     KernelMotion,
     KernelDirect,
-    /// The kernel's direct buffer, to write (`light_tiles`: the light tiles' lists after its per-pixel data).
-    KernelLights,
+    /// For `light_tiles`: the kernel's direct buffer again (the pixels' reports; bound as the lists are, read-write)
+    /// and the light tiles' lists it writes (`gpu::KernelBufs::lists`).
+    KernelReports,
+    KernelLists,
     /// The tonemap LUT and its sampler.
     Lut,
     LutSampler,
@@ -85,7 +87,8 @@ pub(super) const RESOURCES: &[(&str, Res)] = &[
     ("refl_res", Res::Own(Count::Pixels(1))),
     ("motion_in", Res::KernelMotion),
     ("direct_in", Res::KernelDirect),
-    ("light_rw", Res::KernelLights),
+    ("light_rw", Res::KernelReports),
+    ("light_lists", Res::KernelLists),
     ("lock_fwd", Res::Own(Count::Pixels(1))),
 ];
 
@@ -184,10 +187,9 @@ pub(super) fn light_tiles(n: u32) -> u32 {
     n.div_ceil(8) + 1
 }
 
-/// The light tiles' lists in the kernel's direct buffer, for an output of `w` x `h`: after its vec4 a pixel, 64 vec4s
-/// a tile. Their first vec4 and how many they are.
-pub(super) fn light_lists(w: u32, h: u32) -> (u32, u32) {
-    (w * h, light_tiles(w) * light_tiles(h) * 64)
+/// The vec4s of the light tiles' lists for an output of `w` x `h`: 64 a tile.
+pub(super) fn light_lists(w: u32, h: u32) -> u32 {
+    light_tiles(w) * light_tiles(h) * 64
 }
 
 /// The binding live.wgsl gives `name`.
@@ -224,7 +226,7 @@ pub(super) fn check() {
         let fits = match (res, &b.kind) {
             (Res::Params, Kind::Uniform) | (Res::Lut, Kind::Texture(_)) | (Res::LutSampler, Kind::Sampler) => true,
             (Res::Samples | Res::KernelRefl | Res::KernelMotion | Res::KernelDirect, Kind::Storage { read_only, .. }) => *read_only,
-            (Res::KernelLights, Kind::Storage { read_only, .. }) => !*read_only,
+            (Res::KernelReports | Res::KernelLists, Kind::Storage { read_only, .. }) => !*read_only,
             (Res::Own(Count::Declared), Kind::Storage { len, .. }) => *len > 0,
             (Res::Own(_), Kind::Storage { len, .. }) => *len == 0,
             _ => false,
