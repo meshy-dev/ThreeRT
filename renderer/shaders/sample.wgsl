@@ -129,9 +129,10 @@ const D_VOL_LIGHT: u32 = 14u; // lights at a point in a medium (`phase_direct`, 
 const D_VOXEL: u32 = 15u;    // the radiance cache's volume points (`point_sphere`)
 const D_CACHE: u32 = 16u;    // the cache's fixed-point dither
 
-// Live: Sobol only for the camera path's first vertex (not a loop's parts: `rng_sub` sets the top bit), a hash
-// elsewhere (as NVIDIA's RTXPT; all-Sobol cost 2 ms of Bistro's trace). Offline: Sobol everywhere (as Cycles).
-fn rng_white(d: u32) -> bool { return LIVE && (cur_depth > 0u || RNG_PATH != 0u || d >= 0x80000000u); }
+// A_WHITE_NOISE (live): Sobol only for the camera path's first vertex (not a loop's parts: `rng_sub` sets the top
+// bit), a hash elsewhere (as NVIDIA's RTXPT; all-Sobol cost 2 ms of Bistro's trace). Without it: Sobol everywhere
+// (offline, as Cycles).
+fn rng_white(d: u32) -> bool { return approx(A_WHITE_NOISE) && (cur_depth > 0u || RNG_PATH != 0u || d >= 0x80000000u); }
 fn white(d: u32, c: u32) -> f32 { return f32(hash_hp(rng_seed(d) ^ (RNG_INDEX * 0x9e3779b9u + c * 0x85ebca6bu)) >> 8u) * (1.0 / 16777216.0); }
 
 // A hash, always: for loops of no fixed length (delta tracking's steps), where a new Sobol dimension a step is QMC's

@@ -55,6 +55,19 @@ const MAT_EMITTER_CARD: i32 = 2;
 const MAT_UNLIT: i32 = 4;
 // Live (real-time) mode: write this frame's 1-spp sample + first-hit distance instead of accumulating.
 override LIVE: bool = false;
+// The live renderer's approximations (gpu::A_*; docs/RUNTIME.md "How live differs from offline"): what a live path
+// leaves out or takes a cheaper way to stay in its frame, each a bit, each with the bias and the cost it was measured
+// at. A pipeline's constant, as FEAT is: a kernel without one has no code for it. Offline has none; a live view has
+// them all unless it asks otherwise (THREERT_APPROX), which is how a live picture is held to the offline one.
+override APPROX: u32 = 0u;
+const A_GLASS_SHADOWS: u32 = 1u;   // shadow rays to the analytic lights and the sky pass glass in full, untinted (`occluded`)
+const A_MEDIA_SHADOWS: u32 = 2u;   // of the media only the homogeneous ones dim shadow rays (`media_shadows`)
+const A_CUTOUT_PATHS: u32 = 4u;    // cutouts are opaque to rays past a camera hit's own, off mirror paths (`cutouts_opaque`)
+const A_CUTOUT_EMITTERS: u32 = 8u; // cutouts are opaque to emitters' shadow rays (`occluded_emitter`)
+const A_SHADOW_QUERY: u32 = 16u;   // hardware traversal: a shadow ray past a cutout is one query with a candidate loop (trace_hw.wgsl)
+const A_FAR_EMITTERS: u32 = 32u;   // the light tree proposes no emitter beyond LT_FAR (`lt_imp`; without a tree: the emitter cull)
+const A_WHITE_NOISE: u32 = 64u;    // variance only: a hash, not Sobol, past the camera hit's own decisions (sample.wgsl `rng_white`)
+fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
 override FEAT: u32 = 0xffffffffu;
 const F_MASKED: u32 = 1u;
@@ -333,8 +346,8 @@ fn emitter_pick_u(u: f32) -> vec4<f32> {
 // them (from entry P.ltree.y).
 const LT_LEAF: u32 = 0x80000000u;
 const LT_PATH_BITS: u32 = 26u;
-// Live: tree nodes wholly farther than this (m) from the shading point are not proposed (never within one Bistro; in
-// the 3 x 3 district its far copies: 2.0 -> 0.5 ms).
+// A_FAR_EMITTERS: tree nodes wholly farther than this (m) from the shading point are not proposed (never within one
+// Bistro; in the 3 x 3 district its far copies: 2.0 -> 0.5 ms).
 const LT_FAR: f32 = 120.0;
 
 fn lt_on() -> bool { return P.ltree.w > 0.5; }
@@ -358,9 +371,9 @@ fn lt_imp(nd: vec4<f32>, x: vec3<f32>, n: vec3<f32>) -> f32 {
             cb = max(cos_t * cos_b + sqrt(max(1.0 - cos_t * cos_t, 0.0)) * sin_b, 0.0);
         }
     }
-    // Live, nodes wholly farther than LT_FAR from x are not proposed (their light comes by BSDF rays, emit_mis weighs
-    // them 1): shadow rays across a district cost more than the light they find.
-    if (LIVE && d2 > (LT_FAR + czr.y) * (LT_FAR + czr.y)) { return 0.0; }
+    // A_FAR_EMITTERS: nodes wholly farther than LT_FAR from x are not proposed (their light comes by BSDF rays,
+    // emit_mis weighs them 1): shadow rays across a district cost more than the light they find.
+    if (approx(A_FAR_EMITTERS) && d2 > (LT_FAR + czr.y) * (LT_FAR + czr.y)) { return 0.0; }
     return nd.z * cb / max(d2, r2);
 }
 
@@ -741,16 +754,20 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
     if (trace(o, d, tmax, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, tmax, false, rd)) { return true; }
+    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, tmax, false, rd)) { return true; }
     // Through media: blocked with probability 1 - transmittance (an unbiased estimate of it, ratio tracking).
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    // Live: homogeneous media (water) analytically.
-    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
+    return homogeneous_blocks(o, d, tmax, rd);
 }
 
-// Offline: what the glass a shadow ray crosses lets through (it has passed every opaque caster). At each glass surface
-// the share of the BSDF's transmission lobe: transmission x (1 - the specular directional albedo) at the crossing
-// angle. The ray goes straight (no refraction, no caustics, no tint: UE's path tracer), so a light seen from under
+// A_MEDIA_SHADOWS: the homogeneous media (water) alone dim a shadow ray, analytically.
+fn homogeneous_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
+    return approx(A_MEDIA_SHADOWS) && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
+}
+
+// Without A_GLASS_SHADOWS: what the glass a shadow ray crosses lets through (it has passed every opaque caster). At
+// each glass surface the share of the BSDF's transmission lobe, transmission x (1 - the specular directional albedo)
+// at the crossing angle, times the glass's colour. The ray goes straight (no refraction, no caustics), so a light seen from under
 // water at more than the critical angle still lights through the surface, as its refracted light does. `sky`: an odd
 // number of glass surfaces lets nothing through (occluded_sky). Unattenuated, light under a water surface came both
 // through it and from the paths it reflects back (a white furnace through water read 1.25).
@@ -788,15 +805,15 @@ fn glass_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool, rd: u32) -> bo
     return false;
 }
 
-// A shadow ray's glass tint where there can be one (offline, scenes with glass); elsewhere a constant 1 the compiler
-// folds away, so their code (and images) stay as they were.
+// A shadow ray's glass tint where there can be one (scenes with glass, without A_GLASS_SHADOWS); elsewhere a constant
+// 1 the compiler folds away, so their code (and images) stay as they were.
 fn gtint(v: vec3<f32>) -> vec3<f32> {
-    if (!LIVE && has(F_GLASS)) { return v; }
+    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS)) { return v; }
     return vec3<f32>(1.0);
 }
 
 // What reaches a lit point from a light along a shadow ray: 0 when occluded, else 1 or the tint of the glass it passed
-// (offline). `shadows` false (a light that casts none): 1, no ray.
+// (`gtint`). `shadows` false (a light that casts none): 1, no ray.
 fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> vec3<f32> {
     if (!shadows) { return vec3<f32>(1.0); }
     if (occluded(o, d, tmax, rd)) { return vec3<f32>(0.0); }
@@ -858,9 +875,9 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
 fn occluded_sky(o: vec3<f32>, d: vec3<f32>, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
     if (trace(o, d, INF, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!LIVE && has(F_GLASS) && glass_blocks(o, d, INF, true, rd)) { return true; }
+    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, INF, true, rd)) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, INF, rd); }
-    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, INF, false, rd).tr;
+    return homogeneous_blocks(o, d, INF, rd);
 }
 
 // Live homogeneous media (VolumeMesh `homogeneous`: constant coefficients, Coeff = albedo rgb + extinction, Emission rgb,
@@ -933,17 +950,17 @@ fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool, rd: u32
     return r;
 }
 
-// Media in shadow rays: offline, and in the live media voxel training (media_train sets `media_voxels`). The live
-// megakernel has no media code at all: inlined at every shadow ray, the volume functions cost Kabukichō 0.4 ms with
-// a smoke column out of view (its media are composited in a pass of their own, media_composite).
+// Every medium on a shadow ray (`media_tr`): without A_MEDIA_SHADOWS, and in the live media voxel training
+// (media_train sets `media_voxels`). With it a live trace's shadow rays run no volume function: inlined at every
+// shadow ray they cost Kabukichō 0.4 ms with a smoke column out of view (`homogeneous_blocks` is what is left).
 var<private> media_voxels: bool = false;
-fn media_shadows() -> bool { return (!LIVE || media_voxels) && has(F_MEDIA) && P.time.w > 0.5; }
+fn media_shadows() -> bool { return (!approx(A_MEDIA_SHADOWS) || media_voxels) && has(F_MEDIA) && P.time.w > 0.5; }
 
 // Shadow rays toward emissive surfaces: every surface blocks them, as it blocks the BSDF rays that find the same
 // emitters (their MIS partner; a pass-through here counted light that no path can reach, and more of it the larger
 // the emitter's sampling share). UE's path tracer, too, reaches emissive surfaces only through rays that every mesh
 // blocks.
-// Shadow ray to an emitter sample (any surface blocks). Live, alpha-cutout triangles are opaque to it at camera hits too
+// Shadow ray to an emitter sample (any surface blocks). A_CUTOUT_EMITTERS: alpha-cutout triangles are opaque to it at camera hits too
 // (deeper vertices take them as opaque anyway, `cutouts_opaque`): the leaves of a tree block as whole cards. A bias,
 // accepted by the user on 2026-11-09 to bring the Bistro crowd within its 60 fps budget: the alpha tests of these rays
 // were ~0.9 ms of the frame (crowd GPU p50 15.06 -> 14.16 ms, frame start p95 17.14 -> 16.67 ms), and cost the live
@@ -951,15 +968,15 @@ fn media_shadows() -> bool { return (!LIVE || media_voxels) && has(F_MEDIA) && P
 // Removing the bias without the cost (an opacity micromap, or these rays compacted into a pass of their own) is a
 // follow-up item (ROADMAP § 0). Offline rendering always tests.
 fn occluded_emitter(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
-    if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, LIVE)).tri != 0xffffffffu) { return true; }
+    if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, approx(A_CUTOUT_EMITTERS))).tri != 0xffffffffu) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
+    return homogeneous_blocks(o, d, tmax, rd);
 }
 
 fn occluded_any(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     if (trace(o, d, tmax, TRACE_ANY).tri != 0xffffffffu) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    return LIVE && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
+    return homogeneous_blocks(o, d, tmax, rd);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1109,14 +1126,14 @@ fn mat_base(m: Material) -> MatOut {
     return MatOut(m.base_color.rgb, m.params.y, m.params.x, m.params.z, m.emissive.rgb, vec3<f32>(0.0, 1.0, 0.0), m.base_color.a, false);
 }
 
-// Live rays past the camera ray and its own light samples, off mirror-like paths (whose image is still seen), take
+// A_CUTOUT_PATHS: rays past the camera ray and its own light samples, off mirror-like paths (whose image is still seen), take
 // alpha-cutout triangles as opaque: no alpha test, no stepping through the leaves behind. The leaves of a tree are then
 // solid cards to indirect light and to the light samples of later bounces. Through foliage that was most of the trace:
 // Bistro along its camera path, frame GPU 16.1 / 19.9 ms -> 14.2 / 16.0 at its first pose / 15 s in; against the
 // unbiased offline render the live image 0.3 % darker, ΔE +0.02–0.04 (the clamps' darkening is 9–13 %). Offline
 // rendering always tests.
 fn cutouts_opaque() -> bool {
-    return LIVE && cur_depth >= 1u && !mirror_path;
+    return approx(A_CUTOUT_PATHS) && cur_depth >= 1u && !mirror_path;
 }
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
@@ -3129,8 +3146,9 @@ fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the sample for `compose` to apply after the denoisers, as volumetrics are composed over a denoised surface
 // elsewhere. Scaled before, a surface's history kept the shadow of the smoke of the frames before. With it goes how
 // much of the pixel is a medium that changes with time (what it hides, or its light's share of the pixel): the
-// upscaler's reactive mask there. normal.w = that share in 8 bits, plus half the transmittance. Reflection, GI and
-// shadow rays do not see media live (offline paths do).
+// upscaler's reactive mask there. normal.w = that share in 8 bits, plus half the transmittance. Past the camera ray a
+// live path meets the homogeneous media alone (the path loop), its shadow rays too with A_MEDIA_SHADOWS; offline
+// paths track every medium.
 @compute @workgroup_size(8, 8, 1)
 fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = P.size.x;
@@ -3456,7 +3474,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
         // Live: the path ends in the radiance cache at its first bounce. Surfaces seen in mirror-like reflections
-        // (specular lobe below roughness 0.4, where UE traces reflections) get exact direct light, as UE's hit
+        // (specular lobe below roughness 0.4, where UE traces reflections) get direct light of their own, as UE's hit
         // lighting does, and the cache's indirect part; others reflect the cache's total. Rotating tiles train the
         // cache. For the first frames after a reset or a camera cut (live/mod.rs COLD_FALLBACK_FRAMES; flag 1 later),
         // pixels that find their voxel cold trace a fresh estimate and use it meanwhile, without inserting the voxel:

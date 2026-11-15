@@ -1820,8 +1820,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         }
     }
     stats.insert("unique_triangles", (tris.len() + pool_tris.len()) as f64);
-    // Cutout materials: their triangles take the any-hit path in traversal. Glass lets shadow rays through
-    // (unattenuated: no caustics, like UE's raster shadows of translucency).
+    // Cutout materials: their triangles take the any-hit path in traversal. Glass casts no shadow of its own: what a
+    // shadow ray keeps past it is the kernel's (`glass_tr`; in full with `A_GLASS_SHADOWS`).
     for (f, a) in tri_flags.iter_mut().zip(&attrs) {
         let m = &materials[a.uv[3].to_bits() as usize];
         if m.uv2[3] > 0.0 {

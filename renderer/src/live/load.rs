@@ -234,7 +234,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     let sky_inputs = ((prep.env.width, prep.env.height), sc.camera.position.y.max(0.0), prep.env_nee_floor);
     let mut base = prep.params;
-    // The live viewport resamples fewer light-tree candidates at camera hits than offline renders (ltree.rs).
+    // The live view's own count of light-tree candidates at camera hits (ltree.rs `RIS_LIVE`).
     if base.ltree[3] > 0.5 {
         base.ltree[3] = crate::ltree::live_candidates() as f32;
     }
@@ -242,7 +242,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     base.cam_fwd[3] = w as f32 / h as f32;
     let bgs = targets.bind_groups(&g.device, passes, &up.accum);
     let exposure_settings = ExposureSettings::new(&sc.camera.exposure, &sc.preset.post);
-    // Manual: 2^-EV100. Auto: a first guess for the firefly clamp (the GPU histogram takes over from frame 1).
+    // Manual: 2^-EV100. Auto: a first guess (the GPU histogram takes the exposure over from frame 1; the kernel's
+    // firefly clamp, `Params::misc[0]`, keeps `prepare`'s guess).
     let exposure = match &sc.camera.exposure {
         crate::desc::Exposure::Manual { ev100 } => 2f32.powf(-ev100),
         crate::desc::Exposure::Auto { compensation, max_ev100, .. } => 2f32.powf(*compensation) / 2f32.powf(*max_ev100),

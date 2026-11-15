@@ -27,12 +27,12 @@
         // Any hit blocks a shadow ray, except a cutout one that its alpha lets through.
         let h = trace_opaque(o, d, tmax_in, mask, true);
         if (h.tri == 0xffffffffu || is_proc(h) || !cutout(h.tri) || alpha_pass(h.tri, h.inst, h.u, h.v, h.t)) { return h; }
-        // Live: one query whose candidate loop alpha-tests the cutouts (`trace_any_cutout`). It loses hits on Metal
+        // A_SHADOW_QUERY: one query whose candidate loop alpha-tests the cutouts (`trace_any_cutout`). It loses hits on Metal
         // from run to run, confirmed ones too: offline it made two runs of one render differ in 75 % of Kabukichō's
         // pixels and 98 % of Bistro's at 64 spp (the ordered steps below: 0–0.06 % and 2–10 %, Bistro's own share of
         // ties). Live it is 1.6 ms of Bistro's trace less at its worst stretch, its image ΔE +0.04 against the
         // unbiased render; offline, which is that render, steps in order.
-        if (LIVE) { return trace_any_cutout(o, d, tmax_in, mask); }
+        if (approx(A_SHADOW_QUERY)) { return trace_any_cutout(o, d, tmax_in, mask); }
     }
     // In order, each query starting past the last cutout hit its alpha let through. Shadow rays take up to 64 of them
     // and count as blocked past that: with 16, as closest hits take, the rest counted as unblocked (light through dense

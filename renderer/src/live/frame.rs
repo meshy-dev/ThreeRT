@@ -231,8 +231,10 @@ impl LiveCore {
             return;
         }
         b.light_lod = [self.cam.pos.x, self.cam.pos.y, self.cam.pos.z, d0];
-        b.emit_power[1] = EMITTER_CULL;
-        b.emit_power[2] = EMITTER_CULL * EMITTER_CULL_VIEW;
+        // (A_FAR_EMITTERS: the cull is the scenes' without a light tree; without it every emitter is proposed.)
+        let cull = if self.sc.up.kernel.approx & gpu::A_FAR_EMITTERS != 0 { EMITTER_CULL } else { 0.0 };
+        b.emit_power[1] = cull;
+        b.emit_power[2] = cull * EMITTER_CULL_VIEW;
         // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
         let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
         b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, half.min(std::f32::consts::PI).cos()];
