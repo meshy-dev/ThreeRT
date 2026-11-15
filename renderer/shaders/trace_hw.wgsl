@@ -37,7 +37,11 @@
     var t0 = 0.0;
     for (var k = 0u; k < steps; k++) {
         let h = trace_opaque(o + d * t0, d, tmax_in - t0, mask, false);
-        if (h.tri == 0xffffffffu) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
+        if (h.tri == 0xffffffffu) {
+            // (A shadow ray comes here only past a cutout that let it through: `shadow_hole`.)
+            if (mode != TRACE_CLOSEST) { shadow_hole = true; }
+            return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+        }
         let t = t0 + h.t;
         if (is_proc(h) || !cutout(h.tri) || alpha_pass(h.tri, h.inst, h.u, h.v, t)) { return Hit(t, h.tri, h.u, h.v, h.inst); }
         t0 = t + 1e-4 * max(1.0, t);

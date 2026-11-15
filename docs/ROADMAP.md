@@ -2427,6 +2427,17 @@ layouts changes only the five tests that name bits (renumbered); bench-window's 
 Tokyo too. Next: a camera hit's light through a cutout loses the BSDF ray's share of its MIS weight (the 18 %);
 then the cutout bits' defaults.
 
+**A light sample through a cutout keeps its light (2026-11-16, after it).** Under `A_CUTOUT_PATHS` a camera hit's
+shadow rays test cutouts and the ray it sends on does not, but the sample's MIS weight still shared the light with
+that ray: under a card cut out everywhere a uniform sky gave a Lambert plane 18 % of its light. The sample now
+takes the share the BSDF ray cannot bring (`light_mis`; a specular sample off a smooth surface still tests cutouts
+and keeps its share): 50 for 50. None of our shots shows it (Bistro at night, the slice, Kabukichō, Tokyo: as
+main's); the trace is equal (Bistro 8.70 / 8.70 ms, the slice 9.29 / 9.32, Zero Day 9.68 / 9.61; guarded, Tokyo
+4.79 / 4.84 and Kabukichō 17.02 / 16.95); render-identity changes that one test. What is left of the bit is in the
+radiance cache: its rays take cards as solid for their own light samples too, so what a cutout lights sends nothing
+on (`sky/cutout-bounce`: a quarter of the sky offline, black live). Found on the way, not explained: with no card at
+all the live view reads that bounce 16 % low (0.21 for 0.25).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

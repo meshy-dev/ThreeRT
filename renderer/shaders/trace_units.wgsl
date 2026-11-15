@@ -98,7 +98,7 @@
                 let x = intersect_tri(ro, rd, ti, hit.t);
                 if (x.x < hit.t) {
                     let flags = bitcast<u32>(tri_verts[ti * 3u].w);
-                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, rec, x.y, x.z, x.x)) { continue; }
+                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, rec, x.y, x.z, x.x)) { shadow_hole = true; continue; }
                     hit = Hit(x.x, ti, x.y, x.z, rec);
                     if (mode != TRACE_CLOSEST) { return hit; }
                 }

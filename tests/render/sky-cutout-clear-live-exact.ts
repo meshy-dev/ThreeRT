@@ -1,5 +1,5 @@
-// sky/cutout-clear in the real-time renderer without `APPROX.cutoutPaths` (as it ships, the rays a surface sends on
-// take the card as opaque, and their share of the sky is lost): the offline value.
+// sky/cutout-clear in the real-time renderer without `APPROX.cutoutPaths`: the rays the plane sends on pass the card
+// too, and share the sky's light with its samples as they do offline.
 import def, { test as base } from "./sky-cutout-clear.ts";
 import { APPROX, type TestMeta } from "./lib.ts";
 

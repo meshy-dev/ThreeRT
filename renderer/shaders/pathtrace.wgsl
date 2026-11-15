@@ -641,7 +641,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
                 if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
                 let r = intersect_tri(o, d, ti, hit.t);
                 if (r.x < hit.t) {
-                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, r.y, r.z, r.x)) { continue; }
+                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, r.y, r.z, r.x)) { shadow_hole = true; continue; }
                     hit = Hit(r.x, ti, r.y, r.z, NO_INST);
                     if (mode != TRACE_CLOSEST) { return hit; }
                 }
@@ -751,6 +751,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 // Shadow rays of the analytic lights: objects that cast no shadow (castShadow = false, glass) let them through.
 fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
+    shadow_hole = false;
     if (trace(o, d, tmax, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
     if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, tmax, false, rd)) { return true; }
     // Through media: blocked with probability 1 - transmittance (an unbiased estimate of it, ratio tracking).
@@ -813,7 +814,10 @@ fn gtint(v: vec3<f32>) -> vec3<f32> {
 // What reaches a lit point from a light along a shadow ray: 0 when occluded, else 1 or the tint of the glass it passed
 // (`gtint`). `shadows` false (a light that casts none): 1, no ray.
 fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> vec3<f32> {
-    if (!shadows) { return vec3<f32>(1.0); }
+    if (!shadows) {
+        shadow_hole = false;
+        return vec3<f32>(1.0);
+    }
     if (occluded(o, d, tmax, rd)) { return vec3<f32>(0.0); }
     return shadow_tint;
 }
@@ -872,6 +876,7 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
 // path loop counts it in full past such glass), which find it where it is (Snell's window from under water).
 fn occluded_sky(o: vec3<f32>, d: vec3<f32>, rd: u32) -> bool {
     shadow_tint = vec3<f32>(1.0);
+    shadow_hole = false;
     if (trace(o, d, INF, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
     if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, INF, true, rd)) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, INF, rd); }
@@ -966,12 +971,14 @@ fn media_shadows() -> bool { return (!approx(A_MEDIA_SHADOWS) || media_voxels) &
 // Removing the bias without the cost (an opacity micromap, or these rays compacted into a pass of their own) is a
 // follow-up item (ROADMAP § 0). Offline rendering always tests.
 fn occluded_emitter(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
+    shadow_hole = false;
     if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, approx(A_CUTOUT_EMITTERS))).tri != 0xffffffffu) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
     return homogeneous_blocks(o, d, tmax, rd);
 }
 
 fn occluded_any(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
+    shadow_hole = false;
     if (trace(o, d, tmax, TRACE_ANY).tri != 0xffffffffu) { return true; }
     if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
     return homogeneous_blocks(o, d, tmax, rd);
@@ -1133,6 +1140,12 @@ fn mat_base(m: Material) -> MatOut {
 fn cutouts_opaque() -> bool {
     return approx(A_CUTOUT_PATHS) && cur_depth >= 1u && !mirror_path;
 }
+
+// A path stays mirror-like (`mirror_path`) through specular samples off surfaces smoother than this.
+const MIRROR_ROUGHNESS: f32 = 0.3;
+
+// Whether a cutout let the last shadow ray through (`occluded*` clear it, `trace` sets it).
+var<private> shadow_hole: bool = false;
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
 // the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
@@ -1447,6 +1460,32 @@ fn pdf_bsdf(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
     }
     // The delta transmission lobe has no density here: its share of samples only lowers the others'.
     return lb.p_coat * pc + (1.0 - lb.p_coat - lb.p_trans) * (lb.p_spec * ps + (1.0 - lb.p_spec) * pd);
+}
+
+// MIS weight of a light sample (solid-angle pdf `pdf_l`) against BSDF sampling. A_CUTOUT_PATHS: light that reached
+// the sample through a cutout (`shadow_hole`) is light this vertex's BSDF ray cannot bring, a cutout being opaque to
+// it, unless it is a specular or coat sample that keeps the path mirror-like (`mirror_path`). The sample takes the
+// BSDF ray's weight for the rest: 1 - (the share of pdf_bsdf that still tests cutouts) x (the BSDF ray's weight).
+// (Until 2026-11-15 the weight was the plain heuristic: under a card cut out everywhere a uniform sky lit a Lambert
+// plane with 18 % of its light.)
+fn light_mis(pdf_l: f32, s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
+    let pb = pdf_bsdf(s, lb, v, l);
+    let w = power_heuristic(pdf_l, pb);
+    if (!approx(A_CUTOUT_PATHS) || !has(F_MASKED) || !shadow_hole) { return w; }
+    var see = 0.0;
+    if ((cur_depth == 0u || mirror_path) && s.roughness < MIRROR_ROUGHNESS && pb > 0.0) {
+        // pdf_bsdf's specular and coat terms.
+        let nov = max(dot(s.n, v), 1e-4);
+        let h = normalize(v + l);
+        let noh = max(dot(s.n, h), 0.0);
+        var p = (1.0 - lb.p_coat - lb.p_trans) * lb.p_spec * g1(lb.a2, nov) * d_ggx(lb.a2, noh) / (4.0 * nov);
+        if (has(F_COAT) && lb.coat > 0.0) {
+            let ca2 = lb.coat_alpha * lb.coat_alpha;
+            p += lb.p_coat * g1(ca2, nov) * d_ggx(ca2, noh) / (4.0 * nov);
+        }
+        see = min(p / pb, 1.0);
+    }
+    return 1.0 - see * (1.0 - w);
 }
 
 fn basis(n: vec3<f32>) -> mat3x3<f32> {
@@ -2053,7 +2092,7 @@ fn hg_phase(g: f32, c: f32) -> f32 {
             let vis = light_vis(li.ext.w >= 0.5, o, l, INF, rng_sub(rng_dim(D_SUN_VIS), i));
             if (any(vis > vec3<f32>(0.0))) {
                 let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
-                sum += li.color.rgb * f * power_heuristic(pdf_l, pdf_bsdf(s, lb, v, l)) * gtint(vis);
+                sum += li.color.rgb * f * light_mis(pdf_l, s, lb, v, l) * gtint(vis);
             }
         }
     }
@@ -2083,7 +2122,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
             if (any(vis > vec3<f32>(0.0))) {
                 let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
                 let frac = split_frac;
-                let wgt = power_heuristic(pdf_l, pdf_bsdf(s, lb, v, l));
+                let wgt = light_mis(pdf_l, s, lb, v, l);
                 sum += li.color.rgb * f * wgt * gtint(vis);
                 dl_spec += li.color.rgb * f * wgt * gtint(vis) * frac;
             }
@@ -2129,7 +2168,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
             let f = eval_bsdf(s, lb, v, es.l);
             if (any(f > vec3<f32>(0.0)) && !occluded_emitter(o, es.l, es.dist * 0.999, rng_dim(D_EMIT_VIS))) {
                 let frac = split_frac;
-                let wgt = power_heuristic(es.pdf_w, pdf_bsdf(s, lb, v, es.l));
+                let wgt = light_mis(es.pdf_w, s, lb, v, es.l);
                 sum += es.le * f * wgt * es.w;
                 dl_spec += es.le * f * wgt * es.w * frac;
             }
@@ -2145,7 +2184,7 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
             let pdf_e = env_pdf(l);
             if (pdf_e > 0.0 && !occluded_sky(o, l, rng_dim(D_ENV_VIS))) {
                 let frac = split_frac;
-                let wgt = power_heuristic(pdf_e, pdf_bsdf(s, lb, v, l));
+                let wgt = light_mis(pdf_e, s, lb, v, l);
                 sum += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint);
                 dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;
             }
@@ -3567,7 +3606,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         straight = straight && through;
         cone_w = width;
         cone_a += 2.0 * s.roughness * s.roughness;
-        mirror_path = (depth == 0u || mirror_path) && s.roughness < 0.3 && (sampled_spec || through);
+        mirror_path = (depth == 0u || mirror_path) && s.roughness < MIRROR_ROUGHNESS && (sampled_spec || through);
         if (depth >= P.counts.w) {
             let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
             if (rng1(rng_dim(D_RR)) > q) { break; }
