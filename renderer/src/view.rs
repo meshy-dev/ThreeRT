@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
@@ -304,6 +304,14 @@ impl ApplicationHandler for App {
         let Some(s) = self.state.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            // The view, its upscaler and the blit are sized once, at the first window size: keep the window there.
+            // (Windows resizes it when it moves to a monitor of another scale; the surface is then Outdated each frame.)
+            WindowEvent::ScaleFactorChanged { mut inner_size_writer, .. } => {
+                let _ = inner_size_writer.request_inner_size(PhysicalSize::new(s.config.width, s.config.height));
+            }
+            WindowEvent::Resized(sz) if sz.width > 0 && sz.height > 0 && (sz.width, sz.height) != (s.config.width, s.config.height) => {
+                let _ = s.window.request_inner_size(PhysicalSize::new(s.config.width, s.config.height));
+            }
             WindowEvent::ModifiersChanged(m) => s.mods = m.state(),
             WindowEvent::Focused(false) => {
                 // (The keys' ups go to whoever has the keyboard now.)
