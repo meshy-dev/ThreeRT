@@ -30,7 +30,7 @@ const TRI_NO_SHADOW: u32 = 1u;
 const TRACE_CLOSEST: u32 = 0u;
 const TRACE_SHADOW: u32 = 1u;
 const TRACE_ANY: u32 = 2u;
-// Any hit on any surface, alpha-cutout triangles taken as opaque (live emitter shadow rays: `occluded_emitter`).
+// Any hit on any surface, alpha-cutout triangles taken as opaque (live emitter shadow rays: `emitter_tr`).
 const TRACE_ANY_OPAQUE: u32 = 3u;
 const TRI_MASKED: u32 = 2u;
 const TRI_DYNAMIC: u32 = 4u;
@@ -60,10 +60,10 @@ override LIVE: bool = false;
 // at. A pipeline's constant, as FEAT is: a kernel without one has no code for it. Offline has none; a live view has
 // them all unless it asks otherwise (THREERT_APPROX), which is how a live picture is held to the offline one.
 override APPROX: u32 = 0u;
-const A_GLASS_SHADOWS: u32 = 1u;   // shadow rays to the analytic lights and the sky pass glass in full, untinted (`occluded`)
+const A_GLASS_SHADOWS: u32 = 1u;   // shadow rays to the analytic lights and the sky pass glass in full, untinted (`shadow_tr`)
 const A_MEDIA_SHADOWS: u32 = 2u;   // of the media only the homogeneous ones dim shadow rays (`media_shadows`)
 const A_CUTOUT_PATHS: u32 = 4u;    // cutouts are opaque to rays past a camera hit's own, off mirror paths (`cutouts_opaque`)
-const A_CUTOUT_EMITTERS: u32 = 8u; // cutouts are opaque to emitters' shadow rays (`occluded_emitter`)
+const A_CUTOUT_EMITTERS: u32 = 8u; // cutouts are opaque to emitters' shadow rays (`emitter_tr`)
 const A_FAR_EMITTERS: u32 = 16u;   // the light tree proposes no emitter beyond LT_FAR (`lt_imp`; without a tree: the emitter cull)
 fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
@@ -748,27 +748,51 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 }
 
 
-// Shadow rays of the analytic lights: objects that cast no shadow (castShadow = false, glass) let them through.
-fn occluded(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
-    shadow_tint = vec3<f32>(1.0);
+// What a shadow ray keeps of its light: a weight, 0 where a surface stops it, and every caller multiplies by it.
+// (Until 2026-11-16 a pass / stop decision; the glass's colour then reached only the callers that asked for it, and
+// fog and volume points took its largest channel.)
+//
+// The analytic lights' and the sky's: objects that cast no shadow (castShadow = false, glass) let the ray through,
+// the glass it crosses at its transmission's share and colour (`glass_tr`; in full with A_GLASS_SHADOWS), the media
+// at their transmittance. `sky`: as `glass_tr` takes it.
+fn shadow_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool, rd: u32) -> vec3<f32> {
     shadow_hole = false;
-    if (trace(o, d, tmax, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, tmax, false, rd)) { return true; }
-    // Through media: blocked with probability 1 - transmittance (an unbiased estimate of it, ratio tracking).
-    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    return homogeneous_blocks(o, d, tmax, rd);
+    if (trace(o, d, tmax, TRACE_SHADOW).tri != 0xffffffffu) { return vec3<f32>(0.0); }
+    var tr = vec3<f32>(1.0);
+    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS)) {
+        tr = glass_tr(o, d, tmax, sky);
+        if (all(tr <= vec3<f32>(0.0))) { return tr; }
+    }
+    return tr * media_shadow(o, d, tmax, rd);
 }
 
-// A_MEDIA_SHADOWS: the homogeneous media (water) alone dim a shadow ray, analytically.
-fn homogeneous_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
-    return approx(A_MEDIA_SHADOWS) && has(F_HMEDIA) && rng1(rd) >= media_homogeneous(o, d, tmax, false, rd).tr;
+// Whether a shadow ray's light can be less than whole in this kernel (glass that tints, media). Elsewhere the weight
+// is 0 or 1, and `tr3` / `tr1` make it a constant 1 past the caller's test for 0, which the compiler folds away: such
+// scenes' code is as it was with a decision (Bistro's trace is 2 % slower with the products left in, and 1 % with
+// the callers' two tests side by side instead of nested).
+fn shadow_weighted() -> bool { return (!approx(A_GLASS_SHADOWS) && has(F_GLASS)) || has(F_MEDIA) || has(F_HMEDIA); }
+fn tr3(v: vec3<f32>) -> vec3<f32> {
+    if (shadow_weighted()) { return v; }
+    return vec3<f32>(1.0);
+}
+fn tr1(v: f32) -> f32 {
+    if (shadow_weighted()) { return v; }
+    return 1.0;
+}
+
+// The media's transmittance along a shadow ray: every medium's (ratio tracking: an unbiased estimate), or with
+// A_MEDIA_SHADOWS the homogeneous ones' (water) alone, analytic.
+fn media_shadow(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> f32 {
+    if (media_shadows()) { return media_tr(o, d, tmax, rd); }
+    if (approx(A_MEDIA_SHADOWS) && has(F_HMEDIA)) { return media_homogeneous(o, d, tmax, false, rd).tr; }
+    return 1.0;
 }
 
 // Without A_GLASS_SHADOWS: what the glass a shadow ray crosses lets through (it has passed every opaque caster). At
 // each glass surface the share of the BSDF's transmission lobe, transmission x (1 - the specular directional albedo)
 // at the crossing angle, times the glass's colour. The ray goes straight (no refraction, no caustics), so a light seen from under
 // water at more than the critical angle still lights through the surface, as its refracted light does. `sky`: an odd
-// number of glass surfaces lets nothing through (occluded_sky). Unattenuated, light under a water surface came both
+// number of glass surfaces lets nothing through (sky_tr). Unattenuated, light under a water surface came both
 // through it and from the paths it reflects back (a white furnace through water read 1.25).
 fn glass_tr(o_in: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool) -> vec3<f32> {
     var o = o_in;
@@ -793,33 +817,13 @@ fn glass_tr(o_in: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool) -> vec3<f32> {
     return tr;
 }
 
-// The colour a shadow ray's light keeps past glass (glass_tr), drawn as a single decision: blocked with probability
-// 1 - p, p its largest channel; passing, `shadow_tint` = the colour / p (unbiased; light_vis hands it to the caller).
-var<private> shadow_tint: vec3<f32> = vec3<f32>(1.0);
-fn glass_blocks(o: vec3<f32>, d: vec3<f32>, tmax: f32, sky: bool, rd: u32) -> bool {
-    let t = glass_tr(o, d, tmax, sky);
-    let p = max(t.r, max(t.g, t.b));
-    if (rng1(rng_sub(rd, 0x67u)) >= p) { return true; }
-    shadow_tint = t / p;
-    return false;
-}
-
-// A shadow ray's glass tint where there can be one (scenes with glass, without A_GLASS_SHADOWS); elsewhere a constant
-// 1 the compiler folds away, so their code (and images) stay as they were.
-fn gtint(v: vec3<f32>) -> vec3<f32> {
-    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS)) { return v; }
-    return vec3<f32>(1.0);
-}
-
-// What reaches a lit point from a light along a shadow ray: 0 when occluded, else 1 or the tint of the glass it passed
-// (`gtint`). `shadows` false (a light that casts none): 1, no ray.
+// What reaches a lit point from an analytic light (`shadow_tr`). `shadows` false (a light that casts none): 1, no ray.
 fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> vec3<f32> {
     if (!shadows) {
         shadow_hole = false;
         return vec3<f32>(1.0);
     }
-    if (occluded(o, d, tmax, rd)) { return vec3<f32>(0.0); }
-    return shadow_tint;
+    return shadow_tr(o, d, tmax, false, rd);
 }
 
 // Glass at a hit along d, `t` from the ray's start (texture LOD): its geometric normal, the share of the ray its
@@ -871,16 +875,11 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     return g;
 }
 
-// Shadow rays toward the environment: as `occluded`, but glass that bends the ray (an odd number of glass surfaces:
-// a water surface, the shading point inside a glass solid) blocks it. The sky there is the refracted paths' (the
-// path loop counts it in full past such glass), which find it where it is (Snell's window from under water).
-fn occluded_sky(o: vec3<f32>, d: vec3<f32>, rd: u32) -> bool {
-    shadow_tint = vec3<f32>(1.0);
-    shadow_hole = false;
-    if (trace(o, d, INF, TRACE_SHADOW).tri != 0xffffffffu) { return true; }
-    if (!approx(A_GLASS_SHADOWS) && has(F_GLASS) && glass_blocks(o, d, INF, true, rd)) { return true; }
-    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, INF, rd); }
-    return homogeneous_blocks(o, d, INF, rd);
+// Shadow rays toward the environment: `shadow_tr` with `sky`, where glass that bends the ray (an odd number of glass
+// surfaces: a water surface, the shading point inside a glass solid) blocks it. The sky there is the refracted paths'
+// (the path loop counts it in full past such glass), which find it where it is (Snell's window from under water).
+fn sky_tr(o: vec3<f32>, d: vec3<f32>, rd: u32) -> vec3<f32> {
+    return shadow_tr(o, d, INF, true, rd);
 }
 
 // Live homogeneous media (VolumeMesh `homogeneous`: constant coefficients, Coeff = albedo rgb + extinction, Emission rgb,
@@ -955,7 +954,7 @@ fn media_homogeneous(o: vec3<f32>, d: vec3<f32>, tmax: f32, light: bool, rd: u32
 
 // Every medium on a shadow ray (`media_tr`): without A_MEDIA_SHADOWS, and in the live media voxel training
 // (media_train sets `media_voxels`). With it a live trace's shadow rays run no volume function: inlined at every
-// shadow ray they cost Kabukichō 0.4 ms with a smoke column out of view (`homogeneous_blocks` is what is left).
+// shadow ray they cost Kabukichō 0.4 ms with a smoke column out of view (the homogeneous ones are what is left: `media_shadow`).
 var<private> media_voxels: bool = false;
 fn media_shadows() -> bool { return (!approx(A_MEDIA_SHADOWS) || media_voxels) && has(F_MEDIA) && P.time.w > 0.5; }
 
@@ -970,18 +969,17 @@ fn media_shadows() -> bool { return (!approx(A_MEDIA_SHADOWS) || media_voxels) &
 // image under foliage ~1.7 % of its light (static Bistro at 25 s along its path; layer B Bistro ΔE 3.23 -> 3.30).
 // Removing the bias without the cost (an opacity micromap, or these rays compacted into a pass of their own) is a
 // follow-up item (ROADMAP § 0). Offline rendering always tests.
-fn occluded_emitter(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
+fn emitter_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> f32 {
     shadow_hole = false;
-    if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, approx(A_CUTOUT_EMITTERS))).tri != 0xffffffffu) { return true; }
-    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    return homogeneous_blocks(o, d, tmax, rd);
+    if (trace(o, d, tmax, select(TRACE_ANY, TRACE_ANY_OPAQUE, approx(A_CUTOUT_EMITTERS))).tri != 0xffffffffu) { return 0.0; }
+    return media_shadow(o, d, tmax, rd);
 }
 
-fn occluded_any(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> bool {
+// A shadow ray any surface stops (fog and volume points toward emitters).
+fn any_tr(o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> f32 {
     shadow_hole = false;
-    if (trace(o, d, tmax, TRACE_ANY).tri != 0xffffffffu) { return true; }
-    if (media_shadows()) { return rng1(rd) >= media_tr(o, d, tmax, rd); }
-    return homogeneous_blocks(o, d, tmax, rd);
+    if (trace(o, d, tmax, TRACE_ANY).tri != 0xffffffffu) { return 0.0; }
+    return media_shadow(o, d, tmax, rd);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1144,7 +1142,7 @@ fn cutouts_opaque() -> bool {
 // A path stays mirror-like (`mirror_path`) through specular samples off surfaces smoother than this.
 const MIRROR_ROUGHNESS: f32 = 0.3;
 
-// Whether a cutout let the last shadow ray through (`occluded*` clear it, `trace` sets it).
+// Whether a cutout let the last shadow ray through (the shadow rays' functions clear it, `trace` sets it).
 var<private> shadow_hole: bool = false;
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
@@ -1851,8 +1849,8 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
                 if (any(f > vec3<f32>(0.0))) {
                     let vis = light_vis(li.ext.w >= 0.5, o, ls.sl, ls.dist * 0.999, rng_sub(rd ^ 0x40000000u, i));
                     if (any(vis > vec3<f32>(0.0))) {
-                        sum += ls.c * f * gtint(vis);
-                        dl_spec += ls.c * f * gtint(vis) * split_frac;
+                        sum += ls.c * f * tr3(vis);
+                        dl_spec += ls.c * f * tr3(vis) * split_frac;
                     }
                 }
             }
@@ -1909,7 +1907,7 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
         if (any(c > vec3<f32>(0.0))) {
             let vis = light_vis(light_at(pick).ext.w >= 0.5, o, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0xffffffffu));
             if (any(vis > vec3<f32>(0.0))) {
-                let r = c * gtint(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
+                let r = c * tr3(vis) * (wsum * f32(count) / (f32(m_cand) * pick_ph));
                 sum += r;
                 if (!vol) { dl_spec += r * split_frac; }
                 // The light tiles' report: the light the camera hit's ray found.
@@ -2092,7 +2090,7 @@ fn hg_phase(g: f32, c: f32) -> f32 {
             let vis = light_vis(li.ext.w >= 0.5, o, l, INF, rng_sub(rng_dim(D_SUN_VIS), i));
             if (any(vis > vec3<f32>(0.0))) {
                 let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
-                sum += li.color.rgb * f * light_mis(pdf_l, s, lb, v, l) * gtint(vis);
+                sum += li.color.rgb * f * light_mis(pdf_l, s, lb, v, l) * tr3(vis);
             }
         }
     }
@@ -2123,8 +2121,8 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
                 let pdf_l = 1.0 / (2.0 * PI * (1.0 - cos_max));
                 let frac = split_frac;
                 let wgt = light_mis(pdf_l, s, lb, v, l);
-                sum += li.color.rgb * f * wgt * gtint(vis);
-                dl_spec += li.color.rgb * f * wgt * gtint(vis) * frac;
+                sum += li.color.rgb * f * wgt * tr3(vis);
+                dl_spec += li.color.rgb * f * wgt * tr3(vis) * frac;
             }
         }
     }
@@ -2166,11 +2164,14 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         if (lt_on()) { es = sample_emitter_ris(o, s.n, select(1u, u32(P.ltree.w), cur_depth == 0u), s, lb, v, rng_dim(D_EMIT)); } else if (seen_directly()) { es = sample_emitter_ris(o, s.n, select(EMIT_RIS_M / 2u, EMIT_RIS_M, cur_depth == 0u), s, lb, v, rng_dim(D_EMIT)); } else if (P.light_lod.w > 0.0) { es = sample_emitter_ris(o, s.n, 2u, s, lb, v, rng_dim(D_EMIT)); } else { es = sample_emitter(o, s.n, rng_dim(D_EMIT)); }
         if (es.pdf_w > 0.0) {
             let f = eval_bsdf(s, lb, v, es.l);
-            if (any(f > vec3<f32>(0.0)) && !occluded_emitter(o, es.l, es.dist * 0.999, rng_dim(D_EMIT_VIS))) {
-                let frac = split_frac;
-                let wgt = light_mis(es.pdf_w, s, lb, v, es.l);
-                sum += es.le * f * wgt * es.w;
-                dl_spec += es.le * f * wgt * es.w * frac;
+            if (any(f > vec3<f32>(0.0))) {
+                let vis = emitter_tr(o, es.l, es.dist * 0.999, rng_dim(D_EMIT_VIS));
+                if (vis > 0.0) {
+                    let frac = split_frac;
+                    let wgt = light_mis(es.pdf_w, s, lb, v, es.l) * tr1(vis);
+                    sum += es.le * f * wgt * es.w;
+                    dl_spec += es.le * f * wgt * es.w * frac;
+                }
             }
         }
     }
@@ -2182,11 +2183,14 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         let f = eval_bsdf(s, lb, v, l);
         if (any(f > vec3<f32>(0.0))) {
             let pdf_e = env_pdf(l);
-            if (pdf_e > 0.0 && !occluded_sky(o, l, rng_dim(D_ENV_VIS))) {
-                let frac = split_frac;
-                let wgt = light_mis(pdf_e, s, lb, v, l);
-                sum += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint);
-                dl_spec += env_radiance(l) * f * wgt / pdf_e * gtint(shadow_tint) * frac;
+            if (pdf_e > 0.0) {
+                let vis = sky_tr(o, l, rng_dim(D_ENV_VIS));
+                if (any(vis > vec3<f32>(0.0))) {
+                    let frac = split_frac;
+                    let wgt = light_mis(pdf_e, s, lb, v, l);
+                    sum += env_radiance(l) * f * wgt / pdf_e * tr3(vis);
+                    dl_spec += env_radiance(l) * f * wgt / pdf_e * tr3(vis) * frac;
+                }
             }
         }
     }
@@ -2257,7 +2261,8 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32, rd: u32) -
         let li = light_at(i);
         let l = -li.dir.xyz;
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
-        if (li.ext.w < 0.5 || !occluded(x, l, INF, rng_sub(rd, 0x30u + i))) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x; }
+        let vis = light_vis(li.ext.w >= 0.5, x, l, INF, rng_sub(rd, 0x30u + i));
+        if (any(vis > vec3<f32>(0.0))) { ls += li.color.rgb * hg_phase(P.vol.y, dot(l, d)) * li.x.x * tr3(vis); }
     }
     // One shadow ray: either the local lights (RIS) or one emissive point, chosen with equal odds when both exist.
     let has_l = P.counts.x > P.counts2.x;
@@ -2285,8 +2290,9 @@ fn fog_scatter(o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, tr: f32, rd: u32) -
                 pick_t = t;
             }
         }
-        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x40u))) {
-            ls += wk * pick.le * hg_phase(P.vol.y, dot(pick.l, d)) * (wsum / (4.0 * pick_t));
+        if (pick_t > 0.0) {
+            let vis = any_tr(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x40u));
+            if (vis > 0.0) { ls += wk * pick.le * hg_phase(P.vol.y, dot(pick.l, d)) * (wsum / (4.0 * pick_t)) * tr1(vis); }
         }
     } else if (has_l) {
         var dummy_s: Surface;
@@ -2575,7 +2581,7 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32, rd: u32) -> vec3<f32> {
         let ph = hg_phase(g, dot(l, d));
         let vis = light_vis(li.ext.w >= 0.5, x, l, INF, rng_sub(rd, 0x100u + i));
         if (any(vis > vec3<f32>(0.0))) {
-            sum += li.color.rgb * gtint(vis) * ph * power_heuristic(1.0 / (2.0 * PI * (1.0 - cos_max)), ph);
+            sum += li.color.rgb * tr3(vis) * ph * power_heuristic(1.0 / (2.0 * PI * (1.0 - cos_max)), ph);
         }
     }
     let nd = P.counts2.x;
@@ -2600,24 +2606,30 @@ fn phase_direct(x: vec3<f32>, d: vec3<f32>, g: f32, rd: u32) -> vec3<f32> {
         }
         if (pick_w > 0.0) {
             let vis = light_vis(light_at(pick).ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0x300u));
-            if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * gtint(vis) * hg_phase(g, dot(pick_ls.l, d)) * (wsum * f32(nl) / (3.0 * pick_w)); }
+            if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * tr3(vis) * hg_phase(g, dot(pick_ls.l, d)) * (wsum * f32(nl) / (3.0 * pick_w)); }
         }
     }
     if (P.counts.y > 0u) {
         mis_x = x;
         mis_n = vec3<f32>(0.0);
         let es = sample_emitter(x, vec3<f32>(0.0), rng_sub(rd, 0x400u));
-        if (es.pdf_w > 0.0 && !occluded_any(x, es.l, es.dist * 0.999, rng_sub(rd, 0x401u))) {
-            let ph = hg_phase(g, dot(es.l, d));
-            sum += es.le * ph * power_heuristic(es.pdf_w, ph) * es.w;
+        if (es.pdf_w > 0.0) {
+            let vis = any_tr(x, es.l, es.dist * 0.999, rng_sub(rd, 0x401u));
+            if (vis > 0.0) {
+                let ph = hg_phase(g, dot(es.l, d));
+                sum += es.le * ph * power_heuristic(es.pdf_w, ph) * es.w * tr1(vis);
+            }
         }
     }
     if (P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0)) {
         let l = sample_env(rng_sub(rd, 0x500u));
         let pdf_e = env_pdf(l);
-        if (pdf_e > 0.0 && !occluded_sky(x, l, rng_sub(rd, 0x501u))) {
-            let ph = hg_phase(g, dot(l, d));
-            sum += env_radiance(l) * ph * power_heuristic(pdf_e, ph) / pdf_e * gtint(shadow_tint);
+        if (pdf_e > 0.0) {
+            let vis = sky_tr(x, l, rng_sub(rd, 0x501u));
+            if (any(vis > vec3<f32>(0.0))) {
+                let ph = hg_phase(g, dot(l, d));
+                sum += env_radiance(l) * ph * power_heuristic(pdf_e, ph) / pdf_e * tr3(vis);
+            }
         }
     }
     return sum;
@@ -2671,7 +2683,8 @@ fn point_direct(x: vec3<f32>, rd: u32) -> vec3<f32> {
         let phi = 2.0 * PI * u.y;
         let l = basis(-li.dir.xyz) * vec3<f32>(sin_t * cos(phi), sin_t * sin(phi), cos_t);
         if (all(li.color.rgb <= vec3<f32>(0.0))) { continue; } // black: no shadow ray (direct_light)
-        if (li.ext.w < 0.5 || !occluded(x, l, INF, rng_sub(rd, 0x100u + i))) { sum += li.color.rgb * ph; }
+        let vis = light_vis(li.ext.w >= 0.5, x, l, INF, rng_sub(rd, 0x100u + i));
+        if (any(vis > vec3<f32>(0.0))) { sum += li.color.rgb * ph * tr3(vis); }
     }
     let nd = P.counts2.x;
     let nl = P.counts.x - nd;
@@ -2693,8 +2706,9 @@ fn point_direct(x: vec3<f32>, rd: u32) -> vec3<f32> {
                 pick_ls = ls;
             }
         }
-        if (pick_w > 0.0 && (light_at(pick).ext.w < 0.5 || !occluded(x, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0x300u)))) {
-            sum += pick_ls.c * ph * (wsum * f32(nl) / (3.0 * pick_w));
+        if (pick_w > 0.0) {
+            let vis = light_vis(light_at(pick).ext.w >= 0.5, x, pick_ls.sl, pick_ls.dist * 0.999, rng_sub(rd, 0x300u));
+            if (any(vis > vec3<f32>(0.0))) { sum += pick_ls.c * ph * (wsum * f32(nl) / (3.0 * pick_w)) * tr3(vis); }
         }
     }
     if (P.counts.y > 0u) {
@@ -2715,8 +2729,9 @@ fn point_direct(x: vec3<f32>, rd: u32) -> vec3<f32> {
                 pick_t = t;
             }
         }
-        if (pick_t > 0.0 && !occluded_any(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x420u))) {
-            sum += pick.le * ph * (wsum / (4.0 * pick_t));
+        if (pick_t > 0.0) {
+            let vis = any_tr(x, pick.l, pick.dist * 0.999, rng_sub(rd, 0x420u));
+            if (vis > 0.0) { sum += pick.le * ph * (wsum / (4.0 * pick_t)) * tr1(vis); }
         }
     }
     return sum;
@@ -3476,7 +3491,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Emission (one-sided for rect light cards)
         if (any(s.emissive > vec3<f32>(0.0)) && (s.front || !s.card)) {
             var wgt = 1.0;
-            // Behind glass an emitter counts in full: shadow rays toward emitters stop at glass (occluded_any).
+            // Behind glass an emitter counts in full: shadow rays toward emitters stop at glass (emitter_tr).
             if (depth > 0u && !specular_bounce && !behind_glass) {
                 wgt = emit_mis(hit, d, last_pdf);
             }

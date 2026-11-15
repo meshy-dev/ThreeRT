@@ -13,7 +13,7 @@
         return h;
     }
     // A_CUTOUT_PATHS, A_CUTOUT_EMITTERS (TRACE_ANY_OPAQUE): cutouts opaque (pathtrace.wgsl `cutouts_opaque`,
-    // `occluded_emitter`).
+    // `emitter_tr`).
     @if(!cutout_lite) if (cutouts_opaque() || mode == TRACE_ANY_OPAQUE) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }
     @if(cutout_lite) if (cutouts_opaque() || mode != TRACE_CLOSEST) { return trace_opaque(o, d, tmax_in, mask, mode != TRACE_CLOSEST); }
     // Alpha-cutout triangles: every query forces opacity, and a cutout hit that fails its alpha test is stepped

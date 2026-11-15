@@ -2438,6 +2438,17 @@ radiance cache: its rays take cards as solid for their own light samples too, so
 on (`sky/cutout-bounce`: a quarter of the sky offline, black live). Found on the way, not explained: with no card at
 all the live view reads that bounce 16 % low (0.21 for 0.25).
 
+**A shadow ray's light is a weight (2026-11-16, after it).** What a shadow ray kept past glass and media was drawn
+as one pass / stop decision, the glass's colour handed on beside it to the callers that asked: the sun's light in
+fog and the lights of volume points did not, and took the glass's largest channel for all three (`fog/scatter-glass`:
+0.915 for 0.365, offline too). The shadow rays' functions now return the transmittance and every caller multiplies
+by it (`shadow_tr`, `emitter_tr`, `any_tr`); where it can only be 0 or 1 the product folds away, and the kernel is
+as it was (Bistro 8.62 / 8.62 ms, a glass scene 4.96 / 4.96, the slice 9.11 / 9.11, the fire scene 1.89 / 1.88;
+guarded, Tokyo 4.81 / 4.80 and Kabukichō 16.97 / 16.75). `shadow/glass-tint-live-exact` reads 9.13 for 9.17 (8.87
+with the decision: its tolerance 5 % -> 3 %). render-identity changes the eight tests whose shadow rays cross
+tinting glass or media, in noise; bench-window's shots as main's (Kabukichō's flicker 0.68-0.72 over three seeds in
+both builds). The cost of exact glass shadows is the walk over the glass, which this leaves as it is.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
