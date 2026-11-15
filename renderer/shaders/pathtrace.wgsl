@@ -1145,6 +1145,15 @@ const MIRROR_ROUGHNESS: f32 = 0.3;
 // Whether a cutout let the last shadow ray through (the shadow rays' functions clear it, `trace` sets it).
 var<private> shadow_hole: bool = false;
 
+// Set around a `direct_light` that no BSDF ray follows (where a path ends without the cache): its light samples
+// take the whole of their light. Weighed against a BSDF ray that is never traced they kept their MIS share alone:
+// of a uniform sky on a Lambert surface, ln 17 / 16 = 18 %.
+var<private> nee_alone: bool = false;
+
+// `direct_light` without the sky: a surface seen in a reflection lights itself from the lights, the sky's light
+// there is the radiance cache's.
+var<private> lights_only: bool = false;
+
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
 // the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
 fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
@@ -1467,6 +1476,7 @@ fn pdf_bsdf(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
 // (Until 2026-11-15 the weight was the plain heuristic: under a card cut out everywhere a uniform sky lit a Lambert
 // plane with 18 % of its light.)
 fn light_mis(pdf_l: f32, s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
+    if (nee_alone) { return 1.0; }
     let pb = pdf_bsdf(s, lb, v, l);
     let w = power_heuristic(pdf_l, pb);
     if (!approx(A_CUTOUT_PATHS) || !has(F_MASKED) || !shadow_hole) { return w; }
@@ -1630,14 +1640,18 @@ fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     }
     var c = env_radiance(d) * wgt;
     if (has(F_AERIAL) && pdf <= 0.0) { c = aerial_light(d); }
-    // BSDF rays that fall inside a directional light's cone see its disk (MIS vs cone sampling).
-    if (pdf > 0.0) {
-        for (var i = 0u; i < P.counts2.x; i++) {
-            let li = light_at(i);
-            if (dot(d, -li.dir.xyz) >= li.dir.w) {
-                let omega = 2.0 * PI * (1.0 - li.dir.w);
-                c += (li.color.rgb / omega) * power_heuristic(pdf, 1.0 / omega);
-            }
+    if (pdf > 0.0) { c += sun_disks(d, pdf); }
+    return c;
+}
+
+// The directional lights' disks a BSDF ray (pdf `pdf`) falls in, MIS-weighted against their cones' sampling.
+fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
+    var c = vec3<f32>(0.0);
+    for (var i = 0u; i < P.counts2.x; i++) {
+        let li = light_at(i);
+        if (dot(d, -li.dir.xyz) >= li.dir.w) {
+            let omega = 2.0 * PI * (1.0 - li.dir.w);
+            c += (li.color.rgb / omega) * power_heuristic(pdf, 1.0 / omega);
         }
     }
     return c;
@@ -2097,6 +2111,23 @@ fn hg_phase(g: f32, c: f32) -> f32 {
     return sum;
 }
 
+// Whether the sky is light-sampled.
+fn env_sampled() -> bool { return P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0); }
+
+// The sky's light sample at a surface (`o`: its shadow rays' origin): one direction by the map, MIS against the BSDF.
+fn env_light(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>) -> vec3<f32> {
+    let l = sample_env(rng_dim(D_ENV));
+    let f = eval_bsdf(s, lb, v, l);
+    if (any(f > vec3<f32>(0.0))) {
+        let pdf_e = env_pdf(l);
+        if (pdf_e > 0.0) {
+            let vis = sky_tr(o, l, rng_dim(D_ENV_VIS));
+            if (any(vis > vec3<f32>(0.0))) { return env_radiance(l) * f * light_mis(pdf_e, s, lb, v, l) / pdf_e * tr3(vis); }
+        }
+    }
+    return vec3<f32>(0.0);
+}
+
 fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     dl_spec = vec3<f32>(0.0);
@@ -2176,23 +2207,13 @@ fn direct_light(s: Surface, lb: Lobes, v: vec3<f32>) -> vec3<f32> {
         }
     }
     // Environment
-    var env_on = P.counts2.y != 0u && (P.env.x > 0.5 || luminance(P.sky_color.rgb) > 0.0);
-    @if(light_pick) env_on = take_env && has_env;
+    var env_on = env_sampled() && !lights_only;
+    @if(light_pick) env_on = take_env && has_env && !lights_only;
     if (env_on) {
-        let l = sample_env(rng_dim(D_ENV));
-        let f = eval_bsdf(s, lb, v, l);
-        if (any(f > vec3<f32>(0.0))) {
-            let pdf_e = env_pdf(l);
-            if (pdf_e > 0.0) {
-                let vis = sky_tr(o, l, rng_dim(D_ENV_VIS));
-                if (any(vis > vec3<f32>(0.0))) {
-                    let frac = split_frac;
-                    let wgt = light_mis(pdf_e, s, lb, v, l);
-                    sum += env_radiance(l) * f * wgt / pdf_e * tr3(vis);
-                    dl_spec += env_radiance(l) * f * wgt / pdf_e * tr3(vis) * frac;
-                }
-            }
-        }
+        // (`split_frac` is the sky sample's where its BSDF was not 0; where it was, e is 0.)
+        let e = env_light(s, lb, v, o);
+        sum += e;
+        dl_spec += e * split_frac;
     }
     @if(light_pick) if (pick_w > 1.0) {
         sum = sum_sun + (sum - sum_sun) * pick_w;
@@ -2813,7 +2834,11 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     if (s.card) { return e; }
     let c = cache_get(s, false);
     var irr = c.rgb;
-    if (!cache_on() || c.w < CACHE_WARM) { irr = direct_light(s, white_lobes(), -l); }
+    if (!cache_on() || c.w < CACHE_WARM) {
+        nee_alone = true;
+        irr = direct_light(s, white_lobes(), -l);
+        nee_alone = false;
+    }
     return e + cache_reflectance(lobes(s, max(dot(s.n, -l), 1e-4))) * irr;
 }
 
@@ -2937,6 +2962,7 @@ const CACHE_SIZE: u32 = 262144u;     // entries, a power of two (gpu.rs CACHE_SI
 const CACHE_PROBE: u32 = 8u;         // linear probing window
 const CACHE_ANGLE: f32 = 0.02;       // voxel size / distance to the camera
 const CACHE_MIN_VOXEL: f32 = 0.0625; // m
+const CACHE_FACE: f32 = 0.0625;      // a surface's key is taken this far (in voxels) in front of it
 const CACHE_WARM: f32 = 4.0;         // samples before lookups trust an entry
 const CACHE_TRAIN_MASK: u32 = 7u;    // 1 in 8 tiles of 8x4 pixels (one SIMD group: the others really skip) per frame
 const CACHE_FRAME_CAP: u32 = 255u;   // samples per entry per frame (fixed-point headroom)
@@ -2946,7 +2972,8 @@ const CACHE_EVICT: f32 = 120.0;      // frames without samples before an entry i
 
 // cache_keys[i]: checksum of the voxel key (0 = free). cache_acc[8i ..]: this frame's sums (fixed point) of the total
 // r, g, b, of its indirect part r, g, b, and the sample count. cache_val[2i] = (irradiance / π, history samples),
-// cache_val[2i + 1] = (its indirect part: all but the voxel's own direct light, frames since the last sample).
+// cache_val[2i + 1] = (its indirect part: all but the lights' samples there, the sky's light in it; frames since the
+// last sample).
 // (Declared with the trace's outputs, group 1, above `resolve_bound`.)
 
 fn cache_on() -> bool { return LIVE && P.cache.x > 0.5; }
@@ -2956,10 +2983,12 @@ fn cache_key(p: vec3<f32>, ng: vec3<f32>) -> vec2<u32> {
     return cache_key_at(p, ng, 0.0);
 }
 
-// The key `step` levels coarser (negative: finer) than p's own.
+// The key `step` levels coarser (negative: finer) than p's own. The voxel is the one just in front of the surface
+// (CACHE_FACE): a floor at y = 0 lies on a face of every level's voxels, and the rounding of its hits put them on
+// either side, two keys sharing its samples (a floor's bounce 16 % dark at 160 x 90 for 11 % a little higher up).
 fn cache_key_at(p: vec3<f32>, ng: vec3<f32>, step: f32) -> vec2<u32> {
     let lvl = floor(log2(max(length(p - P.cam_pos.xyz) * CACHE_ANGLE, CACHE_MIN_VOXEL))) + step;
-    let q = bitcast<vec3<u32>>(vec3<i32>(floor(p * exp2(-lvl))));
+    let q = bitcast<vec3<u32>>(vec3<i32>(floor(p * exp2(-lvl) + ng * CACHE_FACE)));
     let a = abs(ng);
     let axis = select(select(2u, 1u, a.y >= a.z), 0u, a.x >= a.y && a.x >= a.z);
     let neg = select(select(ng.z, ng.y, axis == 1u), ng.x, axis == 0u) < 0.0;
@@ -2994,6 +3023,18 @@ fn cache_get(s: Surface, indirect: bool) -> vec4<f32> {
     // 2 ms more trace moving than held still at the same poses (now only after a reset or a cut, see the path).
     for (var k = 0u; k < 2u; k++) {
         let e = cache_entry(cache_key_at(s.p, s.ng, select(-1.0, 1.0, k == 0u)), indirect);
+        if (e.w > best.w) { best = e; }
+    }
+    // Still cold: the coarser levels every training sample is added to beside its own (`cache_train`). A voxel with
+    // 16 or 256 times the area is seldom without samples where the own one is: far from the camera's paths, at low
+    // resolutions. (Without them such a lookup read black past a view's first frames: a floor's bounce 11 % dark
+    // at 160 x 90; SHaRC goes on tracing there, GI-1.0 reads a coarser mip.)
+    if (best.w < CACHE_WARM) {
+        let e = cache_entry(cache_key_at(s.p, s.ng, 2.0), indirect);
+        if (e.w > best.w) { best = e; }
+    }
+    if (best.w < CACHE_WARM) {
+        let e = cache_entry(cache_key_at(s.p, s.ng, 4.0), indirect);
         if (e.w > best.w) { best = e; }
     }
     return best;
@@ -3040,9 +3081,12 @@ fn white_lobes() -> Lobes {
 }
 
 // What a surface reflects of irradiance / π toward the viewer, the lighting taken as uniform over the hemisphere:
-// diffuse + directional specular albedo.
+// diffuse + directional specular albedo, under the coat's (as `eval_bsdf_k` layers them; without the coat's term a
+// coated surface reflected e_coat (1 - the rest) too little).
 fn cache_reflectance(lb: Lobes) -> vec3<f32> {
-    return lb.diffuse * (1.0 - lb.e_spec) + lb.e_spec;
+    let r = lb.diffuse * (1.0 - lb.e_spec) + lb.e_spec;
+    if (has(F_COAT)) { return r * (1.0 - lb.e_coat) + lb.e_coat; }
+    return r;
 }
 
 struct Fresh { total: vec3<f32>, direct: vec3<f32> };
@@ -3053,6 +3097,7 @@ struct Fresh { total: vec3<f32>, direct: vec3<f32> };
 // cold pixel's fresh estimate).
 fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert: bool) -> Fresh {
     var slot: array<u32, CACHE_DEPTH>;
+    var coarse: array<u32, 4>; // each vertex's voxels two and four levels coarser (4 and 16 times the size)
     // Per vertex: its direct light; that + the emission / sky its ray brought back; what the next vertex reflects.
     var direct: array<vec3<f32>, CACHE_DEPTH>;
     var gather: array<vec3<f32>, CACHE_DEPTH>;
@@ -3068,8 +3113,14 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
         cur_depth = 2u + k;
         let v = -d;
         slot[k] = cache_find(cache_key(s.p, s.ng), insert);
+        coarse[2u * k] = cache_find(cache_key_at(s.p, s.ng, 2.0), insert);
+        coarse[2u * k + 1u] = cache_find(cache_key_at(s.p, s.ng, 4.0), insert);
+        // `direct`: the lights' samples (not the sky's): what a surface seen in a reflection takes afresh.
+        lights_only = true;
         var g = direct_light(s, wl, v);
+        lights_only = false;
         direct[k] = g;
+        if (env_sampled()) { g += env_light(s, wl, v, offset_origin(s.p, s.ng)); }
         refl[k] = vec3<f32>(0.0);
         gather[k] = g;
         n = k + 1u;
@@ -3117,7 +3168,9 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
             if (c.w >= CACHE_WARM) {
                 tail = c.rgb;
             } else {
+                nee_alone = true;
                 tail = direct_light(s2, wl, -l);
+                nee_alone = false;
             }
             break;
         }
@@ -3135,6 +3188,8 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
         let tcl = CACHE_TRAIN_CLAMP * P.misc.x;
         if (lum > tcl) { e *= tcl / lum; }
         cache_add(slot[j], e, max(e - direct[j], vec3<f32>(0.0)));
+        cache_add(coarse[2 * j], e, max(e - direct[j], vec3<f32>(0.0)));
+        cache_add(coarse[2 * j + 1], e, max(e - direct[j], vec3<f32>(0.0)));
     }
     return Fresh(e, min(direct[0], e));
 }
@@ -3528,9 +3583,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Live: the path ends in the radiance cache at its first bounce. Surfaces seen in mirror-like reflections
         // (specular lobe below roughness 0.4, where UE traces reflections) get direct light of their own, as UE's hit
         // lighting does, and the cache's indirect part; others reflect the cache's total. Rotating tiles train the
-        // cache. For the first frames after a reset or a camera cut (live/mod.rs COLD_FALLBACK_FRAMES; flag 1 later),
-        // pixels that find their voxel cold trace a fresh estimate and use it meanwhile, without inserting the voxel:
-        // the low-sample entries they inserted kept later frames slower until evicted (the crowd's square ~2 ms).
+        // cache. A pixel that finds its voxel cold at every level (`cache_get`) traces a fresh estimate and uses it,
+        // without inserting the voxel: the low-sample entries such pixels inserted kept later frames slower until
+        // evicted (the crowd's square ~2 ms). (Until 2026-11-16 that held for a view's first 30 frames; later a cold
+        // voxel was read as it was, black where there was none. With the coarser levels few lookups are cold, and
+        // the rule's own test cost more than their traces: Bistro 9.05 ms with it, 8.87 without.)
         let cfl = u32(P.cache.w);
         if (cache_on() && depth >= 1u && !(has(F_GLASS) && s.transmission > 0.0)) {
             let v1 = -d;
@@ -3538,7 +3595,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u && (cfl & 2u) == 0u;
             var e = cache_get(s, hit_light);
             let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u && (cfl & 4u) == 0u;
-            if ((cfl & 1u) != 0u) { e.w = max(e.w, CACHE_WARM); }
             if (train || e.w < CACHE_WARM) {
                 // Training tiles trace deep (coherent: whole SIMD groups); scattered cold pixels one vertex.
                 let fresh = cache_train(s, d, vec2<f32>(width, cone_a), select(1u, CACHE_DEPTH, train), train);
@@ -3549,7 +3605,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var c = thr * cache_reflectance(lb1) * e.rgb;
             // Resampled lights, not the exact loop camera hits get (that costs 2x here: mirror pixels are scattered).
             mirror_path = mirror_path && (cfl & 8u) != 0u;
-            if (hit_light) { c += thr * direct_light(s, lb1, v1); }
+            // (The lights alone: the sky's light is in the cache's indirect part, whole. Its samples taken afresh
+            // here against the white-lobe ones the cache left out do not add up on a glossy surface: a white metal
+            // ground in a mirror read 0.80 of a uniform sky. The lights' still are: weights of two lobes, right for a
+            // Lambert surface and for small lights; as light samples alone they were fireflies on Kabukichō's wet
+            // street, flicker + 22 %.)
+            if (hit_light) {
+                lights_only = true;
+                c += thr * direct_light(s, lb1, v1);
+                lights_only = false;
+            }
             let lum = luminance(c);
             if (lum > clamp_v && !straight) { c *= clamp_v / lum; }
             radiance += c;

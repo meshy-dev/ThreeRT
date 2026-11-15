@@ -262,7 +262,6 @@ impl LiveCore {
         self.update_light_lod();
         // A camera cut (a jump no camera makes in one frame: 2 m or 30 degrees) is not motion: no blur (UE: bCameraCut).
         let cut = (self.cam.pos - self.prev_cam.pos).length() > 2.0 || self.cam.fwd.dot(self.prev_cam.fwd) < 0.866;
-        self.cold_frames = if self.reset || cut { 0 } else { self.cold_frames.saturating_add(1) };
         // (Objects moved this frame: re-posed triangles or moved instances, e.g. walkers in a shared pose.)
         let blur = !self.motion_blur_off && self.blur.0 > 0.0 && (moved || self.reposed || self.pose_reposed || self.inst_moved) && !cut;
         // Camera motion is reprojected exactly (disocclusions are rejected per pixel), so history survives motion;
@@ -382,8 +381,7 @@ impl LiveCore {
                 // Light-sampled particles (sparks: Particles emitterArea) move their light every frame: the cache and
                 // the temporal pass keep the short history of a lighting edit while the scene has them.
                 let lit = self.live_lighting();
-                let cold = if self.cold_frames >= COLD_FALLBACK_FRAMES { 1 } else { 0 };
-                p.cache = [1.0, CACHE_SAMPLES, if lit { CACHE_FRAMES_LIT } else { CACHE_FRAMES }, (cache_flags() | cold) as f32];
+                p.cache = [1.0, CACHE_SAMPLES, if lit { CACHE_FRAMES_LIT } else { CACHE_FRAMES }, cache_flags() as f32];
             }
             p.time[0] = shader_time(self.time);
             p.cam_pos = [cam.pos.x, cam.pos.y, cam.pos.z, cam.tan_half_fov];

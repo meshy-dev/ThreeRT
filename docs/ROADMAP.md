@@ -2449,6 +2449,40 @@ with the decision: its tolerance 5 % -> 3 %). render-identity changes the eight 
 tinting glass or media, in noise; bench-window's shots as main's (Kabukichō's flicker 0.68-0.72 over three seeds in
 both builds). The cost of exact glass shadows is the walk over the glass, which this leaves as it is.
 
+**The radiance cache held to numbers (2026-11-16, after it).** A live test of one bounce off a lit floor read
+0.21 for 0.25: the first number anyone had asked of the cache. Read against how the other caches of its kind are
+built (SHaRC, GI-1.0, Lumen, NRC), five faults:
+
+- A lookup that found no voxel read black past a view's first 30 frames (a shortcut, taken for speed, that was in
+  no list): 16 % of that bounce at 160 x 90, 2 % at 1280 x 720, 0.2 % of a Bistro frame. Every training sample is
+  now added two and four levels coarser as well, and a cold lookup reads those; with none it traces, always. The
+  shortcut is gone: with the coarser levels it cost time (Bistro 9.05 ms with it, 8.87 without).
+- A floor on a face of the voxel grid (y = 0) had its hits rounded to either side, two keys sharing its samples:
+  the key is taken just in front of the surface.
+- Where a path ended on a cold voxel its light samples kept their MIS share alone, 18 % of a uniform sky: they
+  stand alone there (`nee_alone`). A view's first frame read 4.0 for 7.05.
+- The lookup's reflectance had no coat: a surface that reflects by its coat alone reflected nothing.
+- A surface seen in a reflection took the sky's samples afresh against the white-lobe ones the cache had left
+  out, which do not add up on a glossy surface (a white metal ground in a mirror: 0.80 of a uniform sky, now 1.00).
+  The sky's light there is the cache's.
+
+Measured and not taken: ending a path in the cache only past a segment of a voxel or so, as the others do. It makes
+a slit narrower than a voxel right (`cache/slit-live`: 14 % bright without) and cost Bistro's trace 15 to 22 %:
+the pixels that go on hold their SIMD groups. Tracing an absent voxel and inserting it: 7 %, for what the coarser
+levels do for 1. A table four times the size: what the trace gains (0.13 ms) the cache's own pass spends. Taking a
+reflection hit's lights as light samples alone, which is the estimator without a bias: fireflies on Kabukichō's
+wet street (flicker + 22 %); they keep their weights.
+
+Against main: the trace Bistro 8.50 / 8.55 ms held still and 4.48 / 4.58 along its camera path, lamp-rooms 3.69 /
+3.75, the fire scene 1.88 / 1.92; guarded, Kabukichō 16.53 / 16.22 and Tokyo 5.85 / 5.50 by day, 4.79 / 4.74 at
+night (a surface in a reflection sends the sky no shadow ray). bench-window: Bistro ΔE 1.82 -> 1.81, lamp-rooms
+0.63 / p99 1.99 -> 0.63 / 1.85, in motion 0.80 -> 0.74, settled after a turn 0.67 -> 0.73 (the one shot that is
+worse: 0.6 % more light where it was 1.3 % bright already); Kabukichō, Tokyo at night and at 14:00 as main's.
+render-identity: the live tests that read the cache change, offline ones by a float's last place at most (the
+sky's light sample became a function). Next for the cache: its training as a pass of its own, as SHaRC's is
+(training that does not thin out with the resolution, deeper paths, a smaller kernel), and with it the table's
+size; a pass for the few pixels that go on, which is what the segment test waits for.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

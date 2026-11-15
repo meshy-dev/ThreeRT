@@ -1371,6 +1371,19 @@ cache's voxels, and later segments meet homogeneous media alone; depth of field 
 particles are lit from the cache's voxels; past a camera hit's own decisions the sampler is a hash, not Sobol
 (variance only).
 
+The radiance cache is held to numbers by the `cache/*` tests (a bounce off a lit floor, the same off a coated one
+and with the floor on a voxel face, two bounces in a view's first frame, a lit ground seen in a mirror, a furnace
+box, a corner): within 2 % of the offline or analytic value. A lookup whose voxel has too few samples reads the
+levels beside it, then the ones two and four levels coarser, which every training sample is added to as well; with
+none of them it traces its light there. Two limits are known and held by tests so that they are seen to move:
+
+- `cache/slit-live`: light in a gap narrower than a voxel reads 14 % bright. A path ends in the cache however short
+  its last segment; other caches of this kind go on tracing below about a voxel and a half (SHaRC), which is right
+  here and cost Bistro's trace 15 to 22 % in this kernel.
+- The cache holds no directions: it takes a mirror for a diffuse reflector of what falls on it (the ground before a
+  sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
+  below a voxel's size.
+
 ## What the kernel trusts
 
 The kernel follows indices it reads from buffers and loops over counts it is given; it checks none of them (a

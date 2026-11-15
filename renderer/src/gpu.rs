@@ -3617,7 +3617,7 @@ mod tests {
             let sun = v(hwrt, KernelSwitches { last_sun: true, ..Default::default() });
             assert_eq!((sun.matches("radiance += dz;").count(), sun.matches("fn sun_light(").count(), sun.matches("sun_light(s, lobes(").count()), (1, 1, 1));
             assert!(!plain.contains("sun_light"));
-            assert_eq!(lit.matches("env_on = take_env && has_env;").count(), 1);
+            assert_eq!(lit.matches("env_on = take_env && has_env && !lights_only;").count(), 1);
             assert_eq!(lit.contains("let steps = 4u;"), hwrt);
             assert_eq!(v(hwrt, KernelSwitches { cutout_lite: 2, ..Default::default() }) == plain, !hwrt);
         }
