@@ -2391,6 +2391,16 @@ placeholder there), so the count of bindings is as it was.
   is byte-identical to one main's binary gave; four confirming runs under-read a test whose output holds for a
   process.
 
+**Shared declarations once; the kernel's layouts held to its source (2026-11-15, after it).** `TriAttr` was
+declared in three shaders, `Pixel` and the light tiles' constants in two; the particle passes got the object table's
+stride by gpu.rs rewriting a line of their text; the kernel's bind group layouts were written by hand beside the
+shader's declarations, with no test between them. Now `records.wgsl` declares what is shared and is part of each
+shader that uses it; the stride is a pipeline constant, as in the kernel; the layouts' entries are one function
+(gpu.rs `kernel_layout_entries`), and a test holds them to what every variant of the kernel declares, kind and
+access (it fails on a wrong entry: tried). The kernels' code is the same: render-identity against main 0 of 194
+changed in four layouts, bench-window's shots as main's, the trace equal (Bistro 8.65 / 8.64 ms, lamp-rooms 3.71 /
+3.72), `tools/web-hello.ts` in Chrome passes.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
