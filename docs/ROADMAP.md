@@ -2643,7 +2643,8 @@ emitters take 0.2 ms of CPU a frame to rewrite (commit 4.88 -> 5.08 ms), which a
 the particles' and the instances' (the next parts). Pictures: the big scenes within main's own run-to-run
 difference; of the suite's 239 outputs, 26 that repeat themselves differ from main's, in the last bits offline
 (up to 3.7e-7) and by a sample that falls otherwise in a few live ones (up to 2.1e-3 of a value; sums within
-3e-5); the list's values are the triangles' to the bit (`the_light_list_holds_its_triangles` reads both back).
+3e-5). That is Metal's compiler rounding the new kernel otherwise: on Vulkan (RTX 5090) every one of the 26 is
+byte-identical to main's, natively and under software traversal.
 
 ## 2. Temporal fixes
 
