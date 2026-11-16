@@ -309,6 +309,7 @@ impl LiveCore {
         self.cpu_skin_ms = 0.0;
         self.cpu_upload_ms = 0.0;
         self.gpu_blas_ms = 0.0;
+        self.top_build = Default::default();
         // The game's particle spawns, for the next frame's pass; the voxel occupancy grid's changes, uploaded.
         for (id, v) in std::mem::take(&mut world.particle_spawns) {
             self.particle_spawns.entry(id).or_default().extend(v);
@@ -375,18 +376,17 @@ impl LiveCore {
                 eprintln!("edit: rebuild (an object added in place moved)");
             }
         }
-        // Instanced objects rewrite their instances in place (`update_instanced`); one that cannot rebuilds the scene. Before
-        // the geometry edits, whose TLAS build (always, or the rebuild they fall back to) then carries the instances too
-        // (a voxel scene's debris and batches: one build of a 20 k instance TLAS a frame, not two); else they build it.
+        // Instanced objects rewrite their instances in place (`update_instanced`); one that cannot rebuilds the scene.
         // (The instances the last update moved, taken first: what this one moves, from here on, keeps its motion.)
         let moved_before = std::mem::take(&mut self.inst_moving);
         let mut instanced_early = false;
         // (Not those added this commit: the geometry edits place them with their instances as they are.)
         let early: Vec<u32> = std::mem::take(&mut changes.instanced).into_iter().filter(|id| !changes.added.contains(id)).collect();
         if !early.is_empty() && !changes.structural {
-            instanced_early = self.instanced_in_place(world, &early, !changes.edits(), &mut changes);
+            instanced_early = self.instanced_in_place(world, &early, &mut changes);
         }
         // Geometry edits in place when nothing else is structural; what they cannot apply rebuilds the scene.
+        let mut edited = false;
         if changes.edits() && !changes.structural {
             let t = Instant::now();
             let r = self.edit_geometry(world, &changes);
@@ -396,6 +396,7 @@ impl LiveCore {
             match r {
                 Ok(()) => {
                     self.edit_ms += t.elapsed().as_secs_f32() * 1e3;
+                    edited = true;
                     // As after a rebuild: history validated per pixel.
                     self.lit_changed = self.frame.max(1);
                 }
@@ -461,12 +462,10 @@ impl LiveCore {
         }
         // Instanced objects under a moved ancestor (or movable themselves) rewrite their instances too, unless the update
         // above did (with the same world matrices; twice would take the new rows for the previous frame's: no motion).
-        // The TLAS is built by whatever moves after them, or there.
         let mut instanced_done = instanced_early;
         instanced_moved.retain(|k| !early.contains(k));
         if !instanced_moved.is_empty() && !changes.structural {
-            let others = !placed.is_empty() || !dynamic.is_empty() || !procs_moved.is_empty();
-            instanced_done |= self.instanced_in_place(world, &instanced_moved, !others, &mut changes);
+            instanced_done |= self.instanced_in_place(world, &instanced_moved, &mut changes);
         }
         // Posed rigid models move their nodes' instances (`repose_rigid`), not triangles.
         let rigid: Vec<u32> = dynamic.iter().copied().filter(|k| self.sc.tables.retained.rigid.contains_key(k)).collect();
@@ -479,13 +478,13 @@ impl LiveCore {
             dynamic.remove(k);
         }
         let shared_ok = shared.is_empty() || (!changes.structural && self.repose_groups(world, &shared)?);
-        // Procedural geometry moves its records and TLAS transforms; the TLAS is built by whatever moves after it, or here.
+        // Procedural geometry moves its records and TLAS transforms.
         if !procs_moved.is_empty() && !changes.structural {
-            self.move_procs(world, &procs_moved, placed.is_empty() && dynamic.is_empty() && rigid.is_empty() && shared.is_empty());
+            self.move_procs(world, &procs_moved);
         }
-        let placed_ok = shared_ok && (placed.is_empty() || (!changes.structural && self.move_instances(world, &placed, dynamic.is_empty() && rigid.is_empty())));
+        let placed_ok = shared_ok && (placed.is_empty() || (!changes.structural && self.move_instances(world, &placed)));
         let t_rigid = Instant::now();
-        let rigid_ok = placed_ok && (rigid.is_empty() || (!changes.structural && self.repose_rigid(world, &rigid, dynamic.is_empty())?));
+        let rigid_ok = placed_ok && (rigid.is_empty() || (!changes.structural && self.repose_rigid(world, &rigid)?));
         self.cpu_skin_ms += t_rigid.elapsed().as_secs_f32() * 1000.0;
         // Instances the last update moved and this one does not: their motion ends, the previous-frame rows catch up
         // (written merged: an instanced object's thousands of records are contiguous).
@@ -502,14 +501,6 @@ impl LiveCore {
             catch_up.flush_section(&self.g.queue, &self.sc.up.heap, Table::Instances);
         }
         if rigid_ok && (dynamic.is_empty() || (!changes.structural && self.repose(world, &dynamic)?)) {
-            // A new shared pose and nothing else that rebuilds the TLAS (no move): rebuild it for the meshes' new bounds.
-            if !shared.is_empty() && placed.is_empty() && rigid.is_empty() && dynamic.is_empty() {
-                if let Some(accel) = self.sc.up.accel.as_ref() {
-                    let mut e = self.g.device.create_command_encoder(&Default::default());
-                    self.g.rebuild_tlas(accel, &mut e);
-                    self.g.queue.submit([e.finish()]);
-                }
-            }
             // Moved emitters: the light tree's moving subtree around them, once (after every in-place update).
             if std::mem::take(&mut self.emitters_moved) {
                 self.refit_moving_tree();
@@ -549,7 +540,12 @@ impl LiveCore {
             changes.structural = true;
         }
         let now = shader_time(self.time);
-        let applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
+        // The tables' edits, then what the edits above left to build above the triangles, once (`build_top`). Either
+        // may say the scene is to be rebuilt, and the rebuild builds all of it.
+        let mut applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
+        if applied.is_some() && !self.build_top(edited) {
+            applied = None;
+        }
         let Some(d) = applied else {
             let t = Instant::now();
             self.rebuild(world)?;
@@ -593,6 +589,41 @@ impl LiveCore {
             self.move_sun(world);
         }
         Ok(false)
+    }
+
+    /// What this commit's edits left to build above the triangles (`gpu::TopBuild`: each of them writes its data and
+    /// notes it there), in one build: the BLASes named and the TLAS, or software traversal's top tree. False: no top
+    /// tree can be made, and the caller rebuilds the scene. Its CPU time is the geometry edit's when the commit had
+    /// one (`edited`: the frame log's `edit` is an edit with its build), else the uploads'. THREERT_PROFILE_BLAS=1:
+    /// the build's GPU time (the queue drained before and after; frame log `blas`).
+    fn build_top(&mut self, edited: bool) -> bool {
+        let b = std::mem::take(&mut self.top_build);
+        if !b.any() {
+            return true;
+        }
+        let profile = std::env::var("THREERT_PROFILE_BLAS").is_ok_and(|v| v == "1");
+        if profile {
+            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let t = Instant::now();
+        let built = self.g.build_top(&mut self.sc.up, b);
+        let ms = t.elapsed().as_secs_f32() * 1e3;
+        if edited {
+            (self.edit_ms, self.edit_split.blas) = (self.edit_ms + ms, self.edit_split.blas + ms as f64);
+        } else {
+            self.cpu_upload_ms += ms;
+        }
+        if profile {
+            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
+            self.gpu_blas_ms += t.elapsed().as_secs_f32() * 1e3;
+        }
+        self.top_builds += 1;
+        if let Err(why) = &built {
+            eprintln!("units: {why}: rebuilding the scene");
+            self.fallback = Some(why.clone());
+            self.fallbacks += 1;
+        }
+        built.is_ok()
     }
 
     /// The kernel features the scene needs as it is now: what its materials and the environment ask for (edits change
@@ -707,11 +738,10 @@ impl LiveCore {
     }
 
     /// Moves movable instances: their kernel records (the old transform kept as the previous frame's, for motion
-    /// vectors), their object entries' pivots and their TLAS transforms (hardware traversal; with `build_tlas` it
-    /// rebuilds the TLAS, otherwise the dynamic rebuild that follows does) or their units and the top tree over them
-    /// (software traversal, units.rs). No triangles change. False when it cannot (software traversal without units,
-    /// or an instance that is no unit; a top tree that cannot be made): the caller rebuilds.
-    pub(super) fn move_instances(&mut self, world: &World, placed: &[(u32, u32)], build_tlas: bool) -> bool {
+    /// vectors), their object entries' pivots and their TLAS transforms (hardware traversal) or their units (software
+    /// traversal, units.rs); the commit builds what is above them (`build_top`). No triangles change. False when it
+    /// cannot (software traversal without units, or an instance that is no unit): the caller rebuilds.
+    pub(super) fn move_instances(&mut self, world: &World, placed: &[(u32, u32)]) -> bool {
         // (Hardware traversal's TLAS instances, or software traversal's units; neither: the caller rebuilds.)
         let Some(mut top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return false };
         let size = std::mem::size_of::<scene::GpuInstance>() as u64;
@@ -757,19 +787,8 @@ impl LiveCore {
         }
         self.sc.up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         self.inst_moved = true;
-        match top {
-            gpu::Top::Hw(accel) => {
-                if build_tlas {
-                    let mut e = self.g.device.create_command_encoder(&Default::default());
-                    self.g.rebuild_tlas(accel, &mut e);
-                    q.submit([e.finish()]);
-                }
-                true
-            }
-            // (The top tree is built here whoever else changes units this commit: it is CPU work and one write, and a
-            // tree that cannot be made must send the caller to a rebuild now.)
-            gpu::Top::Sw(units) => self.g.retop(units, &self.sc.up.bg_parts.nodes).map_err(|e| eprintln!("units: {e}: rebuilding the scene")).is_ok(),
-        }
+        self.top_build.instances = true;
+        true
     }
 
     /// The material table to the GPU: written in place; with more materials than its section holds (materials added
@@ -793,9 +812,9 @@ impl LiveCore {
 
     /// `update_instanced` with its fallback (the reason in the frame log, the scene rebuilt) and its CPU time; whether it
     /// changed anything.
-    pub(super) fn instanced_in_place(&mut self, world: &World, ids: &[u32], build_tlas: bool, changes: &mut crate::world::Changes) -> bool {
+    pub(super) fn instanced_in_place(&mut self, world: &World, ids: &[u32], changes: &mut crate::world::Changes) -> bool {
         let t = Instant::now();
-        let r = self.update_instanced(world, ids, build_tlas);
+        let r = self.update_instanced(world, ids);
         self.instanced_ms += t.elapsed().as_secs_f32() * 1e3;
         let log = std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1");
         match r {
@@ -1022,11 +1041,11 @@ impl LiveCore {
     /// Instanced objects whose instances changed (`World::instanced`, the node's transform, power or customData): their
     /// kernel records (the old transforms kept as the previous frame's, for motion vectors), object entries (pivot,
     /// bounds, power, data, colour), TLAS transforms and masks (`scene::instance_world`: a hidden instance 0), each
-    /// object's records and entries written as one range; with `build_tlas` the TLAS is rebuilt here. No triangles or
+    /// object's records and entries written as one range; the commit builds what is above them. No triangles or
     /// BLASes change. Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
     /// flattened or did not place this way, an instance now mirrored), and the caller rebuilds.
     /// `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
-    pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32], build_tlas: bool) -> std::result::Result<usize, String> {
+    pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32]) -> std::result::Result<usize, String> {
         use crate::world::Kind;
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
             return Err("THREERT_EDIT_REBUILD=1".into());
@@ -1096,24 +1115,15 @@ impl LiveCore {
         }
         if done > 0 {
             self.inst_moved = true;
-            match top {
-                gpu::Top::Hw(accel) => {
-                    if build_tlas {
-                        let mut e = self.g.device.create_command_encoder(&Default::default());
-                        self.g.rebuild_tlas(accel, &mut e);
-                        self.g.queue.submit([e.finish()]);
-                    }
-                }
-                gpu::Top::Sw(units) => self.g.retop(units, &sc.up.bg_parts.nodes)?,
-            }
+            self.top_build.instances = true;
         }
         Ok(done)
     }
 
     /// Moves procedural objects: their kernel records (the old transform kept as the previous frame's, for motion
-    /// vectors), object pivots and, with hardware RT, TLAS transforms (`build_tlas`: the TLAS rebuilt here). Software
+    /// vectors), object pivots and, with hardware RT, TLAS transforms (the commit builds the TLAS). Software
     /// traversal reads the records alone, so neither path rebuilds the scene.
-    pub(super) fn move_procs(&mut self, world: &World, ids: &[u32], build_tlas: bool) {
+    pub(super) fn move_procs(&mut self, world: &World, ids: &[u32]) {
         let size = std::mem::size_of::<scene::GpuInstance>() as u64;
         for id in ids {
             let Some(&j) = self.sc.proc_of.get(id) else { continue };
@@ -1138,19 +1148,16 @@ impl LiveCore {
             self.inst_moving.push(i as u32);
         }
         self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-        if let (true, Some(accel)) = (build_tlas, self.sc.up.accel.as_ref()) {
-            let mut e = self.g.device.create_command_encoder(&Default::default());
-            self.g.rebuild_tlas(accel, &mut e);
-            self.g.queue.submit([e.finish()]);
-        }
+        // (Software traversal reads the records alone: no unit moved.)
+        self.top_build.instances |= self.sc.up.accel.is_some();
         self.inst_moved = true;
     }
 
     /// Posed rigid models (`scene::RigidModel`): each moving node's instance takes object x node transform from the clip
-    /// (previous rows kept for motion vectors) and their flattened triangles are re-transformed in place; then the dynamic
-    /// BLASes (if they have such triangles) and, when `build_tlas`, the TLAS are rebuilt (`repose` rebuilds both after
-    /// it otherwise). False when it cannot (no hardware RT, a model hidden or changed): the caller rebuilds.
-    pub(super) fn repose_rigid(&mut self, world: &World, ids: &[u32], build_tlas: bool) -> Result<bool> {
+    /// (previous rows kept for motion vectors) and their flattened triangles are re-transformed in place; the commit
+    /// builds the dynamic BLASes (if they have such triangles) and the TLAS. False when it cannot (no hardware RT, a
+    /// model hidden or changed): the caller rebuilds.
+    pub(super) fn repose_rigid(&mut self, world: &World, ids: &[u32]) -> Result<bool> {
         if self.sc.up.accel.is_none() {
             return Ok(false);
         }
@@ -1231,22 +1238,14 @@ impl LiveCore {
             q.write_buffer(&up.attrs, k * 96, bytemuck::cast_slice(&attrs[lo..hi]));
             q.write_buffer(&accel.verts, k * 36, bytemuck::cast_slice(&blas[lo * 3..hi * 3]));
         }
-        if build_tlas {
-            let accel = self.sc.up.accel.as_ref().unwrap();
-            let mut e = self.g.device.create_command_encoder(&Default::default());
-            if lo < hi {
-                self.g.rebuild_dynamic(accel, &mut e);
-            } else {
-                self.g.rebuild_tlas(accel, &mut e);
-            }
-            self.g.queue.submit([e.finish()]);
-        }
+        self.top_build.instances = true;
+        self.top_build.dynamic |= lo < hi;
         Ok(true)
     }
 
     /// Models in a shared pose (`scene::PoseGroup`): each group whose pose changed is skinned once, in model space (the
-    /// groups in parallel), into its mesh's pool triangles, and their BLASes are rebuilt; the TLAS is left to the moves
-    /// that follow (or `commit`). False when a group's members no longer share one pose, or one is hidden or changed:
+    /// groups in parallel), into its mesh's pool triangles; the commit builds their BLASes and the TLAS over their
+    /// new bounds. False when a group's members no longer share one pose, or one is hidden or changed:
     /// the caller rebuilds, which groups them again. (Deforming meshes get no motion vectors of their own yet: an
     /// instance's are its transform's.)
     pub(super) fn repose_groups(&mut self, world: &World, members: &[u32]) -> Result<bool> {
@@ -1332,18 +1331,7 @@ impl LiveCore {
             pg.animation = a;
             meshes.push(pg.mesh);
         }
-        let mut e = self.g.device.create_command_encoder(&Default::default());
-        self.g.rebuild_meshes(accel, &meshes, &mut e);
-        let profile_blas = std::env::var("THREERT_PROFILE_BLAS").is_ok_and(|v| v == "1");
-        if profile_blas {
-            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
-        }
-        let t_blas = Instant::now();
-        q.submit([e.finish()]);
-        if profile_blas {
-            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
-            self.gpu_blas_ms += t_blas.elapsed().as_secs_f32() * 1000.0;
-        }
+        self.top_build.meshes.extend(meshes);
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
     }
@@ -1370,7 +1358,7 @@ impl LiveCore {
         self.keep_prev(both);
         self.prev_span = Some((lo, hi));
         self.reposed = true;
-        // Upload the touched span of the dynamic tail, then rebuild the dynamic BLASes and the TLAS.
+        // Upload the touched span of the dynamic tail; the commit builds the dynamic BLASes and the TLAS.
         let (q, up, (first, verts, attrs, blas)) = (&self.g.queue, &self.sc.up, &self.sc.dynamic);
         let accel = up.accel.as_ref().unwrap();
         let k = (first + lo) as u64;
@@ -1378,18 +1366,7 @@ impl LiveCore {
         q.write_buffer(&up.attrs, k * 96, bytemuck::cast_slice(&attrs[lo..hi]));
         q.write_buffer(&accel.verts, k * 36, bytemuck::cast_slice(&blas[lo * 3..hi * 3]));
         up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-        let mut e = self.g.device.create_command_encoder(&Default::default());
-        self.g.rebuild_dynamic(accel, &mut e);
-        let profile_blas = std::env::var("THREERT_PROFILE_BLAS").is_ok_and(|v| v == "1");
-        if profile_blas {
-            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
-        }
-        let t_blas = Instant::now();
-        q.submit([e.finish()]);
-        if profile_blas {
-            let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
-            self.gpu_blas_ms += t_blas.elapsed().as_secs_f32() * 1000.0;
-        }
+        self.top_build.dynamic = true;
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
     }
@@ -1573,7 +1550,6 @@ impl LiveCore {
             }
         };
         let q = &g.queue;
-        let mut e = g.device.create_command_encoder(&Default::default());
         // An emitter mesh's entries go (area 0: their weight; the light tree keeps its shape) when it is removed, hidden
         // or placed again.
         let mut emitters_changed = false;
@@ -2102,39 +2078,24 @@ impl LiveCore {
         w_objects.flush_section(q, &up.heap, Table::Objects);
         split.upload += tw.elapsed().as_secs_f64() * 1e3;
         let t3 = Instant::now();
-        new_meshes.sort_unstable();
-        new_meshes.dedup();
-        // The new meshes' and procedural BLASes and the TLAS in one build (`Gpu::build_meshes`).
-        match &mut top {
-            gpu::Top::Hw(accel) => g.build_edit(accel, &new_meshes, &pending_procs, &mut e, true),
-            // The trees are written; the meshes this edit freed give theirs back; the top tree over the units as they
-            // are now (one that cannot be made: the scene is rebuilt).
-            gpu::Top::Sw(units) => {
-                for &k in &edit.dead_meshes {
-                    if let Some(old) = units.drop_tree(k) {
-                        g.fill_tree(&up.bg_parts.nodes, old);
-                    }
+        // Software traversal: the trees are written; the meshes this edit freed give theirs back.
+        if let gpu::Top::Sw(units) = &mut top {
+            for &k in &edit.dead_meshes {
+                if let Some(old) = units.drop_tree(k) {
+                    g.fill_tree(&up.bg_parts.nodes, old);
                 }
-                g.retop(units, &up.bg_parts.nodes)?;
             }
         }
         split.blas += t3.elapsed().as_secs_f64() * 1e3;
-        // THREERT_PROFILE_BLAS=1: the BLAS / TLAS builds' GPU time (the queue drained before and after; frame log
-        // `blas`), as for the dynamic rebuilds.
-        let profile_blas = std::env::var("THREERT_PROFILE_BLAS").is_ok_and(|v| v == "1");
-        if profile_blas {
-            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
-        }
-        let t = Instant::now();
-        q.submit([e.finish()]);
-        g.keep_proc_blases(fresh_blases);
+        // The new meshes' and procedural BLASes and the TLAS (or the top tree over the units as they are now): the
+        // commit's one build (`build_top`).
+        self.top_build.instances = true;
+        self.top_build.meshes.extend(new_meshes);
+        self.top_build.procs.extend(pending_procs);
+        self.top_build.fresh.extend(fresh_blases);
         // Buffers that grew: the scene bind group over them.
         if std::mem::take(&mut edit.rebind) {
             g.rebind_scene(up);
-        }
-        if profile_blas {
-            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
-            self.gpu_blas_ms += t.elapsed().as_secs_f32() * 1000.0;
         }
         // The uniform tables: entries the edits placed past what a uniform buffer holds read as its last one.
         if g.uniform_tables && !edit.uniform_said {

@@ -253,3 +253,72 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     live.set_display_scale(1.0);
     assert!(!live.dynamic_res && live.render_scale == 0.75, "a fixed scale through another density");
 }
+
+/// Moves and geometry edits a view takes in place, alone and several in one commit, against a view built from the
+/// world as it is then: the same picture, so the acceleration structures hold what moved, built once a commit
+/// (`LiveCore::build_top`). Each kind of object that
+/// moves its own way: triangles re-transformed (a movable mesh), an instance's transform (a mesh a body drives), an
+/// instanced object's copies, a mesh added and removed in place.
+#[test]
+fn moves_in_place_leave_what_a_build_does() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = world();
+    let mesh = |own_blas| Kind::Mesh { geometry: 3, material: 1, own_blas, materials: vec![] };
+    w.set_object(13, "mover".into(), None, mesh(false), true, true).unwrap();
+    w.set_transform(13, Vec3::new(0.35, -0.45, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_object(14, "driven".into(), None, mesh(true), true, false).unwrap();
+    w.set_driven(14).unwrap();
+    w.set_transform(14, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_object(15, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![1], capacity: 2 }, true, false).unwrap();
+    let copies = |x: f32| [glam::Mat4::from_translation(Vec3::new(x, -0.5, 0.4)).to_cols_array(), glam::Mat4::from_translation(Vec3::new(0.6, 0.6, 0.8)).to_cols_array()].concat();
+    w.set_instances(15, 2, Some(copies(-0.7)), None, None).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let at = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+    type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+    let edits: Vec<Edit> = vec![
+        ("a movable mesh moved", Box::new(move |w| w.set_transform(13, at(0.1, -0.3, 0.9), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap())),
+        ("a driven mesh moved", Box::new(move |w| assert!(w.place_driven(14, at(-0.2, 0.3, 1.0), glam::Quat::from_rotation_z(-0.4))))),
+        ("an instanced object's copy moved", Box::new(move |w| w.set_instances(15, 2, Some(copies(-0.2)), None, None).unwrap())),
+        (
+            "all three moved at once",
+            Box::new(move |w| {
+                w.set_transform(13, at(0.5, -0.1, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+                assert!(w.place_driven(14, at(-0.7, 0.1, 0.6), glam::Quat::IDENTITY));
+                w.set_instances(15, 2, Some(copies(-0.9)), None, None).unwrap();
+            }),
+        ),
+        (
+            "a mesh added, the driven one moved",
+            Box::new(move |w| {
+                w.set_object(16, "added".into(), None, mesh(true), true, false).unwrap();
+                w.set_transform(16, at(0.0, 0.65, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+                assert!(w.place_driven(14, at(-0.3, -0.1, 1.1), glam::Quat::IDENTITY));
+            }),
+        ),
+        (
+            "the added mesh removed, the movable one moved",
+            Box::new(move |w| {
+                w.remove(16);
+                w.set_transform(13, at(0.2, 0.2, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+            }),
+        ),
+    ];
+    for (what, edit) in &edits {
+        edit(&mut w);
+        let builds = live.top_builds;
+        let rebuilt = live.commit(&mut w).unwrap();
+        // (Software traversal places some of these another way, and may rebuild: the picture holds either way.)
+        assert!(!(rebuilt && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
+        assert_eq!(live.top_builds - builds, u32::from(!rebuilt), "{what}: one build above the triangles a commit, whatever moved");
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
+        // (0.02 to 0.08 steps as measured; 0.9 after a move with nothing built above the triangles.)
+        assert!(apart(&a, &b) < 0.2, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+    }
+}

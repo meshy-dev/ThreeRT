@@ -2591,6 +2591,21 @@ headless runner takes `{"cmd":"resize"}`. A test holds a resized view to one bui
 frames). Left: the browser host's view is still fixed; the merged layout keeps the cache in one buffer with the
 size's buffers, so a resize there empties it; a drag makes every buffer again at each step.
 
+**One build above the triangles a commit (2026-11-16, scene step B, first part).** Each edit a commit applies in
+place (moved instances, an instanced object's copies, procedural geometry, a rigid model's pose, a shared pose's
+mesh, re-transformed triangles, a geometry edit) built the acceleration structures it had touched itself, in its
+own submit, and was told by an argument whether a later one would build the TLAS for it; a geometry edit always
+built it, so an edit with a move built it twice. They now write their data and note what is to build
+(`gpu::TopBuild`), and the commit builds once at its end (`LiveCore::build_top`): every BLAS named and the TLAS in
+one call, or software traversal's top tree. That call is also the only safe shape on Metal, where a TLAS built
+apart from a BLAS it references can see it unbuilt and lose its instance, in the next submit too: a shared pose
+that changed with nothing moving built its mesh in one submit and the TLAS in the next, and in a process that had
+rendered other scenes before the models were gone. `tests/render/skinning-shared-pose-live` passed through it
+(where the old arm was, there was sky: with no model too); it now holds the chest against that place, and fails on
+the code before. A test holds moves and edits in place, alone and several in a commit, to a view built from the
+world as it is then (`live::inplace_tests::moves_in_place_leave_what_a_build_does`: 0.02–0.08 of an 8-bit step;
+0.9 with nothing built), with one build a commit. No other picture changes (render-identity: 239 outputs).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
