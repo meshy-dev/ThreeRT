@@ -8,6 +8,8 @@ dist/
 
 out/
 target/
+# A game's store in `threert-render play` (`--store`, by default under the asset root).
+.threert/
 /assets
 playground/vendor/
 

@@ -28,6 +28,8 @@ pub mod sample;
 pub mod sky;
 pub mod tables;
 pub mod units;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod userfiles;
 #[cfg(test)]
 mod units_cost;
 pub mod texpack;

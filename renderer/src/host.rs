@@ -15,6 +15,33 @@ pub trait HostServices {
     fn post(&mut self, message: &Value);
     /// The messages for the game since the last call, in order.
     fn poll(&mut self) -> Vec<Value>;
+    /// The families of requests these services answer, for the `launch` message's `caps` (`"files"`, `"store"`): a
+    /// game waits for no answer of a family that is not listed. Services that answer none list nothing.
+    fn caps(&self) -> Vec<&'static str> {
+        vec![]
+    }
+}
+
+/// Several services as one: each is handed every post (and ignores what is not its own), their answers come in the
+/// order of the list, and their families are listed together.
+impl HostServices for Vec<Box<dyn HostServices>> {
+    fn post(&mut self, message: &Value) {
+        for s in self.iter_mut() {
+            s.post(message);
+        }
+    }
+    fn poll(&mut self) -> Vec<Value> {
+        self.iter_mut().flat_map(|s| s.poll()).collect()
+    }
+    fn caps(&self) -> Vec<&'static str> {
+        let mut caps: Vec<&'static str> = vec![];
+        for c in self.iter().flat_map(|s| s.caps()) {
+            if !caps.contains(&c) {
+                caps.push(c);
+            }
+        }
+        caps
+    }
 }
 
 /// An app without services: posts go nowhere, nothing comes back.
@@ -31,9 +58,16 @@ impl HostServices for NoServices {
 /// point of a macOS pointer, a CSS pixel in a browser). 1,000 counts turn 143 degrees.
 pub const LOOK_RADIANS: f32 = 0.0025;
 
-/// The `launch` message: how the app opened the game.
+/// The `launch` message: how the app opened the game. An app that answers requests of some families lists them
+/// with `launch_message_with_caps`.
 pub fn launch_message(params: Option<&Value>) -> Value {
-    json!({ "t": "launch", "params": params.filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({})) })
+    launch_message_with_caps(params, &[])
+}
+
+/// The `launch` message with the families of requests the app answers (`caps`: `HostServices::caps`, `"files"`,
+/// `"store"`).
+pub fn launch_message_with_caps(params: Option<&Value>, caps: &[&str]) -> Value {
+    json!({ "t": "launch", "params": params.filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({})), "caps": caps })
 }
 
 /// A window's keys and pointer between two frames, and the `input` message of a frame.
@@ -169,8 +203,36 @@ mod tests {
 
     #[test]
     fn the_launch_message() {
-        assert_eq!(launch_message(None), json!({ "t": "launch", "params": {} }));
-        assert_eq!(launch_message(Some(&json!({ "room": "K7Q4MZ" }))), json!({ "t": "launch", "params": { "room": "K7Q4MZ" } }));
+        assert_eq!(launch_message(None), json!({ "t": "launch", "params": {}, "caps": [] }));
+        assert_eq!(launch_message_with_caps(Some(&json!({ "room": "K7Q4MZ" })), &["files", "store"]), json!({ "t": "launch", "params": { "room": "K7Q4MZ" }, "caps": ["files", "store"] }));
         assert_eq!(launch_message(Some(&json!("x")))["params"], json!({}));
+    }
+
+    /// Services that answer a family and services that answer none, as the window's one list.
+    struct Echo(&'static str, Vec<Value>);
+    impl HostServices for Echo {
+        fn post(&mut self, m: &Value) {
+            if m["t"].as_str().is_some_and(|t| t.starts_with(self.0)) {
+                self.1.push(json!({ "t": format!("{}answer", self.0), "id": m["id"] }));
+            }
+        }
+        fn poll(&mut self) -> Vec<Value> {
+            std::mem::take(&mut self.1)
+        }
+        fn caps(&self) -> Vec<&'static str> {
+            vec![self.0.trim_end_matches('.'), "store"]
+        }
+    }
+
+    #[test]
+    fn services_as_one() {
+        let mut all: Vec<Box<dyn HostServices>> = vec![Box::new(NoServices), Box::new(Echo("files.", vec![])), Box::new(Echo("net.", vec![]))];
+        assert_eq!(all.caps(), vec!["files", "store", "net"]);
+        all.post(&json!({ "t": "net.open", "id": 1 }));
+        all.post(&json!({ "t": "files.pick", "id": 2 }));
+        all.post(&json!({ "t": "hud" }));
+        assert_eq!(all.poll(), vec![json!({ "t": "files.answer", "id": 2 }), json!({ "t": "net.answer", "id": 1 })]);
+        assert!(all.poll().is_empty());
+        assert!(NoServices.caps().is_empty());
     }
 }

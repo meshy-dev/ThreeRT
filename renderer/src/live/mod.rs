@@ -83,6 +83,11 @@ pub struct LiveOpts {
     pub display_scale: f32,
     /// `--launch`: the `params` of the host channel's `launch` message (docs/RUNTIME.md "The host channel").
     pub launch: Option<serde_json::Value>,
+    /// `--caps files,store`: the families of requests the driver answers, listed in the `launch` message.
+    pub caps: Vec<String>,
+    /// `--store <dir>`: the game's store, where `user:` assets resolve (docs/RUNTIME.md "Files"). The driver answers
+    /// `store.*` itself; this is only where the engine reads what it wrote.
+    pub store: Option<PathBuf>,
 }
 
 /// Lowest dynamic-resolution scale (UE r.DynamicRes.MinScreenPercentage default) of a view whose pixels are the

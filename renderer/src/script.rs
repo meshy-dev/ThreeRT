@@ -92,6 +92,34 @@ const FRAME_MS: u64 = 50;
 /// drains, a render node's, keeps the first of them and drops the rest), and the most bytes of one.
 const MAX_POSTS: usize = 1024;
 const MAX_POST_BYTES: usize = 1 << 20;
+/// A `store.write` carries a file (docs/RUNTIME.md "Files": at most 64 MiB, in base64): the most bytes of one, and of
+/// the whole queue.
+const MAX_STORE_WRITE_BYTES: usize = 96 << 20;
+const MAX_QUEUE_BYTES: usize = 192 << 20;
+
+/// `__host_base64_encode(bytes: Uint8Array): string`.
+fn base64_encode<'js>(ctx: Ctx<'js>, bytes: Value<'js>) -> rquickjs::Result<String> {
+    use base64::Engine;
+    let a = TypedArray::<u8>::from_value(bytes).ok();
+    let b = a.as_ref().and_then(|a| a.as_bytes()).ok_or_else(|| Exception::throw_type(&ctx, "__host_base64_encode: a Uint8Array"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// `__host_base64_decode(text: string): Uint8Array`.
+fn base64_decode<'js>(ctx: Ctx<'js>, text: String) -> rquickjs::Result<TypedArray<'js, u8>> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(text.as_bytes()).map_err(|e| Exception::throw_type(&ctx, &format!("__host_base64_decode: {e}")))?;
+    TypedArray::new(ctx, bytes)
+}
+
+/// The type of a message's JSON text, read without building the rest of it.
+fn post_type(text: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Typed {
+        t: String,
+    }
+    serde_json::from_str::<Typed>(text).ok().map(|m| m.t)
+}
 
 /// The most engine time one entry into the script (a frame, an event, setup) is lent, µs: past it the time the engine
 /// spends in voxel calls counts against the script's budget again. 250 ms: the largest single edit measured on the
@@ -471,16 +499,21 @@ impl ScriptHost {
             // The host channel, script to app: a message's JSON text onto the queue the app drains. False when the
             // queue is full (nobody drains it); a message past the size bound is the script's error.
             g.set("__host_post", Function::new(ctx.clone(), move |ctx: Ctx, text: String| -> rquickjs::Result<bool> {
-                if text.len() > MAX_POST_BYTES {
-                    return Err(Exception::throw_range(&ctx, &format!("host.post: a message of {} bytes (at most {MAX_POST_BYTES})", text.len())));
+                if text.len() > MAX_POST_BYTES && (text.len() > MAX_STORE_WRITE_BYTES || post_type(&text).as_deref() != Some("store.write")) {
+                    let most = if text.len() > MAX_STORE_WRITE_BYTES { MAX_STORE_WRITE_BYTES } else { MAX_POST_BYTES };
+                    return Err(Exception::throw_range(&ctx, &format!("host.post: a message of {} bytes (at most {most}; a store.write {MAX_STORE_WRITE_BYTES})", text.len())));
                 }
                 let mut q = posts.borrow_mut();
-                let room = q.len() < MAX_POSTS;
+                let room = q.len() < MAX_POSTS && q.iter().map(String::len).sum::<usize>() + text.len() <= MAX_QUEUE_BYTES;
                 if room {
                     q.push(text);
                 }
                 Ok(room)
             })?)?;
+            // Bytes as base64 and back, natively: what the host channel carries a file as (docs/RUNTIME.md "Files"),
+            // tens of megabytes that the script would take seconds over. packages/gameplay/src/files.ts uses them.
+            g.set("__host_base64_encode", Function::new(ctx.clone(), base64_encode)?)?;
+            g.set("__host_base64_decode", Function::new(ctx.clone(), base64_decode)?)?;
             install_engine(ctx, &w, &v, &ph, &d2)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
@@ -1267,6 +1300,43 @@ mod tests {
         let old = ScriptHost::new(GAME).unwrap();
         old.host_messages(&[serde_json::json!({ "t": "launch", "params": {} })]).unwrap();
         assert!(old.take_posts().is_empty());
+    }
+
+    /// Files on the channel (docs/RUNTIME.md "Files"): base64 both ways, natively; a `store.write` may carry a file of
+    /// 64 MiB where other messages stop at 1 MiB; and the largest file `files.read` answers with reaches the game and
+    /// is decoded within an entry's budget.
+    #[test]
+    fn files_cross_the_host_channel_as_base64() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let game = GAME.replace(
+            "frame: (dt) => { frames++; },",
+            "frame: (dt) => { frames++; }, hostMessages: (list, ts) => { for (const m of JSON.parse(list)) if (m.t === 'files.data') { const b = __host_base64_decode(m.data); __host_post(JSON.stringify({ t: 'got', n: b.length, first: b[0], last: b[b.length - 1] })); } },",
+        );
+        let h = ScriptHost::new(&game).unwrap();
+        let text: String = h.call(1000, |ctx| ctx.eval("__host_base64_encode(new Uint8Array([9, 0, 1, 2, 255]).subarray(1))")).unwrap();
+        assert_eq!(text, "AAEC/w==", "a view's own bytes");
+        let back: Vec<u8> = h.call(1000, |ctx| ctx.eval::<TypedArray<u8>, _>("__host_base64_decode('AAEC/w==')").map(|a| a.as_bytes().unwrap().to_vec())).unwrap();
+        assert_eq!(back, [0, 1, 2, 255]);
+        assert!(h.call(1000, |ctx| ctx.eval::<(), _>("__host_base64_decode('**')")).is_err());
+        assert!(h.call(1000, |ctx| ctx.eval::<(), _>("__host_base64_encode([1, 2])")).is_err());
+        // A file of 64 MiB the game stores: one post (its text, 85 MiB) where any other message stops at 1 MiB.
+        let t0 = Instant::now();
+        let ok: bool = h.call(EVENT_MS, |ctx| ctx.eval("const big = new Uint8Array(64 << 20); big[0] = 7; __host_post(JSON.stringify({ t: 'store.write', id: 1, path: 'maps/a.glb', data: __host_base64_encode(big) }))")).unwrap();
+        assert!(ok);
+        let posts = h.take_posts();
+        assert_eq!((posts[0]["t"].as_str(), b64.decode(posts[0]["data"].as_str().unwrap()).unwrap().len()), (Some("store.write"), 64 << 20));
+        eprintln!("a 64 MiB store.write posted and taken in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+        assert!(h.call(1000, |ctx| ctx.eval::<bool, _>("__host_post(JSON.stringify({ t: 'net.send', id: 'a', data: 'x'.repeat(2 << 20) }))")).is_err());
+        assert!(h.call(1000, |ctx| ctx.eval::<bool, _>("__host_post(JSON.stringify({ t: 'store.write', id: 2, path: 'a', data: 'x'.repeat(100 << 20) }))")).is_err());
+        // The largest file the app reads for the game, delivered in one batch and decoded under an event's budget.
+        let mut file = vec![0u8; 64 << 20];
+        (file[0], file[(64 << 20) - 1]) = (3, 5);
+        let m = serde_json::json!({ "t": "files.data", "id": "r", "ok": true, "data": b64.encode(&file), "size": file.len() });
+        let t0 = Instant::now();
+        h.host_messages(&[m]).unwrap();
+        eprintln!("a 64 MiB files.data delivered and decoded in {:.0} ms (an entry's budget: {EVENT_MS} ms)", t0.elapsed().as_secs_f64() * 1e3);
+        assert_eq!(h.take_posts(), vec![serde_json::json!({ "t": "got", "n": 64 << 20, "first": 3, "last": 5 })]);
     }
 
     // The game above with what a game written with promises leaves behind in each entry: a `.then` chain and an

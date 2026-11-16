@@ -2,6 +2,7 @@
 //! denoise + UE post) presented straight to a vsync'd swapchain at 60 fps. No encoding, no network.
 //!
 //!   threert-render play <game bundle.js> [--assets <dir>] [--room id] [--width 1280 --height 720 --fps 60]
+//!                       [--launch '{..}'] [--store <dir>] [--pick <dir|file>[,...]]
 //!
 //! The game runs in this process (script.rs): its code builds the scene, key bindings and clicks run its handlers, its
 //! frame script animates. `view` is the same window.
@@ -12,7 +13,9 @@
 //! Esc again quits. The window is the app of the host channel: `--launch '{"room":"K7Q4MZ"}'` is the `launch`
 //! message, `--sensitivity 1.5` scales the look, `--hud-log` prints the HUD the game describes (the window draws
 //! none), the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs), and its `audio.*` messages are
-//! played (src/audio, the `audio` feature: the ears are the camera of each frame).
+//! played (src/audio, the `audio` feature: the ears are the camera of each frame). Its `files.*` and `store.*` are
+//! answered from `--pick <dir|file>[,...]` (the player's picks, in order) and `--store <dir>` (the game's storage,
+//! `<assets>/.threert/store` by default; `user:` assets resolve there): src/userfiles.rs.
 //!
 //! Controls: left-drag orbit · right/shift-drag pan · wheel zoom · WASD/QE fly · R reset camera · 1/2/4/8 cap spp,
 //! 0 adaptive · P snapshot · Esc quit. Scripted over stdio:
@@ -22,7 +25,7 @@
 //!                      | {"type":"host","messages":[..]} (what the game posted)
 
 use crate::gpu;
-use crate::host::{launch_message, HostServices, InputTracker};
+use crate::host::{launch_message_with_caps, HostServices, InputTracker};
 use crate::live::{next_spp, parse_cmd, parse_scale, save_bgra, Camera, Cmd, LiveCore};
 use crate::script::GameSession;
 use anyhow::Result;
@@ -57,6 +60,11 @@ pub struct ViewArgs {
     pub hud_log: bool,
     /// `--sensitivity`: scales the pointer's motion into the game's look (1: `host::LOOK_RADIANS` a count).
     pub sensitivity: f32,
+    /// `--store <dir>`: the game's store (`store.*`, `user:` assets; docs/RUNTIME.md "Files"); `<assets>/.threert/store`
+    /// by default.
+    pub store: PathBuf,
+    /// `--pick a,b`: what the player picks, in order, for the game's `files.pick` requests (none: `"unsupported"`).
+    pub pick: Vec<PathBuf>,
 }
 
 /// Editor-style orbit camera around a target point.
@@ -212,7 +220,7 @@ impl App {
         let (vw, vh) = (config.width, config.height);
         let (mut game, mut core) = GameSession::start(&a.bundle, &a.room, &a.assets, g, &a.presets, vw, vh)?;
         // The host channel: how the game was opened, once after setup.
-        if let Err(e) = game.host_messages(&mut core, &[launch_message(a.launch.as_ref())]) {
+        if let Err(e) = game.host_messages(&mut core, &[launch_message_with_caps(a.launch.as_ref(), &self.services.caps())]) {
             eprintln!("game: launch: {e:#}");
         }
         let pointer = game.host.pointer().map(String::from);
@@ -572,7 +580,8 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
         }
     }
     if !posts.is_empty() {
-        emit(serde_json::json!({ "type": "host", "messages": posts }));
+        // (A file the game stores is its length here, not tens of megabytes of base64.)
+        emit(serde_json::json!({ "type": "host", "messages": posts.iter().map(crate::userfiles::without_payload).collect::<Vec<_>>() }));
     }
     // A game that reads input has the camera to itself (the view follows it with every commit); any other game is
     // looked at through the window's orbit camera, which follows the game's when a handler moves it.
@@ -775,5 +784,7 @@ pub fn parse_args(args: &[String], presets: &Path) -> Result<ViewArgs> {
         launch: crate::live::parse_launch(flag("--launch").as_deref())?,
         hud_log: args.iter().any(|a| a == "--hud-log"),
         sensitivity: flag("--sensitivity").map(|v| v.parse::<f32>()).transpose()?.filter(|v| v.is_finite()).unwrap_or(1.0),
+        store: flag("--store").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())).join(".threert/store")),
+        pick: flag("--pick").map(|p| p.split(',').filter(|p| !p.is_empty()).map(PathBuf::from).collect()).unwrap_or_default(),
     })
 }

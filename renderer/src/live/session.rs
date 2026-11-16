@@ -8,10 +8,13 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     let (w, h) = (opts.width, opts.height);
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
     spawn_stdin_reader(cmd_tx);
+    if let Some(store) = &opts.store {
+        crate::files::set_user_root(Some(store));
+    }
     let (mut game, mut core) = crate::script::GameSession::start(&opts.bundle, &opts.room, &opts.assets, gpu::Gpu::new()?, presets, w, h)?;
     // The host channel: this runner is the app. How the game was opened, once after setup; what the game posts goes
     // out on stdout (`emit_posts`), and whoever drives the runner answers with `{"cmd":"host"}`.
-    if let Err(e) = game.host_messages(&mut core, &[crate::host::launch_message(opts.launch.as_ref())]) {
+    if let Err(e) = game.host_messages(&mut core, &[crate::host::launch_message_with_caps(opts.launch.as_ref(), &opts.caps.iter().map(String::as_str).collect::<Vec<_>>())]) {
         eprintln!("live: launch: {e:#}");
     }
     emit_posts(&mut game);
@@ -296,6 +299,8 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
         frame_log: flag("--frame-log").map(PathBuf::from),
         display_scale: flag("--display-scale").map(|v| v.parse::<f32>()).transpose()?.unwrap_or(1.0),
         launch: parse_launch(flag("--launch").as_deref())?,
+        caps: flag("--caps").map(|c| c.split(',').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect()).unwrap_or_default(),
+        store: flag("--store").map(PathBuf::from),
     })
 }
 
