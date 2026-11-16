@@ -1559,7 +1559,18 @@ pub fn huge(groups: [usize; GROUPS], instanced: bool) -> bool {
 
 /// Features a scene needs; `THREERT_FEATURES` (bit mask) restricts them for profiling.
 pub fn features(scene: &Scene, groups: [usize; GROUPS]) -> u32 {
-    features_of(&scene.materials, scene.fog.as_ref(), !scene.textures.is_empty(), !scene.shaders.is_empty(), groups, instance_features(scene)) | if scene.aerial[0] > 0.0 { F_AERIAL } else { 0 }
+    let environment = environment_features(scene.fog.as_ref(), scene.background.is_some(), scene.aerial);
+    features_of(&scene.materials, environment, !scene.textures.is_empty(), !scene.shaders.is_empty(), groups, instance_features(scene))
+}
+
+/// Kernel features of the environment, which edits change: fog (F_FOG, with lit scattering F_VOLUME), a background
+/// (F_BACKGROUND), the sky's aerial perspective (F_AERIAL; `aerial`: `Params::aerial`).
+pub fn environment_features(fog: Option<&crate::desc::Fog>, background: bool, aerial: [f32; 4]) -> u32 {
+    let mut f = if background { F_BACKGROUND } else { 0 } | if aerial[0] > 0.0 { F_AERIAL } else { 0 };
+    if let Some(fog) = fog.filter(|fog| fog.density > 0.0) {
+        f |= F_FOG | if fog.volumetric.as_ref().is_some_and(|v| v.scattering > 0.0) { F_VOLUME } else { 0 };
+    }
+    f
 }
 
 /// Kernel features of the scene's structure, which parameter edits do not change: F_INST and F_MASKED for the
@@ -1569,28 +1580,21 @@ pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
     let media = if scene.media.is_empty() { 0 } else { F_MEDIA } | if scene.media.iter().any(|m| m.a[2] != 0) { F_HMEDIA } else { 0 } | if grid { F_GRID } else { 0 };
-    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.background.is_some() { F_BACKGROUND } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > RIS_EXACT { F_LISTS } else { 0 };
+    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > RIS_EXACT { F_LISTS } else { 0 };
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
     media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
-/// `features` from the parts parameter edits change (materials, fog), and the instanced meshes' (`instance_features`).
-pub fn features_of(ms: &[crate::scene::GpuMaterial], fog: Option<&crate::desc::Fog>, textures: bool, functions: bool, groups: [usize; GROUPS], instances: u32) -> u32 {
+/// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
+/// scene's structure (`instances`: `instance_features`).
+pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures: bool, functions: bool, groups: [usize; GROUPS], instances: u32) -> u32 {
     // `instances` carries the structural features (instance_features): instancing is its F_INST bit.
     let instanced = instances & F_INST != 0;
-    let mut f = instances;
+    let mut f = instances | environment;
     if groups[1] + groups[3] + groups[5] + groups[7] > 0 {
         f |= F_MASKED;
-    }
-    if let Some(fog) = fog {
-        if fog.density > 0.0 {
-            f |= F_FOG;
-            if fog.volumetric.as_ref().is_some_and(|v| v.scattering > 0.0) {
-                f |= F_VOLUME;
-            }
-        }
     }
     if textures {
         f |= F_TEX;
@@ -3745,9 +3749,9 @@ mod tests {
     fn structural_features_are_not_instancing() {
         const M: usize = 1 << 23;
         let groups = [M + 5, 3, 0, 0, 0, 0, 0, 0];
-        assert_eq!(features_of(&[], None, false, false, groups, F_PEMIT) & F_HUGE, 0);
-        assert_eq!(features_of(&[], None, false, false, groups, F_MEDIA) & F_HUGE, 0);
-        assert_ne!(features_of(&[], None, false, false, groups, F_INST) & F_HUGE, 0);
+        assert_eq!(features_of(&[], 0, false, false, groups, F_PEMIT) & F_HUGE, 0);
+        assert_eq!(features_of(&[], 0, false, false, groups, F_MEDIA) & F_HUGE, 0);
+        assert_ne!(features_of(&[], 0, false, false, groups, F_INST) & F_HUGE, 0);
     }
 
     #[test]

@@ -38,16 +38,27 @@ fn camera(fov: f32, dof: Option<f32>, exposure: serde_json::Value) -> crate::des
     serde_json::from_value(c).unwrap()
 }
 
-/// What a build takes from the things these edits change: compared whole between two views.
-fn state(c: &LiveCore) -> String {
-    let (s, b) = (&c.sc, &c.sc.base);
-    format!(
-        "features {:#x} counts {:?} misc {:?} fog {:?} {:?} {:?} {:?} background {:?} aerial {:?} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
-        s.up.kernel.features, &b.counts[2..], [b.misc[0], b.misc[2]], b.fog, b.fog_color, b.vol, b.vol2, b.background, b.aerial,
-        s.exposure, s.exposure_settings.ae, s.exposure_settings.ae2, s.exposure_settings.speed, s.exposure_settings.lx,
+/// A view's state: the kernel's parameters whole (as words; not the camera's four vectors, which the frame writes from
+/// the view), and what the passes after it take. (After a frame: the frame writes the light LOD's reference.)
+fn state(c: &LiveCore) -> (Vec<u32>, String) {
+    let s = &c.sc;
+    let rest = format!(
+        "features {:#x} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
+        s.up.kernel.features, s.exposure, s.exposure_settings.ae, s.exposure_settings.ae2, s.exposure_settings.speed, s.exposure_settings.lx,
         s.tan_half_fov, s.dof, s.scene_camera.pos, s.scene_camera.fwd, s.scene_camera.tan_half_fov,
         c.post_key, c.bloom, c.vignette, c.post, c.blur, c.scene_name
-    )
+    );
+    let camera = (std::mem::offset_of!(gpu::Params, cam_up) + 16) / 4;
+    assert_eq!((std::mem::offset_of!(gpu::Params, cam_pos), camera), (0, 16), "the camera's vectors are the parameters' first");
+    (bytemuck::cast_slice::<_, u32>(bytemuck::bytes_of(&s.base))[camera..].to_vec(), rest)
+}
+
+/// Holds a view that took an edit in place to one built from the edited world.
+fn same_state(what: &str, live: &LiveCore, fresh: &LiveCore) {
+    let ((a, ra), (b, rb)) = (state(live), state(fresh));
+    let words: Vec<usize> = (0..a.len()).filter(|&k| a[k] != b[k]).map(|k| k + 16).collect();
+    assert!(words.is_empty(), "{what}: the kernel's parameters differ from a build's at words {words:?}");
+    assert_eq!(ra, rb, "{what}: the view's state against a build's");
 }
 
 /// The output (BGRA8) after `frames` frames in lockstep.
@@ -121,13 +132,13 @@ fn edits_in_place_leave_what_a_build_does() {
         edit(&mut w);
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place");
         let mut fresh = open(&w).unwrap();
-        assert_eq!(state(&live), state(&fresh), "{what}: the view's state against a build's");
         // (With no history, as the new view has none: the radiance cache and the frames' histories hold the light as
         // it was for a while, here as after a rebuild; fog gone was still 5 steps off after 264 frames.)
         let now = picture(&mut live, 2);
         forget(&mut live);
         let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
         assert!(apart(&a, &b) < 2.0, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        same_state(what, &live, &fresh);
         if *seen {
             assert!(apart(&now, &before) > 1.0, "{what}: the picture did not change at once ({:.2} steps)", apart(&now, &before));
         }
@@ -139,8 +150,9 @@ fn edits_in_place_leave_what_a_build_does() {
     live.commit(&mut w).unwrap();
     w.set_settings(Settings { camera: Some(6), ..w.settings.clone() });
     assert!(!live.commit(&mut w).unwrap(), "another camera: in place");
-    let fresh = open(&w).unwrap();
-    assert_eq!(state(&live), state(&fresh), "another camera: the view's state against a build's");
+    let mut fresh = open(&w).unwrap();
+    (picture(&mut live, 1), picture(&mut fresh, 1));
+    same_state("another camera", &live, &fresh);
     assert!(live.cam == fresh.cam, "the view is at the scene's camera");
     // A view moved away from the scene's camera stays there through a depth of field or an exposure; a lens takes it back.
     let away = Camera { pos: live.cam.pos + Vec3::new(0.5, 0.0, 0.0), ..live.cam };

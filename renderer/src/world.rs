@@ -901,7 +901,7 @@ impl World {
         // it), a depth of field and an exposure are the post passes' (and the kernel's clamp). Nothing is built from a
         // camera that is not the scene's, nor from near and far; a camera made of another kind of object is a new object.
         let (fov, dof, exposure) = match &o.kind {
-            Kind::Camera(old) => (old.fov != c.fov, format!("{:?}", old.dof) != format!("{:?}", c.dof), format!("{:?}", old.exposure) != format!("{:?}", c.exposure)),
+            Kind::Camera(old) => (old.fov != c.fov, old.dof != c.dof, old.exposure != c.exposure),
             _ => {
                 self.changes.structural = true;
                 (false, false, false)
@@ -973,7 +973,7 @@ impl World {
     pub fn set_environment(&mut self, e: desc::Environment) {
         // Fog appearing, turning volumetric or going, and a background appearing or going, are kernel features: another
         // variant of the kernel, not another scene. A new sky is baked with the scene (a rebuild).
-        if format!("{:?}", self.environment.sky) != format!("{:?}", e.sky) {
+        if self.environment.sky != e.sky {
             self.changes.structural = true;
         } else {
             self.changes.environment = true;
@@ -1001,6 +1001,14 @@ impl World {
     }
 
     // ------------------------------------------------------------------------------------------ queries
+
+    /// The scene's camera (`Settings::camera`), when it names one.
+    pub fn scene_camera(&self) -> Option<&desc::Camera> {
+        match self.settings.camera.and_then(|id| self.objects.get(&id)).map(|o| &o.kind) {
+            Some(Kind::Camera(c)) => Some(c),
+            _ => None,
+        }
+    }
 
     /// Object `id`'s world matrix: its transform and its parents'. One that is not finite (a NaN or infinite position,
     /// rotation or scale anywhere up the chain, as a script may set) places the object at a point, scale 1e-6 at its

@@ -2541,10 +2541,12 @@ offline render's size and clock. Bistro: a change of lens rebuilt for 884 and 72
 (15 to 17 ms). Each is applied where it lives: the lens by the view (as a camera's move), depth of field and
 exposure by the post passes and the kernel's clamp, fog and a background by the kernel's variant with them, the
 preset by the few parameters taken from it. A GPU test (`live::inplace_tests`) takes twelve such edits in place on
-one view and holds each to a view built from the edited world: no rebuild, the same state, the same picture.
-Found by it: after an edit to the light (fog gone), the radiance cache and the frames' histories keep the old
-light for hundreds of frames (5 of 255 steps off after 264), here as after a rebuild; the test compares with the
-histories cleared. Still a rebuild: another sky, and the output's size (a view cannot be resized). The first of the
+one view and holds each to a view built from the edited world: no rebuild, the kernel's parameters the same
+whole, the same state after them, the same picture.
+Found by it: the emitter cull's view cone is made from the lens and was made again only when the camera moved or
+turned, so a lens changed in place kept the old one (it follows the lens now); and after an edit to the light (fog
+gone), the radiance cache and the frames' histories keep the old light for hundreds of frames (5 of 255 steps off
+after 264), here as after a rebuild; the test compares with the histories cleared. Still a rebuild: another sky, and the output's size (a view cannot be resized). The first of the
 scene model's steps: the proxy table next.
 
 ## 2. Temporal fixes

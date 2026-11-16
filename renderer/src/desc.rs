@@ -68,7 +68,7 @@ fn ninety() -> f32 {
     90.0
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum Exposure {
     Manual { ev100: f32 },
@@ -95,7 +95,7 @@ impl Exposure {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Dof {
     pub focus_distance: f32,
@@ -178,7 +178,7 @@ pub struct Volumetric {
     pub distance: f32,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Sky {
     /// `dynamic`: the sun moves while the scene runs (time of day). The live view then bakes the sky at
@@ -213,7 +213,7 @@ pub enum Sky {
     Gradient { zenith: Vec3, horizon: Vec3, ground: Vec3, intensity: f32, horizon_exponent: Option<f32>, glow: Option<SkyGlow>, clouds: Option<SkyClouds>, sky_light_intensity: f32 },
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkyGlow {
     pub color: Vec3,
@@ -227,7 +227,7 @@ pub struct SkyGlow {
     pub power: Option<f32>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkyClouds {
     /// 0..1 sky fraction.
