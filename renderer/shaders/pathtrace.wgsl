@@ -122,7 +122,7 @@ struct Params {
     ltile: vec4<u32>,      // live light tiles (`lt_list_start`): 1 with last frame's lists (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
-    table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, glass energy, -
+    table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, glass energy, emitter triangles
     word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, -
     live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, -, -, -
     live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
@@ -165,8 +165,9 @@ struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: ve
 // The scene's tables: sections of one buffer of vec4s (heap.rs `Table`), each from the vec4 `P.table_first` names:
 //  - materials (scene::GpuMaterial), lights (scene::GpuLight), and per LIGHT_GROUP local lights a sphere (centre,
 //    radius) holding all their light (lib.rs `light_groups`);
-//  - emitters: (triangle index bits, cumulative weight (normalized), weight, area) for i < counts.y, then the guide
-//    table: EMITTER_GUIDE + 1 entry indices (bits), four per vec4 (lib.rs emitter_cdf); the light tree's nodes;
+//  - emitters: (its emitter's index: bits, cumulative weight (normalized), weight, area) for i < counts.y, then the
+//    guide table: EMITTER_GUIDE + 1 entry indices (bits), four per vec4 (lib.rs emitter_cdf); the emitters'
+//    triangles (`EmitterTri`); the light tree's nodes;
 //  - tex_info, per texture: (u0, v0, du, dv) of its rect in the page, (layer, wrap, width, height). See texpack.rs;
 //  - objects, per object (scene node): pivot (world position), world bounds size (UE ObjectPositionWS /
 //    ObjectBounds), then what `OBJECT_STRIDE` says;
@@ -184,6 +185,19 @@ fn lt_node(i: u32) -> vec4<f32> { return table_f(i); }
 fn light_group_at(i: u32) -> vec4<f32> { return table_f(P.table_first[0].w + i); }
 fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
 fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i); }
+// An emitter's triangle (lib.rs `GpuEmitterTri`): in world space, the light list's own copy, so a light sample reads
+// no placement; `tri`: its triangle in the triangles' table (attributes), `obj`: its object-table index (power),
+// `code`: the light tree's path code (0: not one of the tree's), EMITTER_MOVES if it moves.
+struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, obj: u32, e2: vec3<f32>, code: u32 };
+const EMITTER_TRI_VEC4: u32 = 3u;
+const EMITTER_MOVES: u32 = 0x80000000u;
+fn emitter_tri_at(i: u32) -> EmitterTri {
+    let b = P.table_first[2].w + i * EMITTER_TRI_VEC4;
+    let r0 = tables[b];
+    let r1 = tables[b + 1u];
+    let r2 = tables[b + 2u];
+    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w);
+}
 // The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
 // `object_at`, `instance_at` and `medium_at` in every layout.
 @if(merged || whole_tables) {
@@ -438,16 +452,15 @@ fn emitter_draw(x: vec3<f32>, n: vec3<f32>, rd: u32) -> EPick {
     return EPick(e, p * e.z / wsum, e.z);
 }
 
-// With the tree: the probability that emitter_draw(x, n) picks emitter triangle ti (attrs x.w: its path code, 0 = a
-// moving one), the same choices down its path; 0 for triangles not light-sampled.
-fn emitter_sel(ti: u32, x: vec3<f32>, n: vec3<f32>) -> f32 {
-    let a = attrs[ti];
-    let code = bitcast<u32>(a.x.w);
+// With the tree: the probability that emitter_draw(x, n) picks emitter `ei` (`em`; `a`: its triangle's attributes),
+// the same choices down its path (its code; 0: picked by its share of power).
+fn emitter_sel(ei: u32, em: EmitterTri, a: TriAttr, x: vec3<f32>, n: vec3<f32>) -> f32 {
+    let code = em.code & ~EMITTER_MOVES;
     if (code == 0u) {
-        if (P.misc.y <= 0.0 || (has(F_PEMIT) && a.x.z < 0.0)) { return 0.0; }
-        var area = 0.5 * length(cross(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz));
+        if (P.misc.y <= 0.0) { return 0.0; }
+        var area = 0.5 * length(cross(em.e1, em.e2));
         if (has(F_PEMIT) && a.x.z > 0.0) { area = a.x.z; }
-        return luminance(material_at(bitcast<u32>(a.uv.w)).emissive.rgb) * obj_power(a) * area / P.misc.y;
+        return luminance(material_at(bitcast<u32>(a.uv.w)).emissive.rgb) * power_of(em.obj) * area / P.misc.y;
     }
     let depth = (code >> LT_PATH_BITS) - 1u;
     var p = 1.0 - P.ltree.z;
@@ -469,7 +482,7 @@ fn emitter_sel(ti: u32, x: vec3<f32>, n: vec3<f32>) -> f32 {
     for (var j = lo; j < hi; j++) {
         let c = emitter_at(j);
         wsum += c.z;
-        if (bitcast<u32>(c.x) == ti) { we = c.z; }
+        if (bitcast<u32>(c.x) == ei) { we = c.z; }
     }
     return p * we / wsum;
 }
@@ -1115,7 +1128,8 @@ override OBJECT_STRIDE: u32 = select(3u, 4u, (FEAT & F_TINT) != 0u);
 // An instanced object's instance colour (three.js `instanceColor`), white for every other object.
 fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rgb; }
 // Instance power (UE material "Power", scripts animate it): scales the emission of everything the node draws.
-fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
+fn power_of(oi: u32) -> f32 { return object_at(oi * OBJECT_STRIDE).w; }
+fn obj_power(a: TriAttr) -> f32 { return power_of(object_of(a)); }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
 fn mat_in_at(ti: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
@@ -1804,42 +1818,53 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     return c;
 }
 
+// The triangle of emitter `i`. (F_PEMIT, `placed`: a particle's is where its pass puts it each frame, in the
+// triangles' table: the list has no copy of it yet.)
+fn emitter_tri_of(i: u32, placed: bool) -> EmitterTri {
+    var em = emitter_tri_at(i);
+    if (has(F_PEMIT) && placed) {
+        em.v0 = tri_verts[em.tri * 3u].xyz;
+        em.e1 = tri_verts[em.tri * 3u + 1u].xyz;
+        em.e2 = tri_verts[em.tri * 3u + 2u].xyz;
+    }
+    return em;
+}
+
 // MIS weight of emission that a BSDF-sampled ray (pdf `pdf`) hit, against emitter sampling in `direct_light`.
 // Without sampled emitters (only material functions emit, e.g. facade windows) the BSDF ray is the only estimator.
 // It weighs by emitted power alone, as emitter sampling's MIS does with or without light LOD (sample_emitter_ris).
 fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
     // Procedural surfaces are not light-sampled (no emitter entries): the BSDF ray is the only estimator.
-    if (is_proc(hit)) { return 1.0; }
-    if (lt_on()) {
-        // The light tree's pmf where the ray left (the vertex that sampled emitters), per area of the hit triangle.
-        if (P.counts.y == 0u) { return 1.0; }
-        let sel = emitter_sel(hit.tri, mis_x, mis_n);
-        if (!(sel > 0.0)) { return 1.0; }
-        let crt = cross(tri_verts[hit.tri * 3u + 1u].xyz, tri_verts[hit.tri * 3u + 2u].xyz);
-        let at = 0.5 * length(crt);
-        return power_heuristic(pdf, sel / max(at, 1e-12) * hit.t * hit.t / max(abs(dot(normalize(crt), d)), 1e-6));
-    }
-    if (P.counts.y == 0u || P.misc.y <= 0.0 || emitter_culled(hit.tri)) { return 1.0; }
-    let cr = cross(tri_verts[hit.tri * 3u + 1u].xyz, tri_verts[hit.tri * 3u + 2u].xyz);
+    if (is_proc(hit) || P.counts.y == 0u) { return 1.0; }
+    // The hit triangle's emitter (its attributes' x.w: the entry + 1; 0: it is not light-sampled).
+    let ha = attrs[hit.tri];
+    let entry = bitcast<u32>(ha.x.w);
+    if (entry == 0u) { return 1.0; }
+    let em = emitter_tri_of(entry - 1u, ha.x.z != 0.0);
+    let cr = cross(em.e1, em.e2);
     let area = 0.5 * length(cr);
     let cos_l = abs(dot(normalize(cr), d));
-    let ha = attrs[hit.tri];
+    if (lt_on()) {
+        // The light tree's pmf where the ray left (the vertex that sampled emitters), per area of the hit triangle.
+        let sel = emitter_sel(entry - 1u, em, ha, mis_x, mis_n);
+        if (!(sel > 0.0)) { return 1.0; }
+        return power_heuristic(pdf, sel / max(area, 1e-12) * hit.t * hit.t / max(cos_l, 1e-6));
+    }
+    if (P.misc.y <= 0.0 || emitter_culled(em)) { return 1.0; }
     let mat = material_at(bitcast<u32>(ha.uv.w));
-    let pdf_a = luminance(mat.emissive.rgb) * obj_power(ha) / P.emit_power.x;
+    let pdf_a = luminance(mat.emissive.rgb) * power_of(em.obj) / P.emit_power.x;
     let pdf_w = pdf_a * hit.t * hit.t / max(cos_l, 1e-6);
     if (!has(F_PEMIT) || ha.x.z == 0.0) { return power_heuristic(pdf, pdf_w); }
-    // Particles (x.z != 0): a nominal area (> 0) is what the CDF weighed them by, the point is uniform over the actual
-    // area; without one (< 0) they are not light-sampled and the BSDF ray is the only estimator.
-    if (ha.x.z < 0.0) { return 1.0; }
+    // Particles (x.z > 0): a nominal area is what the CDF weighed them by, the point is uniform over the actual area.
+    // (Those without one, x.z < 0, are not light-sampled: no entry.)
     return power_heuristic(pdf, pdf_w * ha.x.z / max(area, 1e-12));
 }
 
-// Light LOD factor of emitter triangle ti (lib.rs emitter_lod): the emitter CDF's weights carry it, so every pdf of an
-// emitter point does too. Moving triangles have none (lib.rs EmitterTri::moves).
-fn emitter_lod(ti: u32) -> f32 {
-    let v0 = tri_verts[ti * 3u];
-    if (P.light_lod.w <= 0.0 || (bitcast<u32>(v0.w) & TRI_DYNAMIC) != 0u) { return 1.0; }
-    let c = v0.xyz + (tri_verts[ti * 3u + 1u].xyz + tri_verts[ti * 3u + 2u].xyz) / 3.0;
+// Light LOD factor of an emitter (lib.rs emitter_lod): the emitter CDF's weights carry it, so every pdf of an
+// emitter point does too. Moving ones have none (lib.rs EmitterTri::moves).
+fn emitter_lod(em: EmitterTri) -> f32 {
+    if (P.light_lod.w <= 0.0 || (em.code & EMITTER_MOVES) != 0u) { return 1.0; }
+    let c = em.v0 + (em.e1 + em.e2) / 3.0;
     let k = P.light_lod.w / max(distance(c, P.light_lod.xyz), P.light_lod.w);
     return k * k;
 }
@@ -1847,20 +1872,13 @@ fn emitter_lod(ti: u32) -> f32 {
 // Live: emitters farther than P.emit_power.y from the light LOD's reference are never proposed (lib.rs emitter_lod),
 // so BSDF rays that hit them keep their whole light (emit_mis), unless they lie in the view cone (P.lod_view) within
 // P.emit_power.z: those light what the camera sees. The same centroid and test as lib.rs EmitterCull::culls.
-fn emitter_culled(ti: u32) -> bool {
+fn emitter_culled(em: EmitterTri) -> bool {
     if (P.emit_power.y <= 0.0 || P.light_lod.w <= 0.0) { return false; }
-    let v0 = tri_verts[ti * 3u];
-    if ((bitcast<u32>(v0.w) & TRI_DYNAMIC) != 0u) { return false; }
-    let c = v0.xyz + (tri_verts[ti * 3u + 1u].xyz + tri_verts[ti * 3u + 2u].xyz) / 3.0;
+    if ((em.code & EMITTER_MOVES) != 0u) { return false; }
+    let c = em.v0 + (em.e1 + em.e2) / 3.0;
     let d = distance(c, P.light_lod.xyz);
     if (d <= P.emit_power.y) { return false; }
     return !(d <= P.emit_power.z && dot(c - P.light_lod.xyz, P.lod_view.xyz) >= P.lod_view.w * d);
-}
-
-fn emitter_pdf_area(tri: u32, emissive: vec3<f32>) -> f32 {
-    // Selection probability (area * luminance / total) times 1/area => luminance / total.
-    if (P.counts.y == 0u || P.misc.y <= 0.0) { return 0.0; }
-    return luminance(emissive) / P.misc.y;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -2091,18 +2109,17 @@ fn local_lights(s: Surface, lb: Lobes, v: vec3<f32>, o: vec3<f32>, x: vec3<f32>,
 // weight `w` (1 / pdf, or the RIS weight).
 struct ES { le: vec3<f32>, l: vec3<f32>, dist: f32, pdf_w: f32, w: f32 };
 
-// Emitted radiance of triangle ti at (b1, b2) toward -l (emissive map, animation, material function, node power).
-fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
-    let a = attrs[ti];
-    let mi = bitcast<u32>(a.uv.w);
-    let m = material_at(mi);
+// Emitted radiance of an emitter at (b1, b2) toward -l (emissive map, animation, material function, node power).
+fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
+    let a = attrs[em.tri];
+    let m = material_at(bitcast<u32>(a.uv.w));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
-    let pw = obj_power(a);
+    let pw = power_of(em.obj);
     var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
@@ -2122,10 +2139,10 @@ fn emitter_radiance(ti: u32, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
 fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes, v: vec3<f32>, rd: u32) -> ES {
     var r = ES(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0, 0.0, 0.0);
     var wsum = 0.0;
-    var pick_ti = 0u;
     var pick_b = vec2<f32>(0.0);
     var pick_ph = 0.0;
     var pick_e = vec4<f32>(0.0);
+    var pick_placed = false;
     var pick_sel = 0.0;
     for (var k = 0u; k < m; k++) {
         let dk = rng_sub(rd, k);
@@ -2136,10 +2153,10 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
         var b2 = bb.y;
         if (pk.p <= 0.0) { continue; }
         if (b1 + b2 > 1.0) { b1 = 1.0 - b1; b2 = 1.0 - b2; }
-        let ti = bitcast<u32>(e.x);
-        let e1 = tri_verts[ti * 3u + 1u].xyz;
-        let e2 = tri_verts[ti * 3u + 2u].xyz;
-        let lp = tri_verts[ti * 3u].xyz + e1 * b1 + e2 * b2;
+        let em = emitter_tri_of(bitcast<u32>(e.x), e.w < 0.0);
+        let e1 = em.e1;
+        let e2 = em.e2;
+        let lp = em.v0 + e1 * b1 + e2 * b2;
         let ln = normalize(cross(e1, e2));
         let dl = lp - x;
         let d2 = max(dot(dl, dl), 1e-8);
@@ -2148,7 +2165,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
         if (m > 1u) { g = abs(dot(ln, l)) * luminance(eval_bsdf(sf, lb, v, l)) / d2; }
         // target (emitted luminance x G) over source pdf (luminance x light LOD / total, per area) = total x G / LOD;
         // with the tree the source pdf is its selection probability / area (weight / area = luminance x power)
-        let lk = emitter_lod(ti);
+        let lk = emitter_lod(em);
         var w = select(P.misc.y * g / lk, pk.w * g / pk.p, lt_on());
         // Particle emitters (e.w < 0): weighed by a nominal area -e.w, sampled over the actual one (0 when not shown).
         var ae = e.w;
@@ -2160,28 +2177,28 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
         if (w <= 0.0) { continue; }
         wsum += w;
         if (bb.z * wsum < w) {
-            pick_ti = ti;
             pick_b = vec2<f32>(b1, b2);
             pick_ph = pk.w / (abs(e.w) * lk) * g;
             pick_e = vec4<f32>(e.x, e.y, e.z / lk, ae);
+            pick_placed = e.w < 0.0;
             pick_sel = pk.p;
         }
     }
     if (pick_ph <= 0.0) { return r; }
-    let ti = pick_ti;
-    let e1 = tri_verts[ti * 3u + 1u].xyz;
-    let e2 = tri_verts[ti * 3u + 2u].xyz;
-    let lp = tri_verts[ti * 3u].xyz + e1 * pick_b.x + e2 * pick_b.y;
+    let em = emitter_tri_of(bitcast<u32>(pick_e.x), pick_placed);
+    let e1 = em.e1;
+    let e2 = em.e2;
+    let lp = em.v0 + e1 * pick_b.x + e2 * pick_b.y;
     let ln = normalize(cross(e1, e2));
     let dl = lp - x;
     let d2 = dot(dl, dl);
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    let m_card = material_at(bitcast<u32>(attrs[ti].uv.w)).tex1.z == MAT_EMITTER_CARD;
+    let m_card = material_at(bitcast<u32>(attrs[em.tri].uv.w)).tex1.z == MAT_EMITTER_CARD;
     if (!m_card) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0) { return r; }
-    r.le = emitter_radiance(ti, pick_b.x, pick_b.y, l);
+    r.le = emitter_radiance(em, pick_b.x, pick_b.y, l);
     r.l = l;
     r.dist = dist;
     // MIS by the source pdf: power alone without the tree (emit_mis), the tree's pmf with it
@@ -2197,10 +2214,10 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let pk = emitter_draw(x, n, rd);
     let e = pk.e;
     if (pk.p <= 0.0) { return r; } // switched off (power 0)
-    let ti = bitcast<u32>(e.x);
-    let v0 = tri_verts[ti * 3u].xyz;
-    let e1 = tri_verts[ti * 3u + 1u].xyz;
-    let e2 = tri_verts[ti * 3u + 2u].xyz;
+    let em = emitter_tri_of(bitcast<u32>(e.x), e.w < 0.0);
+    let v0 = em.v0;
+    let e1 = em.e1;
+    let e2 = em.e2;
     let bb = rng2(rng_sub(rd, 1u));
     var b1 = bb.x;
     var b2 = bb.y;
@@ -2213,20 +2230,10 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let d2 = dot(dl, dl);
     let dist = sqrt(d2);
     let l = dl / dist;
-    let a = attrs[ti];
-    let mi = bitcast<u32>(a.uv.w);
-    let m = material_at(mi);
     var cos_l = dot(ln, -l);
-    if (m.tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
+    if (material_at(bitcast<u32>(attrs[em.tri].uv.w)).tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0 || (has(F_PEMIT) && !(cos_l > 0.0))) { return r; } // also a particle not shown (no area: NaN)
-    // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
-    let pw = obj_power(a);
-    r.le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
-    if (has(F_FUNC) && m.tex1.w > 0) {
-        var mb = mat_base(m);
-        mb.emissive *= pw;
-        r.le = emissive_material_function(m.tex1.w - 1, mat_in_at(ti, b1, b2, -l, log2(0.05)), m, mb).emissive;
-    }
+    r.le = emitter_radiance(em, b1, b2, l);
     r.l = l;
     r.dist = dist;
     r.pdf_w = pk.p / area * d2 / cos_l;

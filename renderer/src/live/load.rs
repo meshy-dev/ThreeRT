@@ -25,6 +25,10 @@ pub(super) struct LoadedScene {
     /// Some object's move is an instance's transform (`Retained::moves_instances`: kept where the proxies change,
     /// here and in a geometry edit): the frame's kernel then writes motion vectors.
     pub(super) moving_instances: bool,
+    /// The emitters of the dynamic tail (`EmitterTri::moves`, particles apart: their pass places them), in the list's
+    /// order, each with its path code (the light tree's moving subtree keeps its shape): the list's copies of their
+    /// triangles follow them (edits.rs `move_emitters`).
+    pub(super) moving_emitters: Vec<(u32, u32)>,
     /// The scene has instanced meshes or procedural geometry (the raster experiment draws only flattened triangles:
     /// primary visibility is traced).
     pub(super) instanced: bool,
@@ -173,7 +177,7 @@ impl EmitterWorker {
             .name("emitters".into())
             .spawn(move || {
                 while let Ok(j) = asked.recv() {
-                    let (em, total, power) = crate::emitter_cdf(&tris, &j.materials, &j.objects, stride, j.lod, j.cull);
+                    let (em, total, power) = crate::emitter_cdf(tris.iter().enumerate(), &j.materials, &j.objects, stride, j.lod, j.cull);
                     let node_powers = tree.as_mut().map_or(vec![], |t| {
                         let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], &j.materials, &j.objects, stride)).collect();
                         t.refit(&|k| w[k]);
@@ -219,7 +223,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     // (The light tree is the tables' by now: its nodes from there.)
-    let up = g.upload(&sc, &targets.accum, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
+    let up = g.upload(&sc, &targets.accum, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
@@ -285,5 +289,10 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         pool_first: prep.groups.iter().sum(),
         blobs,
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    let codes: std::collections::HashMap<u32, u32> = tables.light_tree.as_ref().map_or_else(Default::default, |t| {
+        let moving = t.moving_first as usize..(t.moving_first + t.moving_count) as usize;
+        t.order[moving.clone()].iter().copied().zip(t.code[moving].iter().copied()).collect()
+    });
+    let moving_emitters = tables.emitter_tris.iter().enumerate().filter(|(_, e)| e.moves && !e.nominal).map(|(i, _)| (i as u32, codes.get(&(i as u32)).copied().unwrap_or(0))).collect();
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), moving_emitters, instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

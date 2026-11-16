@@ -194,7 +194,12 @@ mod tests {
             assert!(kernel_template().contains(&format!("const {constant}: u32 = {}u;", bytes / 16)), "{constant}");
             assert_eq!(layout(&m, name).1 as usize, bytes, "{name}");
         }
-        assert_eq!(<Table as crate::heap::Section>::COUNT, Table::GlassEnergy as usize + 1);
+        assert_eq!(<Table as crate::heap::Section>::COUNT, Table::EmitterTris as usize + 1);
+        // The emitters' triangles.
+        assert!(kernel_template().contains(&format!("const EMITTER_TRI_VEC4: u32 = {}u;", std::mem::size_of::<crate::GpuEmitterTri>() / 16)));
+        assert!(kernel_template().contains("let b = P.table_first[2].w + i * EMITTER_TRI_VEC4;"));
+        assert_eq!(Table::EmitterTris as usize, 2 * 4 + 3, "`table_first[2].w`");
+        assert!(kernel_template().contains(&format!("const EMITTER_MOVES: u32 = {:#x}u;", crate::EMITTER_MOVES)));
         // The glass energy table's nodes.
         let [mu, rough, ior] = crate::GLASS_E;
         for (name, n) in [("GLASS_E_MU", mu), ("GLASS_E_ROUGH", rough), ("GLASS_E_IOR", ior)] {

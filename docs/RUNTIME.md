@@ -1452,8 +1452,9 @@ too is an override, from F_TINT).
 The kernel's read-only scene data other than triangles is two storage buffers, each a row of sections
 (`renderer/src/heap.rs`):
 - `tables` (group 0, binding 4), vec4s (`Table`): the light tree's nodes, materials, lights, the light groups'
-  spheres, the emitter CDF with its guide table, the texture pages' rects, objects, instance records, media and the
-  GGX energy table.
+  spheres, the emitter CDF with its guide table, the texture pages' rects, objects, instance records, media, the
+  GGX and glass energy tables, and the emitters' triangles (`GpuEmitterTri`: the light list's own world-space
+  copies, so a light sample reads no placement).
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
   colours (`env_cdf_at`, `pword`, `vcolor_word`). Integers are read as integers, not through a float's bits.
 

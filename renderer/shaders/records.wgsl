@@ -3,7 +3,8 @@
 // `live_source`, build.rs).
 
 // A triangle's shading attributes (scene.rs GpuTriAttr): normals (w: uv parts), uv parts (w: material index, bits),
-// tangent (w: bitangent sign), x: (texel density, object (bits), a particle's area, light-tree path code).
+// tangent (w: bitangent sign), x: (texel density, object (bits), a particle's area, its emitter entry + 1 (bits; 0: it
+// is not light-sampled)).
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
 
 // A sample the kernel leaves in `accum`. Live: color = diffuse lighting at the first hit (w: first-hit distance, 0 =

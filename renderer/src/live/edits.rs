@@ -502,9 +502,10 @@ impl LiveCore {
             catch_up.flush_section(&self.g.queue, &self.sc.up.heap, Table::Instances);
         }
         if rigid_ok && (dynamic.is_empty() || (!changes.structural && self.repose(world, &dynamic, &mut top)?)) {
-            // Moved emitters: the light tree's moving subtree around them, once (after every in-place update).
+            // Moved emitters: their triangles in the list and the light tree's moving subtree around them, once (after
+            // every in-place update).
             if std::mem::take(&mut self.emitters_moved) {
-                self.refit_moving_tree();
+                self.move_emitters();
             }
             changes.poses.clear();
             changes.moved.clear();
@@ -570,8 +571,8 @@ impl LiveCore {
             up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
         if d.materials || d.emitters {
-            self.add_material_emitters();
-            self.write_emitters();
+            let new = self.add_material_emitters();
+            self.write_emitters(&new);
         } else if d.deferred {
             self.send_powers();
         }
@@ -818,9 +819,10 @@ impl LiveCore {
 
     /// Emitter entries for the materials that started emitting (`Tables::started_emitting`): their flattened static
     /// triangles (`mat_runs`), positions from `tris`, in the power-share part of the CDF (path code 0, as the light
-    /// tree's moving emitters; ROADMAP § 6 step 3). `write_emitters` uploads them.
-    pub(super) fn add_material_emitters(&mut self) {
+    /// tree's moving emitters; ROADMAP § 6 step 3). Returns them (each one's index and triangle) for `write_emitters`.
+    pub(super) fn add_material_emitters(&mut self) -> Vec<(u32, crate::GpuEmitterTri)> {
         let sc = &mut self.sc;
+        let mut new = vec![];
         for mat in std::mem::take(&mut sc.tables.started_emitting) {
             for &[first, end, obj] in sc.mat_runs.get(&mat).map_or(&[][..], |v| v.as_slice()) {
                 for k in first..end {
@@ -828,26 +830,38 @@ impl LiveCore {
                     let area = 0.5 * (b - a).cross(c - a).length();
                     if area > 0.0 {
                         let centre = (a + b + c) / 3.0;
-                        sc.tables.emitter_tris.push(crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false });
+                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false };
+                        new.push((sc.tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, [a, b, c], 0)));
+                        sc.tables.emitter_tris.push(e);
                     }
                 }
             }
         }
+        new
     }
 
     /// The emitter CDF from `Tables::emitter_tris` (weights from materials and powers; entries added in place at its
     /// end, removed ones at area 0), the light tree refit to the new weights and its nodes after the CDF, the CDF's
     /// share of power, its count. With the tree's slot for emitters added in place (scenes that can edit geometry), their
     /// subtree is grown again first and their entries go right after the static ones (ROADMAP § 6 step 4); without it
-    /// they stay at the end, by power share. The buffer grows (and the scene bind group is made again) when entries
-    /// were added past it: a scene that adds none keeps its layout.
-    pub(super) fn write_emitters(&mut self) {
+    /// they stay at the end, by power share. `new`: the emitters made or made again since the last call (each one's
+    /// index and triangle): their triangles into the list, their entries into their triangles' attributes. The tables
+    /// grow (and the scene bind group is made again) when entries were added past them: a scene that adds none keeps
+    /// its layout.
+    pub(super) fn write_emitters(&mut self, new: &[(u32, crate::GpuEmitterTri)]) {
         self.land_powers_now();
         let g = &self.g;
         let LoadedScene { tables: e, base: b, up, pool_tris, tris: flat, tri_order, edit, .. } = &mut self.sc;
+        let size = std::mem::size_of::<crate::GpuEmitterTri>();
+        let (mut w_tris, mut w_attrs) = (Gather::default(), Gather::default());
+        for (i, t) in new {
+            w_tris.put((*i as usize * size) as u64, bytemuck::bytes_of(t));
+            w_attrs.put((t.tri as usize * std::mem::size_of::<scene::GpuTriAttr>() + std::mem::offset_of!(scene::GpuTriAttr, x) + 12) as u64, bytemuck::bytes_of(&(i + 1)));
+        }
+        w_attrs.flush(&g.queue, &up.attrs);
         // Emitters added in place, with the tree's slot for them (`ltree::build_slotted`): its subtree grown again over
         // those alive, their entries right after the static ones in the CDF (in its leaf order: each leaf's entry is its
-        // position) and their path codes in their triangles' attrs (written over the code 0 an edit gave them).
+        // position) and their path codes with their triangles in the list (written over the code 0 they were made with).
         let mut perm: Option<Vec<usize>> = None;
         if let Some(t) = e.light_tree.as_mut() {
             if let Some((_, ns)) = t.dynamic {
@@ -860,37 +874,37 @@ impl LiveCore {
                     let Some([va, vb, vc]) = verts(x.tri as usize).filter(|_| !x.in_tree && !x.nominal && !x.moves && w > 0.0) else { continue };
                     items.push(crate::ltree::DynItem { e: i as u32, lo: va.min(vb).min(vc).to_array(), hi: va.max(vb).max(vc).to_array(), c: x.c, w });
                 }
+                let was = t.order[ns..].to_vec();
                 t.set_dynamic(items);
-                let at = std::mem::offset_of!(scene::GpuTriAttr, x) + 12;
-                let mut codes = Gather::default();
+                let at = std::mem::offset_of!(crate::GpuEmitterTri, code);
                 let mut placed = vec![false; e.emitter_tris.len()];
                 let mut p: Vec<usize> = (0..ns).collect();
                 for k in ns..t.order.len() {
                     let i = t.order[k] as usize;
-                    codes.put((e.emitter_tris[i].tri as usize * std::mem::size_of::<scene::GpuTriAttr>() + at) as u64, bytemuck::bytes_of(&t.code[k]));
+                    w_tris.put((i * size + at) as u64, bytemuck::bytes_of(&t.code[k]));
                     placed[i] = true;
                     p.push(i);
                 }
-                codes.flush(&g.queue, &up.attrs);
+                // (One the subtree no longer holds: no code.)
+                for i in was.into_iter().filter(|&i| !placed[i as usize]) {
+                    w_tris.put((i as usize * size + at) as u64, bytemuck::bytes_of(&0u32));
+                }
                 p.extend((ns..e.emitter_tris.len()).filter(|&i| !placed[i]));
                 perm = Some(p);
             }
         }
-        let permuted: Vec<crate::EmitterTri>;
-        let list = match &perm {
-            Some(p) => {
-                permuted = p.iter().map(|&i| e.emitter_tris[i]).collect();
-                &permuted[..]
-            }
-            None => &e.emitter_tris[..],
+        let (em, total, power) = match &perm {
+            Some(p) => crate::emitter_cdf(p.iter().map(|&i| (i, &e.emitter_tris[i])), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b)),
+            None => crate::emitter_cdf(e.emitter_tris.iter().enumerate(), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b)),
         };
-        let (em, total, power) = crate::emitter_cdf(list, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         if let Some(t) = e.light_tree.as_mut() {
             let (tris, mats, objs, st) = (&e.emitter_tris, &e.materials, &e.objects, e.stride);
             let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], mats, objs, st)).collect();
             t.refit(&|k| w[k]);
         }
         self.put_emitters(&em, total, power);
+        // (After `put_emitters`: the list's room for them is there.)
+        w_tris.flush_section(&self.g.queue, &self.sc.up.heap, Table::EmitterTris);
         // Emitters added in place since the worker was made: another, over them.
         if self.sc.emit.as_ref().is_some_and(|w| w.count != self.sc.tables.emitter_tris.len()) {
             self.sc.emit = EmitterWorker::new(&self.sc.tables, &self.g.device);
@@ -898,25 +912,27 @@ impl LiveCore {
         }
     }
 
-    /// The emitter CDF `em` (its total weight and the emitters' power) and the light tree's nodes into their tables
-    /// (grown, and the scene's bind groups made again, when they no longer fit), and the kernel's parameters.
+    /// The emitter CDF `em` (its total weight and the emitters' power) and the light tree's nodes into their tables,
+    /// and the kernel's parameters. The tables, and the one of the emitters' triangles, are grown (and the scene's bind
+    /// groups made again) when they no longer hold the list.
     pub(super) fn put_emitters(&mut self, em: &[[f32; 4]], total: f32, power: f32) {
         let g = &self.g;
-        let LoadedScene { tables: e, base: b, up, .. } = &mut self.sc;
+        let LoadedScene { tables: e, up, .. } = &mut self.sc;
         let nodes: &[[f32; 4]] = e.light_tree.as_ref().map_or(&[], |t| &t.nodes);
+        let tris = e.emitter_tris.len() * std::mem::size_of::<crate::GpuEmitterTri>();
         let mut grew = false;
-        for (t, data) in [(Table::Emitters, em), (Table::LightTree, nodes)] {
-            let need = (data.len() * 16) as u64;
+        for (t, need) in [(Table::Emitters, em.len() * 16), (Table::LightTree, nodes.len() * 16), (Table::EmitterTris, tris)] {
+            let need = need as u64;
             if need > up.heap.cap(t) {
                 up.heap.grow(&g.device, &g.queue, t, need + need / 2);
                 grew = true;
             }
-            up.heap.write(&g.queue, t, 0, bytemuck::cast_slice(data));
         }
+        up.heap.write(&g.queue, Table::Emitters, 0, bytemuck::cast_slice(em));
+        up.heap.write(&g.queue, Table::LightTree, 0, bytemuck::cast_slice(nodes));
         if grew {
             g.rebind_scene(up);
         }
-        let _ = b;
         self.emitter_params(total, power);
     }
 
@@ -956,7 +972,7 @@ impl LiveCore {
             self.sc.emit = None;
             e.defer_powers = false;
             self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-            self.write_emitters();
+            self.write_emitters(&[]);
             return;
         }
         w.flight = Some(powers);
@@ -1365,17 +1381,31 @@ impl LiveCore {
         Ok(true)
     }
 
-    /// now (the CPU copy of the dynamic tail), its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
-    pub(super) fn refit_moving_tree(&mut self) {
+    /// The moving emitters moved (`LoadedScene::moving_emitters`): their triangles in the list as they are now (the CPU
+    /// copy of the dynamic tail), each run of consecutive ones in one write; and the light tree's moving subtree refit
+    /// around them, its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
+    pub(super) fn move_emitters(&mut self) {
         let first = self.sc.dynamic.0;
         let (verts, tables) = (&self.sc.dynamic.1, &mut self.sc.tables);
         let tris = &tables.emitter_tris;
+        let (q, heap) = (&self.g.queue, &self.sc.up.heap);
+        let size = std::mem::size_of::<crate::GpuEmitterTri>() as u64;
+        for run in self.sc.moving_emitters.chunk_by(|a, b| b.0 == a.0 + 1) {
+            let now: Vec<crate::GpuEmitterTri> = run
+                .iter()
+                .map(|&(i, code)| {
+                    let e = &tris[i as usize];
+                    let r = (e.tri as usize - first) * 3;
+                    crate::GpuEmitterTri::new(e, &verts[r..r + 3], code)
+                })
+                .collect();
+            heap.write(q, Table::EmitterTris, run[0].0 as u64 * size, bytemuck::cast_slice(&now));
+        }
         let Some(t) = tables.light_tree.as_mut().filter(|t| t.moving_count > 0) else { return };
         t.refit_moving(&|k| {
             let r = (tris[k].tri as usize - first) * 3;
             crate::ltree::tri_vertices(&verts[r..r + 3])
         });
-        let (q, heap) = (&self.g.queue, &self.sc.up.heap);
         heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));
         heap.write(q, Table::LightTree, 2 * 16, bytemuck::cast_slice(&t.nodes[2..3]));
         heap.write(q, Table::LightTree, t.moving_nodes as u64 * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
@@ -1546,8 +1576,9 @@ impl LiveCore {
         };
         let q = &g.queue;
         // An emitter mesh's entries go (area 0: their weight; the light tree keeps its shape) when it is removed, hidden
-        // or placed again.
+        // or placed again; those it is given are in `new_emitters` (`write_emitters`).
         let mut emitters_changed = false;
+        let mut new_emitters: Vec<(u32, crate::GpuEmitterTri)> = vec![];
         let release = |id: u32, tables: &mut tables::Tables, meshes: &[scene::InstMesh], pool_first: usize| -> bool {
             let Some(scene::Draw::Instance(inst)) = tables.retained.proxies.get_mut(&id).map(|p| &mut p.draw) else { return false };
             let scene::MeshKind::Emitter(k) = std::mem::replace(&mut inst.mesh, scene::MeshKind::Own) else { return false };
@@ -1906,8 +1937,10 @@ impl LiveCore {
                                     let area = 0.5 * (tb - ta).cross(tc - ta).length();
                                     if area > 0.0 {
                                         let e = crate::EmitterTri { tri: (first + j) as u32, mat, obj: object as u32, area, c: ((ta + tb + tc) / 3.0).to_array(), moves: false, nominal: false, in_tree: false };
-                                        match free.pop() {
-                                            Some(i) => tables.emitter_tris[i] = e,
+                                        let i = free.pop().unwrap_or(tables.emitter_tris.len());
+                                        new_emitters.push((i as u32, crate::GpuEmitterTri::of(&e, *tri, 0)));
+                                        match tables.emitter_tris.get_mut(i) {
+                                            Some(old) => *old = e,
                                             None => tables.emitter_tris.push(e),
                                         }
                                     }
@@ -2098,7 +2131,7 @@ impl LiveCore {
         split.objects = ch.added.len() + ch.removed.len();
         self.edit_split.add(&split);
         if emitters_changed {
-            self.write_emitters();
+            self.write_emitters(&new_emitters);
         }
         Ok(())
     }

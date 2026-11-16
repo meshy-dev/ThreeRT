@@ -2626,6 +2626,25 @@ entry of its own beside its copies', so its node's power or customData wrote ove
 in what they can do: what the build flattened or placed as a model's instance is rebuilt to change, what an edit
 placed is not moved unless a body drives it (step E).
 
+**The light list holds its triangles (2026-11-17, scene step D, first part).** Light sampling read an emitter's
+triangle from the triangles' table as world space, so whatever emits had to be stored there in world space:
+flattened, or a mesh of its own written in world space (Tokyo: 1,627,052 triangles flattened for it). The list has
+its own copy now, the way real-time engines keep a light list: `Table::EmitterTris`, one `GpuEmitterTri` an emitter
+(v0, e1, e2 in world space; its triangle, for the attributes; its object, for its power; the light tree's path
+code). The kernel's emitter sampling, light LOD, cull and the BSDF rays' weight (`emit_mis`) read it; a CDF entry
+names its emitter, and a triangle's attributes its emitter entry (`x.w`, where the path code was). The copies
+follow what moves: those of the emitters the CPU moves are rewritten when they do (`move_emitters`), those of the
+emitters edits make are written with their entries (`write_emitters`). A particle's is still read where its pass
+places it (F_PEMIT). Nothing is placed otherwise yet. What it costs: 48 B an emitter (Tokyo +78 MB); the trace
++0.07 to 0.10 ms where emitters are sampled (Bistro 7.18 -> 7.29 ms, Zero Day 7.52 -> 7.59, the crowd 7.25 ->
+7.32, Kabukichō 12.57 -> 12.63, Tokyo 4.41 -> 4.42; nothing in a scene without emitters), not attributed: a typed
+view of the table times the same, so does reading the rows without the record's struct; the crowd's 21,280 moving
+emitters take 0.2 ms of CPU a frame to rewrite (commit 4.88 -> 5.08 ms), which a GPU pass is to take over, with
+the particles' and the instances' (the next parts). Pictures: the big scenes within main's own run-to-run
+difference; of the suite's 239 outputs, 26 that repeat themselves differ from main's, in the last bits offline
+(up to 3.7e-7) and by a sample that falls otherwise in a few live ones (up to 2.1e-3 of a value; sums within
+3e-5); the list's values are the triangles' to the bit (`the_light_list_holds_its_triangles` reads both back).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

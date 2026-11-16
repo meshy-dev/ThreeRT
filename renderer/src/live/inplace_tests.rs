@@ -378,3 +378,118 @@ fn an_instanced_object_added_in_place_keeps_its_copies_data() {
     assert_eq!(entries(&live), entries(&fresh), "each copy's data, in place against a build's");
     assert_eq!(entries(&fresh), [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]);
 }
+
+/// What the kernel's light sampling reads against the triangles it stands for, on the GPU: every emitter of the list
+/// (a particle's is placed by its pass) has the light tree's path code for it, and one that is alive its triangle's
+/// rows, object and moving flag, and its triangle's attributes name it back.
+fn list_is_its_triangles(what: &str, c: &LiveCore) {
+    let read = |b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
+        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = c.g.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
+        c.g.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
+        bytes
+    };
+    let (tables, up) = (&c.sc.tables, &c.sc.up);
+    let size = std::mem::size_of::<crate::GpuEmitterTri>();
+    let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
+    let (verts, attrs) = (read(&up.verts, 0, up.verts.size()), read(&up.attrs, 0, up.attrs.size()));
+    let codes: std::collections::HashMap<u32, u32> = tables.light_tree.as_ref().map_or_else(Default::default, |t| t.order.iter().copied().zip(t.code.iter().copied()).collect());
+    let mut alive = 0;
+    for (i, e) in tables.emitter_tris.iter().enumerate().filter(|(_, e)| !e.nominal) {
+        let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&list[i * size..][..size]);
+        let code = codes.get(&(i as u32)).copied().unwrap_or(0) | if e.moves { crate::EMITTER_MOVES } else { 0 };
+        assert_eq!(r.code, code, "{what}: emitter {i}'s path code");
+        if e.area <= 0.0 {
+            continue;
+        }
+        let rows: Vec<[f32; 4]> = (0..3).map(|k| bytemuck::pod_read_unaligned(&verts[(e.tri as usize * 3 + k) * 16..][..16])).collect();
+        let a: scene::GpuTriAttr = bytemuck::pod_read_unaligned(&attrs[e.tri as usize * 96..][..96]);
+        assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code), "{what}: emitter {i} of the list against its triangle {}", e.tri);
+        assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
+        alive += 1;
+    }
+    assert!(alive > 0, "{what}: the list has emitters");
+}
+
+/// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
+/// moved (in the light tree's moving subtree, and without a tree), and after the edits that make emitters in place
+/// (a mesh added, given other triangles and removed, with the tree's slot for them; a material that starts emitting).
+#[test]
+fn the_light_list_holds_its_triangles() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    // 300 small emitting triangles: enough for a light tree.
+    let strip = |w: &mut World| {
+        let (mut positions, mut indices) = (vec![], vec![]);
+        for q in 0..150u32 {
+            let x = -1.5 + q as f32 * 0.02;
+            positions.extend([x, -0.9, 0.2, x + 0.008, -0.9, 0.2, x + 0.008, -0.892, 0.2, x, -0.892, 0.2]);
+            indices.extend([0, 1, 2, 0, 2, 3].map(|k| q * 4 + k));
+        }
+        w.set_geometry(6, Geometry { normals: [0.0, 0.0, 1.0].repeat(600), uvs: vec![0.0; 1200], positions, indices, groups: vec![], colors: vec![] }).unwrap();
+        w.set_object(17, "strip".into(), None, Kind::Mesh { geometry: 6, material: 5, own_blas: false, materials: vec![] }, true, false).unwrap();
+    };
+    // An emitter the CPU moves.
+    for tree in [true, false] {
+        let mut w = world();
+        w.set_object(13, "mover".into(), None, Kind::Mesh { geometry: 3, material: 5, own_blas: false, materials: vec![] }, true, true).unwrap();
+        w.set_transform(13, Vec3::new(0.35, -0.45, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        assert_eq!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.moving_count > 0), tree, "the mover is in the tree's moving subtree");
+        assert!(!live.sc.moving_emitters.is_empty());
+        list_is_its_triangles("a moving emitter, as loaded", &live);
+        w.set_transform(13, Vec3::new(0.1, -0.3, 0.9), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap();
+        let rebuilt = live.commit(&mut w).unwrap();
+        assert!(!(rebuilt && live.g.hwrt), "the mover moved in place ({:?})", live.fallback);
+        list_is_its_triangles("a moving emitter, moved", &live);
+    }
+    // Emitters made in place, in a scene with the tree's slot for them (one that has a mesh of its own: its geometry
+    // can be edited).
+    let mut w = world();
+    strip(&mut w);
+    w.set_material(7, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
+    w.set_object(14, "own".into(), None, Kind::Mesh { geometry: 3, material: 7, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(14, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    list_is_its_triangles("as loaded", &live);
+    if !live.g.hwrt {
+        return;
+    }
+    assert!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some()), "the tree has the slot");
+    type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+    let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+    let edits: Vec<Edit> = vec![
+        (
+            "an emitting mesh added",
+            Box::new(move |w| {
+                w.set_geometry(8, quad(0.25)).unwrap();
+                w.set_object(16, "added".into(), None, Kind::Mesh { geometry: 8, material: 5, own_blas: true, materials: vec![] }, true, false).unwrap();
+                w.set_transform(16, Vec3::new(0.0, 0.65, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+            }),
+        ),
+        ("the added mesh's triangles changed", Box::new(move |w| w.set_geometry(8, quad(0.15)).unwrap())),
+        ("a material starts emitting", Box::new(|w| w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.8, 0.4, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 2, "doubleSided": true })).unwrap()))),
+        ("the added mesh removed", Box::new(|w| drop(w.remove(16)))),
+    ];
+    for (what, edit) in &edits {
+        let before = live.sc.tables.emitter_tris.len();
+        edit(&mut w);
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        list_is_its_triangles(what, &live);
+        // (A mesh given other triangles takes its entries back; the other edits that add emitters make new ones.)
+        let grew = live.sc.tables.emitter_tris.len() > before;
+        assert_eq!(grew, matches!(*what, "an emitting mesh added" | "a material starts emitting"), "{what}: the list's length");
+    }
+}

@@ -273,15 +273,16 @@ fn main() -> Result<()> {
             let applied = e.apply(&w, &changes, 0.0)?;
             let (b, pb) = build(&w)?;
             // Same sampling distribution: entries switched off (zero weight) only exist on the edited side, so only the
-            // entries are compared, not the guide table after them (indices into the entries).
-            let bits = |v: &[[f32; 4]], n: usize| v[..n].iter().filter(|e| e[2] > 0.0).flat_map(|e| e.map(f32::to_bits)).collect::<Vec<_>>();
-            let (ea, _, _) = threert_render::emitter_cdf(&e.emitter_tris, &e.materials, &e.objects, e.stride, [0.0; 4], threert_render::EmitterCull::default());
+            // entries are compared (each by its emitter's triangle: its index differs with them), not the guide table
+            // after them (indices into the entries).
+            let bits = |v: &[[f32; 4]], tris: &[threert_render::EmitterTri]| v[..tris.len()].iter().filter(|e| e[2] > 0.0).flat_map(|e| [tris[e[0].to_bits() as usize].tri, e[1].to_bits(), e[2].to_bits(), e[3].to_bits()]).collect::<Vec<_>>();
+            let (ea, _, _) = threert_render::emitter_cdf(e.emitter_tris.iter().enumerate(), &e.materials, &e.objects, e.stride, [0.0; 4], threert_render::EmitterCull::default());
             let power = |o: &[[f32; 4]]| o.iter().step_by(e.stride).map(|p| p[3].to_bits()).collect::<Vec<_>>();
             let checks = [
                 ("materials", bytemuck::cast_slice::<_, u8>(&e.materials) == bytemuck::cast_slice::<_, u8>(&b.materials)),
                 ("lights", bytemuck::cast_slice::<_, u8>(&e.lights) == bytemuck::cast_slice::<_, u8>(&b.lights)),
                 ("object power", power(&e.objects) == power(&b.objects)),
-                ("emitters", bits(&ea, e.emitter_tris.len()) == bits(&pb.emitters, pb.emitter_tris.len())),
+                ("emitters", bits(&ea, &e.emitter_tris) == bits(&pb.emitters, &pb.emitter_tris)),
             ];
             println!("{}", serde_json::json!({ "structural": applied.is_none(), "checks": checks.iter().map(|(k, ok)| (k.to_string(), *ok)).collect::<std::collections::BTreeMap<_, _>>() }));
             if applied.is_none() || checks.iter().any(|(_, ok)| !ok) {
@@ -482,7 +483,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     if job.signals.is_some() {
         params.motion[1] = 1.0;
     }
-    let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
+    let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
     if let Some(prefix) = &job.signals {
         // The raw (undenoised) means: diffuse = color less specular and emission.
         let diffuse: Vec<f32> = frame.color.iter().zip(&frame.specular).zip(&frame.emission).flat_map(|((c, s), e)| [0, 1, 2].map(|k| (c[k] - s[k] - e[k]).max(0.0))).collect();

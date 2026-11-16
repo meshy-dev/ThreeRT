@@ -35,7 +35,7 @@ pub enum Table {
     Lights,
     /// One sphere (centre, radius) per `LIGHT_GROUP` local lights (lib.rs `light_groups`).
     LightGroups,
-    /// The emitter CDF: (triangle bits, cumulative weight, weight, area) per emissive triangle (lib.rs `emitter_cdf`).
+    /// The emitter CDF: (its emitter's index: bits, cumulative weight, weight, area) per entry (lib.rs `emitter_cdf`).
     Emitters,
     /// Two vec4s a texture (texpack.rs).
     TexInfo,
@@ -49,10 +49,12 @@ pub enum Table {
     Energy,
     /// The glass energy table (lib.rs `glass_energy_lut`).
     GlassEnergy,
+    /// The emitters' triangles in world space (lib.rs `GpuEmitterTri`), three vec4s an emitter.
+    EmitterTris,
 }
 
 impl Section for Table {
-    const COUNT: usize = 11;
+    const COUNT: usize = 12;
     const UNIT: u64 = 16;
     const LABEL: &'static str = "tables";
     fn index(self) -> usize {

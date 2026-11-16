@@ -70,6 +70,8 @@ pub struct Prepared {
     pub nodes: Vec<bvh::GpuNode>,
     /// The emitter CDF (`emitter_cdf`): one entry per `emitter_tris`, then the guide table.
     pub emitters: Vec<[f32; 4]>,
+    /// The emitters' triangles as light sampling reads them, one per `emitter_tris`.
+    pub gpu_emitter_tris: Vec<GpuEmitterTri>,
     pub env: gpu::EnvMap,
     pub env_cdf: Vec<f32>,
     pub params: gpu::Params,
@@ -127,6 +129,39 @@ pub struct EmitterTri {
     pub nominal: bool,
     /// One of the light tree's (`ltree`): its CDF entry is in the tree's range, at the start of the CDF.
     pub in_tree: bool,
+}
+
+/// `GpuEmitterTri::code`: the emitter moves (`EmitterTri::moves`). Path codes are below it.
+pub const EMITTER_MOVES: u32 = 1 << 31;
+const _: () = assert!((ltree::PATH_BITS + 2) << ltree::PATH_BITS <= EMITTER_MOVES);
+
+/// An emitter's triangle as the kernel's light sampling reads it (pathtrace.wgsl `EmitterTri`; `Table::EmitterTris`,
+/// entry i for `emitter_tris[i]`): in world space, the light list's own copy, so a sample reads no placement. v0, e1,
+/// e2 as the triangles' table has them; its triangle there (attributes); its object-table index (power); the light
+/// tree's path code (0: not one of the tree's) with `EMITTER_MOVES`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuEmitterTri {
+    pub v0: [f32; 3],
+    pub tri: u32,
+    pub e1: [f32; 3],
+    pub obj: u32,
+    pub e2: [f32; 3],
+    pub code: u32,
+}
+
+impl GpuEmitterTri {
+    /// `e`'s, from its triangle's rows (v0, e1, e2: `Prepared::tri_verts`), with path code `code`.
+    pub fn new(e: &EmitterTri, rows: &[[f32; 4]], code: u32) -> GpuEmitterTri {
+        let v = |r: usize| [rows[r][0], rows[r][1], rows[r][2]];
+        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), obj: e.obj, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 } }
+    }
+
+    /// As `new`, from its vertices.
+    pub fn of(e: &EmitterTri, [a, b, c]: [glam::Vec3A; 3], code: u32) -> GpuEmitterTri {
+        let (e1, e2) = (b - a, c - a);
+        GpuEmitterTri::new(e, &[[a.x, a.y, a.z, 0.0], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]], code)
+    }
 }
 
 /// An emitter triangle's power: area x emissive-factor luminance x object power (its CDF weight without light LOD).
@@ -316,21 +351,22 @@ pub fn light_groups(lights: &[scene::GpuLight]) -> Vec<[f32; 4]> {
 /// Buckets of the emitter CDF's guide table (pathtrace.wgsl `EMITTER_GUIDE`, a power of two).
 pub const EMITTER_GUIDE: usize = 65536;
 
-/// Emitter CDF entries (triangle bits, normalized cumulative weight, weight, area), one per triangle, then the guide
-/// table; the total weight and the total without light LOD (Params::emit_power). Weight = area x emissive luminance x
-/// object power (x light LOD). Triangles switched off keep a zero-weight entry.
+/// Emitter CDF entries (its emitter's index in `emitter_tris`: bits, normalized cumulative weight, weight, area), one
+/// per `entries` item (an emitter and its index), in their order; then the guide table; the total weight and the total
+/// without light LOD (Params::emit_power). Weight = area x emissive luminance x object power (x light LOD). Triangles
+/// switched off keep a zero-weight entry.
 /// Guide table (the cutpoint method): EMITTER_GUIDE + 1 indices, four per vec4 (bits); index k is where the kernel's
 /// binary search lands for u = k / EMITTER_GUIDE, so a draw u only searches between the indices of its bucket and the
 /// next, and finds the same entry as a search over the whole CDF.
-pub fn emitter_cdf(tris: &[EmitterTri], materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize, lod: [f32; 4], cull: EmitterCull) -> (Vec<[f32; 4]>, f32, f32) {
+pub fn emitter_cdf<'a>(entries: impl ExactSizeIterator<Item = (usize, &'a EmitterTri)>, materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize, lod: [f32; 4], cull: EmitterCull) -> (Vec<[f32; 4]>, f32, f32) {
     let (mut total, mut power) = (0.0f32, 0.0f32);
-    let mut out = Vec::with_capacity(tris.len());
-    for e in tris {
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, e) in entries {
         let lod_k = if e.moves { 1.0 } else { emitter_lod(e.c, lod, cull) };
         let p = emitter_power(e, materials, objects, stride);
         power += p;
         total += p * lod_k;
-        out.push([f32::from_bits(e.tri), total, p * lod_k, if e.nominal { -e.area } else { e.area }]);
+        out.push([f32::from_bits(i as u32), total, p * lod_k, if e.nominal { -e.area } else { e.area }]);
     }
     if total > 0.0 {
         for e in &mut out {
@@ -595,7 +631,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
-    // code in its triangle's attrs x.w (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
+    // code with its triangle in the list (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
     // (Switched-off objects at full power: `switchable_power`.)
     let all_power: f32 = emitter_tris.iter().map(|e| switchable_power(e, &sc.materials, &sc.objects, sc.object_stride())).sum();
     let use_tree = std::env::var("THREERT_LTREE").map_or(true, |v| v != "0");
@@ -604,11 +640,10 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         // The tree's emitters first, in leaf order (each node covers a range of entries), then the rest as they were.
         let mut taken = vec![false; emitter_tris.len()];
         let mut ordered: Vec<EmitterTri> = Vec::with_capacity(emitter_tris.len());
-        for (k, &i) in t.order.iter().enumerate() {
+        for &i in &t.order {
             taken[i as usize] = true;
             let mut e = emitter_tris[i as usize];
             e.in_tree = true;
-            sc.attrs[e.tri as usize].x[3] = f32::from_bits(t.code[k]);
             ordered.push(e);
         }
         ordered.extend(emitter_tris.iter().zip(&taken).filter(|(_, t)| !**t).map(|(e, _)| *e));
@@ -616,7 +651,14 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         // From here on an entry of the tree is its position in `emitter_tris` (the live view's refits read it so).
         t.order = (0..t.order.len() as u32).collect();
     }
-    let (emitters, total, _) = emitter_cdf(&emitter_tris, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
+    // The list's triangles (the tree's entries are the first, each with its code), and each triangle's entry + 1 in
+    // its attributes (x.w), for the rays that hit it (emit_mis).
+    let code = |i: usize| light_tree.as_ref().and_then(|t| t.code.get(i)).copied().unwrap_or(0);
+    let gpu_emitter_tris: Vec<GpuEmitterTri> = emitter_tris.iter().enumerate().map(|(i, e)| GpuEmitterTri::new(e, &tri_verts[e.tri as usize * 3..][..3], code(i))).collect();
+    for (i, e) in emitter_tris.iter().enumerate() {
+        sc.attrs[e.tri as usize].x[3] = f32::from_bits(i as u32 + 1);
+    }
+    let (emitters, total, _) = emitter_cdf(emitter_tris.iter().enumerate(), &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
     // The moving emitters (after the tree's in the CDF) are picked with the probability of their share of power.
     let ltree_param = light_tree.as_ref().map_or([0.0; 4], |t| [0.0, f32::from_bits(t.order.len() as u32), if total > 0.0 { ((total - t.power) / total).max(0.0) } else { 0.0 }, ltree::RIS_OFFLINE as f32]);
 
@@ -707,7 +749,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes, emitters, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.
@@ -1231,7 +1273,7 @@ mod light_lod_tests {
         let tris: Vec<EmitterTri> = (0..3000)
             .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false })
             .collect();
-        let (t, total, _) = emitter_cdf(&tris, &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
+        let (t, total, _) = emitter_cdf(tris.iter().enumerate(), &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
         let n = tris.len() as u32;
         assert!(total > 0.0);
         assert_eq!(t.len(), tris.len() + (EMITTER_GUIDE + 1).div_ceil(4));

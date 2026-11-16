@@ -357,7 +357,7 @@ pub struct GpuTriAttr {
     pub n2: [f32; 4], // normal2, w = uv1.x
     pub uv: [f32; 4], // uv1.y, uv2.x, uv2.y, material (bits)
     pub t: [f32; 4],  // tangent (dP/du), w = bitangent sign
-    pub x: [f32; 4],  // texture LOD constant 0.5*log2(uv area / world area), object index (bits), -, -
+    pub x: [f32; 4],  // texture LOD constant 0.5*log2(uv area / world area), object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
 }
 
 #[repr(C)]
