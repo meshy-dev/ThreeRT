@@ -410,7 +410,7 @@ pub enum SkyData {
     None,
     Color(Vec3),
     /// `dynamic`: baked at `sky::DYNAMIC_SKY` (the live view re-bakes it as the sun moves); `glow`: night-sky radiance.
-    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, sun_node: Option<usize>, dynamic: bool, glow: crate::sky::Glow },
+    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, dynamic: bool, glow: crate::sky::Glow },
     Gradient(crate::sky::Gradient),
 }
 
@@ -944,9 +944,10 @@ pub const MAX_MEDIA: usize = 32;
 /// (pathtrace.wgsl `medium_span`).
 pub const MEDIUM_HIDDEN: u32 = 2;
 
-/// The scene's sky as the renderer bakes it, and the atmosphere's sun (its light object). `matrix`: an object's world
-/// matrix; `light_of`: its place among the scene's lights (the build's order: `SkyData::Atmosphere::sun_node`).
-pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4, light_of: &dyn Fn(u32) -> Option<usize>) -> Result<(SkyData, Option<u32>)> {
+/// The scene's sky as the renderer bakes it, and the atmosphere's sun (its light object: `Retained::sun`). `matrix`:
+/// an object's world matrix (the build has its own, a product in another order than `World::world_matrix`'s: the
+/// same to the bit only for an object without a parent).
+pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Result<(SkyData, Option<u32>)> {
     let mut sun_id = None;
     let sky = match &w.environment.sky {
         Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, .. } => {
@@ -963,7 +964,6 @@ pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4, light_of
                 mie: *mie_scale,
                 g: *mie_anisotropy,
                 ground: Vec3::from(*ground_albedo),
-                sun_node: sun_id.and_then(light_of),
                 dynamic: *dynamic,
                 glow: crate::sky::glow_of(glow, horizon_glow),
             }
@@ -1803,7 +1803,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     }
 
     let env = &w.environment;
-    let (sky, sun) = sky_data(w, assets, &|id| worlds.get(&id).copied().unwrap_or(Mat4::IDENTITY), &|id| retained.light_nodes.iter().position(|n| *n == id))?;
+    let (sky, sun) = sky_data(w, assets, &|id| worlds.get(&id).copied().unwrap_or(Mat4::IDENTITY))?;
     retained.sun = sun;
 
     let mut stats = HashMap::new();

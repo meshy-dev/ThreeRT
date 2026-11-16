@@ -623,8 +623,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // Sky / environment.
     let t = Instant::now();
     let SkyBaked { env, color: sky_color, has_env, sun } = bake_sky(&sc.sky, sc.cloud_cover, sc.camera.position.y.max(0.0));
-    if let (scene::SkyData::Atmosphere { sun_node: Some(i), .. }, Some(c)) = (&sc.sky, sun) {
-        sc.lights[*i].color = [c.x, c.y, c.z, 0.0];
+    // (The atmosphere's sun: its light's colour is what the bake leaves it.)
+    if let (Some(i), Some(c)) = (sc.retained.sun.and_then(|s| sc.retained.light_nodes.iter().position(|n| *n == s)), sun) {
+        sc.lights[i].color = [c.x, c.y, c.z, 0.0];
     }
     let env_cdf = build_env_cdf(&env);
     let procs = [0, sc.procs.len() as u32, sc.gpu_instances.len() as u32, 0];

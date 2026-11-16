@@ -110,6 +110,14 @@ impl Tables {
     }
 
     /// Applies parameter changes; Err / Ok(None) means the scene must be rebuilt instead.
+    /// The kernel features the scene needs as these tables are: what the materials and the environment ask for (edits
+    /// change them), with the scene's structural ones (`fixed`: textures, material functions, the traversal groups;
+    /// `structure`: `gpu::instance_features`).
+    pub fn features(&self, (textures, functions, groups): (bool, bool, [usize; crate::GROUPS]), structure: u32) -> u32 {
+        let environment = crate::gpu::environment_features(self.fog.as_ref(), self.background.is_some(), self.aerial);
+        crate::gpu::features_of(&self.materials, environment, textures, functions, groups, structure)
+    }
+
     pub fn apply(&mut self, w: &World, c: &Changes, now: f32) -> Result<Option<Dirty>> {
         if c.structural || !c.poses.is_empty() || !c.moved.is_empty() {
             return Ok(None);

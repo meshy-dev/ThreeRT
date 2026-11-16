@@ -360,8 +360,7 @@ impl LiveCore {
             if self.sc.tables.add_materials(world, &changes.new_materials) {
                 self.upload_materials();
                 // (A clear coat, an unlit material: the kernel variant with it, compiled once.)
-                let (e, (tex, func, groups)) = (&self.sc.tables, self.sc.fixed_features);
-                self.sc.up.kernel.features = gpu::features_of(&e.materials, e.fog.as_ref(), tex, func, groups, self.sc.instance_features) | if e.aerial[0] > 0.0 { gpu::F_AERIAL } else { 0 };
+                self.sc.up.kernel.features = self.sc.tables.features(self.sc.fixed_features, self.sc.instance_features);
             } else {
                 self.fallback = Some("a new material that cannot be added in place (it emits, is glass or a cutout)".into());
                 self.fallbacks += 1;
@@ -573,13 +572,10 @@ impl LiveCore {
             b.background = e.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]);
             b.aerial = e.aerial;
             [b.fog, b.fog_color, b.vol, b.vol2] = crate::fog_params(e.fog.as_ref());
-            // (A background that appeared or went: the kernel's variant with or without it, as the fog's below.)
-            self.sc.instance_features = self.sc.instance_features & !gpu::F_BACKGROUND | if e.background.is_some() { gpu::F_BACKGROUND } else { 0 };
         }
         if d.materials || d.environment {
-            // e.g. fog appearing needs the fog kernel variant (compiled once, then cached)
-            let (tex, func, groups) = self.sc.fixed_features;
-            self.sc.up.kernel.features = gpu::features_of(&e.materials, e.fog.as_ref(), tex, func, groups, self.sc.instance_features) | if e.aerial[0] > 0.0 { gpu::F_AERIAL } else { 0 };
+            // (Fog or a background appearing, a clear coat: the kernel's variant with it, compiled once, then cached.)
+            self.sc.up.kernel.features = e.features(self.sc.fixed_features, self.sc.instance_features);
         }
         if let Some(c) = e.camera.take() {
             self.sc.scene_camera = Camera { pos: c.position, fwd: c.forward, up: c.up, right: c.right, tan_half_fov: c.tan_half_fov };
@@ -604,13 +600,11 @@ impl LiveCore {
             self.apply_settings(world)?;
             self.lit_changed = self.frame.max(1);
         }
-        if changes.exposure {
+        if changes.exposure || changes.settings {
             self.apply_exposure(world);
         }
         if changes.dof {
-            if let Some(crate::world::Kind::Camera(c)) = world.settings.camera.and_then(|id| world.objects.get(&id)).map(|o| &o.kind) {
-                self.sc.dof = c.dof.clone();
-            }
+            self.sc.dof = world.scene_camera().and_then(|c| c.dof.clone());
         }
         Ok(false)
     }
@@ -654,8 +648,8 @@ impl LiveCore {
     /// and the lights it owns: the atmosphere's sun takes its colour from the bake, a light that is the sun no longer
     /// its own again.
     pub(super) fn apply_sky(&mut self, world: &World) -> Result<()> {
-        let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id), &|_| None)?;
-        let altitude = world.settings.camera.map_or(self.sc.sky_inputs.1, |id| world.world_matrix(id).transform_point3(glam::Vec3::ZERO).y.max(0.0));
+        let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id))?;
+        let altitude = world.settings.camera.map_or(self.sc.sky_inputs.1, |id| world.world_matrix(id).w_axis.y.max(0.0));
         let cover = self.sc.tables.cloud_cover;
         let baked = crate::bake_sky(&sky, cover, altitude);
         self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env));
@@ -702,7 +696,7 @@ impl LiveCore {
 
     pub(super) fn put_sky(&mut self, (env, cdf, max): (gpu::EnvMap, Vec<f32>, f32)) {
         let Some(sky) = self.sc.sky.as_ref() else { return };
-        self.g.write_env(&self.sc.up, &env, &cdf);
+        self.g.put_env(&mut self.sc.up, &env, &cdf);
         // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night), or a
         // baked sky is not light-sampled at all (`env_nee_on`).
         self.sc.base.counts2[1] = (max >= sky.env_nee_floor && crate::env_nee_on()) as u32;
@@ -712,22 +706,21 @@ impl LiveCore {
     /// The scene camera's exposure (its mode, its values) as a build takes it: what the frame is shown at, the auto
     /// exposure's settings, and the kernel's firefly clamp, which is relative to it.
     pub(super) fn apply_exposure(&mut self, world: &World) {
-        let Some(cid) = world.settings.camera else { return };
-        let Some(crate::world::Kind::Camera(c)) = world.objects.get(&cid).map(|o| &o.kind) else { return };
+        let Some(c) = world.scene_camera() else { return };
         self.sc.base.misc[0] = self.sc.preset.native.firefly_clamp(&c.exposure);
         self.sc.exposure = c.exposure.start();
         self.sc.exposure_settings = ExposureSettings::new(&c.exposure, &self.sc.preset.post);
     }
 
     /// The preset, its overrides or the scene's name changed: the kernel parameters a build takes from the preset
-    /// (bounces, Russian roulette, energy compensation; the firefly clamp with the exposure) and the post passes'.
+    /// (bounces, Russian roulette, energy compensation) and the post passes'. (What the preset says of the exposure:
+    /// `apply_exposure`, after it.)
     pub(super) fn apply_settings(&mut self, world: &World) -> Result<()> {
         let preset = scene::preset_of(world, &self.presets, None)?;
         let b = &mut self.sc.base;
         (b.counts[2], b.counts[3], b.misc[2]) = (preset.native.max_bounces, preset.native.russian_roulette_depth, preset.native.energy_compensation);
         self.apply_post(&preset.post);
         self.sc.preset = preset;
-        self.apply_exposure(world);
         self.scene_name = world.settings.name.clone();
         Ok(())
     }

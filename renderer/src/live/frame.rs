@@ -214,8 +214,9 @@ impl LiveCore {
     }
 
     /// Light LOD: the emitter CDF weighted by distance to the camera (`emitter_lod`) and the emitter cull with its view
-    /// cone (`EmitterCull`), rebuilt when the camera is 15 m from where it was last built or has turned LIGHT_LOD_TURN
-    /// from that direction (the kernel's emitter pdfs read the same reference from the parameters).
+    /// cone (`EmitterCull`), rebuilt when the camera is 15 m from where it was last built, has turned LIGHT_LOD_TURN
+    /// from that direction, or sees another cone (its lens, the view's shape): the kernel's emitter pdfs read the same
+    /// reference from the parameters.
     pub(super) fn update_light_lod(&mut self) {
         let d0 = LIGHT_LOD_D0;
         let (w, h) = (self.w, self.h);
@@ -227,7 +228,10 @@ impl LiveCore {
         let r = glam::Vec3::new(b.light_lod[0], b.light_lod[1], b.light_lod[2]);
         let dir = glam::Vec3::new(b.lod_view[0], b.lod_view[1], b.lod_view[2]);
         let turned = b.emit_power[2] > 0.0 && dir.dot(self.cam.fwd) < LIGHT_LOD_TURN.to_radians().cos();
-        if b.light_lod[3] > 0.0 && r.distance(self.cam.pos) < 15.0 && !turned {
+        // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
+        let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
+        let cone = half.min(std::f32::consts::PI).cos();
+        if b.light_lod[3] > 0.0 && r.distance(self.cam.pos) < 15.0 && !turned && b.lod_view[3] == cone {
             return;
         }
         b.light_lod = [self.cam.pos.x, self.cam.pos.y, self.cam.pos.z, d0];
@@ -235,9 +239,7 @@ impl LiveCore {
         let cull = if self.sc.up.kernel.approx & gpu::A_FAR_EMITTERS != 0 { EMITTER_CULL } else { 0.0 };
         b.emit_power[1] = cull;
         b.emit_power[2] = cull * EMITTER_CULL_VIEW;
-        // The frustum's half-diagonal: tan = tan(fov / 2) x sqrt(1 + aspect^2).
-        let half = (self.cam.tan_half_fov * (1.0 + (w as f32 / h as f32).powi(2)).sqrt()).atan() + EMITTER_CULL_MARGIN.to_radians();
-        b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, half.min(std::f32::consts::PI).cos()];
+        b.lod_view = [self.cam.fwd.x, self.cam.fwd.y, self.cam.fwd.z, cone];
         // Power edits held back for the emitter worker land first (its job in flight was built for the old reference:
         // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
         self.land_powers_now();

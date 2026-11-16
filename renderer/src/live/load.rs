@@ -25,7 +25,7 @@ pub(super) struct LoadedScene {
     /// The scene has instanced meshes or procedural geometry (the raster experiment draws only flattened triangles:
     /// primary visibility is traced).
     pub(super) instanced: bool,
-    /// Kernel features of the instanced meshes (gpu::instance_features), which edits cannot change.
+    /// Kernel features of the scene's structure (gpu::instance_features), which edits cannot change.
     pub(super) instance_features: u32,
     pub(super) name: String,
     pub(super) triangles: usize,
