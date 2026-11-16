@@ -7,8 +7,9 @@
 // - Game text is set as text, never as markup.
 // - A list line with a `ttl` is shown for that long from when it first came and then left out, whether or not the
 //   game still lists it; a flash is played when its `n` changes.
-// - The overlay takes no pointer events: clicks and the pointer lock stay the canvas's.
-import type { Hud, HudAnchor, HudFlash, HudItem, HudLine, HudTone } from "@threert/gameplay";
+// - The overlay takes no pointer events (clicks and the pointer lock stay the canvas's), but for the rows of a
+//   `selectable` table: a click or a tap on one is `{ t: "hud.choose", item, row }` for the game (`onChoose`).
+import type { Hud, HudAnchor, HudChoose, HudFlash, HudItem, HudLine, HudTone } from "@threert/gameplay";
 
 const TONES: Record<HudTone, string> = { default: "#f2f2ee", good: "#6fdc8c", warn: "#f5c542", bad: "#ff6b5e", accent: "#62b6ff", dim: "rgba(242,242,238,.62)" };
 const ANCHORS: HudAnchor[] = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
@@ -38,6 +39,7 @@ const CSS = `
 .hud-table table { border-collapse: collapse; } .hud-table th { font-size: 10px; font-weight: 500; letter-spacing: .1em; text-transform: uppercase; opacity: .6; text-align: left; }
 .hud-table th, .hud-table td { padding: 3px 22px 3px 8px; } .hud-table .n { text-align: right; padding-right: 8px; }
 .hud-table tr.own td { background: rgba(98,182,255,.16); color: ${TONES.accent}; }
+.hud-table tr.pick { pointer-events: auto; cursor: pointer; } .hud-table tr.pick:hover td { background: rgba(255,255,255,.1); }
 .hud-message { position: absolute; left: 50%; top: 27%; transform: translateX(-50%); text-align: center; white-space: nowrap; }
 .hud-message b { display: block; font-size: 36px; line-height: 1.15; font-weight: 700; letter-spacing: .02em; }
 .hud-message span { display: block; margin-top: 6px; font-size: 14px; opacity: .88; }
@@ -80,7 +82,11 @@ export class HudOverlay {
   private timers: number[] = [];
   private flashed = 0;
 
-  constructor(parent: HTMLElement = document.body) {
+  /** `onChoose`: a row of a selectable table was clicked or tapped (the page hands the message to the game). */
+  private readonly onChoose?: (m: HudChoose) => void;
+
+  constructor(parent: HTMLElement = document.body, onChoose?: (m: HudChoose) => void) {
+    this.onChoose = onChoose;
     if (!document.getElementById("hud-style")) {
       const style = el("style", "", CSS);
       style.id = "hud-style";
@@ -105,7 +111,7 @@ export class HudOverlay {
     this.timers = [];
     for (const a of this.anchors.values()) a.replaceChildren();
     for (const item of hud.items ?? []) {
-      const e = this.item(item);
+      const e = this.item(item, (hud.items ?? []).indexOf(item));
       if (e) this.anchors.get(item.anchor)?.appendChild(e);
     }
     this.message.replaceChildren();
@@ -130,7 +136,7 @@ export class HudOverlay {
     }
   }
 
-  private item(item: HudItem): HTMLElement | null {
+  private item(item: HudItem, index: number): HTMLElement | null {
     switch (item.type) {
       case "text": {
         const box = tone(el("div", ""), item.tone);
@@ -176,7 +182,14 @@ export class HudOverlay {
         const numeric = item.columns.map((_, c) => item.rows.length > 0 && item.rows.every((r) => typeof r[c] === "number"));
         item.columns.forEach((c, k) => head.appendChild(el("th", numeric[k] ? "n" : "", c)));
         item.rows.forEach((r, k) => {
-          const row = table.appendChild(el("tr", k === item.highlight ? "own" : ""));
+          const row = table.appendChild(el("tr", [k === item.highlight ? "own" : "", item.selectable && this.onChoose ? "pick" : ""].filter(Boolean).join(" ")));
+          if (item.selectable && this.onChoose) {
+            const choose = this.onChoose;
+            row.addEventListener("click", (e) => {
+              e.stopPropagation();
+              choose({ t: "hud.choose", item: item.id ?? index, row: k });
+            });
+          }
           item.columns.forEach((_, c) => row.appendChild(el("td", numeric[c] ? "n" : "", r[c] === undefined ? "" : String(r[c]))));
         });
         return box;

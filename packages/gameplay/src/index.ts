@@ -9,11 +9,11 @@ export type { Host, HostEvents, HostListener, HostMessage, LaunchParams, NetPost
 export { InputState } from "./input.ts";
 export type { Input, InputMessage } from "./input.ts";
 export { files, HostRequestError, sliced, store } from "./files.ts";
-export type { FileEntry, Files, Picked, PickOptions, Sliced, SliceResult, UserStore } from "./files.ts";
+export type { FileEntry, Files, Picked, PickOptions, ReadRange, Sliced, SliceResult, UserStore } from "./files.ts";
 export { audio } from "./audio.ts";
 export type { Audio, AudioPoint, AudioPost, PlayOptions } from "./audio.ts";
 export { hud } from "./hud.ts";
-export type { Hud, HudAnchor, HudBar, HudCrosshair, HudFlash, HudItem, HudLine, HudList, HudMessage, HudState, HudTable, HudText, HudTone } from "./hud.ts";
+export type { Hud, HudAnchor, HudBar, HudChoose, HudCrosshair, HudFlash, HudItem, HudLine, HudList, HudMessage, HudState, HudTable, HudText, HudTone } from "./hud.ts";
 export { runWorldHandler } from "./world.ts";
 export type { WorldContext, WorldHandler } from "./world.ts";
 export { Failure, isFailure, normalizeRenderRequest, Transaction } from "./tx.ts";

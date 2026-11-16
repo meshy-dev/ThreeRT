@@ -58,6 +58,8 @@ export interface HostEvents {
   "net.closed": { t: "net.closed"; id: string; code: number; reason: string };
   /** A `net.fetch`'s answer. `status` 0: the request failed (`error`). */
   "net.fetched": { t: "net.fetched"; id: string; status: number; body: string; error?: string };
+  /** The player clicked or tapped a row of a selectable HUD table (hud.ts): `item` is its `id`, or its index. */
+  "hud.choose": { t: "hud.choose"; item: string | number; row: number };
   /** Once after setup. `caps`: the families of requests the app answers (`"files"`, `"store"`); none: `[]`. */
   launch: { t: "launch"; params: LaunchParams; caps?: string[] };
 }

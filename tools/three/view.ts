@@ -69,9 +69,11 @@ export async function run(mod: SceneModule): Promise<void> {
     const net = new PageNet();
     const sound = new PageAudio();
     let hud: HudOverlay | null = null;
+    // A row of a selectable HUD table the player clicked: to the game with the next frame's messages.
+    const chosen: HostMessage[] = [];
     const flush = () => {
       for (const m of posts.splice(0)) {
-        if (m.t === "hud") (hud ??= new HudOverlay()).set((m.hud ?? {}) as Hud);
+        if (m.t === "hud") (hud ??= new HudOverlay(document.body, (c) => void chosen.push({ ...c }))).set((m.hud ?? {}) as Hud);
         else if (!sound.post(m)) net.post(m);
       }
     };
@@ -211,7 +213,7 @@ export async function run(mod: SceneModule): Promise<void> {
         // As the renderer's frame: the app's messages (this frame's input, what the sockets received), the frame
         // script, the physics' ticks, then what the game posted.
         try {
-          const messages = [...(input ? [input.message()] : []), ...net.poll()];
+          const messages = [...(input ? [input.message()] : []), ...net.poll(), ...chosen.splice(0)];
           if (messages.length) node.hostMessages(JSON.stringify(messages), Date.now());
           node.frame(dt, Date.now());
         } catch (e) {

@@ -12,7 +12,7 @@
 //! Esc. With `pointer: "look"` a click captures the pointer (its motion is the game's look), Esc lets go of it, and
 //! Esc again quits. The window is the app of the host channel: `--launch '{"room":"K7Q4MZ"}'` is the `launch`
 //! message, `--sensitivity 1.5` scales the look, `--hud-log` prints the HUD the game describes (the window draws
-//! none), the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs), and its `audio.*` messages are
+//! none; a selectable table's rows are chosen on stdin with a `hud.choose` host message, which it prints), the game's `net.*` messages are the binary's sockets and HTTP (src/net.rs), and its `audio.*` messages are
 //! played (src/audio, the `audio` feature: the ears are the camera of each frame). Its `files.*` and `store.*` are
 //! answered from `--pick <dir|file>[,...]` (the player's picks, in order) and `--store <dir>` (the game's storage,
 //! `<assets>/.threert/store` by default; `user:` assets resolve there): src/userfiles.rs.
@@ -577,6 +577,10 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
         services.post(p);
         if args.hud_log && p["t"] == "hud" {
             eprintln!("hud: {}", p["hud"]);
+            // (The window draws no HUD: a menu's row is chosen on stdin, as an app that draws it sends the click.)
+            for (item, title, rows) in crate::host::hud_selectables(&p["hud"]) {
+                eprintln!("hud: selectable table {item} \"{title}\", {rows} rows: choose one with {}", serde_json::json!({ "cmd": "host", "messages": [crate::host::hud_choose_message(&item, 0)] }));
+            }
         }
     }
     if !posts.is_empty() {

@@ -70,6 +70,25 @@ pub fn launch_message_with_caps(params: Option<&Value>, caps: &[&str]) -> Value 
     json!({ "t": "launch", "params": params.filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({})), "caps": caps })
 }
 
+/// The selectable tables of a HUD description (`{ t: "hud", hud }`'s `hud`; packages/gameplay/src/hud.ts): each as
+/// the `item` its `hud.choose` names (its `id`, or its index in `items`), its title and its rows' count. An app that
+/// draws the HUD makes their rows clickable or tappable.
+pub fn hud_selectables(hud: &Value) -> Vec<(Value, String, usize)> {
+    let items = hud["items"].as_array().map(Vec::as_slice).unwrap_or_default();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t["type"] == "table" && t["selectable"] == true)
+        .map(|(k, t)| (t["id"].as_str().map_or_else(|| json!(k), |id| json!(id)), t["title"].as_str().unwrap_or("").to_string(), t["rows"].as_array().map_or(0, Vec::len)))
+        .collect()
+}
+
+/// The message for the game when the player clicked or tapped row `row` of the selectable table `item`
+/// (`hud_selectables`).
+pub fn hud_choose_message(item: &Value, row: usize) -> Value {
+    json!({ "t": "hud.choose", "item": item, "row": row })
+}
+
 /// A window's keys and pointer between two frames, and the `input` message of a frame.
 #[derive(Default)]
 pub struct InputTracker {
@@ -206,6 +225,19 @@ mod tests {
         assert_eq!(launch_message(None), json!({ "t": "launch", "params": {}, "caps": [] }));
         assert_eq!(launch_message_with_caps(Some(&json!({ "room": "K7Q4MZ" })), &["files", "store"]), json!({ "t": "launch", "params": { "room": "K7Q4MZ" }, "caps": ["files", "store"] }));
         assert_eq!(launch_message(Some(&json!("x")))["params"], json!({}));
+    }
+
+    #[test]
+    fn a_huds_selectable_tables() {
+        let hud = json!({ "items": [
+            { "type": "text", "anchor": "top-left", "text": "x" },
+            { "type": "table", "anchor": "center", "id": "maps", "title": "Maps", "columns": ["Map"], "rows": [["de_x"], ["cs_y"]], "selectable": true },
+            { "type": "table", "anchor": "center", "columns": ["Player"], "rows": [["Ada"]] },
+            { "type": "table", "anchor": "right", "columns": ["Mode"], "rows": [["a"], ["b"], ["c"]], "selectable": true },
+        ] });
+        assert_eq!(hud_selectables(&hud), vec![(json!("maps"), "Maps".to_string(), 2), (json!(3), String::new(), 3)]);
+        assert!(hud_selectables(&json!({})).is_empty());
+        assert_eq!(hud_choose_message(&json!("maps"), 1), json!({ "t": "hud.choose", "item": "maps", "row": 1 }));
     }
 
     /// Services that answer a family and services that answer none, as the window's one list.
