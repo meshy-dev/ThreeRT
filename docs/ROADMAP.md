@@ -2512,6 +2512,24 @@ whoever reads it next: the particles' BLAS slot is 0.45 ms when the frame fits a
 with a spread of 3 when it is between one and two, in main's build too: it times a wait.) Next here: the segment
 test, whose pixels can go to the pass; a record that carries the surface where its material function is dear.
 
+**Glass as a rough dielectric (2026-11-16, after it).** Frosted glass was a delta event whatever its roughness: the
+ray refracted through a sampled microfacet with the weight of smooth glass, so the lobe had no value and no
+density, lights were never sampled through it, and a ray totally reflected inside took the glass's tint (a grey
+sheet seen past the critical angle read 0.5 of the sky). It is Walter et al. 2007's interface now (docs/RUNTIME.md
+"Glass"): reflection or refraction at a visible microfacet by the exact Fresnel reflectance, both with a value and
+a density; lights sampled on both sides, their shadow rays from the side they light; a delta lobe below roughness
+0.05 only; the energy single scattering loses returned from a table (Turquin 2019). Held by eleven `glass/*` tests
+against the BSDF's integral (lib.rs `glass_energy_tests`): one interface in a white sky 0.957 for 0.9573 entering,
+0.738 for 0.739 and 0.648 for 0.647 leaving, 0.999 and 0.992 with compensation, a lamp through frosted glass 4.01
+for 4.04, a frosted sphere in a furnace 0.999. Pictures without glass are as they were (render-identity: 196 of
+239 to the byte, the rest glass and water; Bistro's offline render to the byte, Kabukichō's still 4.66). The glass
+scene's offline render moved by ΔE 0.36 and its live frame keeps its distance to it (1.16 -> 1.18). The trace:
+the glass scene 3.95 -> 4.40 ms (+11 %), of which 0.36 ms is the lights now sampled through frosted glass;
+Bistro, Zero Day, lamp-rooms, Kabukichō, Tokyo as they were. bench-window kept one offline reference a shot
+whatever renderer made it: a build that changes the offline picture was read against the old one; the reference
+is keyed by the renderer's binary now, and the tool has a glass shot. Not here: thin walls (a pane is a solid's
+face), absorption by distance, the shadow rays' share (a Schlick albedo still, on a straight ray).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

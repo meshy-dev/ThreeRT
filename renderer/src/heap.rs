@@ -45,7 +45,7 @@ pub enum Table {
     Instances,
     /// `scene::MediumGpu`.
     Media,
-    /// The GGX energy table, 512 vec4s.
+    /// The GGX energy table, 512 vec4s, then the glass energy table (lib.rs `glass_energy_lut`).
     Energy,
 }
 

@@ -1,14 +1,15 @@
 // One rough dielectric interface in a white furnace: a single sheet of glass (ior 1.5, roughness 0.6; the far side
 // stays glass) in a uniform sky of radiance 1, seen at 45 degrees from the air. Without energy compensation the pixel
-// reads what one interface reflects and transmits by single scattering: R + T = 0.955, by a quadrature over
-// microfacet normals done apart (Walter et al. 2007, GGX). The sky is sampled on both sides of the sheet, so the
-// BSDF's value, its density and its sampling are held to each other.
+// reads what one interface reflects and transmits by single scattering: R 0.037 + T 0.920 = 0.9573, the BSDF
+// (Walter et al. 2007, GGX) integrated over both sides' directions and, apart, summed over visible microfacet
+// normals (renderer/src/lib.rs `glass_energy_tests`). The sky is sampled on both sides of the sheet, so the BSDF's
+// value, its density and its sampling are held to each other.
 import { Color, Mesh, MeshPhysicalMaterial, PlaneGeometry, type Object3D } from "@threert/scene";
 import { CENTER, camera, result, sceneWithSky, type TestMeta } from "./lib.ts";
 
 export const test: TestMeta = {
   id: "glass/rough-enter", features: ["transmission", "refraction", "ggx"], reference: "analytic", temporal: false,
-  metric: { kind: "radiance", region: CENTER, expected: 0.955, tolerance: 0.015 },
+  metric: { kind: "radiance", region: CENTER, expected: 0.9573, tolerance: 0.015 },
   spp: 256,
 };
 

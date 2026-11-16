@@ -1009,19 +1009,101 @@ pub fn glass_energy_lut() -> &'static [[f32; 4]] {
 mod glass_energy_tests {
     use super::*;
 
-    /// The glass energy table's estimator against a quadrature over microfacet normals done apart (1200 x 600 points,
-    /// in double precision: R + T of one interface at ior 1.5), and the table's cost.
+    fn lambda(a2: f64, c: f64) -> f64 {
+        let c = c.abs().min(1.0);
+        0.5 * (-1.0 + (1.0 + a2 * (1.0 - c * c) / (c * c)).sqrt())
+    }
+
+    /// The kernel's `dielectric_t`: the interface's transmission x |n.l| (Walter et al. 2007 eq. 21 from the view
+    /// side; n = +y, v above, l below).
+    fn transmitted(v: [f64; 3], l: [f64; 3], a2: f64, eta: f64) -> f64 {
+        let h = [v[0] + eta * l[0], v[1] + eta * l[1], v[2] + eta * l[2]];
+        let k = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt() * h[1].signum();
+        let h = [h[0] / k, h[1] / k, h[2] / k];
+        let (voh, loh) = (v[0] * h[0] + v[1] * h[1] + v[2] * h[2], l[0] * h[0] + l[1] * h[1] + l[2] * h[2]);
+        if voh <= 0.0 || loh >= 0.0 {
+            return 0.0;
+        }
+        let d = (h[1] * a2 - h[1]) * h[1] + 1.0;
+        let den = voh + eta * loh;
+        (1.0 - fresnel_dielectric(voh, eta)) * a2 / (std::f64::consts::PI * d * d) * voh * eta * eta * -loh / (v[1] * den * den * (1.0 + lambda(a2, v[1]) + lambda(a2, l[1])))
+    }
+
+    /// (R, T) of one interface toward a view at cosine `mu`: the BSDF's value x cosine integrated over the directions
+    /// of each side (`n` x 2 `n` points). What the kernel's light samples sum; the table's estimator is its sampling.
+    fn interface(mu: f64, alpha: f64, eta: f64, n: usize) -> (f64, f64) {
+        let a2 = alpha * alpha;
+        let v = [(1.0 - mu * mu).sqrt(), mu, 0.0];
+        let (mut r, mut t) = (0.0, 0.0);
+        for i in 0..n {
+            let c = (i as f64 + 0.5) / n as f64;
+            let st = (1.0 - c * c).sqrt();
+            for j in 0..2 * n {
+                let phi = std::f64::consts::PI * (j as f64 + 0.5) / n as f64;
+                let (x, z) = (st * phi.cos(), st * phi.sin());
+                // Reflection: D x the kernel's joint visibility x Fresnel at the half vector.
+                let h = [v[0] + x, v[1] + c, z];
+                let k = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+                let (noh, voh) = (h[1] / k, (v[0] * h[0] + v[1] * h[1]) / k);
+                let d = (noh * a2 - noh) * noh + 1.0;
+                let vis = 0.5 / (c * (mu * (1.0 - alpha) + alpha) + mu * (c * (1.0 - alpha) + alpha)).max(1e-7);
+                r += a2 / (std::f64::consts::PI * d * d) * vis * fresnel_dielectric(voh, eta) * c;
+                t += transmitted(v, [x, -c, z], a2, eta);
+            }
+        }
+        let k = std::f64::consts::PI / (n * n) as f64;
+        (r * k, t * k)
+    }
+
+    /// The table's estimator against the BSDF's integral; the numbers the `glass/rough-*` render tests expect; the
+    /// table's cost.
     #[test]
     fn the_glass_energy_is_the_interfaces() {
-        for (r, eta, mu, want) in [(0.3, 1.5, 0.7071, 0.9949), (0.3, 1.0 / 1.5, 0.7071, 0.9452), (0.6, 1.5, 0.7071, 0.9550), (0.6, 1.0 / 1.5, 0.7071, 0.7393), (0.6, 1.0 / 1.5, 0.9, 0.8227), (1.0, 1.5, 0.9, 0.8633), (1.0, 1.0 / 1.5, 0.9, 0.4464), (0.1, 1.5, 0.4, 0.9978)] {
-            let e = glass_energy(mu, r * r, eta, 24);
-            assert!((e - want).abs() < 0.012 * want, "roughness {r}, eta {eta:.3}, cos {mu}: {e:.4} for {want}");
+        for (r, eta, mu) in [(0.3, 1.5, 0.7071), (0.3, 1.0 / 1.5, 0.7071), (0.6, 1.5, 0.4), (0.6, 1.0 / 1.5, 0.9), (1.0, 1.5, 0.9), (1.0, 1.0 / 1.5, 0.9), (0.5, 1.33, 0.2), (0.8, 1.0 / 1.33, 0.5)] {
+            let (e, (qr, qt)) = (glass_energy(mu, r * r, eta, 24), interface(mu, r * r, eta, 700));
+            assert!((e - qr - qt).abs() < 0.012 * (qr + qt), "roughness {r}, eta {eta:.3}, cos {mu}: {e:.4} for {:.4}", qr + qt);
+        }
+        // tests/render/glass-rough-enter.ts, -leave.ts, -leave-low.ts (roughness 0.6, ior 1.5).
+        let c45 = std::f64::consts::FRAC_1_SQRT_2;
+        for (eta, mu, want) in [(1.5, c45, 0.9573), (1.0 / 1.5, c45, 0.7390), (1.0 / 1.5, 0.4, 0.6474)] {
+            let ((qr, qt), e) = (interface(mu, 0.36, eta, 1000), glass_energy(mu, 0.36, eta, 192));
+            eprintln!("eta {eta:.3}, cos {mu:.4}: R {qr:.4} + T {qt:.4} = {:.4}; by visible normals {e:.4}", qr + qt);
+            assert!((qr + qt - want).abs() < 1e-3 && (e - want).abs() < 5e-4, "eta {eta:.3}, cos {mu}: R {qr:.4} + T {qt:.4}, {e:.4} for {want}");
         }
         let t = std::time::Instant::now();
         let lut = glass_energy_lut();
         assert_eq!(lut.len() * 4, 2 * GLASS_E[0] * GLASS_E[1] * GLASS_E[2]);
         assert!(lut.iter().flatten().all(|e| (0.05..=1.0).contains(e)));
         eprintln!("glass energy table: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    /// tests/render/glass-rough-lamp.ts and -wide.ts: what a square emitter of side `side`, 1 m under a sheet of
+    /// glass (roughness 0.6, ior 1.5) where the 45-degree view's refracted ray arrives, sends through the sheet, as
+    /// a fraction of its radiance: `transmitted` integrated over the emitter's area.
+    #[test]
+    fn the_lamp_through_frosted_glass() {
+        let (a2, eta) = (0.6f64.powi(4), 1.5f64);
+        let c45 = std::f64::consts::FRAC_1_SQRT_2;
+        let v = [0.0, c45, c45];
+        // The refracted ray's foot 1 m down (the test's lamp is centred there: z = -0.5345).
+        let st = c45 / eta;
+        let cz = -st / (1.0 - st * st).sqrt();
+        assert!((cz + 0.5345).abs() < 1e-4);
+        for (side, want) in [(0.3, 0.40415), (1.0, 0.83641)] {
+            let n = 600;
+            let mut sum = 0.0;
+            for i in 0..n {
+                let x = ((i as f64 + 0.5) / n as f64 - 0.5) * side;
+                for j in 0..n {
+                    let z = cz + ((j as f64 + 0.5) / n as f64 - 0.5) * side;
+                    let d2 = x * x + 1.0 + z * z;
+                    let d = d2.sqrt();
+                    sum += transmitted(v, [x / d, -1.0 / d, z / d], a2, eta) / (d * d2);
+                }
+            }
+            let got = sum * (side / n as f64).powi(2);
+            assert!((got - want).abs() < 2e-4, "a {side} m lamp: {got:.5} for {want}");
+        }
     }
 
     /// The table as the kernel reads it (`glass_energy` in pathtrace.wgsl: trilinear over its nodes) against the
