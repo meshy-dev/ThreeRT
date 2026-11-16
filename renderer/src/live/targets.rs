@@ -128,8 +128,6 @@ pub struct Targets {
     /// The bind group of each pass, in `Passes::pipes`' order.
     pub(super) bgs: Vec<wgpu::BindGroup>,
     size: (u32, u32),
-    /// The radiance cache's entries (1: no cache).
-    cache: u64,
 }
 
 /// What a view of `w` x `h` holds of each of the kernel's four buffers that follow its size, bytes (`gpu::KernelBufs`:
@@ -173,7 +171,6 @@ impl Targets {
             sampler: d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
             bgs: vec![],
             size: (w, h),
-            cache,
         };
         t.bgs = t.bind_groups(d, passes);
         t
@@ -188,7 +185,7 @@ impl Targets {
         (self.bufs, self.out) = Self::own(d, w, h);
         self.accum = g.accum_buffer(w, h);
         let [refl, motion, direct, lists] = kernel_bytes(w, h);
-        self.kernel = self.kernel.resized(d, self.cache, refl, motion, direct, lists);
+        self.kernel = self.kernel.resized(d, refl, motion, direct, lists);
         self.translucent_low = None;
         self.size = (w, h);
         self.bgs = self.bind_groups(d, passes);

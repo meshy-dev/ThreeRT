@@ -20,10 +20,8 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     // Frame-script cost (script + commit), reported every 2 s.
     let (mut fs_sum, mut fs_max, mut fs_n) = (0.0f32, 0.0f32, 0u32);
     core.bounces = opts.bounces;
+    core.set_scale(opts.scale.unwrap_or(0.0));
     core.set_display_scale(opts.display_scale);
-    if let Some(s) = opts.scale {
-        core.set_scale(s);
-    }
     eprintln!("live: load {}", serde_json::Value::Object(core.load_timings().iter().map(|(k, v)| (k.clone(), (*v).into())).collect()));
     eprintln!("live: {}x{} @{} fps on {} ({})", core.w, core.h, opts.fps, core.g.adapter_info.name, if core.g.hwrt { "HW RT" } else { "BVH" });
     // A snapshot's pixels, at the view's size.

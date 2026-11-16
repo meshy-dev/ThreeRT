@@ -502,7 +502,6 @@ impl LiveCore {
         let targets = Targets::new(&g, &passes, w, h, &vec![0u16; (LUT * LUT * LUT * 4) as usize], if cache_on { gpu::CACHE_SIZE } else { 1 });
         let (sc, view, env) = load_scene(&g, world, assets, presets, w, h, &targets)?;
         let cam = view.camera;
-        let pp = view.preset.post.clone();
         let (triangles, scene_name) = (sc.triangles, sc.name.clone());
         let profile = (g.timestamps && std::env::var("THREERT_PROFILE").is_ok()).then(|| {
             // trace, the post passes, cache resolve, then the particle pass, the BLAS rebuild, the translucency pass and
@@ -533,7 +532,7 @@ impl LiveCore {
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
         let mut core = LiveCore { particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false,  pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
-        core.apply_post(&pp);
+        core.apply_post();
         Ok(core)
     }
 
@@ -579,7 +578,6 @@ impl LiveCore {
 
     pub fn rebuild(&mut self, world: &World) -> Result<()> {
         let (s, view, env) = load_scene(&self.g, world, &self.assets, &self.presets, self.w, self.h, &self.targets)?;
-        self.apply_post(&view.preset.post);
         self.triangles = s.triangles;
         self.scene_name = s.name.clone();
         // The scene's camera changed (a new lens rebuilds, and a move in the same commit comes with it): the view takes it.
@@ -588,6 +586,7 @@ impl LiveCore {
             self.cam = view.camera;
         }
         (self.view, self.env) = (view, env);
+        self.apply_post();
         // What the grid programs had simulated goes with the grids that are still the same.
         self.g.carry_grids(&self.sc.up, &s.up);
         self.sc = s;
@@ -600,27 +599,23 @@ impl LiveCore {
         Ok(())
     }
 
-    /// Rebuilds the tonemap LUT and bloom / vignette / fringe / grain settings when the scene's post preset changed.
-    fn apply_post(&mut self, pp: &crate::desc::PostPreset) {
+    /// The post passes' settings from the view's preset (`self.view`: assigned before this): the tone-map table,
+    /// written when the preset's post settings are others, and bloom / vignette / fringe / grain / motion blur, of
+    /// which the bloom's stages and the blur's reach follow the view's size.
+    fn apply_post(&mut self) {
+        let preset = self.view.preset.clone();
+        let pp = &preset.post;
         let key = format!("{pp:?}");
-        if key == self.post_key {
-            return;
+        if key != self.post_key {
+            let lut = tonemap_lut(pp);
+            self.g.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.targets.lut_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                bytemuck::cast_slice(&lut),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(LUT * 8), rows_per_image: Some(LUT) },
+                wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
+            );
+            self.post_key = key;
         }
-        let lut = tonemap_lut(pp);
-        self.g.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &self.targets.lut_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&lut),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(LUT * 8), rows_per_image: Some(LUT) },
-            wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
-        );
-        self.post_key = key;
-        self.size_post();
-    }
-
-    /// The post passes' settings from the view's preset: those that follow the view's size (the bloom's stages, the
-    /// motion blur's reach in pixels) with the rest.
-    fn size_post(&mut self) {
-        let pp = &self.view.preset.post;
         self.bloom = bloom_stages(pp, self.w, self.h);
         self.vignette = pp.vignette;
         // THREERT_NO_GRAIN=1: no film grain (a fresh random pattern every frame; comparisons between frames see it as error).
@@ -653,14 +648,15 @@ impl LiveCore {
         Ok(())
     }
 
-    /// The view is a display's physical pixels, `k` a point: dynamic resolution, from the points' resolution (the rays
-    /// a view in points starts with) down to `MIN_SCALE` of it. A fixed scale is set after it (`set_scale`).
+    /// The view is a display's physical pixels, `k` a point: dynamic resolution runs from the points' resolution (the
+    /// rays a view in points starts with) down to `MIN_SCALE` of it, and starts there again; a fixed scale stays.
     pub fn set_display_scale(&mut self, k: f32) {
         let k = k.max(1.0);
         self.display_scale = k;
         self.min_scale = (MIN_SCALE / k).max(SCALE_FLOOR);
-        self.render_scale = 1.0 / k;
-        self.dynamic_res = true;
+        if self.dynamic_res {
+            self.render_scale = 1.0 / k;
+        }
     }
 
     /// The scene's lighting is changing: something moved or was edited in the last 45 frames, or the scene has spark
@@ -734,7 +730,7 @@ impl LiveCore {
         }
         (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
         self.g.set_accum(&mut self.sc.up, &self.targets.accum);
-        self.size_post();
+        self.apply_post();
         // As a new view: no history, no frame before this one.
         (self.reset, self.prev_isz) = (true, (0, 0));
         Ok(())
@@ -847,7 +843,7 @@ impl LiveCore {
         let composed = read(&fb.buffer, fb.offset, tn * 16)?;
         let spec_pp = t.buf("spec_pp");
         let spec = read(&spec_pp.buffer, spec_pp.offset + n * 8, tn * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
-        let samples = read(&self.targets.accum, 0, tn * 80)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
+        let samples = read(&self.targets.accum, 0, tn * gpu::SAMPLE_BYTES)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
         let (composed, spec, samples): (&[[f32; 4]], &[[u32; 2]], &[[f32; 20]]) = (bytemuck::cast_slice(&composed), bytemuck::cast_slice(&spec), bytemuck::cast_slice(&samples));
         let (mut dif, mut spe, mut emi) = (Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3));
         let finite = |v: f32| if v.is_finite() { v } else { 0.0 };

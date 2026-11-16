@@ -191,6 +191,13 @@ fn edits_in_place_leave_what_a_build_does() {
     assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.view.dof.is_some(), "a depth of field and an exposure: the view stays");
     w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
     assert!(!live.commit(&mut w).unwrap() && live.cam == live.view.camera && live.cam != away, "a lens: the view takes the scene's camera");
+    // A commit that rebuilds (another mesh) and brings another preset with it.
+    w.set_object(13, "more".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_settings(Settings { preset: "cinematic".into(), overrides: Some(serde_json::json!({ "post": { "vignette": 0.3 } })), ..w.settings.clone() });
+    assert!(live.commit(&mut w).unwrap(), "another mesh: a rebuild");
+    let mut fresh = open(&w).unwrap();
+    (picture(&mut live, 1), picture(&mut fresh, 1));
+    same_state("a rebuild with another preset", &live, &fresh);
 }
 
 /// A view at another size, against a view built at that size: the same state and picture, with the scene's data and
@@ -238,4 +245,11 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     // More pixels than a buffer holds.
     assert!(live.resize(1 << 20, 1 << 20).is_err() && (live.w, live.h) == (128, 72), "a size the device does not hold is refused");
     against("a size refused", &mut live, &w);
+    // A display of another density: dynamic resolution starts again from its points' resolution, a fixed scale stays.
+    live.set_scale(0.0);
+    live.set_display_scale(2.0);
+    assert!(live.dynamic_res && live.render_scale == 0.5, "dynamic resolution on a display of two pixels a point");
+    live.set_scale(0.75);
+    live.set_display_scale(1.0);
+    assert!(!live.dynamic_res && live.render_scale == 0.75, "a fixed scale through another density");
 }

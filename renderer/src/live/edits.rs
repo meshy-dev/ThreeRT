@@ -614,8 +614,7 @@ impl LiveCore {
         self.view = view;
         self.view.write(&mut self.sc.base);
         if ch.settings {
-            let preset = self.view.preset.clone();
-            self.apply_post(&preset.post);
+            self.apply_post();
             self.scene_name = world.settings.name.clone();
             self.lit_changed = self.frame.max(1);
         }

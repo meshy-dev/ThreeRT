@@ -232,11 +232,9 @@ impl App {
         if let Some(p) = &pointer {
             eprintln!("view: the game reads input (pointer: {p}){}", if p == "look" { ": click to capture the pointer, Esc lets go" } else { "" });
         }
-        core.set_display_scale(window.scale_factor() as f32);
         core.bounces = a.bounces;
-        if let Some(s) = a.scale {
-            core.set_scale(s);
-        }
+        core.set_scale(a.scale.unwrap_or(0.0));
+        core.set_display_scale(window.scale_factor() as f32);
         let d = &core.g.device;
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("blit"), source: wgpu::ShaderSource::Wgsl(BLIT.into()) });
         let buffer = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None };
@@ -456,15 +454,8 @@ impl ApplicationHandler for App {
                     s.keys.remove(&name);
                 }
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                // A display of another density (the window's pixels follow: `fit`): dynamic resolution's range is a
-                // point's; a fixed scale stays as set.
-                let fixed = (!s.core.dynamic_res).then_some(s.core.render_scale);
-                s.core.set_display_scale(scale_factor as f32);
-                if let Some(v) = fixed {
-                    s.core.set_scale(v);
-                }
-            }
+            // A display of another density (the window's pixels follow: `fit`).
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => s.core.set_display_scale(scale_factor as f32),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = frame(s, &self.cmds, self.services.as_mut(), &self.args, fps) {
                     eprintln!("view: {e:#}");

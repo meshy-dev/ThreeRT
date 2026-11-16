@@ -1218,6 +1218,8 @@ pub const CACHE_SIZE: u64 = 1 << 18;
 /// and the invocations of a dispatch row (DEFERRED_ROW).
 pub const DEFERRED_BYTES: u64 = 96;
 pub const DEFERRED_ROW: u32 = 16384;
+/// The bytes of a traced pixel's samples (records.wgsl `Pixel`), in a view's buffer of them (`Gpu::accum_buffer`).
+pub const SAMPLE_BYTES: u64 = 80;
 
 /// A buffer, or a range of one: in the merged layout (merged.rs) several of the engine's buffers are ranges of the one
 /// buffer a binding holds.
@@ -1298,10 +1300,10 @@ impl KernelBufs {
     }
 
     /// These for a view of another size: the four that follow the size made again, the radiance cache and the loop
-    /// guard's count kept. The merged layout's are one buffer: all of it made again, the cache empty.
-    pub fn resized(&self, d: &wgpu::Device, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
+    /// guard's count kept. The merged layout's are one buffer: all of it made again, the cache (as long) empty.
+    pub fn resized(&self, d: &wgpu::Device, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
         match self.merged {
-            Some(_) => KernelBufs::new(d, true, true, entries, refl, motion, direct, lists),
+            Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, refl, motion, direct, lists),
             None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), refl, motion, direct, lists),
         }
     }
@@ -1949,15 +1951,15 @@ impl Gpu {
         })
     }
 
-    /// A view's buffer of the trace's samples (`Uploaded::accum`): a `Pixel` (80 bytes) a pixel, the largest buffer a
-    /// view holds (`view_fits`).
+    /// A view's buffer of the trace's samples (`Uploaded::accum`): a `Pixel` a pixel, the largest buffer a view holds
+    /// (`view_fits`).
     pub fn accum_buffer(&self, w: u32, h: u32) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("accum"), size: w as u64 * h as u64 * 80, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+        self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("accum"), size: w as u64 * h as u64 * SAMPLE_BYTES, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
     }
 
     /// Whether this device holds a view of `w` x `h` (its samples in one buffer).
     pub fn view_fits(&self, w: u32, h: u32) -> bool {
-        self.buffer_fits(w as u64 * h as u64 * 80)
+        self.buffer_fits(w as u64 * h as u64 * SAMPLE_BYTES)
     }
 
     /// A view's buffer for translucent particles drawn below full resolution (`translucent_bind_group`'s `low`).
