@@ -45,19 +45,21 @@ export interface Recording {
 /**
  * Records `frames` frames of a clip at `fps` after its settling frames. `file(k)` names the PNG of frame k, or null to
  * draw it without keeping it. Every frame is drawn, with its history carried from the frame before, as on screen.
- * `timeoutMs` bounds each wait on the renderer; a timeout throws and leaves the process alone (see `onTimeout`).
+ * `timeoutMs` bounds each wait on a frame, `loadMs` the wait for the first (default 300 s); a timeout throws and leaves
+ * the process alone.
  */
-export async function recordClip(c: Clip, bundle: string, o: { width: number; height: number; fps: number; frames: number; scale: number; room?: string; frameLog: string; file: (k: number) => string | null; timeoutMs?: number; label?: string; bin?: string }): Promise<Recording> {
+export async function recordClip(c: Clip, bundle: string, o: { width: number; height: number; fps: number; frames: number; scale: number; room?: string; frameLog: string; file: (k: number) => string | null; timeoutMs?: number; loadMs?: number; label?: string; bin?: string }): Promise<Recording> {
   const timeout = o.timeoutMs ?? 120_000;
-  const live: Live = startLive({ bin: o.bin ?? rendererBin, assets: repoRoot, presets: join(repoRoot, "presets"), bundles: join(repoRoot, "out/bundles"), label: o.label ?? "reel" }, bundle, { scale: String(o.scale), frameLog: o.frameLog, width: o.width, height: o.height, bounces: c.bounces, room: o.room ?? c.room });
+  const live: Live = startLive({ bin: o.bin ?? rendererBin, assets: repoRoot, presets: join(repoRoot, "presets"), bundles: join(repoRoot, "out/bundles"), label: o.label ?? "reel" }, bundle, { scale: String(o.scale), frameLog: o.frameLog, width: o.width, height: o.height, bounces: c.bounces, room: o.room ?? c.room, firstFrameMs: o.loadMs });
+  // Lockstep from the first frame on: the scene's clock is the frame count, so a clip starts at the same moment of its
+  // scene every time.
+  live.send({ cmd: "lockstep", dt: 1 / o.fps });
   let ok = false;
   try {
     await live.firstFrame;
     for (const cmd of c.before ?? []) live.send(cmd);
     if (c.camera) live.send({ cmd: "camera", ...c.camera(0) });
-    // Lockstep from the first frame: the scene's clock is the frame count, so a clip starts at the same moment of its
-    // scene every time. The settling frames are drawn like the rest and not kept.
-    live.send({ cmd: "lockstep", dt: 1 / o.fps });
+    // The settling frames are drawn like the rest and not kept.
     live.send({ cmd: "frames", n: Math.round((c.settle ?? 4) * o.fps), sync: "settled" });
     await live.wait((l) => l.endsWith("sync settled"), Math.max(timeout, 300_000));
     const pending = [...(c.at ?? [])].sort((a, b) => a[0] - b[0]);

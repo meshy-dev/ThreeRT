@@ -5,9 +5,13 @@ silicon (M3 or later: hardware ray tracing), on AC power, that does not sleep. E
 
 ## Setup
 
-1. Tools: Rust (`rustup`, user-level), Node 24, Bun, ffmpeg (Homebrew).
-2. Assets: a store with what `bun scripts/setup.ts` fetches, plus `orca/bistro`, `orca/zeroday` and the Tokyo city
-   (`city/glb/shiba`, tools/tokyo). Clips whose assets are missing are reported as not run.
+1. Tools: Rust (`rustup`, user-level), Node 24, Bun, Blender (the ORCA scenes), and `brew install ffmpeg-full`
+   (keg-only; plain `ffmpeg` has no drawtext for the grid's labels).
+2. Assets (about 9 GB, an hour): `THREERT_ASSET_STORE=~/reel-ci/threert-assets bun scripts/setup.ts` (with
+   Blender it converts Bistro and Zero-Day), then the Tokyo city: `node tools/city/pipeline/fetch.mjs --area=shiba`,
+   `node --max-old-space-size=4096 tools/city/pipeline/compile.mjs --area=shiba`,
+   `node tools/city/assets/fetch_textures.mjs`, `node tools/tokyo/to-glb.ts --area=shiba`. A clip whose assets are
+   missing is reported as not run.
 3. The runner: Settings → Actions → Runners → New self-hosted runner (macOS, ARM64), unpacked in
    `~/reel-ci/runner`, configured with `--labels reel --name <machine> --unattended`, installed with
    `./svc.sh install && ./svc.sh start` (a launch agent of the logged-in user: Metal needs the user's session).
@@ -20,6 +24,7 @@ silicon (M3 or later: hardware ray tracing), on AC power, that does not sleep. E
    THREERT_REEL_INCIDENT=/Users/<user>/reel-ci/INCIDENT
    CARGO_TARGET_DIR=/Users/<user>/reel-ci/target
    THREERT_BIN=/Users/<user>/reel-ci/target/release/threert-render
+   FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
    PATH=<a PATH with cargo, node, bun, ffmpeg>
    ```
 5. Copy `tools/reel/job-started.sh` to `~/reel-ci/job-started.sh` (a copy, so a checkout cannot change it).

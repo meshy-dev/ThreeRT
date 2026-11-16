@@ -12,13 +12,14 @@
 // marked `truth_fresh`.
 // Checks: every kept frame for black, white or flat (broken); the renderer's error lines; at keyframes ΔE, SSIM and
 // detail against offline and flicker; with --baseline (a previous run.json, normally main's), what got worse.
-// A wait on the renderer that times out writes THREERT_REEL_INCIDENT (default out/reel-incident) and stops: the
-// process is left alone (a hung GPU dispatch is never killed and retried), and the runner takes no job until a person
-// removes the file.
+// A renderer that stops answering (a frame, a load past 15 min, an offline render past 30 min) or reports a panic or
+// a lost device writes THREERT_REEL_INCIDENT (default out/reel-incident) and stops: the process is left alone (a hung
+// GPU dispatch is never killed and retried), and the runner takes no job until a person removes the file.
+// The grid's labels need an ffmpeg with drawtext (FFMPEG=<binary>; Homebrew's ffmpeg-full); without it, no labels.
 // -> DIR/grid.mp4 (4 x 3 tiles of 480 x 270), DIR/<clip>/key-*.png + sheets, DIR/run.json, DIR/summary.md
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import sharp from "sharp";
 import { installAssets } from "../showcase/assets.ts";
@@ -114,15 +115,29 @@ async function flicker(a: string, b: string): Promise<number> {
 const compare = (ref: string, img: string, sheet: string) =>
   JSON.parse(execFileSync(rendererBin, ["compare", ref, img, "--sheet", sheet]).toString().trim().split("\n").pop()!) as { mean_delta_e: number; p99_delta_e: number; ssim: number; luminance_ratio: number };
 
+/** Writes the incident file and stops, leaving any renderer process as it is (a hung GPU dispatch is never killed). */
+function stopOnIncident(what: string): never {
+  writeFileSync(incident, `${new Date().toISOString()} ${what}\n`);
+  console.error(`reel-check: ${what}; wrote ${incident} and stopped`);
+  finish(what);
+  process.exit(3);
+}
+
 /** The offline render of a clip's moment (scene time `time`), cached; whether it was rendered now. */
-function truth(c: CheckClip, bundle: string, t: number, time: number): { path: string; fresh: boolean } {
+async function truth(c: CheckClip, bundle: string, t: number, time: number): Promise<{ path: string; fresh: boolean }> {
   const o = { width: W, height: H, spp: truthSpp, time: r3(time), room: c.room ?? null, camera: c.camera ? offlineCamera(c.camera(t)) : null };
   const key = createHash("sha256").update(readFileSync(bundle)).update(JSON.stringify({ o, v: TRUTH_VERSION })).digest("hex").slice(0, 20);
   const path = join(cache, `${key}.png`);
   if (existsSync(path)) return { path, fresh: false };
   mkdirSync(cache, { recursive: true });
   const extra = [...(o.room ? ["--room", o.room] : []), ...(o.camera ? ["--camera", JSON.stringify(o.camera)] : [])];
-  execFileSync(rendererBin, ["render", bundle, "-o", path, "--assets", repoRoot, "--presets", join(repoRoot, "presets"), "--width", String(W), "--height", String(H), "--spp", String(truthSpp), "--time", String(o.time), ...extra], { stdio: ["ignore", "ignore", "inherit"], timeout: 30 * 60_000 });
+  const tmp = `${path}.${process.pid}.png`;
+  const p = spawn(rendererBin, ["render", bundle, "-o", tmp, "--assets", repoRoot, "--presets", join(repoRoot, "presets"), "--width", String(W), "--height", String(H), "--spp", String(truthSpp), "--time", String(o.time), ...extra], { stdio: ["ignore", "ignore", "inherit"] });
+  const watchdog = setTimeout(() => stopOnIncident(`offline render of ${c.src} at ${o.time} s still running after 30 min`), 30 * 60_000);
+  const code = await new Promise<number | null>((r) => p.on("exit", r));
+  clearTimeout(watchdog);
+  if (code !== 0 || !existsSync(tmp)) throw new Error(`offline render failed (exit ${code})`);
+  renameSync(tmp, path);
   return { path, fresh: true };
 }
 
@@ -140,6 +155,7 @@ function worse(r: ClipResult, b?: ClipResult): string[] {
   if (r.gpu_ms && b.gpu_ms && r.gpu_ms.p50 > b.gpu_ms.p50 * 1.15 + 0.3) why.push(`GPU ms p50 ${b.gpu_ms.p50} -> ${r.gpu_ms.p50}`);
   return why;
 }
+
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
@@ -177,23 +193,22 @@ for (const id of ids) {
   }
   const video = (k: number) => join(frames, `${pad(k / EVERY)}.png`);
   try {
-    const r = await recordClip(c, bundle, { width: W, height: H, fps: FPS, frames: n, scale, frameLog: join(dir, "frames.jsonl"), label: `reel-check ${id}`, file: (k) => keyFrames.get(k) ?? (k % EVERY === 0 ? video(k) : null) });
+    // Loading a large scene (Tokyo: 2.5 GB of tiles) takes minutes; a frame takes milliseconds.
+    const r = await recordClip(c, bundle, { width: W, height: H, fps: FPS, frames: n, scale, loadMs: 15 * 60_000, frameLog: join(dir, "frames.jsonl"), label: `reel-check ${id}`, file: (k) => keyFrames.get(k) ?? (k % EVERY === 0 ? video(k) : null) });
     Object.assign(res, { load_s: r.load_s, gpu_ms: r.gpu_ms, over_budget: r.over_budget, warnings: r.warnings });
   } catch (e) {
     const msg = String((e as Error).message ?? e);
-    if (/timed out/.test(msg)) {
-      writeFileSync(incident, `${new Date().toISOString()} ${id}: ${msg}\n`);
-      console.error(`reel-check: ${id}: the renderer stopped answering; wrote ${incident} and stopped (the process is left alone)`);
-      Object.assign(res, { status: "broken", reasons: [`renderer stopped answering: ${msg.slice(0, 200)}`] });
-      writeFileSync(join(out, "run.json"), JSON.stringify({ incident: true, clips: results }, null, 1) + "\n");
-      process.exit(3);
-    }
-    Object.assign(res, { status: "broken", reasons: [`recording failed: ${msg.slice(0, 300)}`] });
+    Object.assign(res, { status: "broken", reasons: [`${/timed out/.test(msg) ? "renderer stopped answering" : "recording failed"}: ${msg.slice(0, 300)}`] });
+    if (/timed out/.test(msg)) stopOnIncident(`${id}: the renderer stopped answering`);
     console.log(`${id}: broken (${msg.slice(0, 200)})`);
     continue;
   }
+  if (res.warnings.some((l) => /panic|device lost/i.test(l))) {
+    Object.assign(res, { status: "broken", reasons: ["renderer panic / device lost"] });
+    stopOnIncident(`${id}: renderer panic / device lost`);
+  }
   // Keyframes that fall on a video frame go into the video too.
-  for (const [k, f] of keyFrames) if (k % EVERY === 0 && k < n) copyFileSync(f, video(k));
+  for (const [k, f] of keyFrames) if (k % EVERY === 0 && k < n && existsSync(f)) copyFileSync(f, video(k));
   const kept = readdirSync(frames).filter((f) => f.endsWith(".png")).sort();
   if (kept.length !== n / EVERY) res.reasons.push(`${kept.length} of ${n / EVERY} frames`);
   const bad: string[] = [];
@@ -203,13 +218,16 @@ for (const id of ids) {
   }
   res.bad_frames = bad.length;
   if (bad.length) res.reasons.push(`${bad.length} frame(s) with no picture (${bad.slice(0, 3).join(", ")})`);
-  if (res.warnings.some((l) => /panic|device lost/i.test(l))) res.reasons.push("renderer panic / device lost");
   for (const t of keys) {
-    const live = join(dir, `${keyName(t)}.png`);
-    const tr = truth(c, bundle, t, (c.settle ?? 4) + t);
-    copyFileSync(tr.path, join(dir, `${keyName(t)}-offline.png`));
-    const m = compare(tr.path, live, join(dir, `${keyName(t)}-sheet.png`));
-    res.keys.push({ t, dE: r3(m.mean_delta_e), p99: r3(m.p99_delta_e), ssim: r3(m.ssim), lum: r3(m.luminance_ratio), detail: r3(await detail(tr.path, live)), flicker: r3(await flicker(live, join(dir, `${keyName(t)}-next.png`))), truth_fresh: tr.fresh });
+    try {
+      const live = join(dir, `${keyName(t)}.png`);
+      const tr = await truth(c, bundle, t, (c.settle ?? 4) + t);
+      copyFileSync(tr.path, join(dir, `${keyName(t)}-offline.png`));
+      const m = compare(tr.path, live, join(dir, `${keyName(t)}-sheet.png`));
+      res.keys.push({ t, dE: r3(m.mean_delta_e), p99: r3(m.p99_delta_e), ssim: r3(m.ssim), lum: r3(m.luminance_ratio), detail: r3(await detail(tr.path, live)), flicker: r3(await flicker(live, join(dir, `${keyName(t)}-next.png`))), truth_fresh: tr.fresh });
+    } catch (e) {
+      res.reasons.push(`keyframe ${t} s: ${String((e as Error).message ?? e).slice(0, 200)}`);
+    }
   }
   if (res.reasons.length) res.status = "broken";
   else {
@@ -218,50 +236,68 @@ for (const id of ids) {
   }
   console.log(`${id}: ${res.status}${res.reasons.length ? ` (${res.reasons.join("; ")})` : ""}; GPU ms p50 ${res.gpu_ms?.p50}; ${res.keys.map((k) => `ΔE ${k.dE} SSIM ${k.ssim}`).join(", ")}`);
 }
+const status = finish();
+process.exit(status === "broken" ? 1 : 0);
 
-// The grid: 4 x 3 tiles of 480 x 270, each with its clip's name and verdict; a clip not recorded is a grey tile.
-const TW = 480, TH = 270, COLS = 4;
-const font = ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"].find(existsSync);
-const label = (r: ClipResult) => `${r.id}  ${r.status}`.replace(/[:']/g, " ");
-const tiles = ORDER.filter((id) => ids.includes(id)).map((id) => results.find((r) => r.id === id)!);
-const inputs: string[] = [], chains: string[] = [];
-tiles.forEach((r, i) => {
-  const recorded = existsSync(join(out, r.id, "frames", "0000.png"));
-  if (recorded) inputs.push("-framerate", String(FPS / EVERY), "-i", join(out, r.id, "frames", "%04d.png"));
-  else inputs.push("-f", "lavfi", "-i", `color=c=0x303030:s=${TW}x${TH}:r=${FPS / EVERY}:d=${SECONDS}`);
-  const colour = r.status === "ok" ? "white" : r.status === "worse" ? "orange" : "red";
-  const text = font ? `,drawtext=fontfile=${font}:text='${label(r)}':x=8:y=8:fontsize=18:fontcolor=${colour}:box=1:boxcolor=black@0.55:boxborderw=4` : "";
-  chains.push(`[${i}:v]scale=${TW}:${TH}:flags=lanczos,setsar=1${text}[v${i}]`);
-});
-const layout = tiles.map((_, i) => `${(i % COLS) * TW}_${Math.floor(i / COLS) * TH}`).join("|");
-const grid = join(out, "grid.mp4");
-if (tiles.length) {
-  const filter = tiles.length > 1 ? `${chains.join(";")};${tiles.map((_, i) => `[v${i}]`).join("")}xstack=inputs=${tiles.length}:layout=${layout}:fill=black,format=yuv420p[out]` : `${chains[0]};[v0]format=yuv420p[out]`;
-  execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...inputs, "-filter_complex", filter, "-map", "[out]", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-movflags", "+faststart", "-an", grid], { stdio: "inherit" });
-  execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-ss", "2", "-i", grid, "-frames:v", "1", join(out, "grid.jpg")]);
+/** run.json and summary.md, then the grid (its failure is reported, not fatal). Returns the run's status. */
+function finish(incidentNote?: string): ClipResult["status"] {
+  const rank = { ok: 0, "not run": 1, worse: 2, broken: 3 } as const;
+  const status = results.reduce((s, r) => (rank[r.status] > rank[s] ? r.status : s), "ok" as ClipResult["status"]);
+  const finished = new Date();
+  const run: Run = {
+    version: 1, commit: git("rev-parse", "HEAD"), ref: process.env.GITHUB_REF_NAME ?? git("rev-parse", "--abbrev-ref", "HEAD"),
+    started: started.toISOString(), finished: finished.toISOString(), seconds: Math.round((+finished - +started) / 1000),
+    machine: machineName(), adapter, renderer: rendererBin, width: W, height: H, fps: FPS / EVERY, status, clips: results,
+    trigger: Object.fromEntries(Object.entries({ event: process.env.GITHUB_EVENT_NAME, actor: process.env.GITHUB_ACTOR, run_id: process.env.GITHUB_RUN_ID, pr: process.env.REEL_PR, baseline: baseline?.commit, incident: incidentNote }).filter(([, v]) => v)) as Record<string, string>,
+  };
+  const write = (grid: string) => {
+    writeFileSync(join(out, "run.json"), JSON.stringify({ ...run, grid }, null, 1) + "\n");
+    const icon = { ok: "🟢", worse: "🟠", broken: "🔴", "not run": "⚪" };
+    const md = [
+      `### Scene check ${icon[status]} ${status}`,
+      `\`${run.commit.slice(0, 9)}\` on ${run.machine}, ${run.seconds} s${baseline ? `, against \`${baseline.commit.slice(0, 9)}\`` : ""}${incidentNote ? `. **Stopped: ${incidentNote}**` : ""}${grid === "ok" ? "" : `. Grid: ${grid}`}`,
+      "",
+      "| clip | | GPU ms p50 | ΔE / SSIM vs offline | flicker | notes |",
+      "|---|---|---|---|---|---|",
+      ...results.map((r) => `| ${r.id} | ${icon[r.status]} | ${r.gpu_ms?.p50 ?? ""} | ${r.keys.map((k) => `${k.dE} / ${k.ssim}${k.truth_fresh ? "*" : ""}`).join(", ")} | ${r.keys.map((k) => k.flicker).join(", ")} | ${r.reasons.join("; ").replace(/\|/g, "/")} |`),
+      "",
+      results.some((r) => r.keys.some((k) => k.truth_fresh)) ? "\\* offline rendered by this build (not cached)" : "",
+    ].join("\n");
+    writeFileSync(join(out, "summary.md"), md + "\n");
+    return md;
+  };
+  write("not built");
+  let grid = "ok";
+  try {
+    buildGrid();
+  } catch (e) {
+    grid = `failed (${String((e as Error).message ?? e).split("\n")[0].slice(0, 160)})`;
+  }
+  console.log(`\n${write(grid)}\n-> ${out}`);
+  return status;
 }
 
-const rank = { ok: 0, "not run": 1, worse: 2, broken: 3 } as const;
-const status = results.reduce((s, r) => (rank[r.status] > rank[s] ? r.status : s), "ok" as ClipResult["status"]);
-const finished = new Date();
-const run: Run = {
-  version: 1, commit: git("rev-parse", "HEAD"), ref: process.env.GITHUB_REF_NAME ?? git("rev-parse", "--abbrev-ref", "HEAD"),
-  started: started.toISOString(), finished: finished.toISOString(), seconds: Math.round((+finished - +started) / 1000),
-  machine: machineName(), adapter, renderer: rendererBin, width: W, height: H, fps: FPS / EVERY, status, clips: results,
-  trigger: Object.fromEntries(Object.entries({ event: process.env.GITHUB_EVENT_NAME, actor: process.env.GITHUB_ACTOR, run_id: process.env.GITHUB_RUN_ID, pr: process.env.REEL_PR, baseline: baseline?.commit }).filter(([, v]) => v)) as Record<string, string>,
-};
-writeFileSync(join(out, "run.json"), JSON.stringify(run, null, 1) + "\n");
-const icon = { ok: "🟢", worse: "🟠", broken: "🔴", "not run": "⚪" };
-const md = [
-  `### Scene check ${icon[status]} ${status}`,
-  `\`${run.commit.slice(0, 9)}\` on ${run.machine}, ${run.seconds} s${baseline ? `, against \`${baseline.commit.slice(0, 9)}\`` : ""}`,
-  "",
-  "| clip | | GPU ms p50 | ΔE / SSIM vs offline | flicker | notes |",
-  "|---|---|---|---|---|---|",
-  ...results.map((r) => `| ${r.id} | ${icon[r.status]} | ${r.gpu_ms?.p50 ?? ""} | ${r.keys.map((k) => `${k.dE} / ${k.ssim}${k.truth_fresh ? "*" : ""}`).join(", ")} | ${r.keys.map((k) => k.flicker).join(", ")} | ${r.reasons.join("; ")} |`),
-  "",
-  results.some((r) => r.keys.some((k) => k.truth_fresh)) ? "\\* offline rendered by this build (not cached)" : "",
-].join("\n");
-writeFileSync(join(out, "summary.md"), md + "\n");
-console.log(`\n${md}\n-> ${out}`);
-process.exit(status === "broken" ? 1 : 0);
+/** The grid: 4 x 3 tiles of 480 x 270, each with its clip's name and verdict (when ffmpeg has drawtext); a clip not
+ *  recorded is a grey tile. FFMPEG names the binary (default ffmpeg on PATH). */
+function buildGrid() {
+  const ffmpeg = process.env.FFMPEG ?? "ffmpeg";
+  const TW = 480, TH = 270, COLS = 4;
+  const hasText = execFileSync(ffmpeg, ["-hide_banner", "-filters"], { encoding: "utf8" }).includes(" drawtext ");
+  const font = ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"].find(existsSync);
+  const tiles = ORDER.filter((id) => ids.includes(id)).map((id) => results.find((r) => r.id === id) ?? ({ id, status: "not run" } as ClipResult));
+  const inputs: string[] = [], chains: string[] = [];
+  tiles.forEach((r, i) => {
+    const frames = join(out, r.id, "frames");
+    if (existsSync(join(frames, "0000.png"))) inputs.push("-framerate", String(FPS / EVERY), "-i", join(frames, "%04d.png"));
+    else inputs.push("-f", "lavfi", "-i", `color=c=0x303030:s=${TW}x${TH}:r=${FPS / EVERY}:d=${SECONDS}`);
+    const colour = r.status === "ok" ? "white" : r.status === "worse" ? "orange" : "red";
+    const text = hasText && font ? `,drawtext=fontfile=${font}:text='${`${r.id}  ${r.status}`.replace(/[:']/g, " ")}':x=8:y=8:fontsize=18:fontcolor=${colour}:box=1:boxcolor=black@0.55:boxborderw=4` : "";
+    chains.push(`[${i}:v]scale=${TW}:${TH}:flags=lanczos,setsar=1${text}[v${i}]`);
+  });
+  if (!tiles.length) return;
+  const layout = tiles.map((_, i) => `${(i % COLS) * TW}_${Math.floor(i / COLS) * TH}`).join("|");
+  const filter = tiles.length > 1 ? `${chains.join(";")};${tiles.map((_, i) => `[v${i}]`).join("")}xstack=inputs=${tiles.length}:layout=${layout}:fill=black,format=yuv420p[out]` : `${chains[0]};[v0]format=yuv420p[out]`;
+  const grid = join(out, "grid.mp4");
+  execFileSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", ...inputs, "-filter_complex", filter, "-map", "[out]", "-shortest", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-movflags", "+faststart", "-an", grid], { stdio: ["ignore", "inherit", "pipe"] });
+  execFileSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-ss", "2", "-i", grid, "-frames:v", "1", join(out, "grid.jpg")], { stdio: ["ignore", "inherit", "pipe"] });
+}

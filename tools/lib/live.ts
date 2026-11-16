@@ -81,7 +81,7 @@ export interface Live {
 }
 
 /** `stdout`: the runner's stdout lines (what the game posts on the host channel: `{"host":[...]}`); `args`: more flags. */
-export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string; width?: number; height?: number; bounces?: number; stdout?: (line: string) => void; args?: string[] } = {}): Live {
+export function startLive(b: Build, bundle: string, o: { scale?: string; env?: Record<string, string>; frameLog?: string; profile?: boolean; room?: string; width?: number; height?: number; bounces?: number; stdout?: (line: string) => void; args?: string[]; firstFrameMs?: number } = {}): Live {
   const args = ["live", bundle, "--assets", b.assets, "--presets", b.presets, "--width", String(o.width ?? 1280), "--height", String(o.height ?? 720), "--scale", o.scale ?? "0.5"];
   if (o.bounces) args.push("--bounces", String(o.bounces));
   if (o.room) args.push("--room", o.room);
@@ -114,7 +114,7 @@ export function startLive(b: Build, bundle: string, o: { scale?: string; env?: R
     lines,
     send: (c) => p.stdin!.write(JSON.stringify(c) + "\n"),
     wait,
-    firstFrame: wait((l) => l.includes("fps on")).then(() => performance.now() - t0),
+    firstFrame: wait((l) => l.includes("fps on"), o.firstFrameMs).then(() => performance.now() - t0),
     quit: async () => {
       p.stdin!.write(JSON.stringify({ cmd: "quit" }) + "\n");
       const t = setTimeout(() => p.kill(), 10_000);
