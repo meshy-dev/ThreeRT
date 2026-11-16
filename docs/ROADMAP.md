@@ -3051,6 +3051,7 @@ dynamic-resolution floor, 60 Hz camera input.
    - The mannequin plaza's car now has clearcoated paint and a glass cabin with seats inside.
    - Not yet:
      - Thin-walled glass: a single-plane pane refracts as if solid.
+     - (Rough glass as a BSDF with a value and a density: done 2026-11-16, § 1.)
      - Tinted shadows.
      - Light through windows in the radiance cache: it treats glass as a surface, not a window.
      - glTF KHR_materials_transmission / clearcoat.

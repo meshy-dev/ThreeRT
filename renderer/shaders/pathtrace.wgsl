@@ -1369,8 +1369,9 @@ struct Lobes {
     diffuse: vec3<f32>, f0: vec3<f32>, f90: vec3<f32>, w: vec3<f32>, e_spec: vec3<f32>, a2: f32, p_spec: f32,
     coat: f32, coat_alpha: f32, e_coat: f32, p_coat: f32, tint: vec3<f32>, p_trans: f32,
     // The dielectric: its share of the base under the coat x its energy compensation (reflection's factor), `tint`
-    // the same x the base colour (transmission's); n(far side) / n(view side); whether its transmission has a density.
-    t: f32, eta: f32, rough_t: bool,
+    // the same x the base colour (transmission's); n(far side) / n(view side); whether its transmission has a density;
+    // what it reflects toward the viewer of a uniform surround (before the coat).
+    t: f32, eta: f32, rough_t: bool, r_glass: f32,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -1506,6 +1507,7 @@ fn lobes(s: Surface, nov: f32) -> Lobes {
         l.t = t * under * comp;
         l.tint = s.base * l.t;
         let fn_ = fresnel_dielectric(nov, l.eta);
+        l.r_glass = t * fn_;
         wt = t * under * (fn_ + (1.0 - fn_) * dot(s.base, vec3<f32>(0.3, 0.6, 0.1)));
     }
     let total = (ws + wd) * under + l.e_coat + wt;
@@ -3221,7 +3223,8 @@ fn white_lobes() -> Lobes {
 // diffuse + directional specular albedo, under the coat's (as `eval_bsdf_k` layers them; without the coat's term a
 // coated surface reflected e_coat (1 - the rest) too little).
 fn cache_reflectance(lb: Lobes) -> vec3<f32> {
-    let r = lb.diffuse * (1.0 - lb.e_spec) + lb.e_spec;
+    var r = lb.diffuse * (1.0 - lb.e_spec) + lb.e_spec;
+    if (has(F_GLASS)) { r += vec3<f32>(lb.r_glass); }
     if (has(F_COAT)) { return r * (1.0 - lb.e_coat) + lb.e_coat; }
     return r;
 }

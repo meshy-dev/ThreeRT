@@ -1393,6 +1393,27 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
+## Glass
+
+A transmissive material (`transmission`, `ior`, `roughness`) is a rough dielectric interface, Walter et al. 2007
+with GGX (pathtrace.wgsl "The dielectric"): light reflects off a microfacet or refracts through it by the exact
+Fresnel reflectance there. Reflection and transmission both have a value and a density, so lights are sampled
+through frosted glass, on both sides of it, and weighed against the BSDF's rays. Total internal reflection is
+reflection and is not tinted.
+
+- Below roughness 0.05 the transmission is a delta lobe: what lies behind a clear pane is seen straight (the path
+  loop's `through`: no clamp, the live specular signal). The reflection keeps its microfacet lobe.
+- Single scattering loses energy as the roughness grows (leaving glass of roughness 0.6 at 45 degrees: R + T =
+  0.74). With energy compensation the interface is scaled by 1 / (R + T) from a table (Turquin 2019, as Cycles:
+  16 x 16 x 8 x 2 values over the cosine, the roughness, the index and the side; lib.rs `glass_energy_lut`).
+- Shadow rays cross glass straight, weighed by a share of their own (`glass_at`), as before.
+- Not yet: thin walls (a single sheet refracts as a solid's face), absorption by distance, the radiance scaling
+  by the indices' ratio squared (it cancels over a closed solid; Cycles and glTF's formula leave it out too).
+
+Held by `glass/*`: one interface in a white sky from either side against a quadrature over microfacet normals
+done apart, with compensation 1, a lamp seen through frosted glass against the BTDF's integral, a frosted sphere
+in a furnace.
+
 ## What the kernel trusts
 
 The kernel follows indices it reads from buffers and loops over counts it is given; it checks none of them (a

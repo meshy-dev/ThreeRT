@@ -1,10 +1,11 @@
 // The play window's picture against what it should be, in the shots the window's quality work of 2026-11 was measured
 // by (docs/ROADMAP.md § 1a). Each shot bundles its game, drives one headless live session in lockstep and compares
-// its frames with an offline render of the same moment (rendered once and kept: out/cache/window-truth, keyed by the
-// bundle and the shot; --fresh-truth renders them again), or, for the dusk, with the same moment held.
+// its frames with an offline render of the same moment by the same renderer (rendered once and kept:
+// out/cache/window-truth, keyed by the renderer's binary, the bundle and the shot; --fresh-truth renders them again),
+// or, for the dusk, with the same moment held.
 //
-//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,still-rooms-wide,rooms-turn,slice,
-//                               tokyo-dusk,tokyo-turn,tokyo-orbit]
+//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,still-rooms-wide,still-glass,
+//                               rooms-turn,slice,tokyo-dusk,tokyo-turn,tokyo-orbit]
 //                              [--tag NAME] [--fresh-truth]
 //
 // Shots (the bin is THREERT_BIN, else the release build):
@@ -15,6 +16,8 @@
 //       lamps, most behind walls; scale 0.5; offline at 4096 samples): where a light sampler has to find the lamps a
 //       point can see, and what its noise does as they multiply. (The offline render chooses among the lamps
 //       uniformly: with 768 its 4096 samples are still noisy, a floor under every reading of the wide shot.)
+//   still-glass  the same for scenes/khronos-transmission.ts (clear and frosted glass, thin and solid, before a
+//       pattern; scale 0.5).
 //   rooms-turn  lamp-rooms-wide, the camera turning 2 degrees a frame for 24 frames into the scene's view, then still:
 //       the last moving frame and 1, 6, 30 and 150 frames after it against the same offline render.
 //   slice  the Bistro slice half a second after its explosion (40.5 s, from the start in lockstep, scale 0.375, 1440p):
@@ -29,7 +32,7 @@
 // Output: out/bench-window/<tag>/<shot>/*.png, out/bench-window/<tag>/metrics.json, and a table.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import sharp from "sharp";
 import { bundleGame } from "./bundle-game.ts";
@@ -38,7 +41,7 @@ import { startLive, type Build, type Live } from "./lib/live.ts";
 
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "rooms-turn", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
+const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "still-glass", "rooms-turn", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
 const shots = flag("--shots", ALL.join(",")).split(",");
 const tag = flag("--tag", new Date().toISOString().replace(/[:.]/g, "-"));
 const freshTruth = args.includes("--fresh-truth");
@@ -56,9 +59,11 @@ async function bundle(src: string): Promise<string> {
   return bundles.get(src)!;
 }
 
-/** The offline render of a bundle at these settings, rendered once (keyed by the bundle and the settings). */
+/** The offline render of a bundle at these settings, rendered once (keyed by the renderer, the bundle and the
+ *  settings: a build that changes the offline picture is held to its own, not to one kept from before it). */
+const binKey = createHash("sha256").update(readFileSync(rendererBin)).digest("hex");
 function truth(b: string, o: { width: number; height: number; spp: number; time?: number; room?: string; camera?: { position: number[]; target: number[]; fov: number } }): string {
-  const key = createHash("sha256").update(readFileSync(b)).update(JSON.stringify(o)).digest("hex").slice(0, 20);
+  const key = createHash("sha256").update(binKey).update(readFileSync(b)).update(JSON.stringify(o)).digest("hex").slice(0, 20);
   const path = join(repoRoot, "out/cache/window-truth", `${key}.png`);
   if (existsSync(path) && !freshTruth) return path;
   mkdirSync(join(repoRoot, "out/cache/window-truth"), { recursive: true });
@@ -120,6 +125,7 @@ async function still(name: string, src: string, scale: string, env: Record<strin
   mkdirSync(dir, { recursive: true });
   const b = await bundle(src);
   const ref = truth(b, { width: 2560, height: 1440, spp });
+  copyFileSync(ref, join(dir, "ref.png"));
   const live = await session(b, { width: 2560, height: 1440, scale, env: { THREERT_FREEZE_TIME: "1", ...env } });
   const [a, c] = [join(dir, "a.png"), join(dir, "b.png")];
   await frames(live, 300, a);
@@ -239,6 +245,7 @@ for (const s of shots) {
   else if (s === "still-kabukicho") await still(s, "games/kabukicho/kabukicho.game.ts", "0.375", { THREERT_NO_GRAIN: "1" });
   else if (s === "still-rooms") await still(s, "scenes/lamp-rooms.ts", "0.5", {}, 4096);
   else if (s === "still-rooms-wide") await still(s, "scenes/lamp-rooms-wide.ts", "0.5", {}, 4096);
+  else if (s === "still-glass") await still(s, "scenes/khronos-transmission.ts", "0.5", {});
   else if (s === "rooms-turn") await roomsTurn(s);
   else if (s === "slice") await slice();
   else if (s === "tokyo-dusk") await tokyoDusk();
