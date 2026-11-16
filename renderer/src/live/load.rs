@@ -33,14 +33,6 @@ pub(super) struct LoadedScene {
     pub(super) base: gpu::Params,
     /// The live passes' bind groups, a pass each (`Targets::bind_groups`).
     pub(super) bgs: Vec<wgpu::BindGroup>,
-    pub(super) exposure: f32,
-    pub(super) exposure_settings: ExposureSettings,
-    /// The render preset the kernel's parameters and the post passes' settings were taken from.
-    pub(super) preset: crate::desc::Preset,
-    pub(super) tan_half_fov: f32,
-    pub(super) scene_camera: Camera,
-    /// The camera's depth of field (UE: off unless it sets a focus distance).
-    pub(super) dof: Option<crate::desc::Dof>,
     /// GPU table copies that parameter edits rewrite in place (`commit`).
     pub(super) tables: tables::Tables,
     /// CPU copy of the dynamic triangles (posed models: the tail of the GPU triangle order from `dynamic_first`):
@@ -50,12 +42,8 @@ pub(super) struct LoadedScene {
     pub(super) fixed_features: (bool, bool, [usize; crate::GROUPS]),
     /// Where in-place geometry edits write next (`edit_geometry`); a rebuild starts it afresh.
     pub(super) edit: EditState,
-    /// The atmosphere's sky once its sun has moved in place (`move_sun` starts it), and what it bakes with: the
-    /// environment map's size, the viewer's altitude and the environment's light-sampling floor, as the load had them.
-    pub(super) sky: Option<DynamicSky>,
     /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
     pub(super) emit: Option<EmitterWorker>,
-    pub(super) sky_inputs: ((u32, u32), f32, f32),
     /// For materials that start emitting (`add_material_emitters`): their flattened static triangles' runs (`prepare`)
     /// and the flattened triangles' build indices in traversal order (positions in `tris`).
     pub(super) mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
@@ -75,12 +63,10 @@ pub(super) struct DynamicSky {
     /// (sun direction, sun illuminance above the atmosphere, cloud cover)
     pub(super) ask: mpsc::Sender<(glam::Vec3, glam::Vec3, f32)>,
     pub(super) done: mpsc::Receiver<(gpu::EnvMap, Vec<f32>, f32)>,
-    /// The brightest sky texel from which the environment is light-sampled (`Prepared::env_nee_floor`).
-    pub(super) env_nee_floor: f32,
 }
 
 impl DynamicSky {
-    pub(super) fn new(world: &World, (w, h): (u32, u32), altitude: f32, env_nee_floor: f32) -> Option<DynamicSky> {
+    pub(super) fn new(world: &World, (w, h): (u32, u32), altitude: f32) -> Option<DynamicSky> {
         let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, horizon_glow, sun: Some(_), .. } = &world.environment.sky else {
             return None;
         };
@@ -119,7 +105,7 @@ impl DynamicSky {
                 }
             })
             .ok()?;
-        Some(DynamicSky { atm, ask, done, env_nee_floor })
+        Some(DynamicSky { atm, ask, done })
     }
 }
 
@@ -213,7 +199,7 @@ impl EmitterWorker {
     }
 }
 
-pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32, h: u32, targets: &Targets, passes: &Passes) -> Result<(LoadedScene, crate::desc::PostPreset)> {
+pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32, h: u32, targets: &Targets, passes: &Passes) -> Result<(LoadedScene, ViewState, Environment)> {
     let t0 = Instant::now();
     let mut sc = scene::build(world, assets, presets, None)?;
     sc.width = w;
@@ -237,7 +223,11 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
     }
-    let sky_inputs = ((prep.env.width, prep.env.height), sc.camera.position.y.max(0.0), prep.env_nee_floor);
+    let env = Environment {
+        sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
+        settings: sc.environment.clone(),
+    };
+    let view = ViewState::new(&sc.camera, Arc::new(sc.preset.clone()));
     let mut base = prep.params;
     // The live view's own count of light-tree candidates at camera hits (ltree.rs `RIS_LIVE`).
     if base.ltree[3] > 0.5 {
@@ -246,13 +236,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     base.ltile[3] = super::LIST_CANDIDATES;
     base.cam_fwd[3] = w as f32 / h as f32;
     let bgs = targets.bind_groups(&g.device, passes, &up.accum);
-    let exposure_settings = ExposureSettings::new(&sc.camera.exposure, &sc.preset.post);
-    // (Auto: a first guess; the GPU histogram takes the exposure over from frame 1, and the kernel's firefly clamp,
-    // `Params::misc[0]`, keeps `prepare`'s guess.)
-    let exposure = sc.camera.exposure.start();
-    let preset = sc.preset.clone();
-    let c = &sc.camera;
-    let scene_camera = Camera { pos: c.position, fwd: c.forward, up: c.up, right: c.right, tan_half_fov: c.tan_half_fov };
     let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
     let instanced = !sc.gpu_instances.is_empty() || !sc.procs.is_empty();
     let instance_features = gpu::instance_features(&sc);
@@ -303,5 +286,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         inst_at_load: instances.len(),
         added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, preset, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

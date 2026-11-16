@@ -292,12 +292,11 @@ pub struct Changes {
     pub sun: bool,
     /// Another sky (its kind or its parameters): baked and put in place (live/edits.rs `apply_sky`). With `environment`.
     pub sky: bool,
-    /// The scene camera's exposure changed (its mode or its values): applied in place (live/edits.rs `apply_exposure`).
-    pub exposure: bool,
-    /// The scene camera's depth of field changed: the post pass's, in place. (Not `camera`: the view stays where it is.)
-    pub dof: bool,
-    /// The preset, its overrides or the scene's name changed: what a build takes from them is taken again in place
-    /// (live/edits.rs `apply_settings`).
+    /// The scene camera's depth of field or exposure changed: the view's state, taken again in place (live/edits.rs
+    /// `apply_view`). Not `camera`: a view its host moved stays where it is.
+    pub view: bool,
+    /// The preset, its overrides or the scene's name changed: what a view takes from them is taken again in place
+    /// (`apply_view`).
     pub settings: bool,
     /// Models whose animation pose changed.
     pub poses: HashSet<u32>,
@@ -332,7 +331,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || self.dof || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -902,17 +901,16 @@ impl World {
         // In place, when it is the scene's camera: a field of view is the view's (as a camera's move: the view takes
         // it), a depth of field and an exposure are the post passes' (and the kernel's clamp). Nothing is built from a
         // camera that is not the scene's, nor from near and far; a camera made of another kind of object is a new object.
-        let (fov, dof, exposure) = match &o.kind {
-            Kind::Camera(old) => (old.fov != c.fov, old.dof != c.dof, old.exposure != c.exposure),
+        let (fov, rest) = match &o.kind {
+            Kind::Camera(old) => (old.fov != c.fov, old.dof != c.dof || old.exposure != c.exposure),
             _ => {
                 self.changes.structural = true;
-                (false, false, false)
+                (false, false)
             }
         };
         o.kind = Kind::Camera(c);
         self.changes.camera |= active && fov;
-        self.changes.dof |= active && dof;
-        self.changes.exposure |= active && exposure;
+        self.changes.view |= active && rest;
         Ok(())
     }
 
@@ -987,10 +985,8 @@ impl World {
             self.changes.settings = true;
         }
         if old.camera != s.camera {
-            // Another camera: its place and lens, its depth of field and its exposure.
+            // Another camera: the view takes it (its place and lens, its depth of field and its exposure).
             self.changes.camera = true;
-            self.changes.dof = true;
-            self.changes.exposure = true;
         }
         self.settings = s;
     }
@@ -1558,25 +1554,25 @@ mod tests {
         w.take_changes();
         w.set_camera_desc(1, cam(30.0, manual(0.0))).unwrap();
         let c = w.take_changes();
-        assert!(!c.structural && c.camera && !c.exposure && !c.dof, "a lens: the view takes it");
+        assert!(!c.structural && c.camera && !c.view, "a lens: the view takes it");
         let mut with_dof = cam(30.0, manual(0.0));
         with_dof.dof = Some(serde_json::from_value(serde_json::json!({ "focusDistance": 3, "fStop": 2, "sensorWidth": 36 })).unwrap());
         w.set_camera_desc(1, with_dof).unwrap();
         let c = w.take_changes();
-        assert!(!c.structural && !c.camera && c.dof, "a depth of field: the view stays");
+        assert!(!c.structural && !c.camera && c.view, "a depth of field: the view stays");
         w.set_camera_desc(1, cam(30.0, manual(0.0))).unwrap();
         w.take_changes();
         w.set_camera_desc(1, cam(30.0, manual(2.0))).unwrap();
         let c = w.take_changes();
-        assert!(!c.structural && !c.camera && c.exposure, "an exposure value");
+        assert!(!c.structural && !c.camera && c.view, "an exposure value");
         w.set_camera_desc(1, cam(30.0, serde_json::json!({ "mode": "auto", "compensation": 0, "minEv100": -2, "maxEv100": 12 }))).unwrap();
         let c = w.take_changes();
-        assert!(!c.structural && !c.camera && c.exposure, "an exposure mode");
+        assert!(!c.structural && !c.camera && c.view, "an exposure mode");
         w.set_camera_desc(2, cam(20.0, manual(5.0))).unwrap();
         assert!(!w.take_changes().any(), "a camera that is not the scene's");
         w.set_settings(Settings { camera: Some(2), ..w.settings.clone() });
         let c = w.take_changes();
-        assert!(!c.structural && c.camera && c.exposure && c.dof, "the scene's camera is another");
+        assert!(!c.structural && c.camera, "the scene's camera is another");
         w.set_settings(Settings { preset: "preview".into(), ..w.settings.clone() });
         let c = w.take_changes();
         assert!(!c.structural && c.settings, "another preset");

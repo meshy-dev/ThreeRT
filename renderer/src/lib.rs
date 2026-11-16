@@ -622,21 +622,18 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
 
     // Sky / environment.
     let t = Instant::now();
-    let SkyBaked { env, color: sky_color, has_env, sun } = bake_sky(&sc.sky, sc.cloud_cover, sc.camera.position.y.max(0.0));
+    let baked = bake_sky(&sc.sky, sc.environment.cloud_cover, sc.camera.position.y.max(0.0));
     // (The atmosphere's sun: its light's colour is what the bake leaves it.)
-    if let (Some(i), Some(c)) = (sc.retained.sun.and_then(|s| sc.retained.light_nodes.iter().position(|n| *n == s)), sun) {
+    if let (Some(i), Some(c)) = (sc.retained.sun.and_then(|s| sc.retained.light_nodes.iter().position(|n| *n == s)), baked.sun) {
         sc.lights[i].color = [c.x, c.y, c.z, 0.0];
     }
-    let env_cdf = build_env_cdf(&env);
+    let env_cdf = build_env_cdf(&baked.env);
     let procs = [0, sc.procs.len() as u32, sc.gpu_instances.len() as u32, 0];
     // Environment light sampling (one shadow ray per vertex) is skipped when the sky is negligible next to the emitters
-    // (night streets): escaping BSDF rays still pick it up, with full MIS weight. The emitters as if all on: a
-    // time-of-day room loaded by day decides at dusk as one loaded at night does (live/edits.rs `put_sky`).
-    let env_max = sky_brightest(&env, sky_color);
+    // (night streets): escaping BSDF rays still pick it up, with full MIS weight (`SkyBaked::write`). The emitters as
+    // if all on: a time-of-day room loaded by day decides at dusk as one loaded at night does (live/edits.rs `put_sky`).
     let em_area: f32 = emitters[..emitter_tris.len()].iter().map(|e| e[3]).sum();
     let env_nee_floor = if emitter_tris.is_empty() { 0.0 } else { 0.01 * all_power / em_area.max(1e-6) };
-    // (A uniform sky is sampled regardless of `env_nee_on`: it reads no table.)
-    let env_nee = sky_sampled(env_max, env_nee_floor, has_env);
     // The kernel's light order (`light_order`).
     let class = light_class;
     let order = light_order(&sc.lights);
@@ -648,8 +645,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let first_shadowed = sc.lights.iter().position(|l| class(l) == 2).unwrap_or(sc.lights.len()) as u32;
     timings.push(("sky_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
 
-    let preset = sc.preset.clone();
-    let fog = fog_params(sc.fog.as_ref());
     let cam = &sc.camera;
     let aspect = sc.width as f32 / sc.height as f32;
     let (lens_radius, focus) = match &cam.dof {
@@ -666,16 +661,18 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         cam_right: [cam.right.x, cam.right.y, cam.right.z, lens_radius],
         cam_up: [cam.up.x, cam.up.y, cam.up.z, focus],
         size: [sc.width, sc.height, 0, rng_seed()],
-        counts: [sc.lights.len() as u32, if total > 0.0 { emitter_tris.len() as u32 } else { 0 }, preset.native.max_bounces, preset.native.russian_roulette_depth],
-        env: [if has_env { 1.0 } else { 0.0 }, env.width as f32, env.height as f32, -1.0],
-        misc: [preset.native.firefly_clamp(&cam.exposure), total, preset.native.energy_compensation, 0.0],
-        sky_color: [sky_color.x, sky_color.y, sky_color.z, 0.0],
-        counts2: [n_dir, env_nee as u32, 0, first_shadowed],
-        time: [sc.time, sc.wetness, sc.rain, sc.media.len() as f32],
-        fog: fog[0],
-        fog_color: fog[1],
-        vol: fog[2],
-        vol2: fog[3],
+        // (The preset's and the exposure's: `Params::set_preset`; the sky's: `SkyBaked::write`; the environment's:
+        // `EnvSettings::write`. Below.)
+        counts: [sc.lights.len() as u32, if total > 0.0 { emitter_tris.len() as u32 } else { 0 }, 0, 0],
+        env: [0.0, 0.0, 0.0, -1.0],
+        misc: [0.0, total, 0.0, 0.0],
+        sky_color: [0.0; 4],
+        counts2: [n_dir, 0, 0, first_shadowed],
+        time: [sc.time, 0.0, 0.0, sc.media.len() as f32],
+        fog: [0.0; 4],
+        fog_color: [0.0; 4],
+        vol: [0.0; 4],
+        vol2: [0.0; 4],
         raster: [0.0; 4],
         cache: [0.0; 4],
         // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
@@ -684,8 +681,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         group_first: [[0; 4]; 2],
         light_lod: [0.0; 4],
         emit_power: [total, 0.0, 0.0, 0.0],
-        aerial: sc.aerial,
-        background: sc.background.map_or([0.0; 4], |b| [b.x, b.y, b.z, 1.0]),
+        aerial: [0.0; 4],
+        background: [0.0; 4],
         lod_view: [0.0; 4],
         ltree: ltree_param,
         procs,
@@ -700,6 +697,10 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         live_len: [0; 4],
     };
     let mut params = params;
+    params.set_preset(&sc.preset.native, &cam.exposure);
+    baked.write(&mut params, env_nee_floor);
+    sc.environment.write(&mut params);
+    let env = baked.env;
     let mut first = 0u32;
     for (g, &count) in groups.iter().enumerate() {
         params.group_first[g / 4][g % 4] = first;
@@ -881,6 +882,16 @@ pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBak
         }
         scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, color: *c, has_env: false, sun: None },
         scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, color: Vec3::ZERO, has_env: false, sun: None },
+    }
+}
+
+impl SkyBaked {
+    /// The kernel's parameters for it: whether it is a map and its size, a uniform sky's colour, whether it is
+    /// light-sampled (`floor`: `Prepared::env_nee_floor`).
+    pub fn write(&self, p: &mut gpu::Params, floor: f32) {
+        p.env = [if self.has_env { 1.0 } else { 0.0 }, self.env.width as f32, self.env.height as f32, p.env[3]];
+        p.sky_color = [self.color.x, self.color.y, self.color.z, 0.0];
+        p.counts2[1] = sky_sampled(sky_brightest(&self.env, self.color), floor, self.has_env) as u32;
     }
 }
 

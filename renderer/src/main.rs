@@ -282,7 +282,6 @@ fn main() -> Result<()> {
                 ("lights", bytemuck::cast_slice::<_, u8>(&e.lights) == bytemuck::cast_slice::<_, u8>(&b.lights)),
                 ("object power", power(&e.objects) == power(&b.objects)),
                 ("emitters", bits(&ea, e.emitter_tris.len()) == bits(&pb.emitters, pb.emitter_tris.len())),
-                ("wetness / rain", (e.wetness, e.rain) == (b.wetness, b.rain)),
             ];
             println!("{}", serde_json::json!({ "structural": applied.is_none(), "checks": checks.iter().map(|(k, ok)| (k.to_string(), *ok)).collect::<std::collections::BTreeMap<_, _>>() }));
             if applied.is_none() || checks.iter().any(|(_, ok)| !ok) {

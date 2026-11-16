@@ -406,6 +406,43 @@ pub struct CameraData {
     pub dof: Option<desc::Dof>,
 }
 
+/// The environment beside its sky, as the world describes it: one derivation (`of`) for a build and for an edit, one
+/// place that says what the kernel takes from it (`write`, `features`).
+#[derive(Clone, Debug)]
+pub struct EnvSettings {
+    pub fog: Option<desc::Fog>,
+    /// three.js `scene.background` (`desc::Environment::background`): the kernel's F_BACKGROUND, `Params::background`.
+    pub background: Option<[f32; 3]>,
+    /// The sky's aerial perspective (`aerial_params`): the kernel's F_AERIAL, `Params::aerial`.
+    pub aerial: [f32; 4],
+    /// Global wetness and rain intensity (0..1).
+    pub wetness: f32,
+    pub rain: f32,
+    /// Cloud cover (0..1) of an atmosphere sky: the sky is baked with it (`bake_sky`).
+    pub cloud_cover: f32,
+}
+
+impl EnvSettings {
+    pub fn of(w: &World) -> EnvSettings {
+        let e = &w.environment;
+        EnvSettings { fog: e.fog.clone(), background: e.background, aerial: aerial_params(&e.sky), wetness: e.wetness.clamp(0.0, 1.0), rain: e.rain.clamp(0.0, 1.0), cloud_cover: e.cloud_cover.clamp(0.0, 1.0) }
+    }
+
+    /// The kernel's parameters for them.
+    pub fn write(&self, p: &mut crate::gpu::Params) {
+        p.time[1] = self.wetness;
+        p.time[2] = self.rain;
+        p.background = self.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]);
+        p.aerial = self.aerial;
+        [p.fog, p.fog_color, p.vol, p.vol2] = crate::fog_params(self.fog.as_ref());
+    }
+
+    /// The kernel features they ask for (`gpu::environment_features`).
+    pub fn features(&self) -> u32 {
+        crate::gpu::environment_features(self.fog.as_ref(), self.background.is_some(), self.aerial)
+    }
+}
+
 pub enum SkyData {
     None,
     Color(Vec3),
@@ -453,12 +490,8 @@ pub struct Scene {
     pub lights: Vec<GpuLight>,
     pub camera: CameraData,
     pub sky: SkyData,
-    pub fog: Option<desc::Fog>,
-    /// Global wetness and rain intensity (0..1).
-    pub wetness: f32,
-    pub rain: f32,
-    /// Cloud cover (0..1) of an atmosphere sky.
-    pub cloud_cover: f32,
+    /// The environment beside its sky (`EnvSettings::of`).
+    pub environment: EnvSettings,
     pub preset: desc::Preset,
     pub stats: HashMap<&'static str, f64>,
     /// Triangle ranges per object (name, first, end), in `tris` order: picking and selection outlines.
@@ -468,10 +501,6 @@ pub struct Scene {
     /// Some object has instance colours (`InstanceTable::colors`): the kernel's F_TINT, 4 vec4s an object
     /// (`object_stride`).
     pub tinted: bool,
-    /// three.js `scene.background` (`desc::Environment::background`): the kernel's F_BACKGROUND, `Params::background`.
-    pub background: Option<Vec3>,
-    /// The sky's aerial perspective (`aerial_params`): the kernel's F_AERIAL, `Params::aerial`.
-    pub aerial: [f32; 4],
     /// Instanced static glTF meshes (model-space triangles, flags, attributes) and their placements. `prepare` appends
     /// the pool after the flattened triangles (hardware RT) or flattens the instances (software traversal).
     pub pool_tris: Vec<[Vec3A; 3]>,
@@ -1802,7 +1831,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         }
     }
 
-    let env = &w.environment;
     let (sky, sun) = sky_data(w, assets, &|id| worlds.get(&id).copied().unwrap_or(Mat4::IDENTITY))?;
     retained.sun = sun;
 
@@ -1867,17 +1895,12 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         lights,
         camera: camera.ok_or_else(|| anyhow!("no camera (settings.camera must name a camera object)"))?,
         sky,
-        fog: env.fog.clone(),
-        wetness: env.wetness.clamp(0.0, 1.0),
-        rain: env.rain.clamp(0.0, 1.0),
-        cloud_cover: env.cloud_cover.clamp(0.0, 1.0),
+        environment: EnvSettings::of(w),
         preset,
         stats,
         tri_nodes,
         tri_instances,
         tinted,
-        background: w.environment.background.map(Vec3::from),
-        aerial: aerial_params(&w.environment.sky),
         retained,
         particles,
         particle_fns,

@@ -1559,8 +1559,18 @@ pub fn huge(groups: [usize; GROUPS], instanced: bool) -> bool {
 
 /// Features a scene needs; `THREERT_FEATURES` (bit mask) restricts them for profiling.
 pub fn features(scene: &Scene, groups: [usize; GROUPS]) -> u32 {
-    let environment = environment_features(scene.fog.as_ref(), scene.background.is_some(), scene.aerial);
-    features_of(&scene.materials, environment, !scene.textures.is_empty(), !scene.shaders.is_empty(), groups, instance_features(scene))
+    features_of(&scene.materials, scene.environment.features(), !scene.textures.is_empty(), !scene.shaders.is_empty(), groups, instance_features(scene))
+}
+
+impl Params {
+    /// What the kernel takes from the render preset and the camera's exposure: the bounce limit, the depth Russian
+    /// roulette starts at, the firefly clamp on indirect paths (relative to the exposure), energy compensation.
+    pub fn set_preset(&mut self, native: &crate::desc::NativePreset, exposure: &crate::desc::Exposure) {
+        self.counts[2] = native.max_bounces;
+        self.counts[3] = native.russian_roulette_depth;
+        self.misc[0] = native.firefly_clamp(exposure);
+        self.misc[2] = native.energy_compensation;
+    }
 }
 
 /// Kernel features of the environment, which edits change: fog (F_FOG, with lit scattering F_VOLUME), a background

@@ -3,7 +3,7 @@
 //! colour / intensity, material parameters, wetness / rain / fog, camera); `LiveCore::commit` uploads them.
 
 use crate::desc;
-use crate::scene::{self, CameraData, GpuLight, GpuMaterial, Retained};
+use crate::scene::{self, GpuLight, GpuMaterial, Retained};
 use crate::world::{Changes, Kind, World};
 use crate::EmitterTri;
 use anyhow::{anyhow, Result};
@@ -22,14 +22,11 @@ pub struct Dirty {
     /// Power edits held back (`Tables::defer_powers`): the live view's emitter worker rebuilds the CDF and the tree's
     /// powers for them, and they land together.
     pub deferred: bool,
-    /// Wetness / rain / fog kernel parameters.
-    pub environment: bool,
-    pub camera: bool,
 }
 
 impl Dirty {
     pub fn any(&self) -> bool {
-        self.materials || self.lights || self.objects || self.emitters || self.deferred || self.environment || self.camera
+        self.materials || self.lights || self.objects || self.emitters || self.deferred
     }
 }
 
@@ -43,22 +40,12 @@ pub struct Tables {
     pub light_tree: Option<crate::ltree::LightTree>,
     /// Materials that have emitter triangles (others cannot start emitting without a rebuild).
     pub(crate) emissive: HashSet<u32>,
-    pub wetness: f32,
-    pub rain: f32,
-    /// Cloud cover (0..1): a change re-bakes the sky and dims the sun (live/edits.rs `move_sun`).
-    pub cloud_cover: f32,
-    pub fog: Option<desc::Fog>,
-    /// three.js `scene.background` (`Params::background`).
-    pub background: Option<[f32; 3]>,
     /// A material that starts emitting gets emitter entries in place (the live view sets these up, `prepare`'s
     /// `mat_runs` / `fixed_mats`): it is queued in `started_emitting` for live/edits.rs `add_material_emitters`, unless its
     /// triangles include pool or dynamic ones (fixed: a rebuild flattens them). Off: such a material rebuilds.
     pub emit_in_place: bool,
     pub fixed_mats: HashSet<u32>,
     pub started_emitting: Vec<u32>,
-    /// `scene::aerial_params` of the sky.
-    pub aerial: [f32; 4],
-    pub camera: Option<CameraData>,
     /// Object -> its entries in `lights`.
     pub light_index: HashMap<u32, Vec<usize>>,
     /// vec4s an object in `objects` (`scene::object_stride`).
@@ -84,16 +71,9 @@ impl Tables {
             emissive: emitter_tris.iter().map(|e| e.mat).collect(),
             emitter_tris,
             light_tree,
-            wetness: sc.wetness,
-            rain: sc.rain,
-            cloud_cover: sc.cloud_cover,
-            fog: sc.fog.clone(),
-            background: sc.background.map(|b| b.to_array()),
             emit_in_place: false,
             fixed_mats: HashSet::new(),
             started_emitting: vec![],
-            aerial: sc.aerial,
-            camera: None,
             light_index,
             stride: sc.object_stride(),
             defer_powers: false,
@@ -110,14 +90,6 @@ impl Tables {
     }
 
     /// Applies parameter changes; Err / Ok(None) means the scene must be rebuilt instead.
-    /// The kernel features the scene needs as these tables are: what the materials and the environment ask for (edits
-    /// change them), with the scene's structural ones (`fixed`: textures, material functions, the traversal groups;
-    /// `structure`: `gpu::instance_features`).
-    pub fn features(&self, (textures, functions, groups): (bool, bool, [usize; crate::GROUPS]), structure: u32) -> u32 {
-        let environment = crate::gpu::environment_features(self.fog.as_ref(), self.background.is_some(), self.aerial);
-        crate::gpu::features_of(&self.materials, environment, textures, functions, groups, structure)
-    }
-
     pub fn apply(&mut self, w: &World, c: &Changes, now: f32) -> Result<Option<Dirty>> {
         if c.structural || !c.poses.is_empty() || !c.moved.is_empty() {
             return Ok(None);
@@ -176,21 +148,6 @@ impl Tables {
             }
             self.materials[mi as usize] = gm;
             d.materials = true;
-        }
-        if c.environment {
-            self.wetness = w.environment.wetness.clamp(0.0, 1.0);
-            self.rain = w.environment.rain.clamp(0.0, 1.0);
-            self.cloud_cover = w.environment.cloud_cover.clamp(0.0, 1.0);
-            self.fog = w.environment.fog.clone();
-            self.background = w.environment.background;
-            self.aerial = scene::aerial_params(&w.environment.sky);
-            d.environment = true;
-        }
-        if c.camera {
-            let Some(cid) = w.settings.camera else { return Ok(None) };
-            let Some(Kind::Camera(cam)) = w.objects.get(&cid).map(|o| &o.kind) else { return Ok(None) };
-            self.camera = Some(scene::camera_data(w.world_matrix(cid), cam));
-            d.camera = true;
         }
         Ok(Some(d))
     }

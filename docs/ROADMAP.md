@@ -2560,6 +2560,20 @@ takes one pays is the bake: 0.1 ms for a colour, 6 for a gradient, 47 for an atm
 the scene's 0.5 to 0.9 s). No picture changed (render-identity; the live volume tests' own spread is wider than
 two runs show: five runs a side, none differ).
 
+**The view's state and the environment beside the scene's data (2026-11-16, after it).** The live view kept the
+scene camera's lens, depth of field and exposure, the preset, and the sky's state in the struct a rebuild replaces
+with the scene's data, the fog and the background in the tables beside materials and lights, and wrote each from
+two places, the load and an edit, which a test held equal (and found apart once: the emitter cull's cone). They
+are two objects of the view now (`live/state.rs`): `ViewState` and `Environment`, each derived whole from the world
+by one function, at load and on an edit, and the kernel's parameters each of them says are written by one function
+that the build calls too (`Params::set_preset`, `EnvSettings::write`, `SkyBaked::write`). Two change flags that
+came to mean the same (the camera's exposure, its depth of field) are one. No behaviour is meant to change, and
+one does: after a rebuild that changed the cloud cover, the next commit no longer bakes the sky again.
+What other engines do was read first: a scene container without camera, size or post state, size-dependent
+buffers and histories owned by the view, and the environment an object of its own are common to all read; which
+side the environment hangs on is not (here the scene's, as the scene DSL has it). Still against that: the
+per-pixel accumulation buffer is made with the scene's data. Resize moves it to the view.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

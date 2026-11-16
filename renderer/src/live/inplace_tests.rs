@@ -54,12 +54,13 @@ fn camera(fov: f32, dof: Option<f32>, exposure: serde_json::Value) -> crate::des
 /// the view), and what else these edits reach: the lights' table and the sun, the sky's map, what the passes after
 /// the kernel take. (After a frame: the frame writes the light LOD's reference.)
 fn state(c: &LiveCore) -> (Vec<u32>, String) {
-    let s = &c.sc;
+    let (s, v, sky) = (&c.sc, &c.view, &c.env.sky);
     let rest = format!(
-        "features {:#x} | sun {:?} map {:?} lights {:?} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
-        s.up.kernel.features, s.tables.retained.sun, s.sky_inputs.0, bytemuck::cast_slice::<_, u32>(&s.tables.lights),
-        s.exposure, s.exposure_settings.ae, s.exposure_settings.ae2, s.exposure_settings.speed, s.exposure_settings.lx,
-        s.tan_half_fov, s.dof, s.scene_camera.pos, s.scene_camera.fwd, s.scene_camera.tan_half_fov,
+        "features {:#x} | sun {:?} lights {:?} | environment {:?} sky {:?} {} {} | exposure {} {:?} | {:?} {:?} | post {} {:?} {} {:?} {:?} | {}",
+        s.up.kernel.features, s.tables.retained.sun, bytemuck::cast_slice::<_, u32>(&s.tables.lights),
+        // (Not the altitude the sky was baked for: a view keeps its sky when its camera moves, a build bakes anew.)
+        c.env.settings, sky.map, sky.floor, sky.cover,
+        v.exposure, v.exposure_settings, v.camera, v.dof,
         c.post_key, c.bloom, c.vignette, c.post, c.blur, c.scene_name
     );
     let camera = (std::mem::offset_of!(gpu::Params, cam_up) + 16) / 4;
@@ -185,7 +186,7 @@ fn edits_in_place_leave_what_a_build_does() {
     let away = Camera { pos: live.cam.pos + Vec3::new(0.5, 0.0, 0.0), ..live.cam };
     live.cam = away;
     w.set_camera_desc(6, camera(70.0, Some(3.0), manual(2.0))).unwrap();
-    assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.sc.dof.is_some(), "a depth of field and an exposure: the view stays");
+    assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.view.dof.is_some(), "a depth of field and an exposure: the view stays");
     w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
-    assert!(!live.commit(&mut w).unwrap() && live.cam == live.sc.scene_camera && live.cam != away, "a lens: the view takes the scene's camera");
+    assert!(!live.commit(&mut w).unwrap() && live.cam == live.view.camera && live.cam != away, "a lens: the view takes the scene's camera");
 }

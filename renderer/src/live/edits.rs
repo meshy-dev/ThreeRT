@@ -358,7 +358,7 @@ impl LiveCore {
             if self.sc.tables.add_materials(world, &changes.new_materials) {
                 self.upload_materials();
                 // (A clear coat, an unlit material: the kernel variant with it, compiled once.)
-                self.sc.up.kernel.features = self.sc.tables.features(self.sc.fixed_features, self.sc.instance_features);
+                self.sc.up.kernel.features = self.kernel_features();
             } else {
                 self.fallback = Some("a new material that cannot be added in place (it emits, is glass or a cutout)".into());
                 self.fallbacks += 1;
@@ -533,10 +533,19 @@ impl LiveCore {
                 self.g.set_medium(&self.sc.up, *id, None, Some(o.custom));
             }
         }
-        // Another sky, before the tables take the rest of the environment; one whose map cannot grow in place rebuilds.
+        // What is not the scene's data (state.rs), each derived again whole from the world, before the tables' edits. The
+        // environment's settings, then its sky (one whose map cannot grow in place rebuilds), then the view (a world
+        // that names no camera rebuilds, and the build says so).
+        if changes.environment && !changes.structural {
+            self.env.settings = scene::EnvSettings::of(world);
+            self.env.settings.write(&mut self.sc.base);
+        }
         if changes.sky && !changes.structural && !self.apply_sky(world)? {
             self.fallback = Some("a sky whose map does not fit the scene's buffers in place".into());
             self.fallbacks += 1;
+            changes.structural = true;
+        }
+        if (changes.camera || changes.view || changes.settings) && !changes.structural && !self.apply_view(world, &changes)? {
             changes.structural = true;
         }
         let now = shader_time(self.time);
@@ -546,7 +555,7 @@ impl LiveCore {
             self.rebuild(world)?;
             self.rebuild_ms += t.elapsed().as_secs_f32() * 1e3;
             if changes.camera {
-                self.cam = self.sc.scene_camera;
+                self.cam = self.view.camera;
             }
             return Ok(true);
         };
@@ -569,45 +578,51 @@ impl LiveCore {
         } else if d.deferred {
             self.send_powers();
         }
-        let (e, b) = (&mut self.sc.tables, &mut self.sc.base);
-        if d.environment {
-            b.time[1] = e.wetness;
-            b.time[2] = e.rain;
-            b.background = e.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]);
-            b.aerial = e.aerial;
-            [b.fog, b.fog_color, b.vol, b.vol2] = crate::fog_params(e.fog.as_ref());
-        }
-        if d.materials || d.environment {
+        if d.materials || changes.environment {
             // (Fog or a background appearing, a clear coat: the kernel's variant with it, compiled once, then cached.)
-            self.sc.up.kernel.features = e.features(self.sc.fixed_features, self.sc.instance_features);
-        }
-        if let Some(c) = e.camera.take() {
-            self.sc.scene_camera = Camera { pos: c.position, fwd: c.forward, up: c.up, right: c.right, tan_half_fov: c.tan_half_fov };
-            self.sc.tan_half_fov = c.tan_half_fov;
-            self.sc.dof = c.dof.clone();
-            self.cam = self.sc.scene_camera;
+            self.sc.up.kernel.features = self.kernel_features();
         }
         // Lighting changed: for 45 frames the histories hold HISTORY_LIVE frames at most (`live_lighting`), and where the
         // change is strong the temporal pass cuts the history locally (anti-lag).
-        if d.materials || d.lights || d.objects || d.environment {
+        if d.materials || d.lights || d.objects || changes.environment {
             self.lit_changed = self.frame.max(1);
         }
         // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
-        if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
-            self.sky_cover = self.sc.tables.cloud_cover;
+        if changes.sun || self.env.settings.cloud_cover != self.env.sky.cover {
+            self.env.sky.cover = self.env.settings.cloud_cover;
             self.move_sun(world);
         }
-        if changes.settings {
-            self.apply_settings(world)?;
+        Ok(false)
+    }
+
+    /// The kernel features the scene needs as it is now: what its materials and the environment ask for (edits change
+    /// them), with the structural ones the build found (textures, material functions, the traversal groups;
+    /// `gpu::instance_features`). A new variant is compiled once, then cached.
+    pub(super) fn kernel_features(&self) -> u32 {
+        let (textures, functions, groups) = self.sc.fixed_features;
+        gpu::features_of(&self.sc.tables.materials, self.env.settings.features(), textures, functions, groups, self.sc.instance_features)
+    }
+
+    /// The view's state from the world as it is now (`ViewState::of`: the scene's camera with its lens, depth of field
+    /// and exposure; the preset, read again when the settings changed), the kernel's parameters it says, and with
+    /// another preset the post passes' settings. The view takes the scene's camera when that moved, changed its lens
+    /// or is another one (`Changes::camera`); one its host moved stays through the rest. False: the world names no
+    /// camera.
+    pub(super) fn apply_view(&mut self, world: &World, ch: &crate::world::Changes) -> Result<bool> {
+        let keep = (!ch.settings).then(|| self.view.preset.clone());
+        let Some(view) = ViewState::of(world, &self.presets, keep)? else { return Ok(false) };
+        self.view = view;
+        self.view.write(&mut self.sc.base);
+        if ch.settings {
+            let preset = self.view.preset.clone();
+            self.apply_post(&preset.post);
+            self.scene_name = world.settings.name.clone();
             self.lit_changed = self.frame.max(1);
         }
-        if changes.exposure || changes.settings {
-            self.apply_exposure(world);
+        if ch.camera {
+            self.cam = self.view.camera;
         }
-        if changes.dof {
-            self.sc.dof = world.scene_camera().and_then(|c| c.dof.clone());
-        }
-        Ok(false)
+        Ok(true)
     }
 
     /// The atmosphere's sun moved (time of day): its light entry is rewritten now (direction, and its colour through
@@ -615,12 +630,11 @@ impl LiveCore {
     /// move). Lockstep frames wait for the bake, so a lockstep run sees the sky that goes with each sun.
     pub(super) fn move_sun(&mut self, world: &World) {
         let Some((id, dir, lux)) = scene::atmosphere_sun(world) else { return };
-        if self.sc.sky.is_none() {
-            let (size, alt, floor) = self.sc.sky_inputs;
-            self.sc.sky = DynamicSky::new(world, size, alt, floor);
+        if self.env.sky.worker.is_none() {
+            self.env.sky.worker = DynamicSky::new(world, self.env.sky.map, self.env.sky.altitude);
         }
-        let Some(sky) = self.sc.sky.as_ref() else { return };
-        let cover = self.sc.tables.cloud_cover;
+        let Some(sky) = self.env.sky.worker.as_ref() else { return };
+        let cover = self.env.settings.cloud_cover;
         let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux, cover);
         let e = &mut self.sc.tables;
         if e.set_sun_light(world, id, colour) {
@@ -641,17 +655,14 @@ impl LiveCore {
     /// its own again. False, with nothing changed, when the map's CDF cannot grow in place (`Gpu::put_env`).
     pub(super) fn apply_sky(&mut self, world: &World) -> Result<bool> {
         let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id))?;
-        let altitude = world.settings.camera.map_or(self.sc.sky_inputs.1, |id| world.world_matrix(id).w_axis.y.max(0.0));
-        let cover = world.environment.cloud_cover.clamp(0.0, 1.0);
+        let altitude = world.settings.camera.map_or(self.env.sky.altitude, |id| world.world_matrix(id).w_axis.y.max(0.0));
+        let cover = self.env.settings.cloud_cover;
         let baked = crate::bake_sky(&sky, cover, altitude);
         if !self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env)) {
             return Ok(false);
         }
-        let floor = self.sc.sky_inputs.2;
-        let b = &mut self.sc.base;
-        b.env = [if baked.has_env { 1.0 } else { 0.0 }, baked.env.width as f32, baked.env.height as f32, b.env[3]];
-        b.sky_color = [baked.color.x, baked.color.y, baked.color.z, 0.0];
-        b.counts2[1] = crate::sky_sampled(crate::sky_brightest(&baked.env, baked.color), floor, baked.has_env) as u32;
+        let floor = self.env.sky.floor;
+        baked.write(&mut self.sc.base, floor);
         // The lights: what was the sun, and what is.
         let e = &mut self.sc.tables;
         let was = std::mem::replace(&mut e.retained.sun, sun);
@@ -668,16 +679,14 @@ impl LiveCore {
             self.sc.up.put_lights(&self.g.queue, &e.lights);
         }
         // (The worker that re-bakes a dynamic sky is this sky's no longer: the next move of the sun starts one.)
-        self.sc.sky = None;
-        self.sc.sky_inputs = ((baked.env.width, baked.env.height), altitude, floor);
-        self.sky_cover = cover;
+        self.env.sky = SkyState { map: (baked.env.width, baked.env.height), altitude, floor, cover, worker: None };
         self.lit_changed = self.frame.max(1);
         Ok(true)
     }
 
     /// A sky the worker thread has baked since the last frame (the newest), into the environment map and its CDF.
     pub(super) fn take_sky(&mut self) {
-        let Some(sky) = self.sc.sky.as_ref() else { return };
+        let Some(sky) = self.env.sky.worker.as_ref() else { return };
         let mut last = None;
         while let Ok(b) = sky.done.try_recv() {
             last = Some(b);
@@ -688,37 +697,14 @@ impl LiveCore {
     }
 
     pub(super) fn put_sky(&mut self, (env, cdf, max): (gpu::EnvMap, Vec<f32>, f32)) {
-        let Some(sky) = self.sc.sky.as_ref() else { return };
         // (The worker bakes at the map's size: written in place.)
-        if !self.g.put_env(&mut self.sc.up, &env, &cdf) {
+        if self.env.sky.worker.is_none() || !self.g.put_env(&mut self.sc.up, &env, &cdf) {
             return;
         }
         // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night), or a
-        // baked sky is not light-sampled at all (`env_nee_on`).
-        self.sc.base.counts2[1] = (max >= sky.env_nee_floor && crate::env_nee_on()) as u32;
+        // baked sky is not light-sampled at all (`sky_sampled`).
+        self.sc.base.counts2[1] = crate::sky_sampled(max, self.env.sky.floor, true) as u32;
         self.lit_changed = self.frame.max(1);
-    }
-
-    /// The scene camera's exposure (its mode, its values) as a build takes it: what the frame is shown at, the auto
-    /// exposure's settings, and the kernel's firefly clamp, which is relative to it.
-    pub(super) fn apply_exposure(&mut self, world: &World) {
-        let Some(c) = world.scene_camera() else { return };
-        self.sc.base.misc[0] = self.sc.preset.native.firefly_clamp(&c.exposure);
-        self.sc.exposure = c.exposure.start();
-        self.sc.exposure_settings = ExposureSettings::new(&c.exposure, &self.sc.preset.post);
-    }
-
-    /// The preset, its overrides or the scene's name changed: the kernel parameters a build takes from the preset
-    /// (bounces, Russian roulette, energy compensation) and the post passes'. (What the preset says of the exposure:
-    /// `apply_exposure`, after it.)
-    pub(super) fn apply_settings(&mut self, world: &World) -> Result<()> {
-        let preset = scene::preset_of(world, &self.presets, None)?;
-        let b = &mut self.sc.base;
-        (b.counts[2], b.counts[3], b.misc[2]) = (preset.native.max_bounces, preset.native.russian_roulette_depth, preset.native.energy_compensation);
-        self.apply_post(&preset.post);
-        self.sc.preset = preset;
-        self.scene_name = world.settings.name.clone();
-        Ok(())
     }
 
     /// Moves movable instances: their kernel records (the old transform kept as the previous frame's, for motion
