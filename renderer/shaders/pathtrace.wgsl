@@ -16,6 +16,8 @@
 //                         of `FEAT`, a pipeline-overridable constant
 //   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
 //   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
+//   whole_tables          the seven typed tables read from the tables' buffer whole, as `merged` reads them, and
+//                         no views of their sections (gpu.rs `GpuOptions::table_views`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
 // The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
 // uniform tables' lengths, the loop guard's limit.
@@ -184,11 +186,11 @@ fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
 fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i); }
 // The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
 // `object_at`, `instance_at` and `medium_at` in every layout.
-@if(merged) {
-    // The merged layout (merged.rs: a browser's eight storage buffers): from the buffer whole, a record made of its
-    // vec4s (their counts: the tests hold them to the renderer's records). Slower than the views below where it was
-    // measured (docs/RUNTIME.md "The scene's tables"): an offset from the parameters at every read, the records'
-    // assembly.
+@if(merged || whole_tables) {
+    // The merged layout (merged.rs: a browser's eight storage buffers), and a device whose driver reads the views below
+    // wrong (gpu.rs `GpuOptions::table_views`: Android): from the buffer whole, a record made of its vec4s (their
+    // counts: the tests hold them to the renderer's records). Slower than the views below where it was measured
+    // (docs/RUNTIME.md "The scene's tables"): an offset from the parameters at every read, the records' assembly.
     const MATERIAL_VEC4: u32 = 18u;
     const LIGHT_VEC4: u32 = 5u;
     const INSTANCE_VEC4: u32 = 10u;

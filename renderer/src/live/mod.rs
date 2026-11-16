@@ -1219,6 +1219,75 @@ mod instanced_tests {
         assert_eq!((r.m[0][3], r.m[1][3], r.p[0][3], r.p[1][3]), (3.0, 1.0, 2.0, 0.0), "moved: last frame's rows kept");
     }
 
+    /// A wall, a small movable panel in front of it, and an emissive quad that lights both from the side; a camera.
+    fn lit_world() -> World {
+    let mut w = World::default();
+    let mat = |color: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [color, color * 0.5, color], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
+    w.set_material(1, mat(0.8, 0.0));
+    w.set_material(5, mat(0.0, 40.0));
+    let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+    w.set_geometry(2, quad(1.0)).unwrap();
+    w.set_geometry(3, quad(0.25)).unwrap();
+    let mesh = |geometry, material, own_blas| Kind::Mesh { geometry, material, own_blas, materials: vec![] };
+    // A wall, a small movable panel in front of it, and an emissive quad that lights both from the side.
+    w.set_object(10, "wall".into(), None, mesh(2, 1, false), true, false).unwrap();
+    w.set_object(11, "panel".into(), None, mesh(3, 1, true), true, true).unwrap();
+    w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_object(12, "lamp".into(), None, mesh(3, 5, false), true, false).unwrap();
+    w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
+    let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+    w.set_object(4, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+    w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
+    w
+    }
+
+    /// The tables read whole (`gpu::GpuOptions::table_views` off: what a device is opened with on Android), on this
+    /// machine's GPU: the scene renders offline to the views' image bit for bit, and so does a live frame after an
+    /// emissive object's power changed in place. (Skipped without a GPU, or where the layout is the merged one.)
+    #[test]
+    fn the_tables_read_whole_render_what_the_views_do() {
+        let open = |views: bool| gpu::Gpu::new_with(gpu::GpuOptions { table_views: Some(views), ..Default::default() });
+        let (views, whole) = match (open(true), open(false)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+        };
+        if views.merged {
+            return eprintln!("skipped: the merged layout reads the tables whole already");
+        }
+        assert!(whole.whole_tables && !views.whole_tables && !whole.uniform_tables);
+        let w = lit_world();
+        let presets = crate::default_presets_dir();
+        let offline = |g: &gpu::Gpu| {
+            let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
+            (sc.width, sc.height) = (64, 36);
+            let prep = crate::prepare(g, &mut sc, &mut vec![]);
+            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
+        };
+        let (a, b) = (offline(&views), offline(&whole));
+        let lit = a.iter().filter(|v| f32::from_bits(**v) > 0.0).count();
+        assert!(lit > a.len() / 16, "the scene is lit ({lit} of {} numbers)", a.len());
+        let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        assert_eq!(differ, 0, "{differ} of {} numbers differ between the views and the tables read whole", a.len());
+        // Live, lockstep: two frames, the lamp dimmed in place between them.
+        let live = |g: gpu::Gpu, w: &mut World| {
+            let mut core = LiveCore::new(g, w, Path::new("."), &presets, 64, 36).unwrap();
+            core.fixed_dt = Some(1.0 / 30.0);
+            w.take_changes();
+            core.render(1, |_, _| {});
+            w.set_power(12, 0.25).unwrap();
+            assert!(!core.commit(w).unwrap(), "a power edit in place");
+            core.render(1, |_, _| {});
+            let _ = core.g.device.poll(wgpu::PollType::wait_indefinitely());
+            core.read_hdr().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<u32>>()
+        };
+        let (mut w2, mut w3) = (lit_world(), lit_world());
+        let (x, y) = (live(views, &mut w2), live(whole, &mut w3));
+        assert!(x.iter().any(|v| *v != 0), "the live frame has a picture");
+        assert_eq!(x, y, "the live frames differ between the views and the tables read whole");
+    }
+
     /// The uniform tables (`gpu::GpuOptions::uniform_tables`: what a device is opened with on Android), on this
     /// machine's GPU: a lit scene with an instanced mesh renders offline to the default device's image, bit for bit;
     /// live, the four uniform buffers hold what their tables hold when a frame is traced, and after an edit in place
@@ -1234,24 +1303,7 @@ mod instanced_tests {
             return eprintln!("skipped: the merged layout has no uniform tables");
         }
         assert!(uniform.uniform_tables && !plain.uniform_tables);
-        let mut w = World::default();
-        let mat = |color: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [color, color * 0.5, color], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
-        w.set_material(1, mat(0.8, 0.0));
-        w.set_material(5, mat(0.0, 40.0));
-        let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
-        w.set_geometry(2, quad(1.0)).unwrap();
-        w.set_geometry(3, quad(0.25)).unwrap();
-        let mesh = |geometry, material, own_blas| Kind::Mesh { geometry, material, own_blas, materials: vec![] };
-        // A wall, a small movable panel in front of it, and an emissive quad that lights both from the side.
-        w.set_object(10, "wall".into(), None, mesh(2, 1, false), true, false).unwrap();
-        w.set_object(11, "panel".into(), None, mesh(3, 1, true), true, true).unwrap();
-        w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-        w.set_object(12, "lamp".into(), None, mesh(3, 5, false), true, false).unwrap();
-        w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
-        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
-        w.set_object(4, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
-        w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-        w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
+        let mut w = lit_world();
         let presets = crate::default_presets_dir();
 
         // Offline: the same bytes.

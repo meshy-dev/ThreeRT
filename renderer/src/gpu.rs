@@ -17,6 +17,9 @@ pub struct Gpu {
     pub adapter_info: wgpu::AdapterInfo,
     /// The kernel's bounded tables are uniform buffers (`GpuOptions::uniform_tables`; merged.rs `UNIFORM_TABLES`).
     pub uniform_tables: bool,
+    /// The kernel reads its seven typed tables from the tables' buffer whole, not from views of their sections
+    /// (`GpuOptions::table_views`; merged.rs `TABLE_VIEWS`).
+    pub whole_tables: bool,
     /// The kernel's switches this device was opened with (`KernelSwitches`): they are in `source`.
     pub switches: KernelSwitches,
     /// The approximations a live view's kernel takes (`A_*`): the options' (`GpuOptions::approx`) unless a view asked
@@ -208,6 +211,8 @@ pub(crate) struct LayoutShape {
     pub hwrt: bool,
     pub merged: bool,
     pub uniform_tables: bool,
+    /// No views of the tables' sections (`Gpu::whole_tables`).
+    pub whole_tables: bool,
     pub guard: bool,
 }
 
@@ -228,7 +233,7 @@ const ACCELERATION_STRUCTURE: wgpu::BindingType = wgpu::BindingType::Acceleratio
 /// variant of the kernel's source declares (`the_kernels_layouts_are_its_declarations`).
 pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupLayoutEntry>; 3] {
     use crate::merged::{DEFERRED_BINDING, GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS, UNIFORM_TABLES};
-    let LayoutShape { hwrt, merged, uniform_tables, guard } = shape;
+    let LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard } = shape;
     let (read, write) = (storage_buffer(true), storage_buffer(false));
     // Group 0: the parameters; triangles and their attributes; the tables' heap, the words' heap; the dynamic
     // triangles' previous vertices; the texture pages and their sampler, the environment, the density grids' atlas
@@ -251,8 +256,9 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
         scene.push(layout_entry(3, read));
     }
     // The tables the kernel reads at every hit or light, bound again as typed views of their sections (the merged
-    // layout has no binding for them), four of them uniform copies where a driver needs it.
-    if !merged {
+    // layout has no binding for them, nor has a device that reads them from the buffer whole), four of them uniform
+    // copies where a driver needs it.
+    if !merged && !whole_tables {
         let copied = |b: u32| uniform_tables && UNIFORM_TABLES.iter().any(|t| t.binding == b);
         scene.extend(TABLE_VIEWS.iter().map(|&(_, b)| layout_entry(b, if copied(b) { UNIFORM_BUFFER } else { read })));
     }
@@ -860,6 +866,9 @@ pub struct KernelVariant {
     pub merged: bool,
     /// Four tables in uniform buffers (merged.rs `UNIFORM_TABLES`; `GpuOptions::uniform_tables`). Never with `merged`.
     pub uniform_tables: bool,
+    /// The seven typed tables read from the tables' buffer whole, as the merged layout reads them, with the layout as
+    /// written otherwise (`GpuOptions::table_views`). Never with `uniform_tables`.
+    pub whole_tables: bool,
     /// The loop guard's limit, in a kernel with the guard (`loop_guard_of`, `guard_loops`).
     pub guard: Option<u32>,
 }
@@ -871,7 +880,7 @@ impl KernelVariant {
     }
 
     /// The flags of the kernel's conditional translation (pathtrace.wgsl's head).
-    pub fn flags(&self) -> [(&'static str, bool); 11] {
+    pub fn flags(&self) -> [(&'static str, bool); 12] {
         let (k, f) = (&self.switches, |bit: u32| self.features & bit != 0);
         [
             ("hwrt", self.hwrt),
@@ -884,6 +893,7 @@ impl KernelVariant {
             ("units", f(F_UNITS)),
             ("merged", self.merged),
             ("uniform_tables", self.uniform_tables),
+            ("whole_tables", self.whole_tables),
             ("guard", self.guard.is_some()),
         ]
     }
@@ -915,6 +925,7 @@ pub fn kernel_wgsl(src: &str, v: &KernelVariant) -> String {
 /// `kernel_wgsl`, saying what did not compile instead of panicking (a scene's own functions are a game's code).
 pub fn try_kernel_wgsl(src: &str, v: &KernelVariant) -> Result<String, String> {
     assert!(!(v.merged && v.uniform_tables), "the uniform tables are never in the merged layout");
+    assert!(!(v.whole_tables && v.uniform_tables), "the uniform tables are copies of views the kernel reading the tables whole does not have");
     let mut out = try_wesl_wgsl(src, &v.flags(), &v.constants())?;
     if v.guard.is_some() {
         guard_loops(&mut out);
@@ -1113,6 +1124,12 @@ pub struct GpuOptions {
     /// buffers (merged.rs `UNIFORM_TABLES`). None: where a driver needs it, which is Android. Never with the merged
     /// layout, whose tables are one buffer of its own.
     pub uniform_tables: Option<bool>,
+    /// The seven tables the kernel reads at every hit or light (materials, lights, emitters, texture rects, objects,
+    /// instances, media) as views of their sections, each a binding of its own (merged.rs `TABLE_VIEWS`), or read from
+    /// the tables' buffer whole by the offsets in the parameters, as the merged layout reads them. None: views, but on
+    /// Android: Adreno 740's driver read the views wrong (docs/RUNTIME.md "Android"). Without views there are no
+    /// uniform tables either.
+    pub table_views: Option<bool>,
     /// A directory to keep compiled pipelines in between runs (pipeline_cache.rs). None: nothing is kept.
     pub pipeline_cache: Option<std::path::PathBuf>,
     pub kernel: KernelSwitches,
@@ -1132,15 +1149,23 @@ impl GpuOptions {
     fn from_vars(var: &dyn Fn(&str) -> Option<String>, android: bool) -> GpuOptions {
         GpuOptions {
             uniform_tables: var("THREERT_UNIFORM_TABLES").map(|v| v == "1"),
+            table_views: var("THREERT_TABLE_VIEWS").map(|v| v == "1"),
             pipeline_cache: var("THREERT_PIPELINE_CACHE").filter(|d| !d.is_empty()).map(std::path::PathBuf::from),
             kernel: KernelSwitches::from_vars(var, android),
             approx: var("THREERT_APPROX").and_then(|v| v.trim().parse().ok()),
         }
     }
 
-    /// Whether the device has the uniform tables: as asked, else on Android; not in the merged layout.
+    /// Whether the kernel reads its tables from views of their sections: as asked, else everywhere but Android; never
+    /// in the merged layout.
+    fn table_views_on(&self, merged: bool, android: bool) -> bool {
+        !merged && self.table_views.unwrap_or(!android)
+    }
+
+    /// Whether the device has the uniform tables (copies of four of the views): as asked, else on Android; only with
+    /// the views.
     fn uniform_tables_on(&self, merged: bool, android: bool) -> bool {
-        !merged && self.uniform_tables.unwrap_or(android)
+        self.table_views_on(merged, android) && self.uniform_tables.unwrap_or(android)
     }
 }
 
@@ -1756,15 +1781,16 @@ impl Gpu {
         }).await?;
         let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
         let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
+        let whole_tables = !merged && !options.table_views_on(merged, cfg!(target_os = "android"));
         let switches = options.kernel;
         let approx = options.approx.unwrap_or(A_LIVE) & A_LIVE;
         let src = kernel_template();
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = unsafe {
-            let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
+            let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, whole_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         };
-        let [entries, vis_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, guard: guard_room(hwrt) });
+        let [entries, vis_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: guard_room(hwrt) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
         let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
         let one = device.create_texture(&wgpu::TextureDescriptor {
@@ -1804,7 +1830,7 @@ impl Gpu {
         } else {
             (None, None, None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
@@ -1872,7 +1898,7 @@ impl Gpu {
                 };
                 let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
                 // The variant: this device's traversal, switches, layout and loop guard, this scene's features.
-                let v = KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
+                let v = KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, whole_tables: self.whole_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
                 // A scene's functions that do not compile (a game's own WGSL) cost the game its functions, not the
                 // app its renderer: the kernel is made without them, and the game's log says why. (A panic here took
                 // the engine down, and ThreeRT for Android then took the device for one without a renderer.)
@@ -3088,7 +3114,7 @@ impl Gpu {
         if !self.hwrt {
             entries.push(buffer_entry(3, &p.nodes));
         }
-        if !self.merged {
+        if !self.merged && !self.whole_tables {
             for &(table, binding) in &crate::merged::TABLE_VIEWS {
                 let copy = b.uniform.and_then(|u| u.iter().zip(&crate::merged::UNIFORM_TABLES).find(|(_, t)| t.binding == binding).map(|(c, _)| c));
                 entries.push(match copy {
@@ -3544,9 +3570,9 @@ mod tests {
             out
         };
         let mut checked = 0;
-        for (hwrt, merged, uniform_tables) in [(true, false, false), (true, false, true), (false, false, false), (false, false, true), (false, true, false)] {
+        for (hwrt, merged, uniform_tables, whole_tables) in [(true, false, false, false), (true, false, true, false), (true, false, false, true), (false, false, false, false), (false, false, true, false), (false, false, false, true), (false, true, false, false)] {
             for room in [false, true] {
-                let mut layout: Vec<Entry> = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, guard: room }).iter().enumerate().flat_map(|(g, es)| es.iter().map(move |e| (g as u32, e.binding, e.ty))).collect();
+                let mut layout: Vec<Entry> = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: room }).iter().enumerate().flat_map(|(g, es)| es.iter().map(move |e| (g as u32, e.binding, e.ty))).collect();
                 layout.sort_by_key(|e| (e.0, e.1));
                 for guard in [None, Some(1 << 16)] {
                     // (As written, a kernel with the guard needs the room.)
@@ -3558,14 +3584,14 @@ mod tests {
                         if guard.is_none() && !merged {
                             want.retain(|e| (e.0, e.1) != (1, crate::merged::GUARD_BINDING));
                         }
-                        let v = KernelVariant { merged, uniform_tables, guard, ..KernelVariant::new(hwrt, KernelSwitches::default(), features) };
+                        let v = KernelVariant { merged, uniform_tables, whole_tables, guard, ..KernelVariant::new(hwrt, KernelSwitches::default(), features) };
                         assert_eq!(declared(&v), want, "{v:?} in a layout {} room for the guard", if room { "with" } else { "without" });
                         checked += 1;
                     }
                 }
             }
         }
-        assert_eq!(checked, 2 * 3 + 2 * 6 + 8);
+        assert_eq!(checked, 3 * 3 + 3 * 6 + 8);
     }
 
     /// The native default has no loop guard, and the live passes are their file. Every variant the kernel's flags
@@ -3601,6 +3627,7 @@ mod tests {
                 }
                 let all_features = KernelVariant::new(hwrt, k, if hwrt { F_SOURCE & !F_UNITS } else { F_SOURCE });
                 naga_valid(&kernel_wgsl(&template, &KernelVariant { uniform_tables: true, ..all_features }));
+                naga_valid(&kernel_wgsl(&template, &KernelVariant { whole_tables: true, ..all_features }));
                 naga_valid(&kernel_wgsl(&template, &KernelVariant { guard: Some(1 << 16), ..all_features }));
             }
         }
@@ -3661,7 +3688,7 @@ mod tests {
         let desktop = GpuOptions::from_vars(&vars(&[]), false);
         assert_eq!(desktop, GpuOptions::default());
         assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, last_sun: false, light_pick: false });
-        assert!(!desktop.uniform_tables_on(false, false));
+        assert!(!desktop.uniform_tables_on(false, false) && desktop.table_views_on(false, false));
         for hwrt in [false, true] {
             assert!(KernelVariant::new(hwrt, desktop.kernel, 0).flags().iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
         }
@@ -3670,13 +3697,21 @@ mod tests {
         // `sun`: the directional lights alone at the last vertex, in place of all of them, on either platform.
         let sun = GpuOptions::from_vars(&vars(&[("THREERT_LAST_DIRECT", "sun")]), true);
         assert_eq!((sun.kernel.last_direct, sun.kernel.last_sun), (false, true));
-        assert_eq!((android.uniform_tables, android.pipeline_cache.clone()), (None, None));
-        assert!(android.uniform_tables_on(false, true) && !android.uniform_tables_on(true, true));
+        assert_eq!((android.uniform_tables, android.table_views, android.pipeline_cache.clone()), (None, None, None));
+        // Android reads the tables whole (no views, so no uniform copies of four of them); with the views asked for,
+        // the uniform copies as before.
+        assert!(!android.table_views_on(false, true) && !android.uniform_tables_on(false, true) && !android.uniform_tables_on(true, true));
+        let views = GpuOptions::from_vars(&vars(&[("THREERT_TABLE_VIEWS", "1")]), true);
+        assert!(views.table_views_on(false, true) && views.uniform_tables_on(false, true) && !views.table_views_on(true, true));
         // Set: what is asked, on either platform.
         let off = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "0"), ("THREERT_KERNEL_STRICT", "0"), ("THREERT_CUTOUT_LITE", "0"), ("THREERT_LAST_DIRECT", "0")]), true);
         assert_eq!((off.kernel, off.uniform_tables_on(false, true)), (KernelSwitches::default(), false));
         let on = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "1"), ("THREERT_CUTOUT_LITE", "2"), ("THREERT_LIGHT_PICK", "1"), ("THREERT_PIPELINE_CACHE", "/data/cache/pipelines")]), false);
         assert!(on.uniform_tables_on(false, false) && !on.uniform_tables_on(true, false));
+        // Elsewhere the views unless asked otherwise; without them no uniform tables, whatever is asked.
+        assert!(on.table_views_on(false, false) && !on.table_views_on(true, false));
+        let whole = GpuOptions::from_vars(&vars(&[("THREERT_TABLE_VIEWS", "0"), ("THREERT_UNIFORM_TABLES", "1")]), false);
+        assert!(!whole.table_views_on(false, false) && !whole.uniform_tables_on(false, false));
         assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, last_sun: false, light_pick: true });
         assert_eq!(on.pipeline_cache.as_deref(), Some(std::path::Path::new("/data/cache/pipelines")));
         assert_eq!(GpuOptions::from_vars(&vars(&[("THREERT_PIPELINE_CACHE", "")]), true).pipeline_cache, None);
