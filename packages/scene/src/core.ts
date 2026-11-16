@@ -96,7 +96,11 @@ export interface PhysicsDesc {
   angularDamping?: number;
   /** Default 1. */
   gravityScale?: number;
-  /** Continuous collision detection, for small fast bodies. */
+  /**
+   * Continuous collision detection's bullet mode. A fast dynamic body is always swept against fixed colliders (it
+   * does not pass through the ground or a wall in one tick), with or without this; `ccd` sweeps it against other
+   * moving bodies as well.
+   */
   ccd?: boolean;
   /** Default true: a body at rest sleeps (costs nothing) until something wakes it. */
   canSleep?: boolean;

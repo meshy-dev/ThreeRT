@@ -188,7 +188,17 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                     1 => ("velocity", json!({ "body": body, "linvel": [r.range(-1e4, 1e4), r.range(-50.0, 50.0), 0.0], "angvel": [r.range(-1e3, 1e3), 0.0, 0.0] })),
                     2 => ("pose", json!({ "body": body, "position": [pos(&mut r, false), r.range(-300.0, 20.0), 3.0], "rotation": [r.unit(), r.unit(), r.unit(), r.unit() + 0.01] })),
                     3 => ("body", json!({ "id": 1 + r.below(6), "position": [r.range(0.0, 12.0), r.range(1.0, 6.0), 3.0], "kind": (["dynamic", "kinematic", "fixed"][r.below(3) as usize]) })),
-                    4 => ("collider", json!({ "id": 10 + r.below(12), "body": body, "shape": { "type": "box", "halfExtents": [r.range(0.05, 2.0), 0.2, 0.2] }, "mass": if r.chance(0.3) { 1e7 } else { 10.0 }, "events": true })),
+                    // (Boxes, balls, capsules and hulls: what a fast body sweeps against the voxels with, each its own
+                    // path through the voxel sweep, third_party/parry3d/PATCH.md "Sweeps".)
+                    4 => {
+                        let shape = match r.below(4) {
+                            0 => json!({ "type": "sphere", "radius": r.range(0.05, 1.0) }),
+                            1 => json!({ "type": "capsule", "halfHeight": r.range(0.05, 1.0), "radius": r.range(0.05, 0.4) }),
+                            2 => json!({ "type": "convexHull", "points": (0..24).map(|_| r.range(-0.6, 0.6)).collect::<Vec<f64>>() }),
+                            _ => json!({ "type": "box", "halfExtents": [r.range(0.05, 2.0), 0.2, 0.2] }),
+                        };
+                        ("collider", json!({ "id": 10 + r.below(12), "body": body, "shape": shape, "mass": if r.chance(0.3) { 1e7 } else { 10.0 }, "events": true }))
+                    }
                     // (Joints to the level's anchor too: step 10 c1.)
                     5 => ("joint", json!({ "id": 30 + r.below(8), "a": if r.chance(0.3) { anchor.unwrap_or(body) } else { body }, "b": if ids.is_empty() { 2 } else { ids[r.below(ids.len() as u64) as usize] }, "type": (["fixed", "revolute", "spherical", "rope", "prismatic"][r.below(5) as usize]), "length": 1.0, "limits": [-0.5, 0.5] })),
                     6 => ("remove", json!({ "body": if r.chance(0.5) { body } else { 1 + r.below(6) }, "collider": if r.chance(0.5) && !cols.is_empty() { cols[0] } else { 10 + r.below(12) }, "joint": 30 + r.below(8) })),
