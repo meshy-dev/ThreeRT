@@ -817,14 +817,6 @@ impl<'a> Top<'a> {
         }
     }
 
-    /// The slot of the first procedural object (`proc_first`: its record).
-    pub fn proc_base(&self, proc_first: usize) -> usize {
-        match self {
-            Top::Hw(a) => a.proc_base,
-            Top::Sw(_) => proc_first,
-        }
-    }
-
     pub fn sw(&self) -> bool {
         matches!(self, Top::Sw(_))
     }

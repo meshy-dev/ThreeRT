@@ -322,3 +322,59 @@ fn moves_in_place_leave_what_a_build_does() {
         assert!(apart(&a, &b) < 0.2, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
     }
 }
+
+/// An instanced object the build flattened (an emitting material: its copies are triangles of the static groups)
+/// is gone from the picture once it is removed: nothing takes it out in place, so the scene is rebuilt.
+#[test]
+fn a_flattened_instanced_object_removed_is_gone() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = world();
+    w.set_object(15, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![5], capacity: 2 }, true, false).unwrap();
+    let copies = [glam::Mat4::from_translation(Vec3::new(-0.6, -0.5, 0.4)).to_cols_array(), glam::Mat4::from_translation(Vec3::new(0.5, 0.6, 0.8)).to_cols_array()].concat();
+    w.set_instances(15, 2, Some(copies), None, None).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let with = picture(&mut live, 24);
+    w.remove(15);
+    live.commit(&mut w).unwrap();
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
+    assert!(apart(&with, &b) > 1.0, "the copies were in the picture ({:.2} steps)", apart(&with, &b));
+    assert!(apart(&a, &b) < 0.2, "removed: the picture is {:.2} steps from a build's without it", apart(&a, &b));
+}
+
+/// An instanced object an edit added in place keeps each copy's own data when its node's data changes, as one the
+/// build placed does: the objects table's entries of its copies against a build's.
+#[test]
+fn an_instanced_object_added_in_place_keeps_its_copies_data() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = world();
+    // (A mesh with its own BLAS: the scene has instances, so another instanced mesh is added in place.)
+    w.set_object(14, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(14, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    w.set_object(17, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![1], capacity: 2 }, true, false).unwrap();
+    let copies = [glam::Mat4::from_translation(Vec3::new(-0.6, -0.5, 0.4)).to_cols_array(), glam::Mat4::from_translation(Vec3::new(0.5, 0.6, 0.8)).to_cols_array()].concat();
+    w.set_instances(17, 2, Some(copies), None, Some(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "added in place ({:?})", live.fallback);
+    w.set_custom(17, [9.0; 4]).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "its node's data: in place");
+    let fresh = open(&w).unwrap();
+    let entries = |c: &LiveCore| {
+        let (place, st) = (*c.sc.tables.retained.instanced(17).expect("placed as instances"), c.sc.tables.stride);
+        (0..place.capacity as usize).map(|i| c.sc.tables.objects[(place.object as usize + i) * st + 2]).collect::<Vec<_>>()
+    };
+    assert_eq!(entries(&live), entries(&fresh), "each copy's data, in place against a build's");
+    assert_eq!(entries(&fresh), [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]);
+}

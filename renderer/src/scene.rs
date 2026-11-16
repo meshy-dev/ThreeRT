@@ -586,8 +586,8 @@ pub struct Retained {
 /// geometry is held. Edits in place go through it (live/edits.rs `LiveCore::commit`).
 #[derive(Clone, Default)]
 pub struct Proxy {
-    /// Object-table index (pivot, bounds, power, customData). None: an instanced object the build placed (an entry a
-    /// copy, from `InstancedPlace::object`).
+    /// Object-table index (pivot, bounds, power, customData). None: an instanced object (an entry a copy: from
+    /// `InstancedPlace::object` for instances; a flattened one's are the build's alone).
     pub object: Option<u32>,
     /// A rect light's visible card: its material.
     pub card: Option<u32>,
@@ -1416,6 +1416,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                     continue;
                 }
+                // Flattened: nothing kept to change it by (`Draw::Fixed`; an entry a copy, as the instances have).
+                retained.proxy(*id);
                 for (i, &(wm, hidden)) in placed.iter().enumerate() {
                     if hidden {
                         continue;

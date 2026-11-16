@@ -2608,6 +2608,24 @@ the code before. A test holds moves and edits in place, alone and several in a c
 world as it is then (`live::inplace_tests::moves_in_place_leave_what_a_build_does`: 0.02–0.08 of an 8-bit step;
 0.9 with nothing built), with one build a commit. No other picture changes (render-identity: 239 outputs).
 
+**One proxy an object (2026-11-17, scene step B, second part).** Where what an object draws landed was spread over
+fourteen maps keyed by the object: nine the build filled (its object-table entry, its card, its dynamic triangles,
+its instance, whether its moves are the instance's, its rigid model, its pose group, whether its mesh is its own,
+its emitter mesh, its instanced copies), four the edits kept beside them for what they placed (its record, its
+value as picks test it, an instanced range, the mesh it draws) and one for procedural objects. They are one table,
+`scene::Retained::proxies`: `Proxy { object, card, draw }`, `Draw` = Fixed | Dynamic | Instance | Procedural |
+Rigid | Instanced. A proxy holds the object's record; the record's value is in `instances[record]` or
+`procs[record - the first procedural record]`, for what an edit places as for the build's, and a record's slot is
+`inst_base` + it for all of them. "An edit placed it" is its record being the room's (`EditState::in_room`); a
+mesh a body drives moves as an instance because its proxy says so, whoever placed it. Lights, media and particles
+keep their tables' own indices (a table a kind). No picture changes (render-identity: 239 outputs), the voxel
+level's debris and batch routes time as before. Two faults went with the maps, each shown by a test first: an
+instanced object the build flattened had an entry in none of them, so removing it in place did nothing and it
+stayed in the picture (it has a proxy now, and is rebuilt out); an instanced object an edit added had an object
+entry of its own beside its copies', so its node's power or customData wrote over copy 0's. Still two mechanisms
+in what they can do: what the build flattened or placed as a model's instance is rebuilt to change, what an edit
+placed is not moved unless a body drives it (step E).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

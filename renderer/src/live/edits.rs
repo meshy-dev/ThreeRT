@@ -1053,7 +1053,9 @@ impl LiveCore {
             if procedural && top.sw() {
                 return Err("a procedural instanced mesh (software traversal)".into());
             }
-            let (rec0, slot0) = if procedural { (sc.proc_first + first, top.proc_base(sc.proc_first) + first) } else { (first, top.inst_base() + first) };
+            // (A record's slot is `inst_base` + it, a procedural copy's record the first procedural one + its index.)
+            let rec0 = if procedural { sc.proc_first + first } else { first };
+            let slot0 = top.inst_base() + rec0;
             for i in 0..cap {
                 let (wm, hidden) = scene::instance_world(m, t, i);
                 if !procedural && !hidden && wm.determinant() < 0.0 {
@@ -1124,7 +1126,7 @@ impl LiveCore {
             let o = &mut self.sc.tables.objects[p.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
             if let Some(accel) = self.sc.up.accel.as_mut() {
-                if let Some(t) = accel.tlas[accel.proc_base + j].as_mut() {
+                if let Some(t) = accel.tlas[accel.inst_base + i].as_mut() {
                     t.transform = gpu::tlas_rows(w);
                 }
             }
@@ -1573,9 +1575,10 @@ impl LiveCore {
             }
             emitters_changed |= release(*id, tables, meshes, edit.pool_first);
             let at = slot_of(*id, edit, tables);
-            // Placed by the build otherwise (a model, a procedural instanced mesh): a rebuild takes it out.
-            if at.is_none() && tables.retained.object(*id).is_some() {
-                return Err("an object the build placed otherwise (a model, a procedural instanced mesh) removed".into());
+            // Drawn, and not at a record an edit can clear (a model the build placed, anything it flattened): a rebuild
+            // takes it out.
+            if at.is_none() && tables.retained.proxies.contains_key(id) {
+                return Err("an object the build placed otherwise (a model, something it flattened) removed".into());
             }
             let proxy = tables.retained.proxies.remove(id);
             if let Some((slot, record)) = at {
@@ -1621,7 +1624,7 @@ impl LiveCore {
             // The mesh it draws now, as an instance at its record: a user fewer once it is placed again (below).
             let was = at.and_then(|(_, r)| instances.get(r)).filter(|i| !i.hidden).map(|i| i.mesh);
             // Drawn but not by a TLAS instance of its own: the build flattened it (movable, or a material instances skip).
-            if at.is_none() && tables.retained.object(id).is_some() {
+            if at.is_none() && tables.retained.proxies.contains_key(&id) {
                 return Err("an object the build flattened".into());
             }
             let m = world.world_matrix(id);
@@ -1934,9 +1937,8 @@ impl LiveCore {
                         if placed.iter().any(|(wm, hidden)| !hidden && wm.determinant() < 0.0) {
                             return Err("a mirrored instance (the build flattens them)".into());
                         }
-                        if tables.retained.object(id).is_none() {
-                            edit.objects.give(object, 1);
-                        }
+                        // (An entry a copy, below: not the one an object has.)
+                        edit.objects.give(object, 1);
                         let r0 = match edit.records.take(cap) {
                             Some(r) => r,
                             None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, cap, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
@@ -1978,7 +1980,7 @@ impl LiveCore {
                             tables.objects[(o0 + i) * st..(o0 + i + 1) * st].copy_from_slice(&entry[..st]);
                             instances[r0 + i] = inst;
                         }
-                        *tables.retained.proxy(id) = scene::Proxy { object: Some(o0 as u32), card: None, draw: scene::Draw::Instanced(scene::InstancedPlace { first: r0 as u32, capacity: cap as u32, object: o0 as u32, mesh: Some(mesh), drawn: t.count }) };
+                        *tables.retained.proxy(id) = scene::Proxy { object: None, card: None, draw: scene::Draw::Instanced(scene::InstancedPlace { first: r0 as u32, capacity: cap as u32, object: o0 as u32, mesh: Some(mesh), drawn: t.count }) };
                         continue;
                     }
                     if emits {
