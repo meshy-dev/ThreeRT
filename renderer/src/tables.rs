@@ -187,7 +187,8 @@ impl Tables {
         Ok(Some(d))
     }
 
-    fn update_light(&mut self, w: &World, id: u32, d: &mut Dirty) {
+    /// A light's entries as its description and place say (not the atmosphere's sun: `retained.sun`).
+    pub fn update_light(&mut self, w: &World, id: u32, d: &mut Dirty) {
         if self.retained.sun == Some(id) {
             return; // colour comes from the sky bake
         }

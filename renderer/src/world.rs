@@ -290,6 +290,8 @@ pub struct Changes {
     pub camera: bool,
     /// The atmosphere's sun moved (time of day): the live view rewrites its light and re-bakes the sky in place.
     pub sun: bool,
+    /// Another sky (its kind or its parameters): baked and put in place (live/edits.rs `apply_sky`). With `environment`.
+    pub sky: bool,
     /// The scene camera's exposure changed (its mode or its values): applied in place (live/edits.rs `apply_exposure`).
     pub exposure: bool,
     /// The scene camera's depth of field changed: the post pass's, in place. (Not `camera`: the view stays where it is.)
@@ -972,12 +974,9 @@ impl World {
 
     pub fn set_environment(&mut self, e: desc::Environment) {
         // Fog appearing, turning volumetric or going, and a background appearing or going, are kernel features: another
-        // variant of the kernel, not another scene. A new sky is baked with the scene (a rebuild).
-        if format!("{:?}", self.environment.sky) != format!("{:?}", e.sky) {
-            self.changes.structural = true;
-        } else {
-            self.changes.environment = true;
-        }
+        // variant of the kernel, not another scene. Another sky is another environment map.
+        self.changes.sky |= format!("{:?}", self.environment.sky) != format!("{:?}", e.sky);
+        self.changes.environment = true;
         self.environment = e;
     }
 
@@ -1517,7 +1516,7 @@ mod tests {
     }
 
     /// three.js's background (F_BACKGROUND) and the fog's shape (F_FOG, F_VOLUME) are kernel features: appearing or
-    /// going is a parameter edit, as a new colour is (the live view takes the kernel's other variant). A new sky rebuilds.
+    /// going is a parameter edit, as a new colour is (the live view takes the kernel's other variant). So is another sky.
     #[test]
     fn a_background_and_fog_come_and_go_in_place() {
         let mut w = World::default();
@@ -1535,7 +1534,8 @@ mod tests {
         assert!(!c.structural && c.environment, "fog appears");
         let sky: desc::Sky = serde_json::from_value(serde_json::json!({ "type": "color", "color": [0, 0, 1], "intensity": 1, "skyLightIntensity": 1 })).unwrap();
         w.set_environment(desc::Environment { sky, ..base.clone() });
-        assert!(w.take_changes().structural, "another sky");
+        let c = w.take_changes();
+        assert!(!c.structural && c.sky && c.environment, "another sky");
     }
 
     /// The scene camera's lens and exposure, and the preset: in place. Another camera's lens: nothing to do.

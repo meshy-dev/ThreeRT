@@ -2547,6 +2547,17 @@ light for hundreds of frames (5 of 255 steps off after 264), here as after a reb
 histories cleared. Still a rebuild: another sky, and the output's size (a view cannot be resized). The first of the
 scene model's steps: the proxy table next.
 
+**Another sky in place (2026-11-16, after it).** A sky's kind or parameters rebuilt the scene too. The build's sky
+is two functions now, the sky's data from the world (`scene::sky_data`) and its bake (`bake_sky`), and the live view
+calls them for an edit: the environment map and its CDF are written in place when they keep their size, else a new
+texture and the CDF's section grown, the scene bound again (`Gpu::put_env`); the parameters that say how the sky is
+read follow; the atmosphere's sun takes its colour from the bake, and a light that is the sun no longer is a light
+of its own colour again. The same test holds six sky edits (one colour, a gradient, an atmosphere with its sun,
+the same as a dynamic sky, one colour again, none) to a view built from the edited world. What the frame that
+takes one pays is the bake: 0.1 ms for a colour, 6 for a gradient, 47 for an atmosphere (a rebuild paid that and
+the scene's 0.5 to 0.9 s). No picture changed (render-identity; the live volume tests' own spread is wider than
+two runs show: five runs a side, none differ).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

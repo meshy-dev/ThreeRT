@@ -5,7 +5,7 @@ use super::*;
 use crate::world::{Geometry, Kind, Settings};
 use glam::Vec3;
 
-/// A wall, a panel before it and an emissive quad that lights both, under a dim sky; camera 4.
+/// A wall, a panel before it and an emissive quad that lights both, a directional light (20), no sky; camera 4.
 fn world() -> World {
     let mut w = World::default();
     let mat = |color: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [color, color * 0.5, color], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
@@ -20,10 +20,22 @@ fn world() -> World {
     w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     w.set_object(12, "lamp".into(), None, mesh(3, 5), true, false).unwrap();
     w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
+    let sun = serde_json::from_value(serde_json::json!({ "type": "directional", "color": [1.0, 0.9, 0.8], "castShadow": true, "intensity": 2.0, "angularDiameter": 0.5 })).unwrap();
+    w.set_object(20, "sun".into(), None, Kind::Light(sun), true, false).unwrap();
+    w.set_transform(20, Vec3::ZERO, glam::Quat::from_rotation_x(-0.5) * glam::Quat::from_rotation_y(0.4), Vec3::ONE).unwrap();
     w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(0.0))), true, false).unwrap();
     w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     w.set_settings(Settings { camera: Some(4), ..Default::default() });
     w
+}
+
+fn sky(v: serde_json::Value) -> crate::desc::Sky {
+    serde_json::from_value(v).unwrap()
+}
+
+/// An atmosphere whose sun is light 20.
+fn atmosphere(dynamic: bool) -> serde_json::Value {
+    serde_json::json!({ "type": "atmosphere", "sun": 20, "groundAlbedo": [0.3, 0.3, 0.3], "rayleighScale": 1, "mieScale": 1, "mieAnisotropy": 0.8, "skyLightIntensity": 1, "dynamic": dynamic })
 }
 
 fn manual(ev: f32) -> serde_json::Value {
@@ -42,8 +54,9 @@ fn camera(fov: f32, dof: Option<f32>, exposure: serde_json::Value) -> crate::des
 fn state(c: &LiveCore) -> String {
     let (s, b) = (&c.sc, &c.sc.base);
     format!(
-        "features {:#x} counts {:?} misc {:?} fog {:?} {:?} {:?} {:?} background {:?} aerial {:?} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
+        "features {:#x} counts {:?} misc {:?} fog {:?} {:?} {:?} {:?} background {:?} aerial {:?} | sky {:?} {:?} {:?} sun {:?} map {:?} lights {:?} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
         s.up.kernel.features, &b.counts[2..], [b.misc[0], b.misc[2]], b.fog, b.fog_color, b.vol, b.vol2, b.background, b.aerial,
+        b.env, b.sky_color, b.counts2, s.tables.retained.sun, s.sky_inputs.0, bytemuck::cast_slice::<_, u32>(&s.tables.lights),
         s.exposure, s.exposure_settings.ae, s.exposure_settings.ae2, s.exposure_settings.speed, s.exposure_settings.lx,
         s.tan_half_fov, s.dof, s.scene_camera.pos, s.scene_camera.fwd, s.scene_camera.tan_half_fov,
         c.post_key, c.bloom, c.vignette, c.post, c.blur, c.scene_name
@@ -114,12 +127,20 @@ fn edits_in_place_leave_what_a_build_does() {
         ("no fog", true, Box::new(|w| w.set_environment(crate::desc::Environment { fog: None, ..w.environment.clone() }))),
         ("a background", true, Box::new(|w| w.set_environment(crate::desc::Environment { background: Some([0.2, 0.6, 0.1]), ..w.environment.clone() }))),
         ("no background", true, Box::new(|w| w.set_environment(crate::desc::Environment { background: None, ..w.environment.clone() }))),
+        ("a sky of one colour", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [0.3, 0.5, 1.0], "intensity": 0.5, "skyLightIntensity": 1 })), ..w.environment.clone() }))),
+        ("a gradient sky (a map where there was none)", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "gradient", "zenith": [0.1, 0.2, 0.9], "horizon": [0.9, 0.5, 0.2], "ground": [0.1, 0.1, 0.1], "intensity": 0.8, "skyLightIntensity": 1 })), ..w.environment.clone() }))),
+        ("an atmosphere with its sun", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(atmosphere(false)), ..w.environment.clone() }))),
+        ("the atmosphere as a dynamic sky (a map of another size)", false, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(atmosphere(true)), ..w.environment.clone() }))),
+        ("one colour again (the sun is a light of its own)", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [1.0, 1.0, 1.0], "intensity": 0.2, "skyLightIntensity": 1 })), ..w.environment.clone() }))),
+        ("no sky", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [0, 0, 0], "intensity": 0, "skyLightIntensity": 1 })), ..w.environment.clone() }))),
         ("the preset's overrides", false, Box::new(|w| w.set_settings(Settings { overrides: Some(serde_json::json!({ "native": { "maxBounces": 1, "energyCompensation": 0.0, "clampIndirect": 3.0 }, "post": { "vignette": 0.9 } })), name: "renamed".into(), ..w.settings.clone() }))),
         ("another preset", false, Box::new(|w| w.set_settings(Settings { preset: "preview".into(), overrides: None, ..w.settings.clone() }))),
     ];
     for (what, seen, edit) in &edits {
         edit(&mut w);
+        let t = std::time::Instant::now();
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place");
+        eprintln!("{what}: committed in {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
         let mut fresh = open(&w).unwrap();
         assert_eq!(state(&live), state(&fresh), "{what}: the view's state against a build's");
         // (With no history, as the new view has none: the radiance cache and the frames' histories hold the light as

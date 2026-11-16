@@ -944,6 +944,65 @@ pub const MAX_MEDIA: usize = 32;
 /// (pathtrace.wgsl `medium_span`).
 pub const MEDIUM_HIDDEN: u32 = 2;
 
+/// The scene's sky as the renderer bakes it, and the atmosphere's sun (its light object). `matrix`: an object's world
+/// matrix; `light_of`: its place among the scene's lights (the build's order: `SkyData::Atmosphere::sun_node`).
+pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4, light_of: &dyn Fn(u32) -> Option<usize>) -> Result<(SkyData, Option<u32>)> {
+    let mut sun_id = None;
+    let sky = match &w.environment.sky {
+        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, .. } => {
+            let sun_light = sun.and_then(|s| w.objects.get(&s).map(|o| (s, o)));
+            let (sun_dir, sun_lux) = match sun_light.map(|(s, o)| (matrix(s), &o.kind)) {
+                Some((m, Kind::Light(Light::Directional { color, intensity, .. }))) => (-m.transform_vector3(Vec3::NEG_Z).normalize(), Vec3::from(*color) * *intensity),
+                _ => (Vec3::Y, Vec3::ZERO),
+            };
+            sun_id = sun_light.map(|(s, _)| s);
+            SkyData::Atmosphere {
+                sun_dir,
+                sun_lux,
+                rayleigh: *rayleigh_scale,
+                mie: *mie_scale,
+                g: *mie_anisotropy,
+                ground: Vec3::from(*ground_albedo),
+                sun_node: sun_id.and_then(light_of),
+                dynamic: *dynamic,
+                glow: crate::sky::glow_of(glow, horizon_glow),
+            }
+        }
+        Sky::Color { color, intensity, .. } if *intensity > 0.0 => SkyData::Color(Vec3::from(*color) * *intensity),
+        Sky::Color { .. } => SkyData::None,
+        Sky::Hdri { .. } => return Err(anyhow!("hdri environments are not supported by the native renderer yet")),
+        Sky::Gradient { zenith, horizon, ground, intensity, horizon_exponent, glow, clouds, .. } => {
+            let cloud_map = match clouds.as_ref().and_then(|c| c.map.map(|m| (c, m))) {
+                Some((c, tid)) => {
+                    let t = w.textures.get(&tid).ok_or_else(|| anyhow!("unknown texture {tid}"))?;
+                    let (key, image) = texture_image(t, assets)?;
+                    Some(crate::sky::CloudMap {
+                        key,
+                        image,
+                        threshold: c.threshold.unwrap_or([0.35, 0.85]),
+                        gain: c.gain.unwrap_or(1.8),
+                        offset: Vec3::from(c.color) * *intensity,
+                        projection: c.projection.unwrap_or(0.35),
+                        bias: c.bias.unwrap_or(0.25),
+                        fade: c.fade.unwrap_or(4.0),
+                    })
+                }
+                None => None,
+            };
+            SkyData::Gradient(crate::sky::Gradient {
+                zenith: Vec3::from(*zenith) * *intensity,
+                horizon: Vec3::from(*horizon) * *intensity,
+                ground: Vec3::from(*ground) * *intensity,
+                horizon_exponent: *horizon_exponent,
+                glow: glow.as_ref().map(|g| (Vec3::from(g.color) * g.intensity * *intensity, g.height.max(1e-3), g.width.map(|w| (w, g.power.unwrap_or(6.0))))),
+                clouds: if cloud_map.is_some() { None } else { clouds.as_ref().map(|c| (c.coverage, Vec3::from(c.color) * *intensity, c.scale.max(0.05), c.seed)) },
+                cloud_map,
+            })
+        }
+    };
+    Ok((sky, sun_id))
+}
+
 /// A world's render preset: the preset its settings name, the settings' overrides over it, then `overrides`.
 pub fn preset_of(w: &World, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<desc::Preset> {
     let st = &w.settings;
@@ -1744,59 +1803,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     }
 
     let env = &w.environment;
-    let sky = match &env.sky {
-        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, .. } => {
-            let sun_light = sun.and_then(|s| w.objects.get(&s).map(|o| (s, o)));
-            let (sun_dir, sun_lux) = match sun_light.map(|(s, o)| (worlds.get(&s).copied().unwrap_or(Mat4::IDENTITY), &o.kind)) {
-                Some((m, Kind::Light(Light::Directional { color, intensity, .. }))) => (-m.transform_vector3(Vec3::NEG_Z).normalize(), Vec3::from(*color) * *intensity),
-                _ => (Vec3::Y, Vec3::ZERO),
-            };
-            let idx = sun_light.and_then(|(s, _)| retained.light_nodes.iter().position(|id| *id == s));
-            retained.sun = sun_light.map(|(s, _)| s);
-            SkyData::Atmosphere {
-                sun_dir,
-                sun_lux,
-                rayleigh: *rayleigh_scale,
-                mie: *mie_scale,
-                g: *mie_anisotropy,
-                ground: Vec3::from(*ground_albedo),
-                sun_node: idx,
-                dynamic: *dynamic,
-                glow: crate::sky::glow_of(glow, horizon_glow),
-            }
-        }
-        Sky::Color { color, intensity, .. } if *intensity > 0.0 => SkyData::Color(Vec3::from(*color) * *intensity),
-        Sky::Color { .. } => SkyData::None,
-        Sky::Hdri { .. } => return Err(anyhow!("hdri environments are not supported by the native renderer yet")),
-        Sky::Gradient { zenith, horizon, ground, intensity, horizon_exponent, glow, clouds, .. } => {
-            let cloud_map = match clouds.as_ref().and_then(|c| c.map.map(|m| (c, m))) {
-                Some((c, tid)) => {
-                    let t = w.textures.get(&tid).ok_or_else(|| anyhow!("unknown texture {tid}"))?;
-                    let (key, image) = texture_image(t, assets)?;
-                    Some(crate::sky::CloudMap {
-                        key,
-                        image,
-                        threshold: c.threshold.unwrap_or([0.35, 0.85]),
-                        gain: c.gain.unwrap_or(1.8),
-                        offset: Vec3::from(c.color) * *intensity,
-                        projection: c.projection.unwrap_or(0.35),
-                        bias: c.bias.unwrap_or(0.25),
-                        fade: c.fade.unwrap_or(4.0),
-                    })
-                }
-                None => None,
-            };
-            SkyData::Gradient(crate::sky::Gradient {
-                zenith: Vec3::from(*zenith) * *intensity,
-                horizon: Vec3::from(*horizon) * *intensity,
-                ground: Vec3::from(*ground) * *intensity,
-                horizon_exponent: *horizon_exponent,
-                glow: glow.as_ref().map(|g| (Vec3::from(g.color) * g.intensity * *intensity, g.height.max(1e-3), g.width.map(|w| (w, g.power.unwrap_or(6.0))))),
-                clouds: if cloud_map.is_some() { None } else { clouds.as_ref().map(|c| (c.coverage, Vec3::from(c.color) * *intensity, c.scale.max(0.05), c.seed)) },
-                cloud_map,
-            })
-        }
-    };
+    let (sky, sun) = sky_data(w, assets, &|id| worlds.get(&id).copied().unwrap_or(Mat4::IDENTITY), &|id| retained.light_nodes.iter().position(|n| *n == id))?;
+    retained.sun = sun;
 
     let mut stats = HashMap::new();
     stats.insert("load_ms", t0.elapsed().as_secs_f64() * 1000.0);

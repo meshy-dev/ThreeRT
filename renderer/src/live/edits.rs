@@ -592,6 +592,9 @@ impl LiveCore {
         if d.materials || d.lights || d.objects || d.environment {
             self.lit_changed = self.frame.max(1);
         }
+        if changes.sky {
+            self.apply_sky(world)?;
+        }
         // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
         if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
             self.sky_cover = self.sc.tables.cloud_cover;
@@ -644,6 +647,45 @@ impl LiveCore {
             }
         }
         self.lit_changed = self.frame.max(1);
+    }
+
+    /// Another sky (its kind, its parameters, its sun), as a build takes it: baked here, its environment map and CDF
+    /// put in place (of another size: a new texture, the scene bound again), the parameters that say how it is read,
+    /// and the lights it owns: the atmosphere's sun takes its colour from the bake, a light that is the sun no longer
+    /// its own again.
+    pub(super) fn apply_sky(&mut self, world: &World) -> Result<()> {
+        let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id), &|_| None)?;
+        let altitude = world.settings.camera.map_or(self.sc.sky_inputs.1, |id| world.world_matrix(id).transform_point3(glam::Vec3::ZERO).y.max(0.0));
+        let cover = self.sc.tables.cloud_cover;
+        let baked = crate::bake_sky(&sky, cover, altitude);
+        self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env));
+        let floor = self.sc.sky_inputs.2;
+        let b = &mut self.sc.base;
+        b.env = [if baked.has_env { 1.0 } else { 0.0 }, baked.env.width as f32, baked.env.height as f32, b.env[3]];
+        b.sky_color = [baked.color.x, baked.color.y, baked.color.z, 0.0];
+        b.counts2[1] = crate::sky_sampled(crate::sky_brightest(&baked.env, baked.color), floor, baked.has_env) as u32;
+        // The lights: what was the sun, and what is.
+        let e = &mut self.sc.tables;
+        let was = std::mem::replace(&mut e.retained.sun, sun);
+        let mut d = tables::Dirty::default();
+        if let Some(id) = was.filter(|id| Some(*id) != sun) {
+            e.update_light(world, id, &mut d);
+        }
+        if let (Some(id), Some(c)) = (sun, baked.sun) {
+            for i in e.light_index.get(&id).cloned().unwrap_or_default() {
+                e.lights[i].color = [c.x, c.y, c.z, 0.0];
+                d.lights = true;
+            }
+        }
+        if d.lights && !e.lights.is_empty() {
+            self.sc.up.put_lights(&self.g.queue, &e.lights);
+        }
+        // (The worker that re-bakes a dynamic sky is this sky's no longer: the next move of the sun starts one.)
+        self.sc.sky = None;
+        self.sc.sky_inputs = ((baked.env.width, baked.env.height), altitude, floor);
+        self.sky_cover = cover;
+        self.lit_changed = self.frame.max(1);
+        Ok(())
     }
 
     /// A sky the worker thread has baked since the last frame (the newest), into the environment map and its CDF.

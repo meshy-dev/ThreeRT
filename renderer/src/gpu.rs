@@ -2100,23 +2100,7 @@ impl Gpu {
         assert!(parts.iter().enumerate().all(|(k, p)| p.0.index() == k), "the tables in `Table`'s order");
         let heap = Heap::filled(d, &parts.map(|p| (p.1.len() + p.2) as u64), |put| parts.iter().for_each(|p| put(p.0, 0, p.1)));
 
-        let env_tex = d.create_texture(&wgpu::TextureDescriptor {
-            label: Some("env"),
-            size: wgpu::Extent3d { width: env.width, height: env.height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let half: Vec<u16> = env.texels.iter().flat_map(|t| t.iter().map(|v| half::f16::from_f32(v.min(65000.0)).to_bits())).collect();
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &env_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&half),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(env.width * 8), rows_per_image: Some(env.height) },
-            wgpu::Extent3d { width: env.width, height: env.height, depth_or_array_layers: 1 },
-        );
+        let env_tex = self.env_texture(env);
         let env_view = env_tex.create_view(&Default::default());
         let sampler = d.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -2842,21 +2826,58 @@ impl Gpu {
         }
     }
 
-    /// A volume node moved or changed its customData: its medium's world -> local rows / `custom` (None: unchanged).
+    /// An environment map's texture, with its texels.
+    fn env_texture(&self, env: &EnvMap) -> wgpu::Texture {
+        let t = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("env"),
+            size: wgpu::Extent3d { width: env.width, height: env.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.write_env_texels(&t, env);
+        t
+    }
+
+    fn write_env_texels(&self, t: &wgpu::Texture, env: &EnvMap) {
+        let half: Vec<u16> = env.texels.iter().flat_map(|t| t.iter().map(|v| half::f16::from_f32(v.min(65000.0)).to_bits())).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&half),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(env.width * 8), rows_per_image: Some(env.height) },
+            wgpu::Extent3d { width: env.width, height: env.height, depth_or_array_layers: 1 },
+        );
+    }
+
     /// Replaces the environment map and its sampling CDF in place (a dynamic sky's new bake). Both keep their sizes.
     pub fn write_env(&self, up: &Uploaded, env: &EnvMap, cdf: &[f32]) {
         let size = up.env_tex.size();
         if (env.width, env.height) != (size.width, size.height) || cdf.len() != up.cdf_words {
             return;
         }
-        let half: Vec<u16> = env.texels.iter().flat_map(|t| t.iter().map(|v| half::f16::from_f32(v.min(65000.0)).to_bits())).collect();
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &up.env_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&half),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(env.width * 8), rows_per_image: Some(env.height) },
-            size,
-        );
+        self.write_env_texels(&up.env_tex, env);
         up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
+    }
+
+    /// Another sky's environment map and CDF, of any size: written in place where they are as large as the ones they
+    /// replace, else a new texture, the CDF's section grown where it has to, and the scene bound again.
+    pub fn put_env(&self, up: &mut Uploaded, env: &EnvMap, cdf: &[f32]) {
+        let size = up.env_tex.size();
+        if (env.width, env.height) == (size.width, size.height) && cdf.len() == up.cdf_words {
+            return self.write_env(up, env, cdf);
+        }
+        up.env_tex = self.env_texture(env);
+        up.bg_parts.env_view = up.env_tex.create_view(&Default::default());
+        let bytes = cdf.len() as u64 * 4;
+        if bytes > up.words.cap(Stream::EnvCdf) {
+            up.words.grow(&self.device, &self.queue, Stream::EnvCdf, bytes);
+        }
+        up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
+        up.cdf_words = cdf.len();
+        self.rebind_scene(up);
     }
 
     /// A volume node shown or hidden by its own `visible`, in place: its media keep their place in the table with

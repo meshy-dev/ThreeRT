@@ -622,60 +622,20 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
 
     // Sky / environment.
     let t = Instant::now();
-    let (env, sky_color, has_env) = match &sc.sky {
-        scene::SkyData::Atmosphere { sun_dir, sun_lux, rayleigh, mie, g: mie_g, ground, sun_node, dynamic, glow } => {
-            // Scene edits that leave the sky inputs unchanged (materials, transforms, lights) reuse the last bake.
-            static LAST: std::sync::Mutex<Option<(Vec<u32>, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
-            let alt = sc.camera.position.y.max(0.0);
-            let (bw, bh) = if *dynamic { sky::DYNAMIC_SKY } else { (1024, 512) };
-            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32, sc.cloud_cover].iter().map(|f| f.to_bits()).collect();
-            let mut last = LAST.lock().unwrap();
-            let bake = match last.as_ref() {
-                Some((k, b)) if *k == key => b.clone(),
-                _ => {
-                    let atm = sky::Atmosphere::earth(*rayleigh, *mie, *mie_g, *ground);
-                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() || sc.cloud_cover > 0.0 {
-                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow, sc.cloud_cover)
-                    } else {
-                        sky::bake_atmosphere(&atm, *sun_dir, *sun_lux, alt, bw, bh)
-                    });
-                    *last = Some((key, b.clone()));
-                    b
-                }
-            };
-            drop(last);
-            if let Some(i) = sun_node {
-                let s = bake.sun_illuminance;
-                sc.lights[*i].color = [s.x, s.y, s.z, 0.0];
-            }
-            (gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, Vec3::ZERO, true)
-        }
-        scene::SkyData::Gradient(gr) => {
-            static LAST: std::sync::Mutex<Option<(sky::Gradient, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
-            let mut last = LAST.lock().unwrap();
-            let bake = match last.as_ref() {
-                Some((k, b)) if k == gr => b.clone(),
-                _ => {
-                    let b = std::sync::Arc::new(sky::bake_gradient(gr, 1024, 512));
-                    *last = Some((gr.clone(), b.clone()));
-                    b
-                }
-            };
-            (gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, Vec3::ZERO, true)
-        }
-        scene::SkyData::Color(c) => (gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, *c, false),
-        scene::SkyData::None => (gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, Vec3::ZERO, false),
-    };
+    let SkyBaked { env, color: sky_color, has_env, sun } = bake_sky(&sc.sky, sc.cloud_cover, sc.camera.position.y.max(0.0));
+    if let (scene::SkyData::Atmosphere { sun_node: Some(i), .. }, Some(c)) = (&sc.sky, sun) {
+        sc.lights[*i].color = [c.x, c.y, c.z, 0.0];
+    }
     let env_cdf = build_env_cdf(&env);
     let procs = [0, sc.procs.len() as u32, sc.gpu_instances.len() as u32, 0];
     // Environment light sampling (one shadow ray per vertex) is skipped when the sky is negligible next to the emitters
     // (night streets): escaping BSDF rays still pick it up, with full MIS weight. The emitters as if all on: a
     // time-of-day room loaded by day decides at dusk as one loaded at night does (live/edits.rs `put_sky`).
-    let env_max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max).max(0.2126 * sky_color.x + 0.7152 * sky_color.y + 0.0722 * sky_color.z);
+    let env_max = sky_brightest(&env, sky_color);
     let em_area: f32 = emitters[..emitter_tris.len()].iter().map(|e| e[3]).sum();
     let env_nee_floor = if emitter_tris.is_empty() { 0.0 } else { 0.01 * all_power / em_area.max(1e-6) };
     // (A uniform sky is sampled regardless of `env_nee_on`: it reads no table.)
-    let env_nee = env_max >= env_nee_floor && (!has_env || env_nee_on());
+    let env_nee = sky_sampled(env_max, env_nee_floor, has_env);
     // The kernel's light order (`light_order`).
     let class = light_class;
     let order = light_order(&sc.lights);
@@ -869,6 +829,69 @@ fn build_env_cdf(env: &gpu::EnvMap) -> Vec<f32> {
     }
     marg.extend(cond);
     marg
+}
+
+/// A sky as the kernel takes it: the environment map (1 x 1 for a uniform sky or none), a uniform sky's radiance,
+/// whether the map is one to sample, and the illuminance the atmosphere leaves its sun's light.
+pub struct SkyBaked {
+    pub env: gpu::EnvMap,
+    pub color: Vec3,
+    pub has_env: bool,
+    pub sun: Option<Vec3>,
+}
+
+/// Bakes a scene's sky (`cloud_cover`: an atmosphere's; `altitude`: the camera's, m). The last atmosphere and the last
+/// gradient are kept: edits that leave the sky's inputs as they were reuse the bake.
+pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBaked {
+    match sky {
+        scene::SkyData::Atmosphere { sun_dir, sun_lux, rayleigh, mie, g: mie_g, ground, dynamic, glow, .. } => {
+            static LAST: std::sync::Mutex<Option<(Vec<u32>, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
+            let alt = altitude;
+            let (bw, bh) = if *dynamic { sky::DYNAMIC_SKY } else { (1024, 512) };
+            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32, cloud_cover].iter().map(|f| f.to_bits()).collect();
+            let mut last = LAST.lock().unwrap();
+            let bake = match last.as_ref() {
+                Some((k, b)) if *k == key => b.clone(),
+                _ => {
+                    let atm = sky::Atmosphere::earth(*rayleigh, *mie, *mie_g, *ground);
+                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() || cloud_cover > 0.0 {
+                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow, cloud_cover)
+                    } else {
+                        sky::bake_atmosphere(&atm, *sun_dir, *sun_lux, alt, bw, bh)
+                    });
+                    *last = Some((key, b.clone()));
+                    b
+                }
+            };
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: Some(bake.sun_illuminance) }
+        }
+        scene::SkyData::Gradient(gr) => {
+            static LAST: std::sync::Mutex<Option<(sky::Gradient, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
+            let mut last = LAST.lock().unwrap();
+            let bake = match last.as_ref() {
+                Some((k, b)) if k == gr => b.clone(),
+                _ => {
+                    let b = std::sync::Arc::new(sky::bake_gradient(gr, 1024, 512));
+                    *last = Some((gr.clone(), b.clone()));
+                    b
+                }
+            };
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: None }
+        }
+        scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, color: *c, has_env: false, sun: None },
+        scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, color: Vec3::ZERO, has_env: false, sun: None },
+    }
+}
+
+/// The brightest luminance a sky has (its map's texels, its uniform colour).
+pub fn sky_brightest(env: &gpu::EnvMap, color: Vec3) -> f32 {
+    env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max).max(0.2126 * color.x + 0.7152 * color.y + 0.0722 * color.z)
+}
+
+/// Whether the sky is light-sampled (`Params::counts2[1]`): not when it is negligible next to the emitters (`floor`:
+/// `Prepared::env_nee_floor`), nor a baked sky with THREERT_ENV_NEE off. A uniform sky reads no table: always.
+pub fn sky_sampled(brightest: f32, floor: f32, has_env: bool) -> bool {
+    brightest >= floor && (!has_env || env_nee_on())
 }
 
 /// UE GGXEnergyLookup equivalent: E.x = integral of D*Vis*NoL (F = 1), E.y = same weighted by (1-VoH)^5.
