@@ -917,6 +917,12 @@ fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image
             let key = bytes_key(&format!("pixels{width}x{height}"), rgba);
             Ok((key.clone(), cached_image(&key, || image::RgbaImage::from_raw(*width, *height, rgba.to_vec()).context("generated texture: size does not match the pixels"))?))
         }
+        // A stream's identity is its name and size, whatever its pixels: the pages keep its place (texpack.rs
+        // `stream_name`), and the app's pictures go straight into it (gpu.rs `write_stream`).
+        world::TextureSource::Stream { name, width, height, rgba } => {
+            let image = image::RgbaImage::from_raw(*width, *height, rgba.to_vec()).context("stream texture: size does not match the pixels")?;
+            Ok((crate::texpack::stream_key(name, *width, *height), Arc::new(image)))
+        }
     }
 }
 

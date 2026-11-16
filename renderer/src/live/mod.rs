@@ -682,6 +682,13 @@ impl LiveCore {
         self.reset = true;
     }
 
+    /// The next picture of a stream texture (a material's `StreamTexture`, by its name): a screen in the scene shows
+    /// what the app draws. The pixels go into the texture's place; the scene and the history stay. True when the
+    /// scene has the stream.
+    pub fn write_stream(&mut self, name: &str, width: u32, height: u32, rgba: &[u8]) -> Result<bool> {
+        self.g.write_stream(name, width, height, rgba)
+    }
+
     /// Ray tracing on or off (see `rays`). The history starts over: the two modes light a pixel differently.
     pub fn set_rays(&mut self, on: bool) {
         if self.rays != on {
