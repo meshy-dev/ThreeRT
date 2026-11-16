@@ -388,6 +388,7 @@ Messages a game posts:
 | `net.fetch` | `id`, `url`, `method?`, `headers?`, `body?` | one HTTP request (`GET` unless `method`); answers `net.fetched` |
 | `hud` | `hud` | draws the HUD it describes ("HUD", below). `hud.set` posts it; a game does not post it by hand |
 | `audio.*` | below | plays sound ("Sound", below), with the engine's `audio` module. `audio.play` and the rest post them |
+| `files.*`, `store.*` | below | reads what the player picked, keeps the game's files on the device ("Files", below); each request answered once |
 
 Messages an app sends:
 
@@ -397,7 +398,8 @@ Messages an app sends:
 | `net.messages` | `id`, `list: string[]` | the text messages that arrived on `id` since the last frame, in order: one batch a socket a frame |
 | `net.closed` | `id`, `code`, `reason` | the socket closed (the close frame's code; 1005 without one), or failed (1006, `reason` says why) |
 | `net.fetched` | `id`, `status`, `body`, `error?` | the response's status and body as text; `status` 0 and `error` when the request failed |
-| `launch` | `params: { room?, name?, ... }` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none) |
+| `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`), as `host.caps` (`[]` before, and for an app that lists none) |
+| `files.picked`, `files.data`, `store.*` | below | the answers to `files.*` and `store.*` ("Files", below) |
 | `input` | below | once a frame, before the frame script, to a game that asked for input. The node host keeps it; it has no listeners |
 
 `id` is the game's own name for a socket or a request (a string); the app's answers carry it back. Messages are text:
@@ -405,7 +407,8 @@ a binary WebSocket frame is dropped. Which addresses a game may reach is the app
 
 **What an app does** (Rust: whoever holds the `GameSession`; `renderer/src/view.rs` is the example to read):
 
-1. After the scene is built: `session.host_messages(&mut core, &[host::launch_message(params)])`.
+1. After the scene is built: `session.host_messages(&mut core, &[host::launch_message(params)])`, or
+   `launch_message_with_caps(params, &services.caps())` for an app that answers `files.*` / `store.*`.
 2. Every frame, before `session.frame`: one `host_messages` with the frame's `input` message (if the game asked:
    `session.host.pointer()` is `Some("look")` or `Some("free")`) and what its services have for the game (a
    `net.messages` batch a socket, answers). An empty batch is no entry at all.
@@ -419,11 +422,11 @@ a binary WebSocket frame is dropped. Which addresses a game may reach is the app
 
 The apps in this repository:
 
-| app | input | `net.*` | `launch` | HUD | sound |
-| --- | --- | --- | --- | --- | --- |
-| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'` | not drawn; `--hud-log` prints each description | played (`audio` feature) |
-| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch` | on stdout with every other post | on stdout: the driver's |
-| the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`) | DOM over the canvas | Web Audio by the same rules (`audio.ts`) |
+| app | input | `net.*` | `launch` | HUD | sound | files, store |
+| --- | --- | --- | --- | --- | --- | --- |
+| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'`; `caps: ["files", "store"]` | not drawn; `--hud-log` prints each description | played (`audio` feature) | `--pick` and `--store` (`src/userfiles.rs`) |
+| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch`, `--caps files,store` | on stdout with every other post | on stdout: the driver's | the driver's; `--store` is where `user:` assets are |
+| the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`); no `caps` | DOM over the canvas | Web Audio by the same rules (`audio.ts`) | none |
 
 - `live` speaks the channel as JSON lines, so a game's use of it is testable without a window: on stdin
   `{"cmd":"host","messages":[{"t":"net.opened","id":"room"}, ...]}`, on stdout one line `{"host":[...]}` with what
@@ -437,7 +440,8 @@ The apps in this repository:
   natively, without the renderer and without wasm-bindgen), which `node tools/three/open.ts <game>` builds for a
   game whose source names the physics. Bodies move and `intersectPhysics` / `Shapecaster` answer as in the renderer.
   Without the module the view is the baseline it was: bodies stay where the scene put them.
-- Checked: `packages/gameplay/test/host.test.ts` (the channel, input, the HUD's change detection, in Node);
+- Checked: `packages/gameplay/test/host.test.ts` (the channel, input, the HUD's change detection, in Node),
+  `files.test.ts` (files, store, caps, base64, `sliced`);
   `renderer/src/host.rs` and `script.rs` tests (the queue's bounds, a batch's delivery, the input message);
   `node tools/host-echo.ts` (`games/host/echo.game.ts` in `live` with the script as the app, in `play` against a
   WebSocket and HTTP server on the machine, and in the three.js view in Chrome); `node tools/fps-arena.ts` and
@@ -605,6 +609,144 @@ frame(f) {
   The three.js view plays it on Web Audio by the same numbers (`tools/three/audio.ts`, held to mix.rs by
   `tools/three/test/audio.test.ts`; its low pass is a biquad, the one difference), resumed on the page's first key or
   click as browsers require. The engine's library in a browser (wasm32) has no `audio` module.
+
+### Files
+
+A game may let its player bring content they own: OpenStrikeRT, for one, plays Counter-Strike 1.x maps from the
+player's own copy of that game, converted to RT maps. Such files never leave the player's device. The player picks
+them, the game reads and converts them inside its sandbox, keeps the result in the app's storage on that device, and
+shows it as an asset. Nothing is uploaded, published or sent to other players.
+
+```ts
+import { GLTFModel } from "@threert/scene";
+import { files, host, sliced, store } from "@threert/gameplay";
+
+host.on("launch", () => { canImport = files.available() && store.available(); });   // the app's caps
+
+async function importMaps() {                                        // from the frame script (a menu's button)
+  const picked = await files.pick({ mode: "folder", accept: [".bsp", ".wad"], title: "Your Counter-Strike folder" });
+  if (!picked) return;                                               // the player closed the picker
+  for (const e of picked.entries.filter((e) => e.path.endsWith(".bsp"))) {
+    const bsp = await files.read(picked.pick, e.path);               // Uint8Array, the whole file
+    jobs.push({ name: e.path, job: sliced(convert(bsp)) });          // convert: a generator, it yields often
+  }
+}
+function frame() {                                                   // the game's frame script
+  const r = jobs[0]?.job.step(8);                                    // 8 ms of conversion this frame
+  if (r?.done) { void store.write(`maps/${slug}/map.glb`, r.value as Uint8Array); jobs.shift(); }
+}
+scene.add(new GLTFModel(store.uri("maps/de_x/map.glb")));            // "user:maps/de_x/map.glb"
+```
+
+Two families of requests on the host channel (`packages/gameplay/src/files.ts` wraps them as promises). Binary data
+travels as base64 strings. `id` is the game's name for the request; every request gets exactly one answer with the
+same `id`.
+
+- **Capabilities.** An app that answers them lists them in the `launch` message: `{ t: "launch", params, caps:
+  ["files", "store"] }`. `host.caps` is that list: `[]` until launch, and for an app that sends none. A game must not
+  wait for an answer of a family the app did not list: `files.available()` / `store.available()` say whether it did,
+  and the package refuses a request of an unlisted family at once (a `HostRequestError` with `reason:
+  "unsupported"`), without posting it. `caps` comes after setup, so a game asks in its `launch` listener or later.
+
+**`files.*`: what the player picked (read only).**
+
+| game → app | app → game |
+| --- | --- |
+| `{ t: "files.pick", id, mode: "folder" \| "files", accept?: string[], title?: string }` | `{ t: "files.picked", id, ok: true, pick, name, entries: [{ path, size }] }` or `{ t: "files.picked", id, ok: false, reason }` |
+| `{ t: "files.read", id, pick, path }` | `{ t: "files.data", id, ok: true, data, size }` or `{ ..., ok: false, reason }` |
+
+- `accept`: lower-case extensions with the dot (`[".bsp", ".wad", ".rad"]`); a file matches without regard to case.
+  No `accept`: every file.
+- `mode: "folder"`: the player chooses a folder; `entries` are the matching files under it, recursively (at most 6
+  levels, at most 4,000 entries, hidden files and directories left out), `path` relative to the folder with `/`
+  separators. `mode: "files"`: the player chooses one or more files; `entries` are those, `path` = the file's name.
+- `pick` is an opaque string naming the grant; `name` is what to show (the folder's or the file's name). A grant
+  lasts for the game session (until the game is closed or reloaded).
+- `reason`: `"canceled"` (the player closed the picker), `"busy"` (a picker is already open), `"unsupported"`,
+  `"denied"`, or a sentence.
+- `files.read`: `path` must be one of the grant's entries (anything else: `ok: false, reason: "denied"`). `data` is
+  the whole file in base64. Files larger than 64 MiB are refused (`reason: "too large"`).
+- `files.pick(o)` resolves to `{ pick, name, entries }`, or `null` when the player canceled; `files.read(pick, path)`
+  to the file's bytes. Any other `ok: false` rejects with a `HostRequestError` whose `reason` is the app's.
+
+**`store.*`: the app's own storage for this game (read and write, persistent, local).**
+
+| game → app | app → game |
+| --- | --- |
+| `{ t: "store.write", id, path, data?: base64, text?: string }` | `{ t: "store.done", id, ok, reason? }` |
+| `{ t: "store.read", id, path, as: "text" \| "base64" }` | `{ t: "store.data", id, ok: true, text? / data?, size }` or `{ ..., ok: false, reason: "absent" \| ... }` |
+| `{ t: "store.list", id, prefix?: string }` | `{ t: "store.listed", id, ok: true, entries: [{ path, size }] }` |
+| `{ t: "store.remove", id, path }` | `{ t: "store.done", id, ok, reason? }`: a file, or a directory and everything in it |
+
+- `path`: relative, `/`-separated, segments of `[A-Za-z0-9._-]`, no `.` or `..` segment, no leading `/`, at most 200
+  characters. Directories are made as needed. The package checks a path before it posts anything (a `TypeError`);
+  the app checks it again (`ok: false`).
+- `store.write` takes `data` (bytes in base64) or `text` (written as UTF-8), a file of at most 64 MiB. Writes are
+  atomic: a temporary file beside the file, renamed over it, so a reader sees the old file or the new one.
+  `store.read` with `as: "text"` answers `reason: "not text"` for a file that is not UTF-8. `store.list` lists the
+  files (not directories) whose path starts with `prefix` (a plain string: `"maps/"` is everything under maps),
+  sorted by path. `store.remove` of nothing is `ok: true`.
+- One storage per game identity: a published app by its name (`openstrike`), a development project by its project
+  id. It survives app updates and new versions of the game, is never uploaded, and is removed with the game's data.
+- Quota: 1 GiB per game (a write past it: `ok: false, reason: "quota"`).
+- `store.write(path, bytes | text)`, `store.read(path)` (bytes, or `null` when absent), `store.readText(path)`,
+  `store.list(prefix?)`, `store.remove(path)`; `store.uri(path)` is `"user:" + path`.
+
+**Assets from the store: `user:` URIs.** A stored file is an asset of the scene under the URI `user:<path>`:
+`new GLTFModel("user:maps/de_dust2/map.glb")`, a texture's file, a procedural asset, a voxel level's objects, a sound
+(`audio.play("user:sounds/x.wav")`) likewise. The engine resolves `user:` against the store's directory the app gave
+it (`threert_render::files::set_user_root`, before the scene is built; `files::asset_path` is the one place every
+reader of a scene's files goes through), and a path after `user:` must be a store path, so nothing outside the store
+is reached. Without a user root a `user:` asset is missing, as a missing file is. `GameSession::files()` lists `user:`
+assets with the rest: an app that fetches a scene's files from elsewhere (a browser page, a client that downloads a
+package) leaves them out, they are on the device. The browser builds have no store: a `user:` asset is missing there.
+
+**Large messages.** A `store.write` carries a whole file: its post may be up to 96 MiB of JSON text (any other message
+stops at 1 MiB), and the queue holds at most 192 MiB. In the engine's runtime the package's base64 is native
+(`__host_base64_encode` / `__host_base64_decode`, in `script.rs`): a 64 MiB `files.data` reaches a listener and is
+decoded in about 130 ms of an entry's 1 s (measured on a Mac by `script.rs` `files_cross_the_host_channel_as_base64`). In Node it
+is `Buffer`'s, in a page `atob` / `btoa`.
+
+**Long work: `sliced(job)`.** A conversion takes longer than a frame. `sliced(iterator)` runs a generator's work a
+slice at a time: `job.step(ms)` calls `next()` until `ms` milliseconds have passed (at least once) or the job has
+ended, and returns `{ done, value }`: the last value yielded (its progress) while it runs, the value it returned once
+it is done (and from then on). A job that throws ends; its step throws. Steps are timed by the runtime's monotonic
+clock (`performance.now()`), not `Date.now()`, which is the event's fixed time inside listeners and handlers. A step
+stops only between two `yield`s: yield often.
+
+- **Requests are presentation**, as sound is: post them from the frame script and from host listeners (and the code
+  after their `await`s), never from a handler, which is replayed and verified. What the player picked and what the
+  game stored are this device's; nothing of it is state a room agrees on.
+
+**The apps.** `threert-render play` answers both families for development and tests (`src/userfiles.rs`: the work on
+a thread of its own, one request after another in the order they were posted, the answers taken once a frame):
+
+```sh
+threert-render play game.js --assets games/openstrike \
+  --store /tmp/openstrike-store \
+  --pick "$HOME/Games/cstrike,$HOME/Downloads/de_x.bsp"
+```
+
+- `--store <dir>`: the game's store (default `<assets>/.threert/store`), also the user root of `user:` assets.
+- `--pick <dir|file>[,<dir|file>...]` answers `files.pick` requests in order with those paths instead of a dialog: a
+  folder for `mode: "folder"`; a file, or a folder standing for the files in it (not below), for `mode: "files"`.
+  After the last one each pick is `"canceled"`; with no `--pick` at all each is `"unsupported"`. The launch lists
+  `caps: ["files", "store"]` either way.
+- On stdout (`{"type":"host","messages":[...]}`) a `store.write`'s `data` / `text` is its length (`dataLength`).
+- `threert-render live` is driven by a program that is the app: `--caps files,store` lists what that program answers
+  (it answers on stdin with `{"cmd":"host","messages":[...]}`), and `--store <dir>` is where the engine reads `user:`
+  assets from.
+- An app that embeds the engine's library can take `threert_render::userfiles` as it is: `Store` (paths, quota,
+  atomic writes), `Grant` (a folder's or files' entries; reads inside it), `Requests` (the messages' answers, with a
+  `Picker` that asks the player) and `UserFiles` (all of it as `HostServices`, on its thread), and
+  `files::set_user_root` with the game's store directory.
+- Checked: `renderer/src/userfiles.rs` tests (paths refused: `..`, absolute, bad characters, too long; the quota;
+  atomic writes under a concurrent reader; `--pick` answers in order; `files.read` refused outside the grant; hidden
+  files, depth and count bounds), `files.rs` (`user:` models and sounds from the store, never outside it, missing
+  without a root), `script.rs` (base64 natively, the size bounds, a 64 MiB file within a budget), `host.rs` (caps in
+  `launch`, services as one), `packages/gameplay/test/files.test.ts`; and `games/host/files.game.ts` in `play`
+  (picked a folder, read a model from it, converted it across frames, stored it, shown from the store; a second run
+  shows it from the store without asking).
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
