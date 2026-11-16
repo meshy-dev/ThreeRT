@@ -1638,15 +1638,34 @@ layout and its kernels' source are what they were (`gpu.rs` `the_options_default
 on scenes that are not all at hand. What was measured again on this source, on the same handheld, is under "Checked
 on the device", and differs where it says so.
 
-- **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android; never with the
-  merged layout). The driver gave the kernel other buffers' contents for four of its read-only storage buffers, each
+- **The tables read whole** (`GpuOptions::table_views`, `THREERT_TABLE_VIEWS=1|0`; default 0 on Android, 1
+  elsewhere; kernel flag `whole_tables`). Since 2026-11-15 (#89) the kernel's seven typed tables are views of their
+  sections of the tables' buffer, each a binding of its own (12 to 18, merged.rs `TABLE_VIEWS`). The Adreno 740
+  driver read the storage views wrong (checked on the device, 2026-11-16, ThreeRT for Android 0.5.0 at `3d2297e`):
+  - `materials` (binding 12): every scene in a blown-out colour cast (OpenStrikeRT's Foundry pink, Range green, the
+    weapon and the soldiers one colour). Reading the materials alone from the buffer whole drew right.
+  - `emitters` (14): with the materials read whole, the first frame after an emissive object's power changed in a
+    scene with no other emitters on (a muzzle flash in Range, or in an imported map: what a map switch in practice
+    with bots leads to) did not end: `kgsl … gpu timeout`, the host thread blocked for good. Copied into a buffer of
+    its own at offset 0 each frame, the emitters' table hung the same: the binding, not its sharing a buffer with
+    `tables` or its offset. Read whole: no hang.
+  - Without the views the kernel reads all seven from `tables` (binding 4) by the offsets in the parameters
+    (`Params::table_first`), as the merged layout does (pathtrace.wgsl `@if(merged || whole_tables)`), and there are
+    no uniform tables (below), so none of their bounds either. On the device the frame costs what it does with the
+    uniform copies (Foundry at 249 × 140, one bounce: 52 ms read whole, 51 ms with the uniform copies and the other
+    three read whole). `THREERT_TABLE_VIEWS=1` on the device brings back the views (and the uniform copies), for A/B.
+  - Elsewhere the views stay; `THREERT_TABLE_VIEWS=0` reads the tables whole on any device, to the same image bit
+    for bit (`live::instanced_tests::the_tables_read_whole_render_what_the_views_do`, offline and live after a power
+    edit).
+- **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android with the views,
+  `THREERT_TABLE_VIEWS=1`; never with the merged layout or the tables read whole). The driver gave the kernel other buffers' contents for four of its read-only storage buffers, each
   a binding of its own then: `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18), all numbered
   after the acceleration structure (13). As uniform buffers they read right.
   - Since 2026-11-15 the four are views of their sections of the tables' buffer ("The scene's tables"), still at
-    bindings of their own (15 to 18), and the acceleration structure is the group's last binding (19). **Whether
-    the driver reads them right there is not known: no device has run it.** Until one has, Android keeps the
-    uniform copies; `THREERT_UNIFORM_TABLES=0` on the device is the run that decides (if it draws right, the copies
-    and their bounds can go).
+    bindings of their own (15 to 18), and the acceleration structure is the group's last binding (19). The device
+    did not read those views right either (2026-11-16, `THREERT_TABLE_VIEWS=1 THREERT_UNIFORM_TABLES=0`: Range all
+    white), and with the uniform copies the other three views were still wrong (above): Android now reads the
+    tables whole and has no uniform copies; they stay for `THREERT_TABLE_VIEWS=1`.
   - The kernel's source has them under `@if(uniform_tables)` (pathtrace.wgsl): four sized uniform arrays at
     bindings 15 to 18 (merged.rs `UNIFORM_TABLES`; their lengths WESL constants), and their accessors hold every
     index to the array (`min(i, last)`), so nothing is read outside a uniform buffer.
@@ -1662,7 +1681,7 @@ on the device", and differs where it says so.
 
   | buffer | size | decision |
   |---|---|---|
-  | `tables` (4) and its views `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers (bindings 4 to 6 then) |
+  | `tables` (4) and, with the views, `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers of their own (bindings 4 to 6, before #89) and reads them right from `tables` whole; not as the views (above) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
   | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, `finish`'s records, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
@@ -1682,6 +1701,7 @@ on the device", and differs where it says so.
   | `THREERT_CUTOUT_LITE` | Android: 1 | hardware traversal: 1 = shadow and any-hit rays take alpha cutouts as opaque; 2 = camera rays also step through at most 4 cutouts | a map with cutout foliage: the trace 235 ms, 41 ms without cutouts |
   | `THREERT_LAST_DIRECT` | Android: 1 | the path's last vertex (at the bounce limit, past the camera hit) takes its direct light | with one bounce and no radiance cache (which cost 30-60 % more trace) sunlit ground lit nothing and interiors were black |
   | `THREERT_LIGHT_PICK` | 0 | past the camera hit, the directional lights and one of the other kinds (local lights, emitters, the sky), weighted by their number: two shadow rays a vertex instead of four; unbiased, noisier | a handheld's host sets it with `THREERT_LAST_DIRECT` |
+  | `THREERT_LIGHT_TILES` | Android: 0 | a scene with more than `RIS_EXACT` shadow-casting local lights has no light tiles (`F_LISTS`, #87): its lights are resampled unguided, as before the tiles (not a flag of the source: the scene's feature is left off, gpu.rs `light_tiles_on`) | OpenStrikeRT's Foundry, 249 × 140, one bounce, the tables read whole: 48 ms with the tiles, 31 ms without (30 fps, the 0.4 clients' rate); `THREERT_LIGHT_PICK=1` instead: 38 ms |
 
   `THREERT_CHECKED=1` (or a mask: 2 bounds, 4 loop bounding, 8 ray-query initialization) compiles the kernel with
   naga's runtime checks, to tell a driver's fault from the kernel's.
