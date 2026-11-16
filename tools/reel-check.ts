@@ -34,22 +34,22 @@ const FPS = 60, EVERY = 2, SECONDS = 4, W = 960, H = 540;
 interface CheckClip extends Clip {
   /** Keyframes (s into the recording) the offline renderer can reproduce. */
   truth?: number[];
-  /** Files under assets/ the clip needs; without them it is reported as not run. */
-  needs?: string;
+  /** Paths under assets/ the clip needs; without one it is reported as not run. */
+  needs?: string[];
 }
 const CLIPS: Record<string, CheckClip> = {
-  crowd: { what: "Bistro night, 150 walkers: many lights, skinning, the light tree", src: "games/bistro-crowd/bistro-crowd.game.ts", room: "w150-v0", scale: 0.5, camera: (t) => bistroCamera(0.4 + 0.22 * t), truth: [2], needs: "orca/bistro" },
-  tokyo: { what: "Tokyo from afternoon into night: sky, time of day, lamps coming on", src: "games/tokyo/tokyo-tod.game.ts", room: "shiba-15.6-17.7-10.5-r1600", settle: 4, truth: [3], needs: "city/glb/shiba" },
+  crowd: { what: "Bistro night, 150 walkers: many lights, skinning, the light tree", src: "games/bistro-crowd/bistro-crowd.game.ts", room: "w150-v0", scale: 0.5, camera: (t) => bistroCamera(0.4 + 0.22 * t), truth: [2], needs: ["orca/bistro"] },
+  tokyo: { what: "Tokyo from afternoon into night: sky, time of day, lamps coming on", src: "games/tokyo/tokyo-tod.game.ts", room: "shiba-15.6-17.7-10.5-r1600", settle: 4, truth: [3], needs: ["city/glb/shiba"] },
   kabukicho: { what: "Kabukichō in the rain: emissive signs, wet streets", src: "games/kabukicho/kabukicho.game.ts", scale: 0.5, truth: [2] },
-  zeroday: { what: "Zero-Day: a large scene, glossy machines, small emitters", src: "games/zero-day/zero-day.game.ts", scale: 0.5, truth: [2], needs: "orca/zeroday" },
-  voxels: { what: "Voxel level under explosions: edits, physics, fire and its light", src: "games/voxel-level/level-destruction-fire.game.ts", at: [[0.3, ev("show")]] },
+  zeroday: { what: "Zero-Day: a large scene, glossy machines, small emitters", src: "games/zero-day/zero-day.game.ts", scale: 0.5, truth: [2], needs: ["orca/zeroday"] },
+  voxels: { what: "Voxel level under explosions: edits, physics, fire and its light", src: "games/voxel-level/level-destruction-fire.game.ts", at: [[0.3, ev("show")]], needs: ["voxel/level/s1v2-object"] },
   home: { what: "Daylight Home: interior GI, then night with the lamps on", src: "showcase/daylight-home/daylight-home.game.ts", at: [[1.0, ev("time")]], truth: [0.5] },
   colour: { what: "Colour Lab: lamps switched, how fast the history follows", src: "showcase/colour-lab/colour-lab.game.ts", at: [[1.2, ev("red")], [2.4, ev("red")], [3.4, ev("green")]], truth: [0.6] },
   jewellery: { what: "Jeweller's Window: metals and gems turning under soft boxes", src: "showcase/jewellery/jewellery.game.ts", truth: [2] },
   refraction: { what: "Refraction: glass and transmission", src: "showcase/refraction/refraction.game.ts", truth: [2] },
   museum: { what: "Sculpture Gallery: walking up to marble and bronze", src: "showcase/museum/museum.game.ts", at: [[0.6, ev("next")]], truth: [0.3] },
   rooms: { what: "768 shadow-casting lamps behind walls: the light sampler", src: "scenes/lamp-rooms-wide.ts", scale: 0.5, truth: [2] },
-  foliage: { what: "Ferns and plants in the sun: alpha cutouts in wind", src: "tools/foliage-scene.ts", truth: [2], needs: "polyhaven/models" },
+  foliage: { what: "Ferns and plants in the sun: alpha cutouts in wind", src: "tools/foliage-scene.ts", truth: [2], needs: ["polyhaven/models/fern_02_1k.glb", "polyhaven/models/potted_plant_02_1k.glb", "polyhaven/models/potted_plant_04_1k.glb"] },
 };
 const ORDER = ["crowd", "tokyo", "kabukicho", "zeroday", "voxels", "home", "colour", "jewellery", "refraction", "museum", "rooms", "foliage"];
 
@@ -176,9 +176,10 @@ for (const id of ids) {
   const scale = c.scale ?? 0.75;
   const res: ClipResult = { id, what: c.what, status: "ok", reasons: [], scale, keys: [], warnings: [] };
   results.push(res);
-  if (c.needs && !existsSync(join(repoRoot, "assets", c.needs))) {
-    Object.assign(res, { status: "not run", reasons: [`assets/${c.needs} missing`] });
-    console.log(`${id}: not run (assets/${c.needs} missing)`);
+  const missing = (c.needs ?? []).filter((f) => !existsSync(join(repoRoot, "assets", f)));
+  if (missing.length) {
+    Object.assign(res, { status: "not run", reasons: [`missing: ${missing.map((f) => `assets/${f}`).join(", ")}`] });
+    console.log(`${id}: not run (${res.reasons[0]})`);
     continue;
   }
   mkdirSync(frames, { recursive: true });

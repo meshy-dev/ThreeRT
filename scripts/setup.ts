@@ -88,6 +88,8 @@ if (!existsSync(helmet)) {
 }
 await $`node tools/fetch-polyhaven.ts`.cwd(root);
 await $`node tools/fetch-polyhaven.ts --set kabukicho-ue --res 2k`.cwd(root);
+// The foliage scene's plants (tools/foliage-scene.ts: the unbiased check, the scene check).
+await $`node tools/fetch-polyhaven.ts --res 1k --models potted_plant_02,potted_plant_04,fern_02`.cwd(root);
 if (!existsSync(a("kabukicho/textures"))) await $`node tools/kabukicho-assets.ts`.cwd(root);
 await $`node tools/fetch-khronos.ts`.cwd(root);
 const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -98,4 +100,6 @@ await $`bun scripts/orca.ts`.cwd(root);
 // The voxel benchmark level (games/voxel-level, ROADMAP § 6 step 2): generated, not downloaded (~4 s, ~0.3 GB; skips a
 // level already built). Other box granularities: `node tools/voxel-level/generate.ts --granularity brick|object`.
 await $`node tools/voxel-level/generate.ts --granularity region`.cwd(root);
+// The destruction games' level (a box per object; the scene check's voxel clip).
+await $`node tools/voxel-level/generate.ts --granularity object`.cwd(root);
 console.log((await $`du -sh ${store}`.text()).trim());
