@@ -1023,6 +1023,49 @@ mod glass_energy_tests {
         assert!(lut.iter().flatten().all(|e| (0.05..=1.0).contains(e)));
         eprintln!("glass energy table: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     }
+
+    /// The table as the kernel reads it (`glass_energy` in pathtrace.wgsl: trilinear over its nodes) against the
+    /// estimator between the nodes.
+    #[test]
+    fn the_glass_energy_table_interpolates() {
+        let lut = glass_energy_lut();
+        let at = |i: usize| lut[i / 4][i % 4] as f64;
+        let [nm, nr, nz] = GLASS_E;
+        let look = |mu: f64, r: f64, ior: f64, leaving: bool| {
+            let x = (mu.sqrt() * (nm - 1) as f64).clamp(0.0, (nm - 1) as f64);
+            let y = (r * (nr - 1) as f64).clamp(0.0, (nr - 1) as f64);
+            let z = (((ior - 1.0).max(0.0) / (ior + 1.0)).sqrt() * (nz - 1) as f64 / GLASS_E_ZMAX).clamp(0.0, (nz - 1) as f64);
+            let (x0, y0, z0) = (x as usize, y as usize, z as usize);
+            let (x1, y1, z1) = ((x0 + 1).min(nm - 1), (y0 + 1).min(nr - 1), (z0 + 1).min(nz - 1));
+            let (fx, fy, fz) = (x - x0 as f64, y - y0 as f64, z - z0 as f64);
+            let plane = |zi: usize| {
+                let b = (if leaving { nz } else { 0 } + zi) * nr * nm;
+                let row = |yi: usize| at(b + yi * nm + x0) * (1.0 - fx) + at(b + yi * nm + x1) * fx;
+                row(y0) * (1.0 - fy) + row(y1) * fy
+            };
+            plane(z0) * (1.0 - fz) + plane(z1) * fz
+        };
+        let (mut worst, mut sum, mut n) = ((0.0f64, String::new()), 0.0, 0);
+        for leaving in [false, true] {
+            for ior in [1.2, 1.33, 1.5, 1.8, 2.4] {
+                for ri in 0..12 {
+                    let r = 0.08 + ri as f64 * 0.08;
+                    for mi in 0..24 {
+                        let mu = 0.02 + mi as f64 * 0.0408;
+                        let (t, e) = (look(mu, r, ior, leaving), glass_energy(mu, r * r, if leaving { 1.0 / ior } else { ior }, 48));
+                        let d = (t - e).abs() / e;
+                        sum += d;
+                        n += 1;
+                        if d > worst.0 {
+                            worst = (d, format!("ior {ior} r {r:.2} mu {mu:.3} leaving {leaving}: table {t:.4}, direct {e:.4}"));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("glass energy table against the estimator: mean {:.4}, worst {:.4} ({})", sum / n as f64, worst.0, worst.1);
+        assert!(sum / (n as f64) < 0.01 && worst.0 < 0.05, "mean {:.4}, worst {:.4} ({})", sum / n as f64, worst.0, worst.1);
+    }
 }
 
 #[cfg(test)]

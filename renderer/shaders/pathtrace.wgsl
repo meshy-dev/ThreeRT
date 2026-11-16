@@ -827,7 +827,7 @@ fn light_vis(shadows: bool, o: vec3<f32>, d: vec3<f32>, tmax: f32, rd: u32) -> v
 }
 
 // Glass at a hit along d, `t` from the ray's start (texture LOD): its geometric normal, the share of the ray its
-// transmission lobe takes at that angle (transmission (x its texture) x (1 - Fresnel), as a smooth dielectric's; 0: not glass), its
+// transmission takes at that angle (transmission (x its texture) x (1 - a Schlick specular albedo); 0: not glass), its
 // tint (base colour x texture: what the transmission lobe passes), and whether a ray from that side is totally
 // reflected.
 struct GlassAt { ng: vec3<f32>, share: f32, tir: bool, tint: vec3<f32> };
@@ -867,7 +867,14 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     let ior = max(m.layer.y, 1.0001);
     let eta = select(1.0 / ior, ior, dot(g.ng, d) > 0.0);
     g.tir = eta * eta * (1.0 - c * c) >= 1.0;
-    g.share = tr * (1.0 - fresnel_dielectric(c, 1.0 / eta));
+    // (Schlick from either side, no total reflection: the ray goes straight where the light it stands for refracts,
+    // glass_tr. With the dielectric's own reflectance a surface seen past the critical angle let the whole sky
+    // through: water/furnace 1.16.)
+    let r = (ior - 1.0) / (ior + 1.0);
+    let f0 = r * r;
+    let e = energy_lookup(clamp(m.params.y, 0.02, 1.0), c);
+    let w = 1.0 + P.misc.z * f0 * ((1.0 - e.x) / e.x);
+    g.share = tr * (1.0 - w * (e.x * f0 + e.y * (clamp(50.0 * f0, 0.0, 1.0) - f0)));
     return g;
 }
 
