@@ -430,9 +430,9 @@ impl LiveCore {
                         if world.shown(k) {
                             // Movable models placed as instances move their transform (with a shared pose too); the rest
                             // re-transform triangles.
-                            let inst = self.sc.tables.retained.placed(k).filter(|i| i.moves).copied();
+                            let inst = self.sc.tables.retained.instance(k).filter(|i| i.moves).copied();
                             match inst.map(|i| i.instance) {
-                                Some(i) if !changes.poses.contains(&k) || inst.is_some_and(|i| i.pose_group.is_some()) => placed.push((k, i)),
+                                Some(i) if !changes.poses.contains(&k) || inst.is_some_and(|i| matches!(i.mesh, scene::MeshKind::Pose(_))) => placed.push((k, i)),
                                 _ => {
                                     dynamic.insert(k);
                                 }
@@ -474,7 +474,7 @@ impl LiveCore {
             dynamic.remove(k);
         }
         // Models in a shared pose re-skin their group's mesh (`repose_groups`, its BLAS only); their moves place instances.
-        let shared: Vec<u32> = dynamic.iter().copied().filter(|k| self.sc.tables.retained.placed(*k).is_some_and(|i| i.pose_group.is_some())).collect();
+        let shared: Vec<u32> = dynamic.iter().copied().filter(|k| self.sc.tables.retained.instance(*k).is_some_and(|i| matches!(i.mesh, scene::MeshKind::Pose(_)))).collect();
         for k in &shared {
             dynamic.remove(k);
         }
@@ -1239,7 +1239,11 @@ impl LiveCore {
             return Ok(false);
         }
         let r = &self.sc.tables.retained;
-        let mut touched: Vec<u32> = members.iter().map(|k| r.placed(*k).and_then(|i| i.pose_group).expect("a pose group's member (`commit`)")).collect();
+        let group = |k: &u32| match r.instance(*k).map(|i| i.mesh) {
+            Some(scene::MeshKind::Pose(g)) => g,
+            _ => unreachable!("a pose group's member (`commit`)"),
+        };
+        let mut touched: Vec<u32> = members.iter().map(group).collect();
         touched.sort_unstable();
         touched.dedup();
         let mut jobs: Vec<(u32, crate::desc::Animation)> = vec![];
@@ -1503,7 +1507,7 @@ impl LiveCore {
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
             return Err("THREERT_EDIT_REBUILD=1".into());
         }
-        let LoadedScene { up, tables, edit, meshes, pool_tris, instances, gpu_instances, procs, proc_first, .. } = &mut self.sc;
+        let LoadedScene { up, tables, edit, meshes, pool_tris, instances, gpu_instances, procs, proc_first, moving_instances, .. } = &mut self.sc;
         let (g, assets) = (&self.g, &self.assets);
         let features = up.kernel.features;
         let grow = Grow { g: &self.g, ok: up.particles.is_none() && up.gpu_particles.is_none() };
@@ -1534,7 +1538,7 @@ impl LiveCore {
         // its own, or that an edit placed (a model the build placed is the build's to change), or procedural geometry.
         let slot_of = |id: u32, edit: &EditState, tables: &tables::Tables| -> Option<(usize, usize)> {
             let record = match &tables.retained.proxies.get(&id)?.draw {
-                scene::Draw::Instance(i) if i.mesh != scene::MeshKind::Model || edit.in_room(i.instance as usize) => i.instance as usize,
+                scene::Draw::Instance(i) if i.mesh.own() || edit.in_room(i.instance as usize) => i.instance as usize,
                 scene::Draw::Procedural(j) => proc_first + *j as usize,
                 _ => return None,
             };
@@ -2039,7 +2043,7 @@ impl LiveCore {
                     };
                     instances[record] = inst;
                     // (A mesh a body drives moves as an instance does, as the build's: `commit`.)
-                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves: o.driven, pose_group: None })
+                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves: o.driven })
                 }
             };
             let st = tables.stride;
@@ -2078,6 +2082,7 @@ impl LiveCore {
         build.instances = true;
         build.meshes.extend(new_meshes);
         build.procs.extend(pending_procs);
+        *moving_instances = tables.retained.moves_instances();
         // Buffers that grew: the scene bind group over them.
         if std::mem::take(&mut edit.rebind) {
             g.rebind_scene(up);

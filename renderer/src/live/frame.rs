@@ -369,7 +369,7 @@ impl LiveCore {
         }
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
         // Something moves (triangles re-transformed, instances' transforms): the kernel writes motion vectors.
-        let moving = !self.sc.dynamic.1.is_empty() || self.sc.tables.retained.moves_instances();
+        let moving = !self.sc.dynamic.1.is_empty() || self.sc.moving_instances;
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
             if let Some((row, at, size, cam)) = self.light_tiles {

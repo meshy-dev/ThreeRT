@@ -1141,12 +1141,14 @@ mod instanced_tests {
         w.set_object(11, "b".into(), None, mesh(3, 5), true, false).unwrap();
         w.set_driven(11).unwrap();
         w.set_transform(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        assert!(!core.sc.moving_instances, "nothing moves as an instance yet");
         assert!(!core.commit(&mut w).unwrap(), "added in place, its material too");
         assert_eq!(core.sc.tables.materials.len(), materials + 1);
+        assert!(core.sc.moving_instances, "a driven mesh: the frames write motion vectors from here");
         assert_eq!(picked(&core, 0.5).as_deref(), Some("b"));
         // Its body moves it 3 m to the side (u 0.95 of the image, 4 m from the camera): no rebuild, its record moved
         // with the rows it had the frame before.
-        let record = core.sc.tables.retained.placed(11).unwrap().instance as usize;
+        let record = core.sc.tables.retained.instance(11).unwrap().instance as usize;
         assert!(core.sc.edit.in_room(record), "placed by an edit: a record of the room");
         assert!(w.place_driven(11, Vec3::new(3.0, 0.0, 1.0), glam::Quat::IDENTITY));
         assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
@@ -1156,7 +1158,7 @@ mod instanced_tests {
         assert_eq!((r.m[0][3], r.p[0][3]), (3.0, 0.0), "moved: last frame's rows kept");
         // A rebuild places it as an instance too, and it moves on in place.
         core.rebuild(&w).unwrap();
-        assert!(core.sc.tables.retained.placed(11).is_some_and(|i| i.moves && !core.sc.edit.in_room(i.instance as usize)), "placed by the build");
+        assert!(core.sc.tables.retained.instance(11).is_some_and(|i| i.moves && !core.sc.edit.in_room(i.instance as usize)), "placed by the build");
         assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95).as_deref()), (Some("a"), Some("b")));
         assert!(w.place_driven(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY));
         assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
@@ -1165,6 +1167,7 @@ mod instanced_tests {
         w.remove(11);
         assert!(!core.commit(&mut w).unwrap(), "removed in place");
         assert_eq!(picked(&core, 0.5).as_deref(), Some("a"));
+        assert!(!core.sc.moving_instances, "removed: nothing moves as an instance");
     }
 
     /// An instanced mesh's moved instances keep their previous-frame rows (motion vectors) through the commit that moves

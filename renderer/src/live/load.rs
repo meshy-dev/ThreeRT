@@ -22,6 +22,9 @@ pub(super) struct LoadedScene {
     /// `instances[i]`'s. Both hold what edits place too, at its record (hidden fillers at the records between).
     pub(super) procs: Vec<scene::ProcObject>,
     pub(super) proc_first: usize,
+    /// Some object's move is an instance's transform (`Retained::moves_instances`: kept where the proxies change,
+    /// here and in a geometry edit): the frame's kernel then writes motion vectors.
+    pub(super) moving_instances: bool,
     /// The scene has instanced meshes or procedural geometry (the raster experiment draws only flattened triangles:
     /// primary visibility is traced).
     pub(super) instanced: bool,
@@ -282,5 +285,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         pool_first: prep.groups.iter().sum(),
         blobs,
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

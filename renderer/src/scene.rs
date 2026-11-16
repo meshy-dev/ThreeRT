@@ -572,7 +572,7 @@ pub struct Retained {
     pub light_nodes: Vec<u32>,
     /// Atmosphere sun: its colour comes from the sky bake.
     pub sun: Option<u32>,
-    /// Posed models sharing a pose (`PoseGroup`: its members' proxies name it, `InstanceRef::pose_group`).
+    /// Posed models sharing a pose (`PoseGroup`: its members' proxies name it, `MeshKind::Pose`).
     pub pose_groups: Vec<PoseGroup>,
     /// `own_blas` meshes: (geometry, GPU material) -> the shared mesh (objects with the same geometry and material
     /// share its BLAS). live/edits.rs `edit_geometry` keeps it.
@@ -621,8 +621,6 @@ pub struct InstanceRef {
     pub mesh: MeshKind,
     /// A move is its transform's, not its triangles' (a mesh a body drives, a movable model the build placed).
     pub moves: bool,
-    /// It shares a pose (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
-    pub pose_group: Option<u32>,
 }
 
 /// What mesh an instance is of.
@@ -630,10 +628,19 @@ pub struct InstanceRef {
 pub enum MeshKind {
     /// A model's.
     Model,
+    /// A shared pose's (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
+    Pose(u32),
     /// An `own_blas` mesh, shared by the objects of its geometry and material (`Retained::own_mesh`).
     Own,
     /// An emitting `own_blas` mesh (`InstMesh::emits`): this mesh, its own, its triangles in world space.
     Emitter(u32),
+}
+
+impl MeshKind {
+    /// An `own_blas` mesh, an emitter's too: what a geometry edit makes and places again (a model's is the build's).
+    pub fn own(self) -> bool {
+        matches!(self, MeshKind::Own | MeshKind::Emitter(_))
+    }
 }
 
 impl Retained {
@@ -648,7 +655,7 @@ impl Retained {
     }
 
     /// Its instance, if it is one of a mesh.
-    pub fn placed(&self, id: u32) -> Option<&InstanceRef> {
+    pub fn instance(&self, id: u32) -> Option<&InstanceRef> {
         match &self.proxies.get(&id)?.draw {
             Draw::Instance(p) => Some(p),
             _ => None,
@@ -676,7 +683,7 @@ impl Retained {
 
     /// Whether any object is an `own_blas` mesh's instance (what geometry edits place again).
     pub fn has_own_instances(&self) -> bool {
-        self.proxies.values().any(|p| matches!(&p.draw, Draw::Instance(i) if i.mesh != MeshKind::Model))
+        self.proxies.values().any(|p| matches!(&p.draw, Draw::Instance(i) if i.mesh.own()))
     }
 
     /// The triangles re-transformed on the CPU: the dynamic objects' and the rigid models' flattened ones.
@@ -1327,7 +1334,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
-                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven, pose_group: None }) };
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven }) };
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
                     }
                     continue;
@@ -1349,7 +1356,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         pool_attrs.extend(a);
                         let mesh = meshes.len() as u32 - 1;
                         objects.extend_from_slice(&object_row(m.transform_point3(Vec3::ZERO), n.power, im.hi - im.lo, n.custom, [1.0; 3])[..stride]);
-                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Emitter(mesh), moves: false, pose_group: None }) };
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Emitter(mesh), moves: false }) };
                         instances.push(Instance { mesh, world: Mat4::IDENTITY, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
                     }
                     continue;
@@ -1645,7 +1652,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
-                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Model, moves: true, pose_group: Some(g) }) };
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Pose(g), moves: true }) };
                         retained.pose_groups[g as usize].members.push((*id, i));
                         continue;
                     }
@@ -1734,7 +1741,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         }
                         // (A model that does not move keeps no instance of its own here: `Draw::Fixed`.)
                         if movable {
-                            retained.proxy(*id).draw = Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Model, moves: true, pose_group: None });
+                            retained.proxy(*id).draw = Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Model, moves: true });
                         }
                         instances.push(inst);
                         continue;
