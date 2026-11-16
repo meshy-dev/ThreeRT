@@ -573,6 +573,8 @@ impl LiveCore {
             b.background = e.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]);
             b.aerial = e.aerial;
             [b.fog, b.fog_color, b.vol, b.vol2] = crate::fog_params(e.fog.as_ref());
+            // (A background that appeared or went: the kernel's variant with or without it, as the fog's below.)
+            self.sc.instance_features = self.sc.instance_features & !gpu::F_BACKGROUND | if e.background.is_some() { gpu::F_BACKGROUND } else { 0 };
         }
         if d.materials || d.environment {
             // e.g. fog appearing needs the fog kernel variant (compiled once, then cached)
@@ -594,6 +596,10 @@ impl LiveCore {
         if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
             self.sky_cover = self.sc.tables.cloud_cover;
             self.move_sun(world);
+        }
+        if changes.settings {
+            self.apply_settings(world)?;
+            self.lit_changed = self.frame.max(1);
         }
         if changes.exposure {
             self.apply_exposure(world);
@@ -658,16 +664,27 @@ impl LiveCore {
 
     /// The camera's manual exposure changed value (an exposure that follows the time of day), in place: the post pass's
     /// exposure and the kernel's firefly clamp, which is relative to it.
+    /// The scene camera's exposure (its mode, its values) as a build takes it: what the frame is shown at, the auto
+    /// exposure's settings, and the kernel's firefly clamp, which is relative to it.
     pub(super) fn apply_exposure(&mut self, world: &World) {
         let Some(cid) = world.settings.camera else { return };
         let Some(crate::world::Kind::Camera(c)) = world.objects.get(&cid).map(|o| &o.kind) else { return };
-        let crate::desc::Exposure::Manual { ev100 } = c.exposure else { return };
-        let e = 2f32.powf(-ev100);
-        if self.sc.exposure > 0.0 {
-            self.sc.base.misc[0] *= self.sc.exposure / e;
-        }
-        self.sc.exposure = e;
-        self.sc.exposure_settings.ae2 = [e, 0.0, 0.0, 0.0];
+        self.sc.base.misc[0] = self.sc.preset.native.firefly_clamp(&c.exposure);
+        self.sc.exposure = c.exposure.start();
+        self.sc.exposure_settings = ExposureSettings::new(&c.exposure, &self.sc.preset.post);
+    }
+
+    /// The preset, its overrides or the scene's name changed: the kernel parameters a build takes from the preset
+    /// (bounces, Russian roulette, energy compensation; the firefly clamp with the exposure) and the post passes'.
+    pub(super) fn apply_settings(&mut self, world: &World) -> Result<()> {
+        let preset = scene::preset_of(world, &self.presets, None)?;
+        let b = &mut self.sc.base;
+        (b.counts[2], b.counts[3], b.misc[2]) = (preset.native.max_bounces, preset.native.russian_roulette_depth, preset.native.energy_compensation);
+        self.apply_post(&preset.post);
+        self.sc.preset = preset;
+        self.apply_exposure(world);
+        self.scene_name = world.settings.name.clone();
+        Ok(())
     }
 
     /// Moves movable instances: their kernel records (the old transform kept as the previous frame's, for motion

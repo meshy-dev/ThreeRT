@@ -944,8 +944,8 @@ pub const MAX_MEDIA: usize = 32;
 /// (pathtrace.wgsl `medium_span`).
 pub const MEDIUM_HIDDEN: u32 = 2;
 
-pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<Scene> {
-    let t0 = web_time::Instant::now();
+/// A world's render preset: the preset its settings name, the settings' overrides over it, then `overrides`.
+pub fn preset_of(w: &World, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<desc::Preset> {
     let st = &w.settings;
     let mut preset_json: serde_json::Value = serde_json::from_slice(&crate::files::preset(presets_dir, &st.preset).with_context(|| format!("preset {}", st.preset))?)?;
     if let Some(o) = &st.overrides {
@@ -954,7 +954,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     if let Some(o) = overrides {
         desc::merge_json(&mut preset_json, o);
     }
-    let preset: desc::Preset = serde_json::from_value(preset_json)?;
+    Ok(serde_json::from_value(preset_json)?)
+}
+
+pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&serde_json::Value>) -> Result<Scene> {
+    let t0 = web_time::Instant::now();
+    let st = &w.settings;
+    let preset = preset_of(w, presets_dir, overrides)?;
     let order = w.ordered();
     let mut worlds: HashMap<u32, Mat4> = HashMap::new();
     for id in &order {

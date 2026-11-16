@@ -290,8 +290,11 @@ pub struct Changes {
     pub camera: bool,
     /// The atmosphere's sun moved (time of day): the live view rewrites its light and re-bakes the sky in place.
     pub sun: bool,
-    /// Only the camera's manual exposure value changed: applied in place.
+    /// The active camera's exposure changed (its mode or its values): applied in place (live/edits.rs `apply_exposure`).
     pub exposure: bool,
+    /// The preset, its overrides or the scene's name changed: what a build takes from them is taken again in place
+    /// (live/edits.rs `apply_settings`).
+    pub settings: bool,
     /// Models whose animation pose changed.
     pub poses: HashSet<u32>,
     /// Movable objects that moved: everything under them is re-transformed in place.
@@ -325,7 +328,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.exposure || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -890,21 +893,21 @@ impl World {
     }
 
     pub fn set_camera_desc(&mut self, id: u32, c: desc::Camera) -> Result<()> {
+        let active = self.settings.camera == Some(id);
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
-        // Only the manual exposure's value changed (an exposure that follows the time of day): in place. Anything else
-        // (exposure mode, DOF, the lens) shapes the kernel parameters: rebuild (rare).
-        let ev_only = match (&o.kind, &c.exposure) {
-            (Kind::Camera(old), desc::Exposure::Manual { .. }) => {
-                matches!(old.exposure, desc::Exposure::Manual { .. }) && old.fov == c.fov && old.near == c.near && old.far == c.far && format!("{:?}", old.dof) == format!("{:?}", c.dof)
+        // In place, when it is the scene's camera: a lens or a depth of field is the view's (as a camera's move: the
+        // view takes it), an exposure is the post passes' and the kernel's clamp. Nothing is built from a camera that
+        // is not the scene's (nor from near and far), and a camera made of another kind of object is a new object.
+        let (lens, exposure) = match &o.kind {
+            Kind::Camera(old) => (old.fov != c.fov || format!("{:?}", old.dof) != format!("{:?}", c.dof), format!("{:?}", old.exposure) != format!("{:?}", c.exposure)),
+            _ => {
+                self.changes.structural = true;
+                (false, false)
             }
-            _ => false,
         };
         o.kind = Kind::Camera(c);
-        if ev_only {
-            self.changes.exposure = true;
-        } else {
-            self.changes.structural = true;
-        }
+        self.changes.camera |= active && lens;
+        self.changes.exposure |= active && exposure;
         Ok(())
     }
 
@@ -965,10 +968,9 @@ impl World {
     }
 
     pub fn set_environment(&mut self, e: desc::Environment) {
-        let sky_same = format!("{:?}", self.environment.sky) == format!("{:?}", e.sky);
-        let fog_shape = |f: &Option<desc::Fog>| f.as_ref().map(|f| (f.volumetric.is_some(), f.density > 0.0));
-        // (A background appearing or going is a kernel feature, F_BACKGROUND: a rebuild; a new colour is not.)
-        if !sky_same || fog_shape(&self.environment.fog) != fog_shape(&e.fog) || self.environment.background.is_some() != e.background.is_some() {
+        // Fog appearing, turning volumetric or going, and a background appearing or going, are kernel features: another
+        // variant of the kernel, not another scene. A new sky is baked with the scene (a rebuild).
+        if format!("{:?}", self.environment.sky) != format!("{:?}", e.sky) {
             self.changes.structural = true;
         } else {
             self.changes.environment = true;
@@ -978,11 +980,14 @@ impl World {
 
     pub fn set_settings(&mut self, s: Settings) {
         let old = &self.settings;
-        if old.preset != s.preset || old.overrides != s.overrides || old.width != s.width || old.height != s.height || old.time != s.time || old.name != s.name {
-            self.changes.structural = true;
+        // (The size and the clock are an offline render's: a live view has its host's size and its own clock.)
+        if old.preset != s.preset || old.overrides != s.overrides || old.name != s.name {
+            self.changes.settings = true;
         }
         if old.camera != s.camera {
+            // Another camera: its place and lens, and its exposure.
             self.changes.camera = true;
+            self.changes.exposure = true;
         }
         self.settings = s;
     }
@@ -1507,24 +1512,60 @@ mod tests {
         assert!(w.instanced.is_empty());
     }
 
-    /// three.js's background (F_BACKGROUND, a kernel feature): appearing or going rebuilds (the kernel is patched or
-    /// not); a new colour is a parameter edit.
+    /// three.js's background (F_BACKGROUND) and the fog's shape (F_FOG, F_VOLUME) are kernel features: appearing or
+    /// going is a parameter edit, as a new colour is (the live view takes the kernel's other variant). A new sky rebuilds.
     #[test]
-    fn background_presence_is_structural() {
+    fn a_background_and_fog_come_and_go_in_place() {
         let mut w = World::default();
         w.take_changes();
         let base = w.environment.clone();
         let env = |b: Option<[f32; 3]>| desc::Environment { background: b, ..base.clone() };
-        let e = env(Some([1.0, 0.0, 0.0]));
-        w.set_environment(e);
-        assert!(w.take_changes().structural, "a background appears");
-        let e = env(Some([0.0, 1.0, 0.0]));
-        w.set_environment(e);
+        for (b, what) in [(Some([1.0, 0.0, 0.0]), "a background appears"), (Some([0.0, 1.0, 0.0]), "a new colour"), (None, "the background goes")] {
+            w.set_environment(env(b));
+            let c = w.take_changes();
+            assert!(!c.structural && c.environment, "{what}");
+        }
+        let fog: desc::Fog = serde_json::from_value(serde_json::json!({ "density": 0.02, "heightFalloff": 0.2, "height": 0.0, "color": [1, 1, 1] })).unwrap();
+        w.set_environment(desc::Environment { fog: Some(fog), ..base.clone() });
         let c = w.take_changes();
-        assert!(!c.structural && c.environment, "a new colour");
-        let e = env(None);
-        w.set_environment(e);
-        assert!(w.take_changes().structural, "the background goes");
+        assert!(!c.structural && c.environment, "fog appears");
+        let sky: desc::Sky = serde_json::from_value(serde_json::json!({ "type": "color", "color": [0, 0, 1], "intensity": 1, "skyLightIntensity": 1 })).unwrap();
+        w.set_environment(desc::Environment { sky, ..base.clone() });
+        assert!(w.take_changes().structural, "another sky");
+    }
+
+    /// The scene camera's lens and exposure, and the preset: in place. Another camera's lens: nothing to do.
+    #[test]
+    fn a_lens_an_exposure_and_a_preset_change_in_place() {
+        let mut w = World::default();
+        let cam = |fov: f32, exposure: serde_json::Value| -> desc::Camera { serde_json::from_value(serde_json::json!({ "fov": fov, "near": 0.1, "far": 100, "exposure": exposure })).unwrap() };
+        let manual = |ev: f32| serde_json::json!({ "mode": "manual", "ev100": ev });
+        w.set_object(1, "camera".into(), None, Kind::Camera(cam(50.0, manual(0.0))), true, false).unwrap();
+        w.set_object(2, "other".into(), None, Kind::Camera(cam(50.0, manual(0.0))), true, false).unwrap();
+        w.set_settings(Settings { camera: Some(1), ..Default::default() });
+        w.take_changes();
+        w.set_camera_desc(1, cam(30.0, manual(0.0))).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.camera && !c.exposure, "a lens: the view takes it");
+        w.set_camera_desc(1, cam(30.0, manual(2.0))).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && !c.camera && c.exposure, "an exposure value");
+        w.set_camera_desc(1, cam(30.0, serde_json::json!({ "mode": "auto", "compensation": 0, "minEv100": -2, "maxEv100": 12 }))).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && !c.camera && c.exposure, "an exposure mode");
+        w.set_camera_desc(2, cam(20.0, manual(5.0))).unwrap();
+        assert!(!w.take_changes().any(), "a camera that is not the scene's");
+        w.set_settings(Settings { camera: Some(2), ..w.settings.clone() });
+        let c = w.take_changes();
+        assert!(!c.structural && c.camera && c.exposure, "the scene's camera is another");
+        w.set_settings(Settings { preset: "preview".into(), ..w.settings.clone() });
+        let c = w.take_changes();
+        assert!(!c.structural && c.settings, "another preset");
+        w.set_settings(Settings { overrides: Some(serde_json::json!({ "native": { "maxBounces": 2 } })), ..w.settings.clone() });
+        let c = w.take_changes();
+        assert!(!c.structural && c.settings, "the preset's overrides");
+        w.set_settings(Settings { width: 640, height: 360, time: 3.0, ..w.settings.clone() });
+        assert!(!w.take_changes().any(), "an offline render's size and clock");
     }
 
     #[test]

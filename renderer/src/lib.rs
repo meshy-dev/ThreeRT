@@ -699,11 +699,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         }
         None => (0.0, 1.0),
     };
-    // Firefly clamp on indirect paths, expressed relative to the exposure so it is scene independent.
-    let ev_guess = match &cam.exposure {
-        desc::Exposure::Manual { ev100 } => *ev100,
-        desc::Exposure::Auto { max_ev100, .. } => *max_ev100,
-    };
     let params = gpu::Params {
         cam_pos: [cam.position.x, cam.position.y, cam.position.z, cam.tan_half_fov],
         cam_fwd: [cam.forward.x, cam.forward.y, cam.forward.z, aspect],
@@ -712,7 +707,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         size: [sc.width, sc.height, 0, rng_seed()],
         counts: [sc.lights.len() as u32, if total > 0.0 { emitter_tris.len() as u32 } else { 0 }, preset.native.max_bounces, preset.native.russian_roulette_depth],
         env: [if has_env { 1.0 } else { 0.0 }, env.width as f32, env.height as f32, -1.0],
-        misc: [preset.native.clamp_indirect * 2f32.powf(ev_guess), total, preset.native.energy_compensation, 0.0],
+        misc: [preset.native.firefly_clamp(&cam.exposure), total, preset.native.energy_compensation, 0.0],
         sky_color: [sky_color.x, sky_color.y, sky_color.z, 0.0],
         counts2: [n_dir, env_nee as u32, 0, first_shadowed],
         time: [sc.time, sc.wetness, sc.rain, sc.media.len() as f32],

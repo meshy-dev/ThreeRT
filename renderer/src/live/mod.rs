@@ -1059,6 +1059,9 @@ mod timer_tests {
 }
 
 #[cfg(test)]
+mod inplace_tests;
+
+#[cfg(test)]
 mod instanced_tests {
     use super::*;
     use crate::world::{Geometry, Kind};

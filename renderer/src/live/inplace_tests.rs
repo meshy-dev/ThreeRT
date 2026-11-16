@@ -1,0 +1,145 @@
+//! An edit the live view takes in place leaves it as a build of the edited world does: no rebuild, the same
+//! parameters and kernel variant, the same picture. (GPU tests: skipped without a GPU.)
+
+use super::*;
+use crate::world::{Geometry, Kind, Settings};
+use glam::Vec3;
+
+/// A wall, a panel before it and an emissive quad that lights both, under a dim sky; camera 4.
+fn world() -> World {
+    let mut w = World::default();
+    let mat = |color: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": [color, color * 0.5, color], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
+    w.set_material(1, mat(0.8, 0.0));
+    w.set_material(5, mat(0.0, 40.0));
+    let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+    w.set_geometry(2, quad(1.0)).unwrap();
+    w.set_geometry(3, quad(0.25)).unwrap();
+    let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: false, materials: vec![] };
+    w.set_object(10, "wall".into(), None, mesh(2, 1), true, false).unwrap();
+    w.set_object(11, "panel".into(), None, mesh(3, 1), true, false).unwrap();
+    w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_object(12, "lamp".into(), None, mesh(3, 5), true, false).unwrap();
+    w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
+    w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(0.0))), true, false).unwrap();
+    w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_settings(Settings { camera: Some(4), ..Default::default() });
+    w
+}
+
+fn manual(ev: f32) -> serde_json::Value {
+    serde_json::json!({ "mode": "manual", "ev100": ev })
+}
+
+fn camera(fov: f32, dof: Option<f32>, exposure: serde_json::Value) -> crate::desc::Camera {
+    let mut c = serde_json::json!({ "fov": fov, "near": 0.1, "far": 100, "exposure": exposure });
+    if let Some(focus) = dof {
+        c["dof"] = serde_json::json!({ "focusDistance": focus, "fStop": 1.4, "sensorWidth": 36 });
+    }
+    serde_json::from_value(c).unwrap()
+}
+
+/// What a build takes from the things these edits change: compared whole between two views.
+fn state(c: &LiveCore) -> String {
+    let (s, b) = (&c.sc, &c.sc.base);
+    format!(
+        "features {:#x} counts {:?} misc {:?} fog {:?} {:?} {:?} {:?} background {:?} aerial {:?} | exposure {} {:?} {:?} {:?} {:?} | lens {} {:?} view {:?} {:?} {} | post {} {:?} {} {:?} {:?} | {}",
+        s.up.kernel.features, &b.counts[2..], [b.misc[0], b.misc[2]], b.fog, b.fog_color, b.vol, b.vol2, b.background, b.aerial,
+        s.exposure, s.exposure_settings.ae, s.exposure_settings.ae2, s.exposure_settings.speed, s.exposure_settings.lx,
+        s.tan_half_fov, s.dof, s.scene_camera.pos, s.scene_camera.fwd, s.scene_camera.tan_half_fov,
+        c.post_key, c.bloom, c.vignette, c.post, c.blur, c.scene_name
+    )
+}
+
+/// The output (BGRA8) after `frames` frames in lockstep.
+fn picture(core: &mut LiveCore, frames: u32) -> Vec<u8> {
+    core.fixed_dt = Some(1.0 / 60.0);
+    for _ in 0..frames {
+        core.render(1, |_, _| {});
+    }
+    let (d, out) = (&core.g.device, &core.targets.out);
+    let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: out.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut e = d.create_command_encoder(&Default::default());
+    e.copy_buffer_to_buffer(out, 0, &to, 0, out.size());
+    core.g.queue.submit([e.finish()]);
+    to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
+    bytes
+}
+
+/// The view without its histories (the radiance cache emptied, the frames' histories reset), as a new view is.
+fn forget(core: &mut LiveCore) {
+    if let Some(c) = &core.cache {
+        let mut e = core.g.device.create_command_encoder(&Default::default());
+        c.bufs.clear(&mut e);
+        core.g.queue.submit([e.finish()]);
+    }
+    core.reset = true;
+}
+
+/// Mean absolute difference of two pictures, in 8-bit steps.
+fn apart(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as f64).sum::<f64>() / a.len() as f64
+}
+
+/// Each edit, on one view that takes them one after another, against a view built from the world as it is then.
+#[test]
+fn edits_in_place_leave_what_a_build_does() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = world();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let mut before = picture(&mut live, 24);
+    let fog = |density: f32, volumetric: bool| -> crate::desc::Fog {
+        let mut f = serde_json::json!({ "density": density, "heightFalloff": 0.05, "height": 0.0, "color": [0.4, 0.5, 0.7], "intensity": 1.0 });
+        if volumetric {
+            f["volumetric"] = serde_json::json!({ "scattering": 0.9 });
+        }
+        serde_json::from_value(f).unwrap()
+    };
+    type Edit = (&'static str, bool, Box<dyn Fn(&mut World)>);
+    let edits: Vec<Edit> = vec![
+        ("a longer lens", true, Box::new(|w| w.set_camera_desc(4, camera(25.0, None, manual(0.0))).unwrap())),
+        ("a depth of field", false, Box::new(|w| w.set_camera_desc(4, camera(25.0, Some(4.5), manual(0.0))).unwrap())),
+        ("a manual exposure", true, Box::new(|w| w.set_camera_desc(4, camera(25.0, Some(4.5), manual(1.5))).unwrap())),
+        ("auto exposure", false, Box::new(|w| w.set_camera_desc(4, camera(25.0, Some(4.5), serde_json::json!({ "mode": "auto", "compensation": 0.5, "minEv100": -3, "maxEv100": 4 }))).unwrap())),
+        ("manual again, no depth of field", false, Box::new(|w| w.set_camera_desc(4, camera(25.0, None, manual(0.0))).unwrap())),
+        ("fog", true, Box::new(move |w| w.set_environment(crate::desc::Environment { fog: Some(fog(0.25, false)), ..w.environment.clone() }))),
+        ("volumetric fog", false, Box::new(move |w| w.set_environment(crate::desc::Environment { fog: Some(fog(0.25, true)), ..w.environment.clone() }))),
+        ("no fog", true, Box::new(|w| w.set_environment(crate::desc::Environment { fog: None, ..w.environment.clone() }))),
+        ("a background", true, Box::new(|w| w.set_environment(crate::desc::Environment { background: Some([0.2, 0.6, 0.1]), ..w.environment.clone() }))),
+        ("no background", true, Box::new(|w| w.set_environment(crate::desc::Environment { background: None, ..w.environment.clone() }))),
+        ("the preset's overrides", false, Box::new(|w| w.set_settings(Settings { overrides: Some(serde_json::json!({ "native": { "maxBounces": 1, "energyCompensation": 0.0, "clampIndirect": 3.0 }, "post": { "vignette": 0.9 } })), name: "renamed".into(), ..w.settings.clone() }))),
+        ("another preset", false, Box::new(|w| w.set_settings(Settings { preset: "preview".into(), overrides: None, ..w.settings.clone() }))),
+    ];
+    for (what, seen, edit) in &edits {
+        edit(&mut w);
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place");
+        let mut fresh = open(&w).unwrap();
+        assert_eq!(state(&live), state(&fresh), "{what}: the view's state against a build's");
+        // (With no history, as the new view has none: the radiance cache and the frames' histories hold the light as
+        // it was for a while, here as after a rebuild; fog gone was still 5 steps off after 264 frames.)
+        let now = picture(&mut live, 2);
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
+        assert!(apart(&a, &b) < 2.0, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        if *seen {
+            assert!(apart(&now, &before) > 1.0, "{what}: the picture did not change at once ({:.2} steps)", apart(&now, &before));
+        }
+        before = a;
+    }
+    // Another camera becomes the scene's: its place, its lens and its exposure.
+    w.set_object(6, "second".into(), None, Kind::Camera(camera(70.0, None, manual(-1.0))), true, false).unwrap();
+    w.set_transform(6, Vec3::new(1.0, 0.5, 4.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    live.commit(&mut w).unwrap();
+    w.set_settings(Settings { camera: Some(6), ..w.settings.clone() });
+    assert!(!live.commit(&mut w).unwrap(), "another camera: in place");
+    let fresh = open(&w).unwrap();
+    assert_eq!(state(&live), state(&fresh), "another camera: the view's state against a build's");
+    assert!(live.cam == fresh.cam, "the view is at the scene's camera");
+}

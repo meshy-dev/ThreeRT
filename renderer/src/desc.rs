@@ -76,6 +76,25 @@ pub enum Exposure {
     Auto { compensation: f32, min_ev100: f32, max_ev100: f32 },
 }
 
+impl Exposure {
+    /// The EV100 a scene is taken to be shown at before a frame says: the manual value, or auto exposure's brightest.
+    /// The kernel's firefly clamp is relative to it (`NativePreset::firefly_clamp`).
+    pub fn ev_guess(&self) -> f32 {
+        match self {
+            Exposure::Manual { ev100 } => *ev100,
+            Exposure::Auto { max_ev100, .. } => *max_ev100,
+        }
+    }
+
+    /// The exposure a view starts at: manual, 2^-EV100; auto, a first guess (the histogram takes over from frame 1).
+    pub fn start(&self) -> f32 {
+        match self {
+            Exposure::Manual { ev100 } => 2f32.powf(-ev100),
+            Exposure::Auto { compensation, max_ev100, .. } => 2f32.powf(*compensation) / 2f32.powf(*max_ev100),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Dof {
@@ -447,6 +466,14 @@ pub struct NativePreset {
 
 fn one() -> f32 {
     1.0
+}
+
+impl NativePreset {
+    /// The kernel's firefly clamp on indirect paths (`Params::misc[0]`): relative to the exposure, so that it is the
+    /// same in every scene.
+    pub fn firefly_clamp(&self, exposure: &Exposure) -> f32 {
+        self.clamp_indirect * 2f32.powf(exposure.ev_guess())
+    }
 }
 
 pub fn merge_json(a: &mut serde_json::Value, b: &serde_json::Value) {

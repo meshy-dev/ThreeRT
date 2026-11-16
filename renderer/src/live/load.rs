@@ -35,6 +35,8 @@ pub(super) struct LoadedScene {
     pub(super) bgs: Vec<wgpu::BindGroup>,
     pub(super) exposure: f32,
     pub(super) exposure_settings: ExposureSettings,
+    /// The render preset the kernel's parameters and the post passes' settings were taken from.
+    pub(super) preset: crate::desc::Preset,
     pub(super) tan_half_fov: f32,
     pub(super) scene_camera: Camera,
     /// The camera's depth of field (UE: off unless it sets a focus distance).
@@ -245,12 +247,10 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     base.cam_fwd[3] = w as f32 / h as f32;
     let bgs = targets.bind_groups(&g.device, passes, &up.accum);
     let exposure_settings = ExposureSettings::new(&sc.camera.exposure, &sc.preset.post);
-    // Manual: 2^-EV100. Auto: a first guess (the GPU histogram takes the exposure over from frame 1; the kernel's
-    // firefly clamp, `Params::misc[0]`, keeps `prepare`'s guess).
-    let exposure = match &sc.camera.exposure {
-        crate::desc::Exposure::Manual { ev100 } => 2f32.powf(-ev100),
-        crate::desc::Exposure::Auto { compensation, max_ev100, .. } => 2f32.powf(*compensation) / 2f32.powf(*max_ev100),
-    };
+    // (Auto: a first guess; the GPU histogram takes the exposure over from frame 1, and the kernel's firefly clamp,
+    // `Params::misc[0]`, keeps `prepare`'s guess.)
+    let exposure = sc.camera.exposure.start();
+    let preset = sc.preset.clone();
     let c = &sc.camera;
     let scene_camera = Camera { pos: c.position, fwd: c.forward, up: c.up, right: c.right, tan_half_fov: c.tan_half_fov };
     let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
@@ -303,5 +303,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         inst_at_load: instances.len(),
         added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, exposure, exposure_settings, preset, tan_half_fov: c.tan_half_fov, scene_camera, dof: c.dof.clone(), tables, fixed_features, dynamic, edit, sky: None, emit, sky_inputs, mat_runs, tri_order }, sc.preset.post))
 }
