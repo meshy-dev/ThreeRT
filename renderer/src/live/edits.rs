@@ -215,9 +215,7 @@ impl Grow<'_> {
     /// Whether buffers of these sizes (bytes) can be bound (the device's storage binding and buffer limits): past them
     /// the edit rebuilds instead (Bugbot on #131).
     pub(super) fn fits(&self, sizes: &[u64]) -> bool {
-        let l = self.g.device.limits();
-        let max = (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size);
-        sizes.iter().all(|&s| s <= max)
+        sizes.iter().all(|&s| self.g.buffer_fits(s))
     }
 
     /// Triangles: vertices, attributes, the BLASes' vertices, and in a scene with them (`colors`) vertex colours.
@@ -535,6 +533,12 @@ impl LiveCore {
                 self.g.set_medium(&self.sc.up, *id, None, Some(o.custom));
             }
         }
+        // Another sky, before the tables take the rest of the environment; one whose map cannot grow in place rebuilds.
+        if changes.sky && !changes.structural && !self.apply_sky(world)? {
+            self.fallback = Some("a sky whose map does not fit the scene's buffers in place".into());
+            self.fallbacks += 1;
+            changes.structural = true;
+        }
         let now = shader_time(self.time);
         let applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
         let Some(d) = applied else {
@@ -587,9 +591,6 @@ impl LiveCore {
         // change is strong the temporal pass cuts the history locally (anti-lag).
         if d.materials || d.lights || d.objects || d.environment {
             self.lit_changed = self.frame.max(1);
-        }
-        if changes.sky {
-            self.apply_sky(world)?;
         }
         // (A new cloud cover re-bakes the sky and dims the sun as a sun move does.)
         if changes.sun || self.sc.tables.cloud_cover != self.sky_cover {
@@ -646,13 +647,15 @@ impl LiveCore {
     /// Another sky (its kind, its parameters, its sun), as a build takes it: baked here, its environment map and CDF
     /// put in place (of another size: a new texture, the scene bound again), the parameters that say how it is read,
     /// and the lights it owns: the atmosphere's sun takes its colour from the bake, a light that is the sun no longer
-    /// its own again.
-    pub(super) fn apply_sky(&mut self, world: &World) -> Result<()> {
+    /// its own again. False, with nothing changed, when the map's CDF cannot grow in place (`Gpu::put_env`).
+    pub(super) fn apply_sky(&mut self, world: &World) -> Result<bool> {
         let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id))?;
         let altitude = world.settings.camera.map_or(self.sc.sky_inputs.1, |id| world.world_matrix(id).w_axis.y.max(0.0));
-        let cover = self.sc.tables.cloud_cover;
+        let cover = world.environment.cloud_cover.clamp(0.0, 1.0);
         let baked = crate::bake_sky(&sky, cover, altitude);
-        self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env));
+        if !self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env)) {
+            return Ok(false);
+        }
         let floor = self.sc.sky_inputs.2;
         let b = &mut self.sc.base;
         b.env = [if baked.has_env { 1.0 } else { 0.0 }, baked.env.width as f32, baked.env.height as f32, b.env[3]];
@@ -679,7 +682,7 @@ impl LiveCore {
         self.sc.sky_inputs = ((baked.env.width, baked.env.height), altitude, floor);
         self.sky_cover = cover;
         self.lit_changed = self.frame.max(1);
-        Ok(())
+        Ok(true)
     }
 
     /// A sky the worker thread has baked since the last frame (the newest), into the environment map and its CDF.
@@ -696,7 +699,10 @@ impl LiveCore {
 
     pub(super) fn put_sky(&mut self, (env, cdf, max): (gpu::EnvMap, Vec<f32>, f32)) {
         let Some(sky) = self.sc.sky.as_ref() else { return };
-        self.g.put_env(&mut self.sc.up, &env, &cdf);
+        // (The worker bakes at the map's size: written in place.)
+        if !self.g.put_env(&mut self.sc.up, &env, &cdf) {
+            return;
+        }
         // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night), or a
         // baked sky is not light-sampled at all (`env_nee_on`).
         self.sc.base.counts2[1] = (max >= sky.env_nee_floor && crate::env_nee_on()) as u32;

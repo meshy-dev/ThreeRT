@@ -2856,24 +2856,36 @@ impl Gpu {
         );
     }
 
+    /// Whether a buffer of `bytes` can be made and bound (the device's buffer and storage binding limits).
+    pub fn buffer_fits(&self, bytes: u64) -> bool {
+        let l = self.device.limits();
+        bytes <= (l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size)
+    }
+
     /// A sky's environment map and its sampling CDF (a dynamic sky's new bake, another sky): written in place where
     /// they are as large as the ones they replace, else a new texture, the CDF's section grown where it has to, and
-    /// the scene bound again.
-    pub fn put_env(&self, up: &mut Uploaded, env: &EnvMap, cdf: &[f32]) {
+    /// the scene bound again. False, with nothing changed, when the grown buffer would pass the device's limits (a
+    /// build lays the scene's words out again, with less room for edits: the caller rebuilds).
+    pub fn put_env(&self, up: &mut Uploaded, env: &EnvMap, cdf: &[f32]) -> bool {
         let size = up.env_tex.size();
         if (env.width, env.height) == (size.width, size.height) && cdf.len() == up.cdf_words {
             self.write_env_texels(&up.env_tex, env);
-            return up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
+            up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
+            return true;
+        }
+        let bytes = cdf.len() as u64 * 4;
+        if bytes > up.words.cap(Stream::EnvCdf) {
+            if !self.buffer_fits(up.words.size_with(Stream::EnvCdf, bytes)) {
+                return false;
+            }
+            up.words.grow(&self.device, &self.queue, Stream::EnvCdf, bytes);
         }
         up.env_tex = self.env_texture(env);
         up.bg_parts.env_view = up.env_tex.create_view(&Default::default());
-        let bytes = cdf.len() as u64 * 4;
-        if bytes > up.words.cap(Stream::EnvCdf) {
-            up.words.grow(&self.device, &self.queue, Stream::EnvCdf, bytes);
-        }
         up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
         up.cdf_words = cdf.len();
         self.rebind_scene(up);
+        true
     }
 
     /// A volume node shown or hidden by its own `visible`, in place: its media keep their place in the table with
