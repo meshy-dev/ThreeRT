@@ -368,6 +368,8 @@ impl LiveCore {
             self.light_tiles = None;
         }
         let tile_at = (((halton(self.frame % 64 + 1, 2) * 8.0) as u32).min(7), ((halton(self.frame % 64 + 1, 3) * 8.0) as u32).min(7));
+        // Something moves (triangles re-transformed, instances' transforms): the kernel writes motion vectors.
+        let moving = !self.sc.dynamic.1.is_empty() || self.sc.tables.retained.moves_instances();
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
             if let Some((row, at, size, cam)) = self.light_tiles {
@@ -381,7 +383,7 @@ impl LiveCore {
             }
             p.raster = [(self.raster.is_some() && !self.sc.instanced) as u32 as f32, jitter.0, jitter.1, 0.0];
             p.raster[3] = if self.rays { 0.0 } else { 1.0 };
-            if !self.sc.dynamic.1.is_empty() || !self.sc.tables.retained.instance_of.is_empty() || !self.sc.tables.retained.rigid.is_empty() {
+            if moving {
                 // The kernel finds the first dynamic triangle in Params::group_first (group 4), a u32.
                 p.motion[0] = 1.0;
             }

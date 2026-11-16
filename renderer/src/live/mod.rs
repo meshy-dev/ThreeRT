@@ -1170,7 +1170,7 @@ mod instanced_tests {
         assert_eq!((r.m[0][3], r.p[0][3]), (3.0, 0.0), "moved: last frame's rows kept");
         // A rebuild places it as an instance too, and it moves on in place.
         core.rebuild(&w).unwrap();
-        assert!(core.sc.tables.retained.instance_of.contains_key(&11) && core.sc.edit.placed.is_empty());
+        assert!(core.sc.tables.retained.placed(11).is_some_and(|i| i.moves) && core.sc.edit.placed.is_empty());
         assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95).as_deref()), (Some("a"), Some("b")));
         assert!(w.place_driven(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY));
         assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
@@ -1202,7 +1202,7 @@ mod instanced_tests {
         w.set_settings(crate::world::Settings { camera: Some(4), ..Default::default() });
         let mut core = LiveCore::new(g, &w, Path::new("."), &crate::default_presets_dir(), 64, 36).unwrap();
         w.take_changes();
-        let first = core.sc.tables.retained.instanced[&3].first as usize;
+        let first = core.sc.tables.retained.instanced(3).unwrap().first as usize;
         w.set_instances(3, 2, Some(at(2.0)), None, None).unwrap();
         assert!(!core.commit(&mut w).unwrap(), "in place");
         let r = core.sc.gpu_instances[first + 1];
@@ -1214,7 +1214,7 @@ mod instanced_tests {
         // Movable, moved and given new instances in one commit: updated once (twice would lose the motion).
         w.set_object(3, "copies".into(), None, Kind::Instanced { geometry: 2, procedural: false, materials: vec![1], capacity: 2 }, true, true).unwrap();
         assert!(core.commit(&mut w).unwrap(), "made movable: rebuilt");
-        let first = core.sc.tables.retained.instanced[&3].first as usize;
+        let first = core.sc.tables.retained.instanced(3).unwrap().first as usize;
         w.set_transform(3, Vec3::new(0.0, 1.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
         w.set_instances(3, 2, Some(at(3.0)), None, None).unwrap();
         let c = w.changes.clone();

@@ -546,10 +546,10 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         v
     };
     // Posed models: where each of their triangles landed (they are re-skinned in place, hardware RT only).
-    if hwrt && (!sc.retained.dynamic.is_empty() || !sc.retained.rigid.is_empty() || !sc.particles.is_empty() || !sc.gpu_particles.is_empty()) {
+    if hwrt && (sc.retained.dynamics_mut().next().is_some() || !sc.particles.is_empty() || !sc.gpu_particles.is_empty()) {
         let first_dynamic: usize = groups[..4].iter().sum();
         let finals: std::collections::HashMap<u32, u32> = bvh.order[first_dynamic..].iter().enumerate().map(|(k, &i)| (i, (first_dynamic + k) as u32)).collect();
-        for d in sc.retained.dynamic.values_mut().chain(sc.retained.rigid.values_mut().map(|r| &mut r.rest)) {
+        for d in sc.retained.dynamics_mut() {
             d.finals = (0..d.mats.len() as u32).map(|j| finals[&(d.first + j)]).collect();
         }
         // A particle system's triangles stay together (one group, the order within a group is the build order).

@@ -164,7 +164,7 @@ impl EditRoom {
     /// Whether the scene gets room (`for_scene`): editable geometry under hardware RT, or under software traversal
     /// with units (`hwrt` true for them too: `lib.rs prepare`).
     pub fn editable(scene: &Scene, hwrt: bool) -> bool {
-        hwrt && Self::reserve() > 0.0 && (!scene.procs.is_empty() || !scene.retained.own_instance.is_empty())
+        hwrt && Self::reserve() > 0.0 && (!scene.procs.is_empty() || scene.retained.has_own_instances())
     }
 
     /// `units`: software traversal with units, whose room does not grow (hardware traversal's does, from nothing): a
@@ -172,7 +172,7 @@ impl EditRoom {
     /// it has (a mesh it has not rebuilds the scene: no triangles).
     pub(crate) fn for_scene(scene: &Scene, tris: usize, records: usize, hwrt: bool, units: bool) -> EditRoom {
         let k = Self::reserve();
-        let (procs, meshes) = (!scene.procs.is_empty(), !scene.retained.own_instance.is_empty());
+        let (procs, meshes) = (!scene.procs.is_empty(), scene.retained.has_own_instances());
         let part = |n: usize, min: usize| ((n as f64 * 0.25 * k) as usize).max((min as f64 * k) as usize);
         if !Self::editable(scene, hwrt || units) {
             return if units && k > 0.0 {

@@ -260,8 +260,16 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     for i in &instances {
         *users.entry(i.mesh).or_default() += 1;
     }
-    let mesh_of = tables.retained.own_instance.iter().filter_map(|(&id, &k)| instances.get(k as usize).map(|i| (id, i.mesh))).collect();
-    let managed = tables.retained.own_mesh.values().chain(tables.retained.emitter_mesh.values()).copied().collect();
+    let own = |p: &scene::Proxy| match &p.draw {
+        scene::Draw::Instance(i) if i.mesh != scene::MeshKind::Model => Some(*i),
+        _ => None,
+    };
+    let mesh_of = tables.retained.proxies.iter().filter_map(|(&id, p)| own(p).and_then(|i| instances.get(i.instance as usize)).map(|i| (id, i.mesh))).collect();
+    let emitter_meshes = tables.retained.proxies.values().filter_map(|p| match own(p)?.mesh {
+        scene::MeshKind::Emitter(k) => Some(k),
+        _ => None,
+    });
+    let managed = tables.retained.own_mesh.values().copied().chain(emitter_meshes).collect();
     let edit = EditState {
         tris: Holes::new(room_base.0, room_base.0 + room.tris),
         records: Holes::new(room_base.1, room_base.1 + room.records),

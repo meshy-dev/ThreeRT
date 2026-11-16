@@ -104,7 +104,7 @@ impl Tables {
         }
         for id in &c.powers {
             let o = w.objects.get(id).ok_or_else(|| anyhow!("unknown object {id}"))?;
-            if let Some(&oi) = self.retained.objects.get(id) {
+            if let Some(oi) = self.retained.object(*id) {
                 let row = oi as usize * self.stride;
                 if self.defer_powers {
                     self.deferred.retain(|p| p.0 != row);
@@ -120,14 +120,14 @@ impl Tables {
         }
         for id in &c.customs {
             let o = w.objects.get(id).ok_or_else(|| anyhow!("unknown object {id}"))?;
-            if let Some(&oi) = self.retained.objects.get(id) {
+            if let Some(oi) = self.retained.object(*id) {
                 self.objects[oi as usize * self.stride + 2] = o.custom;
                 d.objects = true;
             }
         }
         for id in &c.lights {
             let o = w.objects.get(id).ok_or_else(|| anyhow!("unknown object {id}"))?;
-            if let (Some(&mat), Kind::Light(desc::Light::Rect { color, intensity, visible: true, .. })) = (self.retained.cards.get(id), &o.kind) {
+            if let (Some(mat), Kind::Light(desc::Light::Rect { color, intensity, visible: true, .. })) = (self.retained.proxies.get(id).and_then(|p| p.card), &o.kind) {
                 let m = scene::card_material(*color, *intensity);
                 if !self.can_emit(mat, &m) {
                     return Ok(None);

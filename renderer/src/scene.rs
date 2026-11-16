@@ -566,34 +566,130 @@ pub struct Retained {
     pub textures: HashMap<(u32, bool), i32>,
     /// Material function name -> index (GpuMaterial.tex1[3] - 1).
     pub shaders: HashMap<String, i32>,
-    /// Object -> object-table index (objects that draw triangles: meshes, models, rect-light cards).
-    pub objects: HashMap<u32, u32>,
+    /// Object -> where what it draws landed (`Proxy`): meshes, models, rect-light cards, instanced objects.
+    pub proxies: HashMap<u32, Proxy>,
     /// Object of each `lights` entry, same order (`prepare` sorts both).
     pub light_nodes: Vec<u32>,
-    /// Rect-light object with a visible card -> its card material.
-    pub cards: HashMap<u32, u32>,
     /// Atmosphere sun: its colour comes from the sky bake.
     pub sun: Option<u32>,
-    /// Posed models and movable objects (dynamic triangles) -> what re-transforming them in place needs.
-    pub dynamic: HashMap<u32, DynamicModel>,
-    /// Movable models placed as instances (hardware RT) -> their instance: a move updates its transform, not triangles.
-    pub instance_of: HashMap<u32, u32>,
-    /// Posed rigid models split by node (`RigidModel`): a new pose moves their nodes' instances.
-    pub rigid: HashMap<u32, RigidModel>,
-    /// Posed models sharing a pose (`PoseGroup`), and each member's group (members are in `instance_of` too).
+    /// Posed models sharing a pose (`PoseGroup`: its members' proxies name it, `InstanceRef::pose_group`).
     pub pose_groups: Vec<PoseGroup>,
-    pub pose_member: HashMap<u32, u32>,
-    /// `own_blas` meshes placed as instances (hardware RT): object -> its instance; (geometry, GPU material) -> the
-    /// shared mesh (objects with the same geometry and material share its BLAS). live/edits.rs `edit_geometry` keeps both.
-    pub own_instance: HashMap<u32, u32>,
+    /// `own_blas` meshes: (geometry, GPU material) -> the shared mesh (objects with the same geometry and material
+    /// share its BLAS). live/edits.rs `edit_geometry` keeps it.
     pub own_mesh: HashMap<(u32, u32), u32>,
-    /// Emitting `own_blas` meshes (`InstMesh::emits`): object -> its mesh (its own, in world space).
-    pub emitter_mesh: HashMap<u32, u32>,
-    /// Instanced objects (`Kind::Instanced`) placed as instances -> where (live/edits.rs `update_instanced`).
-    pub instanced: HashMap<u32, InstancedPlace>,
     /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
     /// place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
+}
+
+/// Where what one object of the world draws landed in the GPU's tables: its entry in the objects table and how its
+/// geometry is held. Edits in place go through it (live/edits.rs `LiveCore::commit`).
+#[derive(Clone, Default)]
+pub struct Proxy {
+    /// Object-table index (pivot, bounds, power, customData). None: an instanced object the build placed (an entry a
+    /// copy, from `InstancedPlace::object`).
+    pub object: Option<u32>,
+    /// A rect light's visible card: its material.
+    pub card: Option<u32>,
+    pub draw: Draw,
+}
+
+/// How a drawn object's geometry is held.
+#[derive(Clone, Default)]
+pub enum Draw {
+    /// As the build placed it, with nothing kept to change it by: triangles flattened into the static groups, a
+    /// static model's instance. An edit that would change it rebuilds.
+    #[default]
+    Fixed,
+    /// World-space triangles in the dynamic groups, re-transformed (a movable object) or re-skinned (a posed model)
+    /// on the CPU.
+    Dynamic(DynamicModel),
+    /// An instance of a model-space mesh (hardware RT, or software traversal's units).
+    Instance(InstanceRef),
+    /// A posed rigid model split by node: a new pose moves its nodes' instances.
+    Rigid(RigidModel),
+    /// An instanced object's copies (live/edits.rs `update_instanced`).
+    Instanced(InstancedPlace),
+}
+
+/// One instance of a mesh: its index in `instances` (the kernel's record of the same index).
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceRef {
+    pub instance: u32,
+    pub mesh: MeshKind,
+    /// A move is its transform's, not its triangles' (a mesh a body drives, a movable model).
+    pub moves: bool,
+    /// It shares a pose (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
+    pub pose_group: Option<u32>,
+}
+
+/// What mesh an instance is of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MeshKind {
+    /// A model's.
+    Model,
+    /// An `own_blas` mesh, shared by the objects of its geometry and material (`Retained::own_mesh`).
+    Own,
+    /// An emitting `own_blas` mesh (`InstMesh::emits`): this mesh, its own, its triangles in world space.
+    Emitter(u32),
+}
+
+impl Retained {
+    /// The object's proxy, made if it has none yet (the build, an edit that places it).
+    pub fn proxy(&mut self, id: u32) -> &mut Proxy {
+        self.proxies.entry(id).or_default()
+    }
+
+    /// Its object-table index.
+    pub fn object(&self, id: u32) -> Option<u32> {
+        self.proxies.get(&id)?.object
+    }
+
+    /// Its instance, if it is one of a mesh.
+    pub fn placed(&self, id: u32) -> Option<&InstanceRef> {
+        match &self.proxies.get(&id)?.draw {
+            Draw::Instance(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Its instance, if it is an `own_blas` mesh's (an emitter's too): what a geometry edit places again.
+    pub fn own_instance(&self, id: u32) -> Option<u32> {
+        self.placed(id).filter(|p| p.mesh != MeshKind::Model).map(|p| p.instance)
+    }
+
+    pub fn instanced(&self, id: u32) -> Option<&InstancedPlace> {
+        match &self.proxies.get(&id)?.draw {
+            Draw::Instanced(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn rigid(&self, id: u32) -> Option<&RigidModel> {
+        match &self.proxies.get(&id)?.draw {
+            Draw::Rigid(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Whether any object's move is an instance's transform (a movable or driven instance, a rigid model's nodes).
+    pub fn moves_instances(&self) -> bool {
+        self.proxies.values().any(|p| matches!(&p.draw, Draw::Rigid(_)) || matches!(&p.draw, Draw::Instance(i) if i.moves))
+    }
+
+    /// Whether any object is an `own_blas` mesh's instance (what geometry edits place again).
+    pub fn has_own_instances(&self) -> bool {
+        self.proxies.values().any(|p| matches!(&p.draw, Draw::Instance(i) if i.mesh != MeshKind::Model))
+    }
+
+    /// The triangles re-transformed on the CPU: the dynamic objects' and the rigid models' flattened ones.
+    pub fn dynamics_mut(&mut self) -> impl Iterator<Item = &mut DynamicModel> {
+        self.proxies.values_mut().filter_map(|p| match &mut p.draw {
+            Draw::Dynamic(d) => Some(d),
+            Draw::Rigid(r) => Some(&mut r.rest),
+            _ => None,
+        })
+    }
 }
 
 /// Where an instanced object's instances are: `capacity` of them from `first` in `instances` (triangles) or `procs`
@@ -1205,7 +1301,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         match &n.kind {
             Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() > 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
                 // Its own BLAS (scene code's `dynamicGeometry`, or a mesh a rigid body drives: its moves are the
-                // instance's transform, `retained.instance_of`): placed like a model instance, its geometry's triangles
+                // instance's transform, `InstanceRef::moves`): placed like a model instance, its geometry's triangles
                 // in model space in the pool, shared by the objects of the same geometry and material. Glass, emissive
                 // and function materials are flattened (as a model's would be), so they are never instanced.
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
@@ -1234,11 +1330,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
-                        retained.objects.insert(*id, oi);
-                        retained.own_instance.insert(*id, instances.len() as u32);
-                        if n.driven {
-                            retained.instance_of.insert(*id, instances.len() as u32);
-                        }
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven, pose_group: None }) };
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
                     }
                     continue;
@@ -1260,9 +1352,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         pool_attrs.extend(a);
                         let mesh = meshes.len() as u32 - 1;
                         objects.extend_from_slice(&object_row(m.transform_point3(Vec3::ZERO), n.power, im.hi - im.lo, n.custom, [1.0; 3])[..stride]);
-                        retained.objects.insert(*id, oi);
-                        retained.own_instance.insert(*id, instances.len() as u32);
-                        retained.emitter_mesh.insert(*id, mesh);
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Emitter(mesh), moves: false, pose_group: None }) };
                         instances.push(Instance { mesh, world: Mat4::IDENTITY, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
                     }
                     continue;
@@ -1272,7 +1362,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 // re-transformed in place as any movable mesh's.)
                 append_arrays(g, m, mat, if n.driven { flags | TRI_DYNAMIC } else { flags }, None, &mut tris, &mut tri_flags, &mut attrs);
                 if n.driven {
-                    retained.dynamic.insert(*id, DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
+                    retained.proxy(*id).draw = Draw::Dynamic(DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
                 }
             }
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {
@@ -1287,7 +1377,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if *procedural {
                     let object = (objects.len() / stride) as u32;
                     if let Some(p) = proc_object(w, *id, m, object, &retained.materials, assets)? {
-                        retained.instanced.insert(*id, InstancedPlace { first: procs.len() as u32, capacity: *capacity, object, procedural: true, drawn: t.count });
+                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: procs.len() as u32, capacity: *capacity, object, procedural: true, drawn: t.count });
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let q = ProcObject { world: wm, object: object + i as u32, sub: Some(i as u32), hidden, ..p.clone() };
                             objects.extend_from_slice(&q.entry(n.power, t.custom(i, n.custom), t.color(i))[..stride]);
@@ -1320,7 +1410,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     };
                     if let Some(mesh) = mesh {
                         let object = (objects.len() / stride) as u32;
-                        retained.instanced.insert(*id, InstancedPlace { first: instances.len() as u32, capacity: *capacity, object, procedural: false, drawn: t.count });
+                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: instances.len() as u32, capacity: *capacity, object, procedural: false, drawn: t.count });
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let (lo, hi) = meshes[mesh as usize].placed_bounds(wm);
                             objects.extend_from_slice(&entry(i, wm, Vec3::from(hi - lo))[..stride]);
@@ -1364,7 +1454,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 put_colors(&mut vcolors, tris.len(), vc.then(|| tri_colors(g, m.determinant() < 0.0, vc_tri.as_deref())));
                 append_arrays(g, m, mat, if movable { flags | TRI_DYNAMIC } else { flags }, per_tri.as_deref(), &mut tris, &mut tri_flags, &mut attrs);
                 if movable {
-                    retained.dynamic.insert(*id, DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
+                    retained.proxy(*id).draw = Draw::Dynamic(DynamicModel { first, mats: attrs[first as usize..].iter().map(|a| a.uv[3].to_bits()).collect(), ..Default::default() });
                 }
             }
             Kind::Model { uri, nodes, animation, functions } if shown => {
@@ -1497,7 +1587,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     for a in &mut attrs[first as usize..] {
                         a.x[1] = f32::from_bits(oi);
                     }
-                    retained.objects.insert(*id, oi);
                     rigid.rest.first = rest_first;
                     rigid.rest.object = oi;
                     if tris.len() as u32 > first {
@@ -1506,7 +1595,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
                         eprintln!("rigid: {uri}: {} static triangles, {} moving nodes as instances, {} flattened moving triangles", static_tris.len(), rigid.instances.len(), rigid.rest.mats.len());
                     }
-                    retained.rigid.insert(*id, rigid);
+                    *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Rigid(rigid) };
                     continue;
                 }
                 // A model in a shared pose: an instance of the pose's mesh (`PoseGroup`), made by the group's first.
@@ -1555,11 +1644,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
-                        retained.objects.insert(*id, oi);
                         let i = instances.len() as u32;
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
-                        retained.instance_of.insert(*id, i);
-                        retained.pose_member.insert(*id, g);
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Model, moves: true, pose_group: Some(g) }) };
                         retained.pose_groups[g as usize].members.push((*id, i));
                         continue;
                     }
@@ -1635,7 +1722,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
-                        retained.objects.insert(*id, oi);
+                        retained.proxy(*id).object = Some(oi);
                         let inst = Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false };
                         // Its glass / emissive triangles as ordinary world-space ones (same object).
                         for k in im.rest_first..im.rest_first + im.rest_count {
@@ -1646,8 +1733,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         if tris.len() as u32 > first {
                             tri_nodes.push((n.name.clone(), first, tris.len() as u32));
                         }
+                        // (A model that does not move keeps no instance of its own here: `Draw::Fixed`.)
                         if movable {
-                            retained.instance_of.insert(*id, instances.len() as u32);
+                            retained.proxy(*id).draw = Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Model, moves: true, pose_group: None });
                         }
                         instances.push(inst);
                         continue;
@@ -1660,7 +1748,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     mats.push(mat);
                 }
                 if dynamic {
-                    retained.dynamic.insert(*id, DynamicModel { first, mats, ..Default::default() });
+                    retained.proxy(*id).draw = Draw::Dynamic(DynamicModel { first, mats, ..Default::default() });
                 }
             }
             Kind::Light(l) => match (l, gpu_light_shown(l, m, n.power, shown)) {
@@ -1672,13 +1760,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     // Visible one-sided emissive quad (importance sampled as an emitter).
                     let mat = materials.len() as u32;
                     materials.push(card_material(*color, *intensity));
-                    retained.cards.insert(*id, mat);
+                    retained.proxy(*id).card = Some(mat);
                     let movable = w.movable(*id);
                     for (v, dir) in card_tris(m, *width, *height) {
                         push_tri(&mut tris, &mut tri_flags, &mut attrs, v, [dir; 3], [Vec2::ZERO; 3], None, mat, if movable { TRI_NO_SHADOW | TRI_DYNAMIC } else { TRI_NO_SHADOW });
                     }
                     if movable {
-                        retained.dynamic.insert(*id, DynamicModel { first, mats: vec![mat; 2], ..Default::default() });
+                        retained.proxy(*id).draw = Draw::Dynamic(DynamicModel { first, mats: vec![mat; 2], ..Default::default() });
                     }
                 }
                 _ => {}
@@ -1735,7 +1823,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Procedural { .. } if shown => {
                 if let Some(p) = proc_object(w, *id, m, (objects.len() / stride) as u32, &retained.materials, assets)? {
                     objects.extend_from_slice(&p.object_entry(n)[..stride]);
-                    retained.objects.insert(*id, p.object);
+                    retained.proxy(*id).object = Some(p.object);
                     procs.push(p);
                 }
             }
@@ -1823,8 +1911,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             for a in &mut attrs[first as usize..] {
                 a.x[1] = f32::from_bits(oi);
             }
-            retained.objects.insert(*id, oi);
-            if let Some(d) = retained.dynamic.get_mut(id) {
+            let proxy = retained.proxy(*id);
+            proxy.object = Some(oi);
+            if let Draw::Dynamic(d) = &mut proxy.draw {
                 d.object = oi;
             }
             tri_nodes.push((n.name.clone(), first, tris.len() as u32));
@@ -1873,7 +1962,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             *f |= TRI_NO_SHADOW;
         }
     }
-    for d in retained.dynamic.values_mut().chain(retained.rigid.values_mut().map(|r| &mut r.rest)) {
+    for d in retained.dynamics_mut() {
         d.flags = tri_flags[d.first as usize..d.first as usize + d.mats.len()].to_vec();
     }
     Ok(Scene {
@@ -2372,7 +2461,7 @@ mod instance_tests {
         assert_eq!((sc.meshes.len(), sc.instances.len(), sc.tris.len(), sc.objects.len() / 4), (1, 4, 0, 4), "tinted: 4 vec4s an object");
         assert_eq!(sc.instances.iter().map(|i| (i.sub, i.hidden)).collect::<Vec<_>>(), vec![(Some(0), false), (Some(1), false), (Some(2), true), (Some(3), true)]);
         assert_eq!((sc.objects[4][0], sc.objects[4 + 3]), (1.0, [0.5, 0.5, 0.5, 0.0]));
-        assert!(sc.tinted && sc.retained.instanced[&2].capacity == 4);
+        assert!(sc.tinted && sc.retained.instanced(2).unwrap().capacity == 4);
         let mut m = m.map(|m| m.to_cols_array()).concat();
         m[0] = -1.0;
         w.set_instances(2, 3, Some(m), None, None).unwrap();
