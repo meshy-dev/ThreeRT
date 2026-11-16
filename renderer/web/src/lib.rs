@@ -542,7 +542,7 @@ pub fn frame_end(dt: f32) -> Result<String, JsValue> {
         // (The frame's rebuilds and why, summed over its commits, an event's included; then cleared, as the native
         // runner does when it logs a frame.)
         let (rebuild_ms, fallback) = (std::mem::take(&mut v.core.rebuild_ms), v.core.fallback.take());
-        (v.core.edit_ms, v.core.instanced_ms) = (0.0, 0.0);
+        (v.core.edit_ms, v.core.instanced_ms, v.core.build_ms) = (0.0, 0.0, 0.0);
         Ok(json!({
             "physics": physics.map(|s| json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved })),
             "physics_ms": p1 - p0,

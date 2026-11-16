@@ -2597,7 +2597,9 @@ mesh, re-transformed triangles, a geometry edit) built the acceleration structur
 own submit, and was told by an argument whether a later one would build the TLAS for it; a geometry edit always
 built it, so an edit with a move built it twice. They now write their data and note what is to build
 (`gpu::TopBuild`), and the commit builds once at its end (`LiveCore::build_top`): every BLAS named and the TLAS in
-one call, or software traversal's top tree. That call is also the only safe shape on Metal, where a TLAS built
+one call, or software traversal's top tree; its CPU time is the frame log's `build`, and `edit`, `instanced`,
+`skin` and `upload` no longer hold a build's share (numbers read before this are not comparable there). That call
+is also the only safe shape on Metal, where a TLAS built
 apart from a BLAS it references can see it unbuilt and lose its instance, in the next submit too: a shared pose
 that changed with nothing moving built its mesh in one submit and the TLAS in the next, and in a process that had
 rendered other scenes before the models were gone. `tests/render/skinning-shared-pose-live` passed through it

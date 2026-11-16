@@ -55,8 +55,8 @@ impl Gather {
 }
 
 /// Where an in-place edit's CPU time goes (ms) and what it did: building the triangles' GPU form, uploading them,
-/// creating and recording BLASes and the TLAS; meshes added and rewritten in place, objects added or removed. Frame log
-/// `edit_split`.
+/// making its BLASes (software traversal: its trees; their build is the commit's, `LiveCore::build_ms`); meshes added
+/// and rewritten in place, objects added or removed. Frame log `edit_split`.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct EditSplit {
     pub tris: f64,
@@ -387,7 +387,6 @@ impl LiveCore {
             instanced_early = self.instanced_in_place(world, &early, &mut changes, &mut top);
         }
         // Geometry edits in place when nothing else is structural; what they cannot apply rebuilds the scene.
-        let mut edited = false;
         if changes.edits() && !changes.structural {
             let t = Instant::now();
             let r = self.edit_geometry(world, &changes, &mut top);
@@ -397,7 +396,6 @@ impl LiveCore {
             match r {
                 Ok(()) => {
                     self.edit_ms += t.elapsed().as_secs_f32() * 1e3;
-                    edited = true;
                     // As after a rebuild: history validated per pixel.
                     self.lit_changed = self.frame.max(1);
                 }
@@ -544,7 +542,7 @@ impl LiveCore {
         // The tables' edits, then what the edits above left to build, once. Either may say the scene is to be rebuilt,
         // and the rebuild builds all of it.
         let mut applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
-        if applied.is_some() && !self.build_top(top, edited) {
+        if applied.is_some() && !self.build_top(top) {
             applied = None;
         }
         let Some(d) = applied else {
@@ -593,10 +591,9 @@ impl LiveCore {
     }
 
     /// What a commit's edits left to build above the triangles, in one build (`Gpu::build_top`). False: software
-    /// traversal's top tree cannot be made, and the caller rebuilds the scene. Its CPU time is the geometry edit's
-    /// when the commit had one (`edited`: the frame log's `edit` is an edit with its build), else the uploads'.
+    /// traversal's top tree cannot be made, and the caller rebuilds the scene. Its CPU time is `build_ms`;
     /// THREERT_PROFILE_BLAS=1: its GPU time (the queue drained before and after; frame log `blas`).
-    fn build_top(&mut self, b: gpu::TopBuild, edited: bool) -> bool {
+    fn build_top(&mut self, b: gpu::TopBuild) -> bool {
         if !b.any() {
             return true;
         }
@@ -606,12 +603,7 @@ impl LiveCore {
         }
         let t = Instant::now();
         let built = self.g.build_top(&mut self.sc.up, b);
-        let ms = t.elapsed().as_secs_f32() * 1e3;
-        if edited {
-            (self.edit_ms, self.edit_split.blas) = (self.edit_ms + ms, self.edit_split.blas + ms as f64);
-        } else {
-            self.cpu_upload_ms += ms;
-        }
+        self.build_ms += t.elapsed().as_secs_f32() * 1e3;
         if profile {
             let _ = self.g.device.poll(wgpu::PollType::wait_indefinitely());
             self.gpu_blas_ms += t.elapsed().as_secs_f32() * 1e3;
