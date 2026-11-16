@@ -623,17 +623,8 @@ impl LiveCore {
         let cover = self.sc.tables.cloud_cover;
         let colour = crate::sky::sun_illuminance(&sky.atm, dir, lux, cover);
         let e = &mut self.sc.tables;
-        if let (Some(idx), Some(o)) = (e.light_index.get(&id), world.objects.get(&id)) {
-            if let crate::world::Kind::Light(l) = &o.kind {
-                if let Some(mut gl) = scene::gpu_light(l, world.world_matrix(id), o.power) {
-                    // (The sun: hidden with a rebuild, `World::set_visible`.)
-                    gl.color = [colour.x, colour.y, colour.z, 0.0];
-                    for &i in idx {
-                        e.lights[i] = gl;
-                    }
-                    self.sc.up.put_lights(&self.g.queue, &e.lights);
-                }
-            }
+        if e.set_sun_light(world, id, colour) {
+            self.sc.up.put_lights(&self.g.queue, &e.lights);
         }
         let _ = sky.ask.send((dir, lux, cover));
         if self.fixed_dt.is_some() {
@@ -668,11 +659,10 @@ impl LiveCore {
         if let Some(id) = was.filter(|id| Some(*id) != sun) {
             e.update_light(world, id, &mut d);
         }
+        // (Whole, not its colour alone: the tables no longer update a light that is the sun, and it may have been
+        // turned in this commit.)
         if let (Some(id), Some(c)) = (sun, baked.sun) {
-            for i in e.light_index.get(&id).cloned().unwrap_or_default() {
-                e.lights[i].color = [c.x, c.y, c.z, 0.0];
-                d.lights = true;
-            }
+            d.lights |= e.set_sun_light(world, id, c);
         }
         if d.lights && !e.lights.is_empty() {
             self.sc.up.put_lights(&self.g.queue, &e.lights);

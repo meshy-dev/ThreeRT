@@ -195,6 +195,20 @@ impl Tables {
         Ok(Some(d))
     }
 
+    /// The atmosphere's sun: its light's entries as the world has it now (its direction, its size), with the colour the
+    /// atmosphere leaves it (`colour`: illuminance through the atmosphere). Whether any entry was written.
+    pub fn set_sun_light(&mut self, w: &World, id: u32, colour: glam::Vec3) -> bool {
+        let (Some(idx), Some(o)) = (self.light_index.get(&id), w.objects.get(&id)) else { return false };
+        let Kind::Light(l) = &o.kind else { return false };
+        // (The sun: hidden with a rebuild, `World::set_visible`.)
+        let Some(mut gl) = scene::gpu_light(l, w.world_matrix(id), o.power) else { return false };
+        gl.color = [colour.x, colour.y, colour.z, 0.0];
+        for &i in idx {
+            self.lights[i] = gl;
+        }
+        !idx.is_empty()
+    }
+
     /// A light's entries as its description and place say (not the atmosphere's sun: `retained.sun`).
     pub fn update_light(&mut self, w: &World, id: u32, d: &mut Dirty) {
         if self.retained.sun == Some(id) {
