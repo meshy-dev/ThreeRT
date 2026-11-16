@@ -20,6 +20,8 @@
 //   shows; nothing is posted while it stays the same.
 // - `hud.flash(kind, angle?)` is the one thing that is an event: a hit marker, or the direction damage came from.
 // - Text is plain text: an app shows it as it is, never as markup.
+// - A `selectable` table is a menu the player can click or tap: the app answers with `{ t: "hud.choose", item, row }`
+//   (`host.on("hud.choose", (m) => ...)`).
 
 import { host } from "./host.ts";
 import { canonicalJson } from "./store.ts";
@@ -68,15 +70,33 @@ export interface HudList {
   lines: (string | HudLine)[];
 }
 
-/** A table: a scoreboard, shown while the game lists it (`f.input.down("Tab")`). */
+/**
+ * A table: a scoreboard, shown while the game lists it (`f.input.down("Tab")`), or a menu. A `selectable` table's
+ * rows can be chosen with a click or a tap: the app then sends `{ t: "hud.choose", item, row }` (`item` is the
+ * table's `id`, or its index in `items` without one; `row` the row's index), which the game takes with
+ * `host.on("hud.choose", ...)`. Keys and a gamepad drive the same menu through the game's own `highlight`.
+ */
 export interface HudTable {
   type: "table";
   anchor: HudAnchor;
   title?: string;
   columns: string[];
   rows: (string | number)[][];
-  /** The row to set apart (the player's own). */
+  /** The row to set apart (the player's own; a menu's current choice). */
   highlight?: number;
+  /** The rows can be clicked or tapped (`hud.choose`). */
+  selectable?: boolean;
+  /** The table's name in `hud.choose` (its index in `items` without one). */
+  id?: string;
+}
+
+/** What the app sends when the player clicks or taps a row of a selectable table. */
+export interface HudChoose {
+  t: "hud.choose";
+  /** The table's `id`, or its index in `items`. */
+  item: string | number;
+  /** The row's index in `rows`. */
+  row: number;
 }
 
 export type HudItem = HudText | HudBar | HudList | HudTable;
@@ -118,7 +138,15 @@ function check(h: Hud): void {
   for (const [k, item] of (h.items ?? []).entries()) {
     if (!item || !ITEMS.includes(item.type)) throw new TypeError(`hud.set: items[${k}].type must be one of ${ITEMS.join(", ")}`);
     if (!ANCHORS.includes(item.anchor)) throw new TypeError(`hud.set: items[${k}].anchor must be one of ${ANCHORS.join(", ")}`);
+    if (item.type === "table") {
+      if (!Array.isArray(item.columns) || !Array.isArray(item.rows) || !item.rows.every((r) => Array.isArray(r))) throw new TypeError(`hud.set: items[${k}]: a table has columns and rows (arrays)`);
+      if (item.selectable !== undefined && typeof item.selectable !== "boolean") throw new TypeError(`hud.set: items[${k}].selectable is true or false`);
+      if (item.id !== undefined && (typeof item.id !== "string" || item.id === "")) throw new TypeError(`hud.set: items[${k}].id is a non-empty string`);
+      if (item.highlight !== undefined && !Number.isInteger(item.highlight)) throw new TypeError(`hud.set: items[${k}].highlight is a row's index`);
+    }
   }
+  const ids = (h.items ?? []).flatMap((item) => (item.type === "table" && item.id !== undefined ? [item.id] : []));
+  if (new Set(ids).size !== ids.length) throw new TypeError("hud.set: two tables have the same id");
 }
 
 class HudState {

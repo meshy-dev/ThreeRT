@@ -195,7 +195,7 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
           input.apply(m as unknown as InputMessage);
           continue;
         }
-        if (m.t === "launch") channel.setLaunch(m.params);
+        if (m.t === "launch") channel.setLaunch(m.params, m.caps);
         if (!channel.listens(m.t)) continue;
         ctx ??= worldContext(frames, store.seed, { id: ++eventId, ts });
         const { world, random } = ctx;

@@ -228,8 +228,13 @@ fn main() -> Result<()> {
         }
         "view" | "play" => {
             // The window is the app of the game's host channel: its `net.*` messages are this binary's sockets and
-            // HTTP (src/net.rs; a build without the `net` feature answers that it has none).
-            view::run(view::parse_args(&args, &presets)?, Box::new(net::Net::new()))?;
+            // HTTP (src/net.rs; a build without the `net` feature answers that it has none), its `files.*` and
+            // `store.*` the paths of `--pick` and the store directory (`--store`, where `user:` assets are too).
+            let a = view::parse_args(&args, &presets)?;
+            threert_render::files::set_user_root(Some(&a.store));
+            let files = threert_render::userfiles::UserFiles::new(Some(a.store.clone()), Some(threert_render::userfiles::queued_picks(a.pick.clone())));
+            let services: Vec<Box<dyn threert_render::host::HostServices>> = vec![Box::new(net::Net::new()), Box::new(files)];
+            view::run(a, Box::new(services))?;
         }
         "setup" => {
             // Setup cost of a game bundle in the embedded runtime (as on a render node).
@@ -379,7 +384,7 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     host.settle_physics((start.max(0.0) * 60.0).round() as u32);
     let mut w = host.world.borrow_mut();
     w.take_changes();
-    let missing: Vec<String> = w.files().into_iter().filter(|f| !job.game.assets.join(f).is_file()).collect();
+    let missing: Vec<String> = w.files().into_iter().filter(|f| !threert_render::files::asset_path(&job.game.assets, f).is_file()).collect();
     if !missing.is_empty() {
         return Err(MissingFiles(missing).into());
     }
@@ -449,7 +454,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     let mut sc = {
         let mut w = host.world.borrow_mut();
         w.take_changes();
-        let missing: Vec<String> = w.files().into_iter().filter(|f| !job.game.assets.join(f).is_file()).collect();
+        let missing: Vec<String> = w.files().into_iter().filter(|f| !threert_render::files::asset_path(&job.game.assets, f).is_file()).collect();
         if !missing.is_empty() {
             return Err(MissingFiles(missing).into());
         }

@@ -41,6 +41,9 @@ winit = "0.30"
 oidn = { version = "2.5", optional = true }
 # Scene runtime of the render node (game bundles run in the renderer process, src/script.rs).
 rquickjs = "0.12"
+# Files on the host channel are base64 (docs/RUNTIME.md "Files"): the script runtime's codec (src/script.rs) and the
+# app side of `files.*` / `store.*` (src/userfiles.rs).
+base64 = "0.23"
 
 # The `threert-render` binary's sockets and HTTP, for the games its window runs (src/net.rs: the `net.*` messages of
 # the host channel, docs/RUNTIME.md). Only the binary uses them, and only with the `net` feature: the library has no

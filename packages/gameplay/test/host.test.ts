@@ -239,3 +239,29 @@ test("the HUD is posted when it changed, and only then", () => {
     a.close();
   }
 });
+
+test("a selectable table is a menu: the app's hud.choose reaches the game's listener", () => {
+  const a = app();
+  try {
+    hud.reset();
+    const menu = { type: "table" as const, anchor: "center" as const, id: "maps", title: "Maps", columns: ["Map", "Size"], rows: [["de_dust2", "4.2 MB"], ["cs_office", "3.1 MB"]], highlight: 0, selectable: true };
+    assert.equal(hud.set({ items: [{ type: "text", anchor: "top-left", text: "x" }, menu] }), true);
+    assert.deepEqual((a.posts.at(-1)!.hud as Hud).items![1], menu);
+    assert.throws(() => hud.set({ items: [{ ...menu, selectable: "yes" as never }] }), /selectable/);
+    assert.throws(() => hud.set({ items: [{ ...menu, id: "" }] }), /id/);
+    assert.throws(() => hud.set({ items: [menu, { ...menu }] }), /same id/);
+    assert.throws(() => hud.set({ items: [{ ...menu, rows: "none" as never }] }), /rows/);
+    assert.throws(() => hud.set({ items: [{ ...menu, highlight: 0.5 }] }), /highlight/);
+    // The app's click on a row, as the game hears it.
+    const g = defineGame({ state: {}, setup: scene, handlers: {} });
+    const h = installNodeHost(g, new RecordingEngine());
+    h.setup("node");
+    const chosen: [string | number, number][] = [];
+    const off = host.on("hud.choose", (m) => void chosen.push([m.item, m.row]));
+    send(h, { t: "hud.choose", item: "maps", row: 1 }, { t: "hud.choose", item: 0, row: 0 });
+    off();
+    assert.deepEqual(chosen, [["maps", 1], [0, 0]]);
+  } finally {
+    a.close();
+  }
+});

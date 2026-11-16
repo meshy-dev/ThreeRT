@@ -22,6 +22,8 @@ mod mix;
 mod out;
 
 pub use decode::{decode, EXTENSIONS};
+#[cfg(test)]
+pub(crate) use decode::tests_wav;
 pub use mix::{pan_gains, place, Listener, Sound, DEFAULT_FALLOFF, MAX_COPIES, MAX_VOICES};
 
 use glam::Vec3;
@@ -220,7 +222,7 @@ impl Audio {
     }
 
     /// The decoded sound `name`, decoded now if it is not yet (None: missing or unreadable, said once).
-    fn sound(&mut self, name: &str) -> Option<Arc<Sound>> {
+    pub(crate) fn sound(&mut self, name: &str) -> Option<Arc<Sound>> {
         self.poll();
         if let Some(s) = self.sounds.get(name) {
             return s.clone();
@@ -260,6 +262,11 @@ impl Audio {
 
     fn path(&self, name: &str) -> Result<PathBuf, String> {
         let root = self.root.as_ref().ok_or_else(|| format!("{name}: no game is open"))?;
+        // A sound the game keeps in its store (docs/RUNTIME.md "Files"): `user:<store path>`.
+        if let Some(rel) = name.strip_prefix(crate::files::USER_SCHEME) {
+            crate::files::check_store_path(rel).map_err(|e| format!("{name}: {e}"))?;
+            return crate::files::user_root().map(|r| r.join(rel)).ok_or_else(|| format!("{name}: the app gave the game no store"));
+        }
         let rel = Path::new(name.trim_start_matches("./"));
         if name.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
             return Err(format!("{name}: a sound is a path inside the game's package"));

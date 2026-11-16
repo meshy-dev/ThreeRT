@@ -776,7 +776,7 @@ fn bytes_key(kind: &str, bytes: &[u8]) -> String {
 fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image::RgbaImage>)> {
     match &t.source {
         world::TextureSource::File(uri) => {
-            let path = assets.join(uri);
+            let path = crate::files::asset_path(assets, uri);
             let key = file_key(&path);
             Ok((key.clone(), cached_image(&key, || crate::files::image(&path).with_context(|| format!("texture {uri}")))?))
         }
@@ -793,7 +793,7 @@ fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image
 
 /// A model file (cached per file version).
 pub fn model_gltf(uri: &str, assets: &Path) -> Result<Arc<skin::Model>> {
-    let path = assets.join(uri);
+    let path = crate::files::asset_path(assets, uri);
     cached_gltf(&file_key(&path), || skin::Model::new(import_gltf(&path).with_context(|| format!("asset {uri}"))?))
 }
 
