@@ -21,8 +21,10 @@
 // - The same object is `globalThis.__threert_host`, for a library that does not import this package.
 //
 // The message families an app may implement are in docs/RUNTIME.md ("The host channel"): `net.*` (sockets and HTTP
-// the app owns), `hud` (hud.ts), `audio.*` (audio.ts: played by the engine's mixer), `launch` (how the game was
-// opened), and `input` (input.ts), which the node host takes itself.
+// the app owns), `hud` (hud.ts), `audio.*` (audio.ts: played by the engine's mixer), `files.*` and `store.*` (files.ts:
+// what the player picked, the game's own storage on the device; docs/RUNTIME.md "Files"), `launch` (how the game was
+// opened, and `caps`: the families of requests the app answers, kept as `host.caps`), and `input` (input.ts), which
+// the node host takes itself.
 
 import type { WorldContext } from "./world.ts";
 
@@ -56,8 +58,8 @@ export interface HostEvents {
   "net.closed": { t: "net.closed"; id: string; code: number; reason: string };
   /** A `net.fetch`'s answer. `status` 0: the request failed (`error`). */
   "net.fetched": { t: "net.fetched"; id: string; status: number; body: string; error?: string };
-  /** Once after setup. */
-  launch: { t: "launch"; params: LaunchParams };
+  /** Once after setup. `caps`: the families of requests the app answers (`"files"`, `"store"`); none: `[]`. */
+  launch: { t: "launch"; params: LaunchParams; caps?: string[] };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -74,6 +76,11 @@ export interface Host {
   on(type: string, fn: HostListener<HostMessage>): () => void;
   /** The `launch` message's `params`; `{}` until the app has sent one (and for an app that never does). */
   readonly launch: Readonly<LaunchParams>;
+  /**
+   * The `launch` message's `caps`: the families of requests the app answers (`"files"`, `"store"`: files.ts). `[]`
+   * until the app has sent it, and for an app that lists none. A game waits for no answer of a family not listed.
+   */
+  readonly caps: readonly string[];
 }
 
 /** The node host's side of the channel (node-host.ts). */
@@ -82,12 +89,13 @@ export interface HostChannel extends Host {
   listens(type: string): boolean;
   /** Hands `message` to its listeners. Returns the errors of those that threw. */
   deliver(message: HostMessage, world: WorldContext<unknown>): string[];
-  setLaunch(params: unknown): void;
+  setLaunch(params: unknown, caps?: unknown): void;
 }
 
 function makeHost(): HostChannel {
   const listeners = new Map<string, HostListener[]>();
   let launch: Readonly<LaunchParams> = Object.freeze({});
+  let caps: readonly string[] = Object.freeze([]);
   return {
     post(message) {
       if (!message || typeof message !== "object" || typeof message.t !== "string" || !message.t) throw new TypeError('host.post: a message is an object with a string "t"');
@@ -111,6 +119,9 @@ function makeHost(): HostChannel {
     get launch() {
       return launch;
     },
+    get caps() {
+      return caps;
+    },
     listens: (type) => (listeners.get(type)?.length ?? 0) > 0,
     deliver(message, world) {
       const errors: string[] = [];
@@ -125,8 +136,9 @@ function makeHost(): HostChannel {
       }
       return errors;
     },
-    setLaunch(params) {
+    setLaunch(params, list) {
       launch = Object.freeze(params && typeof params === "object" && !Array.isArray(params) ? { ...(params as LaunchParams) } : {});
+      caps = Object.freeze(Array.isArray(list) ? [...new Set(list.filter((c): c is string => typeof c === "string"))] : []);
     },
   };
 }

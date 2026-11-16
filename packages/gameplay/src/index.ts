@@ -8,6 +8,8 @@ export { host } from "./host.ts";
 export type { Host, HostEvents, HostListener, HostMessage, LaunchParams, NetPost } from "./host.ts";
 export { InputState } from "./input.ts";
 export type { Input, InputMessage } from "./input.ts";
+export { files, HostRequestError, sliced, store } from "./files.ts";
+export type { FileEntry, Files, Picked, PickOptions, Sliced, SliceResult, UserStore } from "./files.ts";
 export { audio } from "./audio.ts";
 export type { Audio, AudioPoint, AudioPost, PlayOptions } from "./audio.ts";
 export { hud } from "./hud.ts";

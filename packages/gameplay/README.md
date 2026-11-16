@@ -63,6 +63,7 @@ export default defineGame({
 - **World handlers** (`on`) reach the engine's own world: physics, a ray cast into the scene, objects added and removed as an event arrives.
 - **Input, a HUD and the app.** A game with `pointer: "look"` reads the keys and the mouse every frame (`f.input.move`, `f.input.look`, `f.input.pressed("Space")`); `hud.set(...)` describes a crosshair, figures, bars and a scoreboard for the app to draw; `host.post` / `host.on` reach what the app owns (a WebSocket, an HTTP request, how the game was opened).
 - **Sound.** `audio.play("assets/sounds/shot.ogg", { at: muzzle, pitch: 1.04 })` plays a file of the game at a place in the world (or, without `at`, in the player's head); the engine decodes, places and mixes it the same way on every platform, with the camera as the ears. `audio.preload`, `audio.stop(key)` and `audio.move(key, at)` for the rest.
+- **The player's files.** Where the app allows it (`files.available()`), `files.pick({ mode: "folder", accept: [".bsp"] })` lets the player choose content they own and `files.read(pick, path)` reads it; `store.write` / `read` / `list` / `remove` keep what the game made of it on the device, and `store.uri(path)` (`"user:maps/x.glb"`) shows it as a model or a texture. Nothing leaves the device. `sliced(generator)` runs a long conversion a few milliseconds a frame.
 
 How scene code runs in the engine is in [RUNTIME.md](https://github.com/meshy-dev/ThreeRT/blob/main/docs/RUNTIME.md).
 
