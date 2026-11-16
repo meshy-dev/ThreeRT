@@ -191,15 +191,18 @@ impl EditRoom {
     }
 }
 
-/// A procedural BLAS an edit made, to be built with its commit's TLAS (`Gpu::proc_blas`, `TopBuild`).
+/// A procedural BLAS an edit made, to be built with its commit's TLAS (`Gpu::proc_blas`, `TopBuild`): kept by its
+/// blob's hash for reuse once built (`bytes`: its size).
 pub struct PendingProc {
+    hash: [u8; 32],
     blas: wgpu::Blas,
     boxes: wgpu::Buffer,
     size: wgpu::BlasAABBGeometrySizeDescriptor,
+    bytes: u64,
 }
 
-/// What a commit's edits left to build above the triangles (live/edits.rs): each writes its data and notes here what
-/// is to build, and the commit builds once at its end (`Gpu::build_top`), whichever of them ran.
+/// What a commit's edits leave to build above the triangles (live/edits.rs `commit`): each writes its data and notes
+/// here what is to build, and the commit builds once at its end (`Gpu::build_top`).
 #[derive(Default)]
 pub struct TopBuild {
     /// Instances (hardware traversal's TLAS instances, software traversal's units) moved, came or went.
@@ -208,9 +211,8 @@ pub struct TopBuild {
     pub dynamic: bool,
     /// Instanced meshes' BLASes: new meshes, a new shared pose.
     pub meshes: Vec<u32>,
-    /// Procedural BLASes an edit made, and their hashes: kept for reuse once built (`Gpu::proc_blas`).
+    /// Procedural BLASes an edit made.
     pub procs: Vec<PendingProc>,
-    pub fresh: Vec<([u8; 32], wgpu::Blas, u64)>,
 }
 
 impl TopBuild {
@@ -3110,33 +3112,22 @@ impl Gpu {
         &accel.meshes[k as usize]
     }
 
-    /// The AABB BLAS of a procedural geometry's boxes (live/edits.rs `edit_geometry`): the one kept by its hash or made
-    /// earlier in this edit (`fresh`), or a new one, its build added to `pending` and itself to `fresh`. Both go to
-    /// the commit's build (`TopBuild::procs`, `fresh`), which keeps `fresh` for reuse once it has built them: a
-    /// commit that falls back never builds, and a BLAS never built must not be reused.
-    pub fn proc_blas(&self, blob: &crate::procasset::ProcBlob, pending: &mut Vec<PendingProc>, fresh: &mut Vec<([u8; 32], wgpu::Blas, u64)>) -> wgpu::Blas {
+    /// The AABB BLAS of a procedural geometry's boxes (live/edits.rs `edit_geometry`): the one kept by its hash, the
+    /// one this commit already made (`pending`), or a new one added to `pending` (`TopBuild::procs`).
+    pub fn proc_blas(&self, blob: &crate::procasset::ProcBlob, pending: &mut Vec<PendingProc>) -> wgpu::Blas {
         if let Some((blas, _)) = self.proc_blases.lock().unwrap().get(&blob.hash) {
             return blas.clone();
         }
-        if let Some((_, blas, _)) = fresh.iter().find(|f| f.0 == blob.hash) {
-            return blas.clone();
+        if let Some(p) = pending.iter().find(|p| p.hash == blob.hash) {
+            return p.blas.clone();
         }
         let d = &self.device;
         let size = wgpu::BlasAABBGeometrySizeDescriptor { primitive_count: (blob.boxes.len() / 6) as u32, flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE };
         let blas = d.create_blas(&wgpu::CreateBlasDescriptor { label: Some("proc"), flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build }, wgpu::BlasGeometrySizeDescriptors::AABBs { descriptors: vec![size.clone()] });
         let boxes = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("proc boxes"), contents: bytemuck::cast_slice(&blob.boxes), usage: wgpu::BufferUsages::BLAS_INPUT });
         let bytes = self.aabb_blas_bytes(&boxes, size.primitive_count).unwrap_or(0);
-        fresh.push((blob.hash, blas.clone(), bytes));
-        pending.push(PendingProc { blas: blas.clone(), boxes, size });
+        pending.push(PendingProc { hash: blob.hash, blas: blas.clone(), boxes, size, bytes });
         blas
-    }
-
-    /// Keeps the procedural BLASes an edit built (`proc_blas`), once its builds are submitted.
-    pub fn keep_proc_blases(&self, fresh: Vec<([u8; 32], wgpu::Blas, u64)>) {
-        let mut built = self.proc_blases.lock().unwrap();
-        for (hash, blas, bytes) in fresh {
-            built.insert(hash, (blas, bytes));
-        }
     }
 
     /// The scene's bind group (group 0: pathtrace.wgsl's declarations, the layout `Gpu::new` makes).
@@ -3254,13 +3245,11 @@ impl Gpu {
         self.queue.write_buffer(nodes, root as u64 * 32, bytemuck::cast_slice(&vec![crate::units::FILL; len as usize]));
     }
 
-    /// What a commit left to build above the triangles (`TopBuild`), once. Hardware traversal: the BLASes it names and
-    /// the TLAS in one call. (The TLAS reads the BLASes' bounds through their resource ids, which Metal does not
-    /// order a later build after: a TLAS built apart from a BLAS it references, in the next submit too, can see it
-    /// unbuilt and lose its instance. Seen: a shared pose's mesh built in one submit and the TLAS in the next lost
-    /// the models, in a process that had rendered other scenes before; tests/render/skinning-shared-pose-live.)
-    /// Software traversal: the top tree over the units as they are now (the meshes' trees are written as
-    /// they change); Err: no tree can be made (`retop`), nothing was written, and the caller rebuilds the scene.
+    /// What a commit left to build above the triangles, once. Hardware traversal: the BLASes named and the TLAS in one
+    /// call: on Metal a TLAS built apart from a BLAS it references, in the next submit too, can see it unbuilt and
+    /// lose its instance until the TLAS is next built (tests/render/skinning-shared-pose-live). Software traversal:
+    /// the top tree over the units as they are now; Err: none can be made (`retop`), nothing was written, and the
+    /// caller rebuilds the scene.
     pub fn build_top(&self, up: &mut Uploaded, b: TopBuild) -> std::result::Result<(), String> {
         match Top::of(&mut up.accel, &mut up.units) {
             Some(Top::Hw(accel)) => {
@@ -3276,7 +3265,8 @@ impl Gpu {
                 e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
                 self.queue.submit([e.finish()]);
                 drop(entries);
-                self.keep_proc_blases(b.fresh);
+                // Built: kept for reuse (a commit that falls back never builds, and a BLAS never built must not be).
+                self.proc_blases.lock().unwrap().extend(b.procs.into_iter().map(|p| (p.hash, (p.blas, p.bytes))));
                 Ok(())
             }
             Some(Top::Sw(units)) => self.retop(units, &up.bg_parts.nodes),

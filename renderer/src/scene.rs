@@ -610,8 +610,8 @@ pub struct InstancedPlace {
 
 /// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects): the nodes the
 /// clip leaves alone are ordinary static triangles; each moving mesh node is an instance of its own mesh (its triangles
-/// in the node's space, one BLAS built once), placed at object x node transform, so a new pose moves instances and
-/// rebuilds the TLAS only. Their glass / emissive / function triangles are flattened (shadow rays, emitter sampling):
+/// in the node's space, one BLAS built once), placed at object x node transform, so a new pose moves instances
+/// only. Their glass / emissive / function triangles are flattened (shadow rays, emitter sampling):
 /// `rest`, re-transformed in place from `rest_local`.
 #[derive(Clone, Default)]
 pub struct RigidModel {
