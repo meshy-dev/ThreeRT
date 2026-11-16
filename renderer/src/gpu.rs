@@ -1573,6 +1573,16 @@ pub const F_GRID: u32 = 1 << 25;
 /// guided live by the light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass runs for such a
 /// scene).
 pub const F_LISTS: u32 = 1 << 27;
+/// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
+/// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
+/// there the lights are resampled as in a scene of fewer, unguided (docs/RUNTIME.md "Android").
+pub fn light_tiles_on() -> bool {
+    light_tiles_of(std::env::var("THREERT_LIGHT_TILES").ok().as_deref(), cfg!(target_os = "android"))
+}
+
+fn light_tiles_of(var: Option<&str>, android: bool) -> bool {
+    var.map_or(!android, |v| v == "1")
+}
 /// Local lights the kernel sums exactly (pathtrace.wgsl `RIS_EXACT`; the test below holds the two together).
 pub const RIS_EXACT: usize = 8;
 /// The features that change the kernel's source (an `@if` flag) rather than switch code in it (`FEAT`).
@@ -1631,7 +1641,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
     let media = if scene.media.is_empty() { 0 } else { F_MEDIA } | if scene.media.iter().any(|m| m.a[2] != 0) { F_HMEDIA } else { 0 } | if grid { F_GRID } else { 0 };
-    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > RIS_EXACT { F_LISTS } else { 0 };
+    let particles = if scene.particles.iter().any(|p| !p.translucent) || !scene.gpu_particles.is_empty() { F_PEMIT } else { 0 } | if scene.procs.is_empty() { 0 } else { F_PROC } | if scene.tinted { F_TINT } else { 0 } | if scene.gpu_vcolors.is_empty() { 0 } else { F_VCOLOR } | if light_tiles_on() && scene.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > RIS_EXACT { F_LISTS } else { 0 };
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
@@ -3716,6 +3726,8 @@ mod tests {
         assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, last_sun: false, light_pick: true });
         assert_eq!(on.pipeline_cache.as_deref(), Some(std::path::Path::new("/data/cache/pipelines")));
         assert_eq!(GpuOptions::from_vars(&vars(&[("THREERT_PIPELINE_CACHE", "")]), true).pipeline_cache, None);
+        // The light tiles: everywhere but Android unless asked.
+        assert_eq!([light_tiles_of(None, false), light_tiles_of(None, true), light_tiles_of(Some("1"), true), light_tiles_of(Some("0"), false)], [true, false, true, false]);
         // (And the environment map's light sampling, which is the scene's preparation's: lib.rs `env_nee_on`.)
         assert_eq!([crate::env_nee_of(None, false), crate::env_nee_of(None, true), crate::env_nee_of(Some("1"), true), crate::env_nee_of(Some("0"), false)], [true, false, true, false]);
     }

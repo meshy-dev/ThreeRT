@@ -1701,6 +1701,7 @@ on the device", and differs where it says so.
   | `THREERT_CUTOUT_LITE` | Android: 1 | hardware traversal: 1 = shadow and any-hit rays take alpha cutouts as opaque; 2 = camera rays also step through at most 4 cutouts | a map with cutout foliage: the trace 235 ms, 41 ms without cutouts |
   | `THREERT_LAST_DIRECT` | Android: 1 | the path's last vertex (at the bounce limit, past the camera hit) takes its direct light | with one bounce and no radiance cache (which cost 30-60 % more trace) sunlit ground lit nothing and interiors were black |
   | `THREERT_LIGHT_PICK` | 0 | past the camera hit, the directional lights and one of the other kinds (local lights, emitters, the sky), weighted by their number: two shadow rays a vertex instead of four; unbiased, noisier | a handheld's host sets it with `THREERT_LAST_DIRECT` |
+  | `THREERT_LIGHT_TILES` | Android: 0 | a scene with more than `RIS_EXACT` shadow-casting local lights has no light tiles (`F_LISTS`, #87): its lights are resampled unguided, as before the tiles (not a flag of the source: the scene's feature is left off, gpu.rs `light_tiles_on`) | OpenStrikeRT's Foundry, 249 × 140, one bounce, the tables read whole: 48 ms with the tiles, 31 ms without (30 fps, the 0.4 clients' rate); `THREERT_LIGHT_PICK=1` instead: 38 ms |
 
   `THREERT_CHECKED=1` (or a mask: 2 bounds, 4 loop bounding, 8 ray-query initialization) compiles the kernel with
   naga's runtime checks, to tell a driver's fault from the kernel's.
