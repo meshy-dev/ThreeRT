@@ -606,18 +606,20 @@ pub enum Draw {
     Dynamic(DynamicModel),
     /// An instance of a model-space mesh (hardware RT, or software traversal's units).
     Instance(InstanceRef),
+    /// Procedural geometry: its index in `procs` (its record less the first procedural record).
+    Procedural(u32),
     /// A posed rigid model split by node: a new pose moves its nodes' instances.
     Rigid(RigidModel),
     /// An instanced object's copies (live/edits.rs `update_instanced`).
     Instanced(InstancedPlace),
 }
 
-/// One instance of a mesh: its index in `instances` (the kernel's record of the same index).
+/// One instance of a mesh: its index in `instances`, which is its record (the build's, or one of the edit room's).
 #[derive(Clone, Copy, Debug)]
 pub struct InstanceRef {
     pub instance: u32,
     pub mesh: MeshKind,
-    /// A move is its transform's, not its triangles' (a mesh a body drives, a movable model).
+    /// A move is its transform's, not its triangles' (a mesh a body drives, a movable model the build placed).
     pub moves: bool,
     /// It shares a pose (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
     pub pose_group: Option<u32>,
@@ -651,11 +653,6 @@ impl Retained {
             Draw::Instance(p) => Some(p),
             _ => None,
         }
-    }
-
-    /// Its instance, if it is an `own_blas` mesh's (an emitter's too): what a geometry edit places again.
-    pub fn own_instance(&self, id: u32) -> Option<u32> {
-        self.placed(id).filter(|p| p.mesh != MeshKind::Model).map(|p| p.instance)
     }
 
     pub fn instanced(&self, id: u32) -> Option<&InstancedPlace> {
@@ -692,15 +689,15 @@ impl Retained {
     }
 }
 
-/// Where an instanced object's instances are: `capacity` of them from `first` in `instances` (triangles) or `procs`
-/// (procedural), with object-table entries from `object`, one each; the first `drawn` were last written with their
-/// matrices (the rest are hidden, and an update leaves them be).
+/// Where an instanced object's instances are: `capacity` of them from `first` in `instances` (instances of `mesh`) or
+/// in `procs` (procedural copies: no mesh), with object-table entries from `object`, one each; the first `drawn`
+/// were last written with their matrices (the rest are hidden, and an update leaves them be).
 #[derive(Clone, Copy, Debug)]
 pub struct InstancedPlace {
     pub first: u32,
     pub capacity: u32,
     pub object: u32,
-    pub procedural: bool,
+    pub mesh: Option<u32>,
     pub drawn: u32,
 }
 
@@ -1377,7 +1374,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if *procedural {
                     let object = (objects.len() / stride) as u32;
                     if let Some(p) = proc_object(w, *id, m, object, &retained.materials, assets)? {
-                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: procs.len() as u32, capacity: *capacity, object, procedural: true, drawn: t.count });
+                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: procs.len() as u32, capacity: *capacity, object, mesh: None, drawn: t.count });
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let q = ProcObject { world: wm, object: object + i as u32, sub: Some(i as u32), hidden, ..p.clone() };
                             objects.extend_from_slice(&q.entry(n.power, t.custom(i, n.custom), t.color(i))[..stride]);
@@ -1410,7 +1407,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     };
                     if let Some(mesh) = mesh {
                         let object = (objects.len() / stride) as u32;
-                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: instances.len() as u32, capacity: *capacity, object, procedural: false, drawn: t.count });
+                        retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: instances.len() as u32, capacity: *capacity, object, mesh: Some(mesh), drawn: t.count });
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let (lo, hi) = meshes[mesh as usize].placed_bounds(wm);
                             objects.extend_from_slice(&entry(i, wm, Vec3::from(hi - lo))[..stride]);
@@ -1823,7 +1820,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Procedural { .. } if shown => {
                 if let Some(p) = proc_object(w, *id, m, (objects.len() / stride) as u32, &retained.materials, assets)? {
                     objects.extend_from_slice(&p.object_entry(n)[..stride]);
-                    retained.proxy(*id).object = Some(p.object);
+                    *retained.proxy(*id) = Proxy { object: Some(p.object), card: None, draw: Draw::Procedural(procs.len() as u32) };
                     procs.push(p);
                 }
             }

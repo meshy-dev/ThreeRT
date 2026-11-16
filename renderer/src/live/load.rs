@@ -18,9 +18,9 @@ pub(super) struct LoadedScene {
     /// The instances' kernel records as uploaded (movable ones are rewritten when they move), then the procedural
     /// objects' (from `proc_first`).
     pub(super) gpu_instances: Vec<scene::GpuInstance>,
-    /// Procedural geometry (moves, picking), by node in `proc_of`; its records start at `proc_first`.
+    /// Procedural geometry (moves, picking): the record `proc_first` + j is `procs[j]`'s, as record i is
+    /// `instances[i]`'s. Both hold what edits place too, at its record (hidden fillers at the records between).
     pub(super) procs: Vec<scene::ProcObject>,
-    pub(super) proc_of: std::collections::HashMap<u32, usize>,
     pub(super) proc_first: usize,
     /// The scene has instanced meshes or procedural geometry (the raster experiment draws only flattened triangles:
     /// primary visibility is traced).
@@ -241,7 +241,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let proc_first = gpu_instances.len();
     gpu_instances.extend_from_slice(&sc.proc_records);
     let procs = std::mem::take(&mut sc.procs);
-    let proc_of = procs.iter().enumerate().filter(|(_, p)| p.sub.is_none()).map(|(j, p)| (p.node, j)).collect();
+    // (A proxy's index in `procs` is the build's: nothing between the build and here may take one out.)
+    assert!(tables.retained.proxies.iter().all(|(id, p)| !matches!(p.draw, scene::Draw::Procedural(j) if procs.get(j as usize).map(|q| q.node) != Some(*id))), "a procedural object's proxy names another's place");
     let triangles = sc.stats.get("triangles").map_or(tris.len(), |t| *t as usize);
     let first = prep.groups[..4].iter().sum::<usize>();
     // The kernel's first dynamic triangle (motion vectors, prev_verts) is group 4's first.
@@ -260,13 +261,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     for i in &instances {
         *users.entry(i.mesh).or_default() += 1;
     }
-    let own = |p: &scene::Proxy| match &p.draw {
-        scene::Draw::Instance(i) if i.mesh != scene::MeshKind::Model => Some(*i),
-        _ => None,
-    };
-    let mesh_of = tables.retained.proxies.iter().filter_map(|(&id, p)| own(p).and_then(|i| instances.get(i.instance as usize)).map(|i| (id, i.mesh))).collect();
-    let emitter_meshes = tables.retained.proxies.values().filter_map(|p| match own(p)?.mesh {
-        scene::MeshKind::Emitter(k) => Some(k),
+    let emitter_meshes = tables.retained.proxies.values().filter_map(|p| match &p.draw {
+        scene::Draw::Instance(scene::InstanceRef { mesh: scene::MeshKind::Emitter(k), .. }) => Some(*k),
         _ => None,
     });
     let managed = tables.retained.own_mesh.values().copied().chain(emitter_meshes).collect();
@@ -276,7 +272,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         objects: Holes::new(room_base.2, room_base.2 + room.objects),
         word: room_base.3,
         word_cap: room_base.3 + room.proc_words,
-        mesh_of,
         users,
         managed,
         dead_meshes: vec![],
@@ -286,10 +281,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         base: room_base,
         pool_first: prep.groups.iter().sum(),
         blobs,
-        placed: Default::default(),
-        instanced: Default::default(),
-        inst_at_load: instances.len(),
-        added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

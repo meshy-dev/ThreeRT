@@ -941,12 +941,7 @@ impl LiveCore {
         let (mut t, i) = closest(&self.sc.tris, o, d);
         let mut node = self.sc.tri_nodes.iter().find(|(_, a, b)| (*a as usize..*b as usize).contains(&i)).map(|n| n.0.as_str());
         let mut sub = self.sc.tri_instances.iter().find(|(a, b, _)| (*a as usize..*b as usize).contains(&i)).map(|r| r.2);
-        let added = |want_mesh: bool| self.sc.edit.added.values().filter_map(move |p| match p {
-            Picked::Mesh(i) if want_mesh => Some(Ok(i)),
-            Picked::Proc(q) if !want_mesh => Some(Err(q)),
-            _ => None,
-        });
-        for inst in self.sc.instances.iter().filter(|i| !i.hidden).chain(added(true).filter_map(|x| x.ok())) {
+        for inst in self.sc.instances.iter().filter(|i| !i.hidden) {
             let m = self.sc.meshes[inst.mesh as usize];
             let inv = inst.world.inverse();
             let (lo, ld) = (inv.transform_point3a(o), inv.transform_vector3a(d));
@@ -964,7 +959,7 @@ impl LiveCore {
             }
         }
         // Procedural geometry: its boxes (the geometry function runs on the GPU only).
-        for p in self.sc.procs.iter().filter(|p| !p.hidden).chain(added(false).filter_map(|x| x.err())) {
+        for p in self.sc.procs.iter().filter(|p| !p.hidden) {
             let inv = p.world.inverse();
             let (lo, ld) = (inv.transform_point3a(o), inv.transform_vector3a(d));
             let slab = |a: glam::Vec3A, b: glam::Vec3A| {
@@ -996,16 +991,6 @@ impl LiveCore {
         for inst in first.into_iter().chain(of_node.filter(|i| i.sub.is_some())) {
             let m = self.sc.meshes[inst.mesh as usize];
             out.extend(self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize].iter().map(|t| inst.tri(t)));
-        }
-        // Objects added in place (Bugbot on #131: `pick` saw them, this did not).
-        for p in self.sc.edit.added.values() {
-            if let Picked::Mesh(inst) = p {
-                if inst.name != id {
-                    continue;
-                }
-                let m = self.sc.meshes[inst.mesh as usize];
-                out.extend(self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize].iter().map(|t| inst.tri(t)));
-            }
         }
         out
     }
@@ -1161,7 +1146,8 @@ mod instanced_tests {
         assert_eq!(picked(&core, 0.5).as_deref(), Some("b"));
         // Its body moves it 3 m to the side (u 0.95 of the image, 4 m from the camera): no rebuild, its record moved
         // with the rows it had the frame before.
-        let record = core.sc.edit.placed[&11].1;
+        let record = core.sc.tables.retained.placed(11).unwrap().instance as usize;
+        assert!(core.sc.edit.in_room(record), "placed by an edit: a record of the room");
         assert!(w.place_driven(11, Vec3::new(3.0, 0.0, 1.0), glam::Quat::IDENTITY));
         assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
         assert_eq!(core.fallbacks, 0);
@@ -1170,7 +1156,7 @@ mod instanced_tests {
         assert_eq!((r.m[0][3], r.p[0][3]), (3.0, 0.0), "moved: last frame's rows kept");
         // A rebuild places it as an instance too, and it moves on in place.
         core.rebuild(&w).unwrap();
-        assert!(core.sc.tables.retained.placed(11).is_some_and(|i| i.moves) && core.sc.edit.placed.is_empty());
+        assert!(core.sc.tables.retained.placed(11).is_some_and(|i| i.moves && !core.sc.edit.in_room(i.instance as usize)), "placed by the build");
         assert_eq!((picked(&core, 0.5).as_deref(), picked(&core, 0.95).as_deref()), (Some("a"), Some("b")));
         assert!(w.place_driven(11, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY));
         assert!(!core.commit(&mut w).unwrap(), "moved as an instance");
