@@ -1376,8 +1376,9 @@ particles are lit from the cache's voxels; past a camera hit's own decisions the
 Where a path ends in the cache, `main` takes only what a warm voxel holds. The pixels with more to trace there (a
 training path, a cold voxel's estimate, a reflection hit's lights) leave a record of 96 bytes, and a second pass
 of the kernel, `finish`, traces them after each sample and adds their light to the pixel, one invocation a record.
-They are few and scattered: traced in `main` they held their SIMD groups, and their code cost every pixel. The
-layout as written only; the merged one ends its paths in `main`.
+They are few and scattered: traced in `main` they held their SIMD groups, and their code cost every pixel (the
+trace 9 to 15 % faster without, Kabukichō 7). The records' buffer follows the traced size. The layout as written
+only; the merged one ends its paths in `main`.
 
 The radiance cache is held to numbers by the `cache/*` tests (a bounce off a lit floor, the same off a coated one
 and with the floor on a voxel face, two bounces in a view's first frame, a lit ground seen in a mirror, a furnace

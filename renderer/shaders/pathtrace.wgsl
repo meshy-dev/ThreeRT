@@ -3269,7 +3269,7 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     rng_start(vec2<u32>(pix % P.size.x, pix / P.size.x), P.size.z, P.size.w, 0u);
     cur_depth = fl >> 8u;
     mirror_path = (fl & DF_MIRROR) != 0u;
-    rays_off = false;
+    rays_off = LIVE && P.raster.w > 0.5;
     if (has(F_LISTS)) {
         lt_list = r0.z & ~(LT_LIST - 1u);
         lt_list_n = r0.z & (LT_LIST - 1u);

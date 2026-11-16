@@ -2493,6 +2493,25 @@ Zero Day 9.41 -> 8.41 ms (-10.6 %), Bistro 8.57 -> 8.05 (-6.1 %) and 4.58 -> 4.3
 slice 9.00 -> 8.29, a glass scene 4.97 -> 4.60, Kabukichō 16.23 -> 14.61 guarded (-10 %); scenes without cutouts
 (lamp-rooms, the fire scene, Tokyo) as they were. The shortcuts now save Zero Day 0.3 ms where they cost it 0.4.
 
+**A second pass for the pixels that go on (2026-11-16, after it).** Where a live path ends in the cache most pixels
+read a warm voxel and are done; some have more to trace: a training path (1 tile in 8), a cold voxel's estimate, a
+reflection hit's lights (a third of Zero Day's pixels). Traced in `main` they held their SIMD groups, and their code
+cost every pixel (`main` without it: Bistro 8.06 -> 6.54 ms). They leave a 96-byte record now, and the kernel's
+`finish` pass traces the records after each sample, one invocation each, and adds the light to the pixel as the
+epilogue splits it. The estimator is the same: bench-window's shots as main's (Bistro 1.81, lamp-rooms 0.63, the
+slice 5.40, Kabukichō 4.66); render-identity: no offline picture differs, 13 live ones of 229 at single pixels with
+the image's mean within 4e-5 (which slot a voxel takes follows the order of inserts), and the build repeats itself
+to the byte where main did not (its lookups raced its own training). The trace: Bistro 8.16 -> 7.29 ms (-10.7 %)
+and 4.36 -> 3.98 along its camera path, Zero Day 8.52 -> 7.75 (-9.0 %), lamp-rooms 3.79 -> 3.24 (-14.5 %), the
+Bistro slice 8.32 -> 7.31 (-12.1 %); guarded, Tokyo 4.74 -> 4.28 (-9.7 %) and Kabukichō 14.60 -> 13.64 (-6.6 %:
+the pass costs 2.7 ms there, the wet street's material function run again for each record). The layout as written
+only; the merged one ends its paths in `main` as before. The records' buffer follows the traced size (50 MB at
+960 x 540). It is the kernel's 23rd binding, and the translucency pass, at Metal's 29 a stage already, binds
+group 1 without it: the next buffer needs a layout for each pass of what it reads. (Kabukichō's profile, for
+whoever reads it next: the particles' BLAS slot is 0.45 ms when the frame fits a display interval and 1.0 to 1.7
+with a spread of 3 when it is between one and two, in main's build too: it times a wait.) Next here: the segment
+test, whose pixels can go to the pass; a record that carries the surface where its material function is dear.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

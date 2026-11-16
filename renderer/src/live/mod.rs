@@ -706,6 +706,19 @@ impl LiveCore {
         self.cam = c;
     }
 
+    /// Room in `finish`'s records for a sample of `pixels` traced pixels, any of which may leave one. The buffer follows
+    /// the traced size, not the output's (96 bytes a pixel: 354 MB for a 2560 x 1440 output, 50 traced at 0.375), and
+    /// is made a quarter larger than asked, so dynamic resolution's steps seldom make it again.
+    pub(super) fn ensure_deferred(&mut self, pixels: u64) {
+        let Some(d) = &self.targets.kernel.deferred else { return };
+        if self.cache.is_none() || d.size >= 16 + pixels * gpu::DEFERRED_BYTES {
+            return;
+        }
+        self.targets.kernel.deferred = Some(gpu::deferred_buffer(&self.g.device, (pixels + pixels / 4).min(self.w as u64 * self.h as u64)));
+        let vis = self.raster.as_ref().map_or(&self.g.no_vis_view, |r| &r.vis);
+        self.kernel_bg = gpu::vis_bind_group(&self.g.device, &self.g.vis_layout, vis, &self.targets.kernel, true);
+    }
+
     /// Renders one frame with `spp` samples per pixel; returns the command buffers to submit after the samples.
     /// Path-trace dispatches are submitted inside (each needs its own uniform contents).
     /// Traced resolution at the current render scale.

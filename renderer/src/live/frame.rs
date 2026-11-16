@@ -254,6 +254,7 @@ impl LiveCore {
         self.take_emitters();
         let (w, h) = (self.w, self.h);
         let (iw, ih) = self.internal_size();
+        self.ensure_deferred(iw as u64 * ih as u64);
         let now = Instant::now();
         // Lockstep (benchmarks) renders at a fixed frame time, whatever the wall clock says.
         self.frame_dt = self.fixed_dt.unwrap_or_else(|| now.duration_since(self.last_frame).as_secs_f32());

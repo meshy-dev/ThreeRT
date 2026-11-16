@@ -1281,7 +1281,7 @@ pub struct KernelBufs {
     pub direct: Buf,
     pub lists: Buf,
     /// The pixels a sample's trace leaves for `finish` (their count, then `DEFERRED_BYTES` each): the layout as
-    /// written only.
+    /// written only. Of one record until a live view makes it for its traced size (`deferred_buffer`).
     pub deferred: Option<Buf>,
     /// The loop guard's count (`guard_loops`: its first word, the invocations a loop of which was stopped): with
     /// the guard, and always in the merged layout.
@@ -1291,14 +1291,13 @@ pub struct KernelBufs {
 }
 
 impl KernelBufs {
-    /// For a cache of `entries`, the live passes' four of these bytes and `deferred` pixels left for `finish`.
+    /// For a cache of `entries` and the live passes' four of these bytes.
     /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
-    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64, deferred: u64) -> KernelBufs {
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
         if !merged {
-            let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
+            let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
             let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
-            let deferred = Some(sb("deferred", 16 + deferred.max(1) * DEFERRED_BYTES));
-            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), deferred, guard, merged: None };
+            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), deferred: Some(deferred_buffer(d, 1)), guard, merged: None };
         }
         // (The cache's keys and sums are as long as the kernel's struct says, whatever `entries`: `live_sizes`. A
         // section's range is the bytes asked for: a pass that binds it sees an array of that length.)
@@ -1316,6 +1315,11 @@ impl KernelBufs {
         p.live_first = [[first(Live::CacheVal), first(Live::Refl), first(Live::Motion), first(Live::Direct)], [first(Live::Lists), 0, 0, 0]];
         p.live_len = [&self.refl, &self.motion, &self.direct, &self.lists].map(|b| (b.size / 16) as u32);
     }
+}
+
+/// `finish`'s buffer for `records` pixels: their count (16 bytes, cleared before each sample), then the records.
+pub fn deferred_buffer(d: &wgpu::Device, records: u64) -> Buf {
+    Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some("deferred"), size: 16 + records.max(1) * DEFERRED_BYTES, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }))
 }
 
 /// The bytes of the merged layout's group-1 buffer's sections (`heap::Live`'s order) for a cache whose values are
@@ -1757,7 +1761,7 @@ impl Gpu {
                 layout_entry(6, storage_buffer(true)),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64, 0);
+        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
         let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs, true);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl) = if hwrt {
