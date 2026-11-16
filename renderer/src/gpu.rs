@@ -2095,6 +2095,7 @@ impl Gpu {
             (Table::Instances, bytemuck::cast_slice(if records.is_empty() { &none[..] } else { &records[..] }), room.records * std::mem::size_of::<crate::scene::GpuInstance>()),
             (Table::Media, bytemuck::cast_slice(&scene.media), 0),
             (Table::Energy, bytemuck::cast_slice(energy), 0),
+            (Table::GlassEnergy, bytemuck::cast_slice(crate::glass_energy_lut()), 0),
         ];
         assert!(parts.iter().enumerate().all(|(k, p)| p.0.index() == k), "the tables in `Table`'s order");
         let heap = Heap::filled(d, &parts.map(|p| (p.1.len() + p.2) as u64), |put| parts.iter().for_each(|p| put(p.0, 0, p.1)));

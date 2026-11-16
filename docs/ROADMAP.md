@@ -2528,7 +2528,10 @@ the glass scene 3.95 -> 4.40 ms (+11 %), of which 0.36 ms is the lights now samp
 Bistro, Zero Day, lamp-rooms, Kabukichō, Tokyo as they were. bench-window kept one offline reference a shot
 whatever renderer made it: a build that changes the offline picture was read against the old one; the reference
 is keyed by the renderer's binary now, and the tool has a glass shot. Not here: thin walls (a pane is a solid's
-face), absorption by distance, the shadow rays' share (a Schlick albedo still, on a straight ray).
+face), absorption by distance, the shadow rays' share (a Schlick albedo still, on a straight ray). Two things the
+kernel's shape decided: a shadow ray's origin on the side it leaves from is every surface's rule, but written into
+every kernel it cost Bistro's trace 4 %, so only kernels with glass have it; and the energy table's vec4 indexed
+by a variable cost the glass scene 1.5 %, a select chain nothing.
 
 ## 2. Temporal fixes
 

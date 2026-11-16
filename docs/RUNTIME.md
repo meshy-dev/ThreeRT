@@ -1578,7 +1578,8 @@ reflection and is not tinted.
   loop's `through`: no clamp, the live specular signal). The reflection keeps its microfacet lobe.
 - Single scattering loses energy as the roughness grows (leaving glass of roughness 0.6 at 45 degrees: R + T =
   0.74). With energy compensation the interface is scaled by 1 / (R + T) from a table (Turquin 2019, as Cycles:
-  16 x 16 x 8 x 2 values over the cosine, the roughness, the index and the side; lib.rs `glass_energy_lut`).
+  16 x 16 x 8 x 2 values over the cosine, the roughness, the index and the side; lib.rs `glass_energy_lut`, a
+  section of the scene's tables).
 - Shadow rays cross glass straight, weighed by a share of their own (`glass_at`), as before.
 - Not yet: thin walls (a single sheet refracts as a solid's face), absorption by distance, the radiance scaling
   by the indices' ratio squared (it cancels over a closed solid; Cycles and glTF's formula leave it out too).

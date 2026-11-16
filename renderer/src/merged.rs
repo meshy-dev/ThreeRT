@@ -194,7 +194,15 @@ mod tests {
             assert!(kernel_template().contains(&format!("const {constant}: u32 = {}u;", bytes / 16)), "{constant}");
             assert_eq!(layout(&m, name).1 as usize, bytes, "{name}");
         }
-        assert_eq!(<Table as crate::heap::Section>::COUNT, Table::Energy as usize + 1);
+        assert_eq!(<Table as crate::heap::Section>::COUNT, Table::GlassEnergy as usize + 1);
+        // The glass energy table's nodes.
+        let [mu, rough, ior] = crate::GLASS_E;
+        for (name, n) in [("GLASS_E_MU", mu), ("GLASS_E_ROUGH", rough), ("GLASS_E_IOR", ior)] {
+            assert!(kernel_template().contains(&format!("const {name}: u32 = {n}u;")), "{name}");
+        }
+        assert!(kernel_template().contains(&format!("const GLASS_E_ZMAX: f32 = {:.8};", crate::GLASS_E_ZMAX)));
+        assert!(kernel_template().contains("fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i); }"));
+        assert_eq!(Table::GlassEnergy as usize, 2 * 4 + 2, "`table_first[2].z`");
         assert!(kernel_template().contains(&format!("const CACHE_SIZE: u32 = {}u;", crate::gpu::CACHE_SIZE)));
         // `finish`'s records and its dispatch rows.
         assert!(kernel_template().contains(&format!("const DEFERRED_VECS: u32 = {}u;", crate::gpu::DEFERRED_BYTES / 16)));

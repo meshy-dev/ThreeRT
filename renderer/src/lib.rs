@@ -914,15 +914,14 @@ pub fn energy_lut() -> Vec<[f32; 4]> {
             vals[ry * n + vx] = [(ex / samples as f64).min(1.0) as f32, (ey / samples as f64) as f32];
         }
     }
-    let mut out: Vec<[f32; 4]> = vals.chunks(2).map(|c| [c[0][0], c[0][1], c[1][0], c[1][1]]).collect();
-    out.extend_from_slice(glass_energy_lut());
-    out
+    vals.chunks(2).map(|c| [c[0][0], c[0][1], c[1][0], c[1][1]]).collect()
 }
 
-/// The glass energy table's nodes (pathtrace.wgsl GLASS_E_*): cos(view) as its square root, roughness, the index of
-/// refraction as sqrt((ior - 1) / (ior + 1)) up to ior 3, and the side (entering, leaving).
+/// The glass energy table's nodes (pathtrace.wgsl GLASS_E_MU, _ROUGH, _IOR): cos(view) as its square root, roughness,
+/// the index of refraction as sqrt((ior - 1) / (ior + 1)) up to `GLASS_E_ZMAX` (ior 3); and the side (entering,
+/// leaving).
 pub const GLASS_E: [usize; 3] = [16, 16, 8];
-const GLASS_E_ZMAX: f64 = std::f64::consts::FRAC_1_SQRT_2;
+pub const GLASS_E_ZMAX: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// Unpolarised Fresnel reflectance of a dielectric interface: `c` the cosine on the incident side, `eta` = n_t / n_i;
 /// 1 at total internal reflection (Walter et al. 2007, eq. 22).
@@ -984,7 +983,8 @@ pub fn glass_energy(mu: f64, alpha: f64, eta: f64, n: usize) -> f64 {
     sum / (n * n) as f64
 }
 
-/// `glass_energy` over the table's nodes, entering then leaving, four values a vec4 (once a process: ~0.1 s).
+/// `glass_energy` over the table's nodes, entering then leaving, four values a vec4 (`heap::Table::GlassEnergy`; once
+/// a process, 35 ms).
 pub fn glass_energy_lut() -> &'static [[f32; 4]] {
     static LUT: std::sync::OnceLock<Vec<[f32; 4]>> = std::sync::OnceLock::new();
     LUT.get_or_init(|| {
@@ -1108,8 +1108,8 @@ mod glass_energy_tests {
         }
     }
 
-    /// The table as the kernel reads it (`glass_energy` in pathtrace.wgsl: trilinear over its nodes) against the
-    /// estimator between the nodes.
+    /// Whether the table's nodes are enough: the kernel's lookup (pathtrace.wgsl `glass_energy`, trilinear over the
+    /// nodes; copied here) against the estimator between them.
     #[test]
     fn the_glass_energy_table_interpolates() {
         let lut = glass_energy_lut();
