@@ -379,7 +379,7 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     host.settle_physics((start.max(0.0) * 60.0).round() as u32);
     let mut w = host.world.borrow_mut();
     w.take_changes();
-    let missing: Vec<String> = w.files().into_iter().filter(|f| !job.game.assets.join(f).is_file()).collect();
+    let missing: Vec<String> = w.files().into_iter().filter(|f| !threert_render::files::asset_path(&job.game.assets, f).is_file()).collect();
     if !missing.is_empty() {
         return Err(MissingFiles(missing).into());
     }
@@ -449,7 +449,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     let mut sc = {
         let mut w = host.world.borrow_mut();
         w.take_changes();
-        let missing: Vec<String> = w.files().into_iter().filter(|f| !job.game.assets.join(f).is_file()).collect();
+        let missing: Vec<String> = w.files().into_iter().filter(|f| !threert_render::files::asset_path(&job.game.assets, f).is_file()).collect();
         if !missing.is_empty() {
             return Err(MissingFiles(missing).into());
         }

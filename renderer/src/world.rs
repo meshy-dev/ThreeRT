@@ -420,8 +420,12 @@ fn light_class(l: &desc::Light) -> (u8, bool, bool) {
     }
 }
 
-/// Asset paths are relative to the asset root and stay inside it (game code is untrusted on render nodes).
+/// Asset paths are relative to the asset root and stay inside it (game code is untrusted on render nodes), or name a
+/// file of the game's store (`user:<store path>`, which stays inside the store: files.rs `asset_path`).
 pub(crate) fn check_uri(uri: &str) -> Result<()> {
+    if let Some(rel) = uri.strip_prefix(crate::files::USER_SCHEME) {
+        return crate::files::check_store_path(rel).map_err(|e| anyhow!("asset path \"{uri}\": {e}"));
+    }
     let p = std::path::Path::new(uri);
     let inside = !uri.is_empty() && !uri.contains(':') && p.components().all(|c| matches!(c, std::path::Component::Normal(_)));
     if !inside {

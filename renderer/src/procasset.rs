@@ -160,7 +160,7 @@ impl ProcBlob {
 /// An asset file under the asset root (the path already checked by the world), parsed once per file version.
 pub fn load(uri: &str, assets: &Path) -> Result<Arc<ProcBlob>> {
     static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Arc<ProcBlob>>>> = std::sync::Mutex::new(None);
-    let path = assets.join(uri);
+    let path = crate::files::asset_path(assets, uri);
     let key = crate::scene::file_key(&path);
     if let Some(b) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(&key)) {
         return Ok(b.clone());
