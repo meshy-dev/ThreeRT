@@ -2582,8 +2582,10 @@ and the radiance cache stay, the frames' histories start again. Bistro, to 1920 
 the CPU, and the next frame waits for the GPU about half a frame longer, once (a rebuild there is 0.7–0.9 s). The
 window (`play`) is resizable and follows its size and its display's density (`view.rs` `fit`), and takes each
 answer of the surface as wgpu documents it (`acquire`): before, a window the system resized (moved to a display
-of another scale) reported `surface: Outdated` on every frame from then on (#101), and a covered window an error
-a frame. The headless runner takes `{"cmd":"resize"}`. A test holds a resized view to one built at that size
+of another scale) reported `surface: Outdated` on every frame from then on (#101). A covered or minimised window
+has no present to pace its loop: it configured its surface and printed an error on every turn and took a core
+(96 %); it says so once now and waits for the next frame's time (3–4 %), the game's frame running as ever. The
+headless runner takes `{"cmd":"resize"}`. A test holds a resized view to one built at that size
 (state, picture; the scene's buffers and the cache the same handles) and fails with each of four steps of
 `resize` left out; on Bistro a view resized and back is the view only reset (dE 0.18, SSIM 0.9995 at the same
 frames). Left: the browser host's view is still fixed; the merged layout keeps the cache in one buffer with the

@@ -102,6 +102,8 @@ struct State {
     /// The view's and the surface's sizes for the blit (`BLIT`'s `size`).
     blit_size: wgpu::Buffer,
     blit_bg: wgpu::BindGroup,
+    /// The last frame had a surface to draw on (`acquire`): its present paces the loop.
+    shown: bool,
     home: Orbit,
     orbit: Orbit,
     tan: f32,
@@ -267,6 +269,7 @@ impl App {
             blit_layout: layout,
             blit_size,
             blit_bg,
+            shown: false,
             home,
             orbit: home,
             tan: cam.tan_half_fov,
@@ -478,10 +481,16 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let Some(s) = &self.state else { return };
         // Present on every vsync (Fifo blocks); `frame` decides whether to render a new image or re-show the last.
-        if let Some(s) = &self.state {
+        // With nothing to draw on (the window covered or minimised) no present blocks: the loop waits for the next
+        // content frame's time, at which the game's frame runs as ever.
+        let due = s.last + Duration::from_secs_f64(1.0 / self.args.fps as f64);
+        if s.shown || Instant::now() >= due {
             s.window.request_redraw();
             el.set_control_flow(ControlFlow::Poll);
+        } else {
+            el.set_control_flow(ControlFlow::WaitUntil(due));
         }
     }
 }
@@ -516,28 +525,36 @@ fn fit(s: &mut State) -> bool {
 
 /// The surface's texture to draw this frame on, each answer of `get_current_texture` taken as wgpu says. None when
 /// there is nothing to draw on for now: the window has no pixels (minimised) or is covered, or its surface was no
-/// longer the window's and is configured again (made again, if lost) for the next frame.
+/// longer the window's and is configured again (made again, if lost) for the next frame. Said once when a window
+/// that was drawn no longer is: a driver that waits for a snapshot of a covered window sees why none comes.
 fn acquire(s: &mut State) -> Result<Option<wgpu::SurfaceTexture>> {
     use wgpu::CurrentSurfaceTexture as T;
     let size = s.window.inner_size();
-    if size.width == 0 || size.height == 0 {
-        return Ok(None);
-    }
-    match s.surface.get_current_texture() {
-        // (Suboptimal: another size, which `fit` configures before the next frame.)
-        T::Success(t) | T::Suboptimal(t) => Ok(Some(t)),
-        T::Timeout | T::Occluded => Ok(None),
-        T::Outdated => {
-            s.surface.configure(&s.core.g.device, &s.config);
-            Ok(None)
+    let (tex, why) = if size.width == 0 || size.height == 0 {
+        (None, "no pixels")
+    } else {
+        match s.surface.get_current_texture() {
+            // (Suboptimal: another size, which `fit` configures before the next frame.)
+            T::Success(t) | T::Suboptimal(t) => (Some(t), ""),
+            T::Timeout => (None, "timeout"),
+            T::Occluded => (None, "occluded"),
+            T::Outdated => {
+                s.surface.configure(&s.core.g.device, &s.config);
+                (None, "outdated")
+            }
+            T::Lost => {
+                s.surface = s.core.g.instance.create_surface(s.window.clone())?;
+                s.surface.configure(&s.core.g.device, &s.config);
+                (None, "lost")
+            }
+            T::Validation => return Err(anyhow::anyhow!("surface: a validation error")),
         }
-        T::Lost => {
-            s.surface = s.core.g.instance.create_surface(s.window.clone())?;
-            s.surface.configure(&s.core.g.device, &s.config);
-            Ok(None)
-        }
-        T::Validation => Err(anyhow::anyhow!("surface: a validation error")),
+    };
+    if s.shown && tex.is_none() {
+        eprintln!("view: nothing to draw on ({why})");
     }
+    s.shown = tex.is_some();
+    Ok(tex)
 }
 
 fn blit_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, out: &wgpu::Buffer, size: &wgpu::Buffer) -> wgpu::BindGroup {
