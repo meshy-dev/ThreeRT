@@ -11,48 +11,14 @@
 //    its start), meta.json (machine, size, scale, GPU ms a frame: a recording pauses for its PNG, so these are a
 //    little better than back to back; tools/site-hero.ts --probe is the tool for a figure to quote)
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BISTRO } from "../scenes/bistro.ts";
 import { installAssets } from "../showcase/assets.ts";
 import { bundleGame } from "./bundle-game.ts";
-import { frameStats, rendererBin } from "./lib/bench.ts";
-import { gltfCameraPath } from "./lib/gltf-camera.ts";
-import { startLive } from "./lib/live.ts";
+import { bistroCamera as bistro, ev, machineName, recordClip, type Clip } from "./lib/reel.ts";
 import { root } from "./three/browser.ts";
 
 const FPS = 60, TAIL = 0.5;
-type Pose = { pos: number[]; target: number[]; tan?: number };
-type Cmd = Record<string, unknown>;
-interface Clip {
-  what: string;
-  src: string;
-  room?: string;
-  seconds?: number;
-  /** Seconds of the scene's clock before the recording starts (the first frames' history; default 4). */
-  settle?: number;
-  /** Render scale (default 0.75: at 1280 x 720, 960 x 540 rays, upscaled by the live frame's temporal upscaler). A
-   *  recording cannot use dynamic resolution: its pauses read as headroom. */
-  scale?: number;
-  bounces?: number;
-  /** Sent once, before settling. */
-  before?: Cmd[];
-  /** Sent at these times (s) into the recording. */
-  at?: [number, Cmd][];
-  /** The camera at time t (s), when the clip moves it. */
-  camera?: (t: number) => Pose;
-}
-const ev = (type: string, payload: unknown = {}): Cmd => ({ cmd: "event", type, payload });
-const ease = (u: number) => (1 - Math.cos(Math.PI * Math.max(0, Math.min(1, u)))) / 2;
-const lerp = (a: number[], b: number[], u: number) => a.map((v, i) => v + (b[i] - v) * u);
-/** From one pose to another and back, eased at both ends: a move that loops. */
-const sway = (a: Pose, b: Pose, seconds: number) => (t: number): Pose => {
-  const u = ease(t < seconds / 2 ? t / (seconds / 2) : 2 - t / (seconds / 2));
-  return { pos: lerp(a.pos, b.pos, u), target: lerp(a.target, b.target, u), tan: a.tan };
-};
-
-let bistroPath: ReturnType<typeof gltfCameraPath> | undefined;
-const bistro = (t: number) => (bistroPath ??= gltfCameraPath(join(root, BISTRO), "Camera")).at(t);
 
 const CLIPS: Record<string, Clip> = {
   crowd: {
@@ -121,42 +87,13 @@ for (const id of ids) {
   await bundleGame(join(root, c.src), bundle);
   const frameLog = join(dir, "frames.jsonl");
   const seconds = c.seconds ?? 8, n = Math.round((seconds + TAIL) * FPS), scale = Number(opt("--scale", "0")) || (c.scale ?? 0.75);
-  const live = startLive({ bin: rendererBin, assets: root, presets: join(root, "presets"), bundles: join(root, "out/bundles"), label: `reel ${id}` }, bundle, { scale: String(scale), frameLog, width, height, bounces: c.bounces, room: opt("--room", "") || c.room });
-  try {
-    await live.firstFrame;
-    for (const cmd of c.before ?? []) live.send(cmd);
-    if (c.camera) live.send({ cmd: "camera", ...c.camera(0) });
-    // Lockstep from the first frame: the scene's clock is the frame count, so a clip starts at the same moment of its
-    // scene every time. The settling frames are drawn like the rest and not kept.
-    live.send({ cmd: "lockstep", dt: 1 / FPS });
-    const settle = Math.round((c.settle ?? 4) * FPS);
-    live.send({ cmd: "frames", n: settle, sync: "settled" });
-    await live.wait((l) => l.endsWith("sync settled"), 300_000);
-    const pending = [...(c.at ?? [])].sort((a, b) => a[0] - b[0]);
-    for (let k = 0; k < n; k++) {
-      const t = k / FPS;
-      while (pending.length && pending[0][0] <= t) live.send(pending.shift()![1]);
-      const keep = !probe || k % FPS === 0;
-      const f = join(dir, `${pad(probe ? k / FPS : k)}.png`);
-      const step: Cmd = { ...(c.camera ? { cmd: "camera", ...c.camera(t) } : { cmd: "frames" }), ...(c.camera ? { frames: 1 } : { n: 1 }), ...(keep ? { snapshot: f } : { sync: `k${k}` }) };
-      live.send(step);
-      await live.wait((l) => (keep ? l.includes(f) : l.endsWith(`sync k${k}`)), 120_000);
-    }
-  } finally {
-    await live.quit().catch(() => {});
-  }
-  // (The log is complete once the renderer has quit; the recording is its last n frames.)
-  const first = await live.firstFrame;
-  type F = { gpu: number };
-  const logged = readFileSync(frameLog, "utf8").trim().split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l) as F]; } catch { return []; } }).slice(-n);
-  const g = frameStats(logged.map((x) => x.gpu));
+  const r = await recordClip(c, bundle, { width, height, fps: FPS, frames: n, scale, room: opt("--room", "") || c.room, frameLog, label: `reel ${id}`, file: (k) => (!probe || k % FPS === 0 ? join(dir, `${pad(probe ? k / FPS : k)}.png`) : null) });
   const meta = {
-    id, what: c.what, at: new Date().toISOString(), machine: execFileSync("sysctl", ["-n", "machdep.cpu.brand_string"], { encoding: "utf8" }).trim(),
+    id, what: c.what, at: new Date().toISOString(), machine: machineName(),
     commit: execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
-    width, height, fps: FPS, seconds, tail: TAIL, frames: n, scale, room: c.room ?? null, load_s: +(first / 1000).toFixed(1),
-    gpu_ms: { p50: +g.p50.toFixed(2), p95: +g.p95.toFixed(2) }, over_budget: logged.filter((x) => x.gpu > 1000 / FPS).length,
+    width, height, fps: FPS, seconds, tail: TAIL, frames: n, scale, room: c.room ?? null, load_s: r.load_s, gpu_ms: r.gpu_ms, over_budget: r.over_budget,
   };
   writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 1) + "\n");
   console.log(`${id}${probe ? " (probe)" : ""}: ${n} frames at ${width} x ${height}, scale ${scale}; GPU ms p50 ${meta.gpu_ms.p50}, p95 ${meta.gpu_ms.p95}, ${meta.over_budget} over 16.7; loaded in ${meta.load_s} s -> ${dir}`);
-  for (const l of [...new Set(live.lines.filter((x) => /fail|error|panic|not found|missing/i.test(x)))].slice(0, 6)) console.log(`! ${l.slice(0, 240)}`);
+  for (const l of r.warnings) console.log(`! ${l}`);
 }

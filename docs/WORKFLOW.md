@@ -153,6 +153,11 @@ A PR runs a job only when it changes that job's inputs (the paths in the workflo
 
 The GPU checks (`test:render`, the perf smoke, the benches, the browser test `tools/web-hello.ts`) run on a Mac, per the merge gate above, on hardware traversal only: what software traversal draws (the browser's, a device without ray queries) is in no gate yet (ROADMAP "Known issues").
 
+`.github/workflows/reel.yml`, the scene check, runs on a self-hosted Mac (`tools/reel/RUNNER.md`) when a member
+comments `/reel` on a PR or runs it by hand, and on main every night. It records 12 typical scenes live
+(`tools/reel-check.ts`), lays them out as one grid video, compares keyframes with offline renders, and comments
+the result on the PR. It is advisory: it does not block a merge.
+
 ## The npm packages
 
 `@threert/scene`, `@threert/gameplay` and `@threert/voxel` are published from `packages/` with one version, the root

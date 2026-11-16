@@ -1,0 +1,127 @@
+name: reel
+
+# The scene check (tools/reel-check.ts) on the reel runner, a Mac with the assets (tools/reel/RUNNER.md). Never on
+# `pull_request`: the repository is public and the runner is a self-hosted machine. It runs when a member asks for it
+# (a PR comment `/reel [clip,clip]`, or Run workflow with a ref), and on main every night (main's baseline).
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to check
+        default: main
+      clips:
+        description: Clips, comma-separated (empty = all)
+        default: ""
+      pr:
+        description: PR number to report to (optional)
+        default: ""
+  schedule:
+    - cron: "0 19 * * *"
+
+permissions:
+  contents: read
+
+# One check at a time on the one runner; a queued check waits, it is not cancelled.
+concurrency:
+  group: reel
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reel') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      issues: write
+    outputs:
+      sha: ${{ steps.r.outputs.sha }}
+      pr: ${{ steps.r.outputs.pr }}
+      clips: ${{ steps.r.outputs.clips }}
+      main: ${{ steps.r.outputs.main }}
+    steps:
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.comment.body }}
+          COMMENT: ${{ github.event.comment.id }}
+          IN_REF: ${{ inputs.ref }}
+          IN_CLIPS: ${{ inputs.clips }}
+          IN_PR: ${{ inputs.pr }}
+        run: |
+          main=false
+          case "$EVENT" in
+            issue_comment)
+              pr=$NUMBER
+              sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq .head.sha)
+              clips=$(head -n1 <<< "$BODY" | sed 's#^/reel##')
+              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT/reactions" -f content=eyes > /dev/null ;;
+            workflow_dispatch)
+              pr=$(tr -cd '0-9' <<< "$IN_PR")
+              sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$IN_REF" --jq .sha)
+              clips=$IN_CLIPS
+              if [ "$IN_REF" = main ]; then main=true; fi ;;
+            schedule)
+              pr=
+              sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+              clips=
+              main=true ;;
+          esac
+          # Clip names only: the list reaches a shell on the runner.
+          clips=$(tr -cd 'a-z,' <<< "$clips")
+          printf 'sha=%s\npr=%s\nclips=%s\nmain=%s\n' "$sha" "$pr" "$clips" "$main" | tee -a "$GITHUB_OUTPUT"
+
+  reel:
+    needs: resolve
+    # The runner's job-started hook refuses any workflow but this file on main (tools/reel/job-started.sh).
+    runs-on: [self-hosted, macOS, ARM64, reel]
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      PR: ${{ needs.resolve.outputs.pr }}
+      CLIPS: ${{ needs.resolve.outputs.clips }}
+      REEL_PR: ${{ needs.resolve.outputs.pr }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      # assets/ -> the runner's store (THREERT_ASSET_STORE); the build goes to CARGO_TARGET_DIR, kept between runs.
+      - run: bun scripts/setup.ts --no-fetch && npm ci
+      - run: cargo build --release --locked --manifest-path renderer/Cargo.toml
+      - id: check
+        run: node tools/reel-check.ts --out "$RUNNER_TEMP/reel" ${CLIPS:+--clips "$CLIPS"} --baseline "$REEL_HOME/baseline-main.json"
+      - if: needs.resolve.outputs.main == 'true' && success() && needs.resolve.outputs.clips == ''
+        run: cp "$RUNNER_TEMP/reel/run.json" "$REEL_HOME/baseline-main.json"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reel-${{ needs.resolve.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/reel/grid.mp4
+            ${{ runner.temp }}/reel/grid.jpg
+            ${{ runner.temp }}/reel/run.json
+            ${{ runner.temp }}/reel/summary.md
+            ${{ runner.temp }}/reel/*/key-*.png
+          if-no-files-found: ignore
+          retention-days: 30
+      - if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          f="$RUNNER_TEMP/reel/summary.md"
+          [ -f "$f" ] || printf '### Scene check 🔴 did not finish\n' > "$f"
+          printf '\n[Run, grid video and keyframes](%s)\n' "$RUN_URL" >> "$f"
+          cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$PR" ]; then gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$f"; fi
