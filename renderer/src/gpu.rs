@@ -352,10 +352,11 @@ pub struct Uploaded {
     /// The uniform tables (`Gpu::uniform_tables`): the uniform buffers the kernel reads four tables from (merged.rs
     /// `UNIFORM_TABLES`' order; `Gpu::sync_tables` copies their sections there each frame).
     pub uniform: Option<[wgpu::Buffer; 4]>,
+    /// The trace's samples, a `Pixel` a pixel: the view's buffer (a live view's targets', an offline render's own:
+    /// `accum_buffer`). A handle of it here, for the scene's bind group, where the kernel's layout has it;
+    /// `Gpu::set_accum` gives it another (a view of another size).
     pub accum: wgpu::Buffer,
     pub params: wgpu::Buffer,
-    pub width: u32,
-    pub height: u32,
     /// Kernel specialisation for this scene (`Gpu::pipeline`).
     pub kernel: Kernel,
     /// Triangle vertices / shading attributes (posed models rewrite their ranges).
@@ -448,8 +449,6 @@ pub struct Translucent {
     pub params: wgpu::Buffer,
     pub points: wgpu::Buffer,
     pub count: wgpu::Buffer,
-    /// Live below full resolution: (colour, transmittance) per traced pixel (translucent.wgsl `tlow`).
-    pub low: wgpu::Buffer,
 }
 
 impl Uploaded {
@@ -1291,13 +1290,28 @@ pub struct KernelBufs {
 }
 
 impl KernelBufs {
+    /// Each in a buffer of its own: the live passes' four of these bytes, made (and `deferred` of one record: its view
+    /// makes it for what it traces), with this radiance cache and loop guard's count.
+    fn separate(d: &wgpu::Device, cache: CacheBuffers, guard: Option<Buf>, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
+        let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
+        KernelBufs { cache, refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), deferred: Some(deferred_buffer(d, 1)), guard, merged: None }
+    }
+
+    /// These for a view of another size: the four that follow the size made again, the radiance cache and the loop
+    /// guard's count kept. The merged layout's are one buffer: all of it made again, the cache empty.
+    pub fn resized(&self, d: &wgpu::Device, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
+        match self.merged {
+            Some(_) => KernelBufs::new(d, true, true, entries, refl, motion, direct, lists),
+            None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), refl, motion, direct, lists),
+        }
+    }
+
     /// For a cache of `entries` and the live passes' four of these bytes.
     /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
     pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
         if !merged {
-            let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
-            let guard = guard.then(|| sb("loop guard", crate::merged::GUARD_WORDS as u64 * 4));
-            return KernelBufs { cache: CacheBuffers::new(d, entries), refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), deferred: Some(deferred_buffer(d, 1)), guard, merged: None };
+            let guard = guard.then(|| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard"), size: crate::merged::GUARD_WORDS as u64 * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })));
+            return KernelBufs::separate(d, CacheBuffers::new(d, entries), guard, refl, motion, direct, lists);
         }
         // (The cache's keys and sums are as long as the kernel's struct says, whatever `entries`: `live_sizes`. A
         // section's range is the bytes asked for: a pass that binds it sees an array of that length.)
@@ -1922,15 +1936,39 @@ impl Gpu {
     }
 
     /// The translucency pass's bind group (group 2) drawing into `target` (live: the composed image; offline: sums);
-    pub fn translucent_bind_group(&self, t: &Translucent, target: &wgpu::Buffer) -> wgpu::BindGroup {
+    /// `low`: (colour, transmittance) per traced pixel, where a live view draws below full resolution
+    /// (`translucent_low`; translucent.wgsl `tlow`).
+    pub fn translucent_bind_group(&self, t: &Translucent, target: &wgpu::Buffer, low: &wgpu::Buffer) -> wgpu::BindGroup {
         fn e(b: u32, buf: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding: b, resource: buf.as_entire_binding() }
         }
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("translucent"),
             layout: self.tl_layout.as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: t.tlas.as_binding() }, e(1, &t.params), e(2, target), e(3, &t.points), e(4, &t.count), e(5, &t.low)],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: t.tlas.as_binding() }, e(1, &t.params), e(2, target), e(3, &t.points), e(4, &t.count), e(5, low)],
         })
+    }
+
+    /// A view's buffer of the trace's samples (`Uploaded::accum`): a `Pixel` (80 bytes) a pixel, the largest buffer a
+    /// view holds (`view_fits`).
+    pub fn accum_buffer(&self, w: u32, h: u32) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("accum"), size: w as u64 * h as u64 * 80, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+    }
+
+    /// Whether this device holds a view of `w` x `h` (its samples in one buffer).
+    pub fn view_fits(&self, w: u32, h: u32) -> bool {
+        self.buffer_fits(w as u64 * h as u64 * 80)
+    }
+
+    /// A view's buffer for translucent particles drawn below full resolution (`translucent_bind_group`'s `low`).
+    pub fn translucent_low(&self, w: u32, h: u32) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent low"), size: (w as u64 * h as u64).max(1) * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
+    }
+
+    /// Another buffer for the trace's samples (a view of another size): the scene bound again with it.
+    pub fn set_accum(&self, up: &mut Uploaded, accum: &wgpu::Buffer) {
+        up.accum = accum.clone();
+        self.rebind_scene(up);
     }
 
     /// The radiance cache's per-frame resolve (pathtrace.wgsl `cache_resolve`; kernel bind groups).
@@ -1991,7 +2029,7 @@ impl Gpu {
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
     /// bind group used by both the offline and the live kernels. `accum` holds one 80-byte Pixel per output pixel.
     #[allow(clippy::too_many_arguments)]
-    pub fn upload(&self, scene: &Scene, w: u32, h: u32, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
+    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
         // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
@@ -2089,8 +2127,7 @@ impl Gpu {
             GridsGpu { atlas, pipeline, grids, step: std::cell::Cell::new(0) }
         });
         let grid_view = grids.as_ref().map_or_else(|| self.no_grid_view.clone(), |g| g.atlas.create_view(&Default::default()));
-        let accum_size = (w as u64) * (h as u64) * 80;
-        let b_accum = d.create_buffer(&wgpu::BufferDescriptor { label: Some("accum"), size: accum_size, usage: st | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let b_accum = accum.clone();
         let b_params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: std::mem::size_of::<Params>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 
         let (tex_view, tex_info) = self.texture_pages(scene, timings);
@@ -2337,8 +2374,7 @@ impl Gpu {
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let points = d.create_buffer(&wgpu::BufferDescriptor { label: Some("volume points"), size: VOLUME_TRAIN_CAP as u64 * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let count = d.create_buffer(&wgpu::BufferDescriptor { label: Some("volume point count"), size: 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                let low = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent low"), size: (w as u64 * h as u64).max(1) * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-                let t = Translucent { blas, tlas, size, verts, first: scene.trans_first, params, points, count, low };
+                let t = Translucent { blas, tlas, size, verts, first: scene.trans_first, params, points, count };
                 // Built once now (collapsed quads): bind groups may use the TLAS before the first particle pass.
                 let mut enc = d.create_command_encoder(&Default::default());
                 t.build(&mut enc);
@@ -2431,7 +2467,7 @@ impl Gpu {
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         // (The scene's own pipelines, made above: particles, grid programs.)
         self.save_pipeline_cache();
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, width: w, height: h, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -3218,14 +3254,14 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     /// Offline translucency: the pass (translucent.wgsl) `spp` times at random points in each pixel, each with a fresh
     /// lighting estimate per hit; the mean (colour, transmittance) per pixel. Empty without translucent particles.
-    fn render_translucent(&self, up: &Uploaded, base: Params, spp: u32) -> Result<Vec<[f32; 4]>> {
+    fn render_translucent(&self, up: &Uploaded, base: Params, spp: u32, (w, h): (u32, u32)) -> Result<Vec<[f32; 4]>> {
         let Some(t) = &up.translucent else { return Ok(vec![]) };
         let d = &self.device;
-        let (w, h) = (up.width, up.height);
         let pipeline = self.translucent_pipelines(&up.kernel, false).draw;
         let size = w as u64 * h as u64 * 16;
         let sums = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent sums"), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let tbg = self.translucent_bind_group(t, &sums);
+        // (Drawn at full resolution: the reduced image's buffer is bound and not read.)
+        let tbg = self.translucent_bind_group(t, &sums, &self.translucent_low(1, 1));
         let tp = TranslucentParams { size: [w, h, t.first, 0], view: [w, h, 0, 0], misc: [0.0; 4] };
         self.queue.write_buffer(&t.params, 0, bytemuck::bytes_of(&tp));
         let n = spp.max(1);
@@ -3269,7 +3305,7 @@ impl Gpu {
     pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
         let d = &self.device;
         let (w, h) = (scene.width, scene.height);
-        let up = self.upload(scene, w, h, tri_verts, groups, nodes, emitters, light_tree, env, env_cdf, energy, timings)?;
+        let up = self.upload(scene, &self.accum_buffer(w, h), tri_verts, groups, nodes, emitters, light_tree, env, env_cdf, energy, timings)?;
         let pipeline = self.pipeline(&up.kernel, false);
         // Particles: placed once, at the scene time and camera.
         if up.particles.is_some() {
@@ -3349,7 +3385,7 @@ impl Gpu {
             }
         }
         let t_tl = Instant::now();
-        let overlay = self.render_translucent(&up, base, spp)?;
+        let overlay = self.render_translucent(&up, base, spp, (w, h))?;
         if up.translucent.is_some() {
             timings.push(("translucent_ms".into(), t_tl.elapsed().as_secs_f64() * 1000.0));
         }

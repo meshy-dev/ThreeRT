@@ -2574,6 +2574,21 @@ buffers and histories owned by the view, and the environment an object of its ow
 side the environment hangs on is not (here the scene's, as the scene DSL has it). Still against that: the
 per-pixel accumulation buffer is made with the scene's data. Resize moves it to the view.
 
+**The view at another size (2026-11-16, scene step A3).** A view's size was fixed when it opened: the window could
+not be resized, and the per-pixel samples were made with the scene's data. The view owns every buffer that follows
+its size now (`live/targets.rs`: the samples, the passes' own and their bind groups, the output, the kernel's
+four), and `LiveCore::resize` makes those again and nothing else: the scene's data, its acceleration structures
+and the radiance cache stay, the frames' histories start again. Bistro, to 1920 × 1080 or 2560 × 1440: 0.5 ms on
+the CPU, and the next frame waits for the GPU about half a frame longer, once (a rebuild there is 0.7–0.9 s). The
+window (`play`) is resizable and follows its size and its display's density (`view.rs` `fit`), and takes each
+answer of the surface as wgpu documents it (`acquire`): before, a window the system resized (moved to a display
+of another scale) reported `surface: Outdated` on every frame from then on (#101), and a covered window an error
+a frame. The headless runner takes `{"cmd":"resize"}`. A test holds a resized view to one built at that size
+(state, picture; the scene's buffers and the cache the same handles) and fails with each of four steps of
+`resize` left out; on Bistro a view resized and back is the view only reset (dE 0.18, SSIM 0.9995 at the same
+frames). Left: the browser host's view is still fixed; the merged layout keeps the cache in one buffer with the
+size's buffers, so a resize there empties it; a drag makes every buffer again at each step.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

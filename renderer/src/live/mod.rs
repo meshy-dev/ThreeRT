@@ -22,6 +22,7 @@
 //!                     | {"cmd":"camera",...,"frames":n,"sync":id | "snapshot":p} | {"cmd":"frames","n":n,"sync":id | "snapshot":p}
 //!                       (a step: camera, frames, and the sync answer / snapshot at its last frame, in one command)
 //!                     | {"cmd":"scale","scale":s (0 = auto)} | {"cmd":"quit"}
+//!                     | {"cmd":"resize","width":w,"height":h} (the view at another size; stderr "live: resized to wxh in t ms")
 //!
 //! The files: this one holds `LiveCore` itself (its settings, camera, resolution governor and readbacks) and what the
 //! others share; `targets` the live passes' pipelines, screen-size buffers and bind group; `load` a scene loaded and
@@ -147,6 +148,13 @@ struct LiveParams {
 /// uniform ones (`Params::ltile.w`; half past the camera hit). 2 read as 4, 8 and 16 on the lamp-rooms shots.
 pub(super) const LIST_CANDIDATES: u32 = 2;
 
+/// The kernel's group-1 bind groups over a view's targets: the trace's, and the translucency pass's where the device
+/// has one (`gpu::Gpu::tl_vis_layout`: without `finish`'s records).
+fn kernel_bind_groups(g: &gpu::Gpu, raster: Option<&Raster>, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
+    let vis = raster.map_or(&g.no_vis_view, |r| &r.vis);
+    (gpu::vis_bind_group(&g.device, &g.vis_layout, vis, &targets.kernel, true), g.tl_vis_layout.as_ref().map(|l| gpu::vis_bind_group(&g.device, l, vis, &targets.kernel, false)))
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Camera {
     pub pos: Vec3,
@@ -207,6 +215,8 @@ pub enum Cmd {
     Status(String),
     /// Render scale (0 = dynamic resolution).
     Scale(f32),
+    /// The view at another size, pixels (`LiveCore::resize`; the window host: its window's).
+    Resize(u32, u32),
     Quit,
 }
 
@@ -489,8 +499,8 @@ impl LiveCore {
         // The scene's post preset replaces this LUT below (apply_post).
         let cache_on = !std::env::var("THREERT_CACHE").is_ok_and(|v| v == "0");
         // (Without the cache the kernel binds one of one entry.)
-        let targets = Targets::new(&g, w, h, &vec![0u16; (LUT * LUT * LUT * 4) as usize], if cache_on { gpu::CACHE_SIZE } else { 1 });
-        let (sc, view, env) = load_scene(&g, world, assets, presets, w, h, &targets, &passes)?;
+        let targets = Targets::new(&g, &passes, w, h, &vec![0u16; (LUT * LUT * LUT * 4) as usize], if cache_on { gpu::CACHE_SIZE } else { 1 });
+        let (sc, view, env) = load_scene(&g, world, assets, presets, w, h, &targets)?;
         let cam = view.camera;
         let pp = view.preset.post.clone();
         let (triangles, scene_name) = (sc.triangles, sc.name.clone());
@@ -516,9 +526,7 @@ impl LiveCore {
         let timer = (g.timestamps && profile.is_none()).then(|| FrameTimer::new(&g.device));
         let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline() });
-        let vis = raster.as_ref().map_or(&g.no_vis_view, |r| &r.vis);
-        let kernel_bg = gpu::vis_bind_group(&g.device, &g.vis_layout, vis, &targets.kernel, true);
-        let tl_kernel_bg = g.tl_vis_layout.as_ref().map(|l| gpu::vis_bind_group(&g.device, l, vis, &targets.kernel, false));
+        let (kernel_bg, tl_kernel_bg) = kernel_bind_groups(&g, raster.as_ref(), &targets);
         // (Read whenever a kernel of this session may have the guard: under software traversal a scene's first unit
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
@@ -570,7 +578,7 @@ impl LiveCore {
     }
 
     pub fn rebuild(&mut self, world: &World) -> Result<()> {
-        let (s, view, env) = load_scene(&self.g, world, &self.assets, &self.presets, self.w, self.h, &self.targets, &self.passes)?;
+        let (s, view, env) = load_scene(&self.g, world, &self.assets, &self.presets, self.w, self.h, &self.targets)?;
         self.apply_post(&view.preset.post);
         self.triangles = s.triangles;
         self.scene_name = s.name.clone();
@@ -605,6 +613,14 @@ impl LiveCore {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(LUT * 8), rows_per_image: Some(LUT) },
             wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
         );
+        self.post_key = key;
+        self.size_post();
+    }
+
+    /// The post passes' settings from the view's preset: those that follow the view's size (the bloom's stages, the
+    /// motion blur's reach in pixels) with the rest.
+    fn size_post(&mut self) {
+        let pp = &self.view.preset.post;
         self.bloom = bloom_stages(pp, self.w, self.h);
         self.vignette = pp.vignette;
         // THREERT_NO_GRAIN=1: no film grain (a fresh random pattern every frame; comparisons between frames see it as error).
@@ -620,7 +636,6 @@ impl LiveCore {
         };
         self.post = [pp.chromatic_aberration, grain, pp.bloom.threshold, mb.max / 100.0 * self.w as f32];
         self.blur = (if mb.max > 0.0 { mb.amount.max(0.0) } else { 0.0 }, mb.target_fps);
-        self.post_key = key;
     }
 
     /// Switches to a different world: camera from it, history cleared.
@@ -694,8 +709,35 @@ impl LiveCore {
             return;
         }
         self.targets.kernel.deferred = Some(gpu::deferred_buffer(&self.g.device, (pixels + pixels / 4).min(self.w as u64 * self.h as u64)));
-        let vis = self.raster.as_ref().map_or(&self.g.no_vis_view, |r| &r.vis);
-        self.kernel_bg = gpu::vis_bind_group(&self.g.device, &self.g.vis_layout, vis, &self.targets.kernel, true);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+    }
+
+    /// The view at another size (its host's window, in pixels): the targets that follow the size are made again
+    /// (`Targets::resize`) and bound, the scene with the new samples' buffer; the frames' histories start again. The
+    /// scene's data, the radiance cache (the world's), the view's camera, state and render scale stay. A size this
+    /// device does not hold is refused, the view as it was.
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<()> {
+        let (w, h) = (w.max(1), h.max(1));
+        if (w, h) == (self.w, self.h) {
+            return Ok(());
+        }
+        if !self.g.view_fits(w, h) {
+            anyhow::bail!("a view of {w} x {h}: more samples than this device holds in one buffer");
+        }
+        (self.w, self.h, self.aspect) = (w, h, w as f32 / h as f32);
+        self.targets.resize(&self.g, &self.passes, w, h);
+        if self.raster.is_some() {
+            self.raster = Some(Raster::new(&self.g, w, h));
+        }
+        if let Some(c) = &mut self.cache {
+            c.bufs = self.targets.kernel.cache.clone();
+        }
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+        self.g.set_accum(&mut self.sc.up, &self.targets.accum);
+        self.size_post();
+        // As a new view: no history, no frame before this one.
+        (self.reset, self.prev_isz) = (true, (0, 0));
+        Ok(())
     }
 
     /// Renders one frame with `spp` samples per pixel; returns the command buffers to submit after the samples.
@@ -804,7 +846,7 @@ impl LiveCore {
         let composed = read(&fb.buffer, fb.offset, tn * 16)?;
         let spec_pp = t.buf("spec_pp");
         let spec = read(&spec_pp.buffer, spec_pp.offset + n * 8, tn * 8)?; // spec_pp slot 1: (rgb, history) as two pairs of f16
-        let samples = read(&self.sc.up.accum, 0, tn * 80)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
+        let samples = read(&self.targets.accum, 0, tn * 80)?; // the kernel's samples (live.wgsl `Pixel`): emit at 48
         let (composed, spec, samples): (&[[f32; 4]], &[[u32; 2]], &[[f32; 20]]) = (bytemuck::cast_slice(&composed), bytemuck::cast_slice(&spec), bytemuck::cast_slice(&samples));
         let (mut dif, mut spe, mut emi) = (Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h * 3));
         let finite = |v: f32| if v.is_finite() { v } else { 0.0 };

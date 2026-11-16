@@ -31,8 +31,6 @@ pub(super) struct LoadedScene {
     pub(super) triangles: usize,
     pub(super) up: gpu::Uploaded,
     pub(super) base: gpu::Params,
-    /// The live passes' bind groups, a pass each (`Targets::bind_groups`).
-    pub(super) bgs: Vec<wgpu::BindGroup>,
     /// GPU table copies that parameter edits rewrite in place (`commit`).
     pub(super) tables: tables::Tables,
     /// CPU copy of the dynamic triangles (posed models: the tail of the GPU triangle order from `dynamic_first`):
@@ -199,7 +197,7 @@ impl EmitterWorker {
     }
 }
 
-pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32, h: u32, targets: &Targets, passes: &Passes) -> Result<(LoadedScene, ViewState, Environment)> {
+pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &Path, w: u32, h: u32, targets: &Targets) -> Result<(LoadedScene, ViewState, Environment)> {
     let t0 = Instant::now();
     let mut sc = scene::build(world, assets, presets, None)?;
     sc.width = w;
@@ -218,7 +216,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     // (The light tree is the tables' by now: its nodes from there.)
-    let up = g.upload(&sc, w, h, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
+    let up = g.upload(&sc, &targets.accum, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
@@ -235,7 +233,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     }
     base.ltile[3] = super::LIST_CANDIDATES;
     base.cam_fwd[3] = w as f32 / h as f32;
-    let bgs = targets.bind_groups(&g.device, passes, &up.accum);
     let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
     let instanced = !sc.gpu_instances.is_empty() || !sc.procs.is_empty();
     let instance_features = gpu::instance_features(&sc);
@@ -286,5 +283,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         inst_at_load: instances.len(),
         added: Default::default(),
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, bgs, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, gpu_instances, procs, proc_of, proc_first, instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

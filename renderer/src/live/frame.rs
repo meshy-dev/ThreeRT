@@ -257,6 +257,9 @@ impl LiveCore {
         let (w, h) = (self.w, self.h);
         let (iw, ih) = self.internal_size();
         self.ensure_deferred(iw as u64 * ih as u64);
+        if self.sc.up.translucent.is_some() {
+            self.targets.translucent_low(&self.g);
+        }
         let now = Instant::now();
         // Lockstep (benchmarks) renders at a fixed frame time, whatever the wall clock says.
         self.frame_dt = self.fixed_dt.unwrap_or_else(|| now.duration_since(self.last_frame).as_secs_f32());
@@ -545,7 +548,7 @@ impl LiveCore {
             let low = (iw, ih) != (w, h);
             let tp = gpu::TranslucentParams { size: [w, h, t.first, 1], view: [iw, ih, gpu::VOLUME_TRAIN_CAP, low as u32], misc: [VOLUME_TRAIN_SHARE, translucent_hidden(self.frame) as u32 as f32, 0.0, 0.0] };
             g.queue.write_buffer(&t.params, 0, bytemuck::bytes_of(&tp));
-            (pipes, g.translucent_bind_group(t, target), &t.count)
+            (pipes, g.translucent_bind_group(t, target, self.targets.translucent_low.as_ref().expect("made at the frame's start")), &t.count)
         });
         // The pass (train = false) or the volume training (train = true).
         let tl_dispatch = |pass: &mut wgpu::ComputePass, train: bool| {
@@ -587,7 +590,7 @@ impl LiveCore {
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
                 if (self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name)) && (tiles_on || *name != layout::LIGHT_TILES_PASS) {
                     pass.set_pipeline(pipe);
-                    pass.set_bind_group(0, &self.sc.bgs[k], &[]);
+                    pass.set_bind_group(0, &self.targets.bgs[k], &[]);
                     let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
                     pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 }
@@ -611,7 +614,7 @@ impl LiveCore {
                     continue;
                 }
                 pass.set_pipeline(pipe);
-                pass.set_bind_group(0, &self.sc.bgs[k], &[]);
+                pass.set_bind_group(0, &self.targets.bgs[k], &[]);
                 let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
                 pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 if *name == "upscale" {

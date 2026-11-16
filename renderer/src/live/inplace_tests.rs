@@ -1,5 +1,5 @@
 //! An edit the live view takes in place leaves it as a build of the edited world does: no rebuild, the same
-//! parameters and kernel variant, the same picture. (GPU tests: skipped without a GPU.)
+//! parameters and kernel variant, the same picture. So does another size. (GPU tests: skipped without a GPU.)
 
 use super::*;
 use crate::world::{Geometry, Kind, Settings};
@@ -50,8 +50,8 @@ fn camera(fov: f32, dof: Option<f32>, exposure: serde_json::Value) -> crate::des
     serde_json::from_value(c).unwrap()
 }
 
-/// A view's state: the kernel's parameters whole (as words; not the camera's four vectors, which the frame writes from
-/// the view), and what else these edits reach: the lights' table and the sun, the sky's map, what the passes after
+/// A view's state: the kernel's parameters whole (as words; not the camera's four vectors and the size, which the frame
+/// writes from the view), and what else these edits reach: the lights' table and the sun, the sky's map, what the passes after
 /// the kernel take. (After a frame: the frame writes the light LOD's reference.)
 fn state(c: &LiveCore) -> (Vec<u32>, String) {
     let (s, v, sky) = (&c.sc, &c.view, &c.env.sky);
@@ -63,15 +63,17 @@ fn state(c: &LiveCore) -> (Vec<u32>, String) {
         v.exposure, v.exposure_settings, v.camera, v.dof,
         c.post_key, c.bloom, c.vignette, c.post, c.blur, c.scene_name
     );
-    let camera = (std::mem::offset_of!(gpu::Params, cam_up) + 16) / 4;
-    assert_eq!((std::mem::offset_of!(gpu::Params, cam_pos), camera), (0, 16), "the camera's vectors are the parameters' first");
-    (bytemuck::cast_slice::<_, u32>(bytemuck::bytes_of(&s.base))[camera..].to_vec(), rest)
+    assert_eq!((std::mem::offset_of!(gpu::Params, cam_pos), std::mem::offset_of!(gpu::Params, size) + 16), (0, FRAME_WORDS * 4), "the camera's vectors and the size are the parameters' first");
+    (bytemuck::cast_slice::<_, u32>(bytemuck::bytes_of(&s.base))[FRAME_WORDS..].to_vec(), rest)
 }
+
+/// The parameters' words the frame writes from the view: the camera's four vectors, the size.
+const FRAME_WORDS: usize = 20;
 
 /// Holds a view that took an edit in place to one built from the edited world.
 fn same_state(what: &str, live: &LiveCore, fresh: &LiveCore) {
     let ((a, ra), (b, rb)) = (state(live), state(fresh));
-    let words: Vec<usize> = (0..a.len()).filter(|&k| a[k] != b[k]).map(|k| k + 16).collect();
+    let words: Vec<usize> = (0..a.len()).filter(|&k| a[k] != b[k]).map(|k| k + FRAME_WORDS).collect();
     assert!(words.is_empty(), "{what}: the kernel's parameters differ from a build's at words {words:?}");
     assert_eq!(ra, rb, "{what}: the view's state against a build's");
 }
@@ -189,4 +191,50 @@ fn edits_in_place_leave_what_a_build_does() {
     assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.view.dof.is_some(), "a depth of field and an exposure: the view stays");
     w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
     assert!(!live.commit(&mut w).unwrap() && live.cam == live.view.camera && live.cam != away, "a lens: the view takes the scene's camera");
+}
+
+/// A view at another size, against a view built at that size: the same state and picture, with the scene's data and
+/// the radiance cache it had; an edit and a rebuild after it as in a view of that size; a size the device does not
+/// hold refused.
+#[test]
+fn a_resized_view_is_a_view_built_at_that_size() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World, (x, y): (u32, u32)| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, x, y));
+    let mut w = world();
+    let mut live = match open(&w, (96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    picture(&mut live, 8);
+    let (verts, cache, out) = (live.sc.up.verts.clone(), live.targets.kernel.cache.val.buffer.clone(), live.targets.out.clone());
+    live.resize(96, 54).unwrap();
+    assert!(live.targets.out == out && !live.reset, "the same size: the view as it was");
+    let against = |what: &str, live: &mut LiveCore, w: &World| {
+        let size = (live.w, live.h);
+        let mut fresh = open(w, size).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 24), picture(&mut fresh, 24));
+        assert_eq!(a.len(), (size.0 * size.1 * 4) as usize, "{what}: the output's size");
+        // (0.02 to 0.13 steps as measured; 9 with the scene bound to the old size's samples.)
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        same_state(what, live, &fresh);
+    };
+    for size in [(160, 90), (54, 96), (97, 55), (96, 54)] {
+        live.resize(size.0, size.1).unwrap();
+        assert!(live.reset && (live.w, live.h) == size, "{size:?}: the histories start again");
+        assert!(live.sc.up.verts == verts, "{size:?}: the scene's data is as it was");
+        assert!(live.g.merged || live.targets.kernel.cache.val.buffer == cache, "{size:?}: the radiance cache is as it was");
+        against(&format!("{size:?}"), &mut live, &w);
+    }
+    // An edit in place, then a rebuild, in a view that was resized.
+    live.resize(128, 72).unwrap();
+    w.set_camera_desc(4, camera(25.0, Some(4.5), manual(1.0))).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a lens after another size: in place");
+    against("a lens after another size", &mut live, &w);
+    live.rebuild(&w).unwrap();
+    against("a rebuild after another size", &mut live, &w);
+    // More pixels than a buffer holds.
+    assert!(live.resize(1 << 20, 1 << 20).is_err() && (live.w, live.h) == (128, 72), "a size the device does not hold is refused");
+    against("a size refused", &mut live, &w);
 }

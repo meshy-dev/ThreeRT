@@ -104,9 +104,13 @@ impl Passes {
     }
 }
 
-/// Screen-size targets shared across scene reloads.
+/// The view's targets: every buffer that follows its size (the trace's samples, what the kernel leaves the passes,
+/// the passes' own, the output), the radiance cache, the passes' parameters and tone-map table, and the bind groups
+/// over them. A scene reload leaves them; another size makes the ones that follow it again (`resize`).
 pub struct Targets {
     pub(super) params: wgpu::Buffer,
+    /// The trace's samples, a `Pixel` a pixel (`gpu::Uploaded::accum` is a handle of it, for the scene's bind group).
+    pub(super) accum: wgpu::Buffer,
     /// The passes' own buffers (`layout::RESOURCES`' `Own`), by binding: what each holds and when is live.wgsl's
     /// table ("The live passes' buffers").
     pub(super) bufs: Vec<(u32, Buf)>,
@@ -116,20 +120,29 @@ pub struct Targets {
     /// a trace: the specular-lobe rays (`refl`), motion vectors per traced pixel (pathtrace.wgsl `motion_out`) and the
     /// deterministic direct light per traced pixel (`direct_out`).
     pub kernel: gpu::KernelBufs,
+    /// Translucent particles per traced pixel (`gpu::Gpu::translucent_low`): made for the first scene that draws them.
+    pub(super) translucent_low: Option<wgpu::Buffer>,
     pub(super) lut_tex: wgpu::Texture,
     pub(super) lut_view: wgpu::TextureView,
     pub(super) sampler: wgpu::Sampler,
+    /// The bind group of each pass, in `Passes::pipes`' order.
+    pub(super) bgs: Vec<wgpu::BindGroup>,
+    size: (u32, u32),
+    /// The radiance cache's entries (1: no cache).
+    cache: u64,
+}
+
+/// What a view of `w` x `h` holds of each of the kernel's four buffers that follow its size, bytes (`gpu::KernelBufs`:
+/// the specular rays, the motion vectors, the direct light, the light tiles' lists).
+fn kernel_bytes(w: u32, h: u32) -> [u64; 4] {
+    let n = (w * h) as u64;
+    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16]
 }
 
 impl Targets {
     /// For a view of `w` x `h` and a radiance cache of `cache` entries.
-    pub(super) fn new(g: &gpu::Gpu, w: u32, h: u32, lut: &[u16], cache: u64) -> Targets {
+    pub(super) fn new(g: &gpu::Gpu, passes: &Passes, w: u32, h: u32, lut: &[u16], cache: u64) -> Targets {
         let d = &g.device;
-        let n = (w * h) as u64;
-        let sb = |label: &str, bytes: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let quarter = (w.div_ceil(4) * h.div_ceil(4)) as u64;
-        let texels = |j: u32| bloom_dim(w, h, j).0 as u64 * bloom_dim(w, h, j).1 as u64;
-        let bloom_texels = (0..5).map(texels).sum::<u64>() + (0..6).map(|k| texels(bloom_stage_level(k))).sum::<u64>();
         let lut_tex = d.create_texture(&wgpu::TextureDescriptor {
             label: Some("tonemap lut"),
             size: wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
@@ -146,7 +159,48 @@ impl Targets {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(LUT * 8), rows_per_image: Some(LUT) },
             wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
         );
-        // The passes' own buffers, in binding order.
+        let (bufs, out) = Self::own(d, w, h);
+        let [refl, motion, direct, lists] = kernel_bytes(w, h);
+        let mut t = Targets {
+            params: d.create_buffer(&wgpu::BufferDescriptor { label: Some("live params"), size: std::mem::size_of::<LiveParams>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
+            accum: g.accum_buffer(w, h),
+            bufs,
+            out,
+            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, refl, motion, direct, lists),
+            translucent_low: None,
+            lut_view: lut_tex.create_view(&Default::default()),
+            lut_tex,
+            sampler: d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
+            bgs: vec![],
+            size: (w, h),
+            cache,
+        };
+        t.bgs = t.bind_groups(d, passes);
+        t
+    }
+
+    /// For another size: what follows it is made again (the samples, the passes' own buffers and the output, the
+    /// kernel's four, the translucent particles'), with the bind groups over them. The radiance cache, which is the
+    /// world's, the passes' parameters and the tone-map table stay. (The merged layout keeps the cache in one buffer
+    /// with the rest: it starts empty.)
+    pub(super) fn resize(&mut self, g: &gpu::Gpu, passes: &Passes, w: u32, h: u32) {
+        let d = &g.device;
+        (self.bufs, self.out) = Self::own(d, w, h);
+        self.accum = g.accum_buffer(w, h);
+        let [refl, motion, direct, lists] = kernel_bytes(w, h);
+        self.kernel = self.kernel.resized(d, self.cache, refl, motion, direct, lists);
+        self.translucent_low = None;
+        self.size = (w, h);
+        self.bgs = self.bind_groups(d, passes);
+    }
+
+    /// The passes' own buffers for a view of `w` x `h`, in binding order, and the output among them.
+    fn own(d: &wgpu::Device, w: u32, h: u32) -> (Vec<(u32, Buf)>, wgpu::Buffer) {
+        let n = (w * h) as u64;
+        let sb = |label: &str, bytes: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let quarter = (w.div_ceil(4) * h.div_ceil(4)) as u64;
+        let texels = |j: u32| bloom_dim(w, h, j).0 as u64 * bloom_dim(w, h, j).1 as u64;
+        let bloom_texels = (0..5).map(texels).sum::<u64>() + (0..6).map(|k| texels(bloom_stage_level(k))).sum::<u64>();
         let bufs: Vec<(u32, Buf)> = layout::BINDINGS
             .iter()
             .filter_map(|b| {
@@ -162,15 +216,13 @@ impl Targets {
             })
             .collect();
         let out = bufs.iter().find(|b| b.0 == layout::binding("out_px").binding).expect("out_px").1.buffer.clone();
-        Targets {
-            params: d.create_buffer(&wgpu::BufferDescriptor { label: Some("live params"), size: std::mem::size_of::<LiveParams>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
-            bufs,
-            out,
-            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16),
-            lut_view: lut_tex.create_view(&Default::default()),
-            lut_tex,
-            sampler: d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() }),
-        }
+        (bufs, out)
+    }
+
+    /// The buffer translucent particles are drawn into below full resolution, made on first use.
+    pub(super) fn translucent_low(&mut self, g: &gpu::Gpu) -> &wgpu::Buffer {
+        let (w, h) = self.size;
+        self.translucent_low.get_or_insert_with(|| g.translucent_low(w, h))
     }
 
     /// The buffer live.wgsl binds as `name` (the passes' own, or the kernel's).
@@ -189,12 +241,12 @@ impl Targets {
         }
     }
 
-    /// The bind group of each pass, in `Passes::pipes`' order (`sample`: the trace's samples).
-    pub(super) fn bind_groups(&self, d: &wgpu::Device, passes: &Passes, sample: &wgpu::Buffer) -> Vec<wgpu::BindGroup> {
+    /// The bind group of each pass, in `Passes::pipes`' order.
+    fn bind_groups(&self, d: &wgpu::Device, passes: &Passes) -> Vec<wgpu::BindGroup> {
         let entry = |b: &'_ layout::Binding| -> wgpu::BindGroupEntry<'_> {
             let resource = match layout::resource(b) {
                 layout::Res::Params => self.params.as_entire_binding(),
-                layout::Res::Samples => sample.as_entire_binding(),
+                layout::Res::Samples => self.accum.as_entire_binding(),
                 layout::Res::Lut => wgpu::BindingResource::TextureView(&self.lut_view),
                 layout::Res::LutSampler => wgpu::BindingResource::Sampler(&self.sampler),
                 _ => self.buf_at(b).binding(),
