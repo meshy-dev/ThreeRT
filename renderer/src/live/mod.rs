@@ -742,10 +742,11 @@ impl LiveCore {
 
     /// Renders one frame with `spp` samples per pixel; returns the command buffers to submit after the samples.
     /// Path-trace dispatches are submitted inside (each needs its own uniform contents).
-    /// Traced resolution at the current render scale.
+    /// Traced resolution at the current render scale: 8 pixels a side at least, or the view's where it has fewer.
     pub fn internal_size(&self) -> (u32, u32) {
         let s = self.render_scale.clamp(SCALE_FLOOR, 1.0);
-        (((self.w as f32 * s).round() as u32).clamp(8, self.w), ((self.h as f32 * s).round() as u32).clamp(8, self.h))
+        let side = |n: u32| ((n as f32 * s).round() as u32).clamp(n.min(8), n);
+        (side(self.w), side(self.h))
     }
 
     /// Dynamic resolution (UE r.DynamicRes): twice a second, move the render scale toward the frame budget (traced

@@ -220,7 +220,8 @@ fn a_resized_view_is_a_view_built_at_that_size() {
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
         same_state(what, live, &fresh);
     };
-    for size in [(160, 90), (54, 96), (97, 55), (96, 54)] {
+    // (Smaller than a tile of 8 too.)
+    for size in [(160, 90), (54, 96), (97, 55), (5, 3), (1, 1), (96, 54)] {
         live.resize(size.0, size.1).unwrap();
         assert!(live.reset && (live.w, live.h) == size, "{size:?}: the histories start again");
         assert!(live.sc.up.verts == verts, "{size:?}: the scene's data is as it was");
