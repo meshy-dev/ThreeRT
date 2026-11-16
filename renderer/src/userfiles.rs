@@ -283,12 +283,37 @@ impl Grant {
 
     /// The file `path` of the grant: `"denied"` for one that is not among its entries.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.read_range(path, 0, None).map(|(bytes, _)| bytes)
+    }
+
+    /// `length` bytes of the file `path` from `offset` (to its end without `length`, and never past it), and the
+    /// file's whole size. `"denied"` for a file that is not among the grant's entries, `"out of range"` for an offset
+    /// past its end, `"too large"` for more than `MAX_FILE` bytes at once.
+    pub fn read_range(&self, path: &str, offset: u64, length: Option<u64>) -> Result<(Vec<u8>, u64), String> {
+        use std::io::{Read, Seek, SeekFrom};
         let file = self.files.get(path).ok_or("denied")?;
-        let len = std::fs::metadata(file).map_err(|e| format!("{path}: {e}"))?.len();
-        if len > MAX_FILE {
+        let io = |e: std::io::Error| format!("{path}: {e}");
+        let mut f = std::fs::File::open(file).map_err(io)?;
+        let size = f.metadata().map_err(io)?.len();
+        if offset > size {
+            return Err("out of range".into());
+        }
+        let n = length.map_or(size - offset, |l| l.min(size - offset));
+        if n > MAX_FILE {
             return Err("too large".into());
         }
-        std::fs::read(file).map_err(|e| format!("{path}: {e}"))
+        f.seek(SeekFrom::Start(offset)).map_err(io)?;
+        let mut bytes = vec![0; n as usize];
+        f.read_exact(&mut bytes).map_err(io)?;
+        Ok((bytes, size))
+    }
+}
+
+/// A request's `offset` / `length`: absent, or a whole number of bytes.
+fn bytes_field(m: &Value, k: &str) -> Result<Option<u64>, String> {
+    match &m[k] {
+        Value::Null => Ok(None),
+        v => v.as_u64().map(Some).ok_or_else(|| format!("{k} is a whole number of bytes")),
     }
 }
 
@@ -334,12 +359,14 @@ impl Requests {
                 Err(e) => fail("files.picked", e),
             },
             "files.read" => {
-                let r = match (m["pick"].as_str().and_then(|p| self.grants.get(p)), m["path"].as_str()) {
-                    (Some(g), Some(path)) => g.read(path),
+                let range = bytes_field(m, "offset").and_then(|o| Ok((o.unwrap_or(0), bytes_field(m, "length")?)));
+                let r = match (m["pick"].as_str().and_then(|p| self.grants.get(p)), m["path"].as_str(), range) {
+                    (_, _, Err(e)) => Err(e),
+                    (Some(g), Some(path), Ok((offset, length))) => g.read_range(path, offset, length).map(|(b, size)| (b, offset, size)),
                     _ => Err("denied".into()),
                 };
                 match r {
-                    Ok(b) => json!({ "t": "files.data", "id": id, "ok": true, "data": b64().encode(&b), "size": b.len() }),
+                    Ok((b, offset, size)) => json!({ "t": "files.data", "id": id, "ok": true, "data": b64().encode(&b), "offset": offset, "size": size }),
                     Err(e) => fail("files.data", e),
                 }
             }
@@ -609,7 +636,22 @@ mod tests {
         assert_eq!(a["entries"], json!([{ "path": "a/b/c/d/e/f.bsp", "size": 5 }, { "path": "cstrike.wad", "size": 3 }, { "path": "maps/DE_Y.BSP", "size": 4 }, { "path": "maps/de_x.bsp", "size": 3 }]));
         let pick = a["pick"].as_str().unwrap().to_string();
         let a = ask(&mut r, json!({ "t": "files.read", "id": "r1", "pick": pick, "path": "maps/de_x.bsp" }));
-        assert_eq!(a, json!({ "t": "files.data", "id": "r1", "ok": true, "data": b64().encode("BSP"), "size": 3 }));
+        assert_eq!(a, json!({ "t": "files.data", "id": "r1", "ok": true, "data": b64().encode("BSP"), "offset": 0, "size": 3 }));
+        // A part of a file: `size` is the whole file's; a length past the end stops at it.
+        let a = ask(&mut r, json!({ "t": "files.read", "id": "r5", "pick": pick, "path": "a/b/c/d/e/f.bsp", "offset": 1, "length": 3 }));
+        assert_eq!(a, json!({ "t": "files.data", "id": "r5", "ok": true, "data": b64().encode("eep"), "offset": 1, "size": 5 }));
+        let a = ask(&mut r, json!({ "t": "files.read", "id": "r6", "pick": pick, "path": "a/b/c/d/e/f.bsp", "offset": 3, "length": 100 }));
+        assert_eq!((a["data"].clone(), a["size"].clone()), (json!(b64().encode("p6")), json!(5)));
+        let a = ask(&mut r, json!({ "t": "files.read", "id": "r7", "pick": pick, "path": "a/b/c/d/e/f.bsp", "offset": 2 }));
+        assert_eq!(a["data"], b64().encode("ep6"));
+        let a = ask(&mut r, json!({ "t": "files.read", "id": "r8", "pick": pick, "path": "a/b/c/d/e/f.bsp", "offset": 5 }));
+        assert_eq!((a["ok"].clone(), a["data"].clone()), (json!(true), json!("")));
+        assert_eq!(ask(&mut r, json!({ "t": "files.read", "id": "r9", "pick": pick, "path": "a/b/c/d/e/f.bsp", "offset": 6 }))["reason"], "out of range");
+        for bad in [json!({ "offset": -1 }), json!({ "offset": 1.5 }), json!({ "length": "3" })] {
+            let mut m = json!({ "t": "files.read", "id": "r10", "pick": pick, "path": "a/b/c/d/e/f.bsp" });
+            m.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            assert_eq!(ask(&mut r, m)["ok"], false);
+        }
         for denied in ["maps/readme.txt", "../secret.bsp", "/etc/passwd", ".hidden/z.bsp", "a/b/c/d/e/f/g.bsp", "maps/../../secret.bsp"] {
             let a = ask(&mut r, json!({ "t": "files.read", "id": "r2", "pick": pick, "path": denied }));
             assert_eq!(a, json!({ "t": "files.data", "id": "r2", "ok": false, "reason": "denied" }), "{denied}");
@@ -631,6 +673,25 @@ mod tests {
         // A folder asked for, a file given.
         let mut r = Requests::new(None, Some(queued_picks(vec![root.join("secret.bsp")])));
         assert_eq!(ask(&mut r, json!({ "t": "files.pick", "id": 1, "mode": "folder" }))["ok"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_past_the_limit_is_read_in_parts() {
+        let root = temp("parts");
+        let f = std::fs::File::create(root.join("big.wad")).unwrap();
+        f.set_len(MAX_FILE + 16).unwrap();
+        drop(f);
+        std::fs::OpenOptions::new().write(true).open(root.join("big.wad")).and_then(|mut f| {
+            use std::io::{Seek, SeekFrom};
+            f.seek(SeekFrom::Start(MAX_FILE + 12))?;
+            f.write_all(b"WAD3")
+        }).unwrap();
+        let g = Grant::folder(&root, &[".wad".into()]).unwrap();
+        assert_eq!(g.read("big.wad"), Err("too large".into()));
+        assert_eq!(g.read_range("big.wad", 0, Some(MAX_FILE + 1)), Err("too large".into()));
+        assert_eq!(g.read_range("big.wad", MAX_FILE + 12, Some(64)), Ok((b"WAD3".to_vec(), MAX_FILE + 16)));
+        assert_eq!(g.read_range("big.wad", 16, Some(MAX_FILE)).map(|(b, _)| b.len() as u64), Ok(MAX_FILE));
         let _ = std::fs::remove_dir_all(root);
     }
 

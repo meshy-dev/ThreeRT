@@ -7,7 +7,7 @@
 //   host.on("launch", () => { canImport = files.available() && store.available(); });   // host.caps, after launch
 //   const picked = await files.pick({ mode: "folder", accept: [".bsp", ".wad"], title: "Your Counter-Strike folder" });
 //   if (picked) for (const e of picked.entries) if (e.path.endsWith(".bsp")) {
-//     const bsp = await files.read(picked.pick, e.path);                  // Uint8Array
+//     const bsp = await files.read(picked.pick, e.path);                  // Uint8Array; a part: { offset, length }
 //     const job = sliced(convert(bsp));                                    // a generator: a little work a step
 //     ... frame(f) { const r = job.step(8); if (r.done) await store.write("maps/de_x/map.glb", r.value); }
 //   }
@@ -61,8 +61,18 @@ export interface Files {
   available(): boolean;
   /** Asks the player; null when they closed the picker. */
   pick(options: PickOptions): Promise<Picked | null>;
-  /** A file of a pick: one of its entries, the whole file. */
-  read(pick: string, path: string): Promise<Uint8Array>;
+  /**
+   * A file of a pick (one of its entries): the whole file, or `length` bytes from `offset` (to its end without
+   * `length`, never past it; the entry's `size` is the whole file's). Read a large file in parts: a directory, then
+   * the pieces it names. At most 64 MiB at once.
+   */
+  read(pick: string, path: string, range?: ReadRange): Promise<Uint8Array>;
+}
+
+/** A part of a file: `offset` (0 by default) and `length` in bytes. */
+export interface ReadRange {
+  offset?: number;
+  length?: number;
 }
 
 export interface UserStore {
@@ -235,9 +245,16 @@ export const files: Files = {
     }
   },
 
-  async read(pick, path) {
+  async read(pick, path, range) {
     if (typeof pick !== "string" || typeof path !== "string") throw new TypeError("files.read(pick, path): two strings");
-    const a = await request("files", "files.read", "files.data", { pick, path });
+    const fields: Record<string, unknown> = { pick, path };
+    for (const k of ["offset", "length"] as const) {
+      const v = range?.[k];
+      if (v === undefined) continue;
+      if (!Number.isSafeInteger(v) || v < 0) throw new TypeError(`files.read: ${k} is a whole number of bytes, not ${String(v)}`);
+      fields[k] = v;
+    }
+    const a = await request("files", "files.read", "files.data", fields);
     return fromBase64(String(a.data ?? ""));
   },
 };

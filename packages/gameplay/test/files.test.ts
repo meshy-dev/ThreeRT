@@ -34,7 +34,10 @@ function app(caps: string[]) {
         return { t: "files.picked", id, ok: true, pick: "pick-1", name: "cstrike", entries: [...folder].map(([path, b]) => ({ path, size: b.length })) };
       case "files.read": {
         const b = m.pick === "pick-1" ? folder.get(m.path as string) : undefined;
-        return b ? { t: "files.data", id, ok: true, data: Buffer.from(b).toString("base64"), size: b.length } : no("files.data", "denied");
+        if (!b) return no("files.data", "denied");
+        const offset = (m.offset as number | undefined) ?? 0;
+        const part = b.subarray(offset, m.length === undefined ? undefined : offset + (m.length as number));
+        return { t: "files.data", id, ok: true, data: Buffer.from(part).toString("base64"), offset, size: b.length };
       }
       case "store.write":
         disk.set(m.path as string, m.data !== undefined ? Buffer.from(m.data as string, "base64") : Buffer.from(m.text as string));
@@ -117,6 +120,11 @@ test("pick a folder, read its files, convert, store, read back, list, remove", a
     assert.deepEqual(picked, { pick: "pick-1", name: "cstrike", entries: [{ path: "maps/de_x.bsp", size: 5 }, { path: "cstrike.wad", size: 4 }] });
     const bsp = await settle(a, files.read(picked!.pick, "maps/de_x.bsp"));
     assert.deepEqual([...bsp], [30, 0, 0, 0, 7]);
+    // A part of it.
+    assert.deepEqual([...(await settle(a, files.read(picked!.pick, "maps/de_x.bsp", { offset: 3, length: 2 })))], [0, 7]);
+    assert.deepEqual([...(await settle(a, files.read(picked!.pick, "maps/de_x.bsp", { offset: 4 })))], [7]);
+    await assert.rejects(files.read(picked!.pick, "maps/de_x.bsp", { offset: -1 }), TypeError);
+    await assert.rejects(files.read(picked!.pick, "maps/de_x.bsp", { length: 1.5 }), TypeError);
     await assert.rejects(settle(a, files.read(picked!.pick, "../secret")), (e: unknown) => e instanceof HostRequestError && e.reason === "denied");
     // The player closes the picker: null.
     assert.equal(await settle(a, files.pick({ mode: "files" })), null);
@@ -144,6 +152,7 @@ test("the messages are the contract's", async () => {
     const seen: Msg[] = [];
     const take = () => seen.push(...a.posts.map((m) => ({ ...m, id: m.id ? "ID" : undefined })));
     void files.pick({ mode: "folder", accept: [".bsp"] }); take(); await a.pump();
+    void files.read("pick-1", "cstrike.wad", { offset: 2, length: 1 }); take(); await a.pump();
     void store.write("a/b.bin", new Uint16Array([1, 256])); take(); await a.pump();
     void store.write("t.txt", "é"); take(); await a.pump();
     void store.readText("t.txt"); take(); await a.pump();
@@ -151,6 +160,7 @@ test("the messages are the contract's", async () => {
     void store.remove("a"); take(); await a.pump();
     assert.deepEqual(seen, [
       { t: "files.pick", id: "ID", mode: "folder", accept: [".bsp"] },
+      { t: "files.read", id: "ID", pick: "pick-1", path: "cstrike.wad", offset: 2, length: 1 },
       { t: "store.write", id: "ID", path: "a/b.bin", data: "AQAAAQ==" },
       { t: "store.write", id: "ID", path: "t.txt", text: "é" },
       { t: "store.read", id: "ID", path: "t.txt", as: "text" },
