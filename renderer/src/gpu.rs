@@ -3596,8 +3596,9 @@ mod tests {
 
     /// The native default has no loop guard, and the live passes are their file. Every variant the kernel's flags
     /// make is valid WGSL (naga, wgpu's front end): each traversal with no switch, each alone and all of them, by no
-    /// scene feature, each alone and all of them (units are software traversal's), with the uniform tables, and with
-    /// the loop guard. (The merged layout's: merged.rs.) Prints the default variants' SHA-256 (`--nocapture`).
+    /// scene feature, each alone and all of them (units are software traversal's), with the uniform tables, with the
+    /// tables read whole, and with the loop guard. (The merged layout's: merged.rs.) Prints the default variants'
+    /// SHA-256 (`--nocapture`).
     #[test]
     fn every_kernel_variant_is_valid() {
         use sha2::{Digest, Sha256};
