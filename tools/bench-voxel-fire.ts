@@ -15,7 +15,10 @@
 //             `sustained` (7 a second for 10 s) and `peak` (20 within a second): frame times, fireballs burning, lights.
 //             `--software`: instead, the fire route's crater under software traversal (THREERT_HWRT=0, loop guard 8,192).
 //             `--scenario name`: instead, that scenario of the game on every route (`sustained`, `topple`: explosions that
-//             cut parts loose): each such explosion's parts kicked and the bodies' speeds just after it (step 10 c1).
+//             cut parts loose): each such explosion's parts kicked and the bodies' speeds just after it (step 10 c1);
+//             `drive`, `drive20`: one car or twenty driving down the road, a 1 m explosion in their way at 3 s (step 10
+//             c2): the physics step's ms (Rapier and the vehicles) beside the frame's, the cars' speeds and wheels.
+//             `--route mesh,fire`: only those routes.
 //
 //   node tools/bench-voxel-fire.ts [--only calibrate,quality,cost] [--spp 2048] [--software]
 //
@@ -274,9 +277,13 @@ if (only.includes("quality")) {
 
 if (only.includes("cost")) {
   generate(1, "object");
-  type Frame = { interval: number; cpu: number; gpu: number; voxel?: [number, number]; guard?: number | null; rebuild: number; fallback: string | null };
+  type Frame = { interval: number; cpu: number; gpu: number; voxel?: [number, number]; guard?: number | null; rebuild: number; fallback: string | null; physics?: { ticks: number; step: number } | null };
   const routes: [string, string, Record<string, string>][] = [["mesh", "level-destruction.game.ts", {}], ["smoke", "level-destruction-smoke.game.ts", {}], ["fire", "level-destruction-fire.game.ts", {}]];
   if (args.includes("--software")) routes.splice(0, routes.length, ["fire, software", "level-destruction-fire.game.ts", { THREERT_HWRT: "0", THREERT_LOOP_GUARD: "8192" }]);
+  if (args.includes("--route")) {
+    const keep = opt("--route", "mesh").split(",");
+    routes.splice(0, routes.length, ...routes.filter((r) => keep.includes(r[0])));
+  }
   const rows: Record<string, unknown>[] = [];
   console.log(`\ncost: lockstep at scale ${SCALE}, frames as fast as the GPU goes; ms p50 / p95 / max`);
   const st = (xs: number[]) => { const s = frameStats(xs); return `${s.p50.toFixed(1)} / ${s.p95.toFixed(1)} / ${Math.max(...xs).toFixed(1)}`; };
@@ -288,7 +295,7 @@ if (only.includes("cost")) {
       const s = live(`cost-${tag}-${scenario}`, b, { env, frameLog: log });
       await s.frames(240); // warm: the level loaded, the radiance cache trained
       s.event(scenario);
-      await s.frames(scenario === "sustained" ? 11 * 60 : scenario === "peak" ? 4 * 60 : scenario === "singles" ? 10 * 60 : scenario === "topple" ? 6 * 60 : 5 * 60);
+      await s.frames(scenario === "sustained" ? 11 * 60 : scenario === "peak" ? 4 * 60 : scenario === "singles" ? 10 * 60 : scenario === "topple" || scenario.startsWith("drive") ? 6 * 60 : 5 * 60);
       const explosions = s.lines.filter((l) => /^(\[game\] )?explosion \{/.test(l)).map((l) => JSON.parse(l.slice(l.indexOf("{"))) as { burning?: number; lit?: number });
       // The loose parts' top speed after the explosion (the game logs it every half second; step 10 c1's blast).
       const fastest = Math.max(0, ...s.lines.filter((l) => /^(\[game\] )?(bodies|explosion) \{/.test(l)).map((l) => (JSON.parse(l.slice(l.indexOf("{"))) as { fastest?: number }).fastest ?? 0));
@@ -310,7 +317,12 @@ if (only.includes("cost")) {
         continue;
       }
       const before = F.slice(Math.max(ex - 120, 0), ex), after = F.slice(ex, ex + (scenario === "crater" ? 240 : scenario === "sustained" ? 600 : 180));
+      // The physics step (Rapier with the vehicles' probes and pushes) over the scenario's frames, and the cars' state.
+      const steps = F.slice(ex - Math.min(ex - 200, 180)).map((f) => f.physics?.step ?? 0).filter((x) => x > 0);
+      const cars = s.lines.filter((l) => /^(\[game\] )?vehicles \{/.test(l)).map((l) => JSON.parse(l.slice(l.indexOf("{"))) as { n: number; speed: number; slowest: number; contacts: number; lost: number });
       const row = {
+        physics_step: steps.length ? { ...frameStats(steps), max: r3(Math.max(...steps)) } : null,
+        cars: cars.length ? { n: cars[cars.length - 1].n, speed_end: cars[cars.length - 1].speed, slowest_end: cars[cars.length - 1].slowest, lost: cars[cars.length - 1].lost, speeds: cars.map((c) => c.speed) } : null,
         tag, scenario, explosion_frame: { cpu: r2(Math.max(F[ex].cpu, F[ex + 1]?.cpu ?? 0)), gpu: r2(Math.max(F[ex].gpu, F[ex + 1]?.gpu ?? 0)) },
         before: { cpu: frameStats(before.map((f) => f.cpu)), gpu: frameStats(before.map((f) => f.gpu)) }, after: { cpu: frameStats(after.map((f) => f.cpu)), gpu: frameStats(after.map((f) => f.gpu)), gpu_max: r2(Math.max(...after.map((f) => f.gpu))) },
         burning_max: Math.max(0, ...explosions.map((e) => e.burning ?? 0)), lit_max: Math.max(0, ...explosions.map((e) => e.lit ?? 0)), explosions: explosions.length,
@@ -322,6 +334,7 @@ if (only.includes("cost")) {
         gpu_bins: Array.from({ length: Math.ceil(after.length / 15) }, (_, k) => r2(frameStats(after.slice(k * 15, k * 15 + 15).map((f) => f.gpu)).p50)),
       };
       rows.push(row);
+      if (row.physics_step) console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} physics step ms p50 ${row.physics_step.p50.toFixed(3)} / p95 ${row.physics_step.p95.toFixed(3)} / max ${row.physics_step.max}${row.cars ? `; cars ${row.cars.n}, mean speed at the end ${row.cars.speed_end} m/s (slowest ${row.cars.slowest_end}), wheels lost ${row.cars.lost}` : ""}`);
       console.log(`  ${tag.padEnd(15)} ${scenario.padEnd(9)} before: CPU ${st(before.map((f) => f.cpu))}, GPU ${st(before.map((f) => f.gpu))};  explosion frame CPU ${row.explosion_frame.cpu}, GPU ${row.explosion_frame.gpu};  after: CPU ${st(after.map((f) => f.cpu))}, GPU ${st(after.map((f) => f.gpu))}${tag.startsWith("fire") ? `; burning at most ${row.burning_max}, lit ${row.lit_max}` : ""}${row.guard ? `; guard ${row.guard}` : ""}; rebuilds after: ${row.rebuilds_after.length ? row.rebuilds_after.join(", ") : "none"}; loose parts' top speed ${row.fastest} m/s; just after the explosion: ${row.speeds_after_explosion.kicked} kicked, ${row.speeds_after_explosion.n} moving, p50 ${row.speeds_after_explosion.p50} / p90 ${row.speeds_after_explosion.p90} / max ${row.speeds_after_explosion.max} m/s`);
       console.log(`  ${"".padEnd(25)} GPU p50 per 0.25 s after: ${row.gpu_bins.join(" ")}`);
     }

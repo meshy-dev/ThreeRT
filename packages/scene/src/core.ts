@@ -900,6 +900,146 @@ export class RopeJoint extends Joint {
   }
 }
 
+/**
+ * A vehicle's wheel as described (ROADMAP § 6 step 10 c2): where its suspension is fixed to the chassis (`anchor`, in
+ * the chassis object's space, scaled with it, as a joint's anchor), the suspension's direction (down) and the axle
+ * (the wheel turns forward about it; forward is `direction × axle` turned the other way: down -y with axle -x is +z),
+ * and in metres: `rest` (the spring's length unloaded: the wheel's centre at `anchor + direction × rest`), `travel` (how
+ * far it compresses from `rest`), the tyre's `radius` and `width`. The suspension: `stiffness`, `compression` and
+ * `damping` (extension) per kg of the chassis (a wheel's spring rate is `stiffness` × the chassis's mass N/m: Bullet's
+ * units); the tyre's grip `frictionSlip` (its friction coefficient) and `sideStiffness` (the sideways grip's share, 1 by
+ * default); the suspension's largest force `maxForce` (N); a bump stop over the last `bumpLength` m of travel whose
+ * stiffness rises to `bumpStiffness` (per kg, as `stiffness`). Behind the travel a stop of the tyre's shape holds the
+ * chassis (docs/VOXEL.md "Vehicles").
+ */
+export interface WheelParameters {
+  anchor: Vector3;
+  direction?: Vector3;
+  axle?: Vector3;
+  rest: number;
+  travel: number;
+  radius: number;
+  width: number;
+  stiffness: number;
+  compression: number;
+  damping: number;
+  frictionSlip: number;
+  sideStiffness?: number;
+  maxForce?: number;
+  bumpLength?: number;
+  bumpStiffness?: number;
+}
+
+/** One wheel of a `Vehicle`: its description, its controls (set each frame; held until changed), what the engine
+ * reports of it after each frame's ticks, and the object drawn as it (placed where the wheel is, turned as it turns
+ * and steers: a wheel modelled in the chassis's axes). */
+export class VehicleWheel {
+  readonly anchor = new Vector3();
+  readonly direction = new Vector3(0, -1, 0);
+  readonly axle = new Vector3(-1, 0, 0);
+  rest: number;
+  travel: number;
+  radius: number;
+  width: number;
+  stiffness: number;
+  compression: number;
+  damping: number;
+  frictionSlip: number;
+  sideStiffness: number;
+  maxForce: number;
+  bumpLength: number;
+  bumpStiffness: number;
+  /** The drive's force at the tyre (N; negative backwards), the brake (N s: the largest rolling impulse a tick), the
+   * steering about the suspension (rad, within ±1.5). */
+  engine = 0;
+  brake = 0;
+  steering = 0;
+  /** The object drawn as the wheel: the binding places it every frame (its parent's space). */
+  object: Object3D | null = null;
+  /** As of the last frame's ticks: on the ground, the suspension's length (m), lost to destruction (its anchor's
+   * material carved away or cut off: a "wheellost" event on the vehicle; it stays lost). */
+  contact = false;
+  suspension = 0;
+  lost = false;
+  constructor(p: WheelParameters) {
+    this.anchor.copy(p.anchor);
+    if (p.direction) this.direction.copy(p.direction);
+    if (p.axle) this.axle.copy(p.axle);
+    this.rest = p.rest;
+    this.travel = p.travel;
+    this.radius = p.radius;
+    this.width = p.width;
+    this.stiffness = p.stiffness;
+    this.compression = p.compression;
+    this.damping = p.damping;
+    this.frictionSlip = p.frictionSlip;
+    this.sideStiffness = p.sideStiffness ?? 1;
+    this.maxForce = p.maxForce ?? 1e6;
+    this.bumpLength = p.bumpLength ?? 0;
+    this.bumpStiffness = p.bumpStiffness ?? 0;
+  }
+}
+
+export interface VehicleParameters {
+  wheels: WheelParameters[];
+  /** The chassis's centre of mass (its object's space, scaled with it), replacing its shapes' (its mass and inertia
+   * kept): a car's mass sits low, not where its body's volume is. */
+  centerOfMass?: Vector3;
+  /** The chassis's forward and up axes (0 x, 1 y, 2 z): 2 and 1 by default. */
+  forwardAxis?: 0 | 1 | 2;
+  upAxis?: 0 | 1 | 2;
+}
+
+/**
+ * A vehicle (ROADMAP § 6 step 10 c2): a chassis, any object with a dynamic body (a voxel body included), and wheels that
+ * are not bodies. An object itself, like `Joint`: it drives while it and its chassis are in the scene. Set each wheel's
+ * `engine`, `brake` and `steering` every frame (sent when they change); `speed` and each wheel's `contact`,
+ * `suspension` and `lost` are read back after each frame's ticks, and a wheel's `object` is placed where the wheel is.
+ * After changing its description (wheels, centre of mass, axes) set `needsUpdate`: it is made anew.
+ *
+ * Destruction: a wheel belongs to the material at its anchor. That material carved away or cut off, the wheel is lost
+ * (a "wheellost" event: `wheel` its index, `position` where it was; the vehicle goes on with the rest; drawing a wheel
+ * thrown off is the game's); the chassis gone (removed, carved away whole, fallen out of the world), the vehicle is
+ * `removed` (a "removed" event) and stays so until it is taken out of the scene.
+ */
+export class Vehicle extends Object3D {
+  readonly isVehicle = true;
+  override type = "Vehicle";
+  chassis: Object3D | null;
+  readonly wheels: VehicleWheel[];
+  centerOfMass: Vector3 | null;
+  forwardAxis: 0 | 1 | 2;
+  upAxis: 0 | 1 | 2;
+  /** Along the chassis's forward axis (m/s), as of the last frame's ticks. */
+  speed = 0;
+  /** True once its chassis went (a "removed" event). */
+  removed = false;
+  constructor(chassis: Object3D | null, params: VehicleParameters) {
+    super();
+    this.chassis = chassis;
+    this.wheels = params.wheels.map((w) => new VehicleWheel(w));
+    this.centerOfMass = params.centerOfMass ? params.centerOfMass.clone() : null;
+    this.forwardAxis = params.forwardAxis ?? 2;
+    this.upAxis = params.upAxis ?? 1;
+  }
+  set needsUpdate(v: boolean) {
+    if (v) touched(this);
+  }
+  /** @internal The engine's description of it, less its chassis; anchors and centre of mass in the chassis's units
+   * scaled by `scale`. */
+  vehicleDesc(scale: readonly number[]): Record<string, unknown> {
+    const k = (v: Vector3) => [v.x * scale[0], v.y * scale[1], v.z * scale[2]];
+    return {
+      wheels: this.wheels.map((w) => ({
+        anchor: k(w.anchor), direction: w.direction.toArray(), axle: w.axle.toArray(), rest: w.rest, travel: w.travel, radius: w.radius, width: w.width, stiffness: w.stiffness, compression: w.compression, damping: w.damping,
+        frictionSlip: w.frictionSlip, sideStiffness: w.sideStiffness, maxForce: w.maxForce, bumpLength: w.bumpLength, bumpStiffness: w.bumpStiffness,
+      })),
+      forwardAxis: this.forwardAxis, upAxis: this.upAxis,
+      ...(this.centerOfMass ? { centerOfMass: k(this.centerOfMass) } : {}),
+    };
+  }
+}
+
 export class Scene extends Object3D {
   readonly isScene = true;
   override type = "Scene";

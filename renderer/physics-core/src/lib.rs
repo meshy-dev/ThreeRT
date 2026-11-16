@@ -13,5 +13,6 @@ mod world;
 pub use world::{
     limits, BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, Contact, CustomShape, Fault, Hit, JointDesc, JointId, JointKind, Limits, Motor, Physics, Shape, SharedVoxels, TICK,
 };
+pub use world::vehicle;
 /// Rapier itself, for engine code that implements `CustomShape` (not for game scripts).
 pub use rapier3d;

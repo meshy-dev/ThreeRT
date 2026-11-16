@@ -13,8 +13,8 @@
 //!   hangs after 30,000 to 400,000 steps (five runs of five; `THREERT_PHYSICS_KICK=off` brings it back). The fuzz
 //!   found it first, in one run of fifty.
 //!
-//! - **The bits** (`--bits`): the physics' recorded hashes (physics_core::check: the script and the 1,500 random
-//!   worlds) and the voxel adapter's (`VoxelWorld::check_script`), stepped on the physics' own threads as the
+//! - **The bits** (`--bits`): the physics' recorded hashes (physics_core::check: the script, the vehicles' script and
+//!   the 1,500 random worlds) and the voxel adapter's (`VoxelWorld::check_script`), stepped on the physics' own threads as the
 //!   renderer steps (`in_pool`, `THREERT_PHYSICS_THREADS`). tools/physics-determinism.ts holds the parallel build to
 //!   the sequential one stepping from a thread outside any pool; this is the path the renderer takes.
 //!
@@ -100,6 +100,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
     };
     let (mut edits, mut refused, mut calls_refused, mut most, mut kicks) = (0u32, 0u32, 0u32, 0usize, 0u32);
     let mut broken_seen = 0u32;
+    let (mut vehicles_made, mut wheels_lost, mut vehicles_gone) = (0u32, 0u32, 0u32);
     let mut moved_seen = 0u32;
     let (mut body_edits, mut checked) = (0u32, 0usize);
     let mut advance = |v: &mut VoxelWorld, w: &mut World, ph: &mut Option<PhysicsWorld>| {
@@ -183,7 +184,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                     _ => ids[r.below(ids.len() as u64) as usize],
                 };
                 let big = |r: &mut Rng| if r.chance(0.1) { 1e6 } else { r.range(-300.0, 300.0) };
-                let (op, args) = match r.below(14) {
+                let (op, args) = match r.below(18) {
                     0 => ("impulse", json!({ "body": body, "impulse": [big(&mut r), big(&mut r), big(&mut r)], "point": [r.range(0.0, 12.0), 1.0, 3.0] })),
                     1 => ("velocity", json!({ "body": body, "linvel": [r.range(-1e4, 1e4), r.range(-50.0, 50.0), 0.0], "angvel": [r.range(-1e3, 1e3), 0.0, 0.0] })),
                     2 => ("pose", json!({ "body": body, "position": [pos(&mut r, false), r.range(-300.0, 20.0), 3.0], "rotation": [r.unit(), r.unit(), r.unit(), r.unit() + 0.01] })),
@@ -209,6 +210,25 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                         }
                         ("joint_set", a)
                     }
+                    // Vehicles (step 10 c2), on any body (a voxel body, the anchor, one that is gone): sane wheels or
+                    // wild ones (NaN, infinities, 0, huge radius and travel, nine wheels), a centre of mass or not.
+                    13 => {
+                        let wild_num = |r: &mut Rng, sane: f64| if r.chance(0.15) { json!([f64::NAN, f64::INFINITY, -1.0, 1e30, 0.0][r.below(5) as usize]) } else { json!(sane) };
+                        let n = if r.chance(0.05) { 9 } else { 1 + r.below(6) };
+                        let wheels: Vec<serde_json::Value> = (0..n).map(|k| json!({ "anchor": [if k % 2 == 0 { -0.3 } else { 0.3 }, 0.0, 0.4 - 0.4 * (k / 2) as f64], "rest": wild_num(&mut r, 0.3), "travel": wild_num(&mut r, 0.2), "radius": wild_num(&mut r, 0.2), "width": 0.1, "stiffness": wild_num(&mut r, 30.0), "compression": 2.0, "damping": 3.0, "frictionSlip": wild_num(&mut r, 1.0), "bumpLength": 0.03, "bumpStiffness": wild_num(&mut r, 500.0) })).collect();
+                        let mut a = json!({ "id": 50 + r.below(4), "chassis": body, "wheels": wheels });
+                        if r.chance(0.5) {
+                            a["centerOfMass"] = json!([0.0, r.range(-0.5, 0.5), 0.0]);
+                        }
+                        ("vehicle", a)
+                    }
+                    14 => {
+                        let c = |r: &mut Rng| if r.chance(0.2) { json!([f64::NAN, f64::INFINITY, -5.0, 1e30, 3.0][r.below(5) as usize]) } else { json!(r.range(-1.0, 1.0)) };
+                        let wheels: Vec<serde_json::Value> = (0..1 + r.below(7)).map(|_| json!({ "engine": c(&mut r).as_f64().map_or(json!(f64::NAN), |x| json!(x * 3000.0)), "brake": c(&mut r).as_f64().map_or(json!(-1.0), |x| json!(x.abs() * 50.0)), "steering": c(&mut r) })).collect();
+                        ("vehicle_set", json!({ "id": 50 + r.below(5), "wheels": wheels }))
+                    }
+                    15 => ("vehicle_state", json!({ "id": 50 + r.below(5) })),
+                    16 => if r.chance(0.5) { ("vehicle_changes", json!({})) } else { ("remove", json!({ "vehicle": 50 + r.below(5) })) },
                     _ => ("overlap", json!({ "shape": { "type": "sphere", "radius": r.range(0.1, 3.0) }, "position": [r.range(0.0, 12.0), 1.0, 3.0] })),
                 };
                 match ph.as_mut().unwrap().call(&mut w, op, &args) {
@@ -218,6 +238,11 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
                         moved_seen += v["moved"].as_array().map_or(0, |a| a.len()) as u32;
                     }
                     Ok(_) if op == "pose" && anchor == Some(body) => panic!("pose of the world's anchor was taken"),
+                    Ok(v) if op == "vehicle_changes" => {
+                        wheels_lost += v["lost"].as_array().map_or(0, |a| a.len()) as u32;
+                        vehicles_gone += v["removed"].as_array().map_or(0, |a| a.len()) as u32;
+                    }
+                    Ok(_) if op == "vehicle" => vehicles_made += 1,
                     Ok(_) => {}
                 }
             }
@@ -248,6 +273,17 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
             assert_eq!(p.bridge_ref().engine_pose(a).map(|x| (x.0, x.1)), Some(([0.0; 3], [0.0, 0.0, 0.0, 1.0])), "seed {seed}, iteration {it}: the anchor moved");
         }
         assert!(list.len() <= MAX_BODIES, "seed {seed}, iteration {it}: {} bodies", list.len());
+        // Every vehicle's state is finite (a lost wheel's too).
+        for vid in 50..54 {
+            if let Ok(st) = ph.as_mut().unwrap().call(&mut w, "vehicle_state", &json!({ "id": vid })) {
+                let finite = |v: &serde_json::Value| v.as_array().is_none_or(|a| a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)));
+                assert!(st["speed"].as_f64().is_none_or(f64::is_finite), "seed {seed}, iteration {it}: vehicle {vid}: {st}");
+                for wh in st["wheels"].as_array().into_iter().flatten() {
+                    assert!(["center", "rotation", "point", "normal"].iter().all(|k| finite(&wh[k])), "seed {seed}, iteration {it}: vehicle {vid}: {wh}");
+                }
+            }
+        }
+        let p = ph.as_ref().unwrap();
         for b in list {
             let (id, collider, voxels) = (b["body"].as_u64().unwrap() as u32, b["collider"].as_u64().unwrap() as u32, b["voxels"].as_u64().unwrap() as usize);
             assert!(voxels > 0, "seed {seed}, iteration {it}: body {id} has no voxel");
@@ -257,7 +293,7 @@ fn run(seed: u64, iterations: u32, many: bool, shells: u32) -> u32 {
         }
     }
     println!(
-        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), body edits {body_edits}, calls refused {calls_refused}, joints broken {broken_seen}, moved {moved_seen}, most bodies {most}, retired {}, shells checked {checked}, kicks {kicks}, hash {:016x}/{:016x}",
+        "seed {seed}: {iterations} iterations, edits {edits} (refused {refused}), body edits {body_edits}, calls refused {calls_refused}, joints broken {broken_seen}, moved {moved_seen}, vehicles made {vehicles_made}, wheels lost {wheels_lost}, vehicles gone {vehicles_gone}, most bodies {most}, retired {}, shells checked {checked}, kicks {kicks}, hash {:016x}/{:016x}",
         v.retired,
         v.hash().unwrap_or(0),
         ph.as_ref().unwrap().hash()
@@ -314,12 +350,12 @@ fn main() {
     if args.iter().any(|a| a == "--bits") {
         use physics_core::check;
         let t = std::time::Instant::now();
-        let (mut script, mut cases) = (0, 0);
-        threert_render::physics::in_pool(|| (script, cases) = (check::script(600), check::cases()));
+        let (mut script, mut cases, mut vehicles) = (0, 0, 0);
+        threert_render::physics::in_pool(|| (script, cases, vehicles) = (check::script(600), check::cases(), check::vehicles(600)));
         let voxels = threert_render::voxel::VoxelWorld::check_script();
         let threads = std::env::var("THREERT_PHYSICS_THREADS").unwrap_or_default();
-        println!("physics bits on the physics' threads (THREERT_PHYSICS_THREADS={threads:?}): script {script:016x} (recorded {:016x}), cases {cases:016x} ({:016x}), voxel bodies {voxels:016x} ({:016x}); {:.1} s", check::EXPECTED, check::EXPECTED_CASES, threert_render::voxel::EXPECTED_SCRIPT, t.elapsed().as_secs_f64());
-        assert_eq!((script, cases, voxels), (check::EXPECTED, check::EXPECTED_CASES, threert_render::voxel::EXPECTED_SCRIPT), "the recorded hashes");
+        println!("physics bits on the physics' threads (THREERT_PHYSICS_THREADS={threads:?}): script {script:016x} (recorded {:016x}), cases {cases:016x} ({:016x}), vehicles {vehicles:016x} ({:016x}), voxel bodies {voxels:016x} ({:016x}); {:.1} s", check::EXPECTED, check::EXPECTED_CASES, check::EXPECTED_VEHICLES, threert_render::voxel::EXPECTED_SCRIPT, t.elapsed().as_secs_f64());
+        assert_eq!((script, cases, vehicles, voxels), (check::EXPECTED, check::EXPECTED_CASES, check::EXPECTED_VEHICLES, threert_render::voxel::EXPECTED_SCRIPT), "the recorded hashes");
     }
     let t = std::time::Instant::now();
     let kicks: u32 = (from..from + runs).map(|seed| run(seed, iterations, many, shells)).sum();

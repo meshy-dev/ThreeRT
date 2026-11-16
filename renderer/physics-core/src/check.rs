@@ -314,6 +314,91 @@ pub fn case(kind: u32, seed: u32) -> u64 {
     h
 }
 
+/// The hash `vehicles(600)` leaves (recorded, as `EXPECTED`; step 10 c2). Natively, in parallel and in wasm32 alike.
+pub const EXPECTED_VEHICLES: u64 = 0x54c7_b733_ebae_c0dc;
+
+/// Vehicles (step 10 c2) for `ticks` ticks: the sedan and the SUV of `vehicle::scenarios` (voxel chassis, the
+/// centre of mass given on the vehicle) on voxel ground with debris and a step, driven, steered and braked; a car on a
+/// plain box (its mass from its collider's density) with a centre of mass of its own; at 2 s the ground carved under
+/// the sedan, at 4 s the SUV's chassis carved, at 6 s the box car's chassis removed (its vehicle goes with it), at 7 s
+/// a blast. Returns the world's hash folded with every vehicle's state.
+pub fn vehicles(ticks: u32) -> u64 {
+    use crate::vehicle::scenarios::{CELL, SEDAN, SUV};
+    use crate::vehicle::{VehicleDesc, WheelControl, WheelDesc};
+    let mut p = Physics::default();
+    let mut cells = vec![];
+    for z in -50i32..400 {
+        for x in -60..60 {
+            let top = if z >= 250 { 1 } else { 0 };
+            for y in -3..top {
+                cells.push([x, y, z]);
+            }
+            // (Debris chunks from 8 to 20 m, every 1.3 m or so, a cell or two high.)
+            if (80..200).contains(&z) && (z * 7 + x * 13).rem_euclid(97) < 3 {
+                cells.push([x, 0, z]);
+                if (x + z).rem_euclid(5) == 0 {
+                    cells.push([x, 1, z]);
+                }
+            }
+        }
+    }
+    let ground = p.add_collider(None, &ColliderDesc { friction: 1.0, ..ColliderDesc::new(Shape::Voxels { size: CELL, cells }) }).unwrap();
+    let (sedan_body, sedan) = SEDAN.add(&mut p, [-2.5, 0.0, 0.0], true);
+    let (suv_body, suv) = SUV.add(&mut p, [2.5, 0.0, 0.0], true);
+    let boxcar = p.add_body(&BodyDesc { position: [0.0, 1.0, -3.0], ..Default::default() }).unwrap();
+    p.add_collider(Some(boxcar), &ColliderDesc { density: 300.0, position: [0.0, 0.2, 0.0], ..ColliderDesc::new(Shape::Box([0.8, 0.3, 2.0])) }).unwrap();
+    let wheel = |x: f32, z: f32| WheelDesc { anchor: [x, 0.0, z], rest: 0.4, travel: 0.25, radius: 0.35, stiffness: 30.0, bump_length: 0.04, bump_stiffness: 600.0, ..Default::default() };
+    let box_vehicle = p.add_vehicle(&VehicleDesc { chassis: boxcar, wheels: vec![wheel(-0.7, 1.4), wheel(0.7, 1.4), wheel(-0.7, -1.4), wheel(0.7, -1.4)], forward_axis: 2, up_axis: 1, center_of_mass: Some([0.0, -0.2, 0.3]) }).unwrap();
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut fold = |x: u64| h = (h ^ x).wrapping_mul(0x0000_0100_0000_01b3);
+    for t in 0..ticks {
+        let s = t as f32 / 60.0;
+        // Throttle, a slalom's steering, the brakes from 5 s.
+        let steer = if (t / 90) % 2 == 0 { 0.35 } else { -0.35 };
+        let engine = if s < 5.0 { 2500.0 } else { 0.0 };
+        let brake = if s < 5.0 { 0.0 } else { 40.0 };
+        for (v, rear) in [(sedan, false), (suv, true), (box_vehicle, false)] {
+            let c: Vec<WheelControl> = (0..4).map(|i| WheelControl { engine: if i < 2 || rear { engine } else { 0.0 }, brake, steering: if i < 2 { steer } else { 0.0 } }).collect();
+            let _ = p.set_vehicle_controls(v, &c);
+        }
+        if t == 120 {
+            // The ground under the sedan (where it is now) carved 0.3 m deep, 3 x 6 m.
+            if let Some((at, _)) = p.pose(sedan_body) {
+                let (cx, cz) = ((at[0] / CELL) as i32, (at[2] / CELL) as i32);
+                let clear: Vec<[i32; 3]> = (cx - 15..cx + 15).flat_map(|x| (cz - 30..cz + 30).flat_map(move |z| (-3..2).map(move |y| [x, y, z]))).collect();
+                p.edit_voxels(ground, &clear, &[]).unwrap();
+            }
+        }
+        if t == 240 {
+            // The SUV's chassis carved: the front left corner of its body.
+            let (_, stops) = p.vehicle_parts(suv).unwrap();
+            let body_collider = p.colliders_of(suv_body).into_iter().find(|c| !stops.contains(c)).unwrap();
+            let clear: Vec<[i32; 3]> = (5..10).flat_map(|x| (0..4).flat_map(move |y| (15..24).map(move |z| [x, y, z]))).collect();
+            p.edit_voxels(body_collider, &clear, &[]).unwrap();
+        }
+        if t == 360 {
+            p.remove_body(boxcar);
+        }
+        if t == 420 {
+            p.blast([0.0, 0.5, 20.0], 6.0, 3000.0, 0.0, &[]).unwrap();
+        }
+        p.step();
+        if t % 30 == 29 {
+            for v in [sedan, suv, box_vehicle] {
+                if let Some(st) = p.vehicle_state(v) {
+                    fold(st.speed.to_bits() as u64);
+                    for w in &st.wheels {
+                        fold(((w.suspension.to_bits() as u64) << 1) | w.contact as u64);
+                    }
+                }
+            }
+        }
+    }
+    fold(p.take_vehicles_gone().len() as u64);
+    fold(p.hash());
+    h
+}
+
 /// Every case's hash folded into one (`EXPECTED_CASES`).
 pub fn cases() -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -333,6 +418,7 @@ mod tests {
     fn this_build_steps_to_the_recorded_bits() {
         assert_eq!(format!("{:016x}", super::script(600)), format!("{:016x}", super::EXPECTED));
         assert_eq!(format!("{:016x}", super::cases()), format!("{:016x}", super::EXPECTED_CASES));
+        assert_eq!(format!("{:016x}", super::vehicles(600)), format!("{:016x}", super::EXPECTED_VEHICLES));
     }
 
     /// Where Rapier 0.36 and parry 0.31 still take a math function from the platform (f32's own methods, whenever

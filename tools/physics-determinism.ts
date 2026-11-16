@@ -2,6 +2,9 @@
 // target. Both must end in the same bits:
 //   - the script (renderer/physics-core/src/check.rs: a tower of boxes hit by a ball, a hinged door, a rope, a ball
 //     joint and a motor-driven slider, 600 ticks): the two hashes are compared with each other and the recorded one;
+//   - the vehicles' script (check.rs `vehicles`: two cars on voxel chassis and a box car driven over carved voxel
+//     ground, their wheels' probes, suspensions, stops and the stops' contact hook, 600 ticks), against the recorded
+//     one;
 //   - 1,000 random worlds (`check::case`: tumbling convex hulls, bodies of several colliders, joints with limits and
 //     motors, 90 ticks each), every one compared, and their folded hash with the recorded one. The script alone has
 //     one hull that happens to agree; these are the shapes whose mass properties need an eigen decomposition, where
@@ -32,20 +35,24 @@ const hex = (h: bigint) => BigInt.asUintN(64, h).toString(16).padStart(16, "0");
 const builds: [string, string[]][] = without ? [[" (without enhanced-determinism)", ["--no-default-features"]]] : [["", []], [" (std in the crate graph)", ["--features", "std-in-graph"]]];
 let failed = false;
 // The sequential native build's script and cases (the first build's), for the parallel build below.
-let sequential: { script: string; cases: string } | null = null;
+let sequential: { script: string; cases: string; vehicles: string } | null = null;
 
 for (const [label, features] of builds) {
   const run = ["run", "--release", "--locked", "--quiet", ...features, "--example", "determinism"];
   const native = cargo(run).trim();
   const casesOut = cargo([...run, "--", "--cases"]).trim();
   const nativeCases = casesOut.split("\n").map((l) => l.split(" "));
-  sequential ??= { script: native, cases: casesOut };
+  const nativeVehicles = cargo([...run, "--", "--vehicles"]).trim();
+  sequential ??= { script: native, cases: casesOut, vehicles: nativeVehicles };
   cargo(["build", "--release", "--locked", "--quiet", ...features, "--target", "wasm32-unknown-unknown", "--example", "determinism_wasm"]);
   const wasm = readFileSync(join(crate, "target/wasm32-unknown-unknown/release/examples/determinism_wasm.wasm"));
   const { instance } = await WebAssembly.instantiate(wasm, {});
   const browser = hex((instance.exports.physics_determinism as (ticks: number) => bigint)(600));
   console.log(`physics determinism${label}: script: native ${native}, wasm32 ${browser}, recorded ${constant("EXPECTED")}`);
   failed ||= native !== browser || native !== constant("EXPECTED");
+  const browserVehicles = hex((instance.exports.physics_vehicles as (ticks: number) => bigint)(600));
+  console.log(`physics determinism${label}: vehicles: native ${nativeVehicles}, wasm32 ${browserVehicles}, recorded ${constant("EXPECTED_VEHICLES")}`);
+  failed ||= nativeVehicles !== browserVehicles || nativeVehicles !== constant("EXPECTED_VEHICLES");
 
   // The random cases, one by one; and all of them folded as check::cases() folds them.
   const differ = kinds.map(() => [] as string[]), count = kinds.map(() => 0);
@@ -70,12 +77,13 @@ if (!without && sequential) {
   const run = ["run", "--release", "--locked", "--quiet", "--features", "parallel", "--example", "determinism"];
   for (const threads of ["2", "4"]) {
     const parallel = (args: string[]) => execFileSync("cargo", args, { cwd: crate, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 1 << 26, env: { ...process.env, RAYON_NUM_THREADS: threads } }).trim();
-    const [script, cases] = [parallel(run), parallel([...run, "--", "--cases"])];
+    const [script, cases, vehicles] = [parallel(run), parallel([...run, "--", "--cases"]), parallel([...run, "--", "--vehicles"])];
     const [mine, theirs] = [cases.split("\n"), sequential.cases.split("\n")];
     const differ = mine.filter((l, k) => l !== theirs[k]);
     console.log(`physics determinism (parallel, ${threads} threads): script ${script}, sequential ${sequential.script}, recorded ${constant("EXPECTED")}; ${mine.length - differ.length} of ${theirs.length} worlds equal the sequential build's`);
     for (const d of differ.slice(0, 3)) console.log(`  ${d}`);
-    failed ||= script !== sequential.script || script !== constant("EXPECTED") || mine.length !== theirs.length || differ.length > 0;
+    console.log(`physics determinism (parallel, ${threads} threads): vehicles ${vehicles}, sequential ${sequential.vehicles}`);
+    failed ||= script !== sequential.script || script !== constant("EXPECTED") || mine.length !== theirs.length || differ.length > 0 || vehicles !== sequential.vehicles;
   }
 }
 // The renderer's own dependency graph built for wasm32 (the engine's library in a browser): the same recorded hashes.

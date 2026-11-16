@@ -8,6 +8,7 @@
 //! objects), so creating one needs no answer. A body that drives an object may take a `slot`: `poses()` is then the
 //! table of every such object's position and rotation as the last sync left them, one copy for a whole frame's reads.
 
+use crate::vehicle::{VehicleDesc, VehicleId, WheelControl, WheelDesc, MAX_WHEELS};
 use crate::{limits, BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, Hit, JointDesc, JointId, Limits, Motor, Physics, Shape, TICK};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -91,6 +92,43 @@ pub struct Bridge {
     /// "state") the last `MAX_FAULTS` of them.
     faults: Vec<(u32, Option<u32>, bool, &'static str)>,
     faulted: BTreeMap<u32, &'static str>,
+    /// Scene code's vehicles (step 10 c2): its id -> the world's, and back; each one's controls as last set (a call sets
+    /// some of them, the rest held); what the engine did to them since the last `vehicle_changes`: wheels lost (their
+    /// anchor's material carved away or cut off: vehicle, wheel, where it was) and vehicles gone with their chassis.
+    vehicles: BTreeMap<u32, VehicleId>,
+    vehicle_ids: BTreeMap<VehicleId, u32>,
+    controls: BTreeMap<u32, Vec<WheelControl>>,
+    wheels_lost: Vec<(u32, usize, [f32; 3])>,
+    vehicles_gone: Vec<u32>,
+}
+
+/// The most vehicles a session holds (`vehicle::MAX_VEHICLES`), and the most of what `vehicle_changes` holds until it
+/// is called.
+pub const MAX_VEHICLE_CHANGES: usize = 1024;
+
+/// A vehicle's wheel in a call (`vehicle`): `{anchor, direction?, axle?, rest, travel, radius, width, stiffness,
+/// compression, damping, frictionSlip, sideStiffness?, maxForce?, bumpLength?, bumpStiffness?, stopInset?}`.
+fn wheel_desc(w: &Value) -> Result<WheelDesc, String> {
+    let d = WheelDesc::default();
+    let need = |key: &str| num(w, key, f32::NAN).and_then(|x| if x.is_nan() { Err(format!("physics: a wheel needs {key}")) } else { Ok(x) });
+    Ok(WheelDesc {
+        anchor: nums::<3>(&w["anchor"]).ok_or("physics: a wheel needs anchor [x, y, z]")?,
+        direction: vec3(w, "direction", d.direction)?,
+        axle: vec3(w, "axle", d.axle)?,
+        rest: need("rest")?,
+        travel: need("travel")?,
+        radius: need("radius")?,
+        width: need("width")?,
+        stiffness: need("stiffness")?,
+        compression: need("compression")?,
+        relaxation: need("damping")?,
+        friction_slip: need("frictionSlip")?,
+        side_stiffness: num(w, "sideStiffness", d.side_stiffness)?,
+        max_force: num(w, "maxForce", d.max_force)?,
+        bump_length: num(w, "bumpLength", d.bump_length)?,
+        bump_stiffness: num(w, "bumpStiffness", d.bump_stiffness)?,
+        stop_inset: num(w, "stopInset", d.stop_inset)?,
+    })
 }
 
 /// The most faults "faults" holds until it is called, and "state" remembers.
@@ -191,6 +229,11 @@ impl Default for Bridge {
             behind: 0.0,
             faults: vec![],
             faulted: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
+            vehicle_ids: BTreeMap::new(),
+            controls: BTreeMap::new(),
+            wheels_lost: vec![],
+            vehicles_gone: vec![],
         }
     }
 }
@@ -401,7 +444,79 @@ impl Bridge {
                 self.core.set_joint(j, &joint_desc(a)?)?;
                 Value::Null
             }
+            // {id, chassis, wheels: [wheel], forwardAxis?, upAxis?, centerOfMass?}: a vehicle (step 10 c2) on a dynamic body
+            // (a voxel body included), its wheels in the chassis's frame (`wheel_desc`; the forward and up axes 0, 1, 2 for
+            // x, y, z: 2 and 1 by default), the chassis's centre of mass given (its frame) or its own. Every number is
+            // checked before anything is made (`vehicle::limits` in docs/VOXEL.md).
+            "vehicle" => {
+                let vid = id(a, "id")?;
+                if self.vehicles.contains_key(&vid) {
+                    return Err(format!("physics: vehicle {vid} exists"));
+                }
+                let chassis = self.body(a, "chassis")?;
+                let wheels = a["wheels"].as_array().filter(|w| w.len() <= MAX_WHEELS).ok_or_else(|| format!("physics: a vehicle's wheels must be a list of at most {MAX_WHEELS}"))?;
+                let wheels = wheels.iter().map(wheel_desc).collect::<Result<Vec<_>, _>>()?;
+                let axis = |key: &str, d: usize| -> Result<usize, String> { match &a[key] { Value::Null => Ok(d), v => whole(v).filter(|&x| x <= 2).map(|x| x as usize).ok_or_else(|| format!("physics: {key} must be 0, 1 or 2")) } };
+                let center_of_mass = if a["centerOfMass"].is_null() { None } else { Some(vec3(a, "centerOfMass", [0.0; 3])?) };
+                let n = wheels.len();
+                let v = self.core.add_vehicle(&VehicleDesc { chassis, wheels, forward_axis: axis("forwardAxis", 2)?, up_axis: axis("upAxis", 1)?, center_of_mass })?;
+                self.vehicles.insert(vid, v);
+                self.vehicle_ids.insert(v, vid);
+                self.controls.insert(vid, vec![WheelControl::default(); n]);
+                Value::Null
+            }
+            // {id, wheels: [{engine?, brake?, steering?}]}: a vehicle's controls, by wheel (a wheel left out, or a control
+            // left out, is held as it was). The drive's force (N, negative backwards), the brake (N s), the steering
+            // about the suspension (rad, within ±1.5).
+            "vehicle_set" => {
+                let vid = id(a, "id")?;
+                let &v = self.vehicles.get(&vid).ok_or_else(|| format!("physics: unknown vehicle {vid}"))?;
+                let given = a["wheels"].as_array().ok_or("physics: vehicle_set needs wheels: [{engine?, brake?, steering?}]")?;
+                let mut c = self.controls[&vid].clone();
+                if given.len() > c.len() {
+                    return Err(format!("physics: vehicle {vid} has {} wheels", c.len()));
+                }
+                for (w, g) in c.iter_mut().zip(given) {
+                    if g.is_null() {
+                        continue;
+                    }
+                    *w = WheelControl { engine: num(g, "engine", w.engine)?, brake: num(g, "brake", w.brake)?, steering: num(g, "steering", w.steering)? };
+                }
+                self.core.set_vehicle_controls(v, &c)?;
+                self.controls.insert(vid, c);
+                Value::Null
+            }
+            // {id}: {speed, wheels: [{center, rotation, spin, steering, contact, suspension, point, normal, lost}]}, as of
+            // the last tick: the speed along the chassis's forward axis; each wheel's centre and its turn for drawing it
+            // (a quaternion of the world: a wheel object placed with it turns and steers as the wheel), on the ground or
+            // not, where it touches and the ground's normal; a lost wheel's `center` is where it was.
+            "vehicle_state" => {
+                let vid = id(a, "id")?;
+                let &v = self.vehicles.get(&vid).ok_or_else(|| format!("physics: unknown vehicle {vid}"))?;
+                match self.core.vehicle_state(v) {
+                    Some(st) => json!({
+                        "speed": st.speed,
+                        "wheels": st.wheels.iter().map(|w| json!({ "center": w.center, "rotation": w.orientation, "spin": w.spin, "steering": w.steering, "contact": w.contact, "suspension": w.suspension, "point": w.point, "normal": w.normal, "lost": w.lost })).collect::<Vec<_>>(),
+                    }),
+                    None => Value::Null,
+                }
+            }
+            // What the engine did to scene code's vehicles since the last call: {lost: [{vehicle, wheel, position}],
+            // removed: [id]}. A lost wheel's anchor's material was carved away or cut off (the vehicle goes on with the
+            // rest; the wheel is not a body: drawing it falling is the game's); a removed vehicle's chassis went (removed,
+            // carved away whole, retired, taken out by the world).
+            "vehicle_changes" => {
+                let lost: Vec<Value> = std::mem::take(&mut self.wheels_lost).into_iter().map(|(v, w, at)| json!({ "vehicle": v, "wheel": w, "position": at })).collect();
+                json!({ "lost": lost, "removed": std::mem::take(&mut self.vehicles_gone) })
+            }
             "remove" => {
+                if let Some(vid) = opt_id(a, "vehicle")? {
+                    if let Some(v) = self.vehicles.remove(&vid) {
+                        self.vehicle_ids.remove(&v);
+                        self.controls.remove(&vid);
+                        self.core.remove_vehicle(v);
+                    }
+                }
                 // (All three read before any is removed: a call that is refused changes nothing.)
                 let (body, collider, joint) = (opt_id(a, "body")?, opt_id(a, "collider")?, opt_id(a, "joint")?);
                 if body.is_some_and(|b| b >= ENGINE_IDS) || collider.is_some_and(|c| c >= ENGINE_IDS) {
@@ -645,6 +760,25 @@ impl Bridge {
         self.core.blast(centre, radius, push, kick, &k)
     }
 
+    /// The vehicles on a body (any body, by its caller's id), each with its wheels that are not lost: index and anchor
+    /// in the chassis's frame (step 10 c2: a wheel belongs to the material at its anchor).
+    pub fn engine_vehicles_of(&self, body: u32) -> Vec<(VehicleId, Vec<(usize, [f32; 3])>)> {
+        let Some(&b) = self.bodies.get(&body) else { return vec![] };
+        self.core.vehicles_on(b).into_iter().map(|v| (v, self.core.vehicle_wheels(v))).collect()
+    }
+
+    /// A wheel lost to destruction (`Physics::remove_wheel`), reported to scene code (`vehicle_changes`).
+    pub fn engine_lose_wheel(&mut self, vehicle: VehicleId, wheel: usize) {
+        if let Some(at) = self.core.remove_wheel(vehicle, wheel) {
+            if let Some(&vid) = self.vehicle_ids.get(&vehicle) {
+                if self.wheels_lost.len() >= MAX_VEHICLE_CHANGES {
+                    self.wheels_lost.remove(0);
+                }
+                self.wheels_lost.push((vid, wheel, at));
+            }
+        }
+    }
+
     /// The world's anchor, if a voxel level with colliders is loaded (`engine_anchor`).
     pub fn engine_anchor_body(&self) -> Option<u32> {
         self.anchor
@@ -861,6 +995,16 @@ impl Bridge {
         for f in self.core.take_faults() {
             self.fault(f);
         }
+        for v in self.core.take_vehicles_gone() {
+            if let Some(vid) = self.vehicle_ids.remove(&v) {
+                self.vehicles.remove(&vid);
+                self.controls.remove(&vid);
+                if self.vehicles_gone.len() >= MAX_VEHICLE_CHANGES {
+                    self.vehicles_gone.remove(0);
+                }
+                self.vehicles_gone.push(vid);
+            }
+        }
         self.core.awake(&mut self.moved);
         // (Made unique once it holds the bodies a few times over: an offline settle makes up to 36,000 ticks before
         // its one sync, and 20,000 awake bodies would add 720 million entries.)
@@ -1075,6 +1219,75 @@ mod tests {
             let e = b.call(&mut s, "impulse", &json!({ "body": bad, "impulse": [0, 300, 0] })).unwrap_err();
             assert!(e.contains("must be an id"), "{bad}: {e}");
         }
+    }
+
+    /// A box with four wheels: made by `vehicle`, driven by `vehicle_set` (controls held until changed, a wheel or a
+    /// control left out held), read back by `vehicle_state`; wild wheels and controls refused with nothing made or
+    /// changed; a wheel lost to the engine and the chassis removed reported by `vehicle_changes`; `remove` of a vehicle.
+    #[test]
+    fn vehicles_through_the_bridge() {
+        let (mut b, mut s) = (Bridge::default(), scene());
+        ground(&mut b, &mut s);
+        b.call(&mut s, "body", &json!({ "id": 2, "object": 2, "slot": 0, "position": [0, 1, 0], "canSleep": false })).unwrap();
+        b.call(&mut s, "collider", &json!({ "id": 2, "body": 2, "shape": { "type": "box", "halfExtents": [0.8, 0.25, 2.0] }, "density": 300 })).unwrap();
+        let wheel = |x: f32, z: f32| json!({ "anchor": [x, 0.0, z], "rest": 0.4, "travel": 0.25, "radius": 0.35, "width": 0.2, "stiffness": 30, "compression": 2, "damping": 3, "frictionSlip": 1, "bumpLength": 0.04, "bumpStiffness": 600 });
+        let wheels = json!([wheel(-0.7, 1.4), wheel(0.7, 1.4), wheel(-0.7, -1.4), wheel(0.7, -1.4)]);
+        for (bad, why) in [
+            (json!({ "id": 1, "chassis": 2, "wheels": [{ "anchor": [0, 0, 0] }] }), "needs rest"),
+            (json!({ "id": 1, "chassis": 2, "wheels": [wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0), wheel(0.0, 0.0)] }), "at most 8"),
+            (json!({ "id": 1, "chassis": 2, "wheels": [{ "anchor": [0, 0, 0], "rest": 0.4, "travel": 0.25, "radius": 1e9, "width": 0.2, "stiffness": 30, "compression": 2, "damping": 3, "frictionSlip": 1 }] }), "radius"),
+            (json!({ "id": 1, "chassis": 1, "wheels": wheels }), "dynamic"),
+            (json!({ "id": 1, "chassis": 9, "wheels": wheels }), "unknown body"),
+            (json!({ "id": 1, "chassis": 2, "wheels": wheels, "forwardAxis": 3 }), "forwardAxis"),
+            (json!({ "id": 1, "chassis": 2, "wheels": wheels, "centerOfMass": [0, "x", 0] }), "centerOfMass"),
+        ] {
+            let e = b.call(&mut s, "vehicle", &bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        b.call(&mut s, "vehicle", &json!({ "id": 1, "chassis": 2, "wheels": wheels, "centerOfMass": [0, -0.2, 0] })).unwrap();
+        assert!(b.call(&mut s, "vehicle", &json!({ "id": 1, "chassis": 2, "wheels": wheels })).unwrap_err().contains("exists"));
+        run(&mut b, &mut s, 60);
+        let st = b.call(&mut s, "vehicle_state", &json!({ "id": 1 })).unwrap();
+        assert!(st["wheels"].as_array().unwrap().iter().all(|w| w["contact"] == true && w["lost"] == false), "{st}");
+        // Throttle on all four, then the front ones steered with the throttle held.
+        b.call(&mut s, "vehicle_set", &json!({ "id": 1, "wheels": [{ "engine": 800 }, { "engine": 800 }, { "engine": 800 }, { "engine": 800 }] })).unwrap();
+        b.call(&mut s, "vehicle_set", &json!({ "id": 1, "wheels": [{ "steering": 0.3 }, { "steering": 0.3 }] })).unwrap();
+        run(&mut b, &mut s, 120);
+        let st = b.call(&mut s, "vehicle_state", &json!({ "id": 1 })).unwrap();
+        assert!(st["speed"].as_f64().unwrap() > 1.0 && (st["wheels"][0]["steering"].as_f64().unwrap() - 0.3).abs() < 1e-6, "{st}");
+        assert!(s.at[&2].0[0].abs() > 0.2, "steered: {:?}", s.at[&2].0);
+        for (bad, why) in [
+            (json!({ "id": 1, "wheels": [{ "engine": "x" }] }), "engine"),
+            (json!({ "id": 1, "wheels": [{ "steering": 2.0 }] }), "steering"),
+            (json!({ "id": 1, "wheels": [{ "brake": -1 }] }), "brake"),
+            (json!({ "id": 1, "wheels": [{}, {}, {}, {}, {}] }), "has 4 wheels"),
+            (json!({ "id": 7, "wheels": [] }), "unknown vehicle"),
+        ] {
+            let e = b.call(&mut s, "vehicle_set", &bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert_eq!(b.controls[&1][0], WheelControl { engine: 800.0, brake: 0.0, steering: 0.3 }, "a refused call changes nothing");
+        // A wheel lost: reported once, the vehicle goes on.
+        let v = b.vehicles[&1];
+        b.engine_lose_wheel(v, 3);
+        b.engine_lose_wheel(v, 3);
+        let c = b.call(&mut s, "vehicle_changes", &json!({})).unwrap();
+        assert_eq!((c["lost"].as_array().unwrap().len(), &c["lost"][0]["wheel"]), (1, &json!(3)), "{c}");
+        run(&mut b, &mut s, 10);
+        let st = b.call(&mut s, "vehicle_state", &json!({ "id": 1 })).unwrap();
+        assert!(st["wheels"][3]["lost"] == true && st["wheels"][0]["lost"] == false, "{st}");
+        // The chassis removed: the vehicle goes with it, reported.
+        b.call(&mut s, "remove", &json!({ "body": 2 })).unwrap();
+        run(&mut b, &mut s, 1);
+        let c = b.call(&mut s, "vehicle_changes", &json!({})).unwrap();
+        assert_eq!(c["removed"], json!([1]), "{c}");
+        assert!(b.call(&mut s, "vehicle_state", &json!({ "id": 1 })).unwrap_err().contains("unknown vehicle"));
+        // `remove` of a vehicle: its id free again.
+        b.call(&mut s, "body", &json!({ "id": 3, "position": [0, 1, 0] })).unwrap();
+        b.call(&mut s, "collider", &json!({ "id": 3, "body": 3, "shape": { "type": "box", "halfExtents": [0.8, 0.25, 2.0] } })).unwrap();
+        b.call(&mut s, "vehicle", &json!({ "id": 1, "chassis": 3, "wheels": wheels })).unwrap();
+        b.call(&mut s, "remove", &json!({ "vehicle": 1 })).unwrap();
+        b.call(&mut s, "vehicle", &json!({ "id": 1, "chassis": 3, "wheels": wheels })).unwrap();
     }
 
     /// Scene code moves a body's object: a dynamic body is there at once with its velocity; a kinematic one goes there

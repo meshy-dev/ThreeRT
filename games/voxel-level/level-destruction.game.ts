@@ -19,6 +19,10 @@
 //              § 6 step 8: how many bodies a frame holds, and the cap on them)
 //   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner (past 500:
 //              the level's cap is reached and held)
+//   drive      a car (a sedan's figures: physics-core's vehicle scenarios, `SEDAN`) driving down the road ahead at 8 m/s,
+//              its wheels drawn; at 3 s a 1 m explosion 9 m ahead of where it started (ROADMAP § 6 step 10 c2: what a
+//              vehicle costs a frame); cars start only where they touch no prop, building or other car
+//   drive20    twenty such cars
 // With `debris`
 // (level-destruction-debris.game.ts; ROADMAP § 6 step 2e), the voxels too few to make a piece are thrown out as
 // instances of one unit cube (an `InstancedMesh`, coloured per instance from the palette), fall, bounce on the ground
@@ -34,13 +38,13 @@
 // logs what it did (`explosion {...}`, renderer timings included) for the bench. Sun and sky; the lamps do not glow (at
 // night they do, and their pieces fly: level-night.game.ts).
 //   node tools/voxel-level/generate.ts --granularity object && node tools/bundle-game.ts games/voxel-level/level-destruction.game.ts
-import { BoxGeometry, Color, DirectionalLight, GpuParticles, InstancedMesh, MaterialFunction, Mesh, MeshStandardMaterial, ParticleProgram, SimulatedSmoke, PerspectiveCamera, PlaneGeometry, ProceduralGeometry, ProceduralMesh, Scene, SkyAtmosphere } from "@threert/scene";
+import { BoxGeometry, Color, CylinderGeometry, DirectionalLight, Group, Vector3, Vehicle, type WheelParameters, GpuParticles, InstancedMesh, MaterialFunction, Mesh, MeshStandardMaterial, ParticleProgram, SimulatedSmoke, PerspectiveCamera, PlaneGeometry, ProceduralGeometry, ProceduralMesh, Scene, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
 import { Explosions, VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
 import { nativeObjects, nativePalette } from "./native.ts";
 import { EDGE, PALETTE, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
 
-type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense";
+type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense" | "drive" | "drive20";
 interface State { scenario: Scenario | null; started: number }
 
 /** Spots for explosions: alternately on the ground ahead of the camera and on the walls of the buildings nearest it
@@ -67,6 +71,41 @@ export function spots(seed: number): [number, number, number][] {
     walls.push([x, y + high, z]);
   }
   return ground.flatMap((g, k) => [g, walls[k]]);
+}
+
+/** A sedan (physics-core `vehicle::scenarios::SEDAN`: a 2018 Camry LE's figures; docs/VOXEL.md "Vehicles") as a box
+ *  chassis of 1.8 x 0.6 x 4.8 m at its mass, its wheels drawn: the chassis's centre at the ride height above `ground`,
+ *  turned `yaw` about up. Its frame: x across, y up, z forward. */
+const CAR = { mass: 1495, wheelbase: 2.825, track: 1.6, radius: 0.334, width: 0.215, clearance: 0.15, height: 0.6, comHeight: 0.55, frontShare: 0.59, rideHz: 1.5, rest: 0.3, travel: 0.22, zeta: [0.25, 0.4], bumpLength: 0.04, bumpRate: 1.6e6 };
+export function sedan(scene: Scene, at: [number, number, number], yaw: number, paint: MeshStandardMaterial, tyreMaterial: MeshStandardMaterial): Vehicle {
+  const g = 9.81, omega = 2 * Math.PI * CAR.rideHz, sag = g / (omega * omega);
+  const centre = CAR.clearance + CAR.height / 2;
+  const chassis = new Mesh(new BoxGeometry(1.8, CAR.height, 4.8), paint);
+  chassis.position.set(at[0], at[1] + centre + 0.02, at[2]);
+  chassis.rotation.y = yaw;
+  chassis.physics = { type: "dynamic", density: CAR.mass / (1.8 * CAR.height * 4.8) };
+  const hard = CAR.radius + CAR.rest - sag - centre;
+  const wheels: WheelParameters[] = [];
+  for (const [z, share] of [[CAR.wheelbase / 2, CAR.frontShare / 2], [-CAR.wheelbase / 2, (1 - CAR.frontShare) / 2]]) {
+    for (const x of [-CAR.track / 2, CAR.track / 2]) {
+      const stiffness = share * g / sag, crit = 2 * Math.sqrt(stiffness * share);
+      wheels.push({ anchor: new Vector3(x, hard, z), rest: CAR.rest, travel: CAR.travel, radius: CAR.radius, width: CAR.width, stiffness, compression: CAR.zeta[0] * crit, damping: CAR.zeta[1] * crit, frictionSlip: 1, bumpLength: CAR.bumpLength, bumpStiffness: CAR.bumpRate / CAR.mass });
+    }
+  }
+  const comZ = CAR.wheelbase / 2 - (1 - CAR.frontShare) * CAR.wheelbase;
+  const vehicle = new Vehicle(chassis, { wheels, centerOfMass: new Vector3(0, CAR.comHeight - centre, comZ) });
+  scene.add(chassis, vehicle);
+  for (const w of vehicle.wheels) {
+    // (A wheel in the chassis's axes: the cylinder's axis along x.)
+    const wheel = new Group();
+    const tyre = new Mesh(new CylinderGeometry(CAR.radius, CAR.radius, CAR.width, 24), tyreMaterial);
+    tyre.rotation.z = Math.PI / 2;
+    wheel.add(tyre);
+    wheel.position.set(at[0], at[1] + CAR.radius, at[2]);
+    scene.add(wheel);
+    w.object = wheel;
+  }
+  return vehicle;
 }
 
 /** Debris: up to `DEBRIS` voxels in flight, each `LIFE` seconds. */
@@ -225,6 +264,10 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
   const [camX, , camZ] = keys[0].pos;
   const trunks = levelPlan(seed).props.filter((p) => p.kind === "tree").map((p) => toScene(p.x, p.y, p.z)).filter((p) => p[2] > camZ + 4).sort((a, b) => Math.hypot(a[0] - camX, a[2] - camZ) - Math.hypot(b[0] - camX, b[2] - camZ)).slice(0, 8);
   let next = 0, fired = 0, frames = 0, last = -1, hadBodies = false, now = 0;
+  // The cars of `drive` / `drive20`, and the scene they go into.
+  let world: Scene | null = null;
+  const cars: Vehicle[] = [];
+  let lostWheels = 0, blastSpot = 2 * 66;
   const flying = debris === true ? new Debris(seed) : null;
   const dust = debris === "dust" ? new Dust() : null;
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
@@ -254,6 +297,54 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
     const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
     console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...speedsNow() })}`);
+  };
+  // `n` cars on the road ahead of the camera, facing along it, where none touches the level's props (each taken as up
+  // to 2.6 x 5.2 m about its point: parked cars, trees, lamps), its buildings or another car: across from -9 to 9 m by
+  // half metres (nearest the camera's line first), rows from 6 m ahead on, 7 m apart. (The street ahead is lined with
+  // parked cars and trees: one lane is clear near the camera, more further on.)
+  const addCars = (n: number) => {
+    if (!world) return;
+    const [tx, , tz] = keys[0].target;
+    const fx = tx - camX, fz = tz - camZ, len = Math.hypot(fx, fz);
+    const [ux, uz] = [fx / len, fz / len];
+    const plan = levelPlan(seed);
+    const props = plan.props.map((p) => toScene(p.x, p.y, p.z));
+    const rects = plan.buildings.map((b) => { const a = toScene(b.x, 0, b.z), c = toScene(b.x + b.w, 0, b.z + b.d); return [Math.min(a[0], c[0]), Math.min(a[2], c[2]), Math.max(a[0], c[0]), Math.max(a[2], c[2])]; });
+    const placed: [number, number][] = [];
+    // (In the street's frame: `across` along -u⊥, `ahead` along u. A car is 1.8 x 4.8 m.)
+    const clear = (x: number, z: number) => {
+      const local = (px: number, pz: number) => [(px - x) * -uz + (pz - z) * ux, (px - x) * ux + (pz - z) * uz];
+      if (props.some((p) => { const [a, f] = local(p[0], p[2]); return Math.abs(a) < 0.9 + 1.3 + 0.3 && Math.abs(f) < 2.4 + 2.6 + 0.3; })) return false;
+      if (rects.some((r) => x > r[0] - 1.5 && x < r[2] + 1.5 && z > r[1] - 3 && z < r[3] + 3)) return false;
+      return placed.every(([px, pz]) => { const [a, f] = local(px, pz); return Math.abs(a) > 2.8 || Math.abs(f) > 5.8; });
+    };
+    const lanes = Array.from({ length: 37 }, (_, k) => -9 + k * 0.5).sort((p, q) => Math.abs(p) - Math.abs(q));
+    const spots: [number, number][] = [];
+    for (let ahead = 6; ahead < 120 && spots.length < n; ahead += 7) {
+      for (const across of lanes) {
+        if (spots.length >= n) break;
+        const x = camX + ux * ahead - uz * across, z = camZ + uz * ahead + ux * across;
+        if (clear(x, z)) {
+          placed.push([x, z]);
+          spots.push([x, z]);
+        }
+      }
+    }
+    console.log(`cars ${JSON.stringify({ asked: n, placed: spots.length, at: spots.map(([x, z]) => [+x.toFixed(2), +z.toFixed(2)]) })}`);
+    // The explosion of `drive` 9 m ahead of the first car, in its lane (a spot of its own at the list's end).
+    if (spots.length) {
+      const [x, z] = [spots[0][0] + ux * 9, spots[0][1] + uz * 9];
+      at.push([x, groundHeight(seed, Math.round(x / VOXEL + SIZE / 2), Math.round(z / VOXEL + SIZE / 2)) * VOXEL, z]);
+      blastSpot = at.length - 1;
+    }
+    const paint = new MeshStandardMaterial({ name: "car_paint", color: 0x8a1c1c, roughness: 0.35, metalness: 0.6 });
+    const rubber = new MeshStandardMaterial({ name: "tyre", color: 0x111111, roughness: 0.9 });
+    for (const [x, z] of spots) {
+      const vx = Math.round(x / VOXEL + SIZE / 2), vz = Math.round(z / VOXEL + SIZE / 2);
+      const v = sedan(world, [x, groundHeight(seed, vx, vz) * VOXEL, z], Math.atan2(ux, uz), paint, rubber);
+      v.addEventListener("wheellost", () => lostWheels++);
+      cars.push(v);
+    }
   };
   return defineGame<State>({
     state: { scenario: null, started: 0 },
@@ -286,6 +377,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       if (dust) scene.add(dust.node);
       if (cloud) scene.add(cloud);
       if (boom) scene.add(boom);
+      world = scene;
       return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}${flames ? "-fire" : ""}${physics ? "" : "-lattice"}`, width: 1280, height: 720, preset: "cinematic" as const } };
     },
     frame(f) {
@@ -303,6 +395,15 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       const s = f.state.scenario;
       if (!s) return;
       const t = (frames - f.state.started) / 60; // frames since the scenario began, at 60 per second of frame script
+      // The cars: the drive towards 8 m/s on the front wheels (at most 0.4 g); their state every half second.
+      for (const v of cars) {
+        const force = Math.max(-0.2 * CAR.mass * 9.81, Math.min(0.2 * CAR.mass * 9.81, (8 - v.speed) * CAR.mass));
+        v.wheels[0].engine = v.wheels[1].engine = force;
+      }
+      if (cars.length && frames % 30 === 0) {
+        const speeds = cars.filter((v) => !v.removed).map((v) => v.speed);
+        console.log(`vehicles ${JSON.stringify({ frame: frames, n: speeds.length, speed: +(speeds.reduce((a, b) => a + b, 0) / Math.max(1, speeds.length)).toFixed(2), slowest: +Math.min(...speeds).toFixed(2), contacts: cars.reduce((n, v) => n + v.wheels.filter((w) => w.contact).length, 0), lost: lostWheels })}`);
+      }
       if (s === "singles") {
         const k = Math.floor(t / 2);
         if (k < 4 && k !== last && t >= 1 + k * 2 - 1) {
@@ -361,6 +462,12 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           last = 0;
           fire(4, 2 * 62);
         }
+      } else if (s === "drive" || s === "drive20") {
+        // 9 m ahead of where the first car started, in its lane.
+        if (t >= 3 && last !== 0) {
+          last = 0;
+          fire(1, blastSpot);
+        }
       } else if (s === "show") {
         // Ground spots 60-79 (spots() interleaves ground and walls): 6 m ahead and on, just left of the camera's line.
         const k = Math.floor(t / 1.5);
@@ -384,6 +491,8 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       shatter: (tx) => { tx.state.scenario = "shatter"; tx.state.started = frames; last = -1; },
       "shatter-dense": (tx) => { tx.state.scenario = "shatter-dense"; tx.state.started = frames; last = -1; },
       topple: (tx) => { tx.state.scenario = "topple"; tx.state.started = frames; last = -1; },
+      drive: (tx) => { tx.state.scenario = "drive"; tx.state.started = frames; last = -1; addCars(1); },
+      drive20: (tx) => { tx.state.scenario = "drive20"; tx.state.started = frames; last = -1; addCars(20); },
       // The level's hash, logged (`hash <16 hex digits>`): the same events at the same frames give the same one.
       // With physics, the physics world's hash too (the bodies' poses and velocities, bit for bit).
       hash: () => {
