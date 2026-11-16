@@ -2533,6 +2533,20 @@ kernel's shape decided: a shadow ray's origin on the side it leaves from is ever
 every kernel it cost Bistro's trace 4 %, so only kernels with glass have it; and the energy table's vec4 indexed
 by a variable cost the glass scene 1.5 %, a select chain nothing.
 
+**What is not the scene's no longer rebuilds it (2026-11-16, after it).** One flag, `Changes::structural`, sends an
+edit to a rebuild of the whole GPU scene, and it was set for things no part of the scene is built from: the scene
+camera's field of view, its depth of field, its exposure's mode, near and far (read by nothing), a camera that is
+not the scene's, fog appearing or turning volumetric, a background appearing, the preset and its overrides, and an
+offline render's size and clock. Bistro: a change of lens rebuilt for 884 and 724 ms; now the frame is as any other
+(15 to 17 ms). Each is applied where it lives: the lens by the view (as a camera's move), depth of field and
+exposure by the post passes and the kernel's clamp, fog and a background by the kernel's variant with them, the
+preset by the few parameters taken from it. A GPU test (`live::inplace_tests`) takes twelve such edits in place on
+one view and holds each to a view built from the edited world: no rebuild, the same state, the same picture.
+Found by it: after an edit to the light (fog gone), the radiance cache and the frames' histories keep the old
+light for hundreds of frames (5 of 255 steps off after 264), here as after a rebuild; the test compares with the
+histories cleared. Still a rebuild: another sky, and the output's size (a view cannot be resized). The first of the
+scene model's steps: the proxy table next.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

@@ -142,4 +142,11 @@ fn edits_in_place_leave_what_a_build_does() {
     let fresh = open(&w).unwrap();
     assert_eq!(state(&live), state(&fresh), "another camera: the view's state against a build's");
     assert!(live.cam == fresh.cam, "the view is at the scene's camera");
+    // A view moved away from the scene's camera stays there through a depth of field or an exposure; a lens takes it back.
+    let away = Camera { pos: live.cam.pos + Vec3::new(0.5, 0.0, 0.0), ..live.cam };
+    live.cam = away;
+    w.set_camera_desc(6, camera(70.0, Some(3.0), manual(2.0))).unwrap();
+    assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.sc.dof.is_some(), "a depth of field and an exposure: the view stays");
+    w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
+    assert!(!live.commit(&mut w).unwrap() && live.cam == live.sc.scene_camera && live.cam != away, "a lens: the view takes the scene's camera");
 }

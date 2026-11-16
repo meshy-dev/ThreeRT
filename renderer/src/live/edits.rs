@@ -604,6 +604,11 @@ impl LiveCore {
         if changes.exposure {
             self.apply_exposure(world);
         }
+        if changes.dof {
+            if let Some(crate::world::Kind::Camera(c)) = world.settings.camera.and_then(|id| world.objects.get(&id)).map(|o| &o.kind) {
+                self.sc.dof = c.dof.clone();
+            }
+        }
         Ok(false)
     }
 
@@ -662,8 +667,6 @@ impl LiveCore {
         self.lit_changed = self.frame.max(1);
     }
 
-    /// The camera's manual exposure changed value (an exposure that follows the time of day), in place: the post pass's
-    /// exposure and the kernel's firefly clamp, which is relative to it.
     /// The scene camera's exposure (its mode, its values) as a build takes it: what the frame is shown at, the auto
     /// exposure's settings, and the kernel's firefly clamp, which is relative to it.
     pub(super) fn apply_exposure(&mut self, world: &World) {
