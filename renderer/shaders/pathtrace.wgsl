@@ -2917,6 +2917,9 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
         @group(1) @binding(8) var<storage, read_write> loop_guard_trips: array<atomic<u32>, GUARD_WORDS>;
         fn loop_guard_stopped() { atomicAdd(&loop_guard_trips[0], 1u); }
     }
+    // The pixels of this sample that `finish` ends (below `cache_end`): their number, then a record each.
+    struct Deferred { n: atomic<u32>, recs: array<vec4<u32>> };
+    @group(1) @binding(9) var<storage, read_write> deferred: Deferred;
 }
 
 // The loop guard (gpu.rs `loop_guard_of`; docs/RUNTIME.md "The engine in a browser"): every loop of the kernel, the
@@ -3192,6 +3195,101 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
         cache_add(coarse[2 * j + 1], e, max(e - direct[j], vec3<f32>(0.0)));
     }
     return Fresh(e, min(direct[0], e));
+}
+
+// What a live path ends with at its first bounce, surface `s` (reached along d; ray-cone width there + spread; path
+// weight `thr`): what `s` reflects of the cache. Surfaces seen in mirror-like reflections (`hit_light`: specular lobe
+// below roughness 0.4, where UE traces reflections) get direct light of their own, as UE's hit lighting does, and the
+// cache's indirect part; others reflect the cache's total. Rotating tiles train the cache (`train`). A pixel that
+// finds its voxel cold at every level (`cache_get`) traces a fresh estimate and uses it, without inserting the voxel:
+// the low-sample entries such pixels inserted kept later frames slower until evicted (the crowd's square ~2 ms).
+// (Until 2026-11-16 that held for a view's first 30 frames; later a cold voxel was read as it was, black where there
+// was none. With the coarser levels few lookups are cold, and the rule's own test cost more than their traces:
+// Bistro 9.05 ms with it, 8.87 without.)
+fn cache_end(s: Surface, d: vec3<f32>, cone: vec2<f32>, thr: vec3<f32>, depth: u32, train: bool, hit_light: bool, straight: bool) -> vec3<f32> {
+    let v1 = -d;
+    let lb1 = lobes(s, max(dot(s.n, v1), 1e-4));
+    var e = cache_get(s, hit_light);
+    if (train || e.w < CACHE_WARM) {
+        // Training tiles trace deep (coherent: whole SIMD groups); scattered cold pixels one vertex.
+        let fresh = cache_train(s, d, cone, select(1u, CACHE_DEPTH, train), train);
+        RNG_PATH = 0u;
+        if (e.w < CACHE_WARM) { e = vec4<f32>(select(fresh.total, fresh.total - fresh.direct, hit_light), 1.0); }
+    }
+    cur_depth = depth;
+    var c = thr * cache_reflectance(lb1) * e.rgb;
+    // Resampled lights, not the exact loop camera hits get (that costs 2x here: mirror pixels are scattered).
+    mirror_path = mirror_path && (u32(P.cache.w) & 8u) != 0u;
+    // (The lights alone: the sky's light is in the cache's indirect part, whole. Its samples taken afresh
+    // here against the white-lobe ones the cache left out do not add up on a glossy surface: a white metal
+    // ground in a mirror read 0.80 of a uniform sky. The lights' still are: weights of two lobes, right for a
+    // Lambert surface and for small lights; as light samples alone they were fireflies on Kabukichō's wet
+    // street, flicker + 22 %.)
+    if (hit_light) {
+        lights_only = true;
+        c += thr * direct_light(s, lb1, v1);
+        lights_only = false;
+    }
+    let lum = luminance(c);
+    if (lum > P.misc.x && !straight) { c *= P.misc.x / lum; }
+    return c;
+}
+
+// A pixel `main` left for `finish`, DEFERRED_VECS vec4<u32>s (floats as their bits): (pixel, DF_ flags | depth << 8,
+// light list + its length, hit triangle) (hit instance, u, v, k_spec.x) (hit point, cone width) (ray direction, cone
+// spread) (path weight, k_spec.y) (the specular ray's weight, k_spec.z).
+const DEFERRED_VECS: u32 = 6u;
+const DEFERRED_ROW: u32 = 16384u; // `finish` invocations a dispatch row (gpu.rs DEFERRED_ROW)
+const DF_TRAIN: u32 = 1u;     // of a training tile
+const DF_OUT: u32 = 2u;       // its light is still to add (a cold voxel, a reflection hit's lights)
+const DF_HIT_LIGHT: u32 = 4u;
+const DF_STRAIGHT: u32 = 8u;
+const DF_MIRROR: u32 = 16u;
+const DF_RESOLVE: u32 = 32u;  // the reflection resolve takes the specular share
+const DF_REFL_RAY: u32 = 64u; // the camera hit's sample was a specular-lobe ray
+
+// Live, after each sample's trace: the pixels that had more to trace than a warm voxel's lookup (`cache_end`: a
+// training path, a cold voxel's fresh estimate, a reflection hit's lights), one invocation each. `main` left them a
+// record and wrote the pixel without that light; this adds it, split as the epilogue of `main` splits it. Such pixels
+// are few and scattered (a third of a glossy scene's, an eighth for training): traced in `main`, the others' lanes
+// idled beside them, and the code cost every pixel (Bistro 8.06 -> 6.54 ms without it, before this pass's own work).
+// The layout as written only: the merged one ends its paths in `main`.
+@if(!merged) @compute @workgroup_size(64, 1, 1)
+fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let at = (gid.y * DEFERRED_ROW + gid.x) * DEFERRED_VECS;
+    if (gid.y * DEFERRED_ROW + gid.x >= atomicLoad(&deferred.n) || at + DEFERRED_VECS > arrayLength(&deferred.recs)) { return; }
+    let r0 = deferred.recs[at];
+    let r1 = deferred.recs[at + 1u];
+    let r2 = bitcast<vec4<f32>>(deferred.recs[at + 2u]);
+    let r3 = bitcast<vec4<f32>>(deferred.recs[at + 3u]);
+    let r4 = bitcast<vec4<f32>>(deferred.recs[at + 4u]);
+    let r5 = bitcast<vec4<f32>>(deferred.recs[at + 5u]);
+    let pix = r0.x;
+    let fl = r0.y;
+    rng_start(vec2<u32>(pix % P.size.x, pix / P.size.x), P.size.z, P.size.w, 0u);
+    cur_depth = fl >> 8u;
+    mirror_path = (fl & DF_MIRROR) != 0u;
+    rays_off = false;
+    if (has(F_LISTS)) {
+        lt_list = r0.z & ~(LT_LIST - 1u);
+        lt_list_n = r0.z & (LT_LIST - 1u);
+        lt_fb = LT_NONE;
+    }
+    // (The hit point as the ray's origin, at distance 0.)
+    let s = surface(r2.xyz, r3.xyz, Hit(0.0, r0.w, bitcast<f32>(r1.y), bitcast<f32>(r1.z), r1.x), r2.w);
+    let c = cache_end(s, r3.xyz, vec2<f32>(r2.w, r3.w), r4.xyz, fl >> 8u, (fl & DF_TRAIN) != 0u, (fl & DF_HIT_LIGHT) != 0u, (fl & DF_STRAIGHT) != 0u);
+    if ((fl & DF_OUT) == 0u || non_finite(c)) { return; }
+    let cs = c * vec3<f32>(bitcast<f32>(r1.w), r4.w, r5.w);
+    var px = accum[pix];
+    px.color = vec4<f32>(px.color.rgb + (c - cs), px.color.w);
+    if ((fl & DF_RESOLVE) == 0u) {
+        px.spec = vec4<f32>(px.spec.rgb + cs, px.spec.w);
+    } else if (P.misc.w < 0.5 && resolve_bound()) {
+        var li = cs;
+        if ((fl & DF_REFL_RAY) != 0u) { li = select(c / r5.xyz, vec3<f32>(0.0), r5.xyz < vec3<f32>(1e-6)); }
+        if (!non_finite(li)) { refl[pix * 2u] += vec4<f32>(li, 0.0); }
+    }
+    accum[pix] = px;
 }
 
 // Live, after the trace: MEDIA_TRAIN_POINTS fresh estimates (point_radiance) into the volume voxels, each at a random
@@ -3580,44 +3678,37 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             break;
         }
-        // Live: the path ends in the radiance cache at its first bounce. Surfaces seen in mirror-like reflections
-        // (specular lobe below roughness 0.4, where UE traces reflections) get direct light of their own, as UE's hit
-        // lighting does, and the cache's indirect part; others reflect the cache's total. Rotating tiles train the
-        // cache. A pixel that finds its voxel cold at every level (`cache_get`) traces a fresh estimate and uses it,
-        // without inserting the voxel: the low-sample entries such pixels inserted kept later frames slower until
-        // evicted (the crowd's square ~2 ms). (Until 2026-11-16 that held for a view's first 30 frames; later a cold
-        // voxel was read as it was, black where there was none. With the coarser levels few lookups are cold, and
-        // the rule's own test cost more than their traces: Bistro 9.05 ms with it, 8.87 without.)
-        let cfl = u32(P.cache.w);
+        // Live: the path ends in the radiance cache at its first bounce (`cache_end`).
         if (cache_on() && depth >= 1u && !(has(F_GLASS) && s.transmission > 0.0)) {
-            let v1 = -d;
-            let lb1 = lobes(s, max(dot(s.n, v1), 1e-4));
-            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u && (cfl & 2u) == 0u;
-            var e = cache_get(s, hit_light);
-            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u && (cfl & 4u) == 0u;
-            if (train || e.w < CACHE_WARM) {
-                // Training tiles trace deep (coherent: whole SIMD groups); scattered cold pixels one vertex.
-                let fresh = cache_train(s, d, vec2<f32>(width, cone_a), select(1u, CACHE_DEPTH, train), train);
-                RNG_PATH = 0u;
-                if (e.w < CACHE_WARM) { e = vec4<f32>(select(fresh.total, fresh.total - fresh.direct, hit_light), 1.0); }
+            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u && (u32(P.cache.w) & 2u) == 0u;
+            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u && (u32(P.cache.w) & 4u) == 0u;
+            @if(merged) { radiance += cache_end(s, d, vec2<f32>(width, cone_a), thr, depth, train, hit_light, straight); }
+            @if(!merged) {
+                // Here only what a warm voxel holds; a pixel with more to trace is left for `finish`.
+                let e = cache_get(s, hit_light);
+                let later = hit_light || e.w < CACHE_WARM;
+                if (later || train) {
+                    let at = atomicAdd(&deferred.n, 1u) * DEFERRED_VECS;
+                    if (at + DEFERRED_VECS <= arrayLength(&deferred.recs)) {
+                        let fl = (depth << 8u) | select(0u, DF_TRAIN, train) | select(0u, DF_OUT, later) | select(0u, DF_HIT_LIGHT, hit_light) | select(0u, DF_STRAIGHT, straight)
+                            | select(0u, DF_MIRROR, mirror_path) | select(0u, DF_RESOLVE, resolve_on() && !through0 && !glass0) | select(0u, DF_REFL_RAY, refl_pdf > 0.0);
+                        var lt = 0u;
+                        if (has(F_LISTS) && lt_list_n > 0u) { lt = lt_list + lt_list_n; }
+                        deferred.recs[at] = vec4<u32>(pix, fl, lt, hit.tri);
+                        deferred.recs[at + 1u] = vec4<u32>(hit.inst, bitcast<u32>(hit.u), bitcast<u32>(hit.v), bitcast<u32>(k_spec.x));
+                        deferred.recs[at + 2u] = bitcast<vec4<u32>>(vec4<f32>(s.p, width));
+                        deferred.recs[at + 3u] = bitcast<vec4<u32>>(vec4<f32>(d, cone_a));
+                        deferred.recs[at + 4u] = bitcast<vec4<u32>>(vec4<f32>(thr, k_spec.y));
+                        deferred.recs[at + 5u] = bitcast<vec4<u32>>(vec4<f32>(refl_w, k_spec.z));
+                    }
+                }
+                if (!later) {
+                    var c = thr * cache_reflectance(lobes(s, max(dot(s.n, -d), 1e-4))) * e.rgb;
+                    let lum = luminance(c);
+                    if (lum > clamp_v && !straight) { c *= clamp_v / lum; }
+                    radiance += c;
+                }
             }
-            cur_depth = depth;
-            var c = thr * cache_reflectance(lb1) * e.rgb;
-            // Resampled lights, not the exact loop camera hits get (that costs 2x here: mirror pixels are scattered).
-            mirror_path = mirror_path && (cfl & 8u) != 0u;
-            // (The lights alone: the sky's light is in the cache's indirect part, whole. Its samples taken afresh
-            // here against the white-lobe ones the cache left out do not add up on a glossy surface: a white metal
-            // ground in a mirror read 0.80 of a uniform sky. The lights' still are: weights of two lobes, right for a
-            // Lambert surface and for small lights; as light samples alone they were fireflies on Kabukichō's wet
-            // street, flicker + 22 %.)
-            if (hit_light) {
-                lights_only = true;
-                c += thr * direct_light(s, lb1, v1);
-                lights_only = false;
-            }
-            let lum = luminance(c);
-            if (lum > clamp_v && !straight) { c *= clamp_v / lum; }
-            radiance += c;
             break;
         }
 

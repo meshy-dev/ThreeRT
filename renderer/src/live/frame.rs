@@ -344,8 +344,10 @@ impl LiveCore {
         let pipeline = g.pipeline(&self.sc.up.kernel, true);
         // (No media pass while every medium is hidden: a pool of idle fireballs costs the frame nothing.)
         let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
-        let media_train = (media && self.cache.is_some()).then(|| g.media_pipeline(&self.sc.up.kernel, "media_train"));
-        let media_composite = media.then(|| g.media_pipeline(&self.sc.up.kernel, "media_composite"));
+        let media_train = (media && self.cache.is_some()).then(|| g.kernel_pass(&self.sc.up.kernel, "media_train"));
+        let media_composite = media.then(|| g.kernel_pass(&self.sc.up.kernel, "media_composite"));
+        // The pixels a sample's trace leaves at the radiance cache (pathtrace.wgsl `finish`).
+        let finish = self.targets.kernel.deferred.as_ref().filter(|_| self.cache.is_some()).map(|d| (g.kernel_pass(&self.sc.up.kernel, "finish"), d));
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
@@ -447,11 +449,19 @@ impl LiveCore {
                     (None, Some(t), Some(slot)) if k == 0 => Some(wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8), end_of_pass_write_index: Some(slot as u32 * 8 + 1) }),
                     _ => None,
                 };
+                if let Some((_, d)) = &finish {
+                    e.clear_buffer(&d.buffer, d.offset, Some(4));
+                }
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live trace"), timestamp_writes: tw });
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &self.sc.up.bg, &[]);
                 pass.set_bind_group(1, &self.kernel_bg, &[]);
                 pass.dispatch_workgroups(iw.div_ceil(8), ih.div_ceil(8), 1);
+                // (Rows over every traced pixel: the invocations past the records' count leave at once.)
+                if let Some((f, _)) = &finish {
+                    pass.set_pipeline(f);
+                    pass.dispatch_workgroups(gpu::DEFERRED_ROW / 64, (iw * ih).div_ceil(gpu::DEFERRED_ROW), 1);
+                }
                 // Participating media: their volume voxels trained after the trace (pathtrace.wgsl media_train), and
                 // camera rays through media once the frame's samples are traced (media_composite). In the trace's pass
                 // and timing; profiled, the frame's last sample's media passes are a pass of their own (`media`).
@@ -538,7 +548,7 @@ impl LiveCore {
         let tl_dispatch = |pass: &mut wgpu::ComputePass, train: bool| {
             if let Some((pipes, tbg, _)) = &tl {
                 pass.set_bind_group(0, &self.sc.up.bg, &[]);
-                pass.set_bind_group(1, &self.kernel_bg, &[]);
+                pass.set_bind_group(1, self.tl_kernel_bg.as_ref().unwrap(), &[]);
                 pass.set_bind_group(2, tbg, &[]);
                 if train {
                     pass.set_pipeline(&pipes.train);

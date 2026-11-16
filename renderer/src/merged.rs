@@ -38,6 +38,9 @@ pub const LISTS_BINDING: u32 = 4;
 /// merged layout a section (`heap::Live::Guard`), written only by a kernel with the guard.
 pub const GUARD_BINDING: u32 = 8;
 pub const GUARD_WORDS: u32 = 4;
+/// The pixels a live sample leaves for the kernel's `finish` pass (`gpu::KernelBufs::deferred`): the layout as
+/// written only.
+pub const DEFERRED_BINDING: u32 = 9;
 
 /// The uniform tables (`gpu::GpuOptions::uniform_tables`; docs/RUNTIME.md "Android"): the tables the kernel reads
 /// from uniform buffers, copies of their sections, instead of from views of the sections. Qualcomm's Adreno 740 driver
@@ -107,17 +110,18 @@ mod tests {
     /// Kernel variants in the merged layout: valid WGSL, no entry point with more than eight storage buffers, none
     /// declared beyond them (a pipeline layout counts what is declared), no length of a view's buffer in the source,
     /// and `MergedLive`'s members where the renderer puts their sections.
-    /// The layout as written has 21 (20 under hardware traversal, which has no trees' buffer). Because the merged
+    /// The layout as written has 22 (21 under hardware traversal, which has no trees' buffer). Because the merged
     /// blocks declare none of the views or of group 1's buffers by their own names, a read or write of one past its
     /// accessor does not compile here (and naga says where), whatever the other layouts take.
     #[test]
     fn the_merged_kernel_fits_eight_storage_buffers() {
         let (m, info) = parse(&variant(0, false));
         let (used, declared) = storage_buffers(&m, &info);
-        assert_eq!(declared, 21, "the kernel as written");
+        assert_eq!(declared, 22, "the kernel as written");
+        // (`main` no longer adds to the cache's sums: `finish` trains it.)
         assert_eq!(used.iter().map(|u| u.1).max(), Some(21), "{used:?}");
         let hw = kernel_wgsl(&kernel_template(), &KernelVariant::new(true, Default::default(), 0));
-        assert_eq!(hw.matches("var<storage").count(), 20 + 4, "hardware traversal: no trees' buffer (and the translucency pass's four)");
+        assert_eq!(hw.matches("var<storage").count(), 21 + 4, "hardware traversal: no trees' buffer (and the translucency pass's four)");
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = variant(features, true);
             assert!(!src.contains("arrayLength"), "the lengths are the parameters'");
@@ -158,7 +162,7 @@ mod tests {
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = kernel_wgsl(&kernel_template(), &KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), features) });
             let (m, info) = parse(&src);
-            assert_eq!(storage_buffers(&m, &info).1, 17, "features {features:#x}");
+            assert_eq!(storage_buffers(&m, &info).1, 18, "features {features:#x}");
             let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P").collect();
             let want: Vec<(String, u32, u32)> = UNIFORM_TABLES.iter().map(|t| (t.name.to_string(), t.binding, (t.stride * t.len as u64) as u32)).collect();
             assert_eq!(tables, want, "features {features:#x}");
@@ -192,6 +196,10 @@ mod tests {
         }
         assert_eq!(<Table as crate::heap::Section>::COUNT, Table::Energy as usize + 1);
         assert!(kernel_template().contains(&format!("const CACHE_SIZE: u32 = {}u;", crate::gpu::CACHE_SIZE)));
+        // `finish`'s records and its dispatch rows.
+        assert!(kernel_template().contains(&format!("const DEFERRED_VECS: u32 = {}u;", crate::gpu::DEFERRED_BYTES / 16)));
+        assert!(kernel_template().contains(&format!("const DEFERRED_ROW: u32 = {}u;", crate::gpu::DEFERRED_ROW)));
+        assert!(kernel_template().contains(&format!("@group(1) @binding({DEFERRED_BINDING}) var<storage, read_write> deferred: Deferred;")));
         // What the kernel reads with no offset is its heap's first section.
         assert_eq!((Table::LightTree as usize, crate::heap::Stream::EnvCdf as usize), (0, 0));
         assert!(kernel_template().contains("fn lt_node(i: u32) -> vec4<f32> { return table_f(i); }") && kernel_template().contains("fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }"));
@@ -223,8 +231,8 @@ mod tests {
             assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain) - counted(&plain));
             let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
-            // (As written: one buffer more, where the device has room. Merged: still eight.)
-            assert_eq!(declared as u32, if merged { STORAGE_BUFFERS } else { 22 }, "{used:?}");
+            // (As written: the guard's count and `finish`'s records too. Merged: still eight.)
+            assert_eq!(declared as u32, if merged { STORAGE_BUFFERS } else { 23 }, "{used:?}");
         }
         // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`; a
         // counted loop left alone, one bounded by a variable or assigning its counter guarded.

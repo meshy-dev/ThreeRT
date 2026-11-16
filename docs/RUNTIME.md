@@ -1310,6 +1310,8 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second copy of each made
   every frame, and was compiled again when a table doubled. The count of bindings is as it was: 22 buffers and
   acceleration structures a stage natively, 28 of Metal's 29 with the translucency pass (29 with the loop guard's).
+  (`finish`'s records are the kernel's 23rd; the translucency pass, which does not read them, binds group 1
+  without, and stays at 29.)
   (Hardware traversal no longer binds software traversal's trees, a placeholder there; the light tiles' lists took
   the binding.)
 
@@ -1370,6 +1372,12 @@ glass; the cache term, its training (4 x) and each sample (256) are clamped besi
 cache's voxels, and later segments meet homogeneous media alone; depth of field is a post pass; translucent
 particles are lit from the cache's voxels; past a camera hit's own decisions the sampler is a hash, not Sobol
 (variance only).
+
+Where a path ends in the cache, `main` takes only what a warm voxel holds. The pixels with more to trace there (a
+training path, a cold voxel's estimate, a reflection hit's lights) leave a record of 96 bytes, and a second pass
+of the kernel, `finish`, traces them after each sample and adds their light to the pixel, one invocation a record.
+They are few and scattered: traced in `main` they held their SIMD groups, and their code cost every pixel. The
+layout as written only; the merged one ends its paths in `main`.
 
 The radiance cache is held to numbers by the `cache/*` tests (a bounce off a lit floor, the same off a coated one
 and with the floor on a voxel face, two bounces in a view's first frame, a lit ground seen in a mirror, a furnace
@@ -1461,7 +1469,7 @@ on the device", and differs where it says so.
   | `tables` (4) and its views `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers (bindings 4 to 6 then) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
   | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
-  | `accum` (11), group 1 (radiance cache, the trace's outputs, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
+  | `accum` (11), group 1 (radiance cache, the trace's outputs, `finish`'s records, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
   | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |
   | the live passes (`live.wgsl`: 25 storage buffers, `ae_bins` and `ae_state` among them; at most eight a pass) | per pixel; two tiny | storage: written by the passes; the device showed their output right |

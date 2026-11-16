@@ -232,6 +232,9 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (The light tree is the tables' by now: its nodes from there.)
     let up = g.upload(&sc, w, h, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
+    if !g.merged {
+        let _ = g.kernel_pass(&up.kernel, "finish");
+    }
     let sky_inputs = ((prep.env.width, prep.env.height), sc.camera.position.y.max(0.0), prep.env_nee_floor);
     let mut base = prep.params;
     // The live view's own count of light-tree candidates at camera hits (ltree.rs `RIS_LIVE`).
