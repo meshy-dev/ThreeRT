@@ -400,6 +400,7 @@ Messages an app sends:
 | `net.fetched` | `id`, `status`, `body`, `error?` | the response's status and body as text; `status` 0 and `error` when the request failed |
 | `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`), as `host.caps` (`[]` before, and for an app that lists none) |
 | `files.picked`, `files.data`, `store.*` | below | the answers to `files.*` and `store.*` ("Files", below) |
+| `hud.choose` | `item`, `row` | the player clicked or tapped a row of a selectable HUD table ("HUD", below) |
 | `input` | below | once a frame, before the frame script, to a game that asked for input. The node host keeps it; it has no listeners |
 
 `id` is the game's own name for a socket or a request (a string); the app's answers carry it back. Messages are text:
@@ -548,13 +549,31 @@ hud.flash("damage", 1.2);        // the player was hit from 1.2 rad clockwise of
   | `text` | `text`, `label?`, `tone?`, `size?` (`small`, `normal`, `large`) | a figure or a line, with a small label over it |
   | `bar` | `value` (0..1), `label?`, `text?`, `tone?` | health, a reload, a round's time; `text` is a figure beside it |
   | `list` | `lines: (string \| { text, tone?, ttl?, id? })[]` | short lines, newest last. A line with `ttl` is shown that many seconds from when the app first got it (the same `id`, or the same text), then left out, whether or not the game still lists it |
-  | `table` | `columns`, `rows`, `title?`, `highlight?` | a scoreboard: listed while it is to be seen (`f.input.down("Tab")`); `highlight` is the row to set apart |
+  | `table` | `columns`, `rows`, `title?`, `highlight?`, `selectable?`, `id?` | a scoreboard: listed while it is to be seen (`f.input.down("Tab")`); `highlight` is the row to set apart. A `selectable` table is a menu (below); `id` names it, unique among the tables |
 - **`crosshair`:** `style` (`dot`, `cross`, `circle`), `gap` (0..1: how far it opens, a weapon's spread), `tone?`.
   **`message`:** `title`, `subtitle?`, `tone?`, at the picture's centre.
 - **`flash`** is the one event: `hud.flash(kind, angle?)` posts the HUD as last set with `flash: { kind, angle?, n }`,
   `n` one more each time. An app plays it when `n` changes: `hit` (a hit marker at the crosshair), `kill`, `damage`
   (the player was hit; `angle`, radians clockwise from straight ahead, is where from).
 - **Tones** say what a value means, for the app to colour: `default`, `good`, `warn`, `bad`, `accent`, `dim`.
+- **Menus: selectable tables.** A table with `selectable: true` is a menu the player can click (with the pointer
+  free) or tap. The app makes each row a target and, when one is chosen, sends `{ t: "hud.choose", item, row }`:
+  `item` is the table's `id` (a string), or its index in `items` when it has none (a number); `row` is the row's
+  index in `rows`. The game takes it with `host.on("hud.choose", (m, world) => ...)` like any message of the app, and
+  decides what it means; a choice changes nothing by itself (the game moves its `highlight`, opens what was chosen).
+  Keys and a gamepad drive the same menu through the game's own `highlight`, so a menu works on a keyboard, a
+  gamepad and a touch screen alike. With the pointer captured for look there is nothing to click: a game that wants
+  clicks shows its menu with the pointer free (`pointer: "free"`, or the player lets go with Esc), and an app on a
+  touch screen has no capture to begin with. `threert-render play` draws no HUD: with `--hud-log` it prints each
+  selectable table and the stdin line that chooses a row (`{"cmd":"host","messages":[{"t":"hud.choose","item":"maps",
+  "row":0}]}`); the three.js view makes the rows clickable (`tools/three/hud.ts`). Rust apps:
+  `host::hud_selectables(hud)` lists them, `host::hud_choose_message(item, row)` is the message.
+
+  ```ts
+  hud.set({ items: [{ type: "table", anchor: "center", id: "maps", title: "Maps", columns: ["Map", "Size"],
+    rows: maps.map((m) => [m.name, m.size]), highlight: current, selectable: true }] });
+  host.on("hud.choose", (m) => { if (m.item === "maps") open(maps[m.row]); });
+  ```
 - **Text is text.** An app shows a game's strings as they are, never as markup.
 - A scene built anew in the same runtime posts its first description whatever the last one was.
 
@@ -627,7 +646,7 @@ async function importMaps() {                                        // from the
   const picked = await files.pick({ mode: "folder", accept: [".bsp", ".wad"], title: "Your Counter-Strike folder" });
   if (!picked) return;                                               // the player closed the picker
   for (const e of picked.entries.filter((e) => e.path.endsWith(".bsp"))) {
-    const bsp = await files.read(picked.pick, e.path);               // Uint8Array, the whole file
+    const bsp = await files.read(picked.pick, e.path);               // Uint8Array, the whole file (or { offset, length })
     jobs.push({ name: e.path, job: sliced(convert(bsp)) });          // convert: a generator, it yields often
   }
 }
@@ -653,7 +672,7 @@ same `id`.
 | game → app | app → game |
 | --- | --- |
 | `{ t: "files.pick", id, mode: "folder" \| "files", accept?: string[], title?: string }` | `{ t: "files.picked", id, ok: true, pick, name, entries: [{ path, size }] }` or `{ t: "files.picked", id, ok: false, reason }` |
-| `{ t: "files.read", id, pick, path }` | `{ t: "files.data", id, ok: true, data, size }` or `{ ..., ok: false, reason }` |
+| `{ t: "files.read", id, pick, path, offset?, length? }` | `{ t: "files.data", id, ok: true, data, offset, size }` or `{ ..., ok: false, reason }` |
 
 - `accept`: lower-case extensions with the dot (`[".bsp", ".wad", ".rad"]`); a file matches without regard to case.
   No `accept`: every file.
@@ -664,10 +683,20 @@ same `id`.
   lasts for the game session (until the game is closed or reloaded).
 - `reason`: `"canceled"` (the player closed the picker), `"busy"` (a picker is already open), `"unsupported"`,
   `"denied"`, or a sentence.
-- `files.read`: `path` must be one of the grant's entries (anything else: `ok: false, reason: "denied"`). `data` is
-  the whole file in base64. Files larger than 64 MiB are refused (`reason: "too large"`).
-- `files.pick(o)` resolves to `{ pick, name, entries }`, or `null` when the player canceled; `files.read(pick, path)`
-  to the file's bytes. Any other `ok: false` rejects with a `HostRequestError` whose `reason` is the app's.
+- `files.read`: `path` must be one of the grant's entries (anything else: `ok: false, reason: "denied"`). Without
+  `offset` and `length`, `data` is the whole file in base64. With them (whole numbers of bytes; `offset` 0 by default,
+  `length` to the end by default) it is `length` bytes from `offset`, fewer where the file ends first; an `offset`
+  past the end is `reason: "out of range"` (at the end: no bytes). The answer's `offset` is where `data` starts and
+  `size` is always the whole file's size. At most 64 MiB at once (`reason: "too large"`): a larger file is read in
+  parts. Read only what is needed: a 38 MB texture archive for its directory and a few textures is a few small reads,
+  where the whole of it is 50 MB of base64 in one message and a frame of a tenth of a second.
+- `files.pick(o)` resolves to `{ pick, name, entries }`, or `null` when the player canceled; `files.read(pick, path,
+  { offset?, length? }?)` to the bytes. Any other `ok: false` rejects with a `HostRequestError` whose `reason` is the
+  app's.
+- **The pointer while the picker is open.** A picker is the app's own window or sheet over the game, and the game
+  cannot let go of the pointer itself: an app that has the pointer captured for look releases it when it opens a
+  picker (as when the window loses the keyboard: everything held is let go), and the player captures it again with a
+  click once the picker is closed.
 
 **`store.*`: the app's own storage for this game (read and write, persistent, local).**
 
@@ -728,6 +757,7 @@ threert-render play game.js --assets games/openstrike \
 ```
 
 - `--store <dir>`: the game's store (default `<assets>/.threert/store`), also the user root of `user:` assets.
+- `files.read` with `offset` / `length` reads only that part (`Grant::read_range`).
 - `--pick <dir|file>[,<dir|file>...]` answers `files.pick` requests in order with those paths instead of a dialog: a
   folder for `mode: "folder"`; a file, or a folder standing for the files in it (not below), for `mode: "files"`.
   After the last one each pick is `"canceled"`; with no `--pick` at all each is `"unsupported"`. The launch lists
@@ -741,7 +771,8 @@ threert-render play game.js --assets games/openstrike \
   `Picker` that asks the player) and `UserFiles` (all of it as `HostServices`, on its thread), and
   `files::set_user_root` with the game's store directory.
 - Checked: `renderer/src/userfiles.rs` tests (paths refused: `..`, absolute, bad characters, too long; the quota;
-  atomic writes under a concurrent reader; `--pick` answers in order; `files.read` refused outside the grant; hidden
+  atomic writes under a concurrent reader; `--pick` answers in order; `files.read` refused outside the grant, and in
+  parts (a file past 64 MiB read by ranges); hidden
   files, depth and count bounds), `files.rs` (`user:` models and sounds from the store, never outside it, missing
   without a root), `script.rs` (base64 natively, the size bounds, a 64 MiB file within a budget), `host.rs` (caps in
   `launch`, services as one), `packages/gameplay/test/files.test.ts`; and `games/host/files.game.ts` in `play`
