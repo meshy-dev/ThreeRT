@@ -2261,6 +2261,26 @@ export class DataTexture extends Texture {
   }
 }
 
+/** A texture whose pixels the app replaces while the scene runs: a screen that shows what a program draws, a camera,
+ *  a video. The app names the stream when it writes a picture (the engine's `LiveCore::write_stream`); the scene and
+ *  its history are not rebuilt. `rgba` is what the texture shows until the first picture arrives (black by default).
+ *  Clamped by default: a screen's edge does not show the opposite edge. */
+export class StreamTexture extends DataTexture {
+  readonly stream: string;
+  constructor(stream: string, width: number, height: number, rgba?: Uint8Array, colorSpace: "srgb" | "linear" = "srgb") {
+    super(width, height, rgba ?? opaqueBlack(width, height), colorSpace);
+    if (!stream || stream.length > 64 || stream.includes("|")) throw new RangeError(`StreamTexture: a stream's name is 1 to 64 characters without "|", not ${JSON.stringify(stream)}`);
+    this.stream = stream;
+    this.wrap = "clamp";
+  }
+}
+
+function opaqueBlack(width: number, height: number): Uint8Array {
+  const px = new Uint8Array(width * height * 4);
+  for (let i = 3; i < px.length; i += 4) px[i] = 255;
+  return px;
+}
+
 /** Two-tone checkerboard (sRGB hex colors), `cells` squares per side. */
 export function checkerTexture(a = 0xd0d0d0, b = 0x303030, cells = 8, size = 512): DataTexture {
   const px = new Uint8Array(size * size * 4);
