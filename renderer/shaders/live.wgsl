@@ -222,9 +222,9 @@ fn oct_enc(n: vec3<f32>) -> vec2<f32> {
 // The g-buffer (`gbuffer`), 8 bytes: octahedral normal (snorm16 x 2), view depth
 // (0 = sky) and roughness (f16). The surface tests compare depths relatively (2-4 %), far coarser than f16. One fetch
 // per tap for the specular filter and the history tests (it was 16 bytes, and roughness a second 16-byte fetch from the
-// albedo / emission history): those passes are bandwidth-bound. `moves`: the surface is a moving object's (the trace's
-// motion, `motion_in` w), kept in the roughness's sign (-1 - roughness), so the next frame knows what was in front of
-// what it uncovers was moving (`judge`) and that a lock on it moved with it (`lock_carry`).
+// albedo / emission history): those passes are bandwidth-bound. `moves`: the surface is a moving object's and crossed
+// a traced sample this frame (`stemporal`), kept in the roughness's sign (-1 - roughness), so the next frame knows what
+// was in front of what it uncovers was moving (`judge`) and that a lock on it moved with it (`lock_carry`).
 struct GB { n: vec3<f32>, depth: f32, rough: f32, moves: bool };
 
 // The second word: view depth, roughness and `moves`.
@@ -919,7 +919,16 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     s_out = select(max(s_out, vec3<f32>(0.0)), vec3<f32>(0.0), non_finite(s_out));
     spec_hist[this_half(q)] = vec4<f32>(s_out, count_s);
     spec_store(0u, q, vec4<f32>(s_out, count_s));
-    gbuffer[this_half(q)] = gb_pack(n, depth, rough, mv.w > 0.5 && t > 0.0);
+    // `moves`: a moving object's surface that crossed a traced sample this frame. One that moved less (a leaf in the
+    // wind, a walker far away) has not left its place among the nine: what it shows and hides is the jitter's, as at
+    // a still edge, and the rules for what a moving object uncovers made every such edge start again each frame.
+    var swept = false;
+    if (mv.w > 0.5 && t > 0.0) {
+        let now = prev_pixel(p + mv.xyz);
+        let still = prev_pixel(p);
+        swept = now.z <= 0.0 || still.z <= 0.0 || length(now.xy - still.xy) >= f32(L.size.x) / f32(max(L.isz.z, 1u));
+    }
+    gbuffer[this_half(q)] = gb_pack(n, depth, rough, swept);
 }
 
 // The specular filter (`spec_filter`'s kernel) on the traced grid: three passes over `spec_pp`, slot 0 -> 1 -> 0 -> 1.
@@ -1072,7 +1081,7 @@ fn track(@builtin(global_invocation_id) gid: vec3<u32>) {
     var was = Carried(0.0, 0.0, 0.0, vec2<f32>(0.0), false);
     // (Not onto a moving object's surface: the thing locked there a frame ago has moved, likely with the object that
     // started moving under it.)
-    if (fw != 0u && L.size.w == 0u && ps.x > 0 && motion_in[q].w <= 0.5) { was = carry((fw & 0x1ffffffu) - 1u); }
+    if (fw != 0u && L.size.w == 0u && ps.x > 0 && !gb_unpack(gbuffer[this_half(q)]).moves) { was = carry((fw & 0x1ffffffu) - 1u); }
     var life = max(was.life - 1.0 / jitter_phases(), 0.0);
     var lz = was.depth;
     var at = clamp(was.at - vec2<f32>(f32(gid.x), f32(gid.y)), vec2<f32>(0.0), vec2<f32>(0.999));

@@ -1607,7 +1607,9 @@ grid) follow a moving object by its motion vectors (`motion_in`), and three rule
 itself where it was (`live.wgsl`; measured by `node tools/bench-object-ghosting.ts`: a dragged device, a light thrown
 over a polished floor, the camera still):
 
-- **What it uncovers starts again.** The g-buffer says whether a surface is a moving object's (`GB.moves`). A sample
+- **What it uncovers starts again.** The g-buffer says whether a surface is a moving object's that crossed a traced
+  sample this frame (`GB.moves`; one that moved less, a leaf in the wind or a far walker, is left to a still edge's
+  rules: counted as moving, wind-blown foliage flickered 4.5 times as much and a crowd twice). A sample
   whose own surface stands still and lies behind the moving surface that was nearest there a frame ago is uncovered,
   and its history goes (`judge`; in every output pixel its verdict reaches, `upscale`, where what went was moving: a
   still scene's jitter finds a gone edge now and then, and dropping it whole there flickered). Before, the band behind a
@@ -1622,7 +1624,9 @@ over a polished floor, the camera still):
 
 ![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
 
-Not covered: a fast light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
+Not covered: the specular clip also cuts a right history where the lighting is live all the time (a crowd's
+reflections are darker than offline's: it wants a short-term history to clip against, as the diffuse has); a fast
+light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
 history and its anti-lag), and the band just uncovered starts from this frame's samples (more aliased for a frame or
 two, as any disocclusion).
 
