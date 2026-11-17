@@ -781,13 +781,7 @@ impl LiveCore {
             self.sc.up.heap.write(q, Table::Instances, lo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[lo..=hi]));
         }
         self.sc.up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-        // Their emitters (instances of a mesh that emits): the runs of the light list taken again on the GPU, through
-        // the records just queued; the light tree's moving subtree after (`move_emitters`).
-        let runs: Vec<[u32; 2]> = placed.iter().map(|&(_, i)| emitter_run(&self.sc.tables.emitter_tris, &self.sc.instances, i)).filter(|r| !r.is_empty()).map(|r| [r.start as u32, r.len() as u32]).collect();
-        if !runs.is_empty() {
-            self.g.fill_emitter_runs(&self.sc.up, &runs);
-            self.emitters_moved = true;
-        }
+        self.fill_moved(placed.iter().map(|&(_, i)| i));
         self.inst_moved = true;
         build.instances = true;
         true
@@ -1238,6 +1232,7 @@ impl LiveCore {
         if ilo < ihi {
             self.sc.up.heap.write(&self.g.queue, Table::Instances, ilo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[ilo..ihi]));
         }
+        self.fill_moved(placements.iter().map(|&(i, _)| i));
         self.inst_moved = true;
         self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         if lo < hi {
@@ -1393,6 +1388,16 @@ impl LiveCore {
         build.dynamic = true;
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
+    }
+
+    /// The emitters of instances that moved (those of a mesh that emits): their runs of the light list taken again on
+    /// the GPU, through the records just queued; the light tree's moving subtree after (`move_emitters`).
+    pub(super) fn fill_moved(&mut self, records: impl Iterator<Item = u32>) {
+        let runs: Vec<[u32; 2]> = records.map(|i| emitter_run(&self.sc.tables.emitter_tris, &self.sc.instances, i)).filter(|r| !r.is_empty()).map(|r| [r.start as u32, r.len() as u32]).collect();
+        if !runs.is_empty() {
+            self.g.fill_emitter_runs(&self.sc.up, &runs);
+            self.emitters_moved = true;
+        }
     }
 
     /// The emitters the CPU moves moved: their triangles in the list taken again on the GPU, from the triangles this
@@ -1789,7 +1794,7 @@ impl LiveCore {
                     // An emitting material (no glass, no function): a mesh as any other, each instance's emitters in
                     // the light list (given below, where its record is known; scene.rs; ROADMAP § 6 step 3).
                     let emits = scene::emits_only(&gm);
-                    let class = scene::own_mesh_class(&gm);
+                    let class = scene::mesh_class(&gm);
                     if class == 2 || (emits && capacity.is_some()) {
                         return Err("a glass or function material (an instanced mesh: emitting too)".into());
                     }
@@ -1831,7 +1836,7 @@ impl LiveCore {
                             };
                             // (A mesh that emits: its triangles numbered as they lie, for its instances' emitters.)
                             if emits {
-                                scene::number_emitters(&mut a);
+                                scene::number_emitters(&mut a, &tables.materials);
                             }
                             // (A unit's cutout triangles carry their flag; hardware traversal has them in a geometry apart.)
                             let flags = f32::from_bits(if tree.is_some() && class == 1 { scene::TRI_MASKED } else { 0 });

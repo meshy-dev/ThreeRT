@@ -684,11 +684,17 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             emitter_tris.push(e);
         }
     }
-    // (A mesh that emits: its triangles numbered as they lie here, for its instances' emitters.)
+    // (A mesh that emits: its emitting triangles numbered as they lie here, for its instances' emitters.)
     for m in sc.meshes.iter().filter(|m| m.emitters > 0) {
-        scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize]);
+        let n = scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize], &sc.materials);
+        assert_eq!(n, m.emitters, "a mesh's emitters as the build counted them");
     }
-    let moving: std::collections::HashSet<u32> = sc.retained.proxies.values().filter_map(|p| match &p.draw { scene::Draw::Instance(i) if i.moves => Some(i.instance), _ => None }).collect();
+    // (The instances an edit moves in place: a body's, a movable model's, a posed rigid model's nodes'.)
+    let moving: std::collections::HashSet<u32> = sc.retained.proxies.values().flat_map(|p| match &p.draw {
+        scene::Draw::Instance(i) if i.moves => vec![i.instance],
+        scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+        _ => vec![],
+    }).collect();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
         if m.emitters == 0 {

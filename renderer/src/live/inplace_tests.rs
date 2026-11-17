@@ -429,9 +429,9 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
 
 /// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
 /// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
-/// after a particle's pass has placed it, and after the edits that make emitters in place (a mesh added, given other
-/// triangles and removed, with the tree's slot for them; a material that starts emitting): each of these also
-/// against a build's picture.
+/// after a model's placement or its clip has moved its emitters, after a particle's pass has placed it, and after
+/// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
+/// them; a material that starts emitting): the moves and edits also against a build's picture.
 #[test]
 fn the_light_list_holds_its_triangles() {
     let presets = crate::default_presets_dir();
@@ -481,6 +481,41 @@ fn the_light_list_holds_its_triangles() {
     let rebuilt = live.commit(&mut w).unwrap();
     assert!(!(rebuilt && live.g.hwrt), "the driven mesh moved in place ({:?})", live.fallback);
     list_is_its_triangles("a driven emitting mesh, moved", &live);
+    // A model's emitters (tests/render/data/panel.glb: a grey quad, then a quad that only emits: its emitting triangles
+    // are not its mesh's first): a placement that stays, one that is movable and moves, and one posed by a clip that
+    // moves its node (a rigid model: the node is an instance), each against a build's picture.
+    let open_at_root = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let model = |animation| Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation, functions: vec![] };
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let small = Vec3::splat(0.05);
+    let mut w = world();
+    w.set_object(30, "still".into(), None, model(None), true, false).unwrap();
+    w.set_transform(30, Vec3::new(-0.6, -0.5, 0.6), glam::Quat::from_rotation_y(0.4), small).unwrap();
+    w.set_object(31, "movable".into(), None, model(None), true, true).unwrap();
+    w.set_transform(31, Vec3::new(0.5, -0.5, 0.6), glam::Quat::IDENTITY, small).unwrap();
+    w.set_object(32, "posed".into(), None, model(slide(0.25)), true, false).unwrap();
+    w.set_transform(32, Vec3::new(0.0, 0.6, 0.4), glam::Quat::IDENTITY, small).unwrap();
+    let mut live = open_at_root(&w).unwrap();
+    w.take_changes();
+    if live.g.hwrt {
+        let of_instances = live.sc.tables.emitter_tris.iter().filter(|e| e.inst != crate::NO_INST).count();
+        assert_eq!(of_instances, 6, "two emitters a placement of the model, each its instance's");
+        list_is_its_triangles("a model's emitters, as loaded", &live);
+        type Move = (&'static str, Box<dyn Fn(&mut World)>);
+        let moves: Vec<Move> = vec![
+            ("a movable model moved", Box::new(move |w| w.set_transform(31, Vec3::new(0.2, -0.2, 0.9), glam::Quat::from_rotation_z(0.5), small).unwrap())),
+            ("a posed model's node moved by its clip", Box::new(move |w| w.set_animation(32, slide(0.75)).unwrap())),
+        ];
+        for (what, edit) in &moves {
+            edit(&mut w);
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            list_is_its_triangles(what, &live);
+            let mut fresh = open_at_root(&w).unwrap();
+            forget(&mut live);
+            let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
+            assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        }
+    }
     // A light-sampled particle: collapsed as loaded, placed by its pass in the first frame.
     let mut w = world();
     w.set_particle_fn("spark", "fn pf_spark(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.3, 0.2, 1.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
