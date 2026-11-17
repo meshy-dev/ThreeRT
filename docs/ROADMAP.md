@@ -2685,7 +2685,7 @@ numbered among its triangles (`number_emitters`), an instance's are a run of the
 model is its glass and its material functions, and one case of emitters: a triangle that emits with a cutout on
 exactly its vertices goes with the cutout (Zero Day has one such pair: kept in one mesh the decal's pass-through
 stepped the ray past the emitter, a region 3 % dark; the unbiased check on Zero Day is the guard, and fails
-without the rule). A mesh that deforms (a shared pose, a skinned model) still flattens its emitters; a model with
+without the rule; `flatten_coincident`, for a still placement and a rigid model's moving node alike). A mesh that deforms (a shared pose, a skinned model) still flattens its emitters; a model with
 emitters added in place still rebuilds, as before. Flattened a placement: Tokyo 1,800,744 -> 0 triangles, Bistro
 20,638 -> 0, Zero Day 10,105 -> 4, the crowd's Bistro's moving nodes 18,400 -> 0.
 Cost and gain (trace p50, main -> this): the crowd 7.38 -> 7.37 ms and its commit 4.46 -> 3.61 ms (the 18,400
