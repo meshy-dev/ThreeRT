@@ -536,9 +536,15 @@ fn the_light_list_holds_its_triangles() {
     ];
     for (what, edit) in &edits {
         let before = live.sc.tables.emitter_tris.len();
+        let added = live.sc.tables.retained.instance(16).map(|i| i.instance);
         edit(&mut w);
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         list_is_its_triangles(what, &live);
+        // (An instance that is gone lights nothing: its run of the list has no weight.)
+        if live.sc.tables.retained.instance(16).is_none() {
+            let left: Vec<f32> = live.sc.tables.emitter_tris.iter().filter(|e| Some(e.inst) == added).map(|e| e.area).collect();
+            assert!(!left.is_empty() && left.iter().all(|a| *a == 0.0), "{what}: the removed instance's emitters keep no weight ({left:?})");
+        }
         // (A mesh given other triangles takes its entries back; the other edits that add emitters make new ones.)
         let grew = live.sc.tables.emitter_tris.len() > before;
         assert_eq!(grew, matches!(*what, "an emitting mesh added" | "a material starts emitting"), "{what}: the list's length");

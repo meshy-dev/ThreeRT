@@ -2657,6 +2657,24 @@ within their own spread, the two light-sampled particle tests in their last bits
 other code); Bistro and the crowd within main's own run-to-run difference. Next: emitters on instances, their runs
 filled by the same pass through the instance's matrix.
 
+**Emitters on instances: a mesh of its own (2026-11-17, scene step D, third part).** A mesh with its own BLAS
+whose material only emits was a case apart: its triangles written in world space at an identity placement, never
+shared, rebuilt to move. It is a mesh as any other now: in model space, shared by the objects of its geometry and
+material, placed by its instance's matrix, moved by the instance when a body drives it. The light list has a run
+an instance (`Instance::emitters`: its first, carried in its record; the mesh's triangles are numbered in their
+attributes, `InstMesh::emitters`), each emitter with its triangle in world space and the instance that places it
+(`GpuEmitterTri::inst`, where the object was): a light sample still reads no matrix, and takes its attributes
+through the instance as a hit does (the object, the texture LOD's offset). A ray that hits an emitting triangle
+finds its emitter at the instance's first plus the triangle's number. An instance that moves has its run filled by
+the pass through its matrix. The edits in place work as before (a mesh added, given other triangles, removed: the
+instance's run reused or left at no weight). Under software traversal a unit's two flags share a word, and the
+word freed is every instance's first emitter. Pictures: the tests with such a mesh render other samples (13 of
+the suite's outputs differ from before, sums within 1e-4, every verdict as before); the voxel night level, whose
+192 lamps are instances of shared meshes now, reads the same to 0.15 % over a 4 x 4 grid, with 0.4 MB less BLAS; the
+voxel level's destruction bench runs as before (no fallback, edit 0.7 ms). A new test holds the weight of a ray
+that hits an instance's emitter to its analytic value (`geometry/emitter-instance`: no test saw that entry). A
+model's and an instanced object's emitters are still flattened (the next parts).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
