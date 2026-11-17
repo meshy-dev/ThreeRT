@@ -2661,7 +2661,7 @@ filled by the same pass through the instance's matrix.
 whose material only emits was a case apart: its triangles written in world space at an identity placement, never
 shared, rebuilt to move. It is a mesh as any other now: in model space, shared by the objects of its geometry and
 material, placed by its instance's matrix, moved by the instance when a body drives it. The light list has a run
-an instance (`Instance::emitters`: its first, carried in its record; the mesh's triangles are numbered in their
+an instance (`Instance::first_emitter`: its first, carried in its record; the mesh's triangles are numbered in their
 attributes, `InstMesh::emitters`), each emitter with its triangle in world space and the instance that places it
 (`GpuEmitterTri::inst`, where the object was): a light sample still reads no matrix, and takes its attributes
 through the instance as a hit does (the object, the texture LOD's offset). A ray that hits an emitting triangle

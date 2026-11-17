@@ -420,7 +420,7 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
                 assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
             }
-            assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.emitters, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
+            assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.first_emitter, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
         }
         alive += 1;
     }

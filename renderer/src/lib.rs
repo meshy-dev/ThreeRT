@@ -694,7 +694,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         if m.emitters == 0 {
             continue;
         }
-        sc.instances[r].emitters = emitter_tris.len() as u32;
+        sc.instances[r].first_emitter = emitter_tris.len() as u32;
         if let Some(g) = sc.gpu_instances.get_mut(r) {
             g.n[2][3] = f32::from_bits(emitter_tris.len() as u32);
         }
