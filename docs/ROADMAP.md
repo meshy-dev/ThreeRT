@@ -2671,7 +2671,8 @@ instance's run reused or left at no weight). Under software traversal a unit's t
 word freed is every instance's first emitter. Pictures: the tests with such a mesh render other samples (13 of
 the suite's outputs differ from before, sums within 1e-4, every verdict as before); the voxel night level, whose
 192 lamps are instances of shared meshes now, reads the same to 0.15 % over a 4 x 4 grid, with 0.4 MB less BLAS; the
-voxel level's destruction bench runs as before (no fallback, edit 0.7 ms). A new test holds the weight of a ray
+voxel level's destruction bench runs as before (no fallback, edit 0.7 ms). No cost: the trace on Bistro 7.17 ->
+7.10 ms, the crowd 7.33 -> 7.29, the night level 4.16 -> 4.16. A new test holds the weight of a ray
 that hits an instance's emitter to its analytic value (`geometry/emitter-instance`: no test saw that entry). A
 model's and an instanced object's emitters are still flattened (the next parts).
 
