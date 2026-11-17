@@ -483,7 +483,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     if job.signals.is_some() {
         params.motion[1] = 1.0;
     }
-    let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
+    let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
     if let Some(prefix) = &job.signals {
         // The raw (undenoised) means: diffuse = color less specular and emission.
         let diffuse: Vec<f32> = frame.color.iter().zip(&frame.specular).zip(&frame.emission).flat_map(|((c, s), e)| [0, 1, 2].map(|k| (c[k] - s[k] - e[k]).max(0.0))).collect();

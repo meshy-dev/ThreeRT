@@ -442,6 +442,10 @@ impl LiveCore {
                 let blas_ts = self.profile.as_ref().map(|p| (&p.queries, n * 2 + 2));
                 g.run_particles(&self.sc.up, cam.pos.to_array(), cam.fwd.to_array(), shader_time(self.time), self.frame_dt, b.time[2], b.time[1], &mut e, pass_ts, blas_ts);
             }
+            // The particles' emitters in the light list, where the passes above placed them.
+            if let (Some(f), 0) = (&self.sc.up.fills.particles, k) {
+                g.fill_emitters(f, &mut e);
+            }
             // (The uniform tables: their sections as this frame's edits and the particle passes above left them, where
             // the kernel reads them; merged.rs.)
             if k == 0 {

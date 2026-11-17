@@ -2646,6 +2646,17 @@ difference; of the suite's 239 outputs, 26 that repeat themselves differ from ma
 3e-5). That is Metal's compiler rounding the new kernel otherwise: on Vulkan (RTX 5090) every one of the 26 is
 byte-identical to main's, natively and under software traversal.
 
+**The light list is filled on the GPU (2026-11-17, scene step D, second part).** What moves an emitter after the
+list was written is copied into it by a pass (`emitter_fill.wgsl`, what real-time engines call preparing the
+lights): a run of the list an invocation row, each emitter's rows taken again from its triangle. Two sets of runs a
+scene (`EmitterRuns`, `gpu::EmitterFills`): the emitters of the triangles the CPU reposes, filled after a commit that
+moved them, in place of the CPU's rewrite (the crowd's commit back at main's: 4.5 ms in a guarded run, 4.9 to 5.0
+with the rewrite); and the particles', filled after their passes, so the kernel reads every emitter from the list
+and its particle case is gone. Pictures: against the first part, 217 of the suite's 239 outputs byte-identical, 19
+within their own spread, the two light-sampled particle tests in their last bits (their kernel variant reads
+other code); Bistro and the crowd within main's own run-to-run difference. Next: emitters on instances, their runs
+filled by the same pass through the instance's matrix.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

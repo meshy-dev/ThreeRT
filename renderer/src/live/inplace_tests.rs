@@ -380,8 +380,8 @@ fn an_instanced_object_added_in_place_keeps_its_copies_data() {
 }
 
 /// What the kernel's light sampling reads against the triangles it stands for, on the GPU: every emitter of the list
-/// (a particle's is placed by its pass) has the light tree's path code for it, and one that is alive its triangle's
-/// rows, object and moving flag, and its triangle's attributes name it back.
+/// has the light tree's path code for it, and one that is alive its triangle's rows, object and moving flag, and its
+/// triangle's attributes name it back.
 fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let read = |b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
         let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -399,7 +399,7 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let (verts, attrs) = (read(&up.verts, 0, up.verts.size()), read(&up.attrs, 0, up.attrs.size()));
     let codes: std::collections::HashMap<u32, u32> = tables.light_tree.as_ref().map_or_else(Default::default, |t| t.order.iter().copied().zip(t.code.iter().copied()).collect());
     let mut alive = 0;
-    for (i, e) in tables.emitter_tris.iter().enumerate().filter(|(_, e)| !e.nominal) {
+    for (i, e) in tables.emitter_tris.iter().enumerate() {
         let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&list[i * size..][..size]);
         let code = codes.get(&(i as u32)).copied().unwrap_or(0) | if e.moves { crate::EMITTER_MOVES } else { 0 };
         assert_eq!(r.code, code, "{what}: emitter {i}'s path code");
@@ -416,8 +416,9 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
 }
 
 /// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
-/// moved (in the light tree's moving subtree, and without a tree), and after the edits that make emitters in place
-/// (a mesh added, given other triangles and removed, with the tree's slot for them; a material that starts emitting).
+/// moved (in the light tree's moving subtree, and without a tree), after a particle's pass has placed it, and after
+/// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
+/// them; a material that starts emitting).
 #[test]
 fn the_light_list_holds_its_triangles() {
     let presets = crate::default_presets_dir();
@@ -447,12 +448,36 @@ fn the_light_list_holds_its_triangles() {
         };
         w.take_changes();
         assert_eq!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.moving_count > 0), tree, "the mover is in the tree's moving subtree");
-        assert!(!live.sc.moving_emitters.is_empty());
+        assert_eq!(live.sc.up.fills.moved.is_some(), live.g.hwrt, "the mover's emitters are filled on the GPU");
         list_is_its_triangles("a moving emitter, as loaded", &live);
         w.set_transform(13, Vec3::new(0.1, -0.3, 0.9), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap();
         let rebuilt = live.commit(&mut w).unwrap();
         assert!(!(rebuilt && live.g.hwrt), "the mover moved in place ({:?})", live.fallback);
         list_is_its_triangles("a moving emitter, moved", &live);
+    }
+    // A light-sampled particle: collapsed as loaded, placed by its pass in the first frame.
+    let mut w = world();
+    w.set_particle_fn("spark", "fn pf_spark(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.3, 0.2, 1.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
+    w.set_object(18, "sparks".into(), None, Kind::Particles { count: 3, emitter: "spark".into(), params: vec![], material: 5, emitter_area: 0.01 }, true, false).unwrap();
+    let mut live = open(&w).unwrap();
+    if live.g.hwrt {
+        let spark = live.sc.tables.emitter_tris.iter().position(|e| e.nominal).expect("the particles are emitters");
+        let side = |c: &LiveCore| {
+            let at = c.sc.up.heap.at(Table::EmitterTris) + (spark * std::mem::size_of::<crate::GpuEmitterTri>()) as u64;
+            let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 48, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let mut e = c.g.device.create_command_encoder(&Default::default());
+            e.copy_buffer_to_buffer(&c.sc.up.heap.buffer, at, &to, 0, 48);
+            c.g.queue.submit([e.finish()]);
+            to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&to.slice(..).get_mapped_range().unwrap());
+            Vec3::from(r.e1).length()
+        };
+        list_is_its_triangles("a particle, as loaded", &live);
+        assert_eq!(side(&live), 0.0, "a particle is collapsed until its pass places it");
+        picture(&mut live, 1);
+        list_is_its_triangles("a particle, placed", &live);
+        assert!(side(&live) > 0.01, "the list has the particle where its pass placed it ({})", side(&live));
     }
     // Emitters made in place, in a scene with the tree's slot for them (one that has a mesh of its own: its geometry
     // can be edited).

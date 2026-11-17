@@ -72,6 +72,8 @@ pub struct Prepared {
     pub emitters: Vec<[f32; 4]>,
     /// The emitters' triangles as light sampling reads them, one per `emitter_tris`.
     pub gpu_emitter_tris: Vec<GpuEmitterTri>,
+    /// The runs of the list that follow their triangles after the load.
+    pub emitter_runs: EmitterRuns,
     pub env: gpu::EnvMap,
     pub env_cdf: Vec<f32>,
     pub params: gpu::Params,
@@ -161,6 +163,31 @@ impl GpuEmitterTri {
     pub fn of(e: &EmitterTri, [a, b, c]: [glam::Vec3A; 3], code: u32) -> GpuEmitterTri {
         let (e1, e2) = (b - a, c - a);
         GpuEmitterTri::new(e, &[[a.x, a.y, a.z, 0.0], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]], code)
+    }
+}
+
+/// Runs of the light list (first emitter, count) whose triangles something moves after the load; the GPU takes them
+/// again from where the triangles are (gpu.rs `EmitterFill`): the emitters of the triangles the CPU reposes, and the
+/// particles', which their passes place.
+#[derive(Default)]
+pub struct EmitterRuns {
+    pub moved: Vec<[u32; 2]>,
+    pub particles: Vec<[u32; 2]>,
+}
+
+impl EmitterRuns {
+    pub fn of(tris: &[EmitterTri]) -> EmitterRuns {
+        let runs = |which: &dyn Fn(&EmitterTri) -> bool| {
+            let mut out: Vec<[u32; 2]> = vec![];
+            for (i, _) in tris.iter().enumerate().filter(|(_, e)| which(e)) {
+                match out.last_mut() {
+                    Some(r) if r[0] + r[1] == i as u32 => r[1] += 1,
+                    _ => out.push([i as u32, 1]),
+                }
+            }
+            out
+        };
+        EmitterRuns { moved: runs(&|e| e.moves && !e.nominal), particles: runs(&|e| e.nominal) }
     }
 }
 
@@ -658,6 +685,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     for (i, e) in emitter_tris.iter().enumerate() {
         sc.attrs[e.tri as usize].x[3] = f32::from_bits(i as u32 + 1);
     }
+    let emitter_runs = EmitterRuns::of(&emitter_tris);
     let (emitters, total, _) = emitter_cdf(emitter_tris.iter().enumerate(), &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
     // The moving emitters (after the tree's in the CDF) are picked with the probability of their share of power.
     let ltree_param = light_tree.as_ref().map_or([0.0; 4], |t| [0.0, f32::from_bits(t.order.len() as u32), if total > 0.0 { ((total - t.power) / total).max(0.0) } else { 0.0 }, ltree::RIS_OFFLINE as f32]);
@@ -749,7 +777,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.

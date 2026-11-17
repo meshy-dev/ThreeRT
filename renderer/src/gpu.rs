@@ -53,6 +53,8 @@ pub struct Gpu {
     /// Binding 19 of scenes without density grids (one cell), and the grid pass's bind group layout (grid_sim.wgsl).
     no_grid_view: wgpu::TextureView,
     grid_layout: wgpu::BindGroupLayout,
+    /// The pass that fills runs of the light list from their triangles (emitter_fill.wgsl), made when first needed.
+    fill: std::sync::OnceLock<wgpu::ComputePipeline>,
     /// Hardware ray queries (Metal / Vulkan RT). Software BVH traversal otherwise.
     pub hwrt: bool,
     /// Last uploaded texture pages, reused while the scene's texture set is unchanged (live edits re-upload often).
@@ -453,6 +455,7 @@ pub struct Uploaded {
     /// The particle pass, when the scene has particle systems (hardware RT).
     pub particles: Option<ParticleGpu>,
     pub gpu_particles: Option<GpuParticlesGpu>,
+    pub fills: EmitterFills,
     /// The density grids (the atlas the kernel reads, the grid programs' pass), when the scene has any.
     pub grids: Option<GridsGpu>,
     /// Each medium's node (the media table's order).
@@ -472,6 +475,23 @@ pub struct Uploaded {
     pub env_tex: wgpu::Texture,
     /// Translucent particles' acceleration structures and pass resources (hardware RT).
     pub translucent: Option<Translucent>,
+}
+
+/// Runs of the light list the GPU takes again from their triangles (emitter_fill.wgsl; lib.rs `EmitterRuns`): the
+/// runs, the pass's bind group, and its dispatch (the runs' count, the longest's length).
+pub struct EmitterFill {
+    runs: wgpu::Buffer,
+    bg: wgpu::BindGroup,
+    count: u32,
+    longest: u32,
+}
+
+/// A scene's fills: of the emitters the CPU moves (after a commit that moved them), and of the particles' (after
+/// their passes). None where the scene has no such emitters.
+#[derive(Default)]
+pub struct EmitterFills {
+    pub moved: Option<EmitterFill>,
+    pub particles: Option<EmitterFill>,
 }
 
 /// The particle pass of a scene (shaders/particles.wgsl with its particle functions): pipeline, bind group, the
@@ -1906,7 +1926,7 @@ impl Gpu {
         } else {
             (None, None, None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
@@ -2133,7 +2153,7 @@ impl Gpu {
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
     /// bind group used by both the offline and the live kernels. `accum` holds one 80-byte Pixel per output pixel.
     #[allow(clippy::too_many_arguments)]
-    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
+    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
         // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
@@ -2572,7 +2592,12 @@ impl Gpu {
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
         // (The scene's own pipelines, made above: particles, grid programs.)
         self.save_pipeline_cache();
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
+        // (What moves emitters after the load needs hardware ray tracing: triangles reposed in place, the particle passes.)
+        let fills = match &accel {
+            Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_verts, &heap), particles: self.emitter_fill(&emitter_runs.particles, &b_verts, &heap) },
+            None => EmitterFills::default(),
+        };
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2753,6 +2778,35 @@ impl Gpu {
         if let Some((q, i)) = blas_ts {
             stamp(e, wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(i + 1), end_of_pass_write_index: None });
         }
+    }
+
+    fn emitter_fill_bind_group(&self, runs: &wgpu::Buffer, verts: &wgpu::Buffer, heap: &Heap<Table>) -> wgpu::BindGroup {
+        let entries = [buffer_entry(0, runs), buffer_entry(1, verts), wgpu::BindGroupEntry { binding: 2, resource: heap.binding(Table::EmitterTris) }];
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("emitter fill"), layout: &self.emitter_fill_pipeline().get_bind_group_layout(0), entries: &entries })
+    }
+
+    fn emitter_fill_pipeline(&self) -> &wgpu::ComputePipeline {
+        self.fill.get_or_init(|| {
+            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("emitter fill"), source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/emitter_fill.wgsl").into()) });
+            self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("emitter fill"), layout: None, module: &module, entry_point: Some("fill"), compilation_options: Default::default(), cache: self.cache() })
+        })
+    }
+
+    /// The fill of `runs` of the light list (none: no fill).
+    fn emitter_fill(&self, runs: &[[u32; 2]], verts: &wgpu::Buffer, heap: &Heap<Table>) -> Option<EmitterFill> {
+        let longest = runs.iter().map(|r| r[1]).max()?;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitter runs"), size: (runs.len() * 8) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(runs));
+        Some(EmitterFill { bg: self.emitter_fill_bind_group(&buffer, verts, heap), runs: buffer, count: runs.len() as u32, longest })
+    }
+
+    /// The runs of `f` taken again from their triangles as the encoder's earlier commands, and the writes queued
+    /// before it is submitted, leave them.
+    pub fn fill_emitters(&self, f: &EmitterFill, e: &mut wgpu::CommandEncoder) {
+        let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("emitter fill"), timestamp_writes: None });
+        pass.set_pipeline(self.emitter_fill_pipeline());
+        pass.set_bind_group(0, &f.bg, &[]);
+        pass.dispatch_workgroups(f.longest.div_ceil(64), f.count, 1);
     }
 
     /// One frame of the stateful GPU particles (gpu_particles.wgsl): each system's emissions (its rate over `dt`, and the
@@ -3195,8 +3249,11 @@ impl Gpu {
     }
 
     /// The bind groups that hold the scene's buffers again, from `up`'s as they are now (one that grew: the tables,
-    /// live/edits.rs): the kernel's, and the particle passes'.
+    /// live/edits.rs): the kernel's, the light list's fills' and the particle passes'.
     pub fn rebind_scene(&self, up: &mut Uploaded) {
+        for f in [&mut up.fills.moved, &mut up.fills.particles].into_iter().flatten() {
+            f.bg = self.emitter_fill_bind_group(&f.runs, &up.verts, &up.heap);
+        }
         up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         let Some(a) = &up.accel else { return };
         let written = ParticleTargets { verts: &up.verts, prev_verts: &up.prev_verts, blas_verts: &a.verts, heap: &up.heap, attrs: &up.attrs };
@@ -3360,10 +3417,10 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     /// Render `spp` samples. `base` holds everything except the per-dispatch sample index.
     #[allow(clippy::too_many_arguments)]
-    pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
+    pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
         let d = &self.device;
         let (w, h) = (scene.width, scene.height);
-        let up = self.upload(scene, &self.accum_buffer(w, h), tri_verts, groups, nodes, emitters, emitter_tris, light_tree, env, env_cdf, energy, timings)?;
+        let up = self.upload(scene, &self.accum_buffer(w, h), tri_verts, groups, nodes, emitters, emitter_tris, emitter_runs, light_tree, env, env_cdf, energy, timings)?;
         let pipeline = self.pipeline(&up.kernel, false);
         // Particles: placed once, at the scene time and camera.
         if up.particles.is_some() {
@@ -3390,6 +3447,12 @@ impl Gpu {
                 }
                 self.queue.submit([e.finish()]);
             }
+        }
+        // The particles' emitters, where the passes above placed them.
+        if let Some(f) = &up.fills.particles {
+            let mut e = d.create_command_encoder(&Default::default());
+            self.fill_emitters(f, &mut e);
+            self.queue.submit([e.finish()]);
         }
         // Grid programs: run from the scene's start to its time at 60 frames a second (the sources of the game's setup at
         // the first), then rendered.

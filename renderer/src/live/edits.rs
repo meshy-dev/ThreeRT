@@ -1381,26 +1381,19 @@ impl LiveCore {
         Ok(true)
     }
 
-    /// The moving emitters moved (`LoadedScene::moving_emitters`): their triangles in the list as they are now (the CPU
-    /// copy of the dynamic tail), each run of consecutive ones in one write; and the light tree's moving subtree refit
-    /// around them, its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
+    /// The emitters the CPU moves moved: their triangles in the list taken again on the GPU, from the triangles this
+    /// commit uploaded (`gpu::EmitterFills::moved`); and the light tree's moving subtree refit around them (the CPU copy
+    /// of the dynamic tail), its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
     pub(super) fn move_emitters(&mut self) {
+        if let Some(f) = &self.sc.up.fills.moved {
+            let mut e = self.g.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitter fill") });
+            self.g.fill_emitters(f, &mut e);
+            self.g.queue.submit([e.finish()]);
+        }
         let first = self.sc.dynamic.0;
         let (verts, tables) = (&self.sc.dynamic.1, &mut self.sc.tables);
         let tris = &tables.emitter_tris;
         let (q, heap) = (&self.g.queue, &self.sc.up.heap);
-        let size = std::mem::size_of::<crate::GpuEmitterTri>() as u64;
-        for run in self.sc.moving_emitters.chunk_by(|a, b| b.0 == a.0 + 1) {
-            let now: Vec<crate::GpuEmitterTri> = run
-                .iter()
-                .map(|&(i, code)| {
-                    let e = &tris[i as usize];
-                    let r = (e.tri as usize - first) * 3;
-                    crate::GpuEmitterTri::new(e, &verts[r..r + 3], code)
-                })
-                .collect();
-            heap.write(q, Table::EmitterTris, run[0].0 as u64 * size, bytemuck::cast_slice(&now));
-        }
         let Some(t) = tables.light_tree.as_mut().filter(|t| t.moving_count > 0) else { return };
         t.refit_moving(&|k| {
             let r = (tris[k].tri as usize - first) * 3;

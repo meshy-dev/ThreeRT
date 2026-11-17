@@ -186,8 +186,9 @@ fn light_group_at(i: u32) -> vec4<f32> { return table_f(P.table_first[0].w + i);
 fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
 fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i); }
 // An emitter's triangle (lib.rs `GpuEmitterTri`): in world space, the light list's own copy, so a light sample reads
-// no placement; `tri`: its triangle in the triangles' table (attributes), `obj`: its object-table index (power),
-// `code`: the light tree's path code (0: not one of the tree's), EMITTER_MOVES if it moves.
+// no placement (what moves it is copied again: emitter_fill.wgsl); `tri`: its triangle in the triangles' table
+// (attributes), `obj`: its object-table index (power), `code`: the light tree's path code (0: not one of the
+// tree's), EMITTER_MOVES if it moves.
 struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, obj: u32, e2: vec3<f32>, code: u32 };
 const EMITTER_TRI_VEC4: u32 = 3u;
 const EMITTER_MOVES: u32 = 0x80000000u;
@@ -1818,18 +1819,6 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     return c;
 }
 
-// The triangle of emitter `i`. (F_PEMIT, `placed`: a particle's is where its pass puts it each frame, in the
-// triangles' table: the list has no copy of it yet.)
-fn emitter_tri_of(i: u32, placed: bool) -> EmitterTri {
-    var em = emitter_tri_at(i);
-    if (has(F_PEMIT) && placed) {
-        em.v0 = tri_verts[em.tri * 3u].xyz;
-        em.e1 = tri_verts[em.tri * 3u + 1u].xyz;
-        em.e2 = tri_verts[em.tri * 3u + 2u].xyz;
-    }
-    return em;
-}
-
 // MIS weight of emission that a BSDF-sampled ray (pdf `pdf`) hit, against emitter sampling in `direct_light`.
 // Without sampled emitters (only material functions emit, e.g. facade windows) the BSDF ray is the only estimator.
 // It weighs by emitted power alone, as emitter sampling's MIS does with or without light LOD (sample_emitter_ris).
@@ -1840,7 +1829,7 @@ fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
     let ha = attrs[hit.tri];
     let entry = bitcast<u32>(ha.x.w);
     if (entry == 0u) { return 1.0; }
-    let em = emitter_tri_of(entry - 1u, ha.x.z != 0.0);
+    let em = emitter_tri_at(entry - 1u);
     let cr = cross(em.e1, em.e2);
     let area = 0.5 * length(cr);
     let cos_l = abs(dot(normalize(cr), d));
@@ -2142,7 +2131,6 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     var pick_b = vec2<f32>(0.0);
     var pick_ph = 0.0;
     var pick_e = vec4<f32>(0.0);
-    var pick_placed = false;
     var pick_sel = 0.0;
     for (var k = 0u; k < m; k++) {
         let dk = rng_sub(rd, k);
@@ -2153,7 +2141,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
         var b2 = bb.y;
         if (pk.p <= 0.0) { continue; }
         if (b1 + b2 > 1.0) { b1 = 1.0 - b1; b2 = 1.0 - b2; }
-        let em = emitter_tri_of(bitcast<u32>(e.x), e.w < 0.0);
+        let em = emitter_tri_at(bitcast<u32>(e.x));
         let e1 = em.e1;
         let e2 = em.e2;
         let lp = em.v0 + e1 * b1 + e2 * b2;
@@ -2180,12 +2168,11 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
             pick_b = vec2<f32>(b1, b2);
             pick_ph = pk.w / (abs(e.w) * lk) * g;
             pick_e = vec4<f32>(e.x, e.y, e.z / lk, ae);
-            pick_placed = e.w < 0.0;
             pick_sel = pk.p;
         }
     }
     if (pick_ph <= 0.0) { return r; }
-    let em = emitter_tri_of(bitcast<u32>(pick_e.x), pick_placed);
+    let em = emitter_tri_at(bitcast<u32>(pick_e.x));
     let e1 = em.e1;
     let e2 = em.e2;
     let lp = em.v0 + e1 * pick_b.x + e2 * pick_b.y;
@@ -2214,7 +2201,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let pk = emitter_draw(x, n, rd);
     let e = pk.e;
     if (pk.p <= 0.0) { return r; } // switched off (power 0)
-    let em = emitter_tri_of(bitcast<u32>(e.x), e.w < 0.0);
+    let em = emitter_tri_at(bitcast<u32>(e.x));
     let v0 = em.v0;
     let e1 = em.e1;
     let e2 = em.e2;
