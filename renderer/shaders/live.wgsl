@@ -803,6 +803,7 @@ const SPEC_TRAIL: f32 = 2.0;
 // How far from this frame's neighbourhood mean a specular history may lie, in deviations of the neighbourhood
 // (`stemporal`'s variance clipping).
 const SPEC_CLIP: f32 = 2.0;
+const SPEC_CLIP_REL: f32 = 0.5;
 
 // Specular temporal accumulation on the traced grid (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the
 // surface history and the reflection-hit one (reprojected through the mirror image of what it shows); the one closer to
@@ -895,7 +896,10 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     // reflection of a thrown orb stayed on the floor along its whole path for the length of the history.
     // While the scene's lighting changes (`mode.z`: something moved, a light switched), as the diffuse anti-lag: a
     // settled scene has nothing to find, and clipping it cuts what the history averaged out of one sample a pixel.
-    let slack = SPEC_CLIP * ssd + vec3<f32>(0.02 * abs(smean.x) + 0.002 / exposure_scale(), 0.0, 0.0);
+    // (Plus SPEC_CLIP_REL of the neighbourhood's luminance: one sample a pixel is heavy-tailed, most of the nine are
+    // dark next to a rare bright one, and a deviation's box alone pulled a right history down and let the next bright
+    // sample flash, a square at a time. What moved past is many times brighter than what is left.)
+    let slack = SPEC_CLIP * ssd + vec3<f32>(SPEC_CLIP_REL * abs(smean.x) + 0.002 / exposure_scale(), 0.0, 0.0);
     var hy = mix(yv, ys, surf);
     if (L.mode.z != 0u && mn >= 3.0) { hy = clamp(hy, smean - slack, smean + slack); }
     // The history's length is the pixel's own (until 2026-11-13 every pixel's was held to 2 .. 12 frames by roughness

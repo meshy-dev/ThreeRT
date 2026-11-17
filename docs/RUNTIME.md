@@ -1600,6 +1600,31 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
+## Moving objects in the live view
+
+The live view's histories (the irradiance and specular ones on the traced grid, the upscaler's colour on the output
+grid) follow a moving object by its motion vectors (`motion_in`), and three rules keep it from leaving copies of
+itself where it was (`live.wgsl`; measured by `node tools/bench-object-ghosting.ts`: a dragged device, a light thrown
+over a polished floor, the camera still):
+
+- **What it uncovers starts again.** The g-buffer says whether a surface is a moving object's (`GB.moves`). A sample
+  whose own surface stands still and lies behind the moving surface that was nearest there a frame ago is uncovered,
+  and its history goes (`judge`, in every output pixel its verdict reaches: `upscale`). Before, the band behind a
+  moving edge kept a line of the object's colour a frame (the nearest of the nine samples there is still the object,
+  so the band reprojected with it, and the clamp in motion kept its colour).
+- **Locks go with it.** A thin feature's lock on a moving surface is not carried by the two cameras (`lock_carry`),
+  and a carried lock that lands on a moving surface is dropped (`track`): a moving screen's text left copies of
+  itself for a jitter sequence.
+- **Reflections follow what moves past them.** While the lighting is live (a moving object sets it), a still
+  surface's specular history is clipped to this frame's neighbourhood (`SPEC_CLIP` deviations plus `SPEC_CLIP_REL`
+  of its luminance): a light carried past a polished floor left its reflection along its path.
+
+![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
+
+Not covered: a fast light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
+history and its anti-lag), and the band just uncovered starts from this frame's samples (more aliased for a frame or
+two, as any disocclusion).
+
 ## Glass
 
 A transmissive material (`transmission`, `ior`, `roughness`) is a rough dielectric interface, Walter et al. 2007
