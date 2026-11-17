@@ -2676,6 +2676,30 @@ voxel level's destruction bench runs as before (no fallback, edit 0.7 ms). No co
 that hits an instance's emitter to its analytic value (`geometry/emitter-instance`: no test saw that entry). A
 model's and an instanced object's emitters are still flattened (the next parts).
 
+**Emitters on instances: a model's (2026-11-17, scene step D, fourth part).** A model's triangles that only emit
+were flattened at every placement (world space, for light sampling: the reason #147 took away), and a movable or
+posed model re-transformed them on the CPU every frame. They stay in the model's mesh now, as every real-time
+engine has them: a static placement's, a movable model's (the instance moves), and a rigid posed model's moving
+nodes' (`repose_rigid` fills their runs of the light list through the pass). The mesh's emitting triangles are
+numbered among its triangles (`number_emitters`), an instance's are a run of the list. What the build flattens of a
+model is its glass and its material functions, and one case of emitters: a triangle that emits with a cutout on
+exactly its vertices goes with the cutout (Zero Day has one such pair: kept in one mesh the decal's pass-through
+stepped the ray past the emitter, a region 3 % dark; the unbiased check on Zero Day is the guard, and fails
+without the rule). A mesh that deforms (a shared pose, a skinned model) still flattens its emitters; a model with
+emitters added in place still rebuilds, as before. Flattened a placement: Tokyo 1,800,744 -> 0 triangles, Bistro
+20,638 -> 0, Zero Day 10,105 -> 4, the crowd's Bistro's moving nodes 18,400 -> 0.
+Cost and gain (trace p50, main -> this): the crowd 7.38 -> 7.37 ms and its commit 4.46 -> 3.61 ms (the 18,400
+triangles are no longer re-transformed, uploaded and built again each frame); Bistro 7.20 -> 7.13; Zero Day 7.68
+-> 7.71; **Tokyo 4.47 -> 4.60 (+2.9 %)**. Tokyo's cost is the emitting triangles' being instanced: with every model
+flattened (`THREERT_INSTANCING=0`) both builds read 4.44 to 4.48, and instancing the other 21.3 M triangles costs
+nothing. Its mechanism is not established (ruled out, each by a build: the record's reads, the attributes' and
+the list's order, `emit_mis`'s descents, the shadow rays' ends; it grows with the paths' depth). Taken on the
+user's word (2026-11-17): the mesh whole in its instance is the standard structure, and what direct-light
+resampling and moving a still model in place need; the way back, if wanted, is merging still geometry whole, as
+its own measured step, not taking emitters out of their meshes again.
+Tests: `geometry/emitter-model` (a model's emitters, analytic; tests/render/data/panel.glb), the readback test
+with a model still, movable and posed. Still flattened: an instanced object's copies (the next part).
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the
