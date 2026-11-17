@@ -19,6 +19,68 @@ pub struct Packed {
     pub layers: Vec<Vec<image::RgbaImage>>,
     /// Per texture two vec4: (u0, v0, du, dv) of the content rect in page UV; (layer, wrap, width, height).
     pub info: Vec<[f32; 4]>,
+    /// Where each stream texture (`stream_key`) sits, by name: its pixels are replaced in place (`patch`).
+    pub streams: Vec<(String, Place)>,
+}
+
+/// A texture's padded rect in the pages (aligned to `ALIGN`, so its mips are its own) and its content's size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub layer: u32,
+    pub x: u32,
+    pub y: u32,
+    pub padded: (u32, u32),
+    /// The content's size in the page: the texture's, or smaller (`pack` shrinks some).
+    pub size: (u32, u32),
+    pub wrap: bool,
+}
+
+/// The key of a stream texture (scene.rs `texture_image`): its name and size, not its pixels.
+pub fn stream_key(name: &str, width: u32, height: u32) -> String {
+    format!("stream:{name}|{width}x{height}")
+}
+
+/// The stream a texture key names, if it is one.
+pub fn stream_name(key: &str) -> Option<&str> {
+    key.strip_prefix("stream:")?.split('|').next()
+}
+
+/// One level of a patch: the rect to write in a page's level, and its RGBA8 texels.
+pub struct PatchLevel {
+    pub level: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// New pixels for a placed texture: its padded rect (the content, the gutters filled as `pack` fills them) at every
+/// level. `img` is resized to the place's content size when it has another.
+pub fn patch(place: &Place, img: &image::RgbaImage) -> Vec<PatchLevel> {
+    let resized;
+    let img = if img.dimensions() == place.size {
+        img
+    } else {
+        resized = resize_triangle(img, place.size.0, place.size.1);
+        &resized
+    };
+    let (w, h) = (img.width() as i64, img.height() as i64);
+    let (pw, ph) = place.padded;
+    let fold = |v: i64, n: i64| if place.wrap { v.rem_euclid(n) } else { v.clamp(0, n - 1) } as usize;
+    let src: &[u32] = bytemuck::cast_slice(img.as_raw());
+    let mut level0 = vec![0u32; (pw * ph) as usize];
+    let g = GUTTER as i64;
+    let cols: Vec<usize> = (0..pw as i64).map(|x| fold(x - g, w)).collect();
+    level0.par_chunks_mut(pw as usize).enumerate().for_each(|(row, dst)| {
+        let sy = fold(row as i64 - g, h);
+        let src_row = &src[sy * w as usize..(sy + 1) * w as usize];
+        for (o, &sx) in dst.iter_mut().zip(&cols) {
+            *o = src_row[sx];
+        }
+    });
+    let chain = mip_chain(image::RgbaImage::from_raw(pw, ph, bytemuck::cast_slice(&level0).to_vec()).unwrap());
+    chain.into_iter().enumerate().map(|(l, i)| PatchLevel { level: l as u32, x: place.x >> l, y: place.y >> l, width: i.width(), height: i.height(), rgba: i.into_raw() }).collect()
 }
 
 fn round_up(v: u32) -> u32 {
@@ -28,7 +90,7 @@ fn round_up(v: u32) -> u32 {
 pub fn pack(textures: &[Texture]) -> Packed {
     if textures.is_empty() {
         let img = image::RgbaImage::from_pixel(ALIGN, ALIGN, image::Rgba([255, 255, 255, 255]));
-        return Packed { side: ALIGN, layers: vec![mip_chain(img)], info: vec![[0.0; 4], [0.0; 4]] };
+        return Packed { side: ALIGN, layers: vec![mip_chain(img)], info: vec![[0.0; 4], [0.0; 4]], streams: vec![] };
     }
     // Power-of-two textures >= 512 give up 2 x GUTTER texels so the padded rect stays a power of two and four
     // 2048s (or sixteen 1024s) fill a page exactly; anything else keeps its size and is padded.
@@ -119,7 +181,15 @@ pub fn pack(textures: &[Texture]) -> Packed {
             image::RgbaImage::from_raw(side, side, bytemuck::cast_slice(&page).to_vec()).unwrap()
         })
         .collect();
-    Packed { side, layers: pages.into_par_iter().map(mip_chain).collect(), info }
+    let streams = textures
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let (layer, x, y) = place[i];
+            Some((stream_name(&t.key)?.to_string(), Place { layer, x, y, padded: padded[i], size: src[i].dimensions(), wrap: t.wrap }))
+        })
+        .collect();
+    Packed { side, layers: pages.into_par_iter().map(mip_chain).collect(), info, streams }
 }
 
 /// 2x2 box-filtered chain (sRGB-encoded texels are averaged as stored, like most engines' default mip gen).
@@ -246,6 +316,36 @@ mod tests {
             let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba([rnd(), rnd(), rnd(), rnd()]));
             let want = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
             assert!(resize_triangle(&img, nw, nh) == want, "{w}x{h} -> {nw}x{nh}");
+        }
+    }
+
+    /// A stream's patch is what `pack` would have put there for the same pixels: every level of its padded rect.
+    #[test]
+    fn a_patch_is_the_pages_texels() {
+        let other = tex(300, 200, true, |x, y| [(x % 251) as u8, (y % 241) as u8, 9, 255]);
+        let stream = |f: fn(u32, u32) -> [u8; 4]| {
+            let mut t = tex(640, 360, false, f);
+            t.key = format!("{}|true|false", stream_key("screen", 640, 360));
+            t
+        };
+        let first = pack(&[other, stream(|_, _| [0, 0, 0, 255])]);
+        let picture: fn(u32, u32) -> [u8; 4] = |x, y| [(x % 256) as u8, (y % 256) as u8, ((x * 7 + y * 3) % 256) as u8, 255];
+        let want = pack(&[tex(300, 200, true, |x, y| [(x % 251) as u8, (y % 241) as u8, 9, 255]), stream(picture)]);
+        assert_eq!(first.streams.len(), 1);
+        let (name, place) = &first.streams[0];
+        assert_eq!(name, "screen");
+        assert_eq!(*place, want.streams[0].1);
+        assert_eq!((place.x % ALIGN, place.y % ALIGN, place.padded.0 % ALIGN, place.padded.1 % ALIGN), (0, 0, 0, 0));
+        let levels = patch(place, &stream(picture).rgba);
+        assert_eq!(levels.len() as u32, MIPS);
+        for l in &levels {
+            let page = &want.layers[place.layer as usize][l.level as usize];
+            for y in 0..l.height {
+                for x in 0..l.width {
+                    let o = ((y * l.width + x) * 4) as usize;
+                    assert_eq!(&l.rgba[o..o + 4], &page.get_pixel(l.x + x, l.y + y).0, "level {} at {x},{y}", l.level);
+                }
+            }
         }
     }
 

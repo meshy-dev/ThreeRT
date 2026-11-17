@@ -10,7 +10,7 @@
 import {
   AmbientLight, compatNote, DirectionalLight, Fog, FogExp2, GLTFModel, HDRIEnvironment, HemisphereLight, InstancedMesh, Light, MeshBasicMaterial, MaterialFunction, Mesh, MeshPhysicalMaterial, type MeshStandardMaterial, Object3D,
   type ParticleBinding, type ParticleFunction, Particles, GpuParticles, type ParticleProgram, type ParticleProgramBinding, type VolumeBinding, type VolumeFunction, VolumeMesh, type DensityGrid, type GridProgram, type GridProgramBinding, ProceduralMesh, ProceduralGeometry,
-  DataTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
+  DataTexture, StreamTexture, PerspectiveCamera, PointLight, RectAreaLight, Scene, SkyAtmosphere, SkyColor, SkyGradient, SpotLight, Texture, trackChanges, vec3, takePhysicsCommands,
   bindBody, unbindBody, usePhysicsEngine, physicsStepped, physicsBodies, Joint, getEngineBodies,
   type SceneChanges, type ShaderBinding, type SwayDesc, type PhysicsDesc, type BoundBody,
 } from "./core.ts";
@@ -145,6 +145,8 @@ export interface TextureDesc {
   uri?: string;
   /** The bytes are RGBA8 pixels of this size (DataTexture), not an encoded image. */
   size?: Vec2;
+  /** The app replaces the pixels while the scene runs, under this name (StreamTexture). */
+  stream?: string;
   srgb: boolean;
   wrap: boolean;
   repeat: Vec2;
@@ -1134,7 +1136,7 @@ export class SceneBinding {
       this.textures.set(t, id);
       t.needsUpdate = false;
       const raw = t instanceof DataTexture;
-      const desc: TextureDesc = { ...(raw || t.data ? {} : { uri: t.uri }), ...(raw ? { size: [t.width, t.height] as Vec2 } : {}), srgb: t.colorSpace === "srgb", wrap: t.wrap !== "clamp", repeat: [...t.repeat], offset: [...t.offset] };
+      const desc: TextureDesc = { ...(raw || t.data ? {} : { uri: t.uri }), ...(raw ? { size: [t.width, t.height] as Vec2 } : {}), ...(t instanceof StreamTexture ? { stream: t.stream } : {}), srgb: t.colorSpace === "srgb", wrap: t.wrap !== "clamp", repeat: [...t.repeat], offset: [...t.offset] };
       this.engine.texture(id, desc, raw ? t.pixels : (t.data ?? null));
     }
     return id;

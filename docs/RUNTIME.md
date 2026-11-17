@@ -779,6 +779,38 @@ threert-render play game.js --assets games/openstrike \
   (picked a folder, read a model from it, converted it across frames, stored it, shown from the store; a second run
   shows it from the store without asking).
 
+## Stream textures
+
+A texture whose pixels the app replaces while the scene runs: a screen in the scene that shows what a program
+draws, a camera, a video. The scene describes it once, by name and size:
+
+```ts
+import { MeshStandardMaterial, StreamTexture } from "@threert/scene";
+
+const picture = new StreamTexture("screen", 640, 360);          // black until the first picture arrives
+const panel = new MeshStandardMaterial({ color: 0x000000, emissive: 0xffffff, emissiveMap: picture, emissiveIntensity: 300 });
+```
+
+and the app that embeds the engine hands over pictures by that name:
+
+```rust
+core.write_stream("screen", 640, 360, &rgba)?;                  // LiveCore, before the frame's `render`
+```
+
+- **Nothing is rebuilt.** A stream's identity in the texture pages is its name and size, not its pixels
+  (`texpack::stream_key`), so `texpack::set_key` does not change with a picture. `Gpu::write_stream` writes the
+  texture's padded rect (its content, its gutters as `pack` fills them, every mip level: `texpack::patch`) into
+  its place with `queue.write_texture`. A 640 x 360 picture is about 1.4 MB of texels a frame.
+- **The last picture is kept** (`Gpu.streams`): pages that are packed again for another texture set show it, not
+  the picture the scene was described with.
+- **A size other than the texture's** is resized to it (the packer shrinks a power-of-two texture of 512 or more
+  by its gutters).
+- **For a picture that changes every frame, emit it from a material function** (docs/MATERIAL_FUNCTIONS.md):
+  emission from a function keeps the live view's short history, so the screen shows this frame's picture and
+  not a blend of the last sixteen.
+- The script side has no call for it: pictures come from the app (`write_stream`), not through the script
+  runtime. A script's own `DataTexture` with `needsUpdate` still rebuilds, as before.
+
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
 Decided by the user on 2026-11-10, with the measurements below.

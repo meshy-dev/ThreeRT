@@ -144,7 +144,11 @@ pub fn texture(w: &mut World, id: u32, j: &Value, data: Option<&[u8]>) -> Result
             if bytes.len() != width as usize * height as usize * 4 {
                 return Err(Error::Type(format!("engine.texture: {} bytes are not {width}x{height} RGBA8 pixels", bytes.len())));
             }
-            TextureSource::Pixels { width, height, rgba: Arc::new(bytes.to_vec()) }
+            match j["stream"].as_str() {
+                Some(name) if !name.is_empty() && name.len() <= 64 && !name.contains('|') => TextureSource::Stream { name: name.to_string(), width, height, rgba: Arc::new(bytes.to_vec()) },
+                Some(name) => return Err(Error::Type(format!("engine.texture: a stream's name is 1 to 64 characters without '|', not {name:?}"))),
+                None => TextureSource::Pixels { width, height, rgba: Arc::new(bytes.to_vec()) },
+            }
         }
         (Some(bytes), _) => TextureSource::Encoded(Arc::new(bytes.to_vec())),
         (None, Some(uri)) => TextureSource::File(uri.to_string()),

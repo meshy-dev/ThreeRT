@@ -7,6 +7,17 @@ use anyhow::{anyhow, Result};
 use web_time::Instant;
 use wgpu::util::DeviceExt;
 
+/// The uploaded texture pages of a texture set (texpack.rs).
+struct Pages {
+    /// `texpack::set_key` of the set.
+    key: u64,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    info: std::sync::Arc<Vec<[f32; 4]>>,
+    /// Stream textures by name: where their pixels go (`Gpu::write_stream`).
+    streams: Vec<(String, crate::texpack::Place)>,
+}
+
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -56,7 +67,9 @@ pub struct Gpu {
     /// Hardware ray queries (Metal / Vulkan RT). Software BVH traversal otherwise.
     pub hwrt: bool,
     /// Last uploaded texture pages, reused while the scene's texture set is unchanged (live edits re-upload often).
-    pages: std::sync::Mutex<Option<(u64, wgpu::TextureView, std::sync::Arc<Vec<[f32; 4]>>)>>,
+    pages: std::sync::Mutex<Option<Pages>>,
+    /// The last picture of each stream texture (`write_stream`), kept for pages that are packed again.
+    streams: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>>,
     /// The translucency pass (hardware RT): group 2's layout (translucent.wgsl), the kernel layout with it, and its
     /// pipelines (`translucent`, `volume_train`) by the kernel's variant key.
     tl_layout: Option<wgpu::BindGroupLayout>,
@@ -1906,7 +1919,7 @@ impl Gpu {
         } else {
             (None, None, None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).
@@ -2094,9 +2107,9 @@ impl Gpu {
     fn texture_pages(&self, scene: &Scene, timings: &mut Vec<(String, f64)>) -> (wgpu::TextureView, std::sync::Arc<Vec<[f32; 4]>>) {
         let key = crate::texpack::set_key(&scene.textures);
         let mut cache = self.pages.lock().unwrap();
-        if let Some((k, view, info)) = cache.as_ref() {
-            if *k == key {
-                return (view.clone(), info.clone());
+        if let Some(p) = cache.as_ref() {
+            if p.key == key {
+                return (p.view.clone(), p.info.clone());
             }
         }
         let t = Instant::now();
@@ -2125,9 +2138,46 @@ impl Gpu {
         }
         let view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let info = std::sync::Arc::new(packed.info);
+        // Streams show their last picture, not the one the scene was described with.
+        let last = self.streams.lock().unwrap();
+        for (name, place) in &packed.streams {
+            if let Some(img) = last.get(name) {
+                self.write_place(&tex, place, img);
+            }
+        }
         timings.push(("texture_pages_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
-        *cache = Some((key, view.clone(), info.clone()));
+        *cache = Some(Pages { key, texture: tex, view: view.clone(), info: info.clone(), streams: packed.streams });
         (view, info)
+    }
+
+    fn write_place(&self, pages: &wgpu::Texture, place: &crate::texpack::Place, img: &image::RgbaImage) {
+        for l in crate::texpack::patch(place, img) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: pages, mip_level: l.level, origin: wgpu::Origin3d { x: l.x, y: l.y, z: place.layer }, aspect: wgpu::TextureAspect::All },
+                &l.rgba,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(l.width * 4), rows_per_image: Some(l.height) },
+                wgpu::Extent3d { width: l.width, height: l.height, depth_or_array_layers: 1 },
+            );
+        }
+    }
+
+    /// New pixels for the stream texture `name` (world.rs `TextureSource::Stream`): written into its place in the
+    /// texture pages, every mip level, before the next frame's passes. Nothing of the scene is rebuilt. True when the
+    /// uploaded scene has the stream; the picture is kept either way, for the pages a later scene packs.
+    pub fn write_stream(&self, name: &str, width: u32, height: u32, rgba: &[u8]) -> Result<bool> {
+        let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| anyhow::anyhow!("stream {name}: {} bytes are not {width}x{height} RGBA8 pixels", rgba.len()))?;
+        let img = std::sync::Arc::new(img);
+        self.streams.lock().unwrap().insert(name.to_string(), img.clone());
+        let cache = self.pages.lock().unwrap();
+        let Some(pages) = cache.as_ref() else { return Ok(false) };
+        let mut found = false;
+        for (n, place) in &pages.streams {
+            if n == name {
+                self.write_place(&pages.texture, place, &img);
+                found = true;
+            }
+        }
+        Ok(found)
     }
 
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
