@@ -112,7 +112,7 @@ pub fn emitter_tri(k: usize, tri_verts: &[[f32; 4]], a: &scene::GpuTriAttr, mate
     }
     let c = v(0) + (e1 + e2) / 3.0;
     let moves = tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0;
-    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal, in_tree: false })
+    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal, in_tree: false, inst: NO_INST })
 }
 
 /// An emissive triangle of the emitter CDF: triangle (traversal order), material, object, area.
@@ -131,7 +131,13 @@ pub struct EmitterTri {
     pub nominal: bool,
     /// One of the light tree's (`ltree`): its CDF entry is in the tree's range, at the start of the CDF.
     pub in_tree: bool,
+    /// The instance that places its triangle (its record; the triangle is the mesh's, in model space), or `NO_INST`:
+    /// a triangle in world space.
+    pub inst: u32,
 }
+
+/// No instance (pathtrace.wgsl `NO_INST`).
+pub const NO_INST: u32 = u32::MAX;
 
 /// `GpuEmitterTri::code`: the emitter moves (`EmitterTri::moves`). Path codes are below it.
 pub const EMITTER_MOVES: u32 = 1 << 31;
@@ -139,15 +145,15 @@ const _: () = assert!((ltree::PATH_BITS + 2) << ltree::PATH_BITS <= EMITTER_MOVE
 
 /// An emitter's triangle as the kernel's light sampling reads it (pathtrace.wgsl `EmitterTri`; `Table::EmitterTris`,
 /// entry i for `emitter_tris[i]`): in world space, the light list's own copy, so a sample reads no placement. v0, e1,
-/// e2 as the triangles' table has them; its triangle there (attributes); its object-table index (power); the light
-/// tree's path code (0: not one of the tree's) with `EMITTER_MOVES`.
+/// e2 in world space; its triangle in the triangles' table (attributes); the instance that places it (`NO_INST`: the
+/// triangle is in world space there too); the light tree's path code (0: not one of the tree's) with `EMITTER_MOVES`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuEmitterTri {
     pub v0: [f32; 3],
     pub tri: u32,
     pub e1: [f32; 3],
-    pub obj: u32,
+    pub inst: u32,
     pub e2: [f32; 3],
     pub code: u32,
 }
@@ -156,7 +162,7 @@ impl GpuEmitterTri {
     /// `e`'s, from its triangle's rows (v0, e1, e2: `Prepared::tri_verts`), with path code `code`.
     pub fn new(e: &EmitterTri, rows: &[[f32; 4]], code: u32) -> GpuEmitterTri {
         let v = |r: usize| [rows[r][0], rows[r][1], rows[r][2]];
-        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), obj: e.obj, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 } }
+        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 } }
     }
 
     /// As `new`, from its vertices.
@@ -1272,7 +1278,7 @@ mod light_lod_tests {
         // the one a load with all of them on builds: the plain build's, its powers summed bottom-up.
         let mats = [scene::GpuMaterial { emissive: [1.0, 1.0, 1.0, 0.0], ..Default::default() }];
         let tris: Vec<EmitterTri> = (0..600u32)
-            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false })
+            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: NO_INST })
             .collect();
         let verts: Vec<[f32; 4]> = (0..600).flat_map(|i| [[2.0 * i as f32, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]).collect();
         let (off, on) = ([[0.0, 0.0, 0.0, 1.0], [0.0; 4]], [[0.0, 0.0, 0.0, 1.0]; 2]);
@@ -1304,7 +1310,7 @@ mod light_lod_tests {
         let mut unit = || (rnd() >> 8) as f32 / (1 << 24) as f32;
         let mats: Vec<scene::GpuMaterial> = (0..4).map(|k| scene::GpuMaterial { emissive: [k as f32 * 3.0, k as f32, 0.5 * k as f32, 0.0], ..Default::default() }).collect();
         let tris: Vec<EmitterTri> = (0..3000)
-            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false })
+            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false, inst: NO_INST })
             .collect();
         let (t, total, _) = emitter_cdf(&tris, &emitter_order(&tris, None), &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
         let n = tris.len() as u32;

@@ -296,17 +296,21 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
     Ok(nodes)
 }
 
-/// A unit's record: the instance's (`scene::Instance::gpu`), with, in the three words the normal rows leave unused
-/// (trace_units.wgsl reads them as bits): its mesh tree's root; whether it casts shadows; whether it is placed by a
-/// translation alone (or not moved at all). The last is read off the record's own normal rows, which are then the
-/// identity's: the walk moves the ray's origin and leaves the rest of the ray as it is, which is what multiplying by
-/// these rows comes to, to the bit (the sign of a zero aside, which no comparison in the walk sees).
+/// A unit's record: the instance's (`scene::Instance::gpu`), with, in two of the words the normal rows leave unused
+/// (trace_units.wgsl reads them as bits): its mesh tree's root; and two flags, whether it casts shadows
+/// (`UNIT_SHADOW`) and whether it is placed by a translation alone, or not moved at all (`UNIT_SHIFTED`). The last is
+/// read off the record's own normal rows, which are then the identity's: the walk moves the ray's origin and leaves
+/// the rest of the ray as it is, which is what multiplying by these rows comes to, to the bit (the sign of a zero
+/// aside, which no comparison in the walk sees). (The third word is every instance's: its first emitter.)
 pub fn unit_record(mut r: GpuInstance, root: u32, cast_shadow: bool) -> GpuInstance {
     r.n[0][3] = f32::from_bits(root);
-    r.n[1][3] = f32::from_bits(cast_shadow as u32);
-    r.n[2][3] = f32::from_bits(translation_alone(&r) as u32);
+    r.n[1][3] = f32::from_bits(if cast_shadow { UNIT_SHADOW } else { 0 } | if translation_alone(&r) { UNIT_SHIFTED } else { 0 });
     r
 }
+
+/// The flags of a unit's record (`unit_record`; trace_units.wgsl).
+pub const UNIT_SHADOW: u32 = 1;
+pub const UNIT_SHIFTED: u32 = 2;
 
 /// Whether a record's normal rows are the identity's.
 pub fn translation_alone(r: &GpuInstance) -> bool {
@@ -1081,10 +1085,10 @@ pub(crate) mod cpu {
                     }
                 } else if rec == NO_INST {
                     let u = self.record(n.left_or_first)?;
-                    if mode != TRACE_SHADOW || u.n[1][3].to_bits() != 0 {
+                    if mode != TRACE_SHADOW || u.n[1][3].to_bits() & UNIT_SHADOW != 0 {
                         rec = n.left_or_first;
                         ro = o - Vec3A::new(u.m[0][3], u.m[1][3], u.m[2][3]);
-                        if u.n[2][3].to_bits() == 0 {
+                        if u.n[1][3].to_bits() & UNIT_SHIFTED == 0 {
                             ro = Self::proc_dir(&u, ro);
                             rd = Self::proc_dir(&u, d);
                             rinv = Self::inv(rd);
@@ -1176,10 +1180,10 @@ mod tests {
                 "continue;",
                 "} else if (rec == NO_INST) {",
                 "let u = instance_at(n.left_or_first);",
-                "if (mode != TRACE_SHADOW || bitcast<u32>(u.n1.w) != 0u) {",
+                "if (mode != TRACE_SHADOW || (bitcast<u32>(u.n1.w) & UNIT_SHADOW) != 0u) {",
                 "rec = n.left_or_first;",
                 "ro = o - vec3<f32>(u.m0.w, u.m1.w, u.m2.w);",
-                "if (bitcast<u32>(u.n2.w) == 0u) {",
+                "if ((bitcast<u32>(u.n1.w) & UNIT_SHIFTED) == 0u) {",
                 "ro = proc_dir(u, ro);",
                 "rd = proc_dir(u, d);",
                 "rinv = 1.0 / select(rd, vec3<f32>(1e-20), abs(rd) < vec3<f32>(1e-20));",
@@ -1538,7 +1542,7 @@ mod tests {
             refits += sc.kept.refits;
             changes += sc.kept.changes;
             builds += sc.kept.builds;
-            short += sc.units.iter().enumerate().filter(|(k, u)| u.is_some() && sc.instances[*k].n[2][3].to_bits() == 1).count();
+            short += sc.units.iter().enumerate().filter(|(k, u)| u.is_some() && sc.instances[*k].n[1][3].to_bits() & UNIT_SHIFTED != 0).count();
         }
         assert!(edits > 300 && unit_hits * 8 > rays, "{edits} edits, {unit_hits} of {rays} closest hits on units");
         assert!(refits > 40 && changes > 100 && builds > 100 && short > 20, "{refits} top trees kept, {changes} with the loose units' built, {builds} built over all; {short} units placed by a translation alone at the end");
@@ -1944,11 +1948,13 @@ mod tests {
         assert!(check_tree(&build_sah(&(0..1 << 12).map(|k| (Vec3A::splat(k as f32), Vec3A::splat(k as f32 + 1.0))).collect::<Vec<_>>(), 12).0, 64, |_, _| Ok(())).unwrap() <= 12);
         // The record's word for a placement by a translation alone.
         let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false }.gpu(0, 0), 9, true);
-        assert_eq!(rec(Mat4::IDENTITY).n[2][3].to_bits(), 1);
-        assert_eq!(rec(Mat4::from_translation(Vec3::new(3.0, -2.0, 0.5))).n[2][3].to_bits(), 1);
-        assert_eq!(rec(Mat4::from_rotation_y(0.3)).n[2][3].to_bits(), 0);
-        assert_eq!(rec(Mat4::from_scale(Vec3::splat(2.0))).n[2][3].to_bits(), 0);
-        assert_eq!(rec(Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))).n[2][3].to_bits(), 0, "a mirror");
-        assert_eq!((rec(Mat4::IDENTITY).n[0][3].to_bits(), rec(Mat4::IDENTITY).n[1][3].to_bits()), (9, 1));
+        let shifted = |m: Mat4| rec(m).n[1][3].to_bits() & UNIT_SHIFTED != 0;
+        assert!(shifted(Mat4::IDENTITY));
+        assert!(shifted(Mat4::from_translation(Vec3::new(3.0, -2.0, 0.5))));
+        assert!(!shifted(Mat4::from_rotation_y(0.3)));
+        assert!(!shifted(Mat4::from_scale(Vec3::splat(2.0))));
+        assert!(!shifted(Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))), "a mirror");
+        assert_eq!((rec(Mat4::IDENTITY).n[0][3].to_bits(), rec(Mat4::IDENTITY).n[1][3].to_bits() & UNIT_SHADOW), (9, 1));
+        assert_eq!(rec(Mat4::IDENTITY).n[2][3].to_bits(), 0, "the third word is not the unit's");
     }
 }

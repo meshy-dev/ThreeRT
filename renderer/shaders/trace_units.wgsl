@@ -4,12 +4,12 @@
 //
 // A unit is a model instance (`instances`, as hardware traversal's): its mesh's triangles in model space in
 // `tri_verts`, from the record's first triangle; its mesh's tree in `nodes`, from the root in the record's `n0.w`
-// (child indices count from that root, a leaf's triangles from the mesh's first). `n1.w`: the unit casts shadows.
+// (child indices count from that root, a leaf's triangles from the mesh's first). `n1.w` (bits): its flags.
 // The top tree, over the units' world boxes, starts at node `P.motion.z` (bits; child indices count from it); each of
 // its leaves is one unit, `left_or_first` its record. `P.motion.w` (bits): how many units there are. (`P.motion.y`
-// is `render --signals`'.) `n2.w` (bits): the unit is placed by a translation alone, its normal rows the identity's
-// (units.rs `unit_record`): the ray keeps its direction and only its origin moves, which is what the rows would have
-// made of it.
+// is `render --signals`'.) The flags (units.rs `unit_record`): UNIT_SHADOW, the unit casts shadows; UNIT_SHIFTED, it
+// is placed by a translation alone, its normal rows the identity's: the ray keeps its direction and only its origin
+// moves, which is what the rows would have made of it.
 //
 // `trace` walks the still scene first and calls this with its hit: the ray is already cut to it.
 //
@@ -33,6 +33,8 @@
 //
 // The root's box is tested before the walk: a ray that meets no unit reads one node, and a scene of one unit is a
 // root that is a leaf, whose record only the rays that meet its box read.
+const UNIT_SHADOW: u32 = 1u;
+const UNIT_SHIFTED: u32 = 2u;
 @if(units) var<private> stack: array<u32, 64>;
 
 @if(units) fn trace_units(o: vec3<f32>, d: vec3<f32>, inv_d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {
@@ -78,10 +80,10 @@
             // A top leaf: one unit. The ray in the unit's space (its direction not renormalised: t is the world's):
             // `proc_point`, `proc_dir`, or the origin moved alone.
             let u = instance_at(n.left_or_first);
-            if (mode != TRACE_SHADOW || bitcast<u32>(u.n1.w) != 0u) {
+            if (mode != TRACE_SHADOW || (bitcast<u32>(u.n1.w) & UNIT_SHADOW) != 0u) {
                 rec = n.left_or_first;
                 ro = o - vec3<f32>(u.m0.w, u.m1.w, u.m2.w);
-                if (bitcast<u32>(u.n2.w) == 0u) {
+                if ((bitcast<u32>(u.n1.w) & UNIT_SHIFTED) == 0u) {
                     ro = proc_dir(u, ro);
                     rd = proc_dir(u, d);
                     rinv = 1.0 / select(rd, vec3<f32>(1e-20), abs(rd) < vec3<f32>(1e-20));

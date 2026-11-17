@@ -830,7 +830,7 @@ impl LiveCore {
                     let area = 0.5 * (b - a).cross(c - a).length();
                     if area > 0.0 {
                         let centre = (a + b + c) / 3.0;
-                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false };
+                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST };
                         new.push((sc.tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, [a, b, c], 0)));
                         sc.tables.emitter_tris.push(e);
                     }
@@ -1919,7 +1919,7 @@ impl LiveCore {
                                     let [ta, tb, tc] = *tri;
                                     let area = 0.5 * (tb - ta).cross(tc - ta).length();
                                     if area > 0.0 {
-                                        let e = crate::EmitterTri { tri: (first + j) as u32, mat, obj: object as u32, area, c: ((ta + tb + tc) / 3.0).to_array(), moves: false, nominal: false, in_tree: false };
+                                        let e = crate::EmitterTri { tri: (first + j) as u32, mat, obj: object as u32, area, c: ((ta + tb + tc) / 3.0).to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST };
                                         let i = free.pop().unwrap_or(tables.emitter_tris.len());
                                         new_emitters.push((i as u32, crate::GpuEmitterTri::of(&e, *tri, 0)));
                                         match tables.emitter_tris.get_mut(i) {
