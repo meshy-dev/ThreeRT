@@ -58,9 +58,9 @@ pub struct InstMesh {
     pub hi: Vec3A,
     /// Its triangles change (a shared pose, `PoseGroup`): its BLAS is rebuilt with them.
     pub deforms: bool,
-    /// An emitting `own_blas` mesh (`emitter_mesh_tris`): its triangles in world space, its one placement at identity,
-    /// so they are light-sampled as flattened ones are (`prepare` gives them emitter entries).
-    pub emits: bool,
+    /// How many emitters an instance of it has in the light list: its triangles of an emitting material, numbered in
+    /// their attributes as they lie in the triangles' table (x.w - 1; `number_emitters`). 0: it does not emit.
+    pub emitters: u32,
 }
 
 /// Pool triangles of the deforming meshes, which the build puts first in the pool.
@@ -96,6 +96,9 @@ pub struct Instance {
     /// hidden (`instance_world`: TLAS mask 0, never flattened or picked).
     pub sub: Option<u32>,
     pub hidden: bool,
+    /// Its first emitter in the light list, if its mesh has emitters (`InstMesh::emitters`): set where the list is
+    /// made (lib.rs `prepare`, the live edits); the record carries it (n2.w), for the rays that hit an emitter of it.
+    pub emitters: u32,
 }
 
 /// Kernel record of an instance (`instances` binding): world matrix rows, normal matrix rows (inverse transpose),
@@ -117,8 +120,8 @@ impl Instance {
         let w = self.world;
         let nm = glam::Mat3::from_mat4(w).inverse().transpose();
         let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
-        let nrow = |r: usize| [nm.x_axis[r], nm.y_axis[r], nm.z_axis[r], 0.0];
-        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0), nrow(1), nrow(2)], info: [first, self.object, lod_offset(w).to_bits(), opaque], p: [row(0), row(1), row(2)] }
+        let nrow = |r: usize, w: f32| [nm.x_axis[r], nm.y_axis[r], nm.z_axis[r], w];
+        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, 0.0), nrow(2, f32::from_bits(self.emitters))], info: [first, self.object, lod_offset(w).to_bits(), opaque], p: [row(0), row(1), row(2)] }
     }
     /// Model-space triangle `t` of its mesh in world space (the same transform the flattening path applies).
     pub fn tri(&self, t: &[Vec3A; 3]) -> [Vec3A; 3] {
@@ -632,14 +635,12 @@ pub enum MeshKind {
     Pose(u32),
     /// An `own_blas` mesh, shared by the objects of its geometry and material (`Retained::own_mesh`).
     Own,
-    /// An emitting `own_blas` mesh (`InstMesh::emits`): this mesh, its own, its triangles in world space.
-    Emitter(u32),
 }
 
 impl MeshKind {
-    /// An `own_blas` mesh, an emitter's too: what a geometry edit makes and places again (a model's is the build's).
+    /// An `own_blas` mesh: what a geometry edit makes and places again (a model's is the build's).
     pub fn own(self) -> bool {
-        matches!(self, MeshKind::Own | MeshKind::Emitter(_))
+        matches!(self, MeshKind::Own)
     }
 }
 
@@ -1312,11 +1313,12 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() > 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
                 // Its own BLAS (scene code's `dynamicGeometry`, or a mesh a rigid body drives: its moves are the
                 // instance's transform, `InstanceRef::moves`): placed like a model instance, its geometry's triangles
-                // in model space in the pool, shared by the objects of the same geometry and material. Glass, emissive
-                // and function materials are flattened (as a model's would be), so they are never instanced.
+                // in model space in the pool, shared by the objects of the same geometry and material. Glass and
+                // function materials are flattened (as a model's would be), so they are never instanced. A material
+                // that only emits is: each instance has its emitters in the light list (`InstMesh::emitters`).
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
-                let class = material_class(&materials[mat as usize]);
+                let class = own_mesh_class(&materials[mat as usize]);
                 let vc = colored(g, &mut std::iter::once(material));
                 if class < 2 {
                     let mesh = match retained.own_mesh.get(&(*geometry, mat)) {
@@ -1324,7 +1326,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         None => {
                             let (t, a) = own_mesh_tris(g, mat);
                             (!t.is_empty()).then(|| {
-                                meshes.push(own_inst_mesh(&t, pool_tris.len() as u32, class));
+                                let mut im = own_inst_mesh(&t, pool_tris.len() as u32, class);
+                                if emits_only(&materials[mat as usize]) {
+                                    im.emitters = t.len() as u32;
+                                }
+                                meshes.push(im);
                                 put_colors(&mut pool_vcolors, pool_tris.len(), vc.then(|| tri_colors(g, false, None)));
                                 pool_tris.extend(t);
                                 pool_attrs.extend(a);
@@ -1341,34 +1347,12 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven }) };
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
-                    }
-                    continue;
-                }
-                // (A driven emitter's triangles cannot stay in world space: it is flattened, dynamic, below.)
-                if emits_only(&materials[mat as usize]) && !n.driven {
-                    // An emitting material: its own BLAS too, but its triangles in world space (placed at identity,
-                    // never shared), so they are light-sampled as flattened triangles are and can be edited in place
-                    // (live/edits.rs `edit_geometry`; ROADMAP § 6 step 3).
-                    let oi = (objects.len() / stride) as u32;
-                    let (t, a) = emitter_mesh_tris(g, m, mat, oi);
-                    if !t.is_empty() {
-                        let cutout = materials[mat as usize].uv2[3] > 0.0;
-                        let mut im = own_inst_mesh(&t, pool_tris.len() as u32, u32::from(cutout));
-                        im.emits = true;
-                        meshes.push(im);
-                        put_colors(&mut pool_vcolors, pool_tris.len(), vc.then(|| tri_colors(g, false, None)));
-                        pool_tris.extend(t);
-                        pool_attrs.extend(a);
-                        let mesh = meshes.len() as u32 - 1;
-                        objects.extend_from_slice(&object_row(m.transform_point3(Vec3::ZERO), n.power, im.hi - im.lo, n.custom, [1.0; 3])[..stride]);
-                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Emitter(mesh), moves: false }) };
-                        instances.push(Instance { mesh, world: Mat4::IDENTITY, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
+                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, emitters: 0 });
                     }
                     continue;
                 }
                 put_colors(&mut vcolors, tris.len(), vc.then(|| tri_colors(g, false, None)));
-                // (A driven mesh that cannot be an instance (glass, emissive, a material function): dynamic triangles,
+                // (A driven mesh that cannot be an instance (glass, a material function): dynamic triangles,
                 // re-transformed in place as any movable mesh's.)
                 append_arrays(g, m, mat, if n.driven { flags | TRI_DYNAMIC } else { flags }, None, &mut tris, &mut tri_flags, &mut attrs);
                 if n.driven {
@@ -1424,7 +1408,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let (lo, hi) = meshes[mesh as usize].placed_bounds(wm);
                             objects.extend_from_slice(&entry(i, wm, Vec3::from(hi - lo))[..stride]);
-                            instances.push(Instance { mesh, world: wm, object: object + i as u32, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: Some(i as u32), hidden });
+                            instances.push(Instance { mesh, world: wm, object: object + i as u32, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: Some(i as u32), hidden, emitters: 0 });
                         }
                     }
                     continue;
@@ -1572,9 +1556,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 ohi = ohi.max(q);
                             }
                             let count = (classed[0].len() + classed[1].len()) as u32;
-                            meshes.push(InstMesh { first: first_pool, count, opaque: classed[0].len() as u32, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emits: false });
+                            meshes.push(InstMesh { first: first_pool, count, opaque: classed[0].len() as u32, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emitters: 0 });
                             rigid.instances.push((*ni, instances.len() as u32));
-                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
+                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, emitters: 0 });
                         }
                         let nm = Mat3::from_mat4(w_n).inverse().transpose();
                         for &(k, mat) in &classed[2] {
@@ -1641,7 +1625,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 }
                                 // Other poses reach further (a stride, a swing): object bounds a quarter wider each way.
                                 let pad = (hi - lo) * 0.25;
-                                meshes.push(InstMesh { first, count: tri_order.len() as u32, opaque: classed[0].len() as u32, rest_first: 0, rest_count: 0, lo: lo - pad, hi: hi + pad, deforms: true, emits: false });
+                                meshes.push(InstMesh { first, count: tri_order.len() as u32, opaque: classed[0].len() as u32, rest_first: 0, rest_count: 0, lo: lo - pad, hi: hi + pad, deforms: true, emitters: 0 });
                                 retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![] });
                                 retained.pose_groups.len() as u32 - 1
                             });
@@ -1657,7 +1641,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false });
+                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, emitters: 0 });
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Pose(g), moves: true }) };
                         retained.pose_groups[g as usize].members.push((*id, i));
                         continue;
@@ -1713,7 +1697,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                     }
                                 }
                                 let count = (classed[0].len() + classed[1].len()) as u32;
-                                meshes.push(InstMesh { first, count, opaque: classed[0].len() as u32, rest_first, rest_count: classed[2].len() as u32, lo, hi, deforms: false, emits: false });
+                                meshes.push(InstMesh { first, count, opaque: classed[0].len() as u32, rest_first, rest_count: classed[2].len() as u32, lo, hi, deforms: false, emitters: 0 });
                                 meshes.len() as u32 - 1
                             });
                             if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
@@ -1735,7 +1719,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         retained.proxy(*id).object = Some(oi);
-                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false };
+                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, emitters: 0 };
                         // Its glass / emissive triangles as ordinary world-space ones (same object).
                         for k in im.rest_first..im.rest_first + im.rest_count {
                             tris.push(inst.tri(&rest_tris[k as usize]));
@@ -2209,22 +2193,24 @@ pub fn own_mesh_tris(g: &world::Geometry, mat: u32) -> (Vec<[Vec3A; 3]>, Vec<Gpu
     (tris, attrs)
 }
 
-/// A material that only emits (no glass, no material function): an `own_blas` mesh of it is an emitter mesh
-/// (`InstMesh::emits`) rather than flattened.
+/// A material that only emits (no glass, no material function): an `own_blas` mesh of it is a mesh as any other, its
+/// instances' emitters in the light list (`InstMesh::emitters`).
 pub fn emits_only(g: &GpuMaterial) -> bool {
     g.layer[0] <= 0.0 && g.tex1[3] == 0 && g.emissive[..3].iter().any(|e| *e > 0.0)
 }
 
-/// An emitting `own_blas` mesh's triangles in world space (`m`) and their attributes carrying its object-table index,
-/// as the pool holds them (light sampling reads them without the placement). The build and the live view's in-place
-/// edits both make them here.
-pub fn emitter_mesh_tris(g: &world::Geometry, m: Mat4, mat: u32, object: u32) -> (Vec<[Vec3A; 3]>, Vec<GpuTriAttr>) {
-    let (mut tris, mut flags, mut attrs) = (vec![], vec![], vec![]);
-    append_arrays(g, m, mat, 0, None, &mut tris, &mut flags, &mut attrs);
-    for a in &mut attrs {
-        a.x[1] = f32::from_bits(object);
+/// `material_class` for an `own_blas` mesh: one that only emits is opaque or cutout, not flattened.
+pub fn own_mesh_class(g: &GpuMaterial) -> u32 {
+    if emits_only(g) { u32::from(g.uv2[3] > 0.0) } else { material_class(g) }
+}
+
+/// Numbers an emitting mesh's triangles (their attributes' x.w = the number + 1): an instance's emitter of a
+/// triangle is its first plus the number. Returns how many.
+pub fn number_emitters(attrs: &mut [GpuTriAttr]) -> u32 {
+    for (k, a) in attrs.iter_mut().enumerate() {
+        a.x[3] = f32::from_bits(k as u32 + 1);
     }
-    (tris, attrs)
+    attrs.len() as u32
 }
 
 /// The `InstMesh` of an `own_blas` mesh's triangles at pool index `first` (class: `material_class`, 0 or 1).
@@ -2237,7 +2223,7 @@ pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32, class: u32) -> InstMesh {
         }
     }
     let count = tris.len() as u32;
-    InstMesh { first, count, opaque: if class == 0 { count } else { 0 }, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emits: false }
+    InstMesh { first, count, opaque: if class == 0 { count } else { 0 }, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emitters: 0 }
 }
 
 /// The GPU material of each triangle of a mesh with several (`Kind::Mesh::materials`, here GPU indices) by its
@@ -2418,7 +2404,7 @@ mod instance_tests {
         let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
         let w = Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::from_rotation_y(0.7) * glam::Quat::from_rotation_x(-0.3), Vec3::new(5.0, 1.0, -3.0));
         let local = tri_attr(p, n, uv, None, 7);
-        let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false };
+        let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, emitters: 0 };
         let placed = inst.tri(&[p[0].into(), p[1].into(), p[2].into()]);
         let wp = p.map(|v| w.transform_point3(v));
         let flat = tri_attr(wp, n.map(|v| (glam::Mat3::from_mat4(w).inverse().transpose() * v).normalize()), uv, None, 7);
@@ -2447,7 +2433,7 @@ mod instance_tests {
         let mats = [opaque, cutout];
         let p = [Vec3::ZERO, Vec3::X, Vec3::Y];
         let a = |m: u32| tri_attr(p, [Vec3::Z; 3], [Vec2::ZERO, Vec2::X, Vec2::Y], None, m);
-        let inst = |shadow: bool| Instance { mesh: 0, world: Mat4::IDENTITY, object: 0, cast_shadow: shadow, name: "x".into(), sub: None, hidden: false };
+        let inst = |shadow: bool| Instance { mesh: 0, world: Mat4::IDENTITY, object: 0, cast_shadow: shadow, name: "x".into(), sub: None, hidden: false, emitters: 0 };
         assert_eq!(instance_tri_flags(&inst(true), &a(0), &mats), 0);
         assert_eq!(instance_tri_flags(&inst(true), &a(1), &mats), TRI_MASKED);
         assert_eq!(instance_tri_flags(&inst(false), &a(1), &mats), TRI_MASKED | TRI_NO_SHADOW);

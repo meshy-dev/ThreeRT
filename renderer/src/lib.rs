@@ -170,11 +170,34 @@ impl GpuEmitterTri {
         let (e1, e2) = (b - a, c - a);
         GpuEmitterTri::new(e, &[[a.x, a.y, a.z, 0.0], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]], code)
     }
+
+    /// Its vertices.
+    pub fn vertices(&self) -> [[f32; 3]; 3] {
+        let at = |e: [f32; 3]| [self.v0[0] + e[0], self.v0[1] + e[1], self.v0[2] + e[2]];
+        [self.v0, at(self.e1), at(self.e2)]
+    }
+}
+
+/// The emitters of an instance of a mesh that emits (`scene::InstMesh::emitters`, `count` of them): one a numbered
+/// triangle, in the numbers' order, each with its triangle as the instance places it. `tris`: the mesh's, in model
+/// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number and material, if
+/// it emits; `record`: the instance's. A hidden instance's, and a triangle of no area: no weight (area 0).
+pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
+    let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record };
+    let mut out = vec![(dead, [glam::Vec3A::ZERO; 3]); count];
+    for (k, t) in tris.iter().enumerate() {
+        let Some((slot, mat)) = numbered(k) else { continue };
+        let w = t.map(|v| glam::Vec3A::from(inst.world.transform_point3(v.into())));
+        let emits = materials.get(mat as usize).is_some_and(|m| 0.2126 * m.emissive[0] + 0.7152 * m.emissive[1] + 0.0722 * m.emissive[2] > 0.0);
+        let area = if emits && !inst.hidden { 0.5 * (w[1] - w[0]).cross(w[2] - w[0]).length() } else { 0.0 };
+        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c: ((w[0] + w[1] + w[2]) / 3.0).to_array(), ..dead }, w);
+    }
+    out
 }
 
 /// Runs of the light list (first emitter, count) whose triangles something moves after the load; the GPU takes them
 /// again from where the triangles are (gpu.rs `EmitterFill`): the emitters of the triangles the CPU reposes, and the
-/// particles', which their passes place.
+/// particles', which their passes place. (An instance that moves has its run filled when it does: live/edits.rs.)
 #[derive(Default)]
 pub struct EmitterRuns {
     pub moved: Vec<[u32; 2]>,
@@ -193,7 +216,7 @@ impl EmitterRuns {
             }
             out
         };
-        EmitterRuns { moved: runs(&|e| e.moves && !e.nominal), particles: runs(&|e| e.nominal) }
+        EmitterRuns { moved: runs(&|e| e.moves && !e.nominal && e.inst == NO_INST), particles: runs(&|e| e.nominal) }
     }
 }
 
@@ -217,9 +240,9 @@ pub fn switchable_power(e: &EmitterTri, materials: &[scene::GpuMaterial], object
 /// weight until they switch on, instead of in the flat CDF beyond it, where the kernel draws them by power share alone
 /// (no importance at the shading point) once they are on. Then, if some are off, the node powers are refit to the
 /// objects' powers now; a scene with every emitter on at load gets the tree it had before, bit for bit.
-pub fn light_tree_of(tris: &[EmitterTri], tri_verts: &[[f32; 4]], materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize, slot: bool) -> Option<ltree::LightTree> {
+pub fn light_tree_of(tris: &[EmitterTri], verts: &dyn Fn(usize) -> [[f32; 3]; 3], materials: &[scene::GpuMaterial], objects: &[[f32; 4]], stride: usize, slot: bool) -> Option<ltree::LightTree> {
     let build = if slot { ltree::build_slotted } else { ltree::build };
-    let mut t = build(tris, tri_verts, &|i| switchable_power(&tris[i], materials, objects, stride))?;
+    let mut t = build(tris, verts, &|i| switchable_power(&tris[i], materials, objects, stride))?;
     let now: Vec<f32> = t.order.iter().map(|&i| emitter_power(&tris[i as usize], materials, objects, stride)).collect();
     if now.iter().any(|&w| !(w > 0.0)) {
         t.refit(&|k| now[k]);
@@ -649,12 +672,37 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     timings.push(("bvh_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
 
-    // Emissive triangle CDF (weight = area * luminance of the emissive factor * object power): the flattened
-    // triangles, then the emitting own_blas meshes' (world space in the pool, `InstMesh::emits`).
+    // The light list (an emitter's weight = area x luminance of the emissive factor x object power): the flattened
+    // triangles that emit, then, an instance at a time, those of a mesh that emits (`InstMesh::emitters`): a run of
+    // the list an instance, its first in its record, its triangles' numbers counted from it. Each with its triangle in
+    // world space.
     let mut emitter_tris: Vec<EmitterTri> = vec![];
-    let emitting_pool = sc.meshes.iter().filter(|m| m.emits).flat_map(|m| pool_first + m.first as usize..pool_first + (m.first + m.count) as usize);
-    for k in (0..pool_first).chain(emitting_pool) {
+    let mut gpu_emitter_tris: Vec<GpuEmitterTri> = vec![];
+    for k in 0..pool_first {
         if let Some(e) = emitter_tri(k, &tri_verts, &sc.attrs[k], &sc.materials) {
+            gpu_emitter_tris.push(GpuEmitterTri::new(&e, &tri_verts[k * 3..][..3], 0));
+            emitter_tris.push(e);
+        }
+    }
+    // (A mesh that emits: its triangles numbered as they lie here, for its instances' emitters.)
+    for m in sc.meshes.iter().filter(|m| m.emitters > 0) {
+        scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize]);
+    }
+    let moving: std::collections::HashSet<u32> = sc.retained.proxies.values().filter_map(|p| match &p.draw { scene::Draw::Instance(i) if i.moves => Some(i.instance), _ => None }).collect();
+    for r in 0..sc.instances.len() {
+        let m = sc.meshes[sc.instances[r].mesh as usize];
+        if m.emitters == 0 {
+            continue;
+        }
+        sc.instances[r].emitters = emitter_tris.len() as u32;
+        if let Some(g) = sc.gpu_instances.get_mut(r) {
+            g.n[2][3] = f32::from_bits(emitter_tris.len() as u32);
+        }
+        let (a, b) = (m.first as usize, (m.first + m.count) as usize);
+        let attrs = &sc.attrs[pool_first + a..pool_first + b];
+        let numbered = |k: usize| (attrs[k].x[3].to_bits() as usize).checked_sub(1).map(|n| (n, attrs[k].uv[3].to_bits()));
+        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, m.emitters as usize, &sc.materials, moving.contains(&(r as u32))) {
+            gpu_emitter_tris.push(GpuEmitterTri::of(&e, w, 0));
             emitter_tris.push(e);
         }
     }
@@ -681,19 +729,18 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // (Switched-off objects at full power: `switchable_power`.)
     let all_power: f32 = emitter_tris.iter().map(|e| switchable_power(e, &sc.materials, &sc.objects, sc.object_stride())).sum();
     let use_tree = std::env::var("THREERT_LTREE").map_or(true, |v| v != "0");
-    let light_tree = if use_tree { light_tree_of(&emitter_tris, &tri_verts, &sc.materials, &sc.objects, sc.object_stride(), sc.emitter_slot) } else { None };
-    // The list keeps its own order (the tree and the CDF name its emitters: `emitter_order`).
-    let mut codes = vec![0u32; emitter_tris.len()];
+    let light_tree = if use_tree { light_tree_of(&emitter_tris, &|i| gpu_emitter_tris[i].vertices(), &sc.materials, &sc.objects, sc.object_stride(), sc.emitter_slot) } else { None };
+    // The list keeps its own order (the tree and the CDF name its emitters: `emitter_order`); the tree's have their
+    // codes.
     if let Some(t) = &light_tree {
         for (k, &i) in t.order.iter().enumerate() {
             emitter_tris[i as usize].in_tree = true;
-            codes[i as usize] = t.code[k];
+            gpu_emitter_tris[i as usize].code |= t.code[k];
         }
     }
-    // The list's triangles (the tree's with their codes), and each triangle's entry + 1 in its attributes (x.w), for
-    // the rays that hit it (emit_mis).
-    let gpu_emitter_tris: Vec<GpuEmitterTri> = emitter_tris.iter().zip(&codes).map(|(e, &code)| GpuEmitterTri::new(e, &tri_verts[e.tri as usize * 3..][..3], code)).collect();
-    for (i, e) in emitter_tris.iter().enumerate() {
+    // A triangle in world space names its emitter in its attributes (x.w = the entry + 1), for the rays that hit it
+    // (emit_mis); a mesh's triangle is numbered among its mesh's, and its instance has the first.
+    for (i, e) in emitter_tris.iter().enumerate().filter(|(_, e)| e.inst == NO_INST) {
         sc.attrs[e.tri as usize].x[3] = f32::from_bits(i as u32 + 1);
     }
     let emitter_runs = EmitterRuns::of(&emitter_tris);
@@ -1282,12 +1329,13 @@ mod light_lod_tests {
             .collect();
         let verts: Vec<[f32; 4]> = (0..600).flat_map(|i| [[2.0 * i as f32, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]).collect();
         let (off, on) = ([[0.0, 0.0, 0.0, 1.0], [0.0; 4]], [[0.0, 0.0, 0.0, 1.0]; 2]);
-        assert!(ltree::build(&tris, &verts, &|i| emitter_power(&tris[i], &mats, &off, 1)).is_none());
-        let mut t = light_tree_of(&tris, &verts, &mats, &off, 1, false).unwrap();
+        let rows = |i: usize| ltree::tri_vertices(&verts[i * 3..i * 3 + 3]);
+        assert!(ltree::build(&tris, &rows, &|i| emitter_power(&tris[i], &mats, &off, 1)).is_none());
+        let mut t = light_tree_of(&tris, &rows, &mats, &off, 1, false).unwrap();
         assert_eq!(t.order.len(), 600);
         assert!((t.power - 100.0 * 0.5).abs() < 1e-3, "{}", t.power);
-        let loaded = light_tree_of(&tris, &verts, &mats, &on, 1, false).unwrap();
-        let plain = ltree::build(&tris, &verts, &|i| emitter_power(&tris[i], &mats, &on, 1)).unwrap();
+        let loaded = light_tree_of(&tris, &rows, &mats, &on, 1, false).unwrap();
+        let plain = ltree::build(&tris, &rows, &|i| emitter_power(&tris[i], &mats, &on, 1)).unwrap();
         let bits = |t: &ltree::LightTree| t.nodes.iter().map(|n| n.map(f32::to_bits)).collect::<Vec<_>>();
         assert_eq!((bits(&loaded), &loaded.order), (bits(&plain), &plain.order));
         let w: Vec<f32> = t.order.iter().map(|&i| emitter_power(&tris[i as usize], &mats, &on, 1)).collect();

@@ -380,8 +380,9 @@ fn an_instanced_object_added_in_place_keeps_its_copies_data() {
 }
 
 /// What the kernel's light sampling reads against the triangles it stands for, on the GPU: every emitter of the list
-/// has the light tree's path code for it, and one that is alive its triangle's rows, object and moving flag, and its
-/// triangle's attributes name it back.
+/// has the light tree's path code for it, and one that is alive its triangle's rows (an instance's: its mesh's
+/// triangle placed by the instance, to rounding), its instance and moving flag, and a ray that hits its triangle
+/// finds it (the attributes' number, from the instance's first).
 fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let read = |b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
         let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -408,8 +409,19 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         }
         let rows: Vec<[f32; 4]> = (0..3).map(|k| bytemuck::pod_read_unaligned(&verts[(e.tri as usize * 3 + k) * 16..][..16])).collect();
         let a: scene::GpuTriAttr = bytemuck::pod_read_unaligned(&attrs[e.tri as usize * 96..][..96]);
-        assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code), "{what}: emitter {i} of the list against its triangle {}", e.tri);
-        assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
+        if e.inst == crate::NO_INST {
+            assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code), "{what}: emitter {i} of the list against its triangle {}", e.tri);
+            assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
+        } else {
+            let (inst, record) = (&c.sc.instances[e.inst as usize], &c.sc.gpu_instances[e.inst as usize]);
+            let at = |k: usize| glam::Vec3::new(rows[k][0], rows[k][1], rows[k][2]);
+            let placed = [inst.world.transform_point3(at(0)), inst.world.transform_vector3(at(1)), inst.world.transform_vector3(at(2))];
+            assert_eq!((r.tri, r.inst, r.code), (e.tri, e.inst, code), "{what}: emitter {i}'s words");
+            for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
+                assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
+            }
+            assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.emitters, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
+        }
         alive += 1;
     }
     assert!(alive > 0, "{what}: the list has emitters");
@@ -455,6 +467,19 @@ fn the_light_list_holds_its_triangles() {
         assert!(!(rebuilt && live.g.hwrt), "the mover moved in place ({:?})", live.fallback);
         list_is_its_triangles("a moving emitter, moved", &live);
     }
+    // An emitting mesh a body drives: an instance of its mesh, whose emitters follow it.
+    let mut w = world();
+    w.set_object(13, "driven".into(), None, Kind::Mesh { geometry: 3, material: 5, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_driven(13).unwrap();
+    w.set_transform(13, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    assert!(live.sc.tables.emitter_tris.iter().any(|e| e.inst != crate::NO_INST && e.moves), "the driven mesh's emitters are its instance's");
+    list_is_its_triangles("a driven emitting mesh, as loaded", &live);
+    assert!(w.place_driven(13, Vec3::new(-0.2, 0.3, 1.0), glam::Quat::from_rotation_z(-0.4)));
+    let rebuilt = live.commit(&mut w).unwrap();
+    assert!(!(rebuilt && live.g.hwrt), "the driven mesh moved in place ({:?})", live.fallback);
+    list_is_its_triangles("a driven emitting mesh, moved", &live);
     // A light-sampled particle: collapsed as loaded, placed by its pass in the first frame.
     let mut w = world();
     w.set_particle_fn("spark", "fn pf_spark(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.3, 0.2, 1.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
@@ -516,5 +541,10 @@ fn the_light_list_holds_its_triangles() {
         // (A mesh given other triangles takes its entries back; the other edits that add emitters make new ones.)
         let grew = live.sc.tables.emitter_tris.len() > before;
         assert_eq!(grew, matches!(*what, "an emitting mesh added" | "a material starts emitting"), "{what}: the list's length");
+        // (The list agrees with the instances; that the instances are where a build puts them is the picture's to say.)
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
     }
 }

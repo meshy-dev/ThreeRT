@@ -2831,7 +2831,7 @@ impl Gpu {
     }
 
     fn emitter_fill_bind_group(&self, runs: &wgpu::Buffer, verts: &wgpu::Buffer, heap: &Heap<Table>) -> wgpu::BindGroup {
-        let entries = [buffer_entry(0, runs), buffer_entry(1, verts), wgpu::BindGroupEntry { binding: 2, resource: heap.binding(Table::EmitterTris) }];
+        let entries = [buffer_entry(0, runs), buffer_entry(1, verts), wgpu::BindGroupEntry { binding: 2, resource: heap.binding(Table::EmitterTris) }, wgpu::BindGroupEntry { binding: 3, resource: heap.binding(Table::Instances) }];
         self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("emitter fill"), layout: &self.emitter_fill_pipeline().get_bind_group_layout(0), entries: &entries })
     }
 
@@ -2848,6 +2848,14 @@ impl Gpu {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitter runs"), size: (runs.len() * 8) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(runs));
         Some(EmitterFill { bg: self.emitter_fill_bind_group(&buffer, verts, heap), runs: buffer, count: runs.len() as u32, longest })
+    }
+
+    /// `runs` of the light list taken again now (the instances an edit just moved: their records are queued).
+    pub fn fill_emitter_runs(&self, up: &Uploaded, runs: &[[u32; 2]]) {
+        let Some(f) = self.emitter_fill(runs, &up.verts, &up.heap) else { return };
+        let mut e = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitter fill") });
+        self.fill_emitters(&f, &mut e);
+        self.queue.submit([e.finish()]);
     }
 
     /// The runs of `f` taken again from their triangles as the encoder's earlier commands, and the writes queued
