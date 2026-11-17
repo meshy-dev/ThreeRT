@@ -536,13 +536,15 @@ mod tests {
     #[test]
     fn moving_emitters_get_a_subtree_that_refits() {
         let n = 400u32;
-        let (mut tris, verts): (Vec<EmitterTri>, Vec<[[f32; 4]; 3]>) = (0..n).map(|i| tri(i, i as f32 * 2.0)).unzip();
+        // (The movers are not along x in the list's order: their leaf order is another, so an entry is not its emitter.)
+        let (mut tris, verts): (Vec<EmitterTri>, Vec<[[f32; 4]; 3]>) = (0..n).map(|i| tri(i, if i < 300 { i as f32 * 2.0 } else { 600.0 + (i * 37 % 100) as f32 * 2.0 })).unzip();
         for t in tris.iter_mut().skip(300) {
             t.moves = true;
         }
         let verts: Vec<[f32; 4]> = verts.into_iter().flatten().collect();
         let mut t = build(&tris, &verts, &|_| 1.0).unwrap();
         assert_eq!((t.moving_first, t.moving_count), (300, 100));
+        assert!((300..400).any(|k| t.order[k] != k as u32), "the movers' leaf order is not the list's");
         assert!((t.power - n as f32).abs() < 1e-3);
         for k in 0..n as usize {
             let moving = tris[t.order[k] as usize].moves;
@@ -560,7 +562,7 @@ mod tests {
             let depth = (t.code[k] >> PATH_BITS) - 1;
             for l in 0..=depth {
                 let (c, r) = sphere_of(&t.nodes[node]);
-                for v in vs[k] {
+                for v in vs[t.order[k] as usize] {
                     let d = ((v[0] - c[0]).powi(2) + (v[1] - c[1]).powi(2) + (v[2] - c[2]).powi(2)).sqrt();
                     assert!(d <= r * 1.001 + 1e-3, "entry {k} outside node {node} at level {l}: {d} > {r}");
                 }
