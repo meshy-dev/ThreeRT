@@ -239,7 +239,7 @@ impl LightTree {
         self.checked();
     }
 
-    /// The moving emitters moved: their leaves' spheres from their triangles now (`verts(k)`: entry k's vertices),
+    /// The moving emitters moved: their leaves' spheres from their triangles now (`verts(e)`: emitter e's vertices),
     /// then each moving node's and the root's from its children's, bottom-up (children come after their parent). The
     /// topology, codes and powers stay.
     pub fn refit_moving(&mut self, verts: &dyn Fn(usize) -> [[f32; 3]; 3]) {
@@ -252,7 +252,7 @@ impl LightTree {
                 let (a, b) = self.ranges[i];
                 let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
                 for k in a..b {
-                    let (l, h) = bounds(&verts(k as usize));
+                    let (l, h) = bounds(&verts(self.order[k as usize] as usize));
                     for j in 0..3 {
                         lo[j] = lo[j].min(l[j]);
                         hi[j] = hi[j].max(h[j]);
@@ -551,13 +551,9 @@ mod tests {
         }
         // The moving ones move 50 m up: every leaf and its ancestors hold them there.
         let codes = t.code.clone();
-        let moved = |k: usize| {
-            let i = t.order[k] as usize * 3;
-            tri_vertices(&verts[i..i + 3]).map(|v| [v[0], v[1] + 50.0, v[2]])
-        };
-        let order = t.order.clone();
-        let vs: Vec<[[f32; 3]; 3]> = (0..n as usize).map(|k| if tris[order[k] as usize].moves { moved(k) } else { [[0.0; 3]; 3] }).collect();
-        t.refit_moving(&|k| vs[k]);
+        let moved = |e: usize| tri_vertices(&verts[e * 3..e * 3 + 3]).map(|v| [v[0], v[1] + 50.0, v[2]]);
+        let vs: Vec<[[f32; 3]; 3]> = (0..n as usize).map(|e| if tris[e].moves { moved(e) } else { [[0.0; 3]; 3] }).collect();
+        t.refit_moving(&|e| vs[e]);
         assert_eq!(t.code, codes);
         for k in t.moving_first as usize..n as usize {
             let mut node = 0usize;

@@ -167,13 +167,14 @@ impl EmitterWorker {
         }
         let device = device.clone();
         let (tris, mut tree, stride) = (e.emitter_tris.clone(), e.light_tree.clone(), e.stride);
+        let order = crate::emitter_order(&tris, tree.as_ref());
         let (ask, asked) = mpsc::channel::<EmitterJob>();
         let (tx, done) = mpsc::channel();
         std::thread::Builder::new()
             .name("emitters".into())
             .spawn(move || {
                 while let Ok(j) = asked.recv() {
-                    let (em, total, power) = crate::emitter_cdf(tris.iter().enumerate(), &j.materials, &j.objects, stride, j.lod, j.cull);
+                    let (em, total, power) = crate::emitter_cdf(&tris, &order, &j.materials, &j.objects, stride, j.lod, j.cull);
                     let node_powers = tree.as_mut().map_or(vec![], |t| {
                         let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], &j.materials, &j.objects, stride)).collect();
                         t.refit(&|k| w[k]);

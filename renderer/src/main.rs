@@ -276,7 +276,7 @@ fn main() -> Result<()> {
             // entries are compared (each by its emitter's triangle: its index differs with them), not the guide table
             // after them (indices into the entries).
             let bits = |v: &[[f32; 4]], tris: &[threert_render::EmitterTri]| v[..tris.len()].iter().filter(|e| e[2] > 0.0).flat_map(|e| [tris[e[0].to_bits() as usize].tri, e[1].to_bits(), e[2].to_bits(), e[3].to_bits()]).collect::<Vec<_>>();
-            let (ea, _, _) = threert_render::emitter_cdf(e.emitter_tris.iter().enumerate(), &e.materials, &e.objects, e.stride, [0.0; 4], threert_render::EmitterCull::default());
+            let (ea, _, _) = threert_render::emitter_cdf(&e.emitter_tris, &threert_render::emitter_order(&e.emitter_tris, e.light_tree.as_ref()), &e.materials, &e.objects, e.stride, [0.0; 4], threert_render::EmitterCull::default());
             let power = |o: &[[f32; 4]]| o.iter().step_by(e.stride).map(|p| p[3].to_bits()).collect::<Vec<_>>();
             let checks = [
                 ("materials", bytemuck::cast_slice::<_, u8>(&e.materials) == bytemuck::cast_slice::<_, u8>(&b.materials)),

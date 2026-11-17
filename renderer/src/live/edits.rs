@@ -860,16 +860,15 @@ impl LiveCore {
         }
         w_attrs.flush(&g.queue, &up.attrs);
         // Emitters added in place, with the tree's slot for them (`ltree::build_slotted`): its subtree grown again over
-        // those alive, their entries right after the static ones in the CDF (in its leaf order: each leaf's entry is its
-        // position) and their path codes with their triangles in the list (written over the code 0 they were made with).
-        let mut perm: Option<Vec<usize>> = None;
+        // those alive, their entries right after the static ones in the CDF (the tree's order: `emitter_order`) and
+        // their path codes with their triangles in the list (written over the code 0 they were made with).
         if let Some(t) = e.light_tree.as_mut() {
             if let Some((_, ns)) = t.dynamic {
                 let ns = ns as usize;
                 let (mats, objs, st, pf) = (&e.materials, &e.objects, e.stride, edit.pool_first);
                 let verts = |k: usize| if k >= pf { pool_tris.get(k - pf).copied() } else { tri_order.get(k).and_then(|&i| flat.get(i as usize)).copied() };
                 let mut items = vec![];
-                for (i, x) in e.emitter_tris.iter().enumerate().skip(ns) {
+                for (i, x) in e.emitter_tris.iter().enumerate() {
                     let w = crate::emitter_power(x, mats, objs, st);
                     let Some([va, vb, vc]) = verts(x.tri as usize).filter(|_| !x.in_tree && !x.nominal && !x.moves && w > 0.0) else { continue };
                     items.push(crate::ltree::DynItem { e: i as u32, lo: va.min(vb).min(vc).to_array(), hi: va.max(vb).max(vc).to_array(), c: x.c, w });
@@ -877,26 +876,17 @@ impl LiveCore {
                 let was = t.order[ns..].to_vec();
                 t.set_dynamic(items);
                 let at = std::mem::offset_of!(crate::GpuEmitterTri, code);
-                let mut placed = vec![false; e.emitter_tris.len()];
-                let mut p: Vec<usize> = (0..ns).collect();
-                for k in ns..t.order.len() {
-                    let i = t.order[k] as usize;
-                    w_tris.put((i * size + at) as u64, bytemuck::bytes_of(&t.code[k]));
-                    placed[i] = true;
-                    p.push(i);
-                }
-                // (One the subtree no longer holds: no code.)
-                for i in was.into_iter().filter(|&i| !placed[i as usize]) {
+                // (One the subtree no longer holds: no code. Those it holds: theirs, written after.)
+                for i in was {
                     w_tris.put((i as usize * size + at) as u64, bytemuck::bytes_of(&0u32));
                 }
-                p.extend((ns..e.emitter_tris.len()).filter(|&i| !placed[i]));
-                perm = Some(p);
+                for k in ns..t.order.len() {
+                    w_tris.put((t.order[k] as usize * size + at) as u64, bytemuck::bytes_of(&t.code[k]));
+                }
             }
         }
-        let (em, total, power) = match &perm {
-            Some(p) => crate::emitter_cdf(p.iter().map(|&i| (i, &e.emitter_tris[i])), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b)),
-            None => crate::emitter_cdf(e.emitter_tris.iter().enumerate(), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b)),
-        };
+        let order = crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref());
+        let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &order, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         if let Some(t) = e.light_tree.as_mut() {
             let (tris, mats, objs, st) = (&e.emitter_tris, &e.materials, &e.objects, e.stride);
             let w: Vec<f32> = t.order.iter().map(|&i| crate::emitter_power(&tris[i as usize], mats, objs, st)).collect();
@@ -1395,8 +1385,8 @@ impl LiveCore {
         let tris = &tables.emitter_tris;
         let (q, heap) = (&self.g.queue, &self.sc.up.heap);
         let Some(t) = tables.light_tree.as_mut().filter(|t| t.moving_count > 0) else { return };
-        t.refit_moving(&|k| {
-            let r = (tris[k].tri as usize - first) * 3;
+        t.refit_moving(&|e| {
+            let r = (tris[e].tri as usize - first) * 3;
             crate::ltree::tri_vertices(&verts[r..r + 3])
         });
         heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));

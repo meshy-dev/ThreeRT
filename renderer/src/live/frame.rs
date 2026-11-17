@@ -244,7 +244,7 @@ impl LiveCore {
         // dropped), so the CDF built here has the powers the objects hold and the reference the kernel reads.
         self.land_powers_now();
         let (e, b) = (&self.sc.tables, &mut self.sc.base);
-        let (em, total, power) = crate::emitter_cdf(e.emitter_tris.iter().enumerate(), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
+        let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref()), &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         self.sc.up.heap.write(&self.g.queue, Table::Emitters, 0, bytemuck::cast_slice(&em));
         b.misc[1] = total;
         b.emit_power[0] = power;
