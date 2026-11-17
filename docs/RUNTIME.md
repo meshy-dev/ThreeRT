@@ -1609,7 +1609,8 @@ over a polished floor, the camera still):
 
 - **What it uncovers starts again.** The g-buffer says whether a surface is a moving object's (`GB.moves`). A sample
   whose own surface stands still and lies behind the moving surface that was nearest there a frame ago is uncovered,
-  and its history goes (`judge`, in every output pixel its verdict reaches: `upscale`). Before, the band behind a
+  and its history goes (`judge`; in every output pixel its verdict reaches, `upscale`, where what went was moving: a
+  still scene's jitter finds a gone edge now and then, and dropping it whole there flickered). Before, the band behind a
   moving edge kept a line of the object's colour a frame (the nearest of the nine samples there is still the object,
   so the band reprojected with it, and the clamp in motion kept its colour).
 - **Locks go with it.** A thin feature's lock on a moving surface is not carried by the two cameras (`lock_carry`),

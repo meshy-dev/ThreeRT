@@ -1262,11 +1262,11 @@ fn flicker_at(q: u32) -> Flicker {
 // history there), the motion its output pixels reproject by: the surface nearest the camera among the nine samples
 // around (the sky the farthest), since an edge moves with what is in front of it; and whether its history is of
 // something that is gone.
-struct Judged { d: vec3<f32>, lum: f32, vel: vec2<f32>, gone: bool };
+struct Judged { d: vec3<f32>, lum: f32, vel: vec2<f32>, gone: bool, moved: bool };
 fn judged_at(q: u32) -> Judged {
     let v = up_state[judged_slot(q)];
     let b = unpack2x16float(v.y);
-    return Judged(vec3<f32>(unpack2x16float(v.x), b.x), b.y, unpack2x16float(v.z), v.w != 0u);
+    return Judged(vec3<f32>(unpack2x16float(v.x), b.x), b.y, unpack2x16float(v.z), v.w != 0u, v.w == 2u);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1302,6 +1302,7 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
     var d = vec3<f32>(0.0);
     var l = -1.0;
     var gone = false;
+    var gone_moving = false;
     if (L.size.w == 0u) {
         let up = vec2<f32>(f32(L.size.x), f32(L.size.y)) / vec2<f32>(f32(iw), f32(ih));
         // Where this sample's point was a frame ago (output pixels; a pixel's centre at + 0.5).
@@ -1386,6 +1387,7 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // within the noisy range of the samples of what it uncovers, and stayed a line where the object's
                     // edge was, one a frame, fading over UP_SAMPLES frames.)
                     gone = alive <= 0.0 && (was_moving || lum(abs(hm - clamp(hm, clo, chi))) > UP_STALE * lum(hm) + 0.01 / exposure_scale());
+                    gone_moving = was_moving;
                 }
             }
         }
@@ -1393,7 +1395,8 @@ fn judge(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A locked sample's distance from the history's range is no finding (a lamp finer than a pixel lies above it
     // whenever a sample hits it).
     d *= 1.0 - locked(q);
-    up_state[judged_slot(q)] = vec4<u32>(pack2x16float(d.xy), pack2x16float(vec2<f32>(d.z, l)), pack2x16float(vel), u32(gone));
+    // (w: 1 gone, 2 gone with what was in front moving.)
+    up_state[judged_slot(q)] = vec4<u32>(pack2x16float(d.xy), pack2x16float(vec2<f32>(d.z, l)), pack2x16float(vel), select(u32(gone), 2u, gone && gone_moving));
 }
 
 // `reject`: per traced pixel, into `spec_pp`'s slot 0 (free once the specular filter is done; f16): the correction
@@ -1445,11 +1448,14 @@ fn reject(@builtin(global_invocation_id) gid: vec3<u32>) {
         let found = wsum / wall;
         drop = clamp(abs(mean) * keep / (UP_REJECT * level / wsum + 0.01 / e), 0.0, 1.0) * found + (1.0 - found);
     }
-    // (Its history is of something that is gone from in front of this: all of it goes, and in every output pixel this
-    // sample's verdict reaches, `upscale`: drop 2 says so.)
-    if (judged_at(q).gone) {
+    // (Its history is of something that is gone from in front of this: all of it goes; and where what went was moving,
+    // in every output pixel this sample's verdict reaches, `upscale`: drop 2 says so. Not for a still scene's gone: the
+    // jitter alone finds one at an edge now and then, and dropped whole every time, a held Bistro flickered half as
+    // much again, Kabukichō twice.)
+    let jq = judged_at(q);
+    if (jq.gone) {
         delta = vec3<f32>(0.0);
-        drop = 2.0;
+        drop = select(1.0, 2.0, jq.moved);
     }
     spec_store(0u, q, vec4<f32>(clamp(delta, vec3<f32>(-6.0e4), vec3<f32>(6.0e4)), drop));
 }
