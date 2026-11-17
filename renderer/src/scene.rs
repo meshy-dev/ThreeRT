@@ -1671,18 +1671,21 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                     emitting.insert(mat);
                                 }
                             }
-                            // A pool triangle on exactly the same vertices as a flattened one (a masked decal over a
-                            // glass or function quad of the same shape) is flattened with it. Split between the model's
-                            // BLAS and the world-space triangles, the two met the ray at one t with different rounding,
-                            // and a decal hit that its alpha let through stepped the ray past the emitter too (black
-                            // through the decal; the software BVH, which flattens both, saw the emitter).
-                            if !classed[2].is_empty() {
+                            // Triangles on exactly the same vertices are flattened together: a pool triangle with a
+                            // flattened one, and one that emits with a cutout over it (Zero Day: masked decals over
+                            // emissive quads of the same shape). A cutout hit that its alpha lets through steps the ray
+                            // on past it (trace_hw.wgsl), and past what lies at the same t: in the model's BLAS the
+                            // emitter under the decal went with it (black through the decal). Flattened, the two are in
+                            // BLASes apart and the opaque one is met first, as the software BVH has it.
+                            {
                                 let key = |k: usize| {
                                     let mut v = local[k].p.map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
                                     v.sort_unstable();
                                     v
                                 };
-                                let flat: std::collections::HashSet<[[u32; 3]; 3]> = classed[2].iter().map(|&(k, _)| key(k)).collect();
+                                let mut flat: std::collections::HashSet<[[u32; 3]; 3]> = classed[2].iter().map(|&(k, _)| key(k)).collect();
+                                let cutouts: std::collections::HashSet<[[u32; 3]; 3]> = classed[1].iter().map(|&(k, _)| key(k)).collect();
+                                flat.extend(classed[0].iter().filter(|(_, mat)| emitting.contains(mat)).map(|&(k, _)| key(k)).filter(|v| cutouts.contains(v)));
                                 for c in 0..2 {
                                     let (stay, go): (Vec<_>, Vec<_>) = classed[c].iter().partition(|&&(k, _)| !flat.contains(&key(k)));
                                     classed[c] = stay;

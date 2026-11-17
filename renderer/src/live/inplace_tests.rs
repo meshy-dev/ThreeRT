@@ -500,6 +500,19 @@ fn the_light_list_holds_its_triangles() {
     if live.g.hwrt {
         let of_instances = live.sc.tables.emitter_tris.iter().filter(|e| e.inst != crate::NO_INST).count();
         assert_eq!(of_instances, 6, "two emitters a placement of the model, each its instance's");
+        // (An instance an edit moves in place has moving emitters: no light LOD from a centroid that goes stale, the
+        // light tree's moving subtree. One that stays has not.)
+        let moves = |id: u32| {
+            let records: Vec<u32> = match &live.sc.tables.retained.proxies[&id].draw {
+                scene::Draw::Instance(i) => vec![i.instance],
+                scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                _ => vec![],
+            };
+            let of: Vec<bool> = live.sc.tables.emitter_tris.iter().filter(|e| records.contains(&e.inst)).map(|e| e.moves).collect();
+            (of.len(), of.iter().all(|m| *m))
+        };
+        assert_eq!((moves(31), moves(32)), ((2, true), (2, true)), "the movable and the posed model's emitters move");
+        assert!(live.sc.tables.emitter_tris.iter().filter(|e| e.inst != crate::NO_INST && !e.moves).count() == 2, "the still model's do not");
         list_is_its_triangles("a model's emitters, as loaded", &live);
         type Move = (&'static str, Box<dyn Fn(&mut World)>);
         let moves: Vec<Move> = vec![
