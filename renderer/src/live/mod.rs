@@ -990,7 +990,7 @@ impl LiveCore {
 
     /// World-space triangles of a node (empty for lights without geometry, cameras, hidden nodes).
     pub fn node_tris(&self, id: &str) -> Vec<[glam::Vec3A; 3]> {
-        // World-space triangles (an instance's glass / emissive part among them), then its instanced mesh.
+        // World-space triangles (an instance's glass / function part among them), then its instanced mesh.
         let mut out: Vec<[glam::Vec3A; 3]> = scene::node_ranges(&self.sc.tri_nodes, id).flat_map(|r| self.sc.tris[r].iter().copied()).collect();
         // A model's first instance; every drawn instance of an instanced object.
         let mut of_node = self.sc.instances.iter().filter(|i| i.name == id && !i.hidden);

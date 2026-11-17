@@ -50,7 +50,7 @@ pub struct InstMesh {
     pub count: u32,
     /// The first `opaque` pool triangles are opaque (BLAS geometry 0), the rest cutout (geometry 1, any-hit test).
     pub opaque: u32,
-    /// Triangles each placement flattens instead (glass, emissive, material functions), in the build's rest arrays.
+    /// Triangles each placement flattens instead (glass, material functions), in the build's rest arrays.
     pub rest_first: u32,
     pub rest_count: u32,
     /// Model-space bounds (object bounds of its instances, picking).
@@ -328,7 +328,7 @@ pub fn instance_tri_flags(inst: &Instance, a: &GpuTriAttr, materials: &[GpuMater
 }
 
 /// Triangle ranges of node `id` in build order: one, or two for an instanced node flattened by software traversal (its
-/// glass / emissive part from the build, its mesh appended by `prepare`).
+/// glass / function part from the build, its mesh appended by `prepare`).
 pub fn node_ranges<'a>(tri_nodes: &'a [(String, u32, u32)], id: &'a str) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
     tri_nodes.iter().filter(move |(n, _, _)| n == id).map(|(_, a, b)| *a as usize..*b as usize)
 }
@@ -712,8 +712,8 @@ pub struct InstancedPlace {
 /// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects): the nodes the
 /// clip leaves alone are ordinary static triangles; each moving mesh node is an instance of its own mesh (its triangles
 /// in the node's space, one BLAS built once), placed at object x node transform, so a new pose moves instances
-/// only. Their glass / emissive / function triangles are flattened (shadow rays, emitter sampling):
-/// `rest`, re-transformed in place from `rest_local`.
+/// only (a node's emitters are its instance's in the light list, filled again when it moves). Their glass / function
+/// triangles are flattened (shadow rays, a function's inputs): `rest`, re-transformed in place from `rest_local`.
 #[derive(Clone, Default)]
 pub struct RigidModel {
     /// (glTF node, instance index).
@@ -1267,7 +1267,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     // Whether a mesh's triangles carry its geometry's vertex colours: any of its materials asks for them.
     let colored = |g: &world::Geometry, mats: &mut dyn Iterator<Item = &u32>| !g.colors.is_empty() && mats.filter(|k| w.materials.get(k).is_some_and(|m| m.vertex_colors)).count() > 0;
     let mut pool_attrs: Vec<GpuTriAttr> = vec![];
-    // Model-space triangles of instanced meshes that each placement flattens (glass, emissive, functions).
+    // Model-space triangles of instanced meshes that each placement flattens (glass, functions).
     let mut rest_tris: Vec<[Vec3A; 3]> = vec![];
     let mut rest_attrs: Vec<GpuTriAttr> = vec![];
     let mut meshes: Vec<InstMesh> = vec![];
@@ -2155,7 +2155,8 @@ pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Resu
 }
 
 /// Instancing class of a GPU material: 0 opaque, 1 cutout (any-hit), 2 flattened per placement (glass: shadow rays pass;
-/// emissive: emitter sampling; material functions).
+/// material functions; emissive, where the light list does not follow the mesh: one that deforms, an instanced
+/// object's copies. Elsewhere `mesh_class`).
 pub fn material_class(g: &GpuMaterial) -> u32 {
     let flat = g.layer[0] > 0.0 || g.tex1[3] != 0 || g.emissive[..3].iter().any(|e| *e > 0.0);
     if flat {

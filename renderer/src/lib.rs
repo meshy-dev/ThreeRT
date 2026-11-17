@@ -922,7 +922,7 @@ fn flatten_instances(sc: &mut scene::Scene) {
             sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
             sc.attrs.push(scene::instance_attr(&sc.pool_attrs[k as usize], inst.world, inst.object));
         }
-        // A second range for the node when its glass / emissive part was flattened at build: node_tris joins them.
+        // A second range for the node when its glass / function part was flattened at build: node_tris joins them.
         sc.tri_nodes.push((inst.name, first, sc.tris.len() as u32));
         if let Some(i) = inst.sub {
             sc.tri_instances.push((first, sc.tris.len() as u32, i));
