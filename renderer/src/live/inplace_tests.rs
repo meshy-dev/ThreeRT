@@ -398,19 +398,25 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
     let (verts, attrs) = (read(&up.verts, 0, up.verts.size()), read(&up.attrs, 0, up.attrs.size()));
-    let codes: std::collections::HashMap<u32, u32> = tables.light_tree.as_ref().map_or_else(Default::default, |t| t.order.iter().copied().zip(t.code.iter().copied()).collect());
+    let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
+    // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
+    let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
     let mut alive = 0;
     for (i, e) in tables.emitter_tris.iter().enumerate() {
         let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&list[i * size..][..size]);
-        let code = codes.get(&(i as u32)).copied().unwrap_or(0) | if e.moves { crate::EMITTER_MOVES } else { 0 };
-        assert_eq!(r.code, code, "{what}: emitter {i}'s path code");
+        let code = codes[i];
+        assert_eq!(r.code, code, "{what}: emitter {i}'s code (its path in the tree, or its entry in the CDF)");
+        if code & !crate::EMITTER_MOVES < 1 << crate::ltree::PATH_BITS {
+            let entry: [u32; 4] = bytemuck::pod_read_unaligned(&cdf[(code & !crate::EMITTER_MOVES) as usize * 16..][..16]);
+            assert_eq!(entry[0], i as u32, "{what}: the CDF entry emitter {i}'s code names is its own");
+        }
         if e.area <= 0.0 {
             continue;
         }
         let rows: Vec<[f32; 4]> = (0..3).map(|k| bytemuck::pod_read_unaligned(&verts[(e.tri as usize * 3 + k) * 16..][..16])).collect();
         let a: scene::GpuTriAttr = bytemuck::pod_read_unaligned(&attrs[e.tri as usize * 96..][..96]);
         if e.inst == crate::NO_INST {
-            assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code), "{what}: emitter {i} of the list against its triangle {}", e.tri);
+            assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
             assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
         } else {
             let (inst, record) = (&c.sc.instances[e.inst as usize], &c.sc.gpu_instances[e.inst as usize]);
@@ -431,22 +437,68 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
 /// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
 /// after a model's placement or its clip has moved its emitters, after a particle's pass has placed it, and after
 /// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
+/// 300 small emitting triangles: enough for a light tree.
+fn strip(w: &mut World) {
+    let (mut positions, mut indices) = (vec![], vec![]);
+    for q in 0..150u32 {
+        let x = -1.5 + q as f32 * 0.02;
+        positions.extend([x, -0.9, 0.2, x + 0.008, -0.9, 0.2, x + 0.008, -0.892, 0.2, x, -0.892, 0.2]);
+        indices.extend([0, 1, 2, 0, 2, 3].map(|k| q * 4 + k));
+    }
+    w.set_geometry(6, Geometry { normals: [0.0, 0.0, 1.0].repeat(600), uvs: vec![0.0; 1200], positions, indices, groups: vec![], colors: vec![] }).unwrap();
+    w.set_object(17, "strip".into(), None, Kind::Mesh { geometry: 6, material: 5, own_blas: false, materials: vec![] }, true, false).unwrap();
+}
+
+/// An emitter that changes size in place is lit as a build lights it: a movable model (its instance is scaled) and a
+/// movable mesh (the CPU moves its triangles), the scene's main light, three times larger and three times smaller,
+/// with and without a light tree. The weights it was given at load are not what its triangles are now.
+#[test]
+fn an_emitter_scaled_in_place_is_lit_as_a_build_lights_it() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    for (is_model, tree, grow) in [(true, false, true), (true, true, true), (false, false, true), (false, true, true), (true, false, false), (false, false, false)] {
+        let what = format!("a movable {} {} in place, {} a light tree", if is_model { "model" } else { "mesh" }, if grow { "three times larger" } else { "three times smaller" }, if tree { "with" } else { "without" });
+        let mut w = world();
+        // (The sun and the lamp away: the emitter lights the scene.)
+        w.set_visible(20, false).unwrap();
+        w.set_visible(12, false).unwrap();
+        let (small, large) = if is_model { (0.05f32, 0.15f32) } else { (0.4, 1.2) };
+        let (from, to) = if grow { (small, large) } else { (large, small) };
+        if is_model {
+            w.set_object(31, "movable".into(), None, Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation: None, functions: vec![] }, true, true).unwrap();
+            w.set_power(31, 60.0).unwrap();
+        } else {
+            w.set_object(31, "movable".into(), None, Kind::Mesh { geometry: 3, material: 5, own_blas: false, materials: vec![] }, true, true).unwrap();
+            w.set_power(31, 1.5).unwrap();
+        }
+        w.set_transform(31, Vec3::new(0.5, -0.5, 0.6), glam::Quat::IDENTITY, Vec3::splat(from)).unwrap();
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        if !live.g.hwrt {
+            return;
+        }
+        assert_eq!(live.sc.tables.light_tree.is_some(), tree, "{what}");
+        picture(&mut live, 4);
+        w.set_transform(31, Vec3::new(0.2, -0.2, 0.9), glam::Quat::from_rotation_z(0.5), Vec3::splat(to)).unwrap();
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+    }
+}
+
 /// them; a material that starts emitting): the moves and edits also against a build's picture.
 #[test]
 fn the_light_list_holds_its_triangles() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
-    // 300 small emitting triangles: enough for a light tree.
-    let strip = |w: &mut World| {
-        let (mut positions, mut indices) = (vec![], vec![]);
-        for q in 0..150u32 {
-            let x = -1.5 + q as f32 * 0.02;
-            positions.extend([x, -0.9, 0.2, x + 0.008, -0.9, 0.2, x + 0.008, -0.892, 0.2, x, -0.892, 0.2]);
-            indices.extend([0, 1, 2, 0, 2, 3].map(|k| q * 4 + k));
-        }
-        w.set_geometry(6, Geometry { normals: [0.0, 0.0, 1.0].repeat(600), uvs: vec![0.0; 1200], positions, indices, groups: vec![], colors: vec![] }).unwrap();
-        w.set_object(17, "strip".into(), None, Kind::Mesh { geometry: 6, material: 5, own_blas: false, materials: vec![] }, true, false).unwrap();
-    };
     // An emitter the CPU moves.
     for tree in [true, false] {
         let mut w = world();

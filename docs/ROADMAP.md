@@ -2700,6 +2700,16 @@ its own measured step, not taking emitters out of their meshes again.
 Tests: `geometry/emitter-model` (a model's emitters, analytic; tests/render/data/panel.glb), the readback test
 with a model still, movable and posed. Still flattened: an instanced object's copies (the next part).
 
+**An emitter's probability is what the picker used (2026-11-18).** An emitter that changed size in place (a movable
+model or mesh scaled, a skinned one) kept the weight it was loaded with, while the kernel took its probability from
+formulas that assumed the weight was the triangle's: scaled three times larger as a scene's main light it read 3 to
+8 % dark, three times smaller 12 % bright (a move alone was right; older than step D). Now a candidate is weighed by
+the density it was drawn with (its pick's probability over the triangle's own area), and a BSDF ray's hit takes the
+same probability from where the picker reads it: the tree's path, or the emitter's entry in the CDF, which its code
+names (`emitter_codes`). A weight that is out of date costs noise, not light. Gone with the formulas: the particles'
+case apart (a nominal area), the cull test at a hit, "MIS by power alone". Test: an emitter scaled in place, a model
+and a mesh, with and without a light tree, against a build's picture.
+
 ## 2. Temporal fixes
 
 Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references move to Bistro night (§ 0 step 7); the

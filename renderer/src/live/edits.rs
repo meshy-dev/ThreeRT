@@ -873,8 +873,7 @@ impl LiveCore {
         // those alive, their entries right after the static ones in the CDF (the tree's order: `emitter_order`) and
         // their path codes with their triangles in the list (written over the code 0 they were made with).
         if let Some(t) = e.light_tree.as_mut() {
-            if let Some((_, ns)) = t.dynamic {
-                let ns = ns as usize;
+            if t.dynamic.is_some() {
                 let (mats, objs, st, pf) = (&e.materials, &e.objects, e.stride, edit.pool_first);
                 // (An emitter's triangle in world space: an instance's is its mesh's, placed.)
                 let verts = |x: &crate::EmitterTri| {
@@ -891,19 +890,17 @@ impl LiveCore {
                     let Some([va, vb, vc]) = verts(x).filter(|_| !x.in_tree && !x.nominal && !x.moves && w > 0.0) else { continue };
                     items.push(crate::ltree::DynItem { e: i as u32, lo: va.min(vb).min(vc).to_array(), hi: va.max(vb).max(vc).to_array(), c: x.c, w });
                 }
-                let was = t.order[ns..].to_vec();
                 t.set_dynamic(items);
-                let at = std::mem::offset_of!(crate::GpuEmitterTri, code);
-                // (One the subtree no longer holds: no code. Those it holds: theirs, written after.)
-                for i in was {
-                    w_tris.put((i as usize * size + at) as u64, bytemuck::bytes_of(&0u32));
-                }
-                for k in ns..t.order.len() {
-                    w_tris.put((t.order[k] as usize * size + at) as u64, bytemuck::bytes_of(&t.code[k]));
-                }
             }
         }
         let order = crate::emitter_order(&e.emitter_tris, e.light_tree.as_ref());
+        // Where each emitter's weight is now (`emitter_codes`), for all but the tree's static ones (theirs stay):
+        // written over the code the new ones were made with.
+        let codes = crate::emitter_codes(&e.emitter_tris, &order, e.light_tree.as_ref());
+        let fixed = e.light_tree.as_ref().map_or(0, |t| t.dynamic.map_or(t.order.len(), |(_, ns)| ns as usize));
+        for &i in &order[fixed.min(order.len())..] {
+            w_tris.put((i as usize * size + std::mem::offset_of!(crate::GpuEmitterTri, code)) as u64, bytemuck::bytes_of(&codes[i as usize]));
+        }
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &order, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         if let Some(t) = e.light_tree.as_mut() {
             let (tris, mats, objs, st) = (&e.emitter_tris, &e.materials, &e.objects, e.stride);
