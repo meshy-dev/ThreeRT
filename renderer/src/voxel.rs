@@ -115,7 +115,7 @@ pub struct PaletteEntry {
     pub color: [f32; 3],
     pub roughness: f32,
     pub metalness: f32,
-    /// Emission, nits (its colour the entry's): voxels that glow, light-sampled as emitter meshes (ROADMAP § 6 step 4).
+    /// Emission, nits (its colour the entry's): voxels that glow, light-sampled as any mesh that emits (ROADMAP § 6 step 4).
     #[serde(default)]
     pub emissive: f32,
     /// How far an explosion reaches it: "soft" (the default: the whole radius), "medium" (0.7 of it), "hard" (0.4),

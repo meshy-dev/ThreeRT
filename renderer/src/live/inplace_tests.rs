@@ -428,9 +428,10 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
 }
 
 /// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
-/// moved (in the light tree's moving subtree, and without a tree), after a particle's pass has placed it, and after
-/// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
-/// them; a material that starts emitting).
+/// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
+/// after a particle's pass has placed it, and after the edits that make emitters in place (a mesh added, given other
+/// triangles and removed, with the tree's slot for them; a material that starts emitting): each of these also
+/// against a build's picture.
 #[test]
 fn the_light_list_holds_its_triangles() {
     let presets = crate::default_presets_dir();

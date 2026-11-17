@@ -4411,6 +4411,8 @@ benchmark level. The order follows the dependencies; a step that meets a further
        build gives them emitter entries (in the light tree with the static emitters); the live view's in-place edits
        add, replace and remove them: a placed mesh's entries go to area 0 (their weight; the tree keeps its shape and
        is refit), new ones are appended to the CDF's power-share part (path code 0, as the tree's moving emitters).
+       (Since 2026-11-17 such a mesh is a mesh as any other, in model space and shared, and each instance's emitters
+       are a run of the light list: § 1, "Emitters on instances".)
      - A material that starts emitting gets emitter entries in place from its flattened static triangles (`prepare`
        keeps each material's runs of them); one that also covers pool (instanced) or dynamic triangles still rebuilds.
      - The emitter buffer grows (and the scene's bind group is made again) only when entries are added past it: a
