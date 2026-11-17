@@ -800,6 +800,9 @@ fn spec_history(pp: vec3<f32>, n: vec3<f32>, t: f32, rough: f32, virt: bool) -> 
 
 // The most a specular history may trail behind its reflection, output pixels (`stemporal`).
 const SPEC_TRAIL: f32 = 2.0;
+// How far from this frame's neighbourhood mean a specular history may lie, in deviations of the neighbourhood
+// (`stemporal`'s variance clipping).
+const SPEC_CLIP: f32 = 2.0;
 
 // Specular temporal accumulation on the traced grid (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the
 // surface history and the reflection-hit one (reprojected through the mirror image of what it shows); the one closer to
@@ -827,8 +830,9 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         depth = dot(p - L.cur.pos.xyz, L.cur.fwd.xyz);
     }
     let cur = sample_specular(q);
-    // This frame's neighbourhood mean (same surface), in YCoCg.
+    // This frame's neighbourhood mean and spread (same surface), in YCoCg.
     var m1 = vec3<f32>(0.0);
+    var m2 = vec3<f32>(0.0);
     var mn = 0.0;
     for (var k = 0; k < 9; k++) {
         let qx = i32(gid.x) + k % 3 - 1;
@@ -843,10 +847,13 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             ok = s.color.w == 0.0;
         }
         if (!ok) { continue; }
-        m1 += ycocg(sample_specular(j));
+        let yq = ycocg(sample_specular(j));
+        m1 += yq;
+        m2 += yq * yq;
         mn += 1.0;
     }
     let smean = m1 / max(mn, 1.0);
+    let ssd = sqrt(max(m2 / max(mn, 1.0) - smean * smean, vec3<f32>(0.0)));
     // Reflection hit distance for the mirror-image reprojection: on near mirrors the resolved one (pass `refl`).
     let st = select(px.spec.w, refl_res[q].w, refl_res[q].w > 0.0 && rough < NEAR_MIRROR);
     let mv = motion_in[q];
@@ -882,7 +889,15 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     var surf = select(0.0, 0.8, length(smean - yv) > length(smean - ys) + 0.01 / exposure_scale());
     surf = select(surf, 1.0, hv.w <= 0.0);
     surf = select(surf, 0.0, hs.w <= 0.0 && hv.w > 0.0);
-    let hy = mix(yv, ys, surf);
+    // The history held within SPEC_CLIP deviations of this frame's neighbourhood (variance clipping, as Lumen's
+    // reflection temporal clamps its history): what a still surface reflects can move while the surface and the camera
+    // hold still (a light carried past a polished floor), and nothing else tells its history so. Unclipped, the
+    // reflection of a thrown orb stayed on the floor along its whole path for the length of the history.
+    // While the scene's lighting changes (`mode.z`: something moved, a light switched), as the diffuse anti-lag: a
+    // settled scene has nothing to find, and clipping it cuts what the history averaged out of one sample a pixel.
+    let slack = SPEC_CLIP * ssd + vec3<f32>(0.02 * abs(smean.x) + 0.002 / exposure_scale(), 0.0, 0.0);
+    var hy = mix(yv, ys, surf);
+    if (L.mode.z != 0u && mn >= 3.0) { hy = clamp(hy, smean - slack, smean + slack); }
     // The history's length is the pixel's own (until 2026-11-13 every pixel's was held to 2 .. 12 frames by roughness
     // while the camera moved or turned at all, and to 4 for 8 frames after it translated): HIST_MOVING at a pixel a
     // frame, as the diffuse; and no longer than keeps its trail behind the reflection (frames x parallax) within
