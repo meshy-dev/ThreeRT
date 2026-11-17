@@ -113,6 +113,19 @@ threert dev        # bundles on save, serves every client on your network, print
 
 The same address in any browser shows the game as three.js. The full walk-through is at [threert.dev/docs](https://threert.dev/docs/).
 
+### Build your own app on the engine
+
+To put ThreeRT inside a native app of your own, start from the **[macOS app template](https://github.com/threert/macos-app-template)**. It is the recommended way to embed the engine, and it is set up for building with a coding agent:
+
+- a SwiftUI app whose window is a live path-traced view (the engine's `LiveCore` on a `CAMetalLayer`, behind a small C ABI), with a sample scene that uses physics, glass, metal and moving lights;
+- the Claude Code or Codex already on the machine, in a side panel over the [Agent Client Protocol](https://agentclientprotocol.com): ask for a change and the agent edits the scene's TypeScript, which the view hot-reloads within a second;
+- a code viewer with syntax highlighting that follows the agent's edits, a console, and a `scene check` / `scene shot` command line the agent uses to verify its own work.
+
+```bash
+git clone --recursive https://github.com/threert/macos-app-template my-app
+cd my-app && bun tools/app.ts --run
+```
+
 ### Packages
 
 | Package | What |
@@ -186,6 +199,7 @@ npm run test:render                                                      # the r
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/REPORT.md`](docs/REPORT.md): the serverless gameplay and rendering runtime the engine was built for
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): the goal, the plan, and what each step measured
 - [Scene authoring skill](.claude/skills/threert-scene-authoring/SKILL.md): photo-referenced scenes with a coding agent
+- [macOS app template](https://github.com/threert/macos-app-template): the engine embedded in a SwiftUI app, with a local coding agent that edits the scene live; start here to build an app on ThreeRT
 
 ## Contributing
 
