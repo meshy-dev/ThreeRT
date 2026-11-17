@@ -282,6 +282,11 @@ fn inst_vec(r: Instance, v: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(r.m0.
 fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(vec3<f32>(dot(r.n0.xyz, n.xyz), dot(r.n1.xyz, n.xyz), dot(r.n2.xyz, n.xyz))), n.w);
 }
+// A model-space triangle's `x` (texel density, object, ...) as its instance has it: the instance's texture LOD offset
+// and object (the record's `info`).
+fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
+}
 // A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;
@@ -289,7 +294,7 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     b.n1 = inst_normal(r, a.n1);
     b.n2 = inst_normal(r, a.n2);
     b.t = vec4<f32>(normalize(inst_vec(r, a.t.xyz)), a.t.w);
-    b.x = vec4<f32>(a.x.x + bitcast<f32>(r.info.z), bitcast<f32>(r.info.y), a.x.z, a.x.w);
+    b.x = inst_x(r.info, a.x);
     return b;
 }
 
@@ -1818,11 +1823,12 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     return c;
 }
 
-// An emitter's attributes as shading has them at a hit of it: its triangle's, placed by its instance if it has one
-// (the object, the texture LOD's offset).
+// What light sampling reads of an emitter's attributes (UVs, material, object, texel density), as shading has them
+// at a hit of it: its triangle's, with its instance's object and texture LOD offset if it has one. (Not the normals
+// and the tangent, which stay the mesh's: a light sample reads none, and placing them is work a sample.)
 fn emitter_attrs(em: EmitterTri) -> TriAttr {
-    let a = attrs[em.tri];
-    if (has(F_INST) && em.inst != NO_INST) { return inst_attr(instance_at(em.inst), a); }
+    var a = attrs[em.tri];
+    if (has(F_INST) && em.inst != NO_INST) { a.x = inst_x(instance_at(em.inst).info, a.x); }
     return a;
 }
 
