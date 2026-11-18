@@ -131,8 +131,9 @@ pub struct Instance {
     /// hidden (`instance_world`: TLAS mask 0, never flattened or picked).
     pub sub: Option<u32>,
     pub hidden: bool,
-    /// Hidden by its object's visibility (`World::shown`), which keeps its mesh and its place above the triangles: it
-    /// is shown again in place. (One that an edit took out is hidden and not this: a rebuild draws it again.)
+    /// Hidden by its object's visibility (`World::shown`) or for a placement without size (`placed_world`), which
+    /// keep its mesh and its place above the triangles: it comes back in place. (One that an edit took out is hidden
+    /// and not this: a rebuild draws it again.)
     pub masked: bool,
     /// Its first emitter in the light list, if its mesh has emitters (`InstMesh::emitters`): set where the list is
     /// made (lib.rs `prepare`, the live edits); the record carries it (n2.w), for the rays that hit an emitter of it.
@@ -1412,13 +1413,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         let shown = w.shown(*id);
         let flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
         match &n.kind {
-            Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if instancing && m.determinant() != 0.0 => {
+            Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if instancing => {
                 // A mesh is an instance of its geometry's mesh: the triangles in model space in the pool, one BLAS,
                 // shared by the objects of the same geometry and materials, whatever those are (`mesh_class`: a
                 // cutout or glass is a part of the mesh; one that emits has each instance's emitters in the light
                 // list, `InstMesh::emitters`). A move is the instance's transform (`InstanceRef::moves`). One that is
-                // hidden (`World::shown`) is an instance too, which no ray sees and whose row has no power: it is
-                // shown in place (`Instance::masked`).
+                // hidden (`World::shown`), or placed without size (`placed_world`), is an instance too, which no ray
+                // sees and whose row has no power: it comes back in place (`Instance::masked`).
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
                 // Several materials: each geometry group's triangles with its own (three.js's material array).
@@ -1449,14 +1450,16 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                 };
                 if let Some(mesh) = mesh {
+                    let (m, gone) = placed_world(m, Vec3::ZERO);
+                    let unseen = !shown || gone;
                     let (lo, hi) = meshes[mesh as usize].placed_bounds(m);
                     let pivot = m.transform_point3(Vec3::ZERO);
                     let size = hi - lo;
                     let oi = (objects.len() / stride) as u32;
-                    objects.extend_from_slice(&object_row(pivot, if shown { n.power } else { 0.0 }, size, n.custom, [1.0; 3])[..stride]);
+                    objects.extend_from_slice(&object_row(pivot, if unseen { 0.0 } else { n.power }, size, n.custom, [1.0; 3])[..stride]);
                     retained.edits_meshes |= *own_blas || n.driven;
                     *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven || w.movable(*id) }) };
-                    instances.push(Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: !shown, masked: !shown, first_emitter: 0 });
+                    instances.push(Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0 });
                 }
             }
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {

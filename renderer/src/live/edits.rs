@@ -499,6 +499,7 @@ impl LiveCore {
             self.move_procs(world, &procs_moved, &mut top);
         }
         let placed_ok = shared_ok && (placed.is_empty() || (!changes.structural && self.move_instances(world, &placed, &mut top)));
+        changes.powers.extend(self.flipped.drain(..));
         let t_rigid = Instant::now();
         let rigid_ok = placed_ok && (rigid.is_empty() || (!changes.structural && self.repose_rigid(world, &rigid, &mut top)?));
         self.cpu_skin_ms += t_rigid.elapsed().as_secs_f32() * 1000.0;
@@ -811,15 +812,15 @@ impl LiveCore {
                     if inst.hidden && !inst.masked {
                         return false;
                     }
-                    let hide = !world.shown(k);
-                    if inst.hidden == hide {
+                    // (Where it stands: it may have moved, or lost its size, while it was hidden.)
+                    let (w, gone) = scene::placed_world(world.world_matrix(k), inst.world.w_axis.truncate());
+                    let unseen = gone || !world.shown(k);
+                    if inst.hidden == unseen {
                         continue;
                     }
                     let Some(mut top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return false };
-                    (inst.hidden, inst.masked) = (hide, hide);
-                    // (Where it stands: it may have moved, or lost its size, while it was hidden.)
-                    let (w, gone) = scene::placed_world(world.world_matrix(k), inst.world.w_axis.truncate());
-                    top.moved(top.inst_base() + r, w, Some((inst.cast_shadow, hide || gone)));
+                    (inst.hidden, inst.masked) = (unseen, unseen);
+                    top.moved(top.inst_base() + r, w, Some((inst.cast_shadow, unseen)));
                     build.instances = true;
                     changes.powers.insert(k);
                 }
@@ -868,7 +869,13 @@ impl LiveCore {
             let o = &mut self.sc.tables.objects[inst.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
             let slot = top.inst_base() + i as usize;
-            top.moved(slot, w, Some((inst.cast_shadow, gone || inst.hidden)));
+            // (Unseen while it has no size, or its object is hidden: `Instance::masked`. Its row's power follows.)
+            let unseen = gone || !world.shown(node);
+            if inst.hidden != unseen {
+                self.flipped.push(node);
+            }
+            (inst.hidden, inst.masked) = (unseen, unseen);
+            top.moved(slot, w, Some((inst.cast_shadow, unseen)));
             self.inst_moving.push(i);
         }
         if merged {
@@ -1381,6 +1388,8 @@ impl LiveCore {
         for &(i, w) in &placements {
             let inst = &mut self.sc.instances[i as usize];
             let old = self.sc.gpu_instances[i as usize];
+            // (A node its clip scales to nothing: at a point, where no ray sees it.)
+            let (w, gone) = scene::placed_world(w, inst.world.w_axis.truncate());
             inst.world = w;
             let mut r = inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]);
             r.p = old.m;
@@ -1389,6 +1398,7 @@ impl LiveCore {
             let row = |k: usize| [w.x_axis[k], w.y_axis[k], w.z_axis[k], w.w_axis[k]];
             if let Some(t) = accel.tlas[accel.inst_base + i as usize].as_mut() {
                 t.transform = [row(0), row(1), row(2)].concat().try_into().unwrap();
+                t.mask = gpu::instance_mask(inst.cast_shadow, gone || inst.hidden);
             }
             // (Rigid models' instances are theirs alone: no other update this commit placed them.)
             self.inst_moving.push(i);
@@ -1963,9 +1973,9 @@ impl LiveCore {
                     if features & gpu::F_INST == 0 {
                         return Err("the scene's first instanced mesh (kernel feature)".into());
                     }
-                    // What the build flattens instead (scene.rs: a placement without size, or instancing off).
+                    // A placement without size (a build places it, unseen at a point), or instancing off (it flattens).
                     if m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
-                        return Err("a mesh without size, or instancing off (the build flattens it)".into());
+                        return Err("a mesh without size, or instancing off".into());
                     }
                     let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
                     let gm = tables.materials[mat as usize];

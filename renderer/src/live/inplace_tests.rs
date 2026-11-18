@@ -1065,8 +1065,9 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
 }
 
 /// A still mesh's first move is its instance's, in place, and it moves in place from then on: one that emits (its
-/// emitters are moving ones from now on), a plain one, a group of two. With and without a light tree. After each: no
-/// rebuild, the light list is its triangles, the picture is a build's.
+/// emitters are moving ones from now on), a plain one, a group of two, and a lamp built without size that is given
+/// one. With and without a light tree. After each: no rebuild, the light list is its triangles, the picture is a
+/// build's.
 #[test]
 fn a_still_mesh_moves_in_place_from_its_first_move() {
     let presets = crate::default_presets_dir();
@@ -1079,6 +1080,9 @@ fn a_still_mesh_moves_in_place_from_its_first_move() {
             w.set_object(id, format!("o{id}"), Some(14), mesh(3, 1), true, false).unwrap();
             w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::ONE).unwrap();
         }
+        // (A lamp built without size: an instance no ray sees, until it is given one.)
+        w.set_object(18, "seed".into(), None, mesh(3, 5), true, false).unwrap();
+        w.set_transform(18, Vec3::new(-0.7, -0.5, 1.1), glam::Quat::IDENTITY, Vec3::ZERO).unwrap();
         if tree {
             strip(&mut w);
         }
@@ -1094,6 +1098,8 @@ fn a_still_mesh_moves_in_place_from_its_first_move() {
             (i.moves, c.sc.tables.emitter_tris.iter().filter(|e| e.inst == i.instance && e.area > 0.0).map(|e| e.moves).collect::<Vec<_>>())
         };
         assert_eq!((moves(&live, 12), moves(&live, 11).0, moves(&live, 15).0), ((false, vec![false; 2]), false, false), "still meshes, as built");
+        let seed = &live.sc.instances[live.sc.tables.retained.instance(18).expect("a mesh without size is an instance").instance as usize];
+        assert!(seed.hidden && seed.masked && seed.world.determinant() != 0.0, "built without size: unseen, at a point");
         type Edit = (&'static str, Box<dyn Fn(&mut World)>);
         let to = |id: u32, at: [f32; 3], turn: f32| -> Box<dyn Fn(&mut World)> { Box::new(move |w| w.set_transform(id, Vec3::from(at), glam::Quat::from_rotation_z(turn), Vec3::ONE).unwrap()) };
         let edits: Vec<Edit> = vec![
@@ -1102,6 +1108,7 @@ fn a_still_mesh_moves_in_place_from_its_first_move() {
             ("a still panel moved", to(11, [-0.6, 0.2, 0.7], 0.3)),
             ("a still group of two moved", to(14, [0.1, 0.15, 0.2], 0.2)),
             ("the group moved again", to(14, [-0.1, 0.1, 0.1], 0.0)),
+            ("a lamp built without size given its size", to(18, [-0.7, -0.5, 1.1], 0.3)),
         ];
         for (what, edit) in &edits {
             let what = format!("{what}, {with} a light tree");
