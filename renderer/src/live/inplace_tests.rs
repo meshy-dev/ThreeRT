@@ -1063,3 +1063,61 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
         }
     }
 }
+
+/// A still mesh's first move is its instance's, in place, and it moves in place from then on: one that emits (its
+/// emitters are moving ones from now on), a plain one, a group of two. With and without a light tree. After each: no
+/// rebuild, the light list is its triangles, the picture is a build's.
+#[test]
+fn a_still_mesh_moves_in_place_from_its_first_move() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    for tree in [false, true] {
+        let mut w = world();
+        let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: false, materials: vec![] };
+        w.set_object(14, "group".into(), None, Kind::Group, true, false).unwrap();
+        for (id, at) in [(15, Vec3::new(0.5, -0.5, 0.6)), (16, Vec3::new(0.0, -0.6, 0.9))] {
+            w.set_object(id, format!("o{id}"), Some(14), mesh(3, 1), true, false).unwrap();
+            w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::ONE).unwrap();
+        }
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        picture(&mut live, 4);
+        let with = if tree { "with" } else { "without" };
+        let moves = |c: &LiveCore, id: u32| {
+            let i = c.sc.tables.retained.instance(id).expect("a mesh is an instance");
+            (i.moves, c.sc.tables.emitter_tris.iter().filter(|e| e.inst == i.instance && e.area > 0.0).map(|e| e.moves).collect::<Vec<_>>())
+        };
+        assert_eq!((moves(&live, 12), moves(&live, 11).0, moves(&live, 15).0), ((false, vec![false; 2]), false, false), "still meshes, as built");
+        type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+        let to = |id: u32, at: [f32; 3], turn: f32| -> Box<dyn Fn(&mut World)> { Box::new(move |w| w.set_transform(id, Vec3::from(at), glam::Quat::from_rotation_z(turn), Vec3::ONE).unwrap()) };
+        let edits: Vec<Edit> = vec![
+            ("the still lamp moved", to(12, [0.3, 0.5, 1.3], 0.4)),
+            ("the lamp moved again", to(12, [-0.2, 0.4, 1.4], -0.2)),
+            ("a still panel moved", to(11, [-0.6, 0.2, 0.7], 0.3)),
+            ("a still group of two moved", to(14, [0.1, 0.15, 0.2], 0.2)),
+            ("the group moved again", to(14, [-0.1, 0.1, 0.1], 0.0)),
+        ];
+        for (what, edit) in &edits {
+            let what = format!("{what}, {with} a light tree");
+            edit(&mut w);
+            let builds = live.top_builds;
+            let rebuilt = live.commit(&mut w).unwrap();
+            // (Software traversal without units has no instance to move, and rebuilds: the picture holds either way.)
+            assert!(!(rebuilt && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
+            assert_eq!(live.top_builds - builds, u32::from(!rebuilt), "{what}: one build above the triangles");
+            list_is_its_triangles(&what, &live);
+            forget(&mut live);
+            let (a, b) = (picture(&mut live, 64), picture(&mut open(&w).unwrap(), 64));
+            assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        }
+        if live.g.hwrt {
+            assert_eq!((moves(&live, 12), moves(&live, 11).0, moves(&live, 15).0, moves(&live, 16).0), ((true, vec![true; 2]), true, true, true), "{with} a light tree: they move from now on");
+        }
+    }
+}

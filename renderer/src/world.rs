@@ -308,6 +308,9 @@ pub struct Changes {
     pub moved: HashSet<u32>,
     /// Objects made movable by their first move (that move rebuilds once).
     pub promoted: Vec<String>,
+    /// Still meshes, or groups, that moved for the first time (and are movable from now on): the renderer moves their
+    /// instances in place where it can (live/edits.rs `start_moving`), and rebuilds where it cannot.
+    pub started: HashSet<u32>,
     /// Meshes given their own BLAS (`own_blas`) by their geometry's first change, updated or replaced, without scene
     /// code's `dynamicGeometry` (three.js code changes geometry without telling): that change rebuilds once, the next
     /// apply in place. Frame log `fallback: promote`.
@@ -711,12 +714,21 @@ impl World {
             // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live/edits.rs `move_sun`).
             self.changes.sun = true;
         } else {
-            // Fixed geometry moved: from now on it is movable. This move rebuilds once, to set its triangles apart.
-            self.changes.structural = true;
+            // Fixed geometry moved: from now on it is movable. A mesh, or a group, is its instances' to move
+            // (`Changes::started`); anything else rebuilds once, to set its triangles apart.
+            let held = matches!(o.kind, Kind::Mesh { .. } | Kind::Group) && !sun && !is_camera && !self.changes.created.contains(&id);
             if !sun && !is_camera && !self.changes.created.contains(&id) {
                 let o = self.objects.get_mut(&id).unwrap();
                 o.movable = true;
-                self.changes.promoted.push(o.name.clone());
+                if !held {
+                    self.changes.promoted.push(o.name.clone());
+                }
+            }
+            if held {
+                self.changes.moved.insert(id);
+                self.changes.started.insert(id);
+            } else {
+                self.changes.structural = true;
             }
         }
     }
@@ -1619,7 +1631,7 @@ mod tests {
         assert!(w.take_changes().promoted.is_empty(), "placing a new object is not a move");
         w.set_transform(1, Vec3::Y, Quat::IDENTITY, Vec3::ONE).unwrap();
         let c = w.take_changes();
-        assert!(c.structural && c.promoted == ["a"], "fixed geometry's first move rebuilds, making it movable");
+        assert!(!c.structural && c.promoted.is_empty() && c.started.contains(&1) && c.moved.contains(&1) && w.objects[&1].movable, "a still mesh's first move: its instance's, and it is movable from now on");
         w.set_transform(1, Vec3::Z, Quat::IDENTITY, Vec3::ONE).unwrap();
         let c = w.take_changes();
         assert!(!c.structural && c.moved.contains(&1), "then it moves in place");

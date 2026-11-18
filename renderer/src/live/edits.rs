@@ -431,6 +431,12 @@ impl LiveCore {
         // Moved movable subtrees: their drawables are re-transformed with the posed models, their lights rewritten in
         // the light table.
         let mut dynamic = changes.poses.clone();
+        // Still objects that moved for the first time: their meshes' instances move from now on, or the scene rebuilds.
+        for id in std::mem::take(&mut changes.started) {
+            if !changes.structural && !self.start_moving(world, id) {
+                changes.structural = true;
+            }
+        }
         let mut placed = vec![];
         let mut procs_moved = vec![];
         let mut instanced_moved = vec![];
@@ -564,6 +570,7 @@ impl LiveCore {
         }
         let Some(d) = applied else {
             let t = Instant::now();
+            self.pending_emitters.clear();
             self.rebuild(world)?;
             self.rebuild_ms += t.elapsed().as_secs_f32() * 1e3;
             if changes.camera {
@@ -585,7 +592,8 @@ impl LiveCore {
             up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
         if d.materials || d.emitters || std::mem::take(&mut self.emitters_reweigh) {
-            let new = self.add_material_emitters(world);
+            let mut new = self.add_material_emitters(world);
+            new.append(&mut self.pending_emitters);
             self.write_emitters(&new);
         } else if d.deferred {
             self.send_powers();
@@ -743,6 +751,54 @@ impl LiveCore {
         // baked sky is not light-sampled at all (`sky_sampled`).
         self.sc.base.counts2[1] = crate::sky_sampled(max, self.env.sky.floor, true) as u32;
         self.lit_changed = self.frame.max(1);
+    }
+
+    /// A still object's first move, in place: the meshes under it (itself, if it is one) move by their instances from
+    /// now on (`InstanceRef::moves`), and one that emits has its emitters as moving ones: a new run of the light list
+    /// (the light tree keeps the old one where it stood, at no weight). False where something under it is drawn
+    /// another way: the caller rebuilds.
+    fn start_moving(&mut self, world: &World, id: u32) -> bool {
+        let children = world.children();
+        let sub = world.subtree_with(id, &children);
+        // (Nothing is changed unless all of it can be.)
+        let held = |k: &u32| match &world.objects[k].kind {
+            crate::world::Kind::Group | crate::world::Kind::Camera(_) => true,
+            crate::world::Kind::Light(l) => !matches!(l, crate::desc::Light::Rect { visible: true, .. }),
+            crate::world::Kind::Mesh { .. } => self.sc.tables.retained.instance(*k).is_some_and(|i| i.mesh.own() && self.sc.instances.get(i.instance as usize).is_some_and(|x| !x.hidden || x.masked)),
+            _ => false,
+        };
+        if !sub.iter().all(held) {
+            return false;
+        }
+        let LoadedScene { tables, instances, gpu_instances, pool_tris, edit, .. } = &mut self.sc;
+        for k in sub {
+            let Some(scene::Draw::Instance(i)) = tables.retained.proxies.get_mut(&k).map(|p| &mut p.draw) else { continue };
+            if std::mem::replace(&mut i.moves, true) {
+                continue;
+            }
+            let r = i.instance;
+            let old = emitter_run(&tables.emitter_tris, instances, r);
+            if old.is_empty() || tables.emitter_tris[old.clone()].iter().all(|e| e.moves) {
+                continue;
+            }
+            let first = tables.emitter_tris.len() as u32;
+            let inst = &mut instances[r as usize];
+            // (Where this commit's move places it: `move_instances`, next.)
+            let (to, _) = scene::placed_world(world.world_matrix(k), inst.world.w_axis.truncate());
+            for j in old {
+                let e = crate::EmitterTri { moves: true, in_tree: false, ..tables.emitter_tris[j] };
+                tables.emitter_tris[j].area = 0.0;
+                let w = pool_tris[e.tri as usize - edit.pool_first].map(|v| glam::Vec3A::from(to.transform_point3(v.into())));
+                self.pending_emitters.push((tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, w, 0)));
+                tables.emitter_tris.push(e);
+            }
+            inst.first_emitter = first;
+            if let Some(rec) = gpu_instances.get_mut(r as usize) {
+                rec.n[2][3] = f32::from_bits(first);
+            }
+            self.emitters_reweigh = true;
+        }
+        true
     }
 
     /// An object shown or hidden by its `visible`, in place: the meshes under it (itself, if it is one) each by its
