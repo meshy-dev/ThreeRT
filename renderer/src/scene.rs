@@ -1832,9 +1832,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         if tris.len() as u32 > first {
                             tri_nodes.push((n.name.clone(), first, tris.len() as u32));
                         }
-                        // (A model that does not move keeps no instance of its own here: `Draw::Fixed`.)
-                        if movable {
-                            retained.proxy(*id).draw = Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Model, moves: true });
+                        // (Its proxy has the instance where the instance is all of it: one with triangles flattened at
+                        // its placement beside is the build's to change, `Draw::Fixed`.)
+                        if im.rest_count == 0 {
+                            retained.proxy(*id).draw = Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Model, moves: movable });
                         }
                         instances.push(inst);
                         continue;

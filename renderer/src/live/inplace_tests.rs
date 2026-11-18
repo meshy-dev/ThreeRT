@@ -1193,3 +1193,65 @@ fn meshes_change_in_place_whether_or_not_the_scene_said_so() {
         }
     }
 }
+
+/// A still model whose instance is all of it (tests/render/data/panel.glb: a grey quad and a quad that only emits) is
+/// hidden, shown, removed and moved in place as a mesh is. With and without a light tree. After each: no rebuild, the
+/// light list is its triangles, the picture is a build's (and the weights, until one has moved).
+#[test]
+fn a_still_model_is_hidden_removed_and_moved_in_place() {
+    let presets = crate::default_presets_dir();
+    let open_at_root = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let model = || Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation: None, functions: vec![] };
+    for tree in [false, true] {
+        let mut w = world();
+        // (The lamp away: the models' panels light the scene.)
+        w.set_visible(12, false).unwrap();
+        for (id, at) in [(30, Vec3::new(-0.6, -0.5, 0.6)), (31, Vec3::new(0.5, 0.4, 0.7)), (32, Vec3::new(0.0, 0.6, 0.5))] {
+            w.set_object(id, format!("m{id}"), None, model(), true, false).unwrap();
+            w.set_transform(id, at, glam::Quat::from_rotation_y(0.4), Vec3::splat(0.05)).unwrap();
+        }
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open_at_root(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        picture(&mut live, 4);
+        let with = if tree { "with" } else { "without" };
+        if live.g.hwrt {
+            assert!(matches!(&live.sc.tables.retained.proxies[&30].draw, scene::Draw::Instance(i) if !i.moves && matches!(i.mesh, scene::MeshKind::Model)), "a still model's proxy has its instance");
+        }
+        type Edit = (&'static str, bool, Box<dyn Fn(&mut World)>);
+        let edits: Vec<Edit> = vec![
+            ("a still model hidden", true, Box::new(|w| w.set_visible(30, false).unwrap())),
+            ("the model shown", true, Box::new(|w| w.set_visible(30, true).unwrap())),
+            (
+                "a still model removed",
+                true,
+                Box::new(|w| {
+                    w.remove(32);
+                }),
+            ),
+            ("a still model moved", false, Box::new(|w| w.set_transform(31, Vec3::new(0.3, 0.2, 1.0), glam::Quat::from_rotation_y(-0.3), Vec3::splat(0.05)).unwrap())),
+            ("the model moved again", false, Box::new(|w| w.set_transform(31, Vec3::new(0.1, 0.3, 1.1), glam::Quat::from_rotation_z(0.3), Vec3::splat(0.05)).unwrap())),
+        ];
+        for (what, weights, edit) in &edits {
+            let what = format!("{what}, {with} a light tree");
+            edit(&mut w);
+            let rebuilt = live.commit(&mut w).unwrap();
+            assert!(!(rebuilt && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
+            list_is_its_triangles(&what, &live);
+            let mut fresh = open_at_root(&w).unwrap();
+            if *weights {
+                lit_as_a_build(&what, &mut live, &mut fresh);
+            } else {
+                // (A moving emitter's centre is not kept on the CPU: the picture alone.)
+                forget(&mut live);
+                let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+                assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+            }
+        }
+    }
+}

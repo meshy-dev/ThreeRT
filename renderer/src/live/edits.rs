@@ -288,6 +288,12 @@ impl Grow<'_> {
     }
 }
 
+/// Whether an object's instance is all of it, so that an edit can hide, move or take out the object by it: a mesh's,
+/// or a still model's whose mesh has nothing flattened at each placement beside.
+pub(super) fn whole(i: &scene::InstanceRef, instances: &[scene::Instance], meshes: &[scene::InstMesh]) -> bool {
+    i.mesh.own() || (matches!(i.mesh, scene::MeshKind::Model) && instances.get(i.instance as usize).is_some_and(|x| meshes.get(x.mesh as usize).is_some_and(|m| m.rest_count == 0)))
+}
+
 /// An object removed or hidden in place is no longer drawn: hidden where its record's value is (`LiveCore::pick`
 /// skips it). The mesh it was an instance of, if it was drawn as one: a user fewer (`drop_mesh_user`).
 pub(super) fn undraw(draw: Option<&scene::Draw>, instances: &mut [scene::Instance], procs: &mut [scene::ProcObject]) -> Option<u32> {
@@ -355,7 +361,7 @@ impl LiveCore {
                         changes.lights.insert(id);
                         true
                     }
-                    Some(crate::world::Kind::Mesh { .. } | crate::world::Kind::Group) => self.show_meshes(world, id, &mut changes, &mut top),
+                    Some(crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } | crate::world::Kind::Group) => self.show_meshes(world, id, &mut changes, &mut top),
                     _ => false,
                 };
                 if !done {
@@ -760,7 +766,9 @@ impl LiveCore {
         let held = |k: &u32| match &world.objects[k].kind {
             crate::world::Kind::Group | crate::world::Kind::Camera(_) => true,
             crate::world::Kind::Light(l) => !matches!(l, crate::desc::Light::Rect { visible: true, .. }),
-            crate::world::Kind::Mesh { .. } => self.sc.tables.retained.instance(*k).is_some_and(|i| i.mesh.own() && self.sc.instances.get(i.instance as usize).is_some_and(|x| !x.hidden || x.masked)),
+            crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } => {
+                self.sc.tables.retained.instance(*k).is_some_and(|i| whole(i, &self.sc.instances, &self.sc.meshes) && self.sc.instances.get(i.instance as usize).is_some_and(|x| !x.hidden || x.masked))
+            }
             _ => false,
         };
         if !sub.iter().all(held) {
@@ -797,7 +805,7 @@ impl LiveCore {
         true
     }
 
-    /// An object shown or hidden by its `visible`, in place: the meshes under it (itself, if it is one) each by its
+    /// An object shown or hidden by its `visible`, in place: the meshes and still models under it (itself, if it is one) each by its
     /// instance's mask above the triangles, where no ray sees a hidden one, and its row's power (`Tables::apply`: a
     /// hidden mesh's emitters at no weight). False where something under it is drawn another way, or a mesh is not
     /// such an instance (the build flattened it, or an edit took it out while it was hidden): the caller rebuilds.
@@ -806,8 +814,8 @@ impl LiveCore {
         for k in world.subtree_with(id, &children) {
             match &world.objects[&k].kind {
                 crate::world::Kind::Group | crate::world::Kind::Camera(_) => {}
-                crate::world::Kind::Mesh { .. } => {
-                    let Some(r) = self.sc.tables.retained.instance(k).filter(|i| i.mesh.own()).map(|i| i.instance as usize) else { return false };
+                crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } => {
+                    let Some(r) = self.sc.tables.retained.instance(k).filter(|i| whole(i, &self.sc.instances, &self.sc.meshes)).map(|i| i.instance as usize) else { return false };
                     let Some(inst) = self.sc.instances.get_mut(r) else { return false };
                     if inst.hidden && !inst.masked {
                         return false;
@@ -1812,11 +1820,12 @@ impl LiveCore {
                 continue;
             }
             emitters_changed |= release(*id, tables, instances);
-            let at = slot_of(*id, edit, tables);
-            // Drawn, and not at a record an edit can clear (a model the build placed, anything it flattened): a rebuild
-            // takes it out.
+            // (A still model the build placed, whose instance is all of it, is taken out by it too.)
+            let at = slot_of(*id, edit, tables).or_else(|| tables.retained.instance(*id).filter(|i| whole(i, instances, meshes)).map(|i| (inst_base + i.instance as usize, i.instance as usize)));
+            // Drawn, and not at a record an edit can clear (a model with triangles flattened beside its instance,
+            // anything the build flattened): a rebuild takes it out.
             if at.is_none() && tables.retained.proxies.contains_key(id) {
-                return Err("an object the build placed otherwise (a model, something it flattened) removed".into());
+                return Err("an object the build placed otherwise (a model in parts, something it flattened) removed".into());
             }
             let proxy = tables.retained.proxies.remove(id);
             if let Some((slot, record)) = at {

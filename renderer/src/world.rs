@@ -696,9 +696,9 @@ impl World {
             // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live/edits.rs `move_sun`).
             self.changes.sun = true;
         } else {
-            // Fixed geometry moved: from now on it is movable. A mesh, or a group, is its instances' to move
+            // Fixed geometry moved: from now on it is movable. A mesh, a still model, or a group, is its instances' to move
             // (`Changes::started`); anything else rebuilds once, to set its triangles apart.
-            let held = matches!(o.kind, Kind::Mesh { .. } | Kind::Group) && !sun && !is_camera && !self.changes.created.contains(&id);
+            let held = matches!(o.kind, Kind::Mesh { .. } | Kind::Model { animation: None, .. } | Kind::Group) && !sun && !is_camera && !self.changes.created.contains(&id);
             if !sun && !is_camera && !self.changes.created.contains(&id) {
                 let o = self.objects.get_mut(&id).unwrap();
                 o.movable = true;
@@ -786,8 +786,8 @@ impl World {
             let in_place = match &o.kind {
                 Kind::Particles { emitter_area, .. } => *emitter_area <= 0.0,
                 Kind::Volume { .. } => true,
-                // (A mesh's instance by its mask, a group's meshes each: the renderer says whether it can.)
-                Kind::Mesh { .. } | Kind::Group => true,
+                // (A mesh's or a still model's instance by its mask, a group's each: the renderer says whether it can.)
+                Kind::Mesh { .. } | Kind::Model { animation: None, .. } | Kind::Group => true,
                 Kind::Light(l) => !sun && !matches!(l, desc::Light::Rect { visible: true, .. }),
                 _ => false,
             };
