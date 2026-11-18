@@ -91,7 +91,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
-const F_IGLASS: u32 = 536870912u; // glass among other triangles in an instanced mesh: shadow rays cull its geometry (trace_hw.wgsl), a unit's glass triangles by their flag
+const F_IGLASS: u32 = 536870912u; // glass among an instance's other triangles: shadow rays pass it by its row, or cull a model's glass geometry (trace_hw.wgsl); a unit's glass triangles by their flag
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
@@ -126,7 +126,7 @@ struct Params {
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
     table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, glass energy, emitter triangles
-    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, -
+    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, the instances' rows
     live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, -, -, -
     live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
 };
@@ -151,7 +151,8 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
 // The scene's flat arrays, sections of one buffer of 32-bit words (heap.rs `Stream`), each from the word
 // `P.word_first` names: the environment's CDF (floats: [0, H) the rows' marginal CDF, then H rows of W conditional
-// entries; `env_cdf_at`), the procedural data (`pword`, `gdata`), the vertex colours (`vcolor_word`).
+// entries; `env_cdf_at`), the procedural data (`pword`, `gdata`), the vertex colours (`vcolor_word`), the instances'
+// rows (`row_word`).
 @group(0) @binding(5) var<storage, read> words: array<u32>;
 // (The CDF is the buffer's first section: from word 0, no offset to read.)
 fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }

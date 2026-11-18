@@ -179,7 +179,8 @@ impl GpuEmitterTri {
     }
 }
 
-/// The emitters of an instance of a mesh that emits (`scene::InstMesh::emitters`, `count` of them): one a numbered
+/// The emitters of an instance that has some (`count` of them: `scene::rows_emitters`, or a model's mesh's
+/// `InstMesh::emitters`): one a numbered
 /// triangle, in the numbers' order, each with its triangle as the instance places it. `tris`: the mesh's, in model
 /// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number and material, if
 /// it emits; `record`: the instance's. A triangle of no area: no weight (area 0). A hidden instance's (an instanced
@@ -712,9 +713,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     timings.push(("bvh_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
 
     // The light list (an emitter's weight = area x luminance of the emissive factor x object power): the flattened
-    // triangles that emit, then, an instance at a time, those of a mesh that emits (`InstMesh::emitters`): a run of
-    // the list an instance, its first in its record, its triangles' numbers counted from it. Each with its triangle in
-    // world space.
+    // triangles that emit, then, an instance at a time, those of its triangles that emit: a run of the list an
+    // instance, its first in its record, its triangles' numbers counted from it (a model's mesh), or from where its
+    // section's start, which the section's row has (a mesh with sections). Each with its triangle in world space.
     let mut emitter_tris: Vec<EmitterTri> = vec![];
     let mut gpu_emitter_tris: Vec<GpuEmitterTri> = vec![];
     for k in 0..pool_first {

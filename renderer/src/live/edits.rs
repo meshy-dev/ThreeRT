@@ -998,10 +998,9 @@ impl LiveCore {
                 }
             }
         }
-        // The meshes with a triangle of one of them (`Tables::mesh_mats`): the mesh's emitting triangles are numbered
-        // again as they lie (`scene::number_emitters`: the build's numbering, with the materials as they are now), and
-        // each of its instances gets its emitters as a new run at the list's end, its first in the instance's record;
-        // the run it had, of fewer, stays at no weight.
+        // The meshes' instances with a row of one of them (`Tables::mesh_mats`): each gets its emitters as a new run
+        // at the list's end, the sections that emit now one after another, where each starts in its row and the
+        // run's first in the instance's record; the run it had, of fewer, stays at no weight.
         if !started.is_empty() && !sc.meshes.is_empty() {
             let LoadedScene { tables, instances, gpu_instances, meshes, pool_tris, sections, rows, edit, up, .. } = sc;
             let moving = tables.retained.moving_records();

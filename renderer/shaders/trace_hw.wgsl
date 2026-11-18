@@ -1,5 +1,6 @@
 // Hardware ray tracing (wgpu ray query). Up to four instances (see Prepared::groups): shadow casters mask 1, the rest
-// mask 2 (glass among them; an instanced mesh's glass is a geometry of its BLAS that a shadow ray culls); opaque groups
+// mask 2 (glass among them; a model's mesh's glass is a geometry of its BLAS that a shadow ray culls, an instance's
+// glass among its other sections is stepped through by its row); opaque groups
 // never report candidates, alpha-cutout groups are confirmed by `alpha_pass`.
 // instance_custom_data holds the instance's first global triangle index, or in scenes where a group starts beyond
 // 2^24 triangles (F_HUGE: custom data has 24 bits) its traversal group, whose first triangle is in P.group_first.
@@ -66,9 +67,10 @@
     hit_row = NO_ROW;
     @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     var rq: ray_query;
-    // A shadow ray (mask 1) where an instanced mesh mixes glass with other triangles (F_IGLASS): it culls the geometry
+    // A shadow ray (mask 1) where a model's mesh mixes glass with other triangles (F_IGLASS): it culls the geometry
     // that is not flagged opaque, the glass parts alone (gpu.rs), instead of forcing every geometry opaque. A mesh that
-    // is all glass is out of its way by the instance's mask. (Measured on Metal with every geometry opaque: the same
+    // is all glass is out of its way by the instance's mask. (A mesh with sections has every geometry flagged opaque:
+    // `trace` steps through its glass.) (Measured on Metal with every geometry opaque: the same
     // pictures, at most 0.5 % of a frame's GPU time.)
     let opacity = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_CULL_NO_OPAQUE, has(F_IGLASS) && mask == 1u);
     let flags = select(opacity, opacity | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);

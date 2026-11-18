@@ -1680,10 +1680,11 @@ pub const F_LISTS: u32 = 1 << 27;
 /// every call otherwise, taken or not (Kabukicho's 64,224 emitters with a function, none on an instance: frame GPU
 /// +2.7 %).
 pub const F_IFUNC: u32 = 1 << 28;
-/// Glass among other triangles in an instanced mesh: its BLAS geometry is not flagged opaque, and a shadow ray culls
-/// such geometry instead of forcing opacity (trace_hw.wgsl; software traversal skips a unit's glass triangles by
-/// their flag). Compiled out where no instanced mesh mixes the two: an instance of a mesh that is all glass is out of
-/// a shadow ray's way by its mask (`scene::InstMesh::casts`).
+/// Glass among an instance's other triangles. With rows: a shadow ray steps through a hit whose row says glass
+/// (trace_hw.wgsl). A model's mesh: its glass geometry is not flagged opaque, and a shadow ray culls such geometry
+/// instead of forcing opacity. (Software traversal skips a unit's glass triangles by their flag, a row's or their
+/// own.) Compiled out where no instance mixes the two: one that is all glass is out of a shadow ray's way by its mask
+/// (`scene::rows_cast`, `scene::InstMesh::casts`).
 pub const F_IGLASS: u32 = 1 << 29;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):

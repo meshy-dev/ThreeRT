@@ -2730,6 +2730,28 @@ geometric normal through a function on a mirrored mesh, vertex colours on one (e
 traversal); the flattening of an instance against the build's flattening, mirrored too; a mirrored model's build; a
 copy mirrored in place; an emitting instanced object added, changed and removed in place against a build.
 
+**A mesh is its geometry's alone (2026-11-19, the material on the instance, first part).** A mesh was shared by the
+objects of one geometry and the same materials, a triangle holding its material: two objects of a geometry with
+different materials held its triangles and its BLAS twice. Now a scene mesh's and an instanced object's mesh is
+keyed by its geometry (`Retained::own_mesh`, `scene::section_mesh`). Its triangles lie by section, a geometry group
+or the whole geometry, each a geometry of the BLAS, all flagged opaque, and hold their section and their index in
+it. An instance has a row a section in the words' heap (`scene::Row`, heap.rs `Stream::Rows`; its record has their
+first): the material with its class, the section's first triangle, its first emitter. The kernel reads a hit's
+material, whether it is a cutout or glass, and its emitter through the row (`material_of`, `row_word`; kernel
+feature `F_ROWS`); the trace's test of a hit reads no attribute and no material. Whether an instance casts a shadow,
+has a cutout or glass, emits: its rows say (`rows_cast`, `rows_bits`, `rows_emitters`). Glass among an instance's
+other sections is stepped through by a shadow ray, as a cutout that lets it pass is; an instance that is all glass
+is out of its way by its mask, as before. Vertex colours are the geometry's, and a material says whether it reads
+them, where they were baked white for one that did not. Software traversal: a unit's cutouts and glass by its rows,
+asked only of a unit that has some.
+Models keep their layout until the next part (materials on triangles, a BLAS geometry a class). Edits place what
+they placed (one section; a row a record of the room). A material that starts emitting gives the instances with a
+row of it their emitters, and writes no attribute. Still a rebuild: a several-material mesh edited, a material that
+turns glass or cutout, vertex colours asked of a mesh made without them.
+Tests: a geometry's sections and an instance's rows; six objects of one geometry with six materials (one reads its
+vertex colours, cutouts, glass, an emitter) against a geometry an object, at the build, one placed in place, two
+given another material; the light list's emitters found through the rows.
+
 **Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
 scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
 instance's mask; a hidden mesh is built as an instance no ray sees, its row without power (`Instance::masked`,

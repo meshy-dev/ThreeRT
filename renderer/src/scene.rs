@@ -51,8 +51,8 @@ pub fn copy_row(mut row: ObjectRow, dark: bool) -> ObjectRow {
     row
 }
 
-/// A glTF mesh placed by several static instances (hardware RT): its triangles once, in model space, in the `pool_*`
-/// arrays; one BLAS, one TLAS instance per placement.
+/// A mesh its instances place: its triangles once, in model space, in the `pool_*` arrays; one BLAS, one TLAS
+/// instance per placement. A geometry's (`section_mesh`: its materials are its instances'), or a model's.
 #[derive(Clone, Copy, Debug)]
 pub struct InstMesh {
     pub first: u32,
@@ -71,8 +71,9 @@ pub struct InstMesh {
     pub hi: Vec3A,
     /// Its triangles change (a shared pose, `PoseGroup`): its BLAS is rebuilt with them.
     pub deforms: bool,
-    /// How many emitters an instance of it has in the light list: its triangles of an emitting material, numbered in
-    /// their attributes as they lie in the triangles' table (x.w - 1; `number_emitters`). 0: it does not emit.
+    /// A model's mesh: how many emitters an instance of it has in the light list, its triangles of an emitting
+    /// material, numbered in their attributes as they lie in the triangles' table (x.w - 1; `number_emitters`). 0: it
+    /// does not emit. (A mesh with sections: `rows_emitters`, an instance's.)
     pub emitters: u32,
     /// Its sections (`Section`), in `Scene::sections`: a mesh of a geometry alone, whose materials are its instances'
     /// (`Instance::rows`). None (`sect_count` 0): a model's mesh, its materials on its triangles and its triangles
@@ -236,7 +237,8 @@ pub struct Instance {
 }
 
 /// Kernel record of an instance (`instances` binding): world matrix rows, normal matrix rows (inverse transpose),
-/// (first triangle in the GPU order, object index, texture-LOD offset bits, first cutout triangle - first), and the
+/// (first triangle in the GPU order, object index, texture-LOD offset bits, its rows' first or, without rows, first
+/// cutout triangle - first), and the
 /// world matrix rows of the previous frame (a movable instance's motion vectors; the same rows when it did not move).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -843,7 +845,7 @@ pub enum MeshKind {
     Model,
     /// A shared pose's (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
     Pose(u32),
-    /// An `own_blas` mesh, shared by the objects of its geometry and material (`Retained::own_mesh`).
+    /// A geometry's mesh, shared by the objects of the geometry (`Retained::own_mesh`).
     Own,
 }
 
@@ -1549,11 +1551,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         match &n.kind {
             Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if instancing => {
                 // A mesh is an instance of its geometry's mesh: the triangles in model space in the pool, one BLAS,
-                // shared by the objects of the same geometry and materials, whatever those are (`mesh_class`: a
-                // cutout or glass is a part of the mesh; one that emits has each instance's emitters in the light
-                // list, `InstMesh::emitters`). A move is the instance's transform (`InstanceRef::moves`). One that is
-                // hidden (`World::shown`), or placed without size (`placed_world`), is an instance too, which no ray
-                // sees and whose row has no power: it comes back in place (`Instance::masked`).
+                // shared by the objects of the geometry whatever their materials, which are the instance's rows
+                // (`section_mesh`, `Row`: a cutout, glass, one that emits). A move is the instance's transform
+                // (`InstanceRef::moves`). One that is hidden (`World::shown`), or placed without size
+                // (`placed_world`), is an instance too, which no ray sees and whose object entry has no power: it
+                // comes back in place (`Instance::masked`).
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
                 // Several materials: each geometry group's triangles with its own (three.js's material array).
@@ -1594,8 +1596,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {
                 // Copies of one geometry: one shared mesh (one BLAS), an instance and an object entry per copy, the
                 // copies' records and entries contiguous (live/edits.rs `update_instanced` rewrites them in place).
-                // A material that only emits is such a mesh too: each copy has its emitters in the light list
-                // (`InstMesh::emitters`), a hidden copy's at no weight (its object has no power). A copy may mirror
+                // With a material that emits each copy has its emitters in the light list (`rows_emitters`), a
+                // hidden copy's at no weight (its object has no power). A copy may mirror
                 // the mesh (`INST_MIRRORED`). Without instancing each copy is its own triangles, and changing the
                 // instances rebuilds.
                 let empty = world::InstanceTable::default();
@@ -2532,8 +2534,8 @@ pub fn section_rows(sections: &[Section], mats: &[u32], materials: &[GpuMaterial
     sections.iter().map(|s| row_of(mats[(s.slot as usize).min(mats.len() - 1)], materials)).collect()
 }
 
-/// A material that emits: a mesh's triangles of it are its instances' emitters in the light list
-/// (`InstMesh::emitters`).
+/// A material that emits: the triangles drawn with it are their instance's emitters in the light list
+/// (`rows_emitters`; a model's mesh: `InstMesh::emitters`).
 pub fn emissive(g: &GpuMaterial) -> bool {
     g.emissive[..3].iter().any(|e| *e > 0.0)
 }
@@ -2565,7 +2567,7 @@ pub fn number_emitters(attrs: &mut [GpuTriAttr], materials: &[GpuMaterial]) -> u
     n
 }
 
-/// The `InstMesh` of an `own_blas` mesh's triangles at pool index `first`, all of one class (`mesh_class`).
+/// The `InstMesh` of triangles at pool index `first`, all of one class (`mesh_class`), without sections.
 pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32, class: u32) -> InstMesh {
     let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
     for t in tris {
