@@ -1318,7 +1318,8 @@ fn a_still_model_is_hidden_removed_and_moved_in_place() {
 /// and one that does not, a cutout that lets everything through and one that lets nothing, glass, one that emits. At
 /// the build; one more placed in place; an object given another material, which keeps the mesh (none is made, no
 /// triangle written). Each time the picture is a build's, and the picture of the same world with a geometry an
-/// object, so a mesh an object; it is not the picture of the objects all with one material.
+/// object, so a mesh an object; it is not the picture of the objects all with one material, nor of the plain one
+/// reading the colours too.
 #[test]
 fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     let presets = crate::default_presets_dir();
@@ -1330,12 +1331,13 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
         json(m)
     };
     // (30 + i: the geometry of object 40 + i where each has its own.)
-    let tile = || Geometry { positions: vec![-0.2, -0.2, 0.0, 0.2, -0.2, 0.0, 0.2, 0.2, 0.0, -0.2, 0.2, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0] };
+    let tile = || Geometry { positions: vec![-0.4, -0.4, 0.0, 0.4, -0.4, 0.0, 0.4, 0.4, 0.0, -0.4, 0.4, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0] };
     let mats = [61, 62, 63, 64, 65, 5];
-    let scene = |own: bool, one: bool| {
+    // (`variant` 1: the objects all of the plain material; 2: the plain material reads the colours too.)
+    let scene = |own: bool, variant: u32| {
         let mut w = world();
         w.set_material(61, plain(serde_json::json!({ "vertexColors": true })));
-        w.set_material(62, plain(serde_json::json!({})));
+        w.set_material(62, plain(serde_json::json!({ "vertexColors": variant == 2 })));
         w.set_material(63, plain(serde_json::json!({ "opacity": 0.3, "alphaTest": 0.5 })));
         w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": 0.5, "color": [0.2, 0.6, 0.9] })));
         w.set_material(65, plain(serde_json::json!({ "color": [0.5, 0.9, 0.5], "roughness": 0, "transmission": 1, "ior": 1.5 })));
@@ -1343,13 +1345,13 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
             let geometry = 30 + if own { i as u32 } else { 0 };
             w.set_geometry(geometry, tile()).unwrap();
             let id = 40 + i as u32;
-            w.set_object(id, format!("tile{i}"), None, Kind::Mesh { geometry, material: if one { 62 } else { *mat }, own_blas: i == 0, materials: vec![] }, true, false).unwrap();
-            w.set_transform(id, Vec3::new(-1.1 + 0.45 * i as f32, 0.55, 0.6), glam::Quat::from_rotation_y(0.2), Vec3::ONE).unwrap();
+            w.set_object(id, format!("tile{i}"), None, Kind::Mesh { geometry, material: if variant == 1 { 62 } else { *mat }, own_blas: i == 0, materials: vec![] }, true, false).unwrap();
+            w.set_transform(id, Vec3::new(-2.25 + 0.9 * i as f32, 0.55, 0.6), glam::Quat::from_rotation_y(0.2), Vec3::ONE).unwrap();
         }
         w
     };
     let mesh_of = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).expect("a mesh is an instance").instance as usize].mesh;
-    let mut w = scene(false, false);
+    let mut w = scene(false, 0);
     let mut live = match open(&w) {
         Ok(c) if c.g.hwrt => c,
         Ok(_) => return eprintln!("skipped: no hardware RT"),
@@ -1364,13 +1366,15 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     let placed = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].clone();
     assert!(!placed(&live, 44).cast_shadow && placed(&live, 43).cast_shadow, "glass alone casts no shadow");
     list_is_its_triangles("objects of one geometry, at the build", &live);
-    let mut apart_world = open(&scene(true, false)).unwrap();
+    let mut apart_world = open(&scene(true, 0)).unwrap();
     let meshes: std::collections::HashSet<u32> = (40..46).map(|id| mesh_of(&apart_world, id)).collect();
     assert_eq!(meshes.len(), 6, "a geometry an object: a mesh an object");
     let (a, b) = (picture(&mut live, 64), picture(&mut apart_world, 64));
     assert!(apart(&a, &b) < 0.5, "one mesh for six materials: the picture is {:.2} steps from six meshes'", apart(&a, &b));
-    let c = picture(&mut open(&scene(false, true)).unwrap(), 64);
+    let c = picture(&mut open(&scene(false, 1)).unwrap(), 64);
     assert!(apart(&a, &c) > 0.5, "the materials are in the picture ({:.2} steps from the objects all of one)", apart(&a, &c));
+    let c = picture(&mut open(&scene(false, 2)).unwrap(), 64);
+    assert!(apart(&a, &c) > 0.5, "the plain material reads no colour of the mesh ({:.2} steps from where it does)", apart(&a, &c));
     // One more of the geometry, glass, placed in place: the mesh it shares, nothing made.
     let (meshes, triangles) = (live.sc.meshes.len(), live.sc.pool_tris.len());
     let place = |w: &mut World, id: u32, material: u32, at: Vec3| {
@@ -1387,7 +1391,7 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     assert_eq!((mesh_of(&live, 46), live.sc.meshes.len(), live.sc.pool_tris.len()), (shared, meshes, triangles), "it shares the mesh: none made");
     against_a_build("an object of the geometry placed in place", &mut live, &w);
     // Another material for an object: its row. The plain one emits now, the one that emitted is a cutout.
-    for (id, material, at) in [(41, 5, Vec3::new(-0.65, 0.55, 0.6)), (45, 64, Vec3::new(1.15, 0.55, 0.6))] {
+    for (id, material, at) in [(41, 5, Vec3::new(-1.35, 0.55, 0.6)), (45, 64, Vec3::new(2.25, 0.55, 0.6))] {
         place(&mut w, id, material, at);
         let what = format!("object {id} given material {material}");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
