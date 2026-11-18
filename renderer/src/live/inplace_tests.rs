@@ -1423,9 +1423,10 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
 
 /// Glass among an instance's other sections lets the sky's and the sun's light through as an instance that is all
 /// glass does: a pane and its frame as one mesh of two materials, against the two as a mesh each, before a wall, in
-/// a scene with a cutout. A shadow ray steps through the first's glass by its row and never meets the second's (its
-/// mask); a sample of the sky weighs the same against the surface's own rays, which pass the glass either way
-/// (glass is no cutout's hole), so the pictures are the same.
+/// a scene with a cutout and in one without (the kernel then tests no hit for a cutout, and still steps through the
+/// glass). A shadow ray steps through the first's glass by its row and never meets the second's (its mask); a
+/// sample of the sky weighs the same against the surface's own rays, which pass the glass either way (glass is no
+/// cutout's hole), so the pictures are the same.
 #[test]
 fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
     let presets = crate::default_presets_dir();
@@ -1441,7 +1442,7 @@ fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
     };
     let (pane, frame) = ([-1.0, -1.0, 1.0, 0.6], [-1.0, 0.6, 1.0, 1.0]);
     // (`parts` 0: the pane and its frame one mesh; 1: a mesh each; 2: neither.)
-    let scene = |parts: u32| {
+    let scene = |parts: u32, cutout: bool| {
         let mut w = world();
         w.set_material(71, json(serde_json::json!({ "name": "pane", "color": [0.6, 0.9, 0.6], "opacity": 1, "metalness": 0, "roughness": 0, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "transmission": 1, "ior": 1.5 })));
         w.set_material(72, json(serde_json::json!({ "name": "frame", "color": [0.05, 0.05, 0.05], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })));
@@ -1450,8 +1451,10 @@ fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
         // samples find it too); a cutout in a corner.
         w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [1.0, 1.0, 1.0], "intensity": 0.3, "skyLightIntensity": 1 })), ..w.environment.clone() });
         w.set_material(5, json(serde_json::json!({ "name": "off", "color": [0.2, 0.2, 0.2], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })));
-        w.set_object(13, "grille".into(), None, Kind::Mesh { geometry: 3, material: 73, own_blas: false, materials: vec![] }, true, false).unwrap();
-        w.set_transform(13, Vec3::new(-0.8, -0.8, 0.9), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        if cutout {
+            w.set_object(13, "grille".into(), None, Kind::Mesh { geometry: 3, material: 73, own_blas: false, materials: vec![] }, true, false).unwrap();
+            w.set_transform(13, Vec3::new(-0.8, -0.8, 0.9), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
         let at = |w: &mut World, id: u32| w.set_transform(id, Vec3::new(0.0, 0.0, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
         match parts {
             0 => {
@@ -1470,22 +1473,24 @@ fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
         }
         w
     };
-    let mut one = match open(&scene(0)) {
-        Ok(c) if c.g.hwrt => c,
-        Ok(_) => return eprintln!("skipped: no hardware RT"),
-        Err(e) => return eprintln!("skipped: {e}"),
-    };
-    let window = one.sc.instances.iter().find(|i| i.name == "window").expect("the window is an instance").clone();
-    assert_eq!((window.bits, window.cast_shadow, one.sc.meshes[window.mesh as usize].sect_count), (scene::INST_ROWS | scene::INST_GLASS, true, 2), "glass and a frame: one mesh, which casts");
-    let wanted = gpu::F_ROWS | gpu::F_IGLASS | gpu::F_MASKED;
-    assert_eq!(one.sc.up.kernel.features & wanted, wanted);
-    assert_eq!(one.sc.base.counts2[1], 1, "the sky is sampled as a light");
-    let mut two = open(&scene(1)).unwrap();
-    assert!(!two.sc.instances.iter().find(|i| i.name == "part30").unwrap().cast_shadow, "the pane alone casts no shadow");
-    let (a, b) = (picture(&mut one, 96), picture(&mut two, 96));
-    assert!(apart(&a, &b) < 0.5, "a pane among its mesh's sections: the picture is {:.2} steps from the pane's as a mesh of its own", apart(&a, &b));
-    let c = picture(&mut open(&scene(2)).unwrap(), 96);
-    assert!(apart(&a, &c) > 0.5, "the window is in the picture ({:.2} steps from none)", apart(&a, &c));
+    for cutout in [true, false] {
+        let mut one = match open(&scene(0, cutout)) {
+            Ok(c) if c.g.hwrt => c,
+            Ok(_) => return eprintln!("skipped: no hardware RT"),
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let window = one.sc.instances.iter().find(|i| i.name == "window").expect("the window is an instance").clone();
+        assert_eq!((window.bits, window.cast_shadow, one.sc.meshes[window.mesh as usize].sect_count), (scene::INST_ROWS | scene::INST_GLASS, true, 2), "glass and a frame: one mesh, which casts");
+        let wanted = gpu::F_ROWS | gpu::F_IGLASS | if cutout { gpu::F_MASKED } else { 0 };
+        assert_eq!(one.sc.up.kernel.features & (wanted | gpu::F_MASKED), wanted);
+        assert_eq!(one.sc.base.counts2[1], 1, "the sky is sampled as a light");
+        let mut two = open(&scene(1, cutout)).unwrap();
+        assert!(!two.sc.instances.iter().find(|i| i.name == "part30").unwrap().cast_shadow, "the pane alone casts no shadow");
+        let (a, b) = (picture(&mut one, 96), picture(&mut two, 96));
+        assert!(apart(&a, &b) < 0.5, "a pane among its mesh's sections, with a cutout in the scene: {cutout}: the picture is {:.2} steps from the pane's as a mesh of its own", apart(&a, &b));
+        let c = picture(&mut open(&scene(2, cutout)).unwrap(), 96);
+        assert!(apart(&a, &c) > 0.5, "the window is in the picture ({:.2} steps from none)", apart(&a, &c));
+    }
 }
 
 /// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume

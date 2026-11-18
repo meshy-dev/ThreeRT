@@ -109,19 +109,15 @@
     return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, hit_inst(it.instance_custom_data));
 }
 
-// An alpha-cutout triangle: its material has an alpha test (as the build flags TRI_MASKED; model instances' pool
-// triangles carry no flags).
-@if(hwrt) fn cutout(ti: u32, inst: u32) -> bool {
-    return material_at(material_of(attrs[ti], inst)).uv2.w > 0.0;
-}
-
 // The first word of the row of the hit `trace_opaque` last found (its material and class bits), NO_ROW where its
 // instance has no rows: the trace's tests of a hit read no attribute and no material then.
 @if(hwrt) var<private> hit_row: u32;
 @if(hwrt) const NO_ROW: u32 = 0xffffffffu;
+// Whether that hit is an alpha-cutout's: its row says, or without a row its triangle's material has an alpha test (as
+// the build flags TRI_MASKED; a model instance's pool triangles carry no flags, and its record is not asked again).
 @if(hwrt) fn cutout_hit(h: Hit) -> bool {
     if (has(F_ROWS) && hit_row != NO_ROW) { return (hit_row & ROW_CUTOUT) != 0u; }
-    return cutout(h.tri, h.inst);
+    return material_at(triangle_material(attrs[h.tri])).uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
@@ -138,10 +134,13 @@
         // (Its mesh's geometries: where the second and the third start, scene.rs `InstMesh::part_offsets`; a third
         // only with glass.)
         let rec = instance_at(custom & (INSTANCE_BIT - 1u));
-        // (With rows: a geometry is a section, and its row has where its triangles start.)
+        // (With rows: a geometry is a section, and its row has where its triangles start; the first section starts
+        // where the mesh does. The row's class is read where the trace tests a hit by it.)
         if (has_rows(rec)) {
-            hit_row = row_word(rec.info.w, geometry, 0u);
-            return row_word(rec.info.w, geometry, 1u) + prim;
+            if (has(F_MASKED) || has(F_IGLASS)) { hit_row = row_word(rec.info.w, geometry, 0u); }
+            var first = rec.info.x;
+            if (geometry != 0u) { first = row_word(rec.info.w, geometry, 1u); }
+            return first + prim;
         }
         var at = select(0u, rec.info.w, geometry == 1u);
         if (has(F_IGLASS) && geometry == 2u) { at = bitcast<u32>(rec.n0.w); }

@@ -313,13 +313,15 @@ fn row_word(first: u32, section: u32, k: u32) -> u32 { return words[P.word_first
 // hit's material goes through here: where the material is kept is this function's alone. On the triangle; with rows,
 // in the row of the triangle's section.
 fn material_of(a: TriAttr, inst: u32) -> u32 {
-    let m = bitcast<u32>(a.uv.w);
+    let m = triangle_material(a);
     if (has(F_ROWS) && inst != NO_INST) {
         let r = instance_at(inst);
         if (has_rows(r)) { return row_word(r.info.w, m, 0u) & ROW_MATERIAL; }
     }
     return m;
 }
+// The material a triangle itself holds: one that no instance with rows places.
+fn triangle_material(a: TriAttr) -> u32 { return bitcast<u32>(a.uv.w); }
 
 // A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
