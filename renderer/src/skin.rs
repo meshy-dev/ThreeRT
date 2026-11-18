@@ -237,6 +237,7 @@ impl Model {
             let nm = Mat3::from_mat4(m).inverse().transpose();
             let pos: Vec<Vec3> = p.positions.iter().map(|v| m.transform_point3(*v)).collect();
             let nrm: Option<Vec<Vec3>> = p.normals.as_ref().map(|n| n.iter().map(|v| (nm * *v).normalize_or_zero()).collect());
+            // (A mirroring placement: the winding stays front-facing, and an authored tangent's frame changes hand.)
             let flip = !local && m.determinant() < 0.0;
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if flip { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
@@ -246,7 +247,7 @@ impl Model {
                 let n = nrm.as_ref().map(|n| [n[a], n[b], n[c]]).unwrap_or([gn; 3]);
                 let tangent = p.tangents.as_ref().map(|tv| {
                     let tt = tv[a];
-                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), tt[3])
+                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if flip { -tt[3] } else { tt[3] })
                 });
                 out.push((p.node, ModelTri { p: tp, n, uv: [p.uvs[a], p.uvs[b], p.uvs[c]], tangent, material: p.material }));
             }
@@ -311,7 +312,7 @@ impl Model {
                 let n = nrm.as_ref().map(|n| [n[a], n[b], n[c]]).unwrap_or([gn; 3]);
                 let tangent = p.tangents.as_ref().map(|tv| {
                     let tt = tv[a];
-                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), tt[3])
+                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if mirrored { -tt[3] } else { tt[3] })
                 });
                 out.push(ModelTri { p: tp, n, uv: [p.uvs[a], p.uvs[b], p.uvs[c]], tangent, material: p.material });
             }
@@ -388,6 +389,23 @@ mod tests {
         let posed = m.triangles(world, None, Some(&pose)).unwrap();
         let w = world * g[1];
         assert!(posed.iter().any(|t| (0..3).all(|k| (t.p[k] - w.transform_point3(local[0].1.p[k])).length() < 1e-5)));
+    }
+
+    /// An authored tangent's frame changes hand where a placement mirrors (the winding is swapped there too); in a
+    /// node's own space it is as authored (the instance that places the node says whether it mirrors).
+    #[test]
+    fn a_mirrored_placement_changes_an_authored_tangents_hand() {
+        let mut m = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
+        for p in &mut m.prims {
+            p.tangents = Some(vec![[1.0, 0.0, 0.0, 1.0]; p.positions.len()]);
+        }
+        let hand = |t: &ModelTri| t.tangent.unwrap().1;
+        let straight = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        let mirrored = straight * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        assert!(m.triangles(straight, None, None).unwrap().iter().all(|t| hand(t) == 1.0));
+        assert!(m.triangles(mirrored, None, None).unwrap().iter().all(|t| hand(t) == -1.0));
+        assert!(m.node_triangles(mirrored, None, &|_| true, false).unwrap().iter().all(|(_, t)| hand(t) == -1.0));
+        assert!(m.node_triangles(Mat4::IDENTITY, None, &|_| true, true).unwrap().iter().all(|(_, t)| hand(t) == 1.0));
     }
 
     fn ch(interpolation: gltf::animation::Interpolation, path: Path, times: Vec<f32>, values: Vec<[f32; 4]>) -> Channel {

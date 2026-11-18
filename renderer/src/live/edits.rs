@@ -1204,12 +1204,8 @@ impl LiveCore {
             }
             let (first, verts, attrs, blas) = &mut self.sc.dynamic;
             for (j, (node, p, n, uv, tg)) in r.rest_local.iter().enumerate() {
-                let w = m * globals[*node];
-                let nm = glam::Mat3::from_mat4(w).inverse().transpose();
-                let pw = p.map(|v| w.transform_point3(v));
-                let nw = n.map(|v| (nm * v).normalize_or_zero());
-                let tw = tg.map(|(v, s)| (w.transform_vector3(v).normalize_or_zero(), s));
-                let a = scene::tri_attr(pw, nw, *uv, tw, d.mats[j]);
+                let (pw, nw, uvw, tw) = scene::placed_tri(m * globals[*node], p, n, uv, *tg);
+                let a = scene::tri_attr(pw, nw, uvw, tw, d.mats[j]);
                 let k = d.finals[j] as usize - *first;
                 let (e1, e2) = (pw[1] - pw[0], pw[2] - pw[0]);
                 verts[k * 3..k * 3 + 3].copy_from_slice(&[[pw[0].x, pw[0].y, pw[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
@@ -1818,6 +1814,8 @@ impl LiveCore {
                     }
                     let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
                     let gm = tables.materials[mat as usize];
+                    // (It covers instances' triangles from here on: `Tables::fixed_mats`.)
+                    tables.fixed_mats.insert(mat);
                     // An emitting material (no glass, no function): a mesh as any other, each instance's emitters in
                     // the light list (given below, where its record is known; scene.rs; ROADMAP § 6 step 3).
                     let emits = scene::emits_only(&gm);

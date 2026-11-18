@@ -584,8 +584,12 @@ fn an_emitting_instanced_object_added_in_place_is_lit_as_a_build_lights_it() {
         ];
         for (what, edit) in &edits {
             let what = format!("an emitting instanced object {what} in place, {} a light tree", if tree { "with" } else { "without" });
+            // (Its material covers instances' triangles once it is added: `Tables::fixed_mats`.)
+            let covers = |c: &LiveCore| c.sc.tables.fixed_mats.contains(&c.sc.tables.retained.materials[&5]);
+            let before = covers(&live);
             edit(&mut w);
             assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            assert!(covers(&live) && (before || what.contains("added")), "{what}: its material is among those of instances' triangles");
             if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
                 list_is_its_triangles(&what, &live);
             }

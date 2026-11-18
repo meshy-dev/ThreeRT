@@ -151,6 +151,17 @@ impl Instance {
     }
 }
 
+/// A triangle in a node's own space (vertices, normals, UVs, an authored tangent) placed by `w` as the build flattens
+/// it: under a mirroring `w` the second and third vertex change places, so that it faces as its mesh does, and an
+/// authored tangent's frame changes hand (`Instance::flat` does the same with a mesh's triangle; a tangent worked out
+/// from the placed triangle has the right hand by itself).
+#[allow(clippy::type_complexity)]
+pub fn placed_tri(w: Mat4, p: &[Vec3; 3], n: &[Vec3; 3], uv: &[Vec2; 3], tangent: Option<(Vec3, f32)>) -> ([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>) {
+    let nm = Mat3::from_mat4(w).inverse().transpose();
+    let (k, hand) = if mirrors(w) { ([0, 2, 1], -1.0) } else { ([0, 1, 2], 1.0) };
+    (k.map(|i| w.transform_point3(p[i])), k.map(|i| (nm * n[i]).normalize_or_zero()), k.map(|i| uv[i]), tangent.map(|(v, s)| (w.transform_vector3(v).normalize_or_zero(), s * hand)))
+}
+
 /// Bit of an instance record's n1.w, beside the units' flags there (units.rs `UNIT_*`): the instance mirrors its mesh
 /// (the kernel's `inst_sign`).
 pub const INST_MIRRORED: u32 = 4;
@@ -1605,13 +1616,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             rigid.instances.push((*ni, instances.len() as u32));
                             instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
                         }
-                        let nm = Mat3::from_mat4(w_n).inverse().transpose();
                         for &(k, mat) in &classed[2] {
                             let t = &local[k].1;
-                            let p = t.p.map(|v| w_n.transform_point3(v));
-                            let nn = t.n.map(|v| (nm * v).normalize_or_zero());
-                            let tg = t.tangent.map(|(v, s)| (w_n.transform_vector3(v).normalize_or_zero(), s));
-                            push_tri(&mut tris, &mut tri_flags, &mut attrs, p, nn, t.uv, tg, mat, base_flags | TRI_DYNAMIC);
+                            let (p, nn, uv, tg) = placed_tri(w_n, &t.p, &t.n, &t.uv, t.tangent);
+                            push_tri(&mut tris, &mut tri_flags, &mut attrs, p, nn, uv, tg, mat, base_flags | TRI_DYNAMIC);
                             rigid.rest.mats.push(mat);
                             rigid.rest_local.push((*ni, t.p, t.n, t.uv, t.tangent));
                         }
@@ -2582,7 +2590,8 @@ mod instance_tests {
 
     /// A model placed mirrored (a negative scale) is an instance as one placed straight is, of the same mesh: a model
     /// that stays and a rigid model's moving node (tests/render/data/panel-decal.glb). The meshes do not depend on
-    /// the placement's hand; the instances' records say that they mirror.
+    /// the placement's hand; the instances' records say that they mirror; what the build flattens of them keeps
+    /// facing as its normals do.
     #[test]
     fn a_mirrored_model_is_an_instance_of_the_same_mesh() {
         let scene = |x: f32| {
@@ -2605,6 +2614,14 @@ mod instance_tests {
         assert_eq!((mirrored.instances.len(), mirrored.tris.len()), (straight.instances.len(), straight.tris.len()));
         assert!(straight.instances.len() >= 2 && straight.instances.iter().all(|i| i.gpu(0, 0).n[1][3].to_bits() == 0));
         assert!(mirrored.instances.iter().all(|i| i.gpu(0, 0).n[1][3].to_bits() == INST_MIRRORED), "every instance of a mirrored model mirrors");
+        // What is flattened of them (the cutout on an emitter with its emitter: a still model's, a moving node's) faces
+        // as its normals do, mirrored too.
+        for (sc, what) in [(&straight, "straight"), (&mirrored, "mirrored")] {
+            assert!(!sc.tris.is_empty());
+            for (t, a) in sc.tris.iter().zip(&sc.attrs) {
+                assert!((t[1] - t[0]).cross(t[2] - t[0]).dot(Vec3A::new(a.n0[0], a.n0[1], a.n0[2])) > 0.0, "{what}: a flattened triangle faces away from its normals");
+            }
+        }
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh with it (`flatten_coincident`), in a model that stays
