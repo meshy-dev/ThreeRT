@@ -2365,11 +2365,11 @@ impl Gpu {
             let vbuf = buf_room("blas_verts", bytemuck::cast_slice(&verts), room.tris * 36, wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE);
             let huge_scene = huge(groups, !scene.gpu_instances.is_empty());
             let mut first = 0usize;
-            let groups: Vec<(usize, usize, u8, bool)> = groups
+            let groups: Vec<(usize, usize, u8)> = groups
                 .iter()
                 .enumerate()
                 .map(|(g, &count)| {
-                    let r = (first, count, if g % 4 < 2 { 1u8 } else { 2u8 }, g % 2 == 0);
+                    let r = (first, count, if g % 4 < 2 { 1u8 } else { 2u8 });
                     first += count;
                     r
                 })
@@ -2378,7 +2378,7 @@ impl Gpu {
             let mut t = d.create_tlas(&wgpu::CreateTlasDescriptor { label: None, max_instances: (GROUPS + scene.instances.len() + scene.procs.len() + room.records) as u32, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
             let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = groups
                 .iter()
-                .map(|&(_, count, _, opaque)| wgpu::BlasTriangleGeometrySizeDescriptor {
+                .map(|&(_, count, _)| wgpu::BlasTriangleGeometrySizeDescriptor {
                     vertex_format: wgpu::VertexFormat::Float32x3,
                     vertex_count: (count * 3) as u32,
                     index_format: None,
@@ -2386,14 +2386,11 @@ impl Gpu {
                     // (Every group's geometry is flagged opaque, the cutout ones' too: a query that forces opacity sees
                     // them alike, and a shadow ray that culls what is not opaque, an instanced mesh's glass, must
                     // still meet a cutout: trace_hw.wgsl.)
-                    flags: {
-                        let _ = opaque;
-                        wgpu::AccelerationStructureGeometryFlags::OPAQUE
-                    },
+                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
                 })
                 .collect();
             let mut blases = vec![];
-            for (i, (first, count, mask, _)) in groups.iter().enumerate() {
+            for (i, (first, count, mask)) in groups.iter().enumerate() {
                 if *count == 0 {
                     continue;
                 }
@@ -2440,7 +2437,7 @@ impl Gpu {
                 })
                 .collect();
             // What the triangle BLASes hold (Metal's own sizes; each instanced mesh once) and their vertex buffer.
-            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _, opaque)| vec![((first * 3) as u32, (count * 3) as u32, opaque)]);
+            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![((first * 3) as u32, (count * 3) as u32, true)]);
             let mesh_vertex_parts = mesh_parts.iter().map(|ps| ps.iter().map(|&(first, count, opaque)| ((pool_first as u32 + first) * 3, count * 3, opaque)).collect::<Vec<_>>());
             let mut blas_per_tri = 0.0;
             let parts: Vec<Vec<(u32, u32, bool)>> = group_parts.chain(mesh_vertex_parts).collect();
