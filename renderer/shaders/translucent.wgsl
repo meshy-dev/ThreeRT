@@ -58,7 +58,8 @@
 // material function.
 @if(hwrt) fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
     let a = attrs[ti];
-    let m = material_at(bitcast<u32>(a.uv.w));
+    // (A particle's triangle is in the world: no instance.)
+    let m = material_at(material_of(a, NO_INST));
     let uv = mesh_uv(a, m, b.x, b.y);
     let tl = mesh_lod(a, m) + lod - LOD_BIAS;
     var r = mat_base(m);

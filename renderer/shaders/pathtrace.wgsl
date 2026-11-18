@@ -293,6 +293,12 @@ fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
 fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
 }
+// The material of a triangle, given its attributes and the instance that places it (NO_INST: none). Every read of a
+// hit's material goes through here: where the material is kept is this function's alone.
+fn material_of(a: TriAttr, inst: u32) -> u32 {
+    return bitcast<u32>(a.uv.w);
+}
+
 // A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;
@@ -877,7 +883,7 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
         a = inst_attr(r, a);
         side = inst_sign(r);
     }
-    let m = material_at(bitcast<u32>(a.uv.w));
+    let m = material_at(material_of(a, h.inst));
     var g = GlassAt(normalize(cross(e1, e2)) * side, 0.0, false, vec3<f32>(1.0));
     var tr = clamp(m.layer.x, 0.0, 1.0) * (1.0 - clamp(m.params.x, 0.0, 1.0));
     if (tr <= 0.0) { return g; }
@@ -1158,7 +1164,7 @@ fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> M
         a = inst_attr(r, a);
         side = inst_sign(r);
     }
-    let m = material_at(bitcast<u32>(a.uv.w));
+    let m = material_at(material_of(a, inst));
     let w = 1.0 - u - v;
     let p = v0 + e1 * u + e2 * v;
     let ng = normalize(cross(e1, e2)) * side;
@@ -1203,7 +1209,7 @@ var<private> lights_only: bool = false;
 // the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
 fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
     let a = attrs[ti];
-    let m = material_at(bitcast<u32>(a.uv.w));
+    let m = material_at(material_of(a, inst));
     var alpha = m.base_color.a;
     var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
     if (has(F_INST) && inst != NO_INST) { lod += bitcast<f32>(instance_at(inst).info.z); }
@@ -1245,7 +1251,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let w = 1.0 - h.u - h.v;
     var ng = normalize(cross(e1, e2)) * side;
     var n = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v);
-    let mi = bitcast<u32>(a.uv.w);
+    let mi = material_of(a, h.inst);
     let m = material_at(mi);
     let front = dot(ng, d) < 0.0;
     if (!front) { ng = -ng; }
@@ -2113,7 +2119,7 @@ struct ES { le: vec3<f32>, l: vec3<f32>, dist: f32, pdf_w: f32, w: f32 };
 // Emitted radiance of an emitter at (b1, b2) toward -l (emissive map, animation, material function, node power).
 fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32> {
     let a = emitter_attrs(em);
-    let m = material_at(bitcast<u32>(a.uv.w));
+    let m = material_at(material_of(a, em.inst));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
     var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
@@ -2192,7 +2198,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    let m_card = material_at(bitcast<u32>(attrs[em.tri].uv.w)).tex1.z == MAT_EMITTER_CARD;
+    let m_card = material_at(material_of(attrs[em.tri], em.inst)).tex1.z == MAT_EMITTER_CARD;
     if (!m_card) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0) { return r; }
     r.le = emitter_radiance(em, pick_b.x, pick_b.y, l);
@@ -2227,7 +2233,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    if (material_at(bitcast<u32>(attrs[em.tri].uv.w)).tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
+    if (material_at(material_of(attrs[em.tri], em.inst)).tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0 || (has(F_PEMIT) && !(cos_l > 0.0))) { return r; } // also a particle not shown (no area: NaN)
     r.le = emitter_radiance(em, b1, b2, l);
     r.l = l;

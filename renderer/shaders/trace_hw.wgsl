@@ -46,7 +46,7 @@
             return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
         }
         let t = t0 + h.t;
-        if (solid || is_proc(h) || !cutout(h.tri) || alpha_pass(h.tri, h.inst, h.u, h.v, t)) { return Hit(t, h.tri, h.u, h.v, h.inst); }
+        if (solid || is_proc(h) || !cutout(h.tri, h.inst) || alpha_pass(h.tri, h.inst, h.u, h.v, t)) { return Hit(t, h.tri, h.u, h.v, h.inst); }
         if (first) { first = false; } else { t0 = t + 1e-4 * max(1.0, t); }
     }
     if (any) { return Hit(t0, 0u, 0.0, 0.0, NO_INST); }
@@ -100,8 +100,8 @@
 
 // An alpha-cutout triangle: its material has an alpha test (as the build flags TRI_MASKED; model instances' pool
 // triangles carry no flags).
-@if(hwrt) fn cutout(ti: u32) -> bool {
-    return material_at(bitcast<u32>(attrs[ti].uv.w)).uv2.w > 0.0;
+@if(hwrt) fn cutout(ti: u32, inst: u32) -> bool {
+    return material_at(material_of(attrs[ti], inst)).uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
