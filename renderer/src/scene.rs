@@ -281,12 +281,24 @@ pub fn blas_tri(t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
 /// keeps the TLAS free of non-finite numbers, and can come back in place.
 pub fn instance_world(m: Mat4, t: &world::InstanceTable, i: usize) -> (Mat4, bool) {
     let w = m * t.matrix(i);
-    let det = glam::Mat3::from_mat4(w).determinant();
-    if i < t.count as usize && w.is_finite() && det.abs() > 1e-30 {
+    if i < t.count as usize {
+        return placed_world(w, m.w_axis.truncate());
+    }
+    (at_point(if w.w_axis.is_finite() { w.w_axis.truncate() } else { m.w_axis.truncate() }), true)
+}
+
+/// An instance's world matrix as the structure above the triangles takes it, and whether the placement has no size:
+/// not finite, or not invertible (scene code hides by scaling to 0). Such an instance stands at a point (its
+/// translation, or `fallback`), hidden.
+pub fn placed_world(w: Mat4, fallback: Vec3) -> (Mat4, bool) {
+    if w.is_finite() && glam::Mat3::from_mat4(w).determinant().abs() > 1e-30 {
         return (w, false);
     }
-    let at = if w.w_axis.is_finite() { w.w_axis.truncate() } else { m.w_axis.truncate() };
-    (Mat4::from_scale_rotation_translation(Vec3::splat(1e-6), glam::Quat::IDENTITY, at), true)
+    (at_point(if w.w_axis.is_finite() { w.w_axis.truncate() } else { fallback }), true)
+}
+
+fn at_point(at: Vec3) -> Mat4 {
+    Mat4::from_scale_rotation_translation(Vec3::splat(1e-6), glam::Quat::IDENTITY, at)
 }
 
 impl ProcObject {
@@ -2685,6 +2697,34 @@ mod instance_tests {
                 assert!((t[1] - t[0]).cross(t[2] - t[0]).dot(Vec3A::new(a.n0[0], a.n0[1], a.n0[2])) > 0.0, "{what}: a flattened triangle faces away from its normals");
             }
         }
+    }
+
+    /// A mesh of several materials (a geometry group each) lies by class, opaque then cutout then glass, whatever the
+    /// order of its groups; each triangle keeps its material, `order` says where it came from among the geometry's
+    /// drawn triangles (one in no group is not drawn), and the mesh counts its parts and the triangles that emit.
+    #[test]
+    fn a_mesh_of_several_materials_lies_by_class() {
+        // Five quads along x: glass, a cutout, one in no group, an opaque one that emits, an opaque one.
+        let (mut positions, mut indices) = (vec![], vec![]);
+        for q in 0..5u32 {
+            let x = q as f32;
+            positions.extend([x, 0.0, 0.0, x + 1.0, 0.0, 0.0, x + 1.0, 1.0, 0.0, x, 1.0, 0.0]);
+            indices.extend([0, 1, 2, 0, 2, 3].map(|i| 4 * q + i));
+        }
+        let g = world::Geometry { normals: [0.0, 0.0, 1.0].repeat(20), uvs: vec![0.0; 40], positions, indices, groups: vec![[0, 6, 0], [6, 6, 1], [18, 6, 2], [24, 6, 3]], colors: vec![] };
+        let materials = [GpuMaterial { layer: [1.0, 1.5, 0.0, 0.0], ..Default::default() }, GpuMaterial { uv2: [0.0, 0.0, 0.0, 0.5], ..Default::default() }, GpuMaterial { emissive: [1.0, 1.0, 1.0, 0.0], ..Default::default() }, GpuMaterial::default()];
+        let per_tri = group_materials(&g, &[0, 1, 2, 3]).unwrap();
+        assert_eq!(per_tri, [Some(0), Some(0), Some(1), Some(1), None, None, Some(2), Some(2), Some(3), Some(3)]);
+        let (t, a, order, im) = own_mesh(&g, 0, Some(&per_tri), &materials, 10);
+        assert_eq!(order, [4, 5, 6, 7, 2, 3, 0, 1], "the opaque triangles, the cutout's, the glass's");
+        assert_eq!(a.iter().map(|a| a.uv[3].to_bits()).collect::<Vec<_>>(), [2, 2, 3, 3, 1, 1, 0, 0]);
+        assert_eq!(t.iter().map(|t| t[0].x.min(t[1].x).min(t[2].x)).collect::<Vec<_>>(), [3.0, 3.0, 4.0, 4.0, 1.0, 1.0, 0.0, 0.0], "each where its material is");
+        assert_eq!((im.first, im.count, im.opaque, im.glass, im.emitters), (10, 8, 4, 2, 2));
+        assert_eq!((im.parts(), im.part_offsets()), (vec![(0, 4, true), (4, 2, true), (6, 2, false)], [4, 6]));
+        assert_eq!((im.lo, im.hi), (Vec3A::new(0.0, 0.0, 0.0), Vec3A::new(5.0, 1.0, 0.0)), "bounds of what is drawn");
+        // One material: as the geometry has them.
+        let (_, a1, order1, one) = own_mesh(&g, 1, None, &materials, 0);
+        assert_eq!((order1, a1.len(), one.opaque, one.glass, one.emitters), ((0..10).collect::<Vec<_>>(), 10, 0, 0, 0), "a cutout mesh");
     }
 
     /// A model's glass is a part of its mesh (tests/render/data/frame-pane.glb: an opaque, a cutout and a glass quad;

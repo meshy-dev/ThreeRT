@@ -314,6 +314,9 @@ fn moves_in_place_leave_what_a_build_does() {
                 w.set_transform(13, at(0.2, 0.2, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
             }),
         ),
+        // (Scene code hides by scaling to 0: the instance stands at a point where no ray sees it, and comes back.)
+        ("the movable mesh scaled to nothing", Box::new(move |w| w.set_transform(13, at(0.2, 0.2, 0.7), glam::Quat::IDENTITY, Vec3::ZERO).unwrap())),
+        ("the movable mesh back at its size", Box::new(move |w| w.set_transform(13, at(-0.1, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap())),
     ];
     for (what, edit) in &edits {
         edit(&mut w);
@@ -322,6 +325,7 @@ fn moves_in_place_leave_what_a_build_does() {
         // (Software traversal places some of these another way, and may rebuild: the picture holds either way.)
         assert!(!(rebuilt && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
         assert_eq!(live.top_builds - builds, u32::from(!rebuilt), "{what}: one build above the triangles a commit, whatever moved");
+        assert!(live.sc.instances.iter().all(|i| i.world.is_finite() && i.world.determinant() != 0.0), "{what}: every instance has a size above the triangles");
         let mut fresh = open(&w).unwrap();
         forget(&mut live);
         let (a, b) = (picture(&mut live, 24), picture(&mut fresh, 24));
@@ -408,6 +412,8 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
+    let record_size = std::mem::size_of::<scene::GpuInstance>();
+    let records = read(&up.heap.buffer, up.heap.at(Table::Instances), (c.sc.gpu_instances.len() * record_size) as u64);
     let mut alive = 0;
     for (i, e) in tables.emitter_tris.iter().enumerate() {
         let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&list[i * size..][..size]);
@@ -426,7 +432,8 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
             assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
         } else {
-            let (inst, record) = (&c.sc.instances[e.inst as usize], &c.sc.gpu_instances[e.inst as usize]);
+            // (The record as the GPU has it.)
+            let (inst, record) = (&c.sc.instances[e.inst as usize], bytemuck::pod_read_unaligned::<scene::GpuInstance>(&records[e.inst as usize * record_size..][..record_size]));
             let at = |k: usize| glam::Vec3::new(rows[k][0], rows[k][1], rows[k][2]);
             let placed = [inst.world.transform_point3(at(0)), inst.world.transform_vector3(at(1)), inst.world.transform_vector3(at(2))];
             assert_eq!((r.tri, r.inst, r.code), (e.tri, e.inst, code), "{what}: emitter {i}'s words");
@@ -872,9 +879,10 @@ fn the_light_list_holds_its_triangles() {
 
 /// A material that starts emitting in place lights the instances of the meshes that have it as a build lights them: a
 /// mesh of that material alone that two objects share, one of them movable (and moved afterwards: its new emitters
-/// follow it), and a mesh of two materials of which the other emitted already (its instance's run of the light list
-/// grows). With and without a light tree. After each: no rebuild, the light list is its triangles, the weights and the
-/// picture are a build's.
+/// follow it), a mesh of two materials of which the other emitted already (its instance's run of the light list
+/// grows), and a mesh added in place of a material nothing had. With and without a light tree. After each: no rebuild,
+/// the light list is its triangles, the weights and the picture are a build's. A material an instanced object has too
+/// rebuilds, one added in place as well.
 #[test]
 fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does() {
     let presets = crate::default_presets_dir();
@@ -885,9 +893,17 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         // (The sun away: the meshes will light the scene.)
         w.set_visible(20, false).unwrap();
         w.set_material(6, late(0.0));
-        // Two quads side by side in one geometry, a group each: the lamp's material, which emits, and the late one.
-        let positions = vec![-0.5, -0.2, 0.0, 0.0, -0.2, 0.0, 0.0, 0.2, 0.0, -0.5, 0.2, 0.0, 0.0, -0.2, 0.0, 0.5, -0.2, 0.0, 0.5, 0.2, 0.0, 0.0, 0.2, 0.0];
-        w.set_geometry(7, Geometry { positions, normals: [0.0, 0.0, 1.0].repeat(8), uvs: vec![0.0; 16], indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7], groups: vec![[0, 6, 0], [6, 6, 1]], colors: vec![] }).unwrap();
+        // Sixteen quads in a row in one geometry, a group each, by turns of the lamp's material, which emits, and of
+        // the late one; the geometry has them out of the row's order (so that a mesh tree orders them its own way under
+        // software traversal).
+        let (mut positions, mut indices, mut groups) = (vec![], vec![], vec![]);
+        for q in 0..16u32 {
+            let x = -0.48 + 0.06 * ((q * 7) % 16) as f32;
+            positions.extend([x, -0.15, 0.0, x + 0.06, -0.15, 0.0, x + 0.06, 0.15, 0.0, x, 0.15, 0.0]);
+            indices.extend([0, 1, 2, 0, 2, 3].map(|i| 4 * q + i));
+            groups.push([6 * q, 6, q % 2]);
+        }
+        w.set_geometry(7, Geometry { positions, normals: [0.0, 0.0, 1.0].repeat(64), uvs: vec![0.0; 128], indices, groups, colors: vec![] }).unwrap();
         let mesh = |geometry, material, materials| Kind::Mesh { geometry, material, own_blas: false, materials };
         w.set_object(13, "one".into(), None, mesh(3, 6, vec![]), true, false).unwrap();
         w.set_transform(13, Vec3::new(-0.6, -0.5, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
@@ -895,6 +911,19 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         w.set_transform(14, Vec3::new(0.5, -0.5, 0.9), glam::Quat::from_rotation_y(0.5), Vec3::ONE).unwrap();
         w.set_object(15, "two".into(), None, mesh(7, 5, vec![5, 6]), true, false).unwrap();
         w.set_transform(15, Vec3::new(0.0, 0.6, 0.7), glam::Quat::from_rotation_x(-0.3), Vec3::ONE).unwrap();
+        // A material a mesh has and an instanced object too, and one nothing has yet; a mesh the scene says it edits
+        // (room for one added in place).
+        w.set_material(7, late(0.0));
+        w.set_material(8, late(0.0));
+        w.set_material(9, late(0.0));
+        w.set_object(32, "nine".into(), None, mesh(3, 9, vec![]), true, false).unwrap();
+        w.set_transform(32, Vec3::new(-0.9, -0.1, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_object(26, "both".into(), None, mesh(3, 7, vec![]), true, false).unwrap();
+        w.set_transform(26, Vec3::new(-0.9, 0.6, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_object(27, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![7], capacity: 1 }, true, false).unwrap();
+        w.set_instances(27, 1, Some(glam::Mat4::from_translation(Vec3::new(0.9, 0.6, 0.6)).to_cols_array().to_vec()), None, None).unwrap();
+        w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+        w.set_transform(28, Vec3::new(0.9, -0.1, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
         if tree {
             strip(&mut w);
         }
@@ -908,13 +937,28 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         let mesh_of = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).expect("a mesh is an instance").instance as usize].mesh;
         assert_eq!(mesh_of(&live, 13), mesh_of(&live, 14), "the two objects share their mesh");
         let two = mesh_of(&live, 15) as usize;
-        assert_eq!((live.sc.meshes[two].count, live.sc.meshes[two].emitters), (4, 2), "the mesh of two materials: one emits");
+        assert_eq!((live.sc.meshes[two].count, live.sc.meshes[two].emitters), (32, 16), "the mesh of two materials: one emits");
         w.set_material(6, late(30.0));
         let what = format!("a material started emitting in place, {with} a light tree");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
-        assert_eq!((live.sc.meshes[two].emitters, live.sc.meshes[mesh_of(&live, 13) as usize].emitters), (4, 2), "{what}: the meshes' emitters");
+        assert_eq!((live.sc.meshes[two].emitters, live.sc.meshes[mesh_of(&live, 13) as usize].emitters), (32, 2), "{what}: the meshes' emitters");
         list_is_its_triangles(&what, &live);
+        let moving = |c: &LiveCore, id: u32| {
+            let r = c.sc.tables.retained.instance(id).unwrap().instance;
+            c.sc.tables.emitter_tris.iter().filter(|e| e.inst == r && e.area > 0.0).map(|e| e.moves).collect::<Vec<_>>()
+        };
+        assert_eq!((moving(&live, 13), moving(&live, 14)), (vec![false; 2], vec![true; 2]), "{what}: the movable one's emitters move");
         lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        if live.g.hwrt {
+            w.set_object(29, "added".into(), None, Kind::Mesh { geometry: 3, material: 8, own_blas: true, materials: vec![] }, true, false).unwrap();
+            w.set_transform(29, Vec3::new(-0.2, 0.1, 1.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+            assert!(!live.commit(&mut w).unwrap(), "a mesh added, {with} a light tree: in place ({:?})", live.fallback);
+            w.set_material(8, late(20.0));
+            let what = format!("the material of a mesh added in place started emitting, {with} a light tree");
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            list_is_its_triangles(&what, &live);
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        }
         w.set_transform(14, Vec3::new(0.2, -0.3, 1.2), glam::Quat::from_rotation_z(0.6), Vec3::ONE).unwrap();
         let what = format!("the movable one of them moved, {with} a light tree");
         assert!(!(live.commit(&mut w).unwrap() && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
@@ -923,5 +967,16 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         forget(&mut live);
         let (a, b) = (picture(&mut live, 64), picture(&mut open(&w).unwrap(), 64));
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        // A material meshes had alone, until an instanced object of it is added in place: a rebuild from then on.
+        if live.g.hwrt {
+            w.set_object(31, "more".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![9], capacity: 1 }, true, false).unwrap();
+            w.set_instances(31, 1, Some(glam::Mat4::from_translation(Vec3::new(0.4, 0.2, 1.1)).to_cols_array().to_vec()), None, None).unwrap();
+            assert!(!live.commit(&mut w).unwrap(), "an instanced object added, {with} a light tree: in place ({:?})", live.fallback);
+            w.set_material(9, late(30.0));
+            assert!(live.commit(&mut w).unwrap(), "a material an instanced object added in place has too started emitting, {with} a light tree: a rebuild");
+        }
+        // (Its copies' emitters are a build's to make.)
+        w.set_material(7, late(30.0));
+        assert!(live.commit(&mut w).unwrap(), "a material an instanced object has too started emitting, {with} a light tree: a rebuild");
     }
 }

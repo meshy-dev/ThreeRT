@@ -752,8 +752,9 @@ impl LiveCore {
         let (mut lo, mut hi) = (usize::MAX, 0usize);
         // (Instances the last update moved and this one does not catch up in `commit`.)
         for &(node, i) in placed {
-            let w = world.world_matrix(node);
             let inst = &mut self.sc.instances[i as usize];
+            // (A placement without size, as scene code hides by scaling to 0: at a point, where no ray sees it.)
+            let (w, gone) = scene::placed_world(world.world_matrix(node), inst.world.w_axis.truncate());
             // (Software traversal: an instance of a mesh that deforms is no unit; its triangles are among the still
             // scene's, in the world, and a rebuild moves them.)
             if !top.has_mesh(inst.mesh) {
@@ -774,7 +775,7 @@ impl LiveCore {
             let o = &mut self.sc.tables.objects[inst.object as usize * st];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
             let slot = top.inst_base() + i as usize;
-            top.moved(slot, w, None);
+            top.moved(slot, w, Some((inst.cast_shadow, gone || inst.hidden)));
             self.inst_moving.push(i);
         }
         if merged {
