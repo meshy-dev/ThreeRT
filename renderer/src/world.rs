@@ -784,13 +784,16 @@ impl World {
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         if o.visible != visible {
             o.visible = visible;
-            // In place: what keeps its slot in the build while hidden (`hidden_built`), and lights, which always
-            // have theirs (not a rect light's card, which is geometry, nor the sun, whose colour is the sky bake's).
+            // In place: what keeps its slot in the build while hidden (`hidden_built`; a mesh, as a hidden instance),
+            // and lights, which always have theirs (not a rect light's card, which is geometry, nor the sun, whose
+            // colour is the sky bake's).
             let sun = matches!(self.environment.sky, desc::Sky::Atmosphere { sun: Some(s), .. } if s == id);
             let o = &self.objects[&id];
             let in_place = match &o.kind {
                 Kind::Particles { emitter_area, .. } => *emitter_area <= 0.0,
                 Kind::Volume { .. } => true,
+                // (A mesh's instance by its mask, a group's meshes each: the renderer says whether it can.)
+                Kind::Mesh { .. } | Kind::Group => true,
                 Kind::Light(l) => !sun && !matches!(l, desc::Light::Rect { visible: true, .. }),
                 _ => false,
             };
@@ -1330,10 +1333,12 @@ mod tests {
         }
         w.set_visible(1, false).unwrap();
         assert!(w.hidden_built(1) && !w.hidden_built(2), "a hidden volume keeps its place in the build; a light always has one");
-        for id in [3, 5] {
-            w.set_visible(id, false).unwrap();
-            assert!(w.take_changes().structural, "{id}: a rect light's card and a group are geometry");
-        }
+        w.set_visible(3, false).unwrap();
+        assert!(w.take_changes().structural, "a rect light's card is geometry");
+        // (A group, as a mesh: the renderer hides its meshes' instances, or says it cannot.)
+        w.set_visible(5, false).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.shown.contains(&5), "a group: for the renderer to hide in place");
         let inner = Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid: None };
         w.set_object(6, "inner".into(), Some(5), inner, false, false).unwrap();
         w.set_visible(6, false).unwrap();

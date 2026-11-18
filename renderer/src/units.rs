@@ -1339,7 +1339,7 @@ mod tests {
 
         fn record(&self, mesh: usize, world: Mat4, cast: bool) -> GpuInstance {
             let (first, _, root, ..) = self.meshes[mesh].unwrap();
-            let inst = crate::scene::Instance { mesh: mesh as u32, world, object: 0, cast_shadow: cast, name: String::new(), sub: None, hidden: false, first_emitter: 0 };
+            let inst = crate::scene::Instance { mesh: mesh as u32, world, object: 0, cast_shadow: cast, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0 };
             unit_record(inst.gpu(first, [0, 0]), root, cast)
         }
 
@@ -1953,7 +1953,7 @@ mod tests {
         // A built tree is a level short of the bound: two of them joined are at it.
         assert!(check_tree(&build_sah(&(0..1 << 12).map(|k| (Vec3A::splat(k as f32), Vec3A::splat(k as f32 + 1.0))).collect::<Vec<_>>(), 12).0, 64, |_, _| Ok(())).unwrap() <= 12);
         // The record's word for a placement by a translation alone.
-        let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, first_emitter: 0 }.gpu(0, [0, 0]), 9, true);
+        let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0 }.gpu(0, [0, 0]), 9, true);
         let shifted = |m: Mat4| rec(m).n[1][3].to_bits() & UNIT_SHIFTED != 0;
         assert!(shifted(Mat4::IDENTITY));
         assert!(shifted(Mat4::from_translation(Vec3::new(3.0, -2.0, 0.5))));

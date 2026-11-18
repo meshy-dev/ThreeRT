@@ -715,6 +715,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         let n = scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize], &sc.materials);
         assert_eq!(n, m.emitters, "a mesh's emitters as the build counted them");
     }
+    // (And the instances hidden at the build, `Instance::masked`: where they stand when they are shown is theirs to
+    // bound then, in the light tree's moving subtree.)
     let moving = sc.retained.moving_records();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
@@ -728,7 +730,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         let (a, b) = (m.first as usize, (m.first + m.count) as usize);
         let attrs = &sc.attrs[pool_first + a..pool_first + b];
         let numbered = |k: usize| (attrs[k].x[3].to_bits() as usize).checked_sub(1).map(|n| (n, attrs[k].uv[3].to_bits()));
-        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, m.emitters as usize, &sc.materials, moving.contains(&(r as u32))) {
+        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, m.emitters as usize, &sc.materials, moving.contains(&(r as u32)) || sc.instances[r].masked) {
             gpu_emitter_tris.push(GpuEmitterTri::of(&e, w, 0));
             emitter_tris.push(e);
         }
@@ -1646,9 +1648,9 @@ mod units_tests {
         assert_eq!(su.tris.len(), 2 * ground, "still triangles: the card's only");
         let u = su.units.as_ref().expect("the scene has units");
         assert!(sf.units.is_none() && sf.instances.is_empty(), "flattened: no instance is left");
-        // Nine instances and the ground: four meshes shown, one hidden (no instance at all), five of the instanced mesh
-        // of which one is hidden: eight units in the top tree, and the ground.
-        assert_eq!((su.instances.len(), u.count as usize), (9 + ground, 8 + ground), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
+        // Ten instances and the ground: four meshes shown, one hidden (an instance no ray sees), five of the instanced
+        // mesh of which one is hidden: eight units in the top tree, and the ground.
+        assert_eq!((su.instances.len(), u.count as usize), (10 + ground, 8 + ground), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
         assert!(gpu::instance_features(&su) & gpu::F_UNITS != 0 && gpu::instance_features(&sf) & gpu::F_UNITS == 0);
         assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits() as usize), (u.layout.top_first, 8 + ground));
         // The flattened scene holds every instance's triangles; the scene with units holds each mesh's once.
