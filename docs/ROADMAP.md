@@ -2732,18 +2732,20 @@ copy mirrored in place; an emitting instanced object added, changed and removed 
 
 **Glass is a part of its mesh (2026-11-18).** The last reason to flatten a material's triangles at every placement
 goes. A mesh's glass is a geometry of its BLAS beside the opaque and the cutout one, the only one not flagged opaque
-(`InstMesh::parts`; a hit's triangle from its geometry and primitive by two starts in the instance's record). A
-shadow ray, which passed glass by the still scene's masks, culls the geometry that is not opaque where an instanced
-mesh has glass (kernel feature `F_IGLASS`; software traversal: a flag a triangle), and `glass_tr` weighs what the
-glass lets through as before. Measured first on Metal with every geometry flagged opaque: the same pictures, at
-most 0.5 % of a frame's GPU time; the cull flag's old cost (Bistro +1.7 ms) was its use for cutouts. Which side of a
-surface a ray meets goes by the instance's sign (a mirrored glass instance). What still leaves a mesh: triangles on
-exactly the same vertices (`flatten_coincident`: a cutout on an emitter, glass on whatever lies under it), and the
-emitters of a mesh that deforms. A glass mesh is added in place where the kernel has the feature; a material of
-instances' triangles that turns glass, or stops being glass, rebuilds.
+(`InstMesh::parts`; a hit's triangle from its geometry and primitive by two starts in the instance's record). A shadow
+ray passed glass by the still scene's masks, and passes an instance of a mesh that is all glass the same way
+(`InstMesh::casts`). Where a mesh mixes glass with other triangles it culls the geometry that is not opaque (kernel
+feature `F_IGLASS`; software traversal: a flag a triangle). `glass_tr` weighs what the glass lets through as before.
+Measured first on Metal with every geometry flagged opaque: the same pictures, at most 0.5 % of a frame's GPU time;
+the cull flag's old cost (Bistro +1.7 ms) was its use for cutouts. With the cull in every pane's own BLAS a scene of
+400 panes traced about 15 % slower under the loop guard; by the mask it does not. Which side of a surface a ray meets
+goes by the instance's sign (a mirrored glass instance). What still leaves a mesh: triangles on exactly the same
+vertices (`flatten_coincident`: a cutout on an emitter, glass on whatever lies under it), and the emitters of a mesh
+that deforms. A mesh that is all glass is added in place, the mask needing no kernel feature; a material of instances'
+triangles that turns glass, or stops being glass, rebuilds.
 Tests: a shadow through an instance's glass (a mesh of its own, offline and live; an instanced copy; a model whose
-one mesh has an opaque, a cutout and a glass part, with the other two parts' shadows), a mirrored glass instance, the
-model's build, a glass mesh added in place with and without the feature.
+one mesh has an opaque, a cutout and a glass part, with the other two parts' shadows, offline and live), a mirrored
+glass instance, the model's build, a glass mesh added in place.
 
 **An emitter's probability is what the picker used (2026-11-18).** An emitter that changed size in place (a movable
 model or mesh scaled, a skinned one) kept the weight it was loaded with, while the kernel took its probability from

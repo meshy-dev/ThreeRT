@@ -90,7 +90,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
-const F_IGLASS: u32 = 536870912u; // glass on an instanced mesh: shadow rays cull its geometry (trace_hw.wgsl), a unit's glass triangles by their flag
+const F_IGLASS: u32 = 536870912u; // glass among other triangles in an instanced mesh: shadow rays cull its geometry (trace_hw.wgsl), a unit's glass triangles by their flag
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
