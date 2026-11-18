@@ -1063,6 +1063,14 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
             if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
                 list_is_its_triangles(&what, &live);
             }
+            // (Where each instance stands, hidden or not: its record's too.)
+            for id in [11, 12, 13, 15, 16, 21] {
+                let r = live.sc.tables.retained.instance(id).unwrap().instance as usize;
+                let (at, rec) = (w.world_matrix(id), live.sc.gpu_instances[r].m);
+                assert!(live.sc.instances[r].world.abs_diff_eq(at, 1e-5), "{what}: object {id}'s instance stands where the object does");
+                let rows = at.transpose().to_cols_array();
+                assert!(rec.iter().flatten().zip(&rows[..12]).all(|(a, b)| (a - b).abs() <= 1e-5), "{what}: object {id}'s record stands where the object does");
+            }
             lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         }
         assert_eq!((hidden(&live, 13), hidden(&live, 11), hidden(&live, 21)), ((true, true), (false, false), (false, false)), "{with} a light tree: as the world has them");
