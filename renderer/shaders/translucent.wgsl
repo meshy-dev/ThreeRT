@@ -69,7 +69,7 @@
     }
     r.emissive = emission(m, uv, tl) * obj_power(a);
     if (has(F_FUNC) && m.tex1.w > 0) {
-        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, b.x, b.y, view, lod), m, r);
+        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, NO_INST, b.x, b.y, view, lod), m, r);
     }
     return r;
 }

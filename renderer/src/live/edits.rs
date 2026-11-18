@@ -1826,7 +1826,7 @@ impl LiveCore {
                     let emits = scene::emits_only(&gm);
                     let class = scene::mesh_class(&gm);
                     if class == 2 || (emits && capacity.is_some()) {
-                        return Err("a glass or function material (an instanced mesh: emitting too)".into());
+                        return Err("a glass material (an instanced mesh: emitting too)".into());
                     }
                     if class == 1 && features & gpu::F_MASKED == 0 {
                         return Err("the scene's first cutout (kernel feature)".into());

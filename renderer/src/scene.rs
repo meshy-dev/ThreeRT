@@ -59,7 +59,7 @@ pub struct InstMesh {
     pub count: u32,
     /// The first `opaque` pool triangles are opaque (BLAS geometry 0), the rest cutout (geometry 1, any-hit test).
     pub opaque: u32,
-    /// Triangles each placement flattens instead (glass, material functions), in the build's rest arrays.
+    /// Triangles each placement flattens instead (glass), in the build's rest arrays.
     pub rest_first: u32,
     pub rest_count: u32,
     /// Model-space bounds (object bounds of its instances, picking).
@@ -721,8 +721,8 @@ pub struct InstancedPlace {
 /// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects): the nodes the
 /// clip leaves alone are ordinary static triangles; each moving mesh node is an instance of its own mesh (its triangles
 /// in the node's space, one BLAS built once), placed at object x node transform, so a new pose moves instances
-/// only (a node's emitters are its instance's in the light list, filled again when it moves). Their glass / function
-/// triangles are flattened (shadow rays, a function's inputs), and what `flatten_coincident` takes with them: `rest`,
+/// only (a node's emitters are its instance's in the light list, filled again when it moves). Their glass
+/// triangles are flattened (shadow rays), and what `flatten_coincident` takes with them: `rest`,
 /// re-transformed in place from `rest_local`.
 #[derive(Clone, Default)]
 pub struct RigidModel {
@@ -1270,14 +1270,14 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let grid_programs: Vec<(String, String, String)> = w.grid_programs.iter().map(|(k, (c, h))| (k.clone(), c.clone(), h.clone())).collect();
     let mut objects: Vec<[f32; 4]> = vec![];
     // Static glTF models drawn more than once share their triangles (model space, one BLAS): opaque, shadow-casting
-    // per node, non-emissive materials without functions, not mirrored. THREERT_INSTANCING=0 flattens everything.
+    // per node, no glass, not mirrored. THREERT_INSTANCING=0 flattens everything.
     let instancing = std::env::var("THREERT_INSTANCING").map_or(true, |v| v != "0");
     let mut pool_tris: Vec<[Vec3A; 3]> = vec![];
     let (mut vcolors, mut pool_vcolors): (Vec<[u32; 3]>, Vec<[u32; 3]>) = (vec![], vec![]);
     // Whether a mesh's triangles carry its geometry's vertex colours: any of its materials asks for them.
     let colored = |g: &world::Geometry, mats: &mut dyn Iterator<Item = &u32>| !g.colors.is_empty() && mats.filter(|k| w.materials.get(k).is_some_and(|m| m.vertex_colors)).count() > 0;
     let mut pool_attrs: Vec<GpuTriAttr> = vec![];
-    // Model-space triangles of instanced meshes that each placement flattens (glass, functions).
+    // Model-space triangles of instanced meshes that each placement flattens (glass).
     let mut rest_tris: Vec<[Vec3A; 3]> = vec![];
     let mut rest_attrs: Vec<GpuTriAttr> = vec![];
     let mut meshes: Vec<InstMesh> = vec![];
@@ -1323,9 +1323,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() > 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
                 // Its own BLAS (scene code's `dynamicGeometry`, or a mesh a rigid body drives: its moves are the
                 // instance's transform, `InstanceRef::moves`): placed like a model instance, its geometry's triangles
-                // in model space in the pool, shared by the objects of the same geometry and material. Glass and
-                // function materials are flattened (as a model's would be), so they are never instanced. A material
-                // that only emits is: each instance has its emitters in the light list (`InstMesh::emitters`).
+                // in model space in the pool, shared by the objects of the same geometry and material. Glass is
+                // flattened (as a model's would be), so it is never instanced. A material that emits is: each
+                // instance has its emitters in the light list (`InstMesh::emitters`).
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
                 let class = mesh_class(&materials[mat as usize]);
@@ -1362,7 +1362,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     continue;
                 }
                 put_colors(&mut vcolors, tris.len(), vc.then(|| tri_colors(g, false, None)));
-                // (A driven mesh that cannot be an instance (glass, a material function): dynamic triangles,
+                // (A driven mesh that cannot be an instance (glass): dynamic triangles,
                 // re-transformed in place as any movable mesh's.)
                 append_arrays(g, m, mat, if n.driven { flags | TRI_DYNAMIC } else { flags }, None, &mut tris, &mut tri_flags, &mut attrs);
                 if n.driven {
@@ -1632,7 +1632,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
                                 classed[if emits { 2 } else { class as usize }].push((k, mat));
                             }
-                            // Triangles flattened per placement (glass, emissive, functions): each model skinned alone.
+                            // Triangles flattened per placement (glass, emissive): each model skinned alone.
                             let g = (classed[2].is_empty() && !local.is_empty()).then(|| {
                                 let first = pool_tris.len() as u32;
                                 let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
@@ -1680,8 +1680,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         None => {
                             // Model-space triangles by class: opaque and cutout ones go to the pool (one BLAS, opaque
                             // geometry then cutout geometry), those that only emit among them (each instance has its
-                            // emitters in the light list: `InstMesh::emitters`); glass and function triangles are
-                            // flattened per placement (shadow-ray pass-through, a function's world-space inputs).
+                            // emitters in the light list: `InstMesh::emitters`); glass triangles are flattened per
+                            // placement (shadow-ray pass-through).
                             let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), None)?;
                             let mut classed: [Vec<(usize, u32)>; 3] = Default::default();
                             let mut emitting: std::collections::HashSet<u32> = Default::default();
@@ -2183,10 +2183,10 @@ fn pool_emitters(classed: &[Vec<(usize, u32)>; 3], emitting: &std::collections::
 }
 
 /// Instancing class of a GPU material: 0 opaque, 1 cutout (any-hit), 2 flattened per placement (glass: shadow rays pass;
-/// material functions; emissive, where the light list does not follow the mesh: one that deforms. Elsewhere
-/// `mesh_class`).
+/// emissive, where the light list does not follow the mesh: one that deforms. Elsewhere `mesh_class`). A material
+/// function is no reason: the kernel gives it the triangle as its instance places it (`mat_in_at`).
 pub fn material_class(g: &GpuMaterial) -> u32 {
-    let flat = g.layer[0] > 0.0 || g.tex1[3] != 0 || g.emissive[..3].iter().any(|e| *e > 0.0);
+    let flat = g.layer[0] > 0.0 || g.emissive[..3].iter().any(|e| *e > 0.0);
     if flat {
         2
     } else if g.uv2[3] > 0.0 {
@@ -2238,10 +2238,10 @@ pub fn own_mesh_tris(g: &world::Geometry, mat: u32) -> (Vec<[Vec3A; 3]>, Vec<Gpu
     (tris, attrs)
 }
 
-/// A material that only emits (no glass, no material function): an `own_blas` mesh of it is a mesh as any other, its
-/// instances' emitters in the light list (`InstMesh::emitters`).
+/// A material that emits and is no glass: an `own_blas` mesh of it is a mesh as any other, its instances' emitters in
+/// the light list (`InstMesh::emitters`).
 pub fn emits_only(g: &GpuMaterial) -> bool {
-    g.layer[0] <= 0.0 && g.tex1[3] == 0 && g.emissive[..3].iter().any(|e| *e > 0.0)
+    g.layer[0] <= 0.0 && g.emissive[..3].iter().any(|e| *e > 0.0)
 }
 
 /// `material_class` in a mesh whose instances have their emitters in the light list (an `own_blas` mesh, a model's

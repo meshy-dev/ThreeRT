@@ -1134,12 +1134,23 @@ fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rg
 fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
-fn mat_in_at(ti: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
-    let a = attrs[ti];
+// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST.
+fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
+    var a = attrs[ti];
+    var v0 = tri_verts[ti * 3u].xyz;
+    var e1 = tri_verts[ti * 3u + 1u].xyz;
+    var e2 = tri_verts[ti * 3u + 2u].xyz;
+    if (has(F_INST) && inst != NO_INST) {
+        let r = instance_at(inst);
+        v0 = inst_vec(r, v0) + vec3<f32>(r.m0.w, r.m1.w, r.m2.w);
+        e1 = inst_vec(r, e1);
+        e2 = inst_vec(r, e2);
+        a = inst_attr(r, a);
+    }
     let m = material_at(bitcast<u32>(a.uv.w));
     let w = 1.0 - u - v;
-    let p = tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * u + tri_verts[ti * 3u + 2u].xyz * v;
-    let ng = normalize(cross(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz));
+    let p = v0 + e1 * u + e2 * v;
+    let ng = normalize(cross(e1, e2));
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
     let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
@@ -1189,7 +1200,7 @@ fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
-        let i = mat_in_at(ti, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
+        let i = mat_in_at(ti, inst, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
         var b = mat_base(m);
         b.opacity = alpha;
         alpha = alpha_material_function(m.tex1.w - 1, i, m, b).opacity;
@@ -2096,7 +2107,7 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, em.inst, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
