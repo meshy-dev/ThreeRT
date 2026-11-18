@@ -304,8 +304,8 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
 /// aside, which no comparison in the walk sees). (The third word is every instance's: its first emitter.)
 pub fn unit_record(mut r: GpuInstance, root: u32, cast_shadow: bool) -> GpuInstance {
     r.n[0][3] = f32::from_bits(root);
-    // (Beside the record's own bit there: `scene::INST_MIRRORED`.)
-    r.n[1][3] = f32::from_bits(r.n[1][3].to_bits() & crate::scene::INST_MIRRORED | if cast_shadow { UNIT_SHADOW } else { 0 } | if translation_alone(&r) { UNIT_SHIFTED } else { 0 });
+    // (Beside the record's own bits there: `scene::INST_BITS`.)
+    r.n[1][3] = f32::from_bits(r.n[1][3].to_bits() & crate::scene::INST_BITS | if cast_shadow { UNIT_SHADOW } else { 0 } | if translation_alone(&r) { UNIT_SHIFTED } else { 0 });
     r
 }
 
@@ -871,6 +871,10 @@ pub(crate) mod cpu {
         pub(crate) nodes: &'a [GpuNode],
         pub(crate) tri_verts: &'a [[f32; 4]],
         pub(crate) instances: &'a [GpuInstance],
+        /// Each triangle's section (its attributes' uv.w) and the instances' rows: what a unit with rows has its
+        /// glass by (`row_flags`). Empty where no unit has rows.
+        pub(crate) sections: &'a [u32],
+        pub(crate) rows: &'a [crate::scene::Row],
         /// `P.motion.z`, `P.motion.w`.
         pub(crate) top: u32,
         pub(crate) units: u32,
@@ -1046,6 +1050,13 @@ pub(crate) mod cpu {
             self.trace_units(o, d, inv_d, hit, mode, &mut stack)
         }
 
+        /// shaders/trace_units.wgsl `row_flags`.
+        fn row_flags(&self, first: u32, ti: u32) -> Walk<u32> {
+            let section = *self.sections.get(ti as usize).ok_or(format!("reads the section of triangle {ti}"))?;
+            let x = self.rows.get((first + section) as usize).ok_or(format!("reads row {first} + {section}"))?[0];
+            Ok(if x & crate::scene::ROW_CUTOUT != 0 { crate::scene::TRI_MASKED } else { 0 } | if x & crate::scene::ROW_GLASS != 0 { crate::scene::TRI_NO_SHADOW } else { 0 })
+        }
+
         /// shaders/trace_units.wgsl `trace_units`, statement for statement.
         pub(crate) fn trace_units(&self, o: Vec3A, d: Vec3A, inv_d: Vec3A, hit_in: Hit, mode: u32, stack: &mut [u32; STACK]) -> Walk<Hit> {
             let mut hit = hit_in;
@@ -1059,6 +1070,7 @@ pub(crate) mod cpu {
             }
             let (mut sp, mut node) = (0usize, top);
             let mut rec = NO_INST;
+            let (mut ubits, mut urows) = (0u32, 0u32);
             let (mut ro, mut rd, mut rinv) = (o, d, inv_d);
             let (mut off, mut first, mut base) = (top, 0u32, 0usize);
             loop {
@@ -1096,6 +1108,7 @@ pub(crate) mod cpu {
                         }
                         off = u.n[0][3].to_bits();
                         first = u.info[0];
+                        (ubits, urows) = (u.n[1][3].to_bits(), u.info[3]);
                         base = sp;
                         node = off;
                         continue;
@@ -1107,7 +1120,10 @@ pub(crate) mod cpu {
                         let x = self.intersect_tri(ro, rd, ti, hit.t)?;
                         if x < hit.t {
                             // (A unit's glass: shadow rays pass it.)
-                            let flags = self.tri_verts.get(ti as usize * 3).ok_or(format!("reads triangle {ti}"))?[3].to_bits();
+                            let mut flags = self.tri_verts.get(ti as usize * 3).ok_or(format!("reads triangle {ti}"))?[3].to_bits();
+                            if ubits & (crate::scene::INST_CUTOUT | crate::scene::INST_GLASS) != 0 {
+                                flags |= self.row_flags(urows, ti)?;
+                            }
                             if mode == TRACE_SHADOW && flags & crate::scene::TRI_NO_SHADOW != 0 {
                                 continue;
                             }
@@ -1339,7 +1355,7 @@ mod tests {
 
         fn record(&self, mesh: usize, world: Mat4, cast: bool) -> GpuInstance {
             let (first, _, root, ..) = self.meshes[mesh].unwrap();
-            let inst = crate::scene::Instance { mesh: mesh as u32, world, object: 0, cast_shadow: cast, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0 };
+            let inst = crate::scene::Instance { mesh: mesh as u32, world, object: 0, cast_shadow: cast, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 };
             unit_record(inst.gpu(first, [0, 0]), root, cast)
         }
 
@@ -1377,7 +1393,7 @@ mod tests {
 
         fn kernel(&self) -> Kernel<'_> {
             let budget = 64 * (self.nodes.len() as u64 + self.tri_verts.len() as u64) + 1024;
-            Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
+            Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, sections: &[], rows: &[], top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
         }
 
         /// Every triangle a ray could meet, tested one by one with the kernel's own triangle test (the still scene's in
@@ -1953,7 +1969,7 @@ mod tests {
         // A built tree is a level short of the bound: two of them joined are at it.
         assert!(check_tree(&build_sah(&(0..1 << 12).map(|k| (Vec3A::splat(k as f32), Vec3A::splat(k as f32 + 1.0))).collect::<Vec<_>>(), 12).0, 64, |_, _| Ok(())).unwrap() <= 12);
         // The record's word for a placement by a translation alone.
-        let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0 }.gpu(0, [0, 0]), 9, true);
+        let rec = |world: Mat4| unit_record(crate::scene::Instance { mesh: 0, world, object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 }.gpu(0, [0, 0]), 9, true);
         let shifted = |m: Mat4| rec(m).n[1][3].to_bits() & UNIT_SHIFTED != 0;
         assert!(shifted(Mat4::IDENTITY));
         assert!(shifted(Mat4::from_translation(Vec3::new(3.0, -2.0, 0.5))));

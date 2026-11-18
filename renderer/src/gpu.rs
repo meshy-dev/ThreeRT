@@ -163,7 +163,8 @@ pub struct Params {
 }
 
 /// Room the live view's in-place geometry edits grow into (live/edits.rs `edit_geometry`), past the scene's own data:
-/// triangles (verts, attrs, BLAS vertices), kernel records and TLAS instances, object-table entries, procedural words.
+/// triangles (verts, attrs, BLAS vertices), kernel records and TLAS instances (and a row a record: what an edit
+/// places has one section), object-table entries, procedural words.
 /// Only scenes with editable geometry (procedural meshes, `own_blas` meshes) under hardware RT get any: a quarter of
 /// what they have, at least a minimum; `THREERT_EDIT_RESERVE` scales it (0: none). Past it an edit rebuilds the scene.
 #[derive(Clone, Copy, Default, Debug)]
@@ -1630,6 +1631,8 @@ pub const A_LIVE: u32 = 31;
 
 // Kernel features (`override FEAT` in pathtrace.wgsl).
 pub const F_MASKED: u32 = 1;
+/// An instance has rows (scene.rs `Row`): its mesh is its geometry's alone, a section's material is its row's.
+pub const F_ROWS: u32 = 2;
 pub const F_FOG: u32 = 64;
 pub const F_VOLUME: u32 = 128;
 pub const F_TEX: u32 = 256;
@@ -1755,10 +1758,18 @@ pub fn instance_features(scene: &Scene) -> u32 {
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
-    let function = |a: &crate::scene::GpuTriAttr| scene.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.tex1[3] != 0);
-    let ifunc = if scene.pool_attrs.iter().any(function) { F_IFUNC } else { 0 };
-    let iglass = if scene.meshes.iter().any(|m| m.glass > 0 && m.glass < m.count) { F_IGLASS } else { 0 };
-    media | particles | ifunc | iglass | F_INST | if scene.meshes.iter().any(|m| m.opaque + m.glass < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    // (A model's mesh has its materials on its triangles and its classes in its counts; a mesh with sections has
+    // them in its instances' rows.)
+    let function = |mat: u32| scene.materials.get(mat as usize).is_some_and(|m| m.tex1[3] != 0);
+    let on_triangles = scene.meshes.iter().filter(|m| m.sect_count == 0).flat_map(|m| &scene.pool_attrs[m.first as usize..(m.first + m.count) as usize]).any(|a| function(a.uv[3].to_bits()));
+    let rows = |i: &crate::scene::Instance| &scene.rows[i.rows as usize..][..scene.meshes[i.mesh as usize].sect_count as usize];
+    let any_row = |bit: u32| scene.instances.iter().any(|i| rows(i).iter().any(|r| r[0] & bit != 0));
+    let mixed_glass = scene.instances.iter().any(|i| i.bits & crate::scene::INST_GLASS != 0 && i.cast_shadow);
+    let ifunc = if on_triangles || scene.rows.iter().any(|r| function(crate::scene::row_material(r))) { F_IFUNC } else { 0 };
+    let iglass = if mixed_glass || scene.meshes.iter().any(|m| m.glass > 0 && m.glass < m.count) { F_IGLASS } else { 0 };
+    let masked = any_row(crate::scene::ROW_CUTOUT) || scene.meshes.iter().any(|m| m.opaque + m.glass < m.count);
+    let with_rows = if scene.instances.iter().any(|i| i.bits & crate::scene::INST_ROWS != 0) { F_ROWS } else { 0 };
+    media | particles | ifunc | iglass | with_rows | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -1790,7 +1801,7 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     }
 
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
-        f &= mask | F_HUGE | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' custom data / the object table holds
+        f &= mask | F_HUGE | F_INST | F_PROC | F_TINT | F_ROWS; // not optional: they say what the instances' custom data / the object table / the records hold
     }
     // Features compiled in although the scene does not use them (the perf smoke's cost of a contract compiled in but off).
     if let Some(on) = std::env::var("THREERT_FEATURES_ON").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -2265,7 +2276,7 @@ impl Gpu {
         // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
         // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
         timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
-        let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, timings)?;
+        let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, room.records, timings)?;
         let room = EditRoom { proc_words: proc_room, ..room };
         // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
         // other textures (A', B, B'), its two half steps and its sources.
@@ -2416,7 +2427,7 @@ impl Gpu {
             // INSTANCE_BIT | record; shadow casters mask 1).
             // Per mesh: (first triangle, count, opaque) geometries: the opaque part, the cutout part, the glass part
             // (`InstMesh::parts`).
-            let mesh_parts: Vec<Vec<(u32, u32, bool)>> = scene.meshes.iter().map(|m| m.parts().into_iter().map(|(at, count, opaque)| (m.first + at, count, opaque)).collect()).collect();
+            let mesh_parts: Vec<Vec<(u32, u32, bool)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count, opaque)| (m.first + at, count, opaque)).collect()).collect();
             let mesh_sizes: Vec<Vec<wgpu::BlasTriangleGeometrySizeDescriptor>> = mesh_parts
                 .iter()
                 .map(|parts| {
@@ -2731,13 +2742,16 @@ impl Gpu {
     /// (`room_words` after the region, as much of it as the binding limit leaves; `room_tris` triangles' colours).
     /// Written straight into the new buffer's mapping; the blobs are copied on the GPU from the last upload when its
     /// geometries are the same. Returns the heap, the region's words in use and the room it got.
-    fn upload_words(&self, scene: &Scene, env_cdf: &[f32], room_words: usize, room_tris: usize, timings: &mut Vec<(String, f64)>) -> Result<(Heap<Stream>, usize, usize)> {
+    fn upload_words(&self, scene: &Scene, env_cdf: &[f32], room_words: usize, room_tris: usize, room_rows: usize, timings: &mut Vec<(String, f64)>) -> Result<(Heap<Stream>, usize, usize)> {
         let t = Instant::now();
         let l = scene.proc_layout.as_ref();
         let (head, blob_words) = l.map_or((0, 0), |l| (l.head.len(), l.blob_words));
         let colors: &[u8] = bytemuck::cast_slice(&scene.gpu_vcolors);
         let color_bytes = if colors.is_empty() { 0 } else { colors.len() + room_tris * 12 };
-        let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64];
+        // (Rows only where records are: flattened instances have none.)
+        let rows: &[u8] = if scene.gpu_instances.is_empty() { &[] } else { bytemuck::cast_slice(&scene.rows) };
+        let row_bytes = if rows.is_empty() && room_rows == 0 { 0 } else { rows.len() + room_rows * 16 };
+        let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64, row_bytes as u64];
         let (used, limit) = (Heap::<Stream>::size_for(&sizes(0)), self.device.limits().max_storage_buffer_binding_size as u64);
         if used > limit {
             return Err(anyhow!("procedural geometry: {} MB of data, more than this device binds in one buffer ({} MB)", used >> 20, limit >> 20));
@@ -2758,6 +2772,7 @@ impl Gpu {
                 heap.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
                 heap.write(&self.queue, Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 heap.write(&self.queue, Stream::VertexColors, 0, colors);
+                heap.write(&self.queue, Stream::Rows, 0, rows);
                 let mut e = self.device.create_command_encoder(&Default::default());
                 e.copy_buffer_to_buffer(&c.buf, c.offset, &heap.buffer, heap.at(Stream::Procs) + blob_at, c.bytes);
                 self.queue.submit([e.finish()]);
@@ -2766,6 +2781,7 @@ impl Gpu {
             _ => Heap::filled(&self.device, &sizes, |put| {
                 put(Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
                 put(Stream::VertexColors, 0, colors);
+                put(Stream::Rows, 0, rows);
                 let Some(l) = l else { return };
                 put(Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 for (blob, off) in &l.blobs {
@@ -3237,15 +3253,15 @@ impl Gpu {
     }
 
     /// Mesh `k` (one an edit no longer draws) made again over `count` triangles from `first`: a new BLAS in its slot.
-    pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, mesh: &crate::scene::InstMesh) {
-        let (blas, geo) = self.mesh_blas_for(accel, first, mesh);
+    pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) {
+        let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
         accel.meshes[k as usize] = blas;
         accel.mesh_geo[k as usize] = geo;
     }
 
-    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh) -> (wgpu::Blas, (Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
+    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
         let rel = (first - accel.pool_first) as u32;
-        let parts: Vec<(u32, u32, bool)> = mesh.parts().into_iter().map(|(at, count, opaque)| (rel + at, count, opaque)).collect();
+        let parts: Vec<(u32, u32, bool)> = mesh.parts(sections).into_iter().map(|(at, count, opaque)| (rel + at, count, opaque)).collect();
         let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = parts
             .iter()
             .map(|&(_, c, opaque)| wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -3263,10 +3279,10 @@ impl Gpu {
 
     /// A new instanced mesh over `count` triangles from GPU-order index `first` (in the edit room; live/edits.rs
     /// `edit_geometry`), its first `opaque` ones opaque: its BLAS, which the commit's build builds (`TopBuild::meshes`). Returns its index.
-    pub fn add_mesh(&self, accel: &mut Accel, first: usize, mesh: &crate::scene::InstMesh) -> u32 {
+    pub fn add_mesh(&self, accel: &mut Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> u32 {
         // Built fast rather than traced fast (edits come every frame under destruction; the batches of pieces are rebuilt
         // every frame); THREERT_EDIT_BLAS=trace for the A/B (`mesh_blas_for`).
-        let (blas, geo) = self.mesh_blas_for(accel, first, mesh);
+        let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
         accel.meshes.push(blas);
         accel.mesh_geo.push(geo);
         accel.meshes.len() as u32 - 1
@@ -3670,6 +3686,7 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
+            ("F_ROWS", F_ROWS),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

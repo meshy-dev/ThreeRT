@@ -414,6 +414,7 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
     let record_size = std::mem::size_of::<scene::GpuInstance>();
     let records = read(&up.heap.buffer, up.heap.at(Table::Instances), (c.sc.gpu_instances.len() * record_size) as u64);
+    let gpu_rows = read(&up.words.buffer, up.words.at(crate::heap::Stream::Rows), up.words.cap(crate::heap::Stream::Rows));
     let mut alive = 0;
     for (i, e) in tables.emitter_tris.iter().enumerate() {
         let r: crate::GpuEmitterTri = bytemuck::pod_read_unaligned(&list[i * size..][..size]);
@@ -440,7 +441,18 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
                 assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
             }
-            assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.first_emitter, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
+            if record.n[1][3].to_bits() & scene::INST_ROWS == 0 {
+                assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.first_emitter, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
+                alive += 1;
+                continue;
+            }
+            // An instance with rows: its section's row as the GPU has it says the material and where the section's
+            // emitters start, the triangle its index among them.
+            let at = (record.info[3] + a.uv[3].to_bits()) as usize;
+            let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
+            assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
+            assert_eq!((record.info[3], record.n[2][3].to_bits()), (inst.rows, inst.first_emitter), "{what}: instance {}'s record has its rows and its first emitter", e.inst);
+            assert_eq!((row[2].wrapping_add(a.x[3].to_bits()), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         }
         alive += 1;
     }
@@ -939,14 +951,19 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         let mesh_of = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).expect("a mesh is an instance").instance as usize].mesh;
         assert_eq!(mesh_of(&live, 13), mesh_of(&live, 14), "the two objects share their mesh");
         let two = mesh_of(&live, 15) as usize;
-        assert_eq!((live.sc.meshes[two].count, live.sc.meshes[two].emitters), (32, 16), "the mesh of two materials: one emits");
+        let emitters_of = |c: &LiveCore, id: u32| {
+            let i = &c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize];
+            let m = c.sc.meshes[i.mesh as usize];
+            scene::rows_emitters(m.sections(&c.sc.sections), &c.sc.rows[i.rows as usize..][..m.sect_count as usize], &c.sc.tables.materials)
+        };
+        assert_eq!((live.sc.meshes[two].count, live.sc.meshes[two].sect_count, emitters_of(&live, 15)), (32, 16, 16), "the mesh of two materials, a section a group: one emits");
         // (A third object of the shared mesh, hidden when the material starts: it has its emitters when it is shown.)
         w.set_visible(33, false).unwrap();
         assert!(!live.commit(&mut w).unwrap(), "a mesh hidden, {with} a light tree: in place ({:?})", live.fallback);
         w.set_material(6, late(30.0));
         let what = format!("a material started emitting in place, {with} a light tree");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
-        assert_eq!((live.sc.meshes[two].emitters, live.sc.meshes[mesh_of(&live, 13) as usize].emitters), (32, 2), "{what}: the meshes' emitters");
+        assert_eq!((emitters_of(&live, 15), emitters_of(&live, 13), emitters_of(&live, 14)), (32, 2, 2), "{what}: the instances' emitters");
         list_is_its_triangles(&what, &live);
         let moving = |c: &LiveCore, id: u32| {
             let r = c.sc.tables.retained.instance(id).unwrap().instance;

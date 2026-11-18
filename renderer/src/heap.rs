@@ -72,10 +72,12 @@ pub enum Stream {
     Procs,
     /// Vertex colours: three sRGB8 words a triangle, in the triangles' GPU order.
     VertexColors,
+    /// The instances' rows (scene.rs `Row`): four words a section of an instance's mesh.
+    Rows,
 }
 
 impl Section for Stream {
-    const COUNT: usize = 3;
+    const COUNT: usize = 4;
     const UNIT: u64 = 4;
     const LABEL: &'static str = "words";
     fn index(self) -> usize {

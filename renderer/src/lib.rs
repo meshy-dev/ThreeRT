@@ -592,19 +592,32 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let pool_first = tri_verts.len() / 3;
     // Deforming meshes come first (scene build): flagged dynamic, their previous vertices kept for motion vectors.
     let deforming = scene::deforming_pool(&sc.meshes);
+    // (A mesh with sections has no material on its triangles: its instances' rows say which are cutouts or glass.)
+    let mut on_triangle = vec![true; sc.pool_tris.len()];
+    for m in sc.meshes.iter().filter(|m| m.sect_count > 0) {
+        on_triangle[m.first as usize..(m.first + m.count) as usize].fill(false);
+    }
     for (k, (t, a)) in sc.pool_tris.iter().zip(&sc.pool_attrs).enumerate() {
         let [a0, b, c] = *t;
         let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
         // (A unit's triangles are in its tree's order, cutouts and glass among the rest: each carries its own flag, as
         // the still scene's do. Hardware traversal has them apart, in geometries of their own.)
-        let material = sc.materials.get(a.uv[3].to_bits() as usize).filter(|_| trees.is_some());
+        let material = sc.materials.get(a.uv[3].to_bits() as usize).filter(|_| trees.is_some() && on_triangle[k]);
         let (cutout, glass) = (material.is_some_and(|m| m.uv2[3] > 0.0), material.is_some_and(|m| m.layer[0] > 0.0));
         tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 } | if cutout { scene::TRI_MASKED } else { 0 } | if glass { scene::TRI_NO_SHADOW } else { 0 })]);
         tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
-    sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.part_offsets()) }).collect();
+    sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, i.parts(&m)) }).collect();
+    // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
+    // primitive counts from there).
+    for i in &sc.instances {
+        let m = sc.meshes[i.mesh as usize];
+        for (s, row) in m.sections(&sc.sections).iter().zip(&mut sc.rows[i.rows as usize..]) {
+            row[1] = pool_first as u32 + m.first + s.first;
+        }
+    }
     // A scene whose triangles are all units': the still tree is then the leaf of one triangle, triangle 0 (bvh.rs
     // `EMPTY`), which no ray meets while triangle 0 is the zeros of an empty buffer. Here triangle 0 is the pool's
     // first, a mesh's in its model space, and the still walk would meet it standing in the world. The leaf gets a
@@ -720,17 +733,30 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let moving = sc.retained.moving_records();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
-        if m.emitters == 0 {
+        // (With sections: the emitters of its sections whose material emits, a section after another; each one's row
+        // has where they start.)
+        let (sections, at) = (m.sections(&sc.sections), sc.instances[r].rows as usize);
+        let rows = sc.rows.get(at..at + sections.len()).unwrap_or(&[]).to_vec();
+        let starts = scene::section_emitters(sections, &rows, &sc.materials);
+        let count = if sections.is_empty() { m.emitters } else { scene::rows_emitters(sections, &rows, &sc.materials) };
+        if count == 0 {
             continue;
         }
-        sc.instances[r].first_emitter = emitter_tris.len() as u32;
+        let first = emitter_tris.len() as u32;
+        sc.instances[r].first_emitter = first;
         if let Some(g) = sc.gpu_instances.get_mut(r) {
-            g.n[2][3] = f32::from_bits(emitter_tris.len() as u32);
+            g.n[2][3] = f32::from_bits(first);
+        }
+        for (k, start) in starts.iter().enumerate() {
+            sc.rows[at + k][2] = start.map_or(scene::NO_EMITTER, |s| first + s);
         }
         let (a, b) = (m.first as usize, (m.first + m.count) as usize);
         let attrs = &sc.attrs[pool_first + a..pool_first + b];
-        let numbered = |k: usize| (attrs[k].x[3].to_bits() as usize).checked_sub(1).map(|n| (n, attrs[k].uv[3].to_bits()));
-        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, m.emitters as usize, &sc.materials, moving.contains(&(r as u32)) || sc.instances[r].masked) {
+        let numbered = |k: usize| match sections.is_empty() {
+            true => (attrs[k].x[3].to_bits() as usize).checked_sub(1).map(|n| (n, attrs[k].uv[3].to_bits())),
+            false => scene::section_slot(&attrs[k], &rows, &starts),
+        };
+        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, count as usize, &sc.materials, moving.contains(&(r as u32)) || sc.instances[r].masked) {
             gpu_emitter_tris.push(GpuEmitterTri::of(&e, w, 0));
             emitter_tris.push(e);
         }
@@ -742,13 +768,17 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // triangle has: each instance of such a mesh gets its emitters in place too (live/edits.rs
     // `add_material_emitters`).
     let mut mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>> = std::collections::HashMap::new();
-    let mut fixed_mats: std::collections::HashSet<u32> = sc.pool_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
-    let own: std::collections::HashSet<u32> = sc.retained.own_mesh.values().copied().collect();
+    // (A model's mesh has its materials on its triangles; a mesh with sections has them in its instances' rows, and
+    // an instanced object's copies are not a mesh's instance here.)
     let (mut mesh_mats, mut others): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = Default::default();
-    for (k, m) in sc.meshes.iter().enumerate() {
-        let mats = sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize].iter().map(|a| a.uv[3].to_bits());
-        if own.contains(&(k as u32)) { mesh_mats.extend(mats) } else { others.extend(mats) }
+    for m in sc.meshes.iter().filter(|m| m.sect_count == 0) {
+        others.extend(sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize].iter().map(|a| a.uv[3].to_bits()));
     }
+    for i in &sc.instances {
+        let mats = sc.rows[i.rows as usize..][..sc.meshes[i.mesh as usize].sect_count as usize].iter().map(scene::row_material);
+        if i.sub.is_none() { mesh_mats.extend(mats) } else { others.extend(mats) }
+    }
+    let mut fixed_mats: std::collections::HashSet<u32> = mesh_mats.union(&others).copied().collect();
     for (k, a) in sc.attrs[..pool_first].iter().enumerate() {
         let (mat, obj) = (a.uv[3].to_bits(), a.x[1].to_bits());
         if tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0 {
@@ -914,7 +944,10 @@ fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
         let r = m.first as usize..(m.first + m.count) as usize;
         let tris: Vec<_> = t.order.iter().map(|&i| sc.pool_tris[r.start + i as usize]).collect();
         sc.pool_tris[r.clone()].copy_from_slice(&tris);
-        let attrs: Vec<_> = t.order.iter().map(|&i| sc.pool_attrs[r.start + i as usize]).collect();
+        let mut attrs: Vec<_> = t.order.iter().map(|&i| sc.pool_attrs[r.start + i as usize]).collect();
+        if m.sect_count > 0 {
+            scene::rank_in_sections(&mut attrs);
+        }
         sc.pool_attrs[r.clone()].copy_from_slice(&attrs);
         if !sc.pool_vcolors.is_empty() {
             let colors: Vec<_> = t.order.iter().map(|&i| sc.pool_vcolors[r.start + i as usize]).collect();
@@ -936,12 +969,13 @@ fn flatten_deforming(sc: &mut scene::Scene) {
         }
         let first = sc.tris.len() as u32;
         for k in m.first..m.first + m.count {
-            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &sc.pool_attrs[k as usize], sc.pool_vcolors.get(k as usize).copied());
+            let own = inst.resolved(&sc.pool_attrs[k as usize], sc.rows.get(inst.rows as usize..).unwrap_or(&[]));
+            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &own, sc.pool_vcolors.get(k as usize).copied());
             if let Some(c) = c {
                 scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
             }
             sc.tris.push(t);
-            sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
+            sc.tri_flags.push(scene::instance_tri_flags(&inst, &own, &sc.materials));
             sc.attrs.push(a);
         }
         sc.tri_nodes.push((inst.name.clone(), first, sc.tris.len() as u32));
@@ -959,12 +993,13 @@ fn flatten_instances(sc: &mut scene::Scene) {
         let m = sc.meshes[inst.mesh as usize];
         let first = sc.tris.len() as u32;
         for k in m.first..m.first + m.count {
-            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &sc.pool_attrs[k as usize], sc.pool_vcolors.get(k as usize).copied());
+            let own = inst.resolved(&sc.pool_attrs[k as usize], sc.rows.get(inst.rows as usize..).unwrap_or(&[]));
+            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &own, sc.pool_vcolors.get(k as usize).copied());
             if let Some(c) = c {
                 scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
             }
             sc.tris.push(t);
-            sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
+            sc.tri_flags.push(scene::instance_tri_flags(&inst, &own, &sc.materials));
             sc.attrs.push(a);
         }
         // A second range for the node when a part of its mesh was flattened at build: node_tris joins them.
@@ -1658,12 +1693,13 @@ mod units_tests {
         assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
         let kernel = |p: &Prepared, sc: &scene::Scene| {
             let (top, units) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
-            (p.nodes.clone(), p.tri_verts.clone(), sc.gpu_instances.clone(), top, units)
+            (p.nodes.clone(), p.tri_verts.clone(), sc.gpu_instances.clone(), top, units, sc.attrs.iter().map(|a| a.uv[3].to_bits()).collect::<Vec<u32>>(), sc.rows.clone())
         };
         let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
-        let walk = |k: &(Vec<bvh::GpuNode>, Vec<[f32; 4]>, Vec<scene::GpuInstance>, u32, u32), o: Vec3A, d: Vec3A, mode: u32| {
+        #[allow(clippy::type_complexity)]
+        let walk = |k: &(Vec<bvh::GpuNode>, Vec<[f32; 4]>, Vec<scene::GpuInstance>, u32, u32, Vec<u32>, Vec<scene::Row>), o: Vec3A, d: Vec3A, mode: u32| {
             let instances = if k.2.is_empty() { vec![scene::GpuInstance::default()] } else { k.2.clone() };
-            let kernel = Kernel { nodes: &k.0, tri_verts: &k.1, instances: &instances, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
+            let kernel = Kernel { nodes: &k.0, tri_verts: &k.1, instances: &instances, sections: &k.5, rows: &k.6, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
             kernel.trace(o, d, INF, mode).unwrap_or_else(|e| panic!("ray {o} {d}, mode {mode}: the kernel {e}"))
         };
         let mut s = 12345u64;

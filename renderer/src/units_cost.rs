@@ -75,7 +75,7 @@ impl Laid {
     }
 
     fn kernel(&self) -> Kernel<'_> {
-        Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, top: self.top, units: self.units, steps: Default::default(), budget: 1 << 26, deepest: Default::default(), reads: Default::default() }
+        Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, sections: &[], rows: &[], top: self.top, units: self.units, steps: Default::default(), budget: 1 << 26, deepest: Default::default(), reads: Default::default() }
     }
 }
 
@@ -409,7 +409,7 @@ fn units_pile() {
         let made = (u.kept.builds - was.0, u.kept.changes - was.1, u.kept.refits - was.2);
         // At rest: the kernel's buffers as a session would have written them.
         for (j, p) in pieces.iter().enumerate() {
-            let inst = scene::Instance { mesh, world: pose(p, 1.0), object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0 };
+            let inst = scene::Instance { mesh, world: pose(p, 1.0), object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 };
             l.instances[first_rec + j] = units::unit_record(inst.gpu(first_tri, [tris.len() as u32, 0]), root as u32, true);
         }
         let at = u.layout.top_first as usize;
