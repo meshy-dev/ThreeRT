@@ -42,9 +42,12 @@ pub struct Tables {
     pub(crate) emissive: HashSet<u32>,
     /// A material that starts emitting gets emitter entries in place (the live view sets these up, `prepare`'s
     /// `mat_runs` / `fixed_mats`): it is queued in `started_emitting` for live/edits.rs `add_material_emitters`, unless its
-    /// triangles include pool or dynamic ones (fixed: a rebuild flattens them). Off: such a material rebuilds.
+    /// triangles include a model's, an instanced object's or dynamic ones (`fixed_mats` less `mesh_mats`, the materials
+    /// whose pool triangles are meshes' alone). Off: such a material rebuilds. `fixed_mats` are also the materials of
+    /// instances' triangles, whose class a rebuild sorts by (`apply`).
     pub emit_in_place: bool,
     pub fixed_mats: HashSet<u32>,
+    pub mesh_mats: HashSet<u32>,
     pub started_emitting: Vec<u32>,
     /// Object -> its entries in `lights`.
     pub light_index: HashMap<u32, Vec<usize>>,
@@ -73,6 +76,7 @@ impl Tables {
             light_tree,
             emit_in_place: false,
             fixed_mats: HashSet::new(),
+            mesh_mats: HashSet::new(),
             started_emitting: vec![],
             light_index,
             stride: sc.object_stride(),
@@ -247,7 +251,7 @@ impl Tables {
         if lum <= 0.0 || self.emissive.contains(&mi) {
             return true;
         }
-        if !self.emit_in_place || self.fixed_mats.contains(&mi) {
+        if !self.emit_in_place || (self.fixed_mats.contains(&mi) && !self.mesh_mats.contains(&mi)) {
             return false;
         }
         self.emissive.insert(mi);

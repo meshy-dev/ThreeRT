@@ -577,7 +577,7 @@ impl LiveCore {
             up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
         if d.materials || d.emitters || std::mem::take(&mut self.emitters_reweigh) {
-            let new = self.add_material_emitters();
+            let new = self.add_material_emitters(world);
             self.write_emitters(&new);
         } else if d.deferred {
             self.send_powers();
@@ -827,10 +827,12 @@ impl LiveCore {
     /// Emitter entries for the materials that started emitting (`Tables::started_emitting`): their flattened static
     /// triangles (`mat_runs`), positions from `tris`, in the power-share part of the CDF (path code 0, as the light
     /// tree's moving emitters; ROADMAP § 6 step 3). Returns them (each one's index and triangle) for `write_emitters`.
-    pub(super) fn add_material_emitters(&mut self) -> Vec<(u32, crate::GpuEmitterTri)> {
+    pub(super) fn add_material_emitters(&mut self, world: &World) -> Vec<(u32, crate::GpuEmitterTri)> {
+        let (hwrt, q) = (self.g.hwrt, &self.g.queue);
         let sc = &mut self.sc;
         let mut new = vec![];
-        for mat in std::mem::take(&mut sc.tables.started_emitting) {
+        let started = std::mem::take(&mut sc.tables.started_emitting);
+        for &mat in &started {
             for &[first, end, obj] in sc.mat_runs.get(&mat).map_or(&[][..], |v| v.as_slice()) {
                 for k in first..end {
                     let Some(&[a, b, c]) = sc.tri_order.get(k as usize).and_then(|&i| sc.tris.get(i as usize)) else { continue };
@@ -840,6 +842,65 @@ impl LiveCore {
                         let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST };
                         new.push((sc.tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, [a, b, c], 0)));
                         sc.tables.emitter_tris.push(e);
+                    }
+                }
+            }
+        }
+        // The meshes with a triangle of one of them (`Tables::mesh_mats`): the mesh's emitting triangles are numbered
+        // again as they lie (`scene::number_emitters`: the build's numbering, with the materials as they are now), and
+        // each of its instances gets its emitters as a new run at the list's end, its first in the instance's record;
+        // the run it had, of fewer, stays at no weight.
+        if !started.is_empty() && !sc.meshes.is_empty() {
+            let LoadedScene { tables, instances, gpu_instances, meshes, pool_tris, edit, up, .. } = sc;
+            let moving = tables.retained.moving_records();
+            let mut done = std::collections::HashSet::new();
+            for (id, o) in &world.objects {
+                let crate::world::Kind::Mesh { geometry, material, materials: mesh_mats, .. } = &o.kind else { continue };
+                let gpu_of = |k: &u32| tables.retained.materials.get(k).copied();
+                if !std::iter::once(material).chain(mesh_mats).any(|k| gpu_of(k).is_some_and(|m| started.contains(&m))) {
+                    continue;
+                }
+                let Some(k) = tables.retained.instance(*id).filter(|i| i.mesh.own()).and_then(|i| instances.get(i.instance as usize)).map(|i| i.mesh) else { continue };
+                if !done.insert(k) {
+                    continue;
+                }
+                let gpu_mats: Option<Vec<u32>> = mesh_mats.iter().map(gpu_of).collect();
+                let (Some(g), Some(mat), Some(gpu_mats)) = (world.geometries.get(geometry), gpu_of(material), gpu_mats) else { continue };
+                let (t, mut a, _, _) = scene::own_mesh(g, mat, scene::group_materials(g, &gpu_mats).as_deref(), &tables.materials, 0);
+                // (Software traversal: a unit's triangles lie in its tree's order.)
+                if !hwrt {
+                    let Ok(tree) = crate::units::mesh_tree(&t) else { continue };
+                    a = tree.order.iter().map(|&i| a[i as usize]).collect();
+                }
+                let im = meshes[k as usize];
+                if a.len() != im.count as usize {
+                    debug_assert!(false, "mesh {k}: {} triangles made again, {} in the pool", a.len(), im.count);
+                    continue;
+                }
+                let n = scene::number_emitters(&mut a, &tables.materials);
+                meshes[k as usize].emitters = n;
+                let first_tri = edit.pool_first + im.first as usize;
+                q.write_buffer(&up.attrs, (first_tri * std::mem::size_of::<scene::GpuTriAttr>()) as u64, bytemuck::cast_slice(&a));
+                let numbered = |j: usize| (a[j].x[3].to_bits() as usize).checked_sub(1).map(|slot| (slot, a[j].uv[3].to_bits()));
+                for r in 0..instances.len() {
+                    // (A record no object draws any more has none.)
+                    if instances[r].mesh != k || instances[r].hidden {
+                        continue;
+                    }
+                    let old = emitter_run(&tables.emitter_tris, instances, r as u32);
+                    for e in &mut tables.emitter_tris[old] {
+                        e.area = 0.0;
+                    }
+                    let first = tables.emitter_tris.len() as u32;
+                    instances[r].first_emitter = first;
+                    if let Some(rec) = gpu_instances.get_mut(r) {
+                        rec.n[2][3] = f32::from_bits(first);
+                        up.heap.write(q, Table::Instances, (r * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(rec));
+                    }
+                    let (b0, b1) = (im.first as usize, (im.first + im.count) as usize);
+                    for (e, w) in crate::instance_emitters(&instances[r], r as u32, &pool_tris[b0..b1], first_tri as u32, &numbered, n as usize, &tables.materials, moving.contains(&(r as u32))) {
+                        new.push((tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, w, 0)));
+                        tables.emitter_tris.push(e);
                     }
                 }
             }
@@ -1677,7 +1738,7 @@ impl LiveCore {
         let mut w_colors = Gather::default();
         let vcolors = up.vcolors;
         // (geometry, material) -> the mesh built in this batch (objects sharing a replaced geometry share it again).
-        let mut fresh: std::collections::HashMap<(u32, u32), u32> = Default::default();
+        let mut fresh: std::collections::HashMap<(u32, Vec<u32>), u32> = Default::default();
         let mask = |shadow: bool| if shadow { 1 } else { 2 };
         for id in todo {
             let Some(o) = world.objects.get(&id) else { continue };
@@ -1815,7 +1876,13 @@ impl LiveCore {
                     }
                     let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
                     let gm = tables.materials[mat as usize];
-                    // (It covers instances' triangles from here on: `Tables::fixed_mats`.)
+                    // (It covers instances' triangles from here on, `Tables::fixed_mats`: meshes' alone, `mesh_mats`,
+                    // if it covered none before or was theirs alone, and this is a mesh.)
+                    if !matches!(o.kind, Kind::Mesh { .. }) {
+                        tables.mesh_mats.remove(&mat);
+                    } else if !tables.fixed_mats.contains(&mat) {
+                        tables.mesh_mats.insert(mat);
+                    }
                     tables.fixed_mats.insert(mat);
                     // An emitting material: a mesh as any other, each instance's emitters in the light list (given
                     // below, where its record is known; scene.rs; ROADMAP § 6 step 3).
@@ -1831,7 +1898,7 @@ impl LiveCore {
                     if colored && !vcolors {
                         return Err("the scene's first vertex colours (kernel feature)".into());
                     }
-                    let key = (*geometry, mat);
+                    let key = (*geometry, vec![mat]);
                     let kept = (!ch.geometries.contains(geometry)).then(|| tables.retained.own_mesh.get(&key).copied()).flatten();
                     let mesh = match fresh.get(&key).copied().or(kept) {
                         Some(k) => k,
@@ -1963,7 +2030,7 @@ impl LiveCore {
                             pool_tris[rel..rel + t.len()].copy_from_slice(&t);
                             let _ = im;
                             new_meshes.push(k);
-                            fresh.insert(key, k);
+                            fresh.insert(key.clone(), k);
                             tables.retained.own_mesh.insert(key, k);
                             k
                         }

@@ -36,7 +36,8 @@ Engine (renderer + DSL; at the time also the scene IR and its UE adapter, both s
    table drives manual wrap / clamp; ray-cone LOD (Akenine-Möller 2019) picks the mip per hit; `texture.offset`;
    alpha-cutout materials (`alphaTest`) through four BLAS groups (opaque / cutout × shadow / no-shadow) with ray-query
    candidate confirmation, and the same test in the software BVH. Pages are cached across live re-uploads.
-   Static glTF models are instanced (hardware RT; `scene::Instance`): each unique mesh's triangles once in model
+   Meshes and static glTF models are instances (`scene::Instance`; a mesh shared by the objects of the same geometry
+   and materials, one that moves moved by its transform): each unique mesh's triangles once in model
    space with one BLAS (an opaque, a cutout and a glass geometry), one TLAS instance per placement (transform, shadow
    mask, custom data = instance record), shading transforms the hit triangle; a shadow ray passes a mesh that is all glass by the
    instance's mask and culls the glass geometry of a mixed mesh (the one not flagged opaque); `glass_tr` weighs what it lets through. A mirrored placement is an instance whose record says so. A model's

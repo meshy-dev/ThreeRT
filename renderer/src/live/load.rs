@@ -217,6 +217,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");
     tables.fixed_mats = std::mem::take(&mut prep.fixed_mats);
+    tables.mesh_mats = std::mem::take(&mut prep.mesh_mats);
     let emit = EmitterWorker::new(&tables, &g.device);
     tables.defer_powers = emit.is_some();
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));

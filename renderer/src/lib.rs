@@ -87,6 +87,7 @@ pub struct Prepared {
     /// place from its runs (live/edits.rs `add_material_emitters`), unless fixed.
     pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub fixed_mats: std::collections::HashSet<u32>,
+    pub mesh_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
     pub tri_order: Vec<u32>,
     /// The brightest sky texel (luminance) from which the environment is light-sampled (`Params::counts2[1]`): 0 when
@@ -714,14 +715,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         let n = scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize], &sc.materials);
         assert_eq!(n, m.emitters, "a mesh's emitters as the build counted them");
     }
-    // (The instances an edit moves in place: a body's, a movable model's, a posed rigid model's nodes', an instanced
-    // object's copies.)
-    let moving: std::collections::HashSet<u32> = sc.retained.proxies.values().flat_map(|p| match &p.draw {
-        scene::Draw::Instance(i) if i.moves => vec![i.instance],
-        scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
-        scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
-        _ => vec![],
-    }).collect();
+    let moving = sc.retained.moving_records();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
         if m.emitters == 0 {
@@ -741,13 +735,23 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     // Where each material's flattened static triangles are (runs of the traversal order, with their object), for a
     // material that starts emitting in the live view (tables.rs `apply`): its emitter entries are made from them in
-    // place. Materials that also cover pool or dynamic triangles cannot (`fixed_mats`).
+    // place. Materials of pool or dynamic triangles are `fixed_mats`; of those, `mesh_mats` are the ones whose pool
+    // triangles are meshes' alone (`Retained::own_mesh`: no model's, no instanced object's) and that no dynamic
+    // triangle has: each instance of such a mesh gets its emitters in place too (live/edits.rs
+    // `add_material_emitters`).
     let mut mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>> = std::collections::HashMap::new();
     let mut fixed_mats: std::collections::HashSet<u32> = sc.pool_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
+    let own: std::collections::HashSet<u32> = sc.retained.own_mesh.values().copied().collect();
+    let (mut mesh_mats, mut others): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = Default::default();
+    for (k, m) in sc.meshes.iter().enumerate() {
+        let mats = sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize].iter().map(|a| a.uv[3].to_bits());
+        if own.contains(&(k as u32)) { mesh_mats.extend(mats) } else { others.extend(mats) }
+    }
     for (k, a) in sc.attrs[..pool_first].iter().enumerate() {
         let (mat, obj) = (a.uv[3].to_bits(), a.x[1].to_bits());
         if tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0 {
             fixed_mats.insert(mat);
+            others.insert(mat);
             continue;
         }
         let runs = mat_runs.entry(mat).or_default();
@@ -756,6 +760,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             _ => runs.push([k as u32, k as u32 + 1, obj]),
         }
     }
+    mesh_mats.retain(|m| !others.contains(m));
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
     // code with its triangle in the list (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
@@ -877,7 +882,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, mesh_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.
@@ -1523,8 +1528,9 @@ mod units_tests {
     use crate::world::{Geometry, Kind, World};
     use glam::{Mat4, Quat};
 
-    /// A world with a flattened ground, meshes of their own (`own_blas`: units under software traversal) turned and
-    /// scaled, one that casts no shadow, one hidden, and an instanced mesh of five instances of which four are drawn.
+    /// A world with a ground and a light's card (the card's two triangles are the only still ones: a mesh is a unit
+    /// under software traversal), meshes turned and scaled, one that casts no shadow, one hidden, and an instanced mesh
+    /// of five instances of which four are drawn.
     fn world(ground: bool) -> World {
         let mut w = World::default();
         w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
@@ -1551,6 +1557,9 @@ mod units_tests {
         if ground {
             w.set_object(10, "ground".into(), None, mesh(2, false), true, false).unwrap();
             w.set_transform(10, Vec3::new(0.0, -1.0, 0.0), Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+            let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 3, "height": 3, "range": 0 })).unwrap();
+            w.set_object(16, "card".into(), None, Kind::Light(card), true, false).unwrap();
+            w.set_transform(16, Vec3::new(1.0, 2.5, -1.0), Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
         }
         let place = |w: &mut World, id: u32, geometry: u32, at: [f32; 3], turn: f32, scale: [f32; 3], shadow: bool| {
             w.set_object(id, format!("o{id}"), None, mesh(geometry, true), shadow, false).unwrap();
@@ -1633,14 +1642,15 @@ mod units_tests {
         };
         let (su, pu) = build(true);
         let (sf, pf) = build(false);
-        assert_eq!(su.tris.is_empty(), w.objects.get(&10).is_none(), "still triangles: the ground's only");
+        let ground = usize::from(w.objects.contains_key(&10));
+        assert_eq!(su.tris.len(), 2 * ground, "still triangles: the card's only");
         let u = su.units.as_ref().expect("the scene has units");
         assert!(sf.units.is_none() && sf.instances.is_empty(), "flattened: no instance is left");
-        // Nine instances: four own meshes shown, one hidden (no instance at all), five of the instanced mesh of which
-        // one is hidden: eight units in the top tree.
-        assert_eq!((su.instances.len(), u.count), (9, 8), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
+        // Nine instances and the ground: four meshes shown, one hidden (no instance at all), five of the instanced mesh
+        // of which one is hidden: eight units in the top tree, and the ground.
+        assert_eq!((su.instances.len(), u.count as usize), (9 + ground, 8 + ground), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
         assert!(gpu::instance_features(&su) & gpu::F_UNITS != 0 && gpu::instance_features(&sf) & gpu::F_UNITS == 0);
-        assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits()), (u.layout.top_first, 8));
+        assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits() as usize), (u.layout.top_first, 8 + ground));
         // The flattened scene holds every instance's triangles; the scene with units holds each mesh's once.
         assert!(pf.tri_verts.len() > pu.tri_verts.len());
         assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
