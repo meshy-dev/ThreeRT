@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { BISTRO } from "../scenes/bistro.ts";
 import { type Variant, cameraPath, pathAt } from "../games/voxel-level/plan.ts";
 import { generate } from "./voxel-level/generate.ts";
-import { acquireGpuLock, frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
+import { acquireGpuLock, editCost, frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
 import { branchBuild } from "./lib/build-at.ts";
 import { type Drive, bistroDrive, district, startLive } from "./lib/live.ts";
 
@@ -114,7 +114,8 @@ async function measure(configs: Config[], what: string) {
 if (args.includes("--edits")) {
   // One object's geometry replaced every half second (tools/perf/voxel-level*-edits.game.ts), in place (live/edits.rs
   // `edit_geometry`) against a scene rebuild (THREERT_EDIT_REBUILD=1), alternated; camera still at the path's start.
-  // Per edit frame from the frame log: the edit's CPU ms (in place) or the rebuild's, and that frame's interval.
+  // Per edit frame from the frame log: the edit's CPU ms (in place: `edit` and the commit's `build`, which is also given
+  // alone) or the rebuild's, and that frame's interval.
   const b = branchBuild(rendererBin);
   const keys = cameraPath(1), tan = Math.tan((55 * Math.PI) / 360);
   const still: Drive = { seconds: 12, at: () => ({ pos: keys[0].pos, target: keys[0].target, tan }) };
@@ -131,11 +132,11 @@ if (args.includes("--edits")) {
     const env: Record<string, string> = mode === "rebuild" ? { THREERT_EDIT_REBUILD: "1" } : mode === "in place, profiled" ? { THREERT_PROFILE_BLAS: "1" } : {};
     if (r === 1) { const l = startLive(b, bundle, { env }); await l.firstFrame; await l.quit(); }
     const d = await district(b, bundle, log, still, { env });
-    type F = { edit: number; rebuild: number; interval: number; blas: number; fallback: string | null };
+    type F = { edit: number; build?: number; rebuild: number; interval: number; blas: number; fallback: string | null };
     const frames = readFileSync(log, "utf8").trim().split("\n").slice(-d.frames).map((l) => JSON.parse(l) as F);
     const hit = frames.filter((f) => f.edit > 0 || f.rebuild > 0);
     const ms = (xs: number[]) => (xs.length ? { p50: +frameStats(xs).p50.toFixed(2), max: +Math.max(...xs).toFixed(2) } : null);
-    const row = { round: r, scene: name, mode, edits: hit.length, cost_ms: ms(hit.map((f) => (mode === "rebuild" ? f.rebuild : f.edit))), interval_ms: ms(hit.map((f) => f.interval)), ...(mode === "in place, profiled" ? { gpu_build_ms: ms(hit.map((f) => f.blas)) } : {}), fallbacks: [...new Set(hit.map((f) => f.fallback).filter((x) => x && !x.startsWith("THREERT_EDIT_REBUILD")))] };
+    const row = { round: r, scene: name, mode, edits: hit.length, cost_ms: ms(hit.map((f) => (mode === "rebuild" ? f.rebuild : editCost(f)))), ...(mode === "rebuild" ? {} : { build_ms: ms(hit.map((f) => f.build ?? 0)) }), interval_ms: ms(hit.map((f) => f.interval)), ...(mode === "in place, profiled" ? { gpu_build_ms: ms(hit.map((f) => f.blas)) } : {}), fallbacks: [...new Set(hit.map((f) => f.fallback).filter((x) => x && !x.startsWith("THREERT_EDIT_REBUILD")))] };
     rows.push(row);
     console.log(JSON.stringify(row));
   }

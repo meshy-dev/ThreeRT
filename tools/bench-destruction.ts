@@ -5,7 +5,8 @@
 // 10 s); since step 6 also topple (explosions at tree trunks: each cuts a crown loose), crater (4 m on open ground) and
 // fell (a saw cut that drops buildings: the limit). Per explosion, from the game's log, the renderer's carve / rebuild / pieces ms and counts; per explosion frame,
 // from the frame log, the worse of its two frames (the tick that fires it, the commit that applies it), interval and
-// CPU, the in-place edit's CPU (`edit`) or the rebuild it fell back to (`rebuild`, `fallback`); over the destruction,
+// CPU, the in-place edit's CPU (`edit` and the commit's `build`, which is also given alone) or the rebuild it fell
+// back to (`rebuild`, `fallback`); over the destruction,
 // frames over 50 ms, frame start p95 and the trace pass's GPU timestamps. One more run per route with
 // THREERT_PROFILE_BLAS=1 times the edits' BLAS / TLAS builds on the GPU. THREERT_EDIT_RESERVE=4 (room for pieces; the
 // memory it costs is reported). The GPU lock is held; other processes' GPU share is recorded per run.
@@ -18,7 +19,8 @@
 // dust: batched, the debris as stateful GPU particles colliding with the ground and the voxels (ROADMAP § 6 step 5a).
 // smoke: batched, every explosion a puff of simulated smoke on a density grid (ROADMAP § 6 step 5b).
 // The debris route also reports the debris in flight (most at once), what the explosions threw, and the in-place
-// instance updates' CPU per frame (frame log `instanced`).
+// instance updates' CPU per frame (frame log `instanced`; the build they leave is the frame's `build`: between
+// explosions, `between_build_p50`).
 //
 // Result: out/bench/destruction/<time>.json and a table on stdout.
 import { execFile, execFileSync } from "node:child_process";
@@ -26,7 +28,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { generate } from "./voxel-level/generate.ts";
-import { acquireGpuLock, frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
+import { acquireGpuLock, editCost, frameStats, rendererBin, repoRoot } from "./lib/bench.ts";
 import { branchBuild } from "./lib/build-at.ts";
 import { startLive } from "./lib/live.ts";
 
@@ -67,7 +69,7 @@ for (const r of routes) {
 }
 
 type Room = { tris: [number, number]; records: [number, number]; objects: [number, number]; holes: number; grows: number; buffers_mb: number; blas_mb: number };
-type Frame = { interval: number; start?: number; cpu: number; edit: number; edit_split?: number[]; rebuild: number; blas: number; trace: number; fallback: string | null; voxel?: [number, number]; instanced?: number; room?: Room | null };
+type Frame = { interval: number; start?: number; cpu: number; edit: number; build?: number; edit_split?: number[]; rebuild: number; blas: number; trace: number; fallback: string | null; voxel?: [number, number]; instanced?: number; room?: Room | null };
 type Explosion = { k: number; r: number; carve_ms: number; rebuild_ms: number; pieces_ms: number; piece_mesh_ms: number; piece_world_ms: number; voxels: number; touched: number; pieces: number; dropped: number; triangles: number; world_objects: number; thrown?: number; debris?: number };
 type BatchFrame = { batches: number; rebuilt_tris?: number; rebuild_ms?: number; settled?: number; settle_ms?: number };
 
@@ -108,7 +110,7 @@ function figures(x: Awaited<ReturnType<typeof once>>) {
   const cost = (i: number) => {
     const fs = span(i), e = fs.find((f) => f.edit > 0) ?? fs[0];
     const sp = e.edit_split ?? [0, 0, 0, 0, 0, 0];
-    return { interval: r2(Math.max(...fs.map((f) => f.interval))), cpu: r2(Math.max(...fs.map((f) => f.cpu))), edit: r2(e.edit), tris: r2(sp[0]), upload: r2(sp[1]), blas_cpu: r2(sp[2]), added: sp[3], deformed: sp[4], blas: r2(Math.max(...fs.map((f) => f.blas ?? 0))), fallback: fs.map((f) => f.fallback).find(Boolean) ?? null };
+    return { interval: r2(Math.max(...fs.map((f) => f.interval))), cpu: r2(Math.max(...fs.map((f) => f.cpu))), edit: r2(editCost(e)), build: r2(e.build ?? 0), tris: r2(sp[0]), upload: r2(sp[1]), blas_cpu: r2(sp[2]), added: sp[3], deformed: sp[4], blas: r2(Math.max(...fs.map((f) => f.blas ?? 0))), fallback: fs.map((f) => f.fallback).find(Boolean) ?? null };
   };
   const ei = at(0), si = at(1);
   const exp = ei.map(cost), settle = si.map(cost);
@@ -126,13 +128,13 @@ function figures(x: Awaited<ReturnType<typeof once>>) {
       const ks = e.map((v, k) => ({ v, k })).filter(({ v }) => v.r === r);
       const fr = one ? ks.map(({ k }) => exp[k]) : [];
       const pm = (f: (v: Explosion) => number) => med(ks.map(({ v }) => f(v)));
-      return { r, n: ks.length, voxels: pm((v) => v.voxels), touched: pm((v) => v.touched), pieces: pm((v) => v.pieces), carve_ms: pm((v) => v.carve_ms), rebuild_ms: pm((v) => v.rebuild_ms), pieces_ms: pm((v) => v.pieces_ms), piece_mesh_ms: pm((v) => v.piece_mesh_ms ?? 0), piece_world_ms: pm((v) => v.piece_world_ms ?? 0), frame_ms: med(fr.map((f) => f.interval)), cpu_ms: med(fr.map((f) => f.cpu)), edit_ms: med(fr.map((f) => f.edit)), edit_tris_ms: med(fr.map((f) => f.tris)), edit_upload_ms: med(fr.map((f) => f.upload)), edit_blas_cpu_ms: med(fr.map((f) => f.blas_cpu)), meshes_added: med(fr.map((f) => f.added)), gpu_blas_ms: med(fr.map((f) => f.blas).filter((v) => v > 0)) };
+      return { r, n: ks.length, voxels: pm((v) => v.voxels), touched: pm((v) => v.touched), pieces: pm((v) => v.pieces), carve_ms: pm((v) => v.carve_ms), rebuild_ms: pm((v) => v.rebuild_ms), pieces_ms: pm((v) => v.pieces_ms), piece_mesh_ms: pm((v) => v.piece_mesh_ms ?? 0), piece_world_ms: pm((v) => v.piece_world_ms ?? 0), frame_ms: med(fr.map((f) => f.interval)), cpu_ms: med(fr.map((f) => f.cpu)), edit_ms: med(fr.map((f) => f.edit)), edit_build_ms: med(fr.map((f) => f.build)), edit_tris_ms: med(fr.map((f) => f.tris)), edit_upload_ms: med(fr.map((f) => f.upload)), edit_blas_cpu_ms: med(fr.map((f) => f.blas_cpu)), meshes_added: med(fr.map((f) => f.added)), gpu_blas_ms: med(fr.map((f) => f.blas).filter((v) => v > 0)) };
     }),
     interval_p50: med(exp.map((f) => f.interval)), interval_max: max(exp.map((f) => f.interval)),
     settle_p50: med(settle.map((f) => f.interval)), settle_max: max(settle.map((f) => f.interval)),
-    between_p50: med(between.map((f) => f.interval)), between_edit_p50: med(between.map((f) => f.edit)),
+    between_p50: med(between.map((f) => f.interval)), between_edit_p50: med(between.map((f) => f.edit)), between_build_p50: med(between.map((f) => f.build ?? 0)),
     batch_rebuild_ms_p50: med(x.batches.map((b) => b.rebuild_ms ?? 0).filter((v) => v > 0)), batch_tris_p50: med(x.batches.map((b) => b.rebuilt_tris ?? 0).filter((v) => v > 0)), batch_live_max: max(x.batches.map((b) => b.batches)),
-    edit_p50: med(exp.map((f) => f.edit)),
+    edit_p50: med(exp.map((f) => f.edit)), build_p50: med(exp.map((f) => f.build)),
     renderer_p50: med(e.map((v) => v.carve_ms + v.rebuild_ms + v.pieces_ms)),
     window_over_50: window.filter((f) => f.interval > 50).length,
     window_frames: window.length,
@@ -170,7 +172,7 @@ for (let round = 1; round <= rounds; round++) {
     const f = figures(await once(route, scenario, {}));
     const row = { round, scenario, route, tag, ...f };
     rows.push(row);
-    console.log(JSON.stringify({ round, scenario, route, tag, explosions: f.explosions, interval_p50: f.interval_p50, interval_max: f.interval_max, settle_p50: f.settle_p50, settle_max: f.settle_max, between_p50: f.between_p50, renderer_p50: f.renderer_p50, edit_p50: f.edit_p50, over_50: f.window_over_50, start_p95: f.window_start_p95, trace_p50: f.window_trace_p50, fallbacks: f.fallbacks.length, objects_end: f.objects_end, others: f.others_pct, ...(route === "dust" ? { thrown: f.thrown } : {}), ...(route === "debris" ? { thrown: f.thrown, debris_max: f.debris_max, instanced_p50: f.instanced_p50, instanced_max: f.instanced_max } : {}) }));
+    console.log(JSON.stringify({ round, scenario, route, tag, explosions: f.explosions, interval_p50: f.interval_p50, interval_max: f.interval_max, settle_p50: f.settle_p50, settle_max: f.settle_max, between_p50: f.between_p50, renderer_p50: f.renderer_p50, edit_p50: f.edit_p50, build_p50: f.build_p50, over_50: f.window_over_50, start_p95: f.window_start_p95, trace_p50: f.window_trace_p50, fallbacks: f.fallbacks.length, objects_end: f.objects_end, others: f.others_pct, ...(route === "dust" ? { thrown: f.thrown } : {}), ...(route === "debris" ? { thrown: f.thrown, debris_max: f.debris_max, instanced_p50: f.instanced_p50, instanced_max: f.instanced_max, between_build_p50: f.between_build_p50 } : {}) }));
   }
 }
 // The edits' GPU builds (drained around: not frame times), once per route and scenario.
