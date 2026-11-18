@@ -761,7 +761,13 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // (Switched-off objects at full power: `switchable_power`.)
     let all_power: f32 = emitter_tris.iter().map(|e| switchable_power(e, &sc.materials, &sc.objects, sc.object_stride())).sum();
     let use_tree = std::env::var("THREERT_LTREE").map_or(true, |v| v != "0");
-    let light_tree = if use_tree { light_tree_of(&emitter_tris, &|i| gpu_emitter_tris[i].vertices(), &sc.materials, &sc.objects, sc.object_stride(), sc.emitter_slot) } else { None };
+    let mut light_tree = if use_tree { light_tree_of(&emitter_tris, &|i| gpu_emitter_tris[i].vertices(), &sc.materials, &sc.objects, sc.object_stride(), sc.emitter_slot) } else { None };
+    // (A hidden instance's emitters, an instanced object's copies not shown, bound nothing: the moving subtree's
+    // spheres without them, as an edit leaves them.)
+    let gone = |i: usize| sc.instances.get(emitter_tris[i].inst as usize).is_some_and(|x| x.hidden);
+    if let Some(t) = light_tree.as_mut().filter(|_| (0..emitter_tris.len()).any(gone)) {
+        t.refit_moving(&|i| (!gone(i)).then(|| gpu_emitter_tris[i].vertices()));
+    }
     // The list keeps its own order (the tree and the CDF name its emitters: `emitter_order`); each emitter carries
     // where the kernel finds its weight (`emitter_codes`).
     if let Some(t) = &light_tree {

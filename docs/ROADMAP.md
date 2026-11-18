@@ -2703,7 +2703,8 @@ with a model still, movable and posed. Still flattened: an instanced object's co
 **An instanced object's emitters (2026-11-18).** The copies of an instanced mesh whose material only emits are
 instances of its one mesh, as any other copies are, each with its run of the light list (the capacity's, shown or
 not). A copy not shown (past `count`, or scaled to 0) has no power in its object entry: its emitters stay in the
-list and in the light tree at no weight, at their mesh's own area, so showing it needs no new entry. A change in
+list and in the light tree at no weight, at their mesh's own area, so showing it needs no new entry; while hidden
+it bounds nothing there (the refit of the tree's moving subtree skips a hidden instance's emitters). A change in
 place (`update_instanced`) takes the copies' triangles again on the GPU and refits the tree's moving subtree; when a
 copy changed size or power, or was shown or hidden, the emitters are weighed again in the same commit (the CDF and
 the tree's powers whole, on the CPU, as a power edit without the worker: a scene with such copies has none).

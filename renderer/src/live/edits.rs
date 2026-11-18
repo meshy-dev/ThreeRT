@@ -1443,13 +1443,13 @@ impl LiveCore {
         let (instances, pool_tris, pool_first) = (&self.sc.instances, &self.sc.pool_tris, self.sc.edit.pool_first);
         t.refit_moving(&|e| {
             let x = &tris[e];
-            // (An instance's: its mesh's triangle, placed.)
+            // (An instance's: its mesh's triangle, placed; none while the instance is hidden.)
             if x.inst != crate::NO_INST {
-                let w = instances[x.inst as usize].world;
-                return pool_tris[x.tri as usize - pool_first].map(|v| w.transform_point3(v.into()).to_array());
+                let i = &instances[x.inst as usize];
+                return (!i.hidden).then(|| pool_tris[x.tri as usize - pool_first].map(|v| i.world.transform_point3(v.into()).to_array()));
             }
             let r = (x.tri as usize - first) * 3;
-            crate::ltree::tri_vertices(&verts[r..r + 3])
+            Some(crate::ltree::tri_vertices(&verts[r..r + 3]))
         });
         heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));
         heap.write(q, Table::LightTree, 2 * 16, bytemuck::cast_slice(&t.nodes[2..3]));
@@ -2165,6 +2165,8 @@ impl LiveCore {
         self.edit_split.add(&split);
         if emitters_changed {
             self.write_emitters(&new_emitters);
+            // (Instances' emitters came or went: the tree's moving subtree around those there, at the commit's end.)
+            self.emitters_moved = true;
         }
         Ok(())
     }

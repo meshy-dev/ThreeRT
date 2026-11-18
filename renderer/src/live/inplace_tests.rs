@@ -436,7 +436,8 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
 /// An instanced object's copies that emit, changed in place, are lit as a build lights them: a copy moved, made
 /// larger, shown by the count, hidden by a matrix scaled to 0 and by the count, the node's power changed, the object
 /// removed; with and without a light tree. After each: no rebuild, the light list is its triangles, the emitters'
-/// weights are a build's, and so is the picture.
+/// weights are a build's, and so is the picture; and the tree's moving subtree is no wider for a copy that is not
+/// shown (one waits 300 m away), nor for an object that was removed.
 #[test]
 fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
     let presets = crate::default_presets_dir();
@@ -449,8 +450,12 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
         w.set_object(15, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![5], capacity: 3 }, true, false).unwrap();
         let at = |x: f32, y: f32, z: f32, s: f32| glam::Mat4::from_scale_rotation_translation(Vec3::splat(s), glam::Quat::from_rotation_y(0.3), Vec3::new(x, y, z)).to_cols_array();
         let set = |w: &mut World, count: u32, m: [[f32; 16]; 3]| w.set_instances(15, count, Some(m.concat()), None, None).unwrap();
-        let (b, c) = (at(0.5, 0.5, 1.0, 0.4), at(0.0, 0.0, 1.4, 0.4));
-        set(&mut w, 2, [at(-0.6, -0.4, 0.8, 0.4), b, c]);
+        // (The third copy waits far away, past the count.)
+        let (b, c, far) = (at(0.5, 0.5, 1.0, 0.4), at(0.0, 0.0, 1.4, 0.4), at(300.0, 0.0, 1.4, 0.4));
+        set(&mut w, 2, [at(-0.6, -0.4, 0.8, 0.4), b, far]);
+        // (Another such object, one copy, stays: what is left in the tree's moving subtree when the first is removed.)
+        w.set_object(16, "another".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![5], capacity: 1 }, true, false).unwrap();
+        w.set_instances(16, 1, Some(at(0.7, -0.6, 0.9, 0.3).to_vec()), None, None).unwrap();
         if tree {
             strip(&mut w);
         }
@@ -465,12 +470,15 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
         assert!(live.sc.tables.retained.instanced(15).is_some_and(|p| p.mesh.is_some()), "the copies are instances");
         assert_eq!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.moving_count > 0), tree, "the copies' emitters are in the tree's moving subtree");
         list_is_its_triangles("emitting copies, as loaded", &live);
+        // A copy that is not shown bounds nothing in the tree: the moving subtree holds the shown ones (within 2 m).
+        let reach = |c: &LiveCore| c.sc.tables.light_tree.as_ref().and_then(|t| t.moving_sphere()).map_or(0.0, |s| s.1);
+        assert!(reach(&live) < 10.0, "as loaded: the moving subtree reaches {} m", reach(&live));
         picture(&mut live, 4);
         type Edit = (&'static str, Box<dyn Fn(&mut World)>);
         let zero = glam::Mat4::from_scale(Vec3::ZERO).to_cols_array();
         let edits: Vec<Edit> = vec![
-            ("a copy moved", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 0.4), b, c]))),
-            ("a copy three times larger", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 1.2), b, c]))),
+            ("a copy moved", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 0.4), b, far]))),
+            ("a copy three times larger", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 1.2), b, far]))),
             ("a third copy shown", Box::new(move |w| set(w, 3, [at(-0.2, -0.5, 1.1, 1.2), b, c]))),
             ("a copy scaled to 0", Box::new(move |w| set(w, 3, [zero, b, c]))),
             ("two copies past the count", Box::new(move |w| set(w, 1, [at(-0.6, 0.4, 0.9, 0.8), b, c]))),
@@ -496,6 +504,11 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
             // (Removed without a tree's strip: no emitter is left to hold.)
             if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
                 list_is_its_triangles(&what, &live);
+            }
+            // (The two objects' copies are a metre apart; the one left when the first is removed is 0.1 m wide.)
+            if tree {
+                let alone = what.starts_with("the object removed");
+                assert!(reach(&live) < if alone { 0.3 } else { 10.0 } && (alone || reach(&live) > 0.3), "{what}: the moving subtree reaches {} m", reach(&live));
             }
             let mut fresh = open(&w).unwrap();
             let (wl, wf) = (weights(&live), weights(&fresh));

@@ -239,33 +239,49 @@ impl LightTree {
         self.checked();
     }
 
-    /// The moving emitters moved: their leaves' spheres from their triangles now (`verts(e)`: emitter e's vertices),
-    /// then each moving node's and the root's from its children's, bottom-up (children come after their parent). The
-    /// topology, codes and powers stay.
-    pub fn refit_moving(&mut self, verts: &dyn Fn(usize) -> [[f32; 3]; 3]) {
+    /// The moving emitters moved: their leaves' spheres from their triangles now (`verts(e)`: emitter e's vertices;
+    /// None: it is not there now, a hidden instance's), then each moving node's and the root's from its children's,
+    /// bottom-up (children come after their parent). What is not there bounds nothing: its leaf keeps its sphere and
+    /// widens no node above it. The topology, codes and powers stay.
+    pub fn refit_moving(&mut self, verts: &dyn Fn(usize) -> Option<[[f32; 3]; 3]>) {
         if self.moving_count == 0 {
             return;
         }
+        let mut empty = vec![false; self.nodes.len()];
         for i in (self.moving_nodes..self.nodes.len()).rev().chain([2, 0]) {
             let w = self.nodes[i][3].to_bits();
             let s = if w & LEAF != 0 {
                 let (a, b) = self.ranges[i];
                 let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-                for k in a..b {
-                    let (l, h) = bounds(&verts(self.order[k as usize] as usize));
+                for v in (a..b).filter_map(|k| verts(self.order[k as usize] as usize)) {
+                    let (l, h) = bounds(&v);
                     for j in 0..3 {
                         lo[j] = lo[j].min(l[j]);
                         hi[j] = hi[j].max(h[j]);
                     }
                 }
-                box_sphere(lo, hi)
+                (lo[0] <= hi[0]).then(|| box_sphere(lo, hi))
             } else {
-                union_sphere(sphere_of(&self.nodes[w as usize]), sphere_of(&self.nodes[w as usize + 1]))
+                let (l, r) = (w as usize, w as usize + 1);
+                match (empty[l], empty[r]) {
+                    (false, false) => Some(union_sphere(sphere_of(&self.nodes[l]), sphere_of(&self.nodes[r]))),
+                    (false, true) => Some([self.nodes[l][0], self.nodes[l][1]]),
+                    (true, false) => Some([self.nodes[r][0], self.nodes[r][1]]),
+                    (true, true) => None,
+                }
             };
-            self.nodes[i][0] = s[0];
-            self.nodes[i][1] = s[1];
+            match s {
+                Some(s) => (self.nodes[i][0], self.nodes[i][1]) = (s[0], s[1]),
+                None => empty[i] = true,
+            }
         }
         self.checked();
+    }
+
+    /// The moving subtree's sphere (centre, radius), if there is one.
+    #[cfg(test)]
+    pub(crate) fn moving_sphere(&self) -> Option<([f32; 3], f32)> {
+        (self.moving_count > 0).then(|| sphere_of(&self.nodes[2]))
     }
 
     /// `check` in tests and debug builds (bvh.rs `build_tris` says why not always).
@@ -554,7 +570,7 @@ mod tests {
         let codes = t.code.clone();
         let moved = |e: usize| tri_vertices(&verts[e * 3..e * 3 + 3]).map(|v| [v[0], v[1] + 50.0, v[2]]);
         let vs: Vec<[[f32; 3]; 3]> = (0..n as usize).map(|e| if tris[e].moves { moved(e) } else { [[0.0; 3]; 3] }).collect();
-        t.refit_moving(&|e| vs[e]);
+        t.refit_moving(&|e| Some(vs[e]));
         assert_eq!(t.code, codes);
         for k in t.moving_first as usize..n as usize {
             let mut node = 0usize;
@@ -570,5 +586,14 @@ mod tests {
                 }
             }
         }
+        // One of them far away and not there (a hidden instance's): the moving subtree is no wider for it.
+        let (_, r) = sphere_of(&t.nodes[2]);
+        let far = |e: usize| vs[e].map(|v| [v[0], v[1] + 5000.0, v[2]]);
+        t.refit_moving(&|e| if e == 350 { Some(far(e)) } else { Some(vs[e]) });
+        assert!(sphere_of(&t.nodes[2]).1 > 2000.0, "there: the subtree reaches it");
+        t.refit_moving(&|e| (e != 350).then(|| vs[e]));
+        assert!(sphere_of(&t.nodes[2]).1 <= r * 1.001, "not there: the subtree is as wide as without it ({} for {r})", sphere_of(&t.nodes[2]).1);
+        t.refit_moving(&|e| (!tris[e].moves).then(|| vs[e]));
+        assert!(sphere_of(&t.nodes[2]).1 <= r * 1.001, "none there: the spheres stay");
     }
 }
