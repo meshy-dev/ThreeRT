@@ -1677,6 +1677,10 @@ pub const F_LISTS: u32 = 1 << 27;
 /// every call otherwise, taken or not (Kabukicho's 64,224 emitters with a function, none on an instance: frame GPU
 /// +2.7 %).
 pub const F_IFUNC: u32 = 1 << 28;
+/// Glass on an instanced mesh: its BLAS geometry is not flagged opaque, and a shadow ray culls such geometry instead of
+/// forcing opacity (trace_hw.wgsl; software traversal skips a unit's glass triangles by their flag). Compiled out
+/// where no instanced mesh has glass.
+pub const F_IGLASS: u32 = 1 << 29;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
 /// there the lights are resampled as in a scene of fewer, unguided (docs/RUNTIME.md "Android").
@@ -1741,7 +1745,7 @@ pub fn environment_features(fog: Option<&crate::desc::Fog>, background: bool, ae
 /// Kernel features of the scene's structure, which parameter edits do not change: F_INST and F_MASKED for the
 /// instanced meshes (cutout triangles among them), F_MEDIA for participating media (F_HMEDIA for homogeneous ones),
 /// F_PEMIT for opaque particles, F_PROC for procedural geometry, F_TINT for instance colours, F_IFUNC for a material
-/// function on an instanced mesh.
+/// function on an instanced mesh, F_IGLASS for glass on one.
 pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
@@ -1752,7 +1756,8 @@ pub fn instance_features(scene: &Scene) -> u32 {
     }
     let function = |a: &crate::scene::GpuTriAttr| scene.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.tex1[3] != 0);
     let ifunc = if scene.pool_attrs.iter().any(function) { F_IFUNC } else { 0 };
-    media | particles | ifunc | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    let iglass = if scene.meshes.iter().any(|m| m.glass > 0) { F_IGLASS } else { 0 };
+    media | particles | ifunc | iglass | F_INST | if scene.meshes.iter().any(|m| m.opaque + m.glass < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -2377,7 +2382,13 @@ impl Gpu {
                     vertex_count: (count * 3) as u32,
                     index_format: None,
                     index_count: None,
-                    flags: if opaque { wgpu::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::AccelerationStructureGeometryFlags::empty() },
+                    // (Every group's geometry is flagged opaque, the cutout ones' too: a query that forces opacity sees
+                    // them alike, and a shadow ray that culls what is not opaque, an instanced mesh's glass, must
+                    // still meet a cutout: trace_hw.wgsl.)
+                    flags: {
+                        let _ = opaque;
+                        wgpu::AccelerationStructureGeometryFlags::OPAQUE
+                    },
                 })
                 .collect();
             let mut blases = vec![];
@@ -2399,8 +2410,9 @@ impl Gpu {
             }
             // Instanced meshes: one opaque model-space BLAS each, a TLAS instance per placement (custom data
             // INSTANCE_BIT | record; shadow casters mask 1).
-            // Per mesh: (first triangle, count, opaque) geometries: the opaque part, then the cutout part (any-hit).
-            let mesh_parts: Vec<Vec<(u32, u32, bool)>> = scene.meshes.iter().map(|m| [(m.first, m.opaque, true), (m.first + m.opaque, m.count - m.opaque, false)].into_iter().filter(|p| p.1 > 0).collect()).collect();
+            // Per mesh: (first triangle, count, opaque) geometries: the opaque part, the cutout part, the glass part
+            // (`InstMesh::parts`).
+            let mesh_parts: Vec<Vec<(u32, u32, bool)>> = scene.meshes.iter().map(|m| m.parts().into_iter().map(|(at, count, opaque)| (m.first + at, count, opaque)).collect()).collect();
             let mesh_sizes: Vec<Vec<wgpu::BlasTriangleGeometrySizeDescriptor>> = mesh_parts
                 .iter()
                 .map(|parts| {
@@ -3221,15 +3233,15 @@ impl Gpu {
     }
 
     /// Mesh `k` (one an edit no longer draws) made again over `count` triangles from `first`: a new BLAS in its slot.
-    pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, count: u32, opaque: u32) {
-        let (blas, geo) = self.mesh_blas_for(accel, first, count, opaque);
+    pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, mesh: &crate::scene::InstMesh) {
+        let (blas, geo) = self.mesh_blas_for(accel, first, mesh);
         accel.meshes[k as usize] = blas;
         accel.mesh_geo[k as usize] = geo;
     }
 
-    fn mesh_blas_for(&self, accel: &Accel, first: usize, count: u32, opaque: u32) -> (wgpu::Blas, (Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
+    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh) -> (wgpu::Blas, (Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
         let rel = (first - accel.pool_first) as u32;
-        let parts: Vec<(u32, u32, bool)> = [(rel, opaque, true), (rel + opaque, count - opaque, false)].into_iter().filter(|p| p.1 > 0).collect();
+        let parts: Vec<(u32, u32, bool)> = mesh.parts().into_iter().map(|(at, count, opaque)| (rel + at, count, opaque)).collect();
         let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = parts
             .iter()
             .map(|&(_, c, opaque)| wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -3247,10 +3259,10 @@ impl Gpu {
 
     /// A new instanced mesh over `count` triangles from GPU-order index `first` (in the edit room; live/edits.rs
     /// `edit_geometry`), its first `opaque` ones opaque: its BLAS, which the commit's build builds (`TopBuild::meshes`). Returns its index.
-    pub fn add_mesh(&self, accel: &mut Accel, first: usize, count: u32, opaque: u32) -> u32 {
+    pub fn add_mesh(&self, accel: &mut Accel, first: usize, mesh: &crate::scene::InstMesh) -> u32 {
         // Built fast rather than traced fast (edits come every frame under destruction; the batches of pieces are rebuilt
         // every frame); THREERT_EDIT_BLAS=trace for the A/B (`mesh_blas_for`).
-        let (blas, geo) = self.mesh_blas_for(accel, first, count, opaque);
+        let (blas, geo) = self.mesh_blas_for(accel, first, mesh);
         accel.meshes.push(blas);
         accel.mesh_geo.push(geo);
         accel.meshes.len() as u32 - 1
@@ -3653,7 +3665,7 @@ mod tests {
             ("F_MASKED", F_MASKED), ("F_FOG", F_FOG), ("F_VOLUME", F_VOLUME), ("F_TEX", F_TEX), ("F_FUNC", F_FUNC),
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
-            ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC),
+            ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

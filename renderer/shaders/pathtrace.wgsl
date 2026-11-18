@@ -90,6 +90,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
+const F_IGLASS: u32 = 536870912u; // glass on an instanced mesh: shadow rays cull its geometry (trace_hw.wgsl), a unit's glass triangles by their flag
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
@@ -868,14 +869,16 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     var a = attrs[h.tri];
     var e1 = tri_verts[h.tri * 3u + 1u].xyz;
     var e2 = tri_verts[h.tri * 3u + 2u].xyz;
+    var side = 1.0;
     if (has(F_INST) && h.inst != NO_INST) {
         let r = instance_at(h.inst);
         e1 = inst_vec(r, e1);
         e2 = inst_vec(r, e2);
         a = inst_attr(r, a);
+        side = inst_sign(r);
     }
     let m = material_at(bitcast<u32>(a.uv.w));
-    var g = GlassAt(normalize(cross(e1, e2)), 0.0, false, vec3<f32>(1.0));
+    var g = GlassAt(normalize(cross(e1, e2)) * side, 0.0, false, vec3<f32>(1.0));
     var tr = clamp(m.layer.x, 0.0, 1.0) * (1.0 - clamp(m.params.x, 0.0, 1.0));
     if (tr <= 0.0) { return g; }
     g.tint = m.base_color.rgb;

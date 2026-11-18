@@ -1,5 +1,6 @@
 // Hardware ray tracing (wgpu ray query). Up to four instances (see Prepared::groups): shadow casters mask 1, the rest
-// mask 2; opaque groups never report candidates, alpha-cutout groups are confirmed by `alpha_pass`.
+// mask 2 (glass among them; an instanced mesh's glass is a geometry of its BLAS that a shadow ray culls); opaque groups
+// never report candidates, alpha-cutout groups are confirmed by `alpha_pass`.
 // instance_custom_data holds the instance's first global triangle index, or in scenes where a group starts beyond
 // 2^24 triangles (F_HUGE: custom data has 24 bits) its traversal group, whose first triangle is in P.group_first.
 @if(hwrt) @group(0) @binding(19) var acc: acceleration_structure;
@@ -22,7 +23,8 @@
     // renders of Kabukichō differed in 75 % of their pixels). Fewer whole-scene steps (the opaque instances once, then
     // the cutout instances alone; or one candidate loop on them) came out within ±0.4 ms on Bistro: the leaves' alpha
     // tests and the traversal past them cost it, however the queries are arranged. Culling the cutout geometry by its
-    // non-opaque flag (RAY_FLAG_CULL_NO_OPAQUE) is slow on Metal (Bistro's trace +1.7 ms).
+    // non-opaque flag (RAY_FLAG_CULL_NO_OPAQUE) was slow on Metal (Bistro's trace +1.7 ms); every geometry but an
+    // instanced mesh's glass is flagged opaque now (`trace_opaque`).
     //
     // In order, each query starting past the last cutout hit its alpha let through. Shadow rays take up to 64 of them
     // and count as blocked past that: with 16, as closest hits take, the rest counted as unblocked (light through dense
@@ -55,7 +57,11 @@
 @if(hwrt) fn trace_opaque(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32, any: bool) -> Hit {
     @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
     var rq: ray_query;
-    let flags = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);
+    // A shadow ray (mask 1) where an instanced mesh has glass (F_IGLASS): it culls the geometry that is not flagged
+    // opaque, the glass parts alone (gpu.rs), instead of forcing every geometry opaque. (Measured on Metal with every
+    // geometry opaque: the same pictures, at most 0.5 % of a frame's GPU time.)
+    let opacity = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_CULL_NO_OPAQUE, has(F_IGLASS) && mask == 1u);
+    let flags = select(opacity, opacity | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);
     rayQueryInitialize(&rq, acc, RayDesc(flags, mask, 0.0, tmax_in, o, d));
     var pg = GOut(-1.0, vec3<f32>(0.0, 1.0, 0.0), 0u, vec2<f32>(0.0));
     var pprim = 0u;
@@ -108,8 +114,12 @@
 // traversal group's.
 @if(hwrt) fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
     if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) {
-        let r = instance_at(custom & (INSTANCE_BIT - 1u)).info;
-        return r.x + select(0u, r.w, geometry == 1u) + prim;
+        // (Its mesh's geometries: where the second and the third start, scene.rs `InstMesh::part_offsets`; a third
+        // only with glass.)
+        let rec = instance_at(custom & (INSTANCE_BIT - 1u));
+        var at = select(0u, rec.info.w, geometry == 1u);
+        if (has(F_IGLASS) && geometry == 2u) { at = bitcast<u32>(rec.n0.w); }
+        return rec.info.x + at + prim;
     }
     return group_tri(custom, prim);
 }

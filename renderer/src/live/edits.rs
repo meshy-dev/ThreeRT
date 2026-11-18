@@ -761,7 +761,7 @@ impl LiveCore {
             }
             let old = self.sc.gpu_instances[i as usize];
             inst.world = w;
-            let mut r = top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, inst.cast_shadow);
+            let mut r = top.record(inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]), inst.mesh, inst.cast_shadow);
             r.p = old.m;
             self.sc.gpu_instances[i as usize] = r;
             if merged {
@@ -1110,7 +1110,7 @@ impl LiveCore {
                         emitting.push((rec0 + i) as u32);
                     }
                     let inst = &sc.instances[first + i];
-                    (top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, n.cast_shadow), scene::copy_row(row, emits && hidden))
+                    (top.record(inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]), inst.mesh, n.cast_shadow), scene::copy_row(row, emits && hidden))
                 };
                 rec.p = old.m;
                 sc.gpu_instances[rec0 + i] = rec;
@@ -1226,7 +1226,7 @@ impl LiveCore {
             let inst = &mut self.sc.instances[i as usize];
             let old = self.sc.gpu_instances[i as usize];
             inst.world = w;
-            let mut r = inst.gpu(old.info[0], old.info[3]);
+            let mut r = inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]);
             r.p = old.m;
             self.sc.gpu_instances[i as usize] = r;
             (ilo, ihi) = (ilo.min(i as usize), ihi.max(i as usize + 1));
@@ -1792,7 +1792,7 @@ impl LiveCore {
                         drop_mesh_user(k, edit, tables, meshes);
                     }
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: o.cast_shadow, name: o.name.clone(), sub: None, hidden: false, first_emitter: 0 };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.opaque), mesh, o.cast_shadow);
+                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.part_offsets()), mesh, o.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
@@ -1816,12 +1816,12 @@ impl LiveCore {
                     let gm = tables.materials[mat as usize];
                     // (It covers instances' triangles from here on: `Tables::fixed_mats`.)
                     tables.fixed_mats.insert(mat);
-                    // An emitting material (no glass, no function): a mesh as any other, each instance's emitters in
-                    // the light list (given below, where its record is known; scene.rs; ROADMAP § 6 step 3).
-                    let emits = scene::emits_only(&gm);
+                    // An emitting material: a mesh as any other, each instance's emitters in the light list (given
+                    // below, where its record is known; scene.rs; ROADMAP § 6 step 3).
+                    let emits = scene::emissive(&gm);
                     let class = scene::mesh_class(&gm);
-                    if class == 2 {
-                        return Err("a glass material".into());
+                    if class == 2 && features & gpu::F_IGLASS == 0 {
+                        return Err("the scene's first glass on an instance (kernel feature)".into());
                     }
                     if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
                         return Err("the scene's first material function on an instance (kernel feature)".into());
@@ -1867,7 +1867,7 @@ impl LiveCore {
                                 scene::number_emitters(&mut a, &tables.materials);
                             }
                             // (A unit's cutout triangles carry their flag; hardware traversal has them in a geometry apart.)
-                            let flags = f32::from_bits(if tree.is_some() && class == 1 { scene::TRI_MASKED } else { 0 });
+                            let flags = f32::from_bits(if tree.is_none() { 0 } else { [0, scene::TRI_MASKED, scene::TRI_NO_SHADOW][class as usize] });
                             // As `prepare` lays the pool out: (a, flags), e1, e2; attributes; the BLAS's vertices.
                             let verts: Vec<[f32; 4]> = t.iter().flat_map(|&[a, b, c]| [[a.x, a.y, a.z, flags], [b.x - a.x, b.y - a.y, b.z - a.z, 0.0], [c.x - a.x, c.y - a.y, c.z - a.z, 0.0]]).collect();
                             let blas_verts: Vec<[f32; 3]> = t.iter().flat_map(|&[a, b, c]| [[a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]]).collect();
@@ -1911,10 +1911,10 @@ impl LiveCore {
                                     let k = match &mut top {
                                         gpu::Top::Hw(accel) => match dead {
                                             Some(k) => {
-                                                g.set_mesh(accel, k, first, im.count, im.opaque);
+                                                g.set_mesh(accel, k, first, &im);
                                                 k
                                             }
-                                            None => g.add_mesh(accel, first, im.count, im.opaque),
+                                            None => g.add_mesh(accel, first, &im),
                                         },
                                         // Its tree into the mesh trees' room (a freed mesh's slot gives its tree back first).
                                         gpu::Top::Sw(units) => {
@@ -2032,7 +2032,7 @@ impl LiveCore {
                                 tables.emissive.insert(mat);
                                 emitters_changed = true;
                             }
-                            let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.opaque), mesh, o.cast_shadow);
+                            let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.part_offsets()), mesh, o.cast_shadow);
                             w_records.put(((r0 + i) * size) as u64, bytemuck::bytes_of(&rec));
                             gpu_instances[r0 + i] = rec;
                             top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | (r0 + i) as u32, o.cast_shadow, hidden);
@@ -2046,7 +2046,7 @@ impl LiveCore {
                         continue;
                     }
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: o.cast_shadow, name: o.name.clone(), sub: None, hidden: false, first_emitter: 0 };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.opaque), mesh, o.cast_shadow);
+                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.part_offsets()), mesh, o.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)

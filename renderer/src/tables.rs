@@ -147,8 +147,10 @@ impl Tables {
                 return Ok(None);
             }
             // (A material of instances' triangles that gets a function, or loses it: the kernel's variant goes by
-            // whether there is one, `gpu::F_IFUNC`, which the build decides.)
-            if (gm.tex1[3] != 0) != (self.materials[mi as usize].tex1[3] != 0) && self.fixed_mats.contains(&mi) {
+            // whether there is one, `gpu::F_IFUNC`, which the build decides. One that turns glass, or stops being
+            // glass: its triangles are a geometry of their mesh's BLAS by that, `scene::mesh_class`.)
+            let old = &self.materials[mi as usize];
+            if ((gm.tex1[3] != 0) != (old.tex1[3] != 0) || (gm.layer[0] > 0.0) != (old.layer[0] > 0.0)) && self.fixed_mats.contains(&mi) {
                 return Ok(None);
             }
             self.materials[mi as usize] = gm;

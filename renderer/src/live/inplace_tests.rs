@@ -330,10 +330,10 @@ fn moves_in_place_leave_what_a_build_does() {
     }
 }
 
-/// An instanced object the build flattened (an emitting material: its copies are triangles of the static groups)
-/// is gone from the picture once it is removed: nothing takes it out in place, so the scene is rebuilt.
+/// An instanced object whose copies emit is gone from the picture once it is removed (its copies were flattened once,
+/// and nothing took them out).
 #[test]
-fn a_flattened_instanced_object_removed_is_gone() {
+fn an_emitting_instanced_object_removed_is_gone() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
     let mut w = world();
@@ -438,6 +438,54 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         alive += 1;
     }
     assert!(alive > 0, "{what}: the list has emitters");
+}
+
+/// A glass mesh added in place is drawn as a build draws it. Where the scene has glass on an instance already (the
+/// kernel's feature for it, `F_IGLASS`): in place. Where it has none: by a rebuild, which sets the feature. Either
+/// way the picture is a build's. And a material of an instance's triangles that turns glass rebuilds.
+#[test]
+fn a_glass_mesh_added_is_drawn_as_a_build_draws_it() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    for has in [true, false] {
+        let mut w = world();
+        w.set_material(7, serde_json::from_value(serde_json::json!({ "name": "glass", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 0, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "transmission": 1, "ior": 1.5 })).unwrap());
+        let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: true, materials: vec![] };
+        // (A mesh with its own BLAS: the scene has instances either way.)
+        w.set_object(14, "own".into(), None, mesh(3, 1), true, false).unwrap();
+        w.set_transform(14, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        if has {
+            w.set_object(18, "glass".into(), None, mesh(3, 7), true, false).unwrap();
+            w.set_transform(18, Vec3::new(0.8, -0.7, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
+        let mut live = match open(&w) {
+            Ok(c) if c.g.hwrt => c,
+            Ok(_) => return eprintln!("skipped: no hardware RT"),
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        assert_eq!(live.sc.up.kernel.features & gpu::F_IGLASS != 0, has);
+        let before = picture(&mut live, 24);
+        // A pane before the wall, in the sun's and the lamp's light.
+        w.set_object(19, "pane".into(), None, mesh(2, 7), true, false).unwrap();
+        w.set_transform(19, Vec3::new(0.1, 0.0, 0.9), glam::Quat::from_rotation_y(0.4), Vec3::splat(0.5)).unwrap();
+        let rebuilt = live.commit(&mut w).unwrap();
+        assert_eq!(rebuilt, !has, "glass on an instance already: {has}; in place unless the kernel has no feature for it ({:?})", live.fallback);
+        assert!(live.sc.up.kernel.features & gpu::F_IGLASS != 0);
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+        assert!(apart(&before, &b) > 0.5, "the pane is in the picture ({:.2} steps)", apart(&before, &b));
+        assert!(apart(&a, &b) < 0.5, "glass on an instance already: {has}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        // A material of an instance's triangles that turns glass (the mesh of its own, and the wall): by a rebuild, its
+        // triangles being another geometry of their mesh's BLAS from then on.
+        w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.8, 0.4, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true, "transmission": 1, "ior": 1.5 })).unwrap());
+        assert!(live.commit(&mut w).unwrap(), "a material of an instance's triangles turned glass: a rebuild");
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "a material turned glass: the picture is {:.2} steps from a build's", apart(&a, &b));
+    }
 }
 
 /// An instanced object's copies that emit, changed in place, are lit as a build lights them: a copy moved, made

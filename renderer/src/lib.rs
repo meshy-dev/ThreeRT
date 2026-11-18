@@ -594,15 +594,16 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     for (k, (t, a)) in sc.pool_tris.iter().zip(&sc.pool_attrs).enumerate() {
         let [a0, b, c] = *t;
         let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
-        // (A unit's triangles are in its tree's order, cutouts among the rest: each carries its own flag, as the still
-        // scene's do. Hardware traversal has them apart, in a geometry of their own.)
-        let cutout = trees.is_some() && sc.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.uv2[3] > 0.0);
-        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 } | if cutout { scene::TRI_MASKED } else { 0 })]);
+        // (A unit's triangles are in its tree's order, cutouts and glass among the rest: each carries its own flag, as
+        // the still scene's do. Hardware traversal has them apart, in geometries of their own.)
+        let material = sc.materials.get(a.uv[3].to_bits() as usize).filter(|_| trees.is_some());
+        let (cutout, glass) = (material.is_some_and(|m| m.uv2[3] > 0.0), material.is_some_and(|m| m.layer[0] > 0.0));
+        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 } | if cutout { scene::TRI_MASKED } else { 0 } | if glass { scene::TRI_NO_SHADOW } else { 0 })]);
         tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
-    sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.opaque) }).collect();
+    sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, m.part_offsets()) }).collect();
     // A scene whose triangles are all units': the still tree is then the leaf of one triangle, triangle 0 (bvh.rs
     // `EMPTY`), which no ray meets while triangle 0 is the zeros of an empty buffer. Here triangle 0 is the pool's
     // first, a mesh's in its model space, and the still walk would meet it standing in the world. The leaf gets a
@@ -959,7 +960,7 @@ fn flatten_instances(sc: &mut scene::Scene) {
             sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
             sc.attrs.push(a);
         }
-        // A second range for the node when its glass / function part was flattened at build: node_tris joins them.
+        // A second range for the node when a part of its mesh was flattened at build: node_tris joins them.
         sc.tri_nodes.push((inst.name, first, sc.tris.len() as u32));
         if let Some(i) = inst.sub {
             sc.tri_instances.push((first, sc.tris.len() as u32, i));
