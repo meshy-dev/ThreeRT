@@ -1052,6 +1052,19 @@ fn track(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let still = 1.0 - clamp(length(vel) / UP_SPEED, 0.0, 1.0);
+    // The light here changed (a shadow's edge passed, a lamp's pool moved, a light switched): the composed sample
+    // jumped by more than LIGHT_CHANGE of itself since the previous frame at the same surface point, and by far more
+    // than it flickers under the jitter (`Flicker`). Its history is of the light before: `upscale` holds it to this
+    // frame's samples. Without it, a shadow swept over a still floor (a character running in the sun) left a
+    // line of its edge a frame, fading over UP_SAMPLES frames: the floor stands still, so nothing clamped it, and a
+    // line a pixel wide widens its own range. While the lighting is live (`mode.z`: something moved, as anti-lag).
+    // The flicker's frame count starts again there (`n`): until it is LIGHT_SETTLE again, `upscale` holds the history
+    // around to this frame's samples (the line of an edge outlives the frame that edge passed).
+    var changed = false;
+    if (L.mode.z != 0u && f.n >= 2.0) {
+        let jump = abs(now - f.last.x) / max(max(now, f.last.x), 1.0e-4 / exposure_scale());
+        changed = jump > LIGHT_CHANGE && jump > LIGHT_FLICKER * f.sd;
+    }
     var sd = select(1.0, f.sd, f.n >= 1.0);
     if (f.n >= 2.0) {
         let bend = min(abs(now - 2.0 * f.last.x + f.last.y) / max(max(now, max(f.last.x, f.last.y)), 1e-9), UP_ONSET * max(f.sd, 0.01));
@@ -1091,7 +1104,7 @@ fn track(@builtin(global_invocation_id) gid: vec3<u32>) {
         at = L.jit.xy;
     }
     life *= 1.0 - reactive;
-    up_state[this_half(q)] = vec4<u32>(pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0))), pack2x16float(vec2<f32>(sd * still, min(max(f.n + still, 1.0), 9.0))), pack2x16float(vec2<f32>(life, min(lz, 6.0e4))), pack2x16float(at));
+    up_state[this_half(q)] = vec4<u32>(pack2x16float(vec2<f32>(now, select(now, f.last.x, f.n >= 1.0))), pack2x16float(vec2<f32>(sd * still, select(min(max(f.n + still, 1.0), 9.0), 1.0, changed))), pack2x16float(vec2<f32>(life, min(lz, 6.0e4))), pack2x16float(at));
 }
 
 // The upscaler works on linear radiance and its means are plain ones. (Weighted by 1 / (1 + luminance x exposure), so
@@ -1111,6 +1124,12 @@ const UP_REJECT: f32 = 0.25;
 const UP_REACTIVE: f32 = 4.0;
 // The share of a pixel a medium that changes with time takes (`medium_share`) from which the pixel is as reactive.
 const UP_MEDIUM: f32 = 0.25;
+// How much a composed sample's luminance changes from the previous frame, as a share of it, and in deviations of its
+// own flicker, before the light there counts as changed (`track`), and the flicker frame count from which it counts
+// as settled again (`upscale`).
+const LIGHT_CHANGE: f32 = 0.35;
+const LIGHT_FLICKER: f32 = 2.5;
+const LIGHT_SETTLE: f32 = 6.0;
 // How far outside the range of the history's pixels around it a point sample may lie (`judge`): this many deviations
 // of the traced sample's own flicker (`Flicker`). Of 1, 2, 3 (measured while the deviation was still an amount of
 // light): Bistro held still changes 0.49, 0.42, 0.38 from frame to frame, and Tokyo's skyline at dusk is furthest from
@@ -1522,6 +1541,7 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     // (A lock spares the output pixels at the thing it is for: where in its traced pixel that is, `Lock`; full within
     // LOCK_REACH output pixels, none half a pixel further.)
     var lock = 0.0;
+    var shaded = 0.0;
     let centre = vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5;
     for (var k = 0; k < 9; k++) {
         let qx = bc.x + k % 3 - 1;
@@ -1537,6 +1557,11 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
         let j = u32(qy * iw + qx);
         let at = (vec2<f32>(f32(qx), f32(qy)) + unpack2x16float(up_state[this_half(j)].w)) * up;
         lock = max(lock, locked(j) * clamp(LOCK_REACH + 0.5 - length(at - centre), 0.0, 1.0));
+        // (A sample whose light changed lately, `track`, near enough to count: fully the frame it changed, less as its
+        // flicker's count grows back to LIGHT_SETTLE.)
+        if (L.mode.z != 0u && wt > 0.02) {
+            shaded = max(shaded, clamp((LIGHT_SETTLE - unpack2x16float(up_state[this_half(j)].y).y) / (LIGHT_SETTLE - 1.0), 0.0, 1.0));
+        }
     }
     let cur = select(fb[u32(bc.y * iw + bc.x)].rgb, sum / wsum, wsum > 1e-9);
     let conf = min(wsum, 1.0);
@@ -1582,7 +1607,8 @@ fn upscale(@builtin(global_invocation_id) gid: vec3<u32>) {
     let kept = hist.w * (1.0 - verdict.w);
     if (kept > 0.0) {
         var hc = max(hist.rgb + verdict.xyz, vec3<f32>(0.0));
-        hc = mix(hc, clamp(hc, xlo, xhi), moving * (1.0 - lock));
+        // (And where the light changed among the samples around: the history is of the light before.)
+        hc = mix(hc, clamp(hc, xlo, xhi), max(moving, shaded) * (1.0 - lock));
         let most = min(mix(UP_SAMPLES, UP_MOVING, moving), mix(UP_SAMPLES, UP_REACTIVE, clamp(sample_vel[u32(bc.y * iw + bc.x)].w, 0.0, 1.0)));
         count = min(kept + conf, most);
         let a = clamp(conf / max(count, 1e-4), 0.0, 1.0);
