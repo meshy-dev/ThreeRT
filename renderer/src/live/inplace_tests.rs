@@ -433,10 +433,85 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     assert!(alive > 0, "{what}: the list has emitters");
 }
 
-/// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
-/// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
-/// after a model's placement or its clip has moved its emitters, after a particle's pass has placed it, and after
-/// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
+/// An instanced object's copies that emit, changed in place, are lit as a build lights them: a copy moved, made
+/// larger, shown by the count, hidden by a matrix scaled to 0 and by the count, the node's power changed, the object
+/// removed; with and without a light tree. After each: no rebuild, the light list is its triangles, the emitters'
+/// weights are a build's, and so is the picture.
+#[test]
+fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    for tree in [false, true] {
+        let mut w = world();
+        // (The sun and the lamp away: the copies light the scene.)
+        w.set_visible(20, false).unwrap();
+        w.set_visible(12, false).unwrap();
+        w.set_object(15, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![5], capacity: 3 }, true, false).unwrap();
+        let at = |x: f32, y: f32, z: f32, s: f32| glam::Mat4::from_scale_rotation_translation(Vec3::splat(s), glam::Quat::from_rotation_y(0.3), Vec3::new(x, y, z)).to_cols_array();
+        let set = |w: &mut World, count: u32, m: [[f32; 16]; 3]| w.set_instances(15, count, Some(m.concat()), None, None).unwrap();
+        let (b, c) = (at(0.5, 0.5, 1.0, 0.4), at(0.0, 0.0, 1.4, 0.4));
+        set(&mut w, 2, [at(-0.6, -0.4, 0.8, 0.4), b, c]);
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        if !live.g.hwrt {
+            return;
+        }
+        assert!(live.sc.tables.retained.instanced(15).is_some_and(|p| p.mesh.is_some()), "the copies are instances");
+        assert_eq!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.moving_count > 0), tree, "the copies' emitters are in the tree's moving subtree");
+        list_is_its_triangles("emitting copies, as loaded", &live);
+        picture(&mut live, 4);
+        type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+        let zero = glam::Mat4::from_scale(Vec3::ZERO).to_cols_array();
+        let edits: Vec<Edit> = vec![
+            ("a copy moved", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 0.4), b, c]))),
+            ("a copy three times larger", Box::new(move |w| set(w, 2, [at(-0.2, -0.5, 1.1, 1.2), b, c]))),
+            ("a third copy shown", Box::new(move |w| set(w, 3, [at(-0.2, -0.5, 1.1, 1.2), b, c]))),
+            ("a copy scaled to 0", Box::new(move |w| set(w, 3, [zero, b, c]))),
+            ("two copies past the count", Box::new(move |w| set(w, 1, [at(-0.6, 0.4, 0.9, 0.8), b, c]))),
+            ("the node's power", Box::new(move |w| w.set_power(15, 0.25).unwrap())),
+            (
+                "the object removed",
+                Box::new(move |w| {
+                    w.remove(15);
+                }),
+            ),
+        ];
+        // The emitters that weigh something: each one's weight and where it is.
+        let weights = |c: &LiveCore| {
+            let t = &c.sc.tables;
+            let mut v: Vec<(f32, [f32; 3])> = t.emitter_tris.iter().map(|e| (crate::emitter_power(e, &t.materials, &t.objects, t.stride), e.c)).filter(|(p, _)| *p > 0.0).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v
+        };
+        for (what, edit) in &edits {
+            let what = format!("{what}, {} a light tree", if tree { "with" } else { "without" });
+            edit(&mut w);
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            // (Removed without a tree's strip: no emitter is left to hold.)
+            if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
+                list_is_its_triangles(&what, &live);
+            }
+            let mut fresh = open(&w).unwrap();
+            let (wl, wf) = (weights(&live), weights(&fresh));
+            assert_eq!(wl.len(), wf.len(), "{what}: as many emitters weigh something as in a build");
+            for (l, f) in wl.iter().zip(&wf) {
+                assert!((l.0 - f.0).abs() <= 1e-5 * f.0 && (Vec3::from(l.1) - Vec3::from(f.1)).length() <= 1e-4, "{what}: an emitter weighs {l:?}, a build's {f:?}");
+            }
+            let (tl, tf) = (live.sc.base.misc[1], fresh.sc.base.misc[1]);
+            assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
+            forget(&mut live);
+            let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+            assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        }
+    }
+}
+
 /// 300 small emitting triangles: enough for a light tree.
 fn strip(w: &mut World) {
     let (mut positions, mut indices) = (vec![], vec![]);
@@ -494,6 +569,10 @@ fn an_emitter_scaled_in_place_is_lit_as_a_build_lights_it() {
     }
 }
 
+/// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
+/// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
+/// after a model's placement or its clip has moved its emitters, after a particle's pass has placed it, and after
+/// the edits that make emitters in place (a mesh added, given other triangles and removed, with the tree's slot for
 /// them; a material that starts emitting): the moves and edits also against a build's picture.
 #[test]
 fn the_light_list_holds_its_triangles() {

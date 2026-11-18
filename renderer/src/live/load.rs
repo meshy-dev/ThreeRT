@@ -161,7 +161,9 @@ impl EmitterWorker {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn new(e: &tables::Tables, device: &wgpu::Device) -> Option<EmitterWorker> {
-        let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0);
+        // (Nor where an instance's emitters change in place, an instanced object's copies: the worker weighs its own
+        // copy of the list.)
+        let changing = e.light_tree.as_ref().is_some_and(|t| t.dynamic.is_some() || t.moving_count > 0) || e.emitter_tris.iter().any(|t| t.moves && t.inst != crate::NO_INST);
         if e.emitter_tris.len() < ASYNC_EMITTERS || changing {
             return None;
         }

@@ -576,7 +576,7 @@ impl LiveCore {
         if d.objects {
             up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
-        if d.materials || d.emitters {
+        if d.materials || d.emitters || std::mem::take(&mut self.emitters_reweigh) {
             let new = self.add_material_emitters();
             self.write_emitters(&new);
         } else if d.deferred {
@@ -1043,7 +1043,9 @@ impl LiveCore {
     /// kernel records (the old transforms kept as the previous frame's, for motion vectors), object entries (pivot,
     /// bounds, power, data, colour), TLAS transforms and masks (`scene::instance_world`: a hidden instance 0), each
     /// object's records and entries written as one range; the commit builds what is above them. No triangles or
-    /// BLASes change. Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
+    /// BLASes change. Copies that emit: their emitters in the light list follow (`fill_moved`), a hidden copy's object
+    /// without power, and the emitters are weighed again when a copy's size or power changed (`emitters_reweigh`).
+    /// Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
     /// flattened or did not place this way, an instance now mirrored), and the caller rebuilds.
     /// `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
     pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> std::result::Result<usize, String> {
@@ -1057,6 +1059,7 @@ impl LiveCore {
         let sc = &mut self.sc;
         let Some(mut top) = gpu::Top::of(&mut sc.up.accel, &mut sc.up.units) else { return Err("software traversal".into()) };
         let mut done = 0;
+        let (mut emitting, mut reweigh): (Vec<u32>, bool) = (vec![], false);
         for &id in ids {
             // (Removed or hidden: nothing is drawn; a structural change rebuilds.)
             let Some(n) = world.objects.get(&id).filter(|_| world.shown(id)) else { continue };
@@ -1083,6 +1086,7 @@ impl LiveCore {
                     return Err("an instance is mirrored".into());
                 }
                 let old = sc.gpu_instances[rec0 + i];
+                let mut emits = false;
                 let (mut rec, entry) = if procedural {
                     let p = &mut sc.procs[first + i];
                     (p.world, p.hidden) = (wm, hidden);
@@ -1093,8 +1097,23 @@ impl LiveCore {
                         return Err("an instanced mesh that is no unit (software traversal)".into());
                     }
                     (inst.world, inst.hidden) = (wm, hidden);
-                    let (lo, hi) = sc.meshes[inst.mesh as usize].placed_bounds(wm);
-                    (top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, n.cast_shadow), scene::object_row(wm.transform_point3(glam::Vec3::ZERO), n.power, hi - lo, t.custom(i, n.custom), t.color(i)))
+                    let im = sc.meshes[inst.mesh as usize];
+                    emits = im.emitters > 0;
+                    let (lo, hi) = im.placed_bounds(wm);
+                    let row = scene::object_row(wm.transform_point3(glam::Vec3::ZERO), n.power, hi - lo, t.custom(i, n.custom), t.color(i));
+                    if emits {
+                        // Its emitters as it is placed now (their triangles on the GPU: `fill_moved` below).
+                        let run = emitter_run(&sc.tables.emitter_tris, &sc.instances, (rec0 + i) as u32);
+                        let inst = &sc.instances[first + i];
+                        for e in &mut sc.tables.emitter_tris[run] {
+                            let (area, c, _) = crate::placed_emitter(inst, &sc.pool_tris[e.tri as usize - sc.edit.pool_first], e.mat, &sc.tables.materials);
+                            reweigh |= (area - e.area).abs() > 1e-5 * area.max(e.area);
+                            (e.area, e.c) = (area, c);
+                        }
+                        emitting.push((rec0 + i) as u32);
+                    }
+                    let inst = &sc.instances[first + i];
+                    (top.record(inst.gpu(old.info[0], old.info[3]), inst.mesh, n.cast_shadow), scene::copy_row(row, emits && hidden))
                 };
                 rec.p = old.m;
                 sc.gpu_instances[rec0 + i] = rec;
@@ -1102,6 +1121,7 @@ impl LiveCore {
                 let st = sc.tables.stride;
                 let at = (place.object as usize + i) * st;
                 let e = &mut sc.tables.objects[at..at + st];
+                reweigh |= emits && e[0][3] != entry[0][3];
                 let edited = if e[0][3] != entry[0][3] { now } else { e[1][3] };
                 e.copy_from_slice(&entry[..st]);
                 e[1][3] = edited;
@@ -1122,6 +1142,8 @@ impl LiveCore {
             self.inst_moved = true;
             build.instances = true;
         }
+        self.fill_moved(emitting.into_iter());
+        self.emitters_reweigh |= reweigh;
         Ok(done)
     }
 
@@ -1390,7 +1412,14 @@ impl LiveCore {
     /// The emitters of instances that moved (those of a mesh that emits): their runs of the light list taken again on
     /// the GPU, through the records just queued; the light tree's moving subtree after (`move_emitters`).
     pub(super) fn fill_moved(&mut self, records: impl Iterator<Item = u32>) {
-        let runs: Vec<[u32; 2]> = records.map(|i| emitter_run(&self.sc.tables.emitter_tris, &self.sc.instances, i)).filter(|r| !r.is_empty()).map(|r| [r.start as u32, r.len() as u32]).collect();
+        // (Runs that follow each other as one: an instanced object's copies'.)
+        let mut runs: Vec<[u32; 2]> = vec![];
+        for r in records.map(|i| emitter_run(&self.sc.tables.emitter_tris, &self.sc.instances, i)).filter(|r| !r.is_empty()) {
+            match runs.last_mut() {
+                Some(l) if l[0] + l[1] == r.start as u32 => l[1] += r.len() as u32,
+                _ => runs.push([r.start as u32, r.len() as u32]),
+            }
+        }
         if !runs.is_empty() {
             self.g.fill_emitter_runs(&self.sc.up, &runs);
             self.emitters_moved = true;
@@ -1608,6 +1637,10 @@ impl LiveCore {
                 let (r0, cap) = (place.first as usize, place.capacity as usize);
                 for r in r0..r0 + cap {
                     top.clear(inst_base + r);
+                    // (A copy's emitters go as an instance's do.)
+                    let run = emitter_run(&tables.emitter_tris, instances, r as u32);
+                    emitters_changed |= !run.is_empty();
+                    tables.emitter_tris[run].iter_mut().for_each(|e| e.area = 0.0);
                     if let Some(i) = instances.get_mut(r) {
                         i.hidden = true;
                     }

@@ -42,6 +42,15 @@ pub fn object_row(pivot: Vec3, power: f32, size: impl Into<Vec3>, custom: [f32; 
     [[pivot.x, pivot.y, pivot.z, power.max(0.0)], [size.x, size.y, size.z, -1.0e9], custom, [color[0], color[1], color[2], 0.0]]
 }
 
+/// An instanced object's copy's entry: without power when the copy emits and is hidden (its emitters stay in the light
+/// list, at no weight until it is shown).
+pub fn copy_row(mut row: ObjectRow, dark: bool) -> ObjectRow {
+    if dark {
+        row[0][3] = 0.0;
+    }
+    row
+}
+
 /// A glTF mesh placed by several static instances (hardware RT): its triangles once, in model space, in the `pool_*`
 /// arrays; one BLAS, one TLAS instance per placement.
 #[derive(Clone, Copy, Debug)]
@@ -1363,8 +1372,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Instanced { geometry, procedural, materials: mats, capacity } if shown => {
                 // Copies of one geometry: one shared mesh (one BLAS), an instance and an object entry per copy, the
                 // copies' records and entries contiguous (live/edits.rs `update_instanced` rewrites them in place).
-                // Glass, emissive and function materials and mirrored copies are flattened instead, each copy its
-                // own triangles, as `own_blas` meshes are; changing their instances rebuilds.
+                // A material that only emits is such a mesh too: each copy has its emitters in the light list
+                // (`InstMesh::emitters`), a hidden copy's at no weight (its object has no power). Glass and function
+                // materials and mirrored copies are flattened instead, each copy its own triangles, as `own_blas`
+                // meshes are; changing their instances rebuilds.
                 let empty = world::InstanceTable::default();
                 let t = w.instanced.get(id).unwrap_or(&empty);
                 let placed: Vec<(Mat4, bool)> = (0..*capacity as usize).map(|i| instance_world(m, t, i)).collect();
@@ -1384,7 +1395,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let g = w.geometries.get(geometry).ok_or_else(|| anyhow!("object {}: unknown geometry {geometry}", n.name))?;
                 let material = mats.first().ok_or_else(|| anyhow!("object {}: an instanced mesh needs a material", n.name))?;
                 let mat = *retained.materials.get(material).ok_or_else(|| anyhow!("object {}: unknown material {material}", n.name))?;
-                let class = material_class(&materials[mat as usize]);
+                let class = mesh_class(&materials[mat as usize]);
+                let emits = emits_only(&materials[mat as usize]);
                 let vc = colored(g, &mut std::iter::once(material));
                 let mirrored = placed.iter().any(|(wm, hidden)| !hidden && wm.determinant() < 0.0);
                 if instancing && class < 2 && !mirrored {
@@ -1393,7 +1405,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         None => {
                             let (tr, a) = own_mesh_tris(g, mat);
                             (!tr.is_empty()).then(|| {
-                                meshes.push(own_inst_mesh(&tr, pool_tris.len() as u32, class));
+                                let mut im = own_inst_mesh(&tr, pool_tris.len() as u32, class);
+                                if emits {
+                                    im.emitters = tr.len() as u32;
+                                }
+                                meshes.push(im);
                                 put_colors(&mut pool_vcolors, pool_tris.len(), vc.then(|| tri_colors(g, false, None)));
                                 pool_tris.extend(tr);
                                 pool_attrs.extend(a);
@@ -1408,7 +1424,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         retained.proxy(*id).draw = Draw::Instanced(InstancedPlace { first: instances.len() as u32, capacity: *capacity, object, mesh: Some(mesh), drawn: t.count });
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let (lo, hi) = meshes[mesh as usize].placed_bounds(wm);
-                            objects.extend_from_slice(&entry(i, wm, Vec3::from(hi - lo))[..stride]);
+                            objects.extend_from_slice(&copy_row(entry(i, wm, Vec3::from(hi - lo)), emits && hidden)[..stride]);
                             instances.push(Instance { mesh, world: wm, object: object + i as u32, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: Some(i as u32), hidden, first_emitter: 0 });
                         }
                     }
@@ -2167,8 +2183,8 @@ fn pool_emitters(classed: &[Vec<(usize, u32)>; 3], emitting: &std::collections::
 }
 
 /// Instancing class of a GPU material: 0 opaque, 1 cutout (any-hit), 2 flattened per placement (glass: shadow rays pass;
-/// material functions; emissive, where the light list does not follow the mesh: one that deforms, an instanced
-/// object's copies. Elsewhere `mesh_class`).
+/// material functions; emissive, where the light list does not follow the mesh: one that deforms. Elsewhere
+/// `mesh_class`).
 pub fn material_class(g: &GpuMaterial) -> u32 {
     let flat = g.layer[0] > 0.0 || g.tex1[3] != 0 || g.emissive[..3].iter().any(|e| *e > 0.0);
     if flat {
@@ -2229,7 +2245,7 @@ pub fn emits_only(g: &GpuMaterial) -> bool {
 }
 
 /// `material_class` in a mesh whose instances have their emitters in the light list (an `own_blas` mesh, a model's
-/// that does not deform): a material that only emits is opaque or cutout there, not flattened.
+/// that does not deform, an instanced object's): a material that only emits is opaque or cutout there, not flattened.
 pub fn mesh_class(g: &GpuMaterial) -> u32 {
     if emits_only(g) { u32::from(g.uv2[3] > 0.0) } else { material_class(g) }
 }
@@ -2498,6 +2514,35 @@ mod instance_tests {
         w.set_instances(2, 3, Some(m), None, None).unwrap();
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!((sc.instances.len(), sc.tris.len(), sc.tri_instances.iter().map(|r| r.2).collect::<Vec<_>>()), (0, 2, vec![0, 1]), "mirrored: the drawn copies flattened");
+    }
+
+    /// An instanced object whose material only emits is placed as any other: one shared mesh, which has the emitters,
+    /// an instance a copy; a hidden copy's entry has no power. `prepare` gives every copy, the hidden too, its run of
+    /// the light list, of emitters that move: a hidden copy's at its mesh's own area and no weight.
+    #[test]
+    fn an_emitting_instanced_object_is_instances() {
+        let mut w = World::default();
+        w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 5, "doubleSided": false })).unwrap());
+        let g = world::Geometry { positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], normals: vec![0.0, 0.0, 1.0].repeat(3), uvs: vec![0.0; 6], indices: vec![0, 1, 2], groups: vec![], colors: vec![] };
+        w.set_geometry(1, g).unwrap();
+        w.set_object(2, "lamps".into(), None, Kind::Instanced { geometry: 1, procedural: false, materials: vec![1], capacity: 4 }, true, false).unwrap();
+        w.set_power(2, 2.0).unwrap();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+        let m = [Mat4::from_scale(Vec3::splat(2.0)), Mat4::from_translation(Vec3::X), Mat4::from_scale(Vec3::ZERO), Mat4::from_translation(Vec3::Y)];
+        w.set_instances(2, 3, Some(m.iter().flat_map(|m| m.to_cols_array()).collect()), None, None).unwrap();
+        let mut sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
+        assert_eq!((sc.meshes.len(), sc.meshes[0].emitters, sc.instances.len(), sc.tris.len()), (1, 1, 4, 0));
+        let (st, first) = (sc.object_stride(), sc.retained.instanced(2).unwrap().object as usize);
+        assert_eq!((0..4).map(|i| sc.objects[(first + i) * st][3]).collect::<Vec<_>>(), [2.0, 2.0, 0.0, 0.0], "a hidden copy's entry has no power");
+        let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let e = &prep.emitter_tris;
+        assert_eq!(e.iter().map(|e| (e.inst, e.obj as usize - first, e.moves, e.area)).collect::<Vec<_>>(), [(0, 0, true, 2.0), (1, 1, true, 0.5), (2, 2, true, 0.5), (3, 3, true, 0.5)]);
+        assert_eq!(sc.instances.iter().map(|i| i.first_emitter).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        let power = |i: usize| crate::emitter_power(&e[i], &sc.materials, &sc.objects, st);
+        assert_eq!([power(0), power(1), power(2), power(3)], [4.0 * power(1), power(1), 0.0, 0.0], "weights: by size, none when hidden");
+        assert!(power(1) > 0.0 && crate::switchable_power(&e[2], &sc.materials, &sc.objects, st) > 0.0, "a hidden copy's emitter is one the light tree would have");
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh with it (`flatten_coincident`), in a model that stays

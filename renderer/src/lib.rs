@@ -181,18 +181,28 @@ impl GpuEmitterTri {
 /// The emitters of an instance of a mesh that emits (`scene::InstMesh::emitters`, `count` of them): one a numbered
 /// triangle, in the numbers' order, each with its triangle as the instance places it. `tris`: the mesh's, in model
 /// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number and material, if
-/// it emits; `record`: the instance's. A hidden instance's, and a triangle of no area: no weight (area 0).
+/// it emits; `record`: the instance's. A triangle of no area: no weight (area 0). A hidden instance's (an instanced
+/// object's copy not shown) keep their mesh's own area: its object has no power, so they weigh nothing, and the light
+/// tree has them (`switchable_power`) for when the copy is shown.
 pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
     let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record };
     let mut out = vec![(dead, [glam::Vec3A::ZERO; 3]); count];
     for (k, t) in tris.iter().enumerate() {
         let Some((slot, mat)) = numbered(k) else { continue };
-        let w = t.map(|v| glam::Vec3A::from(inst.world.transform_point3(v.into())));
-        let emits = materials.get(mat as usize).is_some_and(|m| 0.2126 * m.emissive[0] + 0.7152 * m.emissive[1] + 0.0722 * m.emissive[2] > 0.0);
-        let area = if emits && !inst.hidden { 0.5 * (w[1] - w[0]).cross(w[2] - w[0]).length() } else { 0.0 };
-        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c: ((w[0] + w[1] + w[2]) / 3.0).to_array(), ..dead }, w);
+        let (area, c, w) = placed_emitter(inst, t, mat, materials);
+        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c, ..dead }, w);
     }
     out
+}
+
+/// An instance's emitter of its mesh's triangle `t` (material `mat`): its area, its centre and the triangle as the
+/// instance places it (`instance_emitters` has which area).
+pub fn placed_emitter(inst: &scene::Instance, t: &[glam::Vec3A; 3], mat: u32, materials: &[scene::GpuMaterial]) -> (f32, [f32; 3], [glam::Vec3A; 3]) {
+    let w = t.map(|v| glam::Vec3A::from(inst.world.transform_point3(v.into())));
+    let emits = materials.get(mat as usize).is_some_and(|m| 0.2126 * m.emissive[0] + 0.7152 * m.emissive[1] + 0.0722 * m.emissive[2] > 0.0);
+    let shape = if inst.hidden { *t } else { w };
+    let area = if emits { 0.5 * (shape[1] - shape[0]).cross(shape[2] - shape[0]).length() } else { 0.0 };
+    (area, ((w[0] + w[1] + w[2]) / 3.0).to_array(), w)
 }
 
 /// Runs of the light list (first emitter, count) whose triangles something moves after the load; the GPU takes them
@@ -703,10 +713,12 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         let n = scene::number_emitters(&mut sc.attrs[pool_first + m.first as usize..pool_first + (m.first + m.count) as usize], &sc.materials);
         assert_eq!(n, m.emitters, "a mesh's emitters as the build counted them");
     }
-    // (The instances an edit moves in place: a body's, a movable model's, a posed rigid model's nodes'.)
+    // (The instances an edit moves in place: a body's, a movable model's, a posed rigid model's nodes', an instanced
+    // object's copies.)
     let moving: std::collections::HashSet<u32> = sc.retained.proxies.values().flat_map(|p| match &p.draw {
         scene::Draw::Instance(i) if i.moves => vec![i.instance],
         scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+        scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
         _ => vec![],
     }).collect();
     for r in 0..sc.instances.len() {

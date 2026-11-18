@@ -2700,6 +2700,19 @@ its own measured step, not taking emitters out of their meshes again.
 Tests: `geometry/emitter-model` (a model's emitters, analytic; tests/render/data/panel.glb), the readback test
 with a model still, movable and posed. Still flattened: an instanced object's copies (the next part).
 
+**An instanced object's emitters (2026-11-18).** The copies of an instanced mesh whose material only emits are
+instances of its one mesh, as any other copies are, each with its run of the light list (the capacity's, shown or
+not). A copy not shown (past `count`, or scaled to 0) has no power in its object entry: its emitters stay in the
+list and in the light tree at no weight, at their mesh's own area, so showing it needs no new entry. A change in
+place (`update_instanced`) takes the copies' triangles again on the GPU and refits the tree's moving subtree; when a
+copy changed size or power, or was shown or hidden, the emitters are weighed again in the same commit (the CDF and
+the tree's powers whole, on the CPU, as a power edit without the worker: a scene with such copies has none).
+Removed in place, its emitters go as an instance's do. Still a rebuild: an emitting instanced object added in
+place. Still flattened: glass, material functions, mirrored copies (the next parts).
+Tests: `geometry/emitter-instanced` (analytic), `geometry/emitter-instanced-live` (copies moved, scaled up and
+shown in place), the build's, and the edits in place against a build (a copy moved, larger, shown, hidden two ways,
+the node's power, the object removed; with and without a light tree).
+
 **An emitter's probability is what the picker used (2026-11-18).** An emitter that changed size in place (a movable
 model or mesh scaled, a skinned one) kept the weight it was loaded with, while the kernel took its probability from
 formulas that assumed the weight was the triangle's: scaled three times larger as a scene's main light it read 3 to

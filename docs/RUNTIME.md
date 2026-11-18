@@ -1625,7 +1625,9 @@ over a polished floor, the camera still):
 ![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
 
 Not covered: the specular clip also cuts a right history where the lighting is live all the time (a crowd's
-reflections are darker than offline's: it wants a short-term history to clip against, as the diffuse has); a fast
+reflections are darker than offline's). A short-term specular history to clip against is no answer: at one sample
+a pixel it is noise (tried and dropped: `dtemporal`'s anti-lag note). The clip is transitional: it goes when a
+change in the lighting can be told from noise (last frame's path traced again with its random numbers). A fast
 light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
 history and its anti-lag), and the band just uncovered starts from this frame's samples (more aliased for a frame or
 two, as any disocclusion).
