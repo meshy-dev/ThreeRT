@@ -38,8 +38,8 @@ Engine (renderer + DSL; at the time also the scene IR and its UE adapter, both s
    candidate confirmation, and the same test in the software BVH. Pages are cached across live re-uploads.
    Static glTF models are instanced (hardware RT; `scene::Instance`): each unique mesh's triangles once in model
    space with one BLAS (opaque geometry + cutout geometry), one TLAS instance per placement (transform, shadow mask,
-   custom data = instance record), shading transforms the hit triangle; glass and material-function triangles
-   are flattened per placement (shadow rays, a function's inputs), skinned and mirrored models entirely. A model's
+   custom data = instance record), shading transforms the hit triangle; glass triangles are flattened per
+   placement (shadow rays), skinned models entirely. A mirrored placement is an instance whose record says so. A model's
    triangles that only emit stay in its mesh: each placement's are a run of the light list. `THREERT_INSTANCING=0` flattens everything, `=log` lists what each model instances.
    `node tools/check-instancing.ts` renders instanced cutout props (scaled and not) instanced, flattened and through
    software traversal, and fails when they differ (crops: `docs/img/bugbot-instanced-cutouts.jpg`).

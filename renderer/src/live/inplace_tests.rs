@@ -497,13 +497,6 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
                 }),
             ),
         ];
-        // The emitters that weigh something: each one's weight and where it is.
-        let weights = |c: &LiveCore| {
-            let t = &c.sc.tables;
-            let mut v: Vec<(f32, [f32; 3])> = t.emitter_tris.iter().map(|e| (crate::emitter_power(e, &t.materials, &t.objects, t.stride), e.c)).filter(|(p, _)| *p > 0.0).collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            v
-        };
         for (what, edit) in &edits {
             let what = format!("{what}, {} a light tree", if tree { "with" } else { "without" });
             edit(&mut w);
@@ -517,17 +510,86 @@ fn emitting_copies_changed_in_place_are_lit_as_a_build_lights_them() {
                 let alone = what.starts_with("the object removed");
                 assert!(reach(&live) < if alone { 0.3 } else { 10.0 } && (alone || reach(&live) > 0.3), "{what}: the moving subtree reaches {} m", reach(&live));
             }
-            let mut fresh = open(&w).unwrap();
-            let (wl, wf) = (weights(&live), weights(&fresh));
-            assert_eq!(wl.len(), wf.len(), "{what}: as many emitters weigh something as in a build");
-            for (l, f) in wl.iter().zip(&wf) {
-                assert!((l.0 - f.0).abs() <= 1e-5 * f.0 && (Vec3::from(l.1) - Vec3::from(f.1)).length() <= 1e-4, "{what}: an emitter weighs {l:?}, a build's {f:?}");
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        }
+    }
+}
+
+/// A view that took edits in place against one built from the edited world: the emitters that weigh something are as
+/// many, each weighs what a build's does where a build's is, the kernel's total weight is a build's, and so is the
+/// picture after 64 frames.
+fn lit_as_a_build(what: &str, live: &mut LiveCore, fresh: &mut LiveCore) {
+    let weights = |c: &LiveCore| {
+        let t = &c.sc.tables;
+        let mut v: Vec<(f32, [f32; 3])> = t.emitter_tris.iter().map(|e| (crate::emitter_power(e, &t.materials, &t.objects, t.stride), e.c)).filter(|(p, _)| *p > 0.0).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    };
+    let (wl, wf) = (weights(live), weights(fresh));
+    assert_eq!(wl.len(), wf.len(), "{what}: as many emitters weigh something as in a build");
+    for (l, f) in wl.iter().zip(&wf) {
+        assert!((l.0 - f.0).abs() <= 1e-5 * f.0 && (Vec3::from(l.1) - Vec3::from(f.1)).length() <= 1e-4, "{what}: an emitter weighs {l:?}, a build's {f:?}");
+    }
+    let (tl, tf) = (live.sc.base.misc[1], fresh.sc.base.misc[1]);
+    assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
+    forget(live);
+    let (a, b) = (picture(live, 64), picture(fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+}
+
+/// An instanced object whose copies emit, added in place, is lit as a build lights it; so it is after its copies
+/// changed in place (one moved, one more shown) and after it was removed. With and without a light tree. After each:
+/// no rebuild, the light list is its triangles, the weights and the picture are a build's.
+#[test]
+fn an_emitting_instanced_object_added_in_place_is_lit_as_a_build_lights_it() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    for tree in [false, true] {
+        let mut w = world();
+        // (The sun and the lamp away: the copies will light the scene. A mesh with its own BLAS: the scene has
+        // instances, so an instanced mesh is added in place.)
+        w.set_visible(20, false).unwrap();
+        w.set_visible(12, false).unwrap();
+        w.set_object(14, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+        w.set_transform(14, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) if c.g.hwrt => c,
+            Ok(_) => return eprintln!("skipped: no hardware RT"),
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        picture(&mut live, 4);
+        let at = |x: f32, y: f32, z: f32, s: f32| glam::Mat4::from_scale_rotation_translation(Vec3::splat(s), glam::Quat::from_rotation_y(0.3), Vec3::new(x, y, z)).to_cols_array();
+        let set = |w: &mut World, count: u32, m: [[f32; 16]; 3]| w.set_instances(15, count, Some(m.concat()), None, None).unwrap();
+        let (b, c) = (at(0.5, 0.5, 1.0, 0.4), at(0.0, 0.0, 1.4, 0.4));
+        type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+        let edits: Vec<Edit> = vec![
+            (
+                "added",
+                Box::new(move |w| {
+                    w.set_object(15, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![5], capacity: 3 }, true, false).unwrap();
+                    set(w, 2, [at(-0.6, -0.4, 0.8, 0.4), b, c]);
+                }),
+            ),
+            ("a copy moved, a third shown", Box::new(move |w| set(w, 3, [at(-0.2, -0.5, 1.1, 0.8), b, c]))),
+            (
+                "removed",
+                Box::new(move |w| {
+                    w.remove(15);
+                }),
+            ),
+        ];
+        for (what, edit) in &edits {
+            let what = format!("an emitting instanced object {what} in place, {} a light tree", if tree { "with" } else { "without" });
+            edit(&mut w);
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
+                list_is_its_triangles(&what, &live);
             }
-            let (tl, tf) = (live.sc.base.misc[1], fresh.sc.base.misc[1]);
-            assert!((tl - tf).abs() <= 1e-4 * tf.abs(), "{what}: the kernel's total weight {tl}, a build's {tf}");
-            forget(&mut live);
-            let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
-            assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         }
     }
 }

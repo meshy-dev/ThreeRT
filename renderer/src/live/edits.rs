@@ -1822,8 +1822,8 @@ impl LiveCore {
                     // the light list (given below, where its record is known; scene.rs; ROADMAP § 6 step 3).
                     let emits = scene::emits_only(&gm);
                     let class = scene::mesh_class(&gm);
-                    if class == 2 || (emits && capacity.is_some()) {
-                        return Err("a glass material (an instanced mesh: emitting too)".into());
+                    if class == 2 {
+                        return Err("a glass material".into());
                     }
                     if class == 1 && features & gpu::F_MASKED == 0 {
                         return Err("the scene's first cutout (kernel feature)".into());
@@ -2016,13 +2016,27 @@ impl LiveCore {
                             tables.objects.resize((o0 + cap) * st, [0.0; 4]);
                         }
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
-                            let inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: o.cast_shadow, name: o.name.clone(), sub: Some(i as u32), hidden, first_emitter: 0 };
+                            let mut inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: o.cast_shadow, name: o.name.clone(), sub: Some(i as u32), hidden, first_emitter: 0 };
+                            // A copy of a mesh that emits: its emitters, a run at the light list's end; moving ones
+                            // (`update_instanced` changes the copies in place), a hidden copy's at no weight.
+                            if im.emitters > 0 {
+                                let first = tables.emitter_tris.len();
+                                inst.first_emitter = first as u32;
+                                let (a, b) = (im.first as usize, (im.first + im.count) as usize);
+                                let made = crate::instance_emitters(&inst, (r0 + i) as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.emitters as usize, &tables.materials, true);
+                                for (j, (e, w)) in made.into_iter().enumerate() {
+                                    new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
+                                    tables.emitter_tris.push(e);
+                                }
+                                tables.emissive.insert(mat);
+                                emitters_changed = true;
+                            }
                             let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.opaque), mesh, o.cast_shadow);
                             w_records.put(((r0 + i) * size) as u64, bytemuck::bytes_of(&rec));
                             gpu_instances[r0 + i] = rec;
                             top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | (r0 + i) as u32, o.cast_shadow, hidden);
                             let (lo, hi) = im.placed_bounds(wm);
-                            let entry = scene::object_row(wm.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, t.custom(i, o.custom), t.color(i));
+                            let entry = scene::copy_row(scene::object_row(wm.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, t.custom(i, o.custom), t.color(i)), im.emitters > 0 && hidden);
                             w_objects.put(((o0 + i) * st * 16) as u64, bytemuck::cast_slice(&entry[..st]));
                             tables.objects[(o0 + i) * st..(o0 + i + 1) * st].copy_from_slice(&entry[..st]);
                             instances[r0 + i] = inst;

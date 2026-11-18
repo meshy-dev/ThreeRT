@@ -2714,6 +2714,22 @@ Tests: `geometry/emitter-instanced` (analytic), `geometry/emitter-instanced-live
 shown in place), the build's, and the edits in place against a build (a copy moved, larger, shown, hidden two ways,
 the node's power, the object removed; with and without a light tree).
 
+**Material functions and mirrored placements on instances (2026-11-18).** Two more reasons to flatten a mesh at
+every placement are gone. A material function's inputs outside full shading (the alpha test of a candidate hit, an
+emitter's radiance in light sampling: `mat_in_at`) read the triangle as world space; they now place it by its
+instance, as full shading does. A placement with a negative scale (a mesh, a model, an instanced object's copy, a
+rigid model's node, whose mesh was built with its winding swapped instead) is an instance whose record says that it
+mirrors (`INST_MIRRORED`): the kernel's placement takes the sign for the geometric normal's side and the tangent
+frame's hand. The flattening path (software traversal without units, a model's glass part) swaps the second and
+third vertex of such an instance's triangles, with their attributes and vertex colours. A copy may become mirrored
+in place. An emitting instanced object added in place now gets its emitters there (a run a copy at the list's end,
+by power share where a tree has no place for them, as a driven mesh added in place). What the build still flattens
+at a placement: glass (the next part).
+Tests: a function's emission and a function's alpha on a mesh far from the origin, the tangent frame's hand and the
+geometric normal through a function on a mirrored mesh, vertex colours on one (each natively and under software
+traversal); the flattening of an instance against the build's flattening, mirrored too; a mirrored model's build; a
+copy mirrored in place; an emitting instanced object added, changed and removed in place against a build.
+
 **An emitter's probability is what the picker used (2026-11-18).** An emitter that changed size in place (a movable
 model or mesh scaled, a skinned one) kept the weight it was loaded with, while the kernel took its probability from
 formulas that assumed the weight was the triangle's: scaled three times larger as a scene's main light it read 3 to
