@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import sys
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageChops
@@ -15,10 +16,31 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageChops
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "generated", "textures")
 os.makedirs(OUT, exist_ok=True)
 
-FONT_DIR = "/System/Library/Fonts"
-GOTHIC = {w: os.path.join(FONT_DIR, f"ヒラギノ角ゴシック W{w}.ttc") for w in range(0, 10)}
-MINCHO = os.path.join(FONT_DIR, "ヒラギノ明朝 ProN.ttc")
-MARU = os.path.join(FONT_DIR, "ヒラギノ丸ゴ ProN W4.ttc")
+# Hiragino, as on macOS (the UE session's textures, byte for byte). THREERT_FONT_DIR: a directory with those files.
+# Without them (Linux), each face is the Japanese font fontconfig picks for its family and weight (fonts-noto-cjk).
+FONT_DIR = os.environ.get("THREERT_FONT_DIR", "/System/Library/Fonts")
+
+
+def hiragino(name, family, weight):
+    path = os.path.join(FONT_DIR, name)
+    if os.path.exists(path):
+        return path
+    try:
+        found = subprocess.run(["fc-match", "-f", "%{file}\n%{lang}", f"{family}:lang=ja:weight={weight}"],
+                               capture_output=True, text=True, check=True).stdout.split("\n")
+    except (OSError, subprocess.CalledProcessError):
+        found = []
+    if len(found) == 2 and "ja" in found[1].split("|"):
+        return found[0]
+    sys.exit(f"gen_signs.py: no {name} in {FONT_DIR} and no Japanese {family} font from fontconfig: install one "
+             "(Debian/Ubuntu: fonts-noto-cjk) or set THREERT_FONT_DIR to a directory with the Hiragino fonts")
+
+
+# Hiragino W0-W9 as fontconfig weights (thin 0 ... black 210).
+GOTHIC = {w: hiragino(f"ヒラギノ角ゴシック W{w}.ttc", "sans-serif", (0, 40, 50, 75, 80, 100, 180, 200, 205, 210)[w])
+          for w in range(0, 10)}
+MINCHO = hiragino("ヒラギノ明朝 ProN.ttc", "serif", 80)
+MARU = hiragino("ヒラギノ丸ゴ ProN W4.ttc", "sans-serif", 80)
 
 rng = random.Random(20261104)
 manifest = []
