@@ -1157,7 +1157,8 @@ fn a_still_mesh_moves_in_place_from_its_first_move() {
 }
 
 /// Meshes the scene did not say it edits change in place as those it did: a geometry two of them use replaced (one
-/// emits), one re-created with another geometry, a movable one added and moved, one removed, a group of two removed.
+/// emits), one re-created with another geometry, a movable one added and moved, a still one added and moved, the
+/// movable one hidden, moved and shown, one removed, a group of two removed.
 /// With and without a light tree. After each: no rebuild, the light list is its triangles, the weights and the picture
 /// are a build's. (Hardware traversal: its room for edits grows from nothing.)
 #[test]
@@ -1196,6 +1197,19 @@ fn meshes_change_in_place_whether_or_not_the_scene_said_so() {
                 }),
             ),
             ("the added mesh moved", Box::new(|w| w.set_transform(13, Vec3::new(-0.3, 0.7, 1.0), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap())),
+            // (What an edit placed moves as what the build placed does: a still one from its first move, a hidden one
+            // while it is hidden.)
+            (
+                "a still mesh added",
+                Box::new(move |w| {
+                    w.set_object(18, "still".into(), None, mesh(3, 1), true, false).unwrap();
+                    w.set_transform(18, Vec3::new(0.7, 0.6, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+                }),
+            ),
+            ("the still added mesh moved", Box::new(|w| w.set_transform(18, Vec3::new(0.6, 0.3, 0.9), glam::Quat::from_rotation_z(-0.3), Vec3::ONE).unwrap())),
+            ("the added movable mesh hidden", Box::new(|w| w.set_visible(13, false).unwrap())),
+            ("the added movable mesh moved while hidden", Box::new(|w| w.set_transform(13, Vec3::new(-0.6, 0.2, 1.2), glam::Quat::IDENTITY, Vec3::ONE).unwrap())),
+            ("the added movable mesh shown", Box::new(|w| w.set_visible(13, true).unwrap())),
             (
                 "the lamp removed",
                 Box::new(|w| {

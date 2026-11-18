@@ -382,10 +382,11 @@ impl LiveCore {
                 changes.structural = true;
             }
         }
-        // An object an edit placed (its record is the room's) moves in place only as an instance does: a mesh a body
-        // drives, while it is drawn. Any other rebuilds.
+        // An object an edit placed (its record is the room's) moves in place as an instance does (a still one from its
+        // first move: `start_moving`), unless an edit took the instance out while the object was hidden; procedural
+        // geometry an edit placed rebuilds.
         let stuck = |id: &u32| match self.sc.tables.retained.proxies.get(id).map(|p| &p.draw) {
-            Some(scene::Draw::Instance(i)) => self.sc.edit.in_room(i.instance as usize) && !(i.moves && self.sc.instances.get(i.instance as usize).is_some_and(|i| !i.hidden)),
+            Some(scene::Draw::Instance(i)) => self.sc.edit.in_room(i.instance as usize) && self.sc.instances.get(i.instance as usize).is_none_or(|i| i.hidden && !i.masked),
             Some(scene::Draw::Procedural(j)) => self.sc.edit.in_room(self.sc.proc_first + *j as usize),
             _ => false,
         };
