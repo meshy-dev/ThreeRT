@@ -2038,6 +2038,12 @@ impl Gpu {
             .clone()
     }
 
+    /// The entries of the live passes made so far (`kernel_pass`), for tests: which were made, and when.
+    #[cfg(test)]
+    pub fn kernel_passes_made(&self) -> Vec<&'static str> {
+        self.kernel_passes.lock().unwrap().keys().map(|k| k.2).collect()
+    }
+
     /// A live pass of a scene's kernel variant beside `main`: `finish` (the pixels a sample's trace left), `media_train`
     /// (the volume voxels) or `media_composite` (camera rays through media, after the trace).
     pub fn kernel_pass(&self, k: &Kernel, entry: &'static str) -> wgpu::ComputePipeline {

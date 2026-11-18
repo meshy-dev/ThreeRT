@@ -228,6 +228,12 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
     }
+    // (And the media passes where the scene has a medium, shown or hidden: the frame that first shows one, an idle
+    // fireball's first fire, would otherwise wait for them.)
+    if up.kernel.features & gpu::F_MEDIA != 0 {
+        let _ = g.kernel_pass(&up.kernel, "media_train");
+        let _ = g.kernel_pass(&up.kernel, "media_composite");
+    }
     let env = Environment {
         sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
         settings: sc.environment.clone(),
