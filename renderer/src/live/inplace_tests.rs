@@ -285,6 +285,13 @@ fn moves_in_place_leave_what_a_build_does() {
         ("a driven mesh moved", Box::new(move |w| assert!(w.place_driven(14, at(-0.2, 0.3, 1.0), glam::Quat::from_rotation_z(-0.4))))),
         ("an instanced object's copy moved", Box::new(move |w| w.set_instances(15, 2, Some(copies(-0.2)), None, None).unwrap())),
         (
+            "an instanced object's copy mirrored",
+            Box::new(move |w| {
+                let mirror = glam::Mat4::from_translation(Vec3::new(-0.2, -0.5, 0.4)) * glam::Mat4::from_scale(Vec3::new(-1.0, 1.5, 1.0));
+                w.set_instances(15, 2, Some([mirror.to_cols_array(), glam::Mat4::from_translation(Vec3::new(0.6, 0.6, 0.8)).to_cols_array()].concat()), None, None).unwrap()
+            }),
+        ),
+        (
             "all three moved at once",
             Box::new(move |w| {
                 w.set_transform(13, at(0.5, -0.1, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();

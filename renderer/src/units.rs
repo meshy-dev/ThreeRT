@@ -304,7 +304,8 @@ pub fn top_tree(units: &[UnitBox]) -> Result<Vec<GpuNode>, String> {
 /// aside, which no comparison in the walk sees). (The third word is every instance's: its first emitter.)
 pub fn unit_record(mut r: GpuInstance, root: u32, cast_shadow: bool) -> GpuInstance {
     r.n[0][3] = f32::from_bits(root);
-    r.n[1][3] = f32::from_bits(if cast_shadow { UNIT_SHADOW } else { 0 } | if translation_alone(&r) { UNIT_SHIFTED } else { 0 });
+    // (Beside the record's own bit there: `scene::INST_MIRRORED`.)
+    r.n[1][3] = f32::from_bits(r.n[1][3].to_bits() & crate::scene::INST_MIRRORED | if cast_shadow { UNIT_SHADOW } else { 0 } | if translation_alone(&r) { UNIT_SHIFTED } else { 0 });
     r
 }
 

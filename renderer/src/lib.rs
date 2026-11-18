@@ -928,12 +928,13 @@ fn flatten_deforming(sc: &mut scene::Scene) {
         }
         let first = sc.tris.len() as u32;
         for k in m.first..m.first + m.count {
-            if let Some(&c) = sc.pool_vcolors.get(k as usize) {
+            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &sc.pool_attrs[k as usize], sc.pool_vcolors.get(k as usize).copied());
+            if let Some(c) = c {
                 scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
             }
-            sc.tris.push(inst.tri(&sc.pool_tris[k as usize]));
+            sc.tris.push(t);
             sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
-            sc.attrs.push(scene::instance_attr(&sc.pool_attrs[k as usize], inst.world, inst.object));
+            sc.attrs.push(a);
         }
         sc.tri_nodes.push((inst.name.clone(), first, sc.tris.len() as u32));
         if let Some(i) = inst.sub {
@@ -950,12 +951,13 @@ fn flatten_instances(sc: &mut scene::Scene) {
         let m = sc.meshes[inst.mesh as usize];
         let first = sc.tris.len() as u32;
         for k in m.first..m.first + m.count {
-            if let Some(&c) = sc.pool_vcolors.get(k as usize) {
+            let (t, a, c) = inst.flat(&sc.pool_tris[k as usize], &sc.pool_attrs[k as usize], sc.pool_vcolors.get(k as usize).copied());
+            if let Some(c) = c {
                 scene::put_colors(&mut sc.vcolors, sc.tris.len(), Some(vec![c]));
             }
-            sc.tris.push(inst.tri(&sc.pool_tris[k as usize]));
+            sc.tris.push(t);
             sc.tri_flags.push(scene::instance_tri_flags(&inst, &sc.pool_attrs[k as usize], &sc.materials));
-            sc.attrs.push(scene::instance_attr(&sc.pool_attrs[k as usize], inst.world, inst.object));
+            sc.attrs.push(a);
         }
         // A second range for the node when its glass / function part was flattened at build: node_tris joins them.
         sc.tri_nodes.push((inst.name, first, sc.tris.len() as u32));

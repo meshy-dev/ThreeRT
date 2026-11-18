@@ -1046,7 +1046,7 @@ impl LiveCore {
     /// BLASes change. Copies that emit: their emitters in the light list follow (`fill_moved`), a hidden copy's object
     /// without power, and the emitters are weighed again when a copy's size or power changed (`emitters_reweigh`).
     /// Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
-    /// flattened or did not place this way, an instance now mirrored), and the caller rebuilds.
+    /// flattened or did not place this way), and the caller rebuilds.
     /// `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
     pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> std::result::Result<usize, String> {
         use crate::world::Kind;
@@ -1082,9 +1082,6 @@ impl LiveCore {
             let slot0 = top.inst_base() + rec0;
             for i in 0..cap {
                 let (wm, hidden) = scene::instance_world(m, t, i);
-                if !procedural && !hidden && wm.determinant() < 0.0 {
-                    return Err("an instance is mirrored".into());
-                }
                 let old = sc.gpu_instances[rec0 + i];
                 let mut emits = false;
                 let (mut rec, entry) = if procedural {
@@ -1786,8 +1783,8 @@ impl LiveCore {
                     if !functions.is_empty() {
                         return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
-                    if features & gpu::F_INST == 0 || m.determinant() <= 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
-                        return Err("a model the build would flatten (mirrored, instancing off, or the scene's first instance)".into());
+                    if features & gpu::F_INST == 0 || m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
+                        return Err("a model the build would flatten (no size, instancing off, or the scene's first instance)".into());
                     }
                     let mesh = *tables.retained.model_mesh.get(&(uri.clone(), nodes.clone())).ok_or("a model not in the scene (its materials and textures load with a rebuild)")?;
                     let im = meshes[mesh as usize];
@@ -1815,9 +1812,9 @@ impl LiveCore {
                     if features & gpu::F_INST == 0 {
                         return Err("the scene's first instanced mesh (kernel feature)".into());
                     }
-                    // What the build flattens instead (scene.rs: mirrored, or instancing off).
-                    if m.determinant() <= 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
-                        return Err("a mirrored mesh, or instancing off (the build flattens it)".into());
+                    // What the build flattens instead (scene.rs: a placement without size, or instancing off).
+                    if m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
+                        return Err("a mesh without size, or instancing off (the build flattens it)".into());
                     }
                     let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
                     let gm = tables.materials[mat as usize];
@@ -1987,9 +1984,6 @@ impl LiveCore {
                             return Err("the scene's first instance colours (kernel feature)".into());
                         }
                         let placed: Vec<(glam::Mat4, bool)> = (0..cap).map(|i| scene::instance_world(m, t, i)).collect();
-                        if placed.iter().any(|(wm, hidden)| !hidden && wm.determinant() < 0.0) {
-                            return Err("a mirrored instance (the build flattens them)".into());
-                        }
                         // (An entry a copy, below: not the one an object has.)
                         edit.objects.give(object, 1);
                         let r0 = match edit.records.take(cap) {

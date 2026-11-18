@@ -227,8 +227,9 @@ impl Model {
     /// A rigid model's triangles of the nodes `keep` admits, with each one's node: in world space for `pose`
     /// (`world` x the node's global transform), or in the node's own space (`local`: the caller places them per node).
     /// Same order as `triangles`. Mirrored placements keep the winding front-facing in world space, as `triangles`
-    /// does; in local space `mirrored(node)` says which nodes will be placed mirrored.
-    pub fn node_triangles(&self, world: Mat4, pose: Option<&desc::Animation>, keep: &dyn Fn(usize) -> bool, local: bool, mirrored: &dyn Fn(usize) -> bool) -> Result<Vec<(usize, ModelTri)>> {
+    /// does; in local space a node's triangles are as its mesh has them (an instance that places it mirrored says so
+    /// itself: `scene::INST_MIRRORED`).
+    pub fn node_triangles(&self, world: Mat4, pose: Option<&desc::Animation>, keep: &dyn Fn(usize) -> bool, local: bool) -> Result<Vec<(usize, ModelTri)>> {
         let globals = self.globals(pose)?;
         let mut out = vec![];
         for p in self.prims.iter().filter(|p| keep(p.node)) {
@@ -236,7 +237,7 @@ impl Model {
             let nm = Mat3::from_mat4(m).inverse().transpose();
             let pos: Vec<Vec3> = p.positions.iter().map(|v| m.transform_point3(*v)).collect();
             let nrm: Option<Vec<Vec3>> = p.normals.as_ref().map(|n| n.iter().map(|v| (nm * *v).normalize_or_zero()).collect());
-            let flip = if local { mirrored(p.node) } else { m.determinant() < 0.0 };
+            let flip = !local && m.determinant() < 0.0;
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if flip { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
                 let (a, b, c) = (a as usize, b as usize, c as usize);
@@ -375,11 +376,11 @@ mod tests {
         assert!((g[1].transform_point3(Vec3::ZERO) - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
         // Static part in world space (the object at x = 10), the moving part in its node's space.
         let world = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
-        let stat = m.node_triangles(world, Some(&pose), &|n| n == 2, false, &|_| false).unwrap();
+        let stat = m.node_triangles(world, Some(&pose), &|n| n == 2, false).unwrap();
         assert_eq!(stat.len(), 1);
         assert_eq!(stat[0].0, 2);
         assert!((stat[0].1.p[1] - Vec3::new(11.0, 0.0, 5.0)).length() < 1e-6);
-        let local = m.node_triangles(Mat4::IDENTITY, None, &|n| n != 2, true, &|_| false).unwrap();
+        let local = m.node_triangles(Mat4::IDENTITY, None, &|n| n != 2, true).unwrap();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].0, 1);
         assert_eq!(local[0].1.p, [Vec3::ZERO, Vec3::X, Vec3::Y]);
@@ -387,9 +388,6 @@ mod tests {
         let posed = m.triangles(world, None, Some(&pose)).unwrap();
         let w = world * g[1];
         assert!(posed.iter().any(|t| (0..3).all(|k| (t.p[k] - w.transform_point3(local[0].1.p[k])).length() < 1e-5)));
-        // A node placed mirrored keeps its winding front-facing once placed.
-        let flipped = m.node_triangles(Mat4::IDENTITY, None, &|n| n == 1, true, &|_| true).unwrap();
-        assert_eq!(flipped[0].1.p, [Vec3::ZERO, Vec3::Y, Vec3::X]);
     }
 
     fn ch(interpolation: gltf::animation::Interpolation, path: Path, times: Vec<f32>, values: Vec<[f32; 4]>) -> Channel {

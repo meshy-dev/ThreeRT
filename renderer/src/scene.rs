@@ -130,12 +130,34 @@ impl Instance {
         let nm = glam::Mat3::from_mat4(w).inverse().transpose();
         let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
         let nrow = |r: usize, w: f32| [nm.x_axis[r], nm.y_axis[r], nm.z_axis[r], w];
-        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, 0.0), nrow(2, f32::from_bits(self.first_emitter))], info: [first, self.object, lod_offset(w).to_bits(), opaque], p: [row(0), row(1), row(2)] }
+        let mirrored = f32::from_bits(if mirrors(w) { INST_MIRRORED } else { 0 });
+        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, mirrored), nrow(2, f32::from_bits(self.first_emitter))], info: [first, self.object, lod_offset(w).to_bits(), opaque], p: [row(0), row(1), row(2)] }
     }
     /// Model-space triangle `t` of its mesh in world space (the same transform the flattening path applies).
     pub fn tri(&self, t: &[Vec3A; 3]) -> [Vec3A; 3] {
         t.map(|v| self.world.transform_point3a(v))
     }
+    /// A triangle of its mesh (vertices `t`, attributes `a`, vertex colours `c`) as flattening has it: in world space
+    /// (`tri`, `instance_attr`), and under a mirroring instance with its second and third vertex changed places, so
+    /// that it faces as the mesh's does (as `append_arrays` flattens a mirrored placement).
+    pub fn flat(&self, t: &[Vec3A; 3], a: &GpuTriAttr, c: Option<[u32; 3]>) -> ([Vec3A; 3], GpuTriAttr, Option<[u32; 3]>) {
+        let (w, b) = (self.tri(t), instance_attr(a, self.world, self.object));
+        if !mirrors(self.world) {
+            return (w, b, c);
+        }
+        // (The UVs are packed along the normals: uv0 in n0.w n1.w, uv1 in n2.w uv.x, uv2 in uv.y uv.z.)
+        let swapped = GpuTriAttr { n1: [b.n2[0], b.n2[1], b.n2[2], b.n1[3]], n2: [b.n1[0], b.n1[1], b.n1[2], b.uv[1]], uv: [b.uv[2], b.n2[3], b.uv[0], b.uv[3]], ..b };
+        ([w[0], w[2], w[1]], swapped, c.map(|c| [c[0], c[2], c[1]]))
+    }
+}
+
+/// Bit of an instance record's n1.w, beside the units' flags there (units.rs `UNIT_*`): the instance mirrors its mesh
+/// (the kernel's `inst_sign`).
+pub const INST_MIRRORED: u32 = 4;
+
+/// Whether a placement mirrors what it places (a negative determinant).
+pub fn mirrors(w: Mat4) -> bool {
+    glam::Mat3::from_mat4(w).determinant() < 0.0
 }
 
 /// Procedural geometry placed in the scene (`Kind::Procedural`): an instance of its own AABB BLAS (hardware RT), its
@@ -349,7 +371,7 @@ pub fn lod_offset(w: Mat4) -> f32 {
 }
 
 /// Model-space shading attributes of a pool triangle placed by `w` (normals by the inverse transpose, tangent by the
-/// matrix, texture-LOD constant by the scale), object `object`.
+/// matrix, its frame's hand changed by a mirroring one, texture-LOD constant by the scale), object `object`.
 pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
     let m3 = glam::Mat3::from_mat4(w);
     let nm = m3.inverse().transpose();
@@ -358,7 +380,8 @@ pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
         [r.x, r.y, r.z, v[3]]
     };
     let t = (m3 * Vec3::new(a.t[0], a.t[1], a.t[2])).normalize_or_zero();
-    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: [t.x, t.y, t.z, a.t[3]], x: [a.x[0] + lod_offset(w), f32::from_bits(object), a.x[2], a.x[3]] }
+    let hand = if mirrors(w) { -a.t[3] } else { a.t[3] };
+    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: [t.x, t.y, t.z, hand], x: [a.x[0] + lod_offset(w), f32::from_bits(object), a.x[2], a.x[3]] }
 }
 
 #[repr(C)]
@@ -1270,7 +1293,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let grid_programs: Vec<(String, String, String)> = w.grid_programs.iter().map(|(k, (c, h))| (k.clone(), c.clone(), h.clone())).collect();
     let mut objects: Vec<[f32; 4]> = vec![];
     // Static glTF models drawn more than once share their triangles (model space, one BLAS): opaque, shadow-casting
-    // per node, no glass, not mirrored. THREERT_INSTANCING=0 flattens everything.
+    // per node, no glass. THREERT_INSTANCING=0 flattens everything.
     let instancing = std::env::var("THREERT_INSTANCING").map_or(true, |v| v != "0");
     let mut pool_tris: Vec<[Vec3A; 3]> = vec![];
     let (mut vcolors, mut pool_vcolors): (Vec<[u32; 3]>, Vec<[u32; 3]>) = (vec![], vec![]);
@@ -1290,7 +1313,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         let mut count: HashMap<PoseKey, usize> = HashMap::new();
         for id in &order {
             let Kind::Model { uri, nodes, animation: Some(a), functions } = &w.objects[id].kind else { continue };
-            if !w.shown(*id) || worlds[id].determinant() <= 0.0 {
+            if !w.shown(*id) || worlds[id].determinant() == 0.0 {
                 continue;
             }
             // (Rigid models whose nodes move are `RigidModel`s.)
@@ -1320,7 +1343,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         let shown = w.shown(*id);
         let flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
         match &n.kind {
-            Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() > 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
+            Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } if shown && instancing && mesh_mats.len() <= 1 && m.determinant() != 0.0 && (n.driven || (*own_blas && !w.movable(*id))) => {
                 // Its own BLAS (scene code's `dynamicGeometry`, or a mesh a rigid body drives: its moves are the
                 // instance's transform, `InstanceRef::moves`): placed like a model instance, its geometry's triangles
                 // in model space in the pool, shared by the objects of the same geometry and material. Glass is
@@ -1373,9 +1396,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 // Copies of one geometry: one shared mesh (one BLAS), an instance and an object entry per copy, the
                 // copies' records and entries contiguous (live/edits.rs `update_instanced` rewrites them in place).
                 // A material that only emits is such a mesh too: each copy has its emitters in the light list
-                // (`InstMesh::emitters`), a hidden copy's at no weight (its object has no power). Glass and function
-                // materials and mirrored copies are flattened instead, each copy its own triangles, as `own_blas`
-                // meshes are; changing their instances rebuilds.
+                // (`InstMesh::emitters`), a hidden copy's at no weight (its object has no power). A copy may mirror
+                // the mesh (`INST_MIRRORED`). Glass is flattened instead, each copy its own triangles, as `own_blas`
+                // meshes are; changing its instances rebuilds.
                 let empty = world::InstanceTable::default();
                 let t = w.instanced.get(id).unwrap_or(&empty);
                 let placed: Vec<(Mat4, bool)> = (0..*capacity as usize).map(|i| instance_world(m, t, i)).collect();
@@ -1398,8 +1421,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let class = mesh_class(&materials[mat as usize]);
                 let emits = emits_only(&materials[mat as usize]);
                 let vc = colored(g, &mut std::iter::once(material));
-                let mirrored = placed.iter().any(|(wm, hidden)| !hidden && wm.determinant() < 0.0);
-                if instancing && class < 2 && !mirrored {
+                if instancing && class < 2 {
                     let mesh = match inst_mesh_of.get(&(*geometry, mat)) {
                         Some(&k) => Some(k),
                         None => {
@@ -1520,14 +1542,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let a = animation.as_ref().unwrap();
                     let moving = glb.moving_nodes(&a.clip)?;
                     let globals = glb.node_globals(Some(a))?;
-                    let static_tris = glb.node_triangles(m, Some(a), &|ni| !moving[ni], false, &|_| false)?;
+                    let static_tris = glb.node_triangles(m, Some(a), &|ni| !moving[ni], false)?;
                     let base_flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
                     for (_, t) in &static_tris {
                         let mat = resolve(t.material.and_then(|i| doc.materials().nth(i)))?.0;
                         push_tri(&mut tris, &mut tri_flags, &mut attrs, t.p, t.n, t.uv, t.tangent, mat, base_flags);
                     }
-                    let mirrored = |ni: usize| (m * globals[ni]).determinant() < 0.0;
-                    let local = glb.node_triangles(Mat4::IDENTITY, None, &|ni| moving[ni], true, &mirrored)?;
+                    let local = glb.node_triangles(Mat4::IDENTITY, None, &|ni| moving[ni], true)?;
                     // Group by node (the order within a node is the file's).
                     let mut by_node: Vec<(usize, Vec<usize>)> = vec![];
                     for (k, (ni, _)) in local.iter().enumerate() {
@@ -1673,7 +1694,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         continue;
                     }
                 }
-                if instancing && !posed && m.determinant() > 0.0 {
+                if instancing && !posed && m.determinant() != 0.0 {
                     let key = mesh_key.clone();
                     let mesh = match mesh_of.get(&key) {
                         Some(k) => *k,
@@ -1739,9 +1760,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let inst = Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 };
                         // Its glass / function triangles as ordinary world-space ones (same object).
                         for k in im.rest_first..im.rest_first + im.rest_count {
-                            tris.push(inst.tri(&rest_tris[k as usize]));
+                            let (t, a, _) = inst.flat(&rest_tris[k as usize], &rest_attrs[k as usize], None);
+                            tris.push(t);
                             tri_flags.push(flags);
-                            attrs.push(instance_attr(&rest_attrs[k as usize], m, oi));
+                            attrs.push(a);
                         }
                         if tris.len() as u32 > first {
                             tri_nodes.push((n.name.clone(), first, tris.len() as u32));
@@ -2445,31 +2467,43 @@ mod instance_tests {
         assert_eq!(texture_image(&tex(0), assets).unwrap().0, kb);
     }
 
-    /// An instance's placed triangle and attributes equal flattening the same triangle at the instance transform.
+    /// An instance's placed triangle and attributes equal flattening the same triangle at the instance transform: as
+    /// the flattening path has them (`Instance::flat`) against the triangle built in world space as `append_arrays`
+    /// builds it, under a transform that keeps the hand and under one that mirrors (the second and third vertex
+    /// change places, the tangent frame changes hand), with distinct normals, UVs and vertex colours a vertex.
     #[test]
     fn instance_matches_flattening() {
         let p = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.5, 0.2)];
-        let n = [Vec3::new(0.0, -0.37, 0.93).normalize(); 3];
-        let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
-        let w = Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::from_rotation_y(0.7) * glam::Quat::from_rotation_x(-0.3), Vec3::new(5.0, 1.0, -3.0));
+        let n = [Vec3::new(0.0, -0.37, 0.93).normalize(), Vec3::new(0.1, -0.3, 0.9).normalize(), Vec3::new(-0.2, -0.4, 0.8).normalize()];
+        let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.25), Vec2::new(0.5, 1.0)];
+        let colors = [1, 2, 3];
+        let keeps = Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::from_rotation_y(0.7) * glam::Quat::from_rotation_x(-0.3), Vec3::new(5.0, 1.0, -3.0));
         let local = tri_attr(p, n, uv, None, 7);
-        let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, first_emitter: 0 };
-        let placed = inst.tri(&[p[0].into(), p[1].into(), p[2].into()]);
-        let wp = p.map(|v| w.transform_point3(v));
-        let flat = tri_attr(wp, n.map(|v| (glam::Mat3::from_mat4(w).inverse().transpose() * v).normalize()), uv, None, 7);
-        let got = instance_attr(&local, w, 3);
-        for k in 0..3 {
-            assert!((Vec3::from(placed[k]) - wp[k]).length() < 1e-5);
+        for (w, mirrored) in [(keeps, false), (keeps * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)), true)] {
+            assert_eq!(mirrors(w), mirrored);
+            let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, first_emitter: 0 };
+            assert_eq!(inst.gpu(0, 0).n[1][3].to_bits(), if mirrored { INST_MIRRORED } else { 0 }, "the record says whether it mirrors");
+            let (placed, got, got_colors) = inst.flat(&[p[0].into(), p[1].into(), p[2].into()], &local, Some(colors));
+            // The world-space triangle: its vertices in the order the build flattens a placement in.
+            let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
+            let nm = glam::Mat3::from_mat4(w).inverse().transpose();
+            let wp = order.map(|k| w.transform_point3(p[k]));
+            let flat = tri_attr(wp, order.map(|k| (nm * n[k]).normalize()), order.map(|k| uv[k]), None, 7);
+            for k in 0..3 {
+                assert!((Vec3::from(placed[k]) - wp[k]).length() < 1e-5, "mirrored {mirrored}: vertex {k}");
+            }
+            assert!((placed[1] - placed[0]).cross(placed[2] - placed[0]).dot(Vec3A::from(nm * n[0])) > 0.0, "mirrored {mirrored}: it faces as its normals do");
+            for (a, b) in [(got.n0, flat.n0), (got.n1, flat.n1), (got.n2, flat.n2), (got.t, flat.t)] {
+                assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5, "mirrored {mirrored}: {a:?} vs {b:?}");
+                assert_eq!(a[3], b[3], "mirrored {mirrored}: the UV packed there, the tangent frame's hand");
+            }
+            assert_eq!(got.uv, flat.uv, "mirrored {mirrored}");
+            assert_eq!(got_colors, Some(order.map(|k| colors[k])), "mirrored {mirrored}: the vertex colours follow their vertices");
+            // Uniform scale 2: texel density per metre halves (LOD constant - 1), exactly as the world-space triangle.
+            assert!((got.x[0] - flat.x[0]).abs() < 1e-5);
+            assert!((lod_offset(w) + 1.0).abs() < 1e-5);
+            assert_eq!(got.x[1].to_bits(), 3);
         }
-        for (a, b) in [(got.n0, flat.n0), (got.n1, flat.n1), (got.n2, flat.n2), (got.t, flat.t)] {
-            assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5, "{a:?} vs {b:?}");
-            assert_eq!(a[3], b[3]);
-        }
-        // Uniform scale 2: texel density per metre halves (LOD constant - 1), exactly as the world-space triangle.
-        assert!((got.x[0] - flat.x[0]).abs() < 1e-5);
-        assert!((lod_offset(w) + 1.0).abs() < 1e-5);
-        assert_eq!(got.x[1].to_bits(), 3);
-        assert_eq!(got.uv, flat.uv);
     }
 
     /// Software traversal flattens instances: a cutout material's triangles keep TRI_MASKED (any-hit alpha test),
@@ -2491,7 +2525,7 @@ mod instance_tests {
     /// A node's triangles may come in two ranges (an instance's glass part flattened at build, its mesh appended by
     /// software traversal): selection outlines need both.
     /// An instanced object: one shared mesh, an instance and an object entry per copy (capacity, not count), hidden
-    /// past the count and where a matrix scales to 0; mirrored copies flatten every drawn copy.
+    /// past the count and where a matrix scales to 0; a copy may mirror the mesh.
     #[test]
     fn instanced_objects_share_one_mesh() {
         let mut w = World::default();
@@ -2513,7 +2547,8 @@ mod instance_tests {
         m[0] = -1.0;
         w.set_instances(2, 3, Some(m), None, None).unwrap();
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.instances.len(), sc.tris.len(), sc.tri_instances.iter().map(|r| r.2).collect::<Vec<_>>()), (0, 2, vec![0, 1]), "mirrored: the drawn copies flattened");
+        assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "a copy that mirrors the mesh is an instance as the others");
+        assert_eq!(sc.instances.iter().map(|i| i.gpu(0, 0).n[1][3].to_bits()).collect::<Vec<_>>(), [INST_MIRRORED, 0, 0, 0], "and its record says so");
     }
 
     /// An instanced object whose material only emits is placed as any other: one shared mesh, which has the emitters,
@@ -2543,6 +2578,33 @@ mod instance_tests {
         let power = |i: usize| crate::emitter_power(&e[i], &sc.materials, &sc.objects, st);
         assert_eq!([power(0), power(1), power(2), power(3)], [4.0 * power(1), power(1), 0.0, 0.0], "weights: by size, none when hidden");
         assert!(power(1) > 0.0 && crate::switchable_power(&e[2], &sc.materials, &sc.objects, st) > 0.0, "a hidden copy's emitter is one the light tree would have");
+    }
+
+    /// A model placed mirrored (a negative scale) is an instance as one placed straight is, of the same mesh: a model
+    /// that stays and a rigid model's moving node (tests/render/data/panel-decal.glb). The meshes do not depend on
+    /// the placement's hand; the instances' records say that they mirror.
+    #[test]
+    fn a_mirrored_model_is_an_instance_of_the_same_mesh() {
+        let scene = |x: f32| {
+            let mut w = World::default();
+            let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+            w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+            w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+            let model = |animation| Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation, functions: vec![] };
+            w.set_object(1, "still".into(), None, model(None), true, false).unwrap();
+            w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true })), true, false).unwrap();
+            for id in [1, 2] {
+                w.set_transform(id, Vec3::new(id as f32, 0.0, 0.0), glam::Quat::from_rotation_y(0.4), Vec3::new(x, 1.0, 1.0)).unwrap();
+            }
+            build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap()
+        };
+        let (straight, mirrored) = (scene(1.0), scene(-1.0));
+        let meshes = |sc: &Scene| sc.meshes.iter().map(|m| (m.first, m.count, m.opaque, m.rest_count, m.emitters)).collect::<Vec<_>>();
+        assert_eq!(meshes(&mirrored), meshes(&straight));
+        assert_eq!(mirrored.pool_tris, straight.pool_tris, "the meshes' triangles are the model's own, whatever places them");
+        assert_eq!((mirrored.instances.len(), mirrored.tris.len()), (straight.instances.len(), straight.tris.len()));
+        assert!(straight.instances.len() >= 2 && straight.instances.iter().all(|i| i.gpu(0, 0).n[1][3].to_bits() == 0));
+        assert!(mirrored.instances.iter().all(|i| i.gpu(0, 0).n[1][3].to_bits() == INST_MIRRORED), "every instance of a mirrored model mirrors");
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh with it (`flatten_coincident`), in a model that stays

@@ -279,6 +279,10 @@ fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
 
 
 fn inst_vec(r: Instance, v: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(r.m0.xyz, v), dot(r.m1.xyz, v), dot(r.m2.xyz, v)); }
+// An instance that mirrors its mesh (scene.rs `INST_MIRRORED`, a bit of the record's n1.w): -1, else 1. The placed
+// edges' cross product then points to the mesh's inner side, and the tangent frame changes hand.
+const INST_MIRRORED: u32 = 4u;
+fn inst_sign(r: Instance) -> f32 { return select(1.0, -1.0, (bitcast<u32>(r.n1.w) & INST_MIRRORED) != 0u); }
 fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(vec3<f32>(dot(r.n0.xyz, n.xyz), dot(r.n1.xyz, n.xyz), dot(r.n2.xyz, n.xyz))), n.w);
 }
@@ -293,7 +297,7 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     b.n0 = inst_normal(r, a.n0);
     b.n1 = inst_normal(r, a.n1);
     b.n2 = inst_normal(r, a.n2);
-    b.t = vec4<f32>(normalize(inst_vec(r, a.t.xyz)), a.t.w);
+    b.t = vec4<f32>(normalize(inst_vec(r, a.t.xyz)), a.t.w * inst_sign(r));
     b.x = inst_x(r.info, a.x);
     return b;
 }
@@ -1140,17 +1144,19 @@ fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> M
     var v0 = tri_verts[ti * 3u].xyz;
     var e1 = tri_verts[ti * 3u + 1u].xyz;
     var e2 = tri_verts[ti * 3u + 2u].xyz;
+    var side = 1.0;
     if (has(F_INST) && inst != NO_INST) {
         let r = instance_at(inst);
         v0 = inst_vec(r, v0) + vec3<f32>(r.m0.w, r.m1.w, r.m2.w);
         e1 = inst_vec(r, e1);
         e2 = inst_vec(r, e2);
         a = inst_attr(r, a);
+        side = inst_sign(r);
     }
     let m = material_at(bitcast<u32>(a.uv.w));
     let w = 1.0 - u - v;
     let p = v0 + e1 * u + e2 * v;
-    let ng = normalize(cross(e1, e2));
+    let ng = normalize(cross(e1, e2)) * side;
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
     let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
@@ -1223,14 +1229,16 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     var e1 = tri_verts[i * 3u + 1u].xyz;
     var e2 = tri_verts[i * 3u + 2u].xyz;
     var a = attrs[i];
+    var side = 1.0;
     if (has(F_INST) && h.inst != NO_INST) {
         let r = instance_at(h.inst);
         e1 = inst_vec(r, e1);
         e2 = inst_vec(r, e2);
         a = inst_attr(r, a);
+        side = inst_sign(r);
     }
     let w = 1.0 - h.u - h.v;
-    var ng = normalize(cross(e1, e2));
+    var ng = normalize(cross(e1, e2)) * side;
     var n = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v);
     let mi = bitcast<u32>(a.uv.w);
     let m = material_at(mi);
