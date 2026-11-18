@@ -1296,3 +1296,31 @@ fn a_still_model_is_hidden_removed_and_moved_in_place() {
         }
     }
 }
+
+/// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume
+/// compiles nothing (an idle fireball's first fire).
+#[test]
+fn a_hidden_volumes_passes_are_made_at_load() {
+    let presets = crate::default_presets_dir();
+    let mut w = world();
+    w.set_volume_fn("f", "o.extinction = 1.0;".into(), String::new());
+    w.set_object(40, "fog".into(), None, Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: true, animated: false, grid: None }, true, false).unwrap();
+    w.set_visible(40, false).unwrap();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert!(live.sc.up.kernel.features & gpu::F_MEDIA != 0, "a hidden volume is the scene's medium");
+    let made = |c: &LiveCore| {
+        let mut v: Vec<&'static str> = c.g.kernel_passes_made().into_iter().filter(|e| e.starts_with("media")).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(made(&live), ["media_composite", "media_train"], "made when the scene was loaded");
+    picture(&mut live, 2);
+    w.set_visible(40, true).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "shown in place ({:?})", live.fallback);
+    picture(&mut live, 2);
+    assert_eq!(made(&live), ["media_composite", "media_train"], "the frame that shows it makes none");
+}
