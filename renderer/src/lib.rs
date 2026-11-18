@@ -1012,6 +1012,8 @@ fn flatten_instances(sc: &mut scene::Scene) {
     sc.pool_tris.clear();
     sc.pool_attrs.clear();
     sc.meshes.clear();
+    sc.sections.clear();
+    sc.rows.clear();
 }
 
 /// Traversal group: shadow casting x alpha cutout, static (0..4) or dynamic (4..8: posed models, own BLASes).

@@ -2749,8 +2749,7 @@ impl Gpu {
         let (head, blob_words) = l.map_or((0, 0), |l| (l.head.len(), l.blob_words));
         let colors: &[u8] = bytemuck::cast_slice(&scene.gpu_vcolors);
         let color_bytes = if colors.is_empty() { 0 } else { colors.len() + room_tris * 12 };
-        // (Rows only where records are: flattened instances have none.)
-        let rows: &[u8] = if scene.gpu_instances.is_empty() { &[] } else { bytemuck::cast_slice(&scene.rows) };
+        let rows: &[u8] = bytemuck::cast_slice(&scene.rows);
         let row_bytes = if rows.is_empty() && room_rows == 0 { 0 } else { rows.len() + room_rows * 16 };
         let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64, row_bytes as u64];
         let (used, limit) = (Heap::<Stream>::size_for(&sizes(0)), self.device.limits().max_storage_buffer_binding_size as u64);

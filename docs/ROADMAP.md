@@ -2750,7 +2750,8 @@ row of it their emitters, and writes no attribute. Still a rebuild: a several-ma
 turns glass or cutout, vertex colours asked of a mesh made without them.
 Tests: a geometry's sections and an instance's rows; six objects of one geometry with six materials (one reads its
 vertex colours, cutouts, glass, an emitter) against a geometry an object, at the build, one placed in place, two
-given another material; the light list's emitters found through the rows.
+given another material; a pane and its frame as one mesh against a mesh each, under a sky sampled as a light; the
+light list's emitters found through the rows.
 
 **Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
 scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
