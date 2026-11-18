@@ -25,12 +25,6 @@ export const MAX_TIME = 1e9;
 export const FIREBALL_SIZE = 2.2;
 export const MAX_FIREBALL = 40;
 export const MIN_FIREBALL = 0.05;
-/** Where idle fireballs wait: tiny, far below any level (moving a volume is done in place; hiding one is not
- *  promised to be). */
-const PARK: [number, number, number] = [0, -10000, 0];
-const PARKED = 1e-3;
-/** An idle light's reach (m): its light group's sphere, parked with it, then holds no pixel. */
-const IDLE_REACH = 1e-3;
 
 /** The fireball sizes (full size, m) the fire light was measured at. */
 export const FIRE_LIGHT_SIZES = [1.1, 2.2, 4.4, 8.8] as const;
@@ -152,7 +146,7 @@ export class Explosions extends Group {
   readonly life: number;
   readonly intensity: number;
   readonly stats: ExplosionStats = { fired: 0, reused: 0, unlit: 0, most: 0, burning: 0, lit: 0 };
-  /** Per fireball: when it started (scene time; NaN = parked), its full size, its centre, the order it was fired in. */
+  /** Per fireball: when it started (scene time; NaN = idle), its full size, its centre, the order it was fired in. */
   private started: number[] = [];
   private sizes: number[] = [];
   private centers: [number, number, number][] = [];
@@ -176,27 +170,24 @@ export class Explosions extends Group {
     for (let k = 0; k < n; k++) {
       const f = new Fireball({ life: this.life, intensity: this.intensity, density });
       f.name = `fireball-${k}`;
-      // Moved at every fire: movable from the start (a fixed object's first move rebuilds the live scene once).
+      // Moved at every fire: movable from the start (a volume's first move would rebuild the live scene once).
       f.movable = true;
-      // Parked while idle: a temporary way round (docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
-      f.position.set(...PARK);
-      f.scale.setScalar(PARKED);
+      // Hidden while idle: it keeps its place among the scene's volumes, and costs no pixel anything.
+      f.visible = false;
       f.customData = [-1e6, 0, 0, 0];
       this.add(f);
       this.fireballs.push(f);
       this.started.push(NaN);
       this.sizes.push(0);
-      this.centers.push([...PARK]);
+      this.centers.push([0, 0, 0]);
       this.order.push(-1);
     }
     for (let k = 0; k < nl; k++) {
-      // The stand-in light, and its idle reach of 1 mm where it is parked: temporary ways round (docs/VOXEL.md,
-      // "Temporary ways round on the engine's shared paths").
+      // The stand-in light: a temporary way round (docs/VOXEL.md, "Temporary ways round on the engine's shared
+      // paths"). Black while idle: the kernel passes a black light before anything else.
       const l = new PointLight(0xffffff, 0);
       l.name = `fire-light-${k}`;
-      l.distance = IDLE_REACH;
       l.movable = true;
-      l.position.set(...PARK);
       this.add(l);
       this.lights.push(l);
     }
@@ -224,6 +215,7 @@ export class Explosions extends Group {
     const s = this.started[k];
     if (!Number.isNaN(s) && time - s < this.life) this.stats.reused++;
     const f = this.fireballs[k];
+    f.visible = true;
     f.position.set(...c);
     f.scale.setScalar(size);
     f.customData = [time, 0, 0, 0];
@@ -246,16 +238,16 @@ export class Explosions extends Group {
   }
 
   /** Once a frame (scene time): each light set from its fireball's age (the youngest that give light have them);
-   *  burnt-out fireballs parked. Time going back (a restart) ends every fire. */
+   *  burnt-out fireballs hidden. Time going back (a restart) ends every fire. */
   step(time: number): void {
     within("Explosions.step: the time (the frame's f.time)", time, -MAX_TIME, MAX_TIME);
     if (this.disposed) return;
-    if (time < this.now) for (let k = 0; k < this.fireballs.length; k++) this.park(k);
+    if (time < this.now) for (let k = 0; k < this.fireballs.length; k++) this.rest(k);
     this.now = time;
     const alive: number[] = [];
     for (let k = 0; k < this.fireballs.length; k++) {
       if (this.burning(k, time)) alive.push(k);
-      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.park(k);
+      else if (!Number.isNaN(this.started[k]) && time - this.started[k] >= this.life) this.rest(k);
     }
     this.stats.burning = alive.length;
     this.stats.most = Math.max(this.stats.most, alive.length);
@@ -268,8 +260,6 @@ export class Explosions extends Group {
       const g = glowing[j];
       if (g === undefined) {
         l.intensity = 0;
-        l.distance = IDLE_REACH;
-        l.position.set(...PARK);
         continue;
       }
       lit++;
@@ -298,10 +288,10 @@ export class Explosions extends Group {
     return !Number.isNaN(s) && time - s >= 0 && time - s < this.life;
   }
 
-  private park(k: number): void {
+  /** Fireball `k` burns no more: hidden where it is. */
+  private rest(k: number): void {
     this.started[k] = NaN;
-    this.fireballs[k].position.set(...PARK);
-    this.fireballs[k].scale.setScalar(PARKED);
+    this.fireballs[k].visible = false;
   }
 
   /** The pool's positions are the world's: it and every parent at the origin, unrotated, unscaled. */

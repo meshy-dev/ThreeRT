@@ -33,8 +33,8 @@ function bound(x: Explosions) {
   binding.sync();
   return { scene, e, binding, made: e.take() };
 }
-/** Placed fireballs (not parked). */
-const placed = (x: Explosions) => x.fireballs.filter((f) => f.position.y > -1000);
+/** Fireballs that show (not idle). */
+const placed = (x: Explosions) => x.fireballs.filter((f) => f.visible);
 
 test("the pool: the next fireball each fire, the oldest taken over, lights for the youngest that give light", () => {
   const x = new Explosions({ fireballs: 3, lights: 2 });
@@ -66,12 +66,14 @@ test("the pool: the next fireball each fire, the oldest taken over, lights for t
   assert.deepEqual(x.lights.map((q) => q.position.x).sort((a, b) => a - b), [20, 30]);
   x.step(10.45);
   assert.deepEqual(x.lights.map((q) => q.position.x).sort((a, b) => a - b), [30, 40], "a frame on, it has one");
-  // Burnt out: parked, the lights off.
+  // Burnt out: hidden where they burnt, the lights black where they were.
   x.step(20);
   assert.equal(x.stats.burning, 0);
   assert.equal(x.stats.lit, 0);
-  assert.ok(x.lights.every((q) => q.intensity === 0 && q.distance > 0 && q.distance < 0.01), "off, and reaching nothing (distance 0 would be unbounded)");
+  assert.ok(x.lights.every((q) => q.intensity === 0), "off: a black light is passed over whatever its reach");
+  assert.deepEqual(x.lights.map((q) => q.position.x).sort((a, b) => a - b), [30, 40], "and not moved away");
   assert.equal(placed(x).length, 0);
+  assert.equal(x.fireballs[0].position.x, 30, "not moved away");
   assert.equal(x.stats.most, 3);
 });
 
