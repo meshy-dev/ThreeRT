@@ -32,7 +32,7 @@ import sharp from "sharp";
 import { blastLamp, type Night, SHOTS } from "../games/voxel-level/level-night.game.ts";
 import { cameraPath } from "../games/voxel-level/plan.ts";
 import { bundleGame } from "./bundle-game.ts";
-import { frameStats, rendererBin, repoRoot, requireGpuLock } from "./lib/bench.ts";
+import { editCost, frameStats, rendererBin, repoRoot, requireGpuLock } from "./lib/bench.ts";
 import { startLive } from "./lib/live.ts";
 import { generate } from "./voxel-level/generate.ts";
 
@@ -200,7 +200,7 @@ if (only.includes("subtree")) {
 if (only.includes("blast")) {
   const b = await bundle("blast-live-0", { blast: "lamp", when: 300 });
   const runs: Record<string, unknown>[] = [];
-  type Frame = { interval: number; start?: number; cpu: number; edit: number; rebuild: number; fallback: string | null; voxel?: [number, number] };
+  type Frame = { interval: number; start?: number; cpu: number; edit: number; build?: number; rebuild: number; fallback: string | null; voxel?: [number, number] };
   for (let round = 1; round <= rounds; round++) {
     const log = join(dir, "blast-frames.jsonl");
     const live = startLive({ bin: rendererBin, assets: repoRoot, presets: join(repoRoot, "presets"), bundles: dir, label: "blast" }, b, { frameLog: log });
@@ -215,7 +215,7 @@ if (only.includes("blast")) {
     const starts = after.map((f) => f.start ?? f.interval);
     const row = {
       round, frames: F.length, explosion_frame_ms: r2(Math.max(F[ex].interval, F[ex + 1]?.interval ?? 0)), explosion_cpu_ms: r2(Math.max(F[ex].cpu, F[ex + 1]?.cpu ?? 0)), settle_frame_ms: st >= 0 ? r2(Math.max(F[st].interval, F[st + 1]?.interval ?? 0)) : null,
-      flight_edit_p50: r2(frameStats(F.slice(ex + 2, st > 0 ? st : undefined).map((f) => f.edit)).p50), over_50: after.filter((f) => f.interval > 50).length, start_p95: r2(frameStats(starts).p95), start_max: r2(Math.max(...starts)),
+      flight_edit_p50: r2(frameStats(F.slice(ex + 2, st > 0 ? st : undefined).map(editCost)).p50), over_50: after.filter((f) => f.interval > 50).length, start_p95: r2(frameStats(starts).p95), start_max: r2(Math.max(...starts)),
       fallbacks: F.filter((f) => f.fallback).map((f) => f.fallback), rebuilds: F.filter((f) => f.rebuild > 0).length,
     };
     runs.push(row);

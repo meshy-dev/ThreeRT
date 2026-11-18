@@ -197,6 +197,13 @@ export function frameStats(ms: number[]) {
   return { n: s.length, p50, p95: q(0.95), p99: q(0.99), max: s.at(-1) ?? NaN, spikes: ms.filter((v) => v > 2 * p50).length };
 }
 
+/** What a frame's in-place edits cost its CPU, ms: writing them (frame log `edit`) and the one build above the
+ *  triangles the commit ends with (`build`; a log from before it has none, and its `edit` held that share). The build
+ *  is the frame's whole: whatever else moved in that frame was built in the same call. */
+export function editCost(f: { edit: number; build?: number }): number {
+  return f.edit + (f.build ?? 0);
+}
+
 /**
  * Runs `fn` repeatedly for about `budgetMs` after dropping `warmup` runs; returns per-run times (ms). Throughput
  * benchmarks size their work this way instead of a fixed iteration count.
