@@ -293,13 +293,13 @@ fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
 fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
 }
-// A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
 // The material of a triangle, given its attributes and the instance that places it (NO_INST: none). Every read of a
 // hit's material goes through here: where the material is kept is this function's alone.
 fn material_of(a: TriAttr, inst: u32) -> u32 {
     return bitcast<u32>(a.uv.w);
 }
 
+// A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;
     b.n0 = inst_normal(r, a.n0);
