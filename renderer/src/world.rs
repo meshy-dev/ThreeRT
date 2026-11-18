@@ -1618,6 +1618,13 @@ mod tests {
         w.set_transform(2, Vec3::X, Quat::IDENTITY, Vec3::ONE).unwrap();
         let c = w.take_changes();
         assert!(!c.structural && c.materials.contains(&1) && c.powers.contains(&1) && c.camera);
+        // An alpha test that comes, changes or goes: a rebuild (an instance's row says whether its material is a
+        // cutout's, and the kernel's variant goes by whether there is one).
+        for (test, what) in [(Some(0.5), "an alpha test"), (Some(0.3), "another threshold"), (None, "no alpha test again")] {
+            m.alpha_test = test;
+            w.set_material(1, m.clone());
+            assert!(w.take_changes().structural, "{what}: structural");
+        }
         m.map = Some(7);
         w.set_material(1, m);
         assert!(w.take_changes().structural, "texture slots are structural");
