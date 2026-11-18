@@ -1672,6 +1672,11 @@ pub const F_GRID: u32 = 1 << 25;
 /// guided live by the light tiles (pathtrace.wgsl "Light tiles"; the live view's `light_tiles` pass runs for such a
 /// scene).
 pub const F_LISTS: u32 = 1 << 27;
+/// A material function on an instanced mesh: its inputs outside full shading (pathtrace.wgsl `mat_in_at`) place the
+/// triangle by its instance. Compiled out where no scene has one: the kernel's compiler works the placement out for
+/// every call otherwise, taken or not (Kabukicho's 64,224 emitters with a function, none on an instance: frame GPU
+/// +2.7 %).
+pub const F_IFUNC: u32 = 1 << 28;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
 /// there the lights are resampled as in a scene of fewer, unguided (docs/RUNTIME.md "Android").
@@ -1735,7 +1740,8 @@ pub fn environment_features(fog: Option<&crate::desc::Fog>, background: bool, ae
 
 /// Kernel features of the scene's structure, which parameter edits do not change: F_INST and F_MASKED for the
 /// instanced meshes (cutout triangles among them), F_MEDIA for participating media (F_HMEDIA for homogeneous ones),
-/// F_PEMIT for opaque particles, F_PROC for procedural geometry, F_TINT for instance colours.
+/// F_PEMIT for opaque particles, F_PROC for procedural geometry, F_TINT for instance colours, F_IFUNC for a material
+/// function on an instanced mesh.
 pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
@@ -1744,7 +1750,9 @@ pub fn instance_features(scene: &Scene) -> u32 {
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
-    media | particles | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    let function = |a: &crate::scene::GpuTriAttr| scene.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.tex1[3] != 0);
+    let ifunc = if scene.pool_attrs.iter().any(function) { F_IFUNC } else { 0 };
+    media | particles | ifunc | F_INST | if scene.meshes.iter().any(|m| m.opaque < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -3645,7 +3653,7 @@ mod tests {
             ("F_MASKED", F_MASKED), ("F_FOG", F_FOG), ("F_VOLUME", F_VOLUME), ("F_TEX", F_TEX), ("F_FUNC", F_FUNC),
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
-            ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS),
+            ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

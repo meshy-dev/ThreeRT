@@ -89,6 +89,7 @@ const F_UNLIT: u32 = 1048576u; // MeshBasicMaterial (MAT_UNLIT)
 const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
+const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
@@ -1138,14 +1139,15 @@ fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rg
 fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
-// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST.
+// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST. (By F_IFUNC, not by
+// F_INST: where no instanced mesh has a function the placement is not compiled in.)
 fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
     var a = attrs[ti];
     var v0 = tri_verts[ti * 3u].xyz;
     var e1 = tri_verts[ti * 3u + 1u].xyz;
     var e2 = tri_verts[ti * 3u + 2u].xyz;
     var side = 1.0;
-    if (has(F_INST) && inst != NO_INST) {
+    if (has(F_IFUNC) && inst != NO_INST) {
         let r = instance_at(inst);
         v0 = inst_vec(r, v0) + vec3<f32>(r.m0.w, r.m1.w, r.m2.w);
         e1 = inst_vec(r, e1);

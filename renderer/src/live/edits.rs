@@ -1825,6 +1825,9 @@ impl LiveCore {
                     if class == 2 {
                         return Err("a glass material".into());
                     }
+                    if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
+                        return Err("the scene's first material function on an instance (kernel feature)".into());
+                    }
                     if class == 1 && features & gpu::F_MASKED == 0 {
                         return Err("the scene's first cutout (kernel feature)".into());
                     }

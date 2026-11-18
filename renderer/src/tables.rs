@@ -146,6 +146,11 @@ impl Tables {
             if !self.can_emit(mi, &gm) {
                 return Ok(None);
             }
+            // (A material of instances' triangles that gets a function, or loses it: the kernel's variant goes by
+            // whether there is one, `gpu::F_IFUNC`, which the build decides.)
+            if (gm.tex1[3] != 0) != (self.materials[mi as usize].tex1[3] != 0) && self.fixed_mats.contains(&mi) {
+                return Ok(None);
+            }
             self.materials[mi as usize] = gm;
             d.materials = true;
         }
