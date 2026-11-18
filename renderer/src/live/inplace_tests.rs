@@ -1361,8 +1361,8 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     assert!(live.sc.meshes[shared as usize].colored && live.sc.meshes[shared as usize].sect_count == 1);
     let features = live.sc.up.kernel.features;
     assert_eq!(features & (gpu::F_ROWS | gpu::F_MASKED | gpu::F_VCOLOR), gpu::F_ROWS | gpu::F_MASKED | gpu::F_VCOLOR);
-    let tile = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].clone();
-    assert!(!tile(&live, 44).cast_shadow && tile(&live, 43).cast_shadow, "glass alone casts no shadow");
+    let placed = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].clone();
+    assert!(!placed(&live, 44).cast_shadow && placed(&live, 43).cast_shadow, "glass alone casts no shadow");
     list_is_its_triangles("objects of one geometry, at the build", &live);
     let mut apart_world = open(&scene(true, false)).unwrap();
     let meshes: std::collections::HashSet<u32> = (40..46).map(|id| mesh_of(&apart_world, id)).collect();
@@ -1392,9 +1392,28 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
         let what = format!("object {id} given material {material}");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         assert_eq!((mesh_of(&live, id), live.sc.meshes.len(), live.sc.pool_tris.len()), (shared, meshes, triangles), "{what}: it keeps the mesh, none made");
-        assert_eq!(scene::row_material(&live.sc.rows[tile(&live, id).rows as usize]), live.sc.tables.retained.materials[&material], "{what}: its row names it");
+        assert_eq!(scene::row_material(&live.sc.rows[placed(&live, id).rows as usize]), live.sc.tables.retained.materials[&material], "{what}: its row names it");
         against_a_build(&what, &mut live, &w);
     }
+    // A geometry with colours that no object read at the build: its mesh was made without them, and an object that
+    // reads them, placed later, has them by a rebuild.
+    let mut w = world();
+    w.set_material(61, plain(serde_json::json!({ "vertexColors": true })));
+    w.set_material(62, plain(serde_json::json!({})));
+    w.set_geometry(30, tile()).unwrap();
+    w.set_object(40, "tile0".into(), None, Kind::Mesh { geometry: 30, material: 62, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(40, Vec3::new(-0.6, 0.55, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    // (And a coloured mesh in the scene: the kernel has vertex colours.)
+    w.set_geometry(31, tile()).unwrap();
+    w.set_object(41, "tile1".into(), None, Kind::Mesh { geometry: 31, material: 61, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(41, Vec3::new(0.9, -0.6, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    assert!(!live.sc.meshes[mesh_of(&live, 40) as usize].colored && live.sc.meshes[mesh_of(&live, 41) as usize].colored);
+    place(&mut w, 42, 61, Vec3::new(0.0, 0.55, 0.6));
+    assert!(live.commit(&mut w).unwrap(), "colours asked of a mesh made without them: a rebuild");
+    assert!(live.sc.meshes[mesh_of(&live, 42) as usize].colored && mesh_of(&live, 42) == mesh_of(&live, 40));
+    against_a_build("an object that reads its geometry's colours placed", &mut live, &w);
 }
 
 /// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume
