@@ -509,9 +509,10 @@ export class Object3D {
     touched(this);
   }
   /**
-   * UE Mobility "Movable": the frame script moves it (and everything under it) every frame; the renderer keeps its
-   * triangles apart and updates them in place. Fixed objects that move become movable at their first move, which
-   * rebuilds the scene once.
+   * The frame script moves it (and everything under it) every frame. A mesh or a still model moves in place by its
+   * instance whether this is set or not, and is movable from its first move. What the renderer draws another way (an
+   * animated model, an instanced object or a light's card under it) has its triangles kept apart by this; without
+   * it, the first move rebuilds the scene once.
    */
   get movable(): boolean {
     return this._movable;
@@ -1201,9 +1202,9 @@ export class Mesh extends Object3D {
   declare private _material: MeshStandardMaterial | MeshStandardMaterial[];
   declare private _dynamicGeometry: boolean;
   /**
-   * The mesh's geometry will change at run time (a new `geometry`, `needsUpdate`), or meshes like it come and go:
-   * the renderer gives it its own acceleration structure, so those changes apply in place instead of rebuilding the
-   * scene. Off by default: static meshes share the scene's (faster to trace, cheaper in memory).
+   * The mesh's geometry will change at run time (a new `geometry`, `needsUpdate`), or meshes like it come and go.
+   * Any mesh's geometry changes in place; this says so beforehand, and the renderer keeps room for the changes when
+   * it builds the scene instead of growing it at the first one.
    */
   get dynamicGeometry(): boolean {
     return this._dynamicGeometry ?? false;

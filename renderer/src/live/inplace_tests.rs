@@ -907,6 +907,8 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         let mesh = |geometry, material, materials| Kind::Mesh { geometry, material, own_blas: false, materials };
         w.set_object(13, "one".into(), None, mesh(3, 6, vec![]), true, false).unwrap();
         w.set_transform(13, Vec3::new(-0.6, -0.5, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_object(33, "third".into(), None, mesh(3, 6, vec![]), true, false).unwrap();
+        w.set_transform(33, Vec3::new(-0.1, -0.1, 1.2), glam::Quat::from_rotation_y(-0.4), Vec3::ONE).unwrap();
         w.set_object(14, "other".into(), None, mesh(3, 6, vec![]), true, true).unwrap();
         w.set_transform(14, Vec3::new(0.5, -0.5, 0.9), glam::Quat::from_rotation_y(0.5), Vec3::ONE).unwrap();
         w.set_object(15, "two".into(), None, mesh(7, 5, vec![5, 6]), true, false).unwrap();
@@ -938,6 +940,9 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         assert_eq!(mesh_of(&live, 13), mesh_of(&live, 14), "the two objects share their mesh");
         let two = mesh_of(&live, 15) as usize;
         assert_eq!((live.sc.meshes[two].count, live.sc.meshes[two].emitters), (32, 16), "the mesh of two materials: one emits");
+        // (A third object of the shared mesh, hidden when the material starts: it has its emitters when it is shown.)
+        w.set_visible(33, false).unwrap();
+        assert!(!live.commit(&mut w).unwrap(), "a mesh hidden, {with} a light tree: in place ({:?})", live.fallback);
         w.set_material(6, late(30.0));
         let what = format!("a material started emitting in place, {with} a light tree");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
@@ -948,6 +953,11 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
             c.sc.tables.emitter_tris.iter().filter(|e| e.inst == r && e.area > 0.0).map(|e| e.moves).collect::<Vec<_>>()
         };
         assert_eq!((moving(&live, 13), moving(&live, 14)), (vec![false; 2], vec![true; 2]), "{what}: the movable one's emitters move");
+        lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        w.set_visible(33, true).unwrap();
+        let what = format!("a mesh hidden when its material started emitting, shown, {with} a light tree");
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        list_is_its_triangles(&what, &live);
         lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         if live.g.hwrt {
             w.set_object(29, "added".into(), None, Kind::Mesh { geometry: 3, material: 8, own_blas: true, materials: vec![] }, true, false).unwrap();
@@ -1000,6 +1010,8 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
         // A lamp hidden at the build, a group of two panels, a movable panel, a mesh the scene edits (a geometry of
         // its own).
         place(&mut w, 13, "late", None, mesh(3, 5, false), false, [-0.6, 0.6, 1.2]);
+        // (Stretched: the area it has when it is shown is not its mesh's own.)
+        w.set_transform(13, Vec3::new(-0.6, 0.6, 1.2), glam::Quat::from_rotation_y(0.3), Vec3::new(1.6, 0.6, 1.0)).unwrap();
         w.set_visible(13, false).unwrap();
         w.set_object(14, "group".into(), None, Kind::Group, true, false).unwrap();
         place(&mut w, 15, "a", Some(14), mesh(3, 1, false), false, [0.5, -0.5, 0.6]);
@@ -1022,6 +1034,11 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
             (i.hidden, i.masked)
         };
         assert_eq!((hidden(&live, 13), hidden(&live, 12)), ((true, true), (false, false)), "a mesh hidden at the build is an instance no ray sees");
+        let emitters = |c: &LiveCore, id: u32| {
+            let (t, r) = (&c.sc.tables, c.sc.tables.retained.instance(id).unwrap().instance);
+            t.emitter_tris.iter().filter(|e| e.inst == r && e.area > 0.0).map(|e| (crate::emitter_power(e, &t.materials, &t.objects, t.stride) > 0.0, e.moves)).collect::<Vec<_>>()
+        };
+        assert_eq!((emitters(&live, 13), emitters(&live, 12)), (vec![(false, true); 2], vec![(true, false); 2]), "its emitters weigh nothing, and are the moving subtree's when it is shown");
         type Edit = (&'static str, Box<dyn Fn(&mut World)>);
         let show = |id: u32, on: bool| -> Box<dyn Fn(&mut World)> { Box::new(move |w| w.set_visible(id, on).unwrap()) };
         let edits: Vec<Edit> = vec![
@@ -1053,9 +1070,11 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
         if live.g.hwrt {
             w.set_visible(22, false).unwrap();
             assert!(!live.commit(&mut w).unwrap(), "a mesh the scene edits hidden, {with} a light tree: in place ({:?})", live.fallback);
+            let its = live.sc.instances[live.sc.tables.retained.instance(22).unwrap().instance as usize].mesh;
             w.set_geometry(8, quad(0.35)).unwrap();
             assert!(!live.commit(&mut w).unwrap(), "its geometry changed while hidden, {with} a light tree: in place ({:?})", live.fallback);
             assert_eq!(hidden(&live, 22), (true, false), "taken out by the edit");
+            assert_eq!(live.sc.edit.users.get(&its).copied().unwrap_or(0), 0, "and its mesh has no user left");
             w.set_visible(22, true).unwrap();
             assert!(live.commit(&mut w).unwrap(), "shown after its geometry changed, {with} a light tree: a rebuild");
             let what = format!("a mesh shown after its geometry changed while hidden, {with} a light tree");

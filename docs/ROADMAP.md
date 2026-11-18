@@ -2730,6 +2730,23 @@ geometric normal through a function on a mirrored mesh, vertex colours on one (e
 traversal); the flattening of an instance against the build's flattening, mirrored too; a mirrored model's build; a
 copy mirrored in place; an emitting instanced object added, changed and removed in place against a build.
 
+**Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
+scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
+instance's mask; a hidden mesh is built as an instance no ray sees, its row without power (`Instance::masked`,
+`show_meshes`). A still mesh's first move: its instance moves from then on, and one that emits has its emitters as
+moving ones, a new run of the light list (`Changes::started`, `start_moving`). Its geometry changed, the mesh
+re-created or removed, a group of meshes removed, a movable mesh added: in place whether or not the scene said it
+edits the mesh (`world::edits_in_place`; `dynamicGeometry` now only keeps room for it at the build). A placement
+without size is an unseen instance everywhere: built so, moved so, a posed rigid model's node too. A still model
+whose instance is all of it is hidden, moved and removed the same way (`whole`).
+Still a rebuild: a mesh of several materials changed or added; a mesh shown after its geometry changed while it was
+hidden; a model hidden when the scene was built, or with triangles flattened beside its instance; an animated model's
+first move; a hidden mesh under software traversal without units.
+Tests, each against a build's light list, weights and picture: meshes hidden and shown (still, emitting, hidden at
+the build, a group, moved while hidden); a still mesh's first move (emitting, plain, a group, one built without
+size); meshes changed without the scene's word (a shared geometry, a re-creation, a movable one added, removals); a
+still model hidden, removed and moved. `volume/grid-rebuild-live` rebuilds by adding a group.
+
 **A mesh is an instance of its geometry's mesh (2026-11-18, scene step E, first part).** A mesh was an instance
 only where scene code asked (`dynamicGeometry`) or a body drove it; every other one was flattened into the
 still scene's world-space groups, a movable one re-transformed on the CPU at each move. Now every shown mesh with a

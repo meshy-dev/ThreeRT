@@ -23,8 +23,7 @@ written, the page around it (DOM, window, requestAnimationFrame, asset loaders) 
   exponential fog (95 % at `far`; FogExp2's e-folding distance).
 - **Light decay is physical** (inverse square) whatever `decay` says.
 - **`object.id`** is the stable id scene code sets (picking, events); until one is set, a number, as three.js's.
-- **Geometry that changes at run time**: `attribute.setUsage(DynamicDrawUsage)` gives the mesh its own acceleration
-  structure; without it, the first change rebuilds the scene once and promotes the mesh (frame log `fallback`
-  "promote").
+- **Geometry that changes at run time** is replaced in place; `attribute.setUsage(DynamicDrawUsage)` says so
+  beforehand, and the renderer keeps room for the changes when it builds the scene.
 - Not drawn (noted `unsupported`): vertex colours, wireframe, `BackSide` (drawn double-sided). Missing: `Shape` /
   `ExtrudeGeometry`.

@@ -755,6 +755,22 @@ impl LiveCore {
         self.lit_changed = self.frame.max(1);
     }
 
+    /// An instance that came back, or went unseen: its emitters' areas and centres as it stands now (an unseen one's
+    /// are its mesh's own: `placed_emitter`), for their weights.
+    fn weigh_run(&mut self, r: u32) {
+        let LoadedScene { tables, instances, pool_tris, edit, .. } = &mut self.sc;
+        let Some(inst) = instances.get(r as usize) else { return };
+        let run = emitter_run(&tables.emitter_tris, instances, r);
+        for j in run.clone() {
+            let e = tables.emitter_tris[j];
+            if e.area > 0.0 {
+                let (area, c, _) = crate::placed_emitter(inst, &pool_tris[e.tri as usize - edit.pool_first], e.mat, &tables.materials);
+                (tables.emitter_tris[j].area, tables.emitter_tris[j].c) = (area, c);
+            }
+        }
+        self.emitters_reweigh |= !run.is_empty();
+    }
+
     /// A still object's first move, in place: the meshes under it (itself, if it is one) move by their instances from
     /// now on (`InstanceRef::moves`), and one that emits has its emitters as moving ones: a new run of the light list
     /// (the light tree keeps the old one where it stood, at no weight). False where something under it is drawn
@@ -831,6 +847,7 @@ impl LiveCore {
                     top.moved(top.inst_base() + r, w, Some((inst.cast_shadow, unseen)));
                     build.instances = true;
                     changes.powers.insert(k);
+                    self.weigh_run(r as u32);
                 }
                 _ => return false,
             }
@@ -879,17 +896,23 @@ impl LiveCore {
             let slot = top.inst_base() + i as usize;
             // (Unseen while it has no size, or its object is hidden: `Instance::masked`. Its row's power follows.)
             let unseen = gone || !world.shown(node);
-            if inst.hidden != unseen {
-                self.flipped.push(node);
-            }
+            let flipped = inst.hidden != unseen;
             (inst.hidden, inst.masked) = (unseen, unseen);
             top.moved(slot, w, Some((inst.cast_shadow, unseen)));
             self.inst_moving.push(i);
+            if flipped {
+                self.flipped.push(node);
+            }
         }
         if merged {
             self.sc.up.heap.write(q, Table::Instances, lo as u64 * size, bytemuck::cast_slice(&self.sc.gpu_instances[lo..=hi]));
         }
         self.sc.up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
+        for k in 0..self.flipped.len() {
+            if let Some(r) = self.sc.tables.retained.instance(self.flipped[k]).map(|i| i.instance) {
+                self.weigh_run(r);
+            }
+        }
         self.fill_moved(placed.iter().map(|&(_, i)| i));
         self.inst_moved = true;
         build.instances = true;
