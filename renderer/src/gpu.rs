@@ -1677,9 +1677,10 @@ pub const F_LISTS: u32 = 1 << 27;
 /// every call otherwise, taken or not (Kabukicho's 64,224 emitters with a function, none on an instance: frame GPU
 /// +2.7 %).
 pub const F_IFUNC: u32 = 1 << 28;
-/// Glass on an instanced mesh: its BLAS geometry is not flagged opaque, and a shadow ray culls such geometry instead of
-/// forcing opacity (trace_hw.wgsl; software traversal skips a unit's glass triangles by their flag). Compiled out
-/// where no instanced mesh has glass.
+/// Glass among other triangles in an instanced mesh: its BLAS geometry is not flagged opaque, and a shadow ray culls
+/// such geometry instead of forcing opacity (trace_hw.wgsl; software traversal skips a unit's glass triangles by
+/// their flag). Compiled out where no instanced mesh mixes the two: an instance of a mesh that is all glass is out of
+/// a shadow ray's way by its mask (`scene::InstMesh::casts`).
 pub const F_IGLASS: u32 = 1 << 29;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
@@ -1756,7 +1757,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     }
     let function = |a: &crate::scene::GpuTriAttr| scene.materials.get(a.uv[3].to_bits() as usize).is_some_and(|m| m.tex1[3] != 0);
     let ifunc = if scene.pool_attrs.iter().any(function) { F_IFUNC } else { 0 };
-    let iglass = if scene.meshes.iter().any(|m| m.glass > 0) { F_IGLASS } else { 0 };
+    let iglass = if scene.meshes.iter().any(|m| m.glass > 0 && m.glass < m.count) { F_IGLASS } else { 0 };
     media | particles | ifunc | iglass | F_INST | if scene.meshes.iter().any(|m| m.opaque + m.glass < m.count) { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 

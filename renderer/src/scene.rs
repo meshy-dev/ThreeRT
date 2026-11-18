@@ -97,6 +97,13 @@ impl InstMesh {
         [p.get(1).map_or(0, |p| p.0), p.get(2).map_or(0, |p| p.0)]
     }
 
+    /// Whether an instance of it casts shadows: as its object says, and never when the mesh is all glass. Such an
+    /// instance is out of a shadow ray's way by its mask, as one that casts none is; a mesh with glass among other
+    /// triangles has it culled by its geometry's flag (`parts`, gpu.rs `F_IGLASS`).
+    pub fn casts(&self, cast_shadow: bool) -> bool {
+        cast_shadow && self.glass < self.count
+    }
+
     /// World bounds of a placement: the box of the transformed model-space box.
     pub fn placed_bounds(&self, m: Mat4) -> (Vec3A, Vec3A) {
         let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
@@ -1410,7 +1417,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Own, moves: n.driven }) };
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
+                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
                     }
                 }
             }
@@ -1469,7 +1476,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let (lo, hi) = meshes[mesh as usize].placed_bounds(wm);
                             objects.extend_from_slice(&copy_row(entry(i, wm, Vec3::from(hi - lo)), emits && hidden)[..stride]);
-                            instances.push(Instance { mesh, world: wm, object: object + i as u32, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: Some(i as u32), hidden, first_emitter: 0 });
+                            instances.push(Instance { mesh, world: wm, object: object + i as u32, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: Some(i as u32), hidden, first_emitter: 0 });
                         }
                     }
                     continue;
@@ -1623,7 +1630,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             let count = classed[..FLAT].iter().map(Vec::len).sum::<usize>() as u32;
                             meshes.push(InstMesh { first: first_pool, count, opaque: classed[0].len() as u32, glass: classed[2].len() as u32, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emitters });
                             rigid.instances.push((*ni, instances.len() as u32));
-                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
+                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: meshes[meshes.len() - 1].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
                         }
                         for &(k, mat) in &classed[FLAT] {
                             let t = &local[k].1;
@@ -1705,7 +1712,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
+                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 });
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Pose(g), moves: true }) };
                         retained.pose_groups[g as usize].members.push((*id, i));
                         continue;
@@ -1773,7 +1780,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         retained.proxy(*id).object = Some(oi);
-                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: n.cast_shadow, name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 };
+                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, first_emitter: 0 };
                         // Its glass / function triangles as ordinary world-space ones (same object).
                         for k in im.rest_first..im.rest_first + im.rest_count {
                             let (t, a, _) = inst.flat(&rest_tris[k as usize], &rest_attrs[k as usize], None);
