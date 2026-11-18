@@ -191,10 +191,10 @@ fn edits_in_place_leave_what_a_build_does() {
     assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.view.dof.is_some(), "a depth of field and an exposure: the view stays");
     w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
     assert!(!live.commit(&mut w).unwrap() && live.cam == live.view.camera && live.cam != away, "a lens: the view takes the scene's camera");
-    // A commit that rebuilds (another mesh) and brings another preset with it.
-    w.set_object(13, "more".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+    // A commit that rebuilds (another group: what a build places) and brings another preset with it.
+    w.set_object(13, "more".into(), None, Kind::Group, true, false).unwrap();
     w.set_settings(Settings { preset: "cinematic".into(), overrides: Some(serde_json::json!({ "post": { "vignette": 0.3 } })), ..w.settings.clone() });
-    assert!(live.commit(&mut w).unwrap(), "another mesh: a rebuild");
+    assert!(live.commit(&mut w).unwrap(), "another group: a rebuild");
     let mut fresh = open(&w).unwrap();
     (picture(&mut live, 1), picture(&mut fresh, 1));
     same_state("a rebuild with another preset", &live, &fresh);
@@ -1118,6 +1118,71 @@ fn a_still_mesh_moves_in_place_from_its_first_move() {
         }
         if live.g.hwrt {
             assert_eq!((moves(&live, 12), moves(&live, 11).0, moves(&live, 15).0, moves(&live, 16).0), ((true, vec![true; 2]), true, true, true), "{with} a light tree: they move from now on");
+        }
+    }
+}
+
+/// Meshes the scene did not say it edits change in place as those it did: a geometry two of them use replaced (one
+/// emits), one re-created with another geometry, a movable one added and moved, one removed, a group of two removed.
+/// With and without a light tree. After each: no rebuild, the light list is its triangles, the weights and the picture
+/// are a build's. (Hardware traversal: its room for edits grows from nothing.)
+#[test]
+fn meshes_change_in_place_whether_or_not_the_scene_said_so() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+    for tree in [false, true] {
+        let mut w = world();
+        let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: false, materials: vec![] };
+        w.set_object(14, "group".into(), None, Kind::Group, true, false).unwrap();
+        for (id, at) in [(15, Vec3::new(0.5, -0.5, 0.6)), (16, Vec3::new(0.0, -0.6, 0.9))] {
+            w.set_object(id, format!("o{id}"), Some(14), mesh(3, 1), true, false).unwrap();
+            w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::ONE).unwrap();
+        }
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) if c.g.hwrt => c,
+            Ok(_) => return eprintln!("skipped: no hardware RT"),
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        picture(&mut live, 4);
+        assert!(!live.sc.tables.retained.has_own_instances(), "the scene said of no mesh that it edits it");
+        type Edit = (&'static str, Box<dyn Fn(&mut World)>);
+        let edits: Vec<Edit> = vec![
+            ("a geometry two meshes use replaced", Box::new(move |w| w.set_geometry(3, quad(0.4)).unwrap())),
+            ("a mesh re-created with another geometry", Box::new(move |w| w.set_object(10, "wall".into(), None, mesh(3, 1), true, false).unwrap())),
+            (
+                "a movable mesh added",
+                Box::new(move |w| {
+                    w.set_object(13, "mover".into(), None, mesh(3, 1), true, true).unwrap();
+                    w.set_transform(13, Vec3::new(-0.7, 0.6, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+                }),
+            ),
+            ("the added mesh moved", Box::new(|w| w.set_transform(13, Vec3::new(-0.3, 0.7, 1.0), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap())),
+            (
+                "the lamp removed",
+                Box::new(|w| {
+                    w.remove(12);
+                }),
+            ),
+            (
+                "a group of two meshes removed",
+                Box::new(|w| {
+                    w.remove(14);
+                }),
+            ),
+        ];
+        for (what, edit) in &edits {
+            let what = format!("{what}, {} a light tree", if tree { "with" } else { "without" });
+            edit(&mut w);
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
+                list_is_its_triangles(&what, &live);
+            }
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         }
     }
 }

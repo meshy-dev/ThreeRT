@@ -311,10 +311,6 @@ pub struct Changes {
     /// Still meshes, or groups, that moved for the first time (and are movable from now on): the renderer moves their
     /// instances in place where it can (live/edits.rs `start_moving`), and rebuilds where it cannot.
     pub started: HashSet<u32>,
-    /// Meshes given their own BLAS (`own_blas`) by their geometry's first change, updated or replaced, without scene
-    /// code's `dynamicGeometry` (three.js code changes geometry without telling): that change rebuilds once, the next
-    /// apply in place. Frame log `fallback: promote`.
-    pub promoted_geometry: Vec<String>,
     /// Objects created (or re-created) in this batch: the rebuild builds them where they are, so setting their
     /// transform is not a move.
     pub created: HashSet<u32>,
@@ -346,9 +342,10 @@ impl Changes {
     }
 }
 
-/// An object kind whose geometry lives in its own BLAS (one TLAS instance per object): its edits apply in place.
-pub fn own_blas(k: &Kind) -> bool {
-    matches!(k, Kind::Procedural { .. } | Kind::Mesh { own_blas: true, .. })
+/// An object kind that is an instance of its geometry (one TLAS instance per object): its edits apply in place.
+/// (`Kind::Mesh::own_blas`, scene code's `dynamicGeometry`, says that the scene edits it: the build keeps room for that.)
+pub fn edits_in_place(k: &Kind) -> bool {
+    matches!(k, Kind::Procedural { .. } | Kind::Mesh { .. })
 }
 
 #[derive(Clone)]
@@ -465,21 +462,10 @@ impl World {
         if g.positions.iter().any(|v| !v.is_finite()) {
             return Err(anyhow!("geometry {id}: a position is not finite"));
         }
-        // A geometry only meshes with their own BLAS use is replaced in place; one a flattened mesh uses rebuilds. A new
-        // id no object uses yet: nothing to look for (the scan over every object cost ~40 µs a geometry at 10 k objects).
+        // A geometry meshes use is replaced in place (their instances' mesh: live/edits.rs `edit_geometry`); one an
+        // instanced object uses rebuilds. A new id no object uses yet: nothing to look for (the scan over every object
+        // cost ~40 µs a geometry at 10 k objects).
         let new = self.geometries.insert(id, Arc::new(g)).is_none();
-        if !new {
-            // Flattened meshes of a geometry that changes: promoted to their own BLAS (once; this change rebuilds).
-            for o in self.objects.values_mut() {
-                if let Kind::Mesh { geometry, own_blas: own @ false, .. } = &mut o.kind {
-                    if *geometry == id {
-                        *own = true;
-                        self.changes.structural = true;
-                        self.changes.promoted_geometry.push(o.name.clone());
-                    }
-                }
-            }
-        }
         if !self.changes.structural {
             if !new && self.objects.values().any(|o| matches!(o.kind, Kind::Instanced { geometry, procedural: false, .. } if geometry == id)) {
                 self.changes.structural = true;
@@ -551,30 +537,26 @@ impl World {
                 return Err(anyhow!("object {name}: a volume's majorant must be a finite number > 0 (1/m), not {majorant}"));
             }
         }
-        // A mesh given another geometry: promoted to its own BLAS if it was not (this swap rebuilds once, the next apply
-        // in place); a promotion stays.
+        // A mesh given another geometry is one the scene edits from now on (the build keeps room for that); it stays so.
         if let (Some(Kind::Mesh { geometry: old, own_blas: was, .. }), Kind::Mesh { geometry, own_blas, .. }) = (self.objects.get(&id).map(|o| &o.kind), &mut kind) {
-            if *was && !*own_blas {
+            if *was || (*old != *geometry && !self.changes.created.contains(&id)) {
                 *own_blas = true;
-            } else if !*own_blas && *old != *geometry && !self.changes.created.contains(&id) {
-                *own_blas = true;
-                self.changes.promoted_geometry.push(name.clone());
             }
         }
-        // An object with its own BLAS and no movable ancestor is built in place: a new one, or one re-created with the
-        // same kind of object, parent and shadow flag (scene code swapping its geometry or materials). Anything else
-        // rebuilds.
+        // A mesh is placed in place: a new one, or one re-created with the same kind of object, parent and shadow flag
+        // (scene code swapping its geometry or materials). So is procedural geometry with no movable ancestor. Anything
+        // else rebuilds.
         // (Movable as the build sees it: the object or any ancestor, `movable`.)
         let static_parent = parent.is_none_or(|p| !self.objects.contains_key(&p) || !self.movable(p));
+        let mesh = matches!(kind, Kind::Mesh { .. });
         // A new instanced mesh or static model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
         // says when it cannot); changing one still rebuilds.
         let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
-        let fresh = (own_blas(&kind) || placed_new)
-            && !movable
-            && static_parent
+        let fresh = (edits_in_place(&kind) || placed_new)
+            && (mesh || (!movable && static_parent))
             && match self.objects.get(&id) {
                 None => true,
-                Some(o) => !self.movable(id) && o.parent == parent && o.cast_shadow == cast_shadow && std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind) && own_blas(&o.kind),
+                Some(o) => (mesh || !self.movable(id)) && o.parent == parent && o.cast_shadow == cast_shadow && std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind) && edits_in_place(&o.kind),
             };
         match &kind {
             Kind::Instanced { capacity, .. } => {
@@ -968,17 +950,18 @@ impl World {
             doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
             k += 1;
         }
-        // A lone object with its own BLAS, an instanced mesh or a static model is removed in place (or never added, if it
-        // came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot take out).
-        if let [only] = doomed[..] {
-            if self.objects.get(&only).is_some_and(|o| own_blas(&o.kind) || matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. })) {
-                self.instanced.remove(&only);
-                self.objects.remove(&only);
-                if !self.changes.added.remove(&only) {
-                    self.changes.removed.insert(only);
+        // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or static
+        // model (or never added, if it came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot
+        // take out).
+        let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
+        if doomed.iter().all(|d| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || (doomed.len() > 1 && matches!(o.kind, Kind::Group)))) {
+            for d in &doomed {
+                self.instanced.remove(d);
+                if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
+                    self.changes.removed.insert(*d);
                 }
-                return doomed;
             }
+            return doomed;
         }
         for &d in &doomed {
             self.instanced.remove(&d);
@@ -1452,26 +1435,24 @@ mod tests {
         w.set_proc_geometry(3, "f".into(), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![]).unwrap();
         w.set_object(3, "proc".into(), None, Kind::Procedural { geometry: 3, materials: vec![1] }, true, false).unwrap();
         assert!(w.take_changes().structural, "the first commit builds the scene");
-        // Replacing geometry: in place for objects with their own BLAS, a rebuild for a flattened mesh's.
+        // Replacing geometry: in place, whether or not the scene said it edits the mesh.
         w.set_geometry(1, tri()).unwrap();
         w.set_proc_geometry(3, "f".into(), vec![0.0, 0.0, 0.0, 2.0, 2.0, 2.0], vec![]).unwrap();
         let c = w.take_changes();
         assert!(!c.structural && c.geometries.contains(&1) && c.geometries.contains(&3) && c.edits());
         w.set_geometry(2, tri()).unwrap();
         let c = w.take_changes();
-        assert!(c.structural && c.promoted_geometry == ["flat"], "a flattened mesh's geometry: promoted to its own BLAS, once");
-        assert!(matches!(w.objects[&2].kind, Kind::Mesh { own_blas: true, .. }));
-        w.set_geometry(2, tri()).unwrap();
-        assert!(!w.take_changes().structural, "promoted: in place");
-        // A flattened mesh given another geometry: promoted (that swap rebuilds once); the promotion stays.
+        assert!(!c.structural && c.geometries.contains(&2), "a mesh's geometry the scene did not say it edits: in place too");
+        // A mesh given another geometry is one the scene edits from now on (the build keeps room for that), and stays so.
         w.set_object(12, "lod".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
-        w.take_changes();
+        let c = w.take_changes();
+        assert!(!c.structural && c.added.contains(&12) && matches!(w.objects[&12].kind, Kind::Mesh { own_blas: false, .. }), "a new mesh: placed in place");
         w.set_object(12, "lod".into(), None, Kind::Mesh { geometry: 2, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         let c = w.take_changes();
-        assert!(c.structural && c.promoted_geometry == ["lod"] && matches!(w.objects[&12].kind, Kind::Mesh { own_blas: true, .. }));
+        assert!(!c.structural && c.added.contains(&12) && matches!(w.objects[&12].kind, Kind::Mesh { own_blas: true, .. }));
         w.set_object(12, "lod".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         let c = w.take_changes();
-        assert!(!c.structural && c.added.contains(&12) && matches!(w.objects[&12].kind, Kind::Mesh { own_blas: true, .. }), "promoted: in place");
+        assert!(!c.structural && c.added.contains(&12) && matches!(w.objects[&12].kind, Kind::Mesh { own_blas: true, .. }), "it stays one the scene edits");
         w.remove(12);
         w.take_changes();
         // Added (placed where it is: its transform is not a move), re-created with other geometry, removed.
@@ -1486,19 +1467,33 @@ mod tests {
         w.set_object(5, "brief".into(), None, Kind::Procedural { geometry: 3, materials: vec![1] }, true, false).unwrap();
         w.remove(5);
         assert!(!w.take_changes().any());
-        // Not in place: a movable one, another kind, a flattened mesh removed, an object with children.
+        // Not in place: movable procedural geometry, another kind.
         w.set_object(6, "mover".into(), None, Kind::Procedural { geometry: 3, materials: vec![1] }, true, true).unwrap();
         assert!(w.take_changes().structural, "movable");
         w.set_object(1, "own".into(), None, Kind::Procedural { geometry: 3, materials: vec![1] }, true, false).unwrap();
         assert!(w.take_changes().structural, "another kind");
+        // In place: a movable mesh added (its instance moves), any mesh removed, an object with children that are
+        // meshes, procedural geometry or groups.
+        w.set_object(13, "moving".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, true).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.added.contains(&13), "a movable mesh: placed in place");
         w.set_object(11, "flat2".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         w.take_changes();
         w.remove(11);
-        assert!(w.take_changes().structural, "a flattened mesh removed");
+        let c = w.take_changes();
+        assert!(!c.structural && c.removed.contains(&11), "a mesh the scene did not say it edits, removed");
         w.set_object(7, "child".into(), Some(4), Kind::Procedural { geometry: 3, materials: vec![1] }, true, false).unwrap();
+        w.set_object(14, "set".into(), Some(4), Kind::Group, true, false).unwrap();
         w.take_changes();
-        w.remove(4);
-        assert!(w.take_changes().structural, "with children");
+        assert_eq!(w.remove(4).len(), 3);
+        let c = w.take_changes();
+        assert!(!c.structural && c.removed.iter().copied().collect::<std::collections::BTreeSet<_>>() == [4, 7].into(), "with children: each taken out, the group has nothing drawn");
+        // Not in place: something else among them.
+        w.set_object(15, "set".into(), None, Kind::Group, true, false).unwrap();
+        w.set_object(16, "lamp".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "range": 0, "radius": 0.01 })).unwrap()), true, false).unwrap();
+        w.take_changes();
+        w.remove(15);
+        assert!(w.take_changes().structural, "a group with a light");
         // Under a still group in a movable subtree (`movable` walks the ancestors, as the build does).
         w.set_object(8, "rig".into(), None, Kind::Group, true, true).unwrap();
         w.set_object(9, "still".into(), Some(8), Kind::Group, true, false).unwrap();

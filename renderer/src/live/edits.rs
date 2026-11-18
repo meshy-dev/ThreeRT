@@ -420,11 +420,6 @@ impl LiveCore {
                 }
             }
         }
-        if !changes.promoted_geometry.is_empty() {
-            eprintln!("live: {}: geometry changed, now with its own BLAS (this once rebuilds; set `dynamicGeometry` or the attribute's DynamicDrawUsage to avoid it)", changes.promoted_geometry.join(", "));
-            self.fallback = Some("promote".into());
-            self.fallbacks += 1;
-        }
         if !changes.promoted.is_empty() {
             eprintln!("live: {} moved, now movable (this once rebuilds; set `movable = true` in the scene code to avoid it)", changes.promoted.join(", "));
         }
@@ -1744,7 +1739,7 @@ impl LiveCore {
         let Some(mut top) = gpu::Top::of(&mut up.accel, &mut up.units) else {
             // Software traversal without units. With units on, that is a scene without an instance yet: the first
             // one brings the unit walk into the kernel (F_UNITS), as hardware traversal's first brings F_INST.
-            let first = crate::units_on(true) && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { own_blas: true, .. } | Kind::Instanced { procedural: false, .. })));
+            let first = crate::units_on(true) && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. })));
             return Err(if first { "the scene's first instanced mesh (kernel feature)" } else { "software traversal" }.into());
         };
         // The objects to place again: those added, and those whose geometry was replaced.
@@ -1752,10 +1747,9 @@ impl LiveCore {
         if !ch.geometries.is_empty() {
             for (id, o) in &world.objects {
                 match &o.kind {
-                    Kind::Procedural { geometry, .. } | Kind::Mesh { geometry, own_blas: true, .. } if ch.geometries.contains(geometry) => {
+                    Kind::Procedural { geometry, .. } | Kind::Mesh { geometry, .. } if ch.geometries.contains(geometry) => {
                         todo.insert(*id);
                     }
-                    Kind::Mesh { geometry, .. } if ch.geometries.contains(geometry) => return Err("a flattened mesh's geometry changed".into()),
                     // (One added this commit is placed with its geometry as it is.)
                     Kind::Instanced { geometry, .. } if ch.geometries.contains(geometry) && !ch.added.contains(id) => return Err("an instanced mesh's geometry changed".into()),
                     _ => {}
@@ -1958,7 +1952,7 @@ impl LiveCore {
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
                 }
-                Kind::Mesh { own_blas: true, .. } | Kind::Instanced { procedural: false, .. } => {
+                Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. } => {
                     // An own-BLAS mesh, or (added in place) an instanced mesh: their mesh made alike.
                     let (geometry, material, capacity) = match &o.kind {
                         Kind::Mesh { geometry, material, .. } => (*geometry, *material, None),
@@ -2215,7 +2209,7 @@ impl LiveCore {
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
                 }
-                _ => return Err("not an object with its own BLAS".into()),
+                _ => return Err("not an object an edit places".into()),
             };
             // Its record, TLAS instance and object entry: where it had them, or new ones from the room.
             let (slot, record) = match (at, record) {
@@ -2245,7 +2239,7 @@ impl LiveCore {
                     inst.first_emitter = first as u32;
                     gpu.n[2][3] = f32::from_bits(first as u32);
                     let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-                    let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.emitters as usize, &tables.materials, o.driven);
+                    let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.emitters as usize, &tables.materials, o.driven || world.movable(id));
                     for (j, (e, w)) in made.into_iter().enumerate() {
                         new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                         match tables.emitter_tris.get_mut(first + j) {
@@ -2282,7 +2276,7 @@ impl LiveCore {
                     let mesh = if matches!(o.kind, Kind::Model { .. }) { scene::MeshKind::Model } else { scene::MeshKind::Own };
                     instances[record] = inst;
                     // (A mesh a body drives moves as an instance does, as the build's: `commit`.)
-                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves: o.driven })
+                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves: o.driven || world.movable(id) })
                 }
             };
             let st = tables.stride;
