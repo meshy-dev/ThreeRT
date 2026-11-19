@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BISTRO } from "../scenes/bistro.ts";
+import { ZERO_DAY } from "../scenes/zero-day.ts";
 import { installAssets } from "../showcase/assets.ts";
 import { bundleGame } from "./bundle-game.ts";
 import { frameStats, rendererBin } from "./lib/bench.ts";
@@ -51,8 +52,15 @@ const sway = (a: Pose, b: Pose, seconds: number) => (t: number): Pose => {
   return { pos: lerp(a.pos, b.pos, u), target: lerp(a.target, b.target, u), tan: a.tan };
 };
 
-let bistroPath: ReturnType<typeof gltfCameraPath> | undefined;
+let bistroPath: ReturnType<typeof gltfCameraPath> | undefined, zeroDayPath: typeof bistroPath;
 const bistro = (t: number) => (bistroPath ??= gltfCameraPath(join(root, BISTRO), "Camera")).at(t);
+/** Zero-Day's own camera move (the FBX take's DynamicCamera2), on the same clock as the room's animation. */
+const zeroDay = (t: number) => (zeroDayPath ??= gltfCameraPath(join(root, ZERO_DAY), "DynamicCamera2")).at(t);
+const lv = (pos: number[], target: number[], fov: number): Pose => ({ pos, target, tan: Math.tan((fov / 2) * Math.PI / 180) });
+const move = (p0: number[], p1: number[], t0: number[], t1: number[], fov: number, secs = 8.5) => (t: number): Pose => {
+  const u = ease(t / secs);
+  return lv(lerp(p0, p1, u), lerp(t0, t1, u), fov);
+};
 
 const CLIPS: Record<string, Clip> = {
   crowd: {
@@ -66,12 +74,30 @@ const CLIPS: Record<string, Clip> = {
     src: "games/tokyo/tokyo-tod.game.ts", room: "shiba-15.6-17.7-10.5-r1600", settle: 2,
   },
   voxels: {
-    what: "The voxel level under explosions, each with its fireball and light: what is cut loose falls",
-    src: "games/voxel-level/level-destruction-fire.game.ts", at: [[0.3, ev("show")]],
+    what: "The voxel city demolished: a street of buildings brought down one after another, every piece a rigid body, the dust thrown out as GPU particles",
+    src: "games/voxel-level/level-demolition.game.ts", at: [[0.5, ev("demolish")]],
+    camera: move([-73, 27, -116], [-72, 24, -111], [-66, 6, -64], [-66, 6, -62], 50),
   },
-  kabukicho: {
-    what: "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
-    src: "games/kabukicho/kabukicho.game.ts", scale: 0.5, before: [ev("traffic")],
+  "zero-day": {
+    what: "Beeple's Zero-Day (Measure One), animated: the room lit only by its ~10,000 glowing strips, the camera on the opening of its own move",
+    src: "games/zero-day/zero-day.game.ts", settle: 2, camera: (t) => zeroDay(0.5 + 0.4 * t),
+  },
+  cascade: {
+    what: "Four hundred balls, a third of them glowing, poured down a polished staircase: each lights the steps it lands on",
+    src: "games/showreel/cascade.game.ts", settle: 2.6, before: [ev("go")],
+    camera: (t) => { const u = ease(t / 8.5); return { pos: [3.2 - 1.0 * u, 3.7 - 0.5 * u, 7.4 - 0.8 * u], target: [0, 1.7 - 0.2 * u, -3.0 + 0.6 * u], tan: Math.tan(19 * Math.PI / 180) }; },
+  },
+  wreck: {
+    what: "A wrecking ball through a round tower of bricks at last light, a quarter of them glowing: they light the floor as they fall",
+    src: "games/showreel/wreck.game.ts", settle: 4, at: [[1.0, ev("go")]],
+    camera: (t) => {
+      const a = (60 - 10 * ease(t / 8.5)) * Math.PI / 180, r = 11.6 - 1.0 * ease(t / 2.6) + 1.6 * ease((t - 2.5) / 2.5), h = 1.25 + 0.6 * ease((t - 2.5) / 3);
+      return { pos: [r * Math.sin(a), h, -r * Math.cos(a)], target: [0, 2.8 - 0.8 * ease((t - 2.6) / 2.5), 0.8 - 2.2 * ease((t - 2.2) / 1.6)], tan: Math.tan(19 * Math.PI / 180) };
+    },
+  },
+  lanterns: {
+    what: "Four hundred lanterns in a dark hall over a polished floor: every one lights and shadows",
+    src: "games/showreel/lanterns.game.ts", camera: move([-4.5, 1.0, 5.5], [-3.0, 2.7, 4.0], [0, 1.4, -0.5], [0, 1.2, -0.5], 50),
   },
   home: {
     what: "Daylight Home: golden hour, night with the lamps on, then the morning sun",
@@ -92,10 +118,6 @@ const CLIPS: Record<string, Clip> = {
   moon: {
     what: "Moon Phases: a month of the Moon round the Earth",
     src: "showcase/moon-phases/moon-phases.game.ts",
-  },
-  showroom: {
-    what: "Boutique Showroom in the evening: walking to the sneaker, then the sunglasses",
-    src: "showcase/showroom/showroom.game.ts", at: [[0.6, ev("next")], [4.4, ev("next")]],
   },
 };
 

@@ -17,6 +17,9 @@
 //   shatter    `fell`, then from two seconds on a cut 0.2 m thick every tenth of a second through what fell, 30 a
 //              metre apart across the road and 30 along it: the bodies are cut into more and more bodies (ROADMAP
 //              § 6 step 8: how many bodies a frame holds, and the cap on them)
+//   demolish   the landing page's reel: the buildings along a street brought down one after another, nearest first,
+//              0.3 s apart: each cut off its footing and into pieces (at every floor, and down through it both ways),
+//              then a charge at its back pushes the pieces out into the street (level-demolition.game.ts)
 //   shatter-dense  the same with the cuts half a metre apart and twenty a second: more bodies, sooner (past 500:
 //              the level's cap is reached and held)
 // With `debris`
@@ -27,21 +30,22 @@
 // thrown out from the explosion, collided with the ground and the level's voxels (its occupancy grid), no CPU work
 // per particle. With `smoke` (level-destruction-smoke.game.ts; ROADMAP § 6 step 5b), every explosion leaves a puff of
 // simulated smoke (`SimulatedSmoke`: a density grid over the streets ahead of the camera, advected, diffused and lifted
-// on the GPU every frame), which rises and drifts with the wind. With `flames` instead (level-destruction-fire.game.ts;
-// ROADMAP § 6 step 10 b), every explosion is `Explosions.explode`: the voxel explosion, a fireball from a pool of 8
-// (cooling to its own dark smoke), and a light following it. Spots alternate between the ground ahead
+// on the GPU every frame), which rises and drifts with the wind. Spots alternate between the ground ahead
 // of the camera and the walls of the buildings nearest to it. Each explosion
 // logs what it did (`explosion {...}`, renderer timings included) for the bench. Sun and sky; the lamps do not glow (at
 // night they do, and their pieces fly: level-night.game.ts).
 //   node tools/voxel-level/generate.ts --granularity object && node tools/bundle-game.ts games/voxel-level/level-destruction.game.ts
 import { BoxGeometry, Color, DirectionalLight, GpuParticles, InstancedMesh, MaterialFunction, Mesh, MeshStandardMaterial, ParticleProgram, SimulatedSmoke, PerspectiveCamera, PlaneGeometry, ProceduralGeometry, ProceduralMesh, Scene, SkyAtmosphere } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
-import { Explosions, VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
+import { VOXEL_BRICKS, voxelBodies, voxelCarve, voxelDebris, voxelExplode, voxelFrame, voxelHash, voxelLevel, type VoxelFrame } from "@threert/voxel";
 import { nativeObjects, nativePalette } from "./native.ts";
-import { EDGE, PALETTE, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
+import { EDGE, PALETTE, PERIOD, ROAD, SIZE, VOXEL, cameraPath, groundHeight, levelPlan, toScene } from "./plan.ts";
 
-type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense";
+type Scenario = "singles" | "sustained" | "peak" | "stress" | "endurance" | "show" | "crater" | "fell" | "topple" | "shatter" | "shatter-dense" | "demolish";
 interface State { scenario: Scenario | null; started: number }
+
+/** `demolish`: the charge's push (N s / m² per m of radius; voxelExplode). */
+const DEMOLITION_PUSH = 1200;
 
 /** Spots for explosions: alternately on the ground ahead of the camera and on the walls of the buildings nearest it
  *  (deterministic: the k-th spot is always the same). */
@@ -216,24 +220,40 @@ class Dust {
  *  `smoke`: the cells of the simulated smoke's grid. `physics` (ROADMAP § 6 step 8; on by default): the level
  *  collides and what comes loose is a rigid body, logged every half second while there are any as `bodies {...}`
  *  (how many, how many sleep, the fastest); off, loose parts fall through the lattice as in step 6 and are logged
- *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (300 unless given). `flames` (ROADMAP § 6
- *  step 10 b): every explosion through `Explosions` (fireball and light); not with `smoke` (volumes must not overlap). */
-export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number, flames = false) {
+ *  per frame as `batch {...}`. `maxBodies`: the level's cap on voxel bodies (300 unless given). */
+export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boolean | "dust" = false, smoke: false | [number, number, number] = false, physics = true, maxBodies?: number) {
   const keys = cameraPath(seed);
   const at = spots(seed);
   // The ground points of the eight trees nearest ahead of the camera (`topple`).
   const [camX, , camZ] = keys[0].pos;
   const trunks = levelPlan(seed).props.filter((p) => p.kind === "tree").map((p) => toScene(p.x, p.y, p.z)).filter((p) => p[2] > camZ + 4).sort((a, b) => Math.hypot(a[0] - camX, a[2] - camZ) - Math.hypot(b[0] - camX, b[2] - camZ)).slice(0, 8);
-  let next = 0, fired = 0, frames = 0, last = -1, hadBodies = false, now = 0;
+  // `demolish`: the buildings either side of the third street along x (x = -70.5 m for seed 1) from its crossing at
+  // z = -96.5 m on, nearest the crossing first, 0.3 s apart. A building is cut off its footing and into pieces (a saw
+  // cut across it at every floor, two down through it), then a charge at its back pushes the pieces out into the
+  // street; what the cuts and the charge take is thrown out as dust (with `debris: "dust"`). An edit every other frame at most (a frame's script has 50 ms; a cut that makes a dozen bodies takes 20 to 45).
+  const street = toScene(2 * PERIOD + ROAD / 2, 0, 0)[0];
+  type Op = { at: number; building: number; shape: Parameters<typeof voxelCarve>[0] } | { at: number; building: number; blast: [number, number, number, number] };
+  const demolition: Op[] = levelPlan(seed).buildings
+    .map((b) => ({ b, c: toScene(b.x + b.w / 2, b.base, b.z + b.d / 2) }))
+    .filter(({ c }) => Math.abs(c[0] - street) < 16 && c[2] > -95 && c[2] < -30)
+    .sort((a, b) => a.c[2] - b.c[2])
+    .flatMap(({ b, c }, i): Op[] => {
+      const [x0, y0, z0] = toScene(b.x - 5, b.base, b.z - 5), [x1, , z1] = toScene(b.x + b.w + 5, b.base, b.z + b.d + 5), top = y0 + b.floors * 3 + 6;
+      const start = 0.3 * i, cuts = [0.4, ...Array.from({ length: b.floors - 1 }, (_, k) => 3 * (k + 1) + 0.1)];
+      const out: Op[] = cuts.map((h, k) => ({ at: start + (2 * k) / 60, building: i, shape: { box: [x0, y0 + h - 0.15, z0, x1, y0 + h + 0.15, z1] as [number, number, number, number, number, number] } }));
+      out.push({ at: start + (2 * cuts.length) / 60, building: i, shape: { box: [c[0] - 0.15, y0 + 0.2, z0, c[0] + 0.15, top, z1] } });
+      out.push({ at: start + (2 * cuts.length + 2) / 60, building: i, shape: { box: [x0, y0 + 0.2, c[2] - 0.15, x1, top, c[2] + 0.15] } });
+      const back = Math.sign(c[0] - street) * (b.w * VOXEL) / 2 + c[0];
+      out.push({ at: start + (2 * cuts.length + 6) / 60, building: i, blast: [back, y0 + 1.5, c[2], 4] });
+      return out;
+    })
+    .sort((a, b) => a.at - b.at);
+  let next = 0, fired = 0, frames = 0, last = -1, hadBodies = false;
   const flying = debris === true ? new Debris(seed) : null;
   const dust = debris === "dust" ? new Dust() : null;
   // Smoke: a box 22 x 14 x 36 m over the streets ahead of the camera (from 3 m ahead; the level's +z), `smoke` cells
   // across it, a light wind across the road.
   const [cx, cy, cz] = keys[0].pos;
-  // Fireballs and the smoke grid are not both on: the grid's box is a volume, and the fireballs would be in it (volumes
-  // must not overlap; docs/VOXEL.md, "Temporary ways round on the engine's shared paths").
-  if (flames && smoke) throw new Error("destructionGame: fire and the smoke grid are not both on (volumes must not overlap)");
-  const boom = flames ? new Explosions() : null;
   const cloud = smoke ? new SimulatedSmoke({ size: smoke, density: 2.5, wind: [0.8, 0, 0.3], buoyancy: 3.5, dissipation: 0.2, cooling: 0.9 }) : null;
   if (cloud) {
     cloud.position.set(cx, cy + 5, cz + 21);
@@ -250,10 +270,10 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
   };
   const fire = (r: number, spot?: number) => {
     const [x, y, z] = at[(spot ?? next++) % at.length];
-    const e = boom ? boom.explode(x, y, z, r, now) : voxelExplode(x, y, z, r);
+    const e = voxelExplode(x, y, z, r);
     const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
     cloud?.puff([x, y + 0.3 * r, z], 0.8 * r + 0.3, { density: 0.9, temperature: 1, push: 1.2 });
-    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...(boom ? { burning: boom.stats.burning, lit: boom.stats.lit } : {}), ...speedsNow() })}`);
+    console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, ...e, ...(flying ? { thrown, debris: flying.live } : dust ? { thrown } : {}), ...speedsNow() })}`);
   };
   return defineGame<State>({
     state: { scenario: null, started: 0 },
@@ -285,13 +305,10 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       if (flying) scene.add(flying.mesh);
       if (dust) scene.add(dust.node);
       if (cloud) scene.add(cloud);
-      if (boom) scene.add(boom);
-      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}${flames ? "-fire" : ""}${physics ? "" : "-lattice"}`, width: 1280, height: 720, preset: "cinematic" as const } };
+      return { scene, camera, options: { name: `voxel-level-destruction-${route}${debris === true ? "-debris" : debris ? "-dust" : ""}${smoke ? "-smoke" : ""}${physics ? "" : "-lattice"}`, width: 1280, height: 720, preset: "cinematic" as const } };
     },
     frame(f) {
       frames++;
-      now = f.time;
-      boom?.step(now);
       flying?.step(f.dt);
       const b = voxelFrame(f.dt) as VoxelFrame; // (the level is loaded by the first frame)
       if (b.batches > 0 || (b.settled ?? 0) > 0) console.log(`batch ${JSON.stringify(b)}`);
@@ -355,6 +372,25 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
           const e = voxelCarve({ box: along ? [p - 0.1, y + 0.3, z - 6, p + 0.1, y + 40, z + 24] : [x - 15, y + 0.3, p - 0.1, x + 15, y + 40, p + 0.1] });
           console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, ...e })}`);
         }
+      } else if (s === "demolish") {
+        // The next edit due, at most one every other frame.
+        const k = Math.floor(t * 60);
+        if (k >= last + 2 && next < demolition.length && demolition[next].at <= t) {
+          last = k;
+          const op = demolition[next++];
+          if ("blast" in op) {
+            const [x, y, z, r] = op.blast;
+            const e = voxelExplode(x, y, z, r, { push: DEMOLITION_PUSH });
+            const thrown = flying ? flying.spawn(voxelDebris(), [x, y, z]) : dust ? dust.spawn(voxelDebris(), [x, y, z]) : 0;
+            console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r, building: op.building, ...e, ...(flying || dust ? { thrown } : {}), ...speedsNow() })}`);
+          } else {
+            const e = voxelCarve(op.shape);
+            // (What the cut took is thrown out as dust from its middle.)
+            const [x0, y0, z0, x1, y1, z1] = (op.shape as { box: number[] }).box;
+            const thrown = dust ? dust.spawn(voxelDebris(), [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2]) : 0;
+            console.log(`explosion ${JSON.stringify({ k: fired++, frame: frames, r: 0, cut: true, building: op.building, ...e, ...(dust ? { thrown } : {}) })}`);
+          }
+        }
       } else if (s === "crater") {
         // Ground spot 62: 9 m ahead on the road.
         if (t >= 1 && last !== 0) {
@@ -383,6 +419,7 @@ export function destructionGame(route: "mesh" | "boxes", seed = 1, debris: boole
       fell: (tx) => { tx.state.scenario = "fell"; tx.state.started = frames; last = -1; },
       shatter: (tx) => { tx.state.scenario = "shatter"; tx.state.started = frames; last = -1; },
       "shatter-dense": (tx) => { tx.state.scenario = "shatter-dense"; tx.state.started = frames; last = -1; },
+      demolish: (tx) => { tx.state.scenario = "demolish"; tx.state.started = frames; last = -1; next = 0; },
       topple: (tx) => { tx.state.scenario = "topple"; tx.state.started = frames; last = -1; },
       // The level's hash, logged (`hash <16 hex digits>`): the same events at the same frames give the same one.
       // With physics, the physics world's hash too (the bodies' poses and velocities, bit for bit).
