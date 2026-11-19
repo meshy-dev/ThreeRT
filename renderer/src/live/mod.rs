@@ -1,7 +1,7 @@
 //! Real-time renderer (LiveCore), modelled on UE5's real-time path with hardware RT: every frame traces 1+ spp
 //! (primary visibility, GI, shadows, reflections), reprojects and accumulates history (converging to the offline
 //! reference while the camera holds still), denoises and applies the UE post chain. Drawn by the native window viewer
-//! (`view`) and the playground client; `live` runs it headless at a fixed frame rate for benchmarks:
+//! (`view`) and the native clients; `live` runs it headless at a fixed frame rate for benchmarks:
 //!
 //!   threert-render live <game bundle.js> [--assets DIR] [--room id] [--width 1280 --height 720 --fps 60 --bounces 4
 //!                       --scale 1|0.6|auto --display-scale 1|2|3] [--frame-log frames.jsonl]
@@ -221,7 +221,7 @@ pub enum Cmd {
 }
 
 /// The real-time renderer: scene + screen targets + camera/history state. Records one frame at a time; the output
-/// (sRGB BGRA8 per pixel) lands in `targets.out`. Used by the headless runner, the native window viewer and the playground.
+/// (sRGB BGRA8 per pixel) lands in `targets.out`. Used by the headless runner, the native window viewer and the native clients.
 pub struct LiveCore {
     /// The game's particle spawns since the last frame (`World::particle_spawns`), for the GPU particle pass.
     particle_spawns: std::collections::BTreeMap<u32, Vec<f32>>,
@@ -290,8 +290,6 @@ pub struct LiveCore {
     pub view_mode: u32,
     /// Lockstep frame time (s; benchmarks): motion blur and exposure adaptation use it instead of the wall clock.
     pub fixed_dt: Option<f32>,
-    /// A/B switch (playground key N): motion blur off whatever the scene's post settings say.
-    pub motion_blur_off: bool,
     pub triangles: usize,
     pub scene_name: String,
     /// Scene time, s: what `advance_time` added up, the dt each frame script gets, so it is the game's clock (`f.time`)
@@ -542,7 +540,7 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, motion_blur_off: false, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let mut core = LiveCore { pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();
         Ok(core)

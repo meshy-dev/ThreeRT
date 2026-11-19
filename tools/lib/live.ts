@@ -49,7 +49,7 @@ export async function gpuUtilization(ms = 2000): Promise<number | null> {
 }
 
 /**
- * Whether the GPU is quiet enough to time: no known GPU process (UE, another live renderer, a playground) and the
+ * Whether the GPU is quiet enough to time: no known GPU process (UE, another live renderer) and the
  * device under 15 % busy over 3 s (that also catches a render farm or a hung job). Returns the reasons it is not.
  */
 export async function quietGpu(): Promise<string[]> {

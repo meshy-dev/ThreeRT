@@ -19,7 +19,7 @@
 //   seek(time, now)               the frame script's clock set to `time`, the scene shown settled at that moment (an
 //                                 offline render at a scene time: the timeline a frame script draws)
 //   outline() / inspect(name) / edit(name, path, value)   the editor: the live scene, not a document (name "" = the
-//                                 world: sky, fog, wetness); paths as the playground's Details panel shows them
+//                                 world: sky, fog, wetness); paths as `inspect` returns them
 //
 // Strings carry JSON both ways.
 

@@ -15,7 +15,7 @@
 // measured first. Pass: still and moving each ≤ baseline + 0.3 ms and ≤ 16.7 ms; the drive's GPU p50 / p95 ≤ baseline
 // + 0.3 ms and its interval p50 / p95 ≤ baseline + max(1.5 ms, 7.5 %) (wall-clock pacing); otherwise the PR moves up
 // to R3. The drive's interval p95 against 16.7 ms is reported as the budget (over it today: ROADMAP item 3), not gated.
-// The GPU must be quiet before and after (no UE, other renderer, playground, or > 15 % utilisation); --force measures
+// The GPU must be quiet before and after (no UE, other renderer, or > 15 % utilisation); --force measures
 // anyway and marks the result. Exit code: 0 pass, 1 fail, 2 not measured. Result: out/bench/perf-smoke.json.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

@@ -171,18 +171,6 @@ lighting changes converge within a few frames.
 * Weak spot: indirect-dominated interiors right after a disocclusion (sun-room k = 1: SSIM 0.62). Lumen's radiance
   cache keeps those stable; here they need ~0.25–1 s of history. A world-space irradiance cache is the next step.
 
-## 7. Playground client (macOS native, PocketJS UI)
-
-`playground/` is a native editor for manual acceptance: one winit window and one wgpu 30 device shared by the
-PocketJS UI (Solid TSX compiled to a QuickJS bundle + pak; laid out and drawn by PocketJS's wgpu renderer, recorded
-into the frame's command encoder) and LiveCore, whose output is composited inside the UI layout through a PocketJS
-compositor surface. The opened scene / game runs in the host's embedded JS runtime (as on a render node); a Node
-backend (`tools/playground-backend.ts`) keeps the catalog, the editor model (selection, details, undo) and the Play
-flow, and edits apply to the live scene (parameters in place, structure by an in-memory rebuild; opening the 4
-M-triangle Kabukichō port takes ~5.8 s). Measured (`--tour`, M5, 2844×1768 Retina window): 60 fps median on all seven scenes (Kabukichō: 60.1 with dynamic resolution); UI turn
-0.01–0.1 ms; `--uitest` drives real pointer input through 14 checks at a 1245×829 window (content browser + scene menu, outliner, scrub edits, undo,
-checkbox, compare, view mode, viewport picking, Play / Stop, in-game clicks) — 14/14 pass.
-
 ## 8. Kabukichō Night: a procedural, photo-referenced interactive scene
 
 `games/kabukicho/kabukicho.game.ts` is an agent-style game written only against the Three-like DSL and the
@@ -256,7 +244,6 @@ bun renderer/build.ts                                                     # nati
 node tools/bench-quality.ts && node tools/bench-throughput.ts && node tools/cost-model.ts
 node cloud/test/e2e-local.ts                                              # gameplay + cloud closed loop (local)
 renderer/target/release/threert-render play out/bundles/light-room.js    # local 60 fps native demo (window)
-bun playground/build.ts && bun playground/run.ts                                  # macOS playground client (editor + A/B vs UE5)
 node tools/bench-live.ts                                                  # real-time viewport vs UE5
 node tools/kabukicho-atlas.ts                                             # Kabukichō gate atlas (headless Chrome)
 bun ue5/capture.ts <scratch-copy>.uproject <job.json>                    # UE ground truth of an existing level (MRQ)

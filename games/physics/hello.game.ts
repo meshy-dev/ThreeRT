@@ -50,7 +50,7 @@ export default defineGame({
   state: {},
   keys: { R: "report" },
   setup: () => {
-    // (Setup may run again in one runtime, the playground's Stop: the boxes of the scene before are not this one's.)
+    // (Setup may run again in one runtime, an editor's Stop: the boxes of the scene before are not this one's.)
     boxes.length = 0;
     [clicks, kicks] = [0, 0];
     const scene = new Scene();

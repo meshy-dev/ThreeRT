@@ -136,10 +136,6 @@ node tools/build-scenes.ts                              bundles every catalog en
 the job's state (`setState`, settled by the frame script). A job whose scene reads files that are not under the asset
 root yet fails with `missing: [...]`; the node fetches them and retries.
 
-The playground runs the opened scene the same way: its host holds the `GameSession`; the Node backend keeps the
-catalog, the selection, the undo stack (Details edits as `{node, path, before, after}`) and the Play flow. Stop
-re-runs setup and replays the editor's edits (UE PIE: Play changes are discarded).
-
 ## World handlers
 
 A handler is a transaction on the JSON state and may run in a room, where there is no scene and no physics world; the
@@ -166,7 +162,7 @@ export default defineGame({
 });
 ```
 
-- **Where:** on the node that owns the scene and the physics world (`play`, `live`, the playground: wherever events
+- **Where:** on the node that owns the scene and the physics world (`play`, `live`, an app embedding the engine: wherever events
   arrive at a node). Not in a room.
 - **When:** as the event arrives, synchronously, before the engine's next physics tick. What it changed goes to the
   engine through the scene binding when it returns: no commit, and `frame` is not run again for it.

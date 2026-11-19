@@ -11,7 +11,6 @@ target/
 # A game's store in `threert-render play` (`--store`, by default under the asset root).
 .threert/
 /assets
-playground/vendor/
 
 # The site's generated directories: the client release (a closed-source binary) and the example packages, written by
 # the client repository's release script (site/README.md).

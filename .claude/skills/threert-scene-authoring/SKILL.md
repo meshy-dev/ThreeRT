@@ -42,7 +42,7 @@ way; every one of those techniques exists in our DSL and renders natively in rea
 9. **Review loop** — render every hero view, look at them next to the references, list the 3 biggest differences,
    fix, repeat (≥ 3 rounds). Check close-ups (window, ground, sign) not just the wide shot.
    See [review & performance](references/review-and-performance.md).
-10. **Performance pass.** Live viewport ≥ 60 fps target (bench-live). The viewer and playground hold 60 fps with
+10. **Performance pass.** Live viewport ≥ 60 fps target (bench-live). The viewer holds 60 fps with
     dynamic resolution (render scale 50–100 %, TSR-style upsampling), so measure the cost at `--scale 1` and trade
     features per the cost table before relying on the scale.
 

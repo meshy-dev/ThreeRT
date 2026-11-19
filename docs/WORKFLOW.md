@@ -163,7 +163,7 @@ the packages whose version npm does not have yet, without a token (npm trusts th
 
 ## Scheduled suites on main (after merging)
 
-Both suites are run by the supervisor, only on a quiet GPU (no other `threert-render`, UE, playground or bench
+Both suites are run by the supervisor, only on a quiet GPU (no other `threert-render`, UE or bench
 process; checked before and after, and a run with interference is discarded). Results are kept per main commit, so
 a later run compares against the previous one.
 
@@ -216,7 +216,7 @@ a later run compares against the previous one.
   using regional p95, maximum error and trail length against the same build's converged frames and against our
   unbiased offline render (no clamps, no denoiser, high spp; UE only in milestone audits, ROADMAP "How we are judged").
   Never quote only 100 % scale or frame means.
-- Never run a GPU benchmark while another GPU job runs (UE, a playground, the Studio render farm, a second bench).
+- Never run a GPU benchmark while another GPU job runs (UE, the Studio render farm, a second bench).
   On a quiet GPU, Kabukichō repeated within ±0.05 ms and Bistro within ±0.03 ms. A busy one has shown +3 ms and worse.
 - A/B pairs come from the same run where they can, because lockstep shader time follows the wall clock and separate
   runs differ by about ±2 %.
@@ -247,7 +247,7 @@ a later run compares against the previous one.
   suite confirms them: exit 0 if neither reads as regressed, 1 if one does, 2 if not measured (the GPU was not quiet
   before or after the launches).
 - **Shared code.**
-  - `tools/lib/live.ts`: the measurements. The GPU counts as quiet when no UE, other renderer or playground runs and
+  - `tools/lib/live.ts`: the measurements. The GPU counts as quiet when no UE or other renderer runs and
     the device is under 15 % busy (macOS `ioreg`) before and after a run.
   - `tools/lib/build-at.ts`: builds another commit in its own worktree with one shared cargo target directory.
     Bisects cross the ThreeRT rename, so it reads the binary's name from the commit and sets environment switches

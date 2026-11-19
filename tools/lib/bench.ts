@@ -130,7 +130,7 @@ export function requireGpuLock(tool?: string): void {
 }
 
 /**
- * Processes that would skew GPU measurements: UE editors, playgrounds, Blender, and renderers running a live view or
+ * Processes that would skew GPU measurements: UE editors, Blender, and renderers running a live view or
  * a render farm. Matched on the executable's name (not on command lines, which may only mention one).
  */
 export function gpuBusy(): string[] {
@@ -151,8 +151,8 @@ export function gpuBusy(): string[] {
     if (!m || m[1] === self) continue;
     const exe = m[2].trim().split("/").pop()!;
     const a = args.get(m[1]) ?? "";
-    // Renderer and playground binaries by suffix: bisects run builds from before and after the ThreeRT rename.
-    const gpu = /^(UnrealEditor|Blender)$/.test(exe) || /^[a-z0-9]+-playground$/.test(exe) || (/^[a-z0-9]+-render$/.test(exe) && / (live|play|view|farm)( |$)/.test(a));
+    // Renderer binaries by suffix: bisects run builds from before and after the ThreeRT rename.
+    const gpu = /^(UnrealEditor|Blender)$/.test(exe) || (/^[a-z0-9]+-render$/.test(exe) && / (live|play|view|farm)( |$)/.test(a));
     if (gpu) out.push(`${m[1]} ${a.replace(/\s+/g, " ").slice(0, 110)}`);
   }
   return out;

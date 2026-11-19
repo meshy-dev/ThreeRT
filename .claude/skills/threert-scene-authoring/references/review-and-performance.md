@@ -3,7 +3,7 @@
 ## Review loop (every round)
 
 1. Build the bundle, render each hero view offline (`--spp 128`, OIDN) and grab a live snapshot
-   (`threert-render live out/bundles/x.js` + `{"cmd":"snapshot","path":...,"after":64}` on stdin, or the playground).
+   (`threert-render live out/bundles/x.js` + `{"cmd":"snapshot","path":...,"after":64}` on stdin).
 2. Put renders next to the reference photos; also render close-ups (`render --camera
    '{"position":[..],"target":[..],"fov":..}'`) of a facade, the ground, a sign cluster.
 3. Write the three largest differences, ranked by how much of the frame they cover; fix those first. Typical order:

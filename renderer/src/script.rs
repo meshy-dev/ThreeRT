@@ -77,7 +77,7 @@ pub fn set_log_sink(sink: Option<fn(&str, &str)>) {
 }
 
 /// The game code a session runs: a one-script bundle (tools/bundle-game.ts), or a game module on the runtime module
-/// (`ScriptHost::from_modules`, the cloud's layout; the clients' playground code).
+/// (`ScriptHost::from_modules`, the cloud's layout).
 pub enum GameCode<'a> {
     Bundle(&'a str),
     Modules { game: &'a str, runtime: &'a str },
@@ -759,7 +759,7 @@ impl ScriptHost {
 
 /// A game running on this node with its live view: the scene built in the embedded runtime, events (local authority)
 /// and the frame script committed to the renderer. Shared by the native window (`play`), the headless runner and the
-/// playground.
+/// native clients.
 pub struct GameSession {
     pub host: ScriptHost,
     pub seq: i64,
@@ -788,8 +788,8 @@ fn click_log() -> bool {
 }
 
 /// The frame script's clock: the gameplay FrameRunner adds each frame's dt clamped to [0, 0.1] s, in f64. While a
-/// frame script runs, the scene time is this clock, whatever advanced the scene between its frames (the playground
-/// animates the scene while editing, and runs the frame script only in Play).
+/// frame script runs, the scene time is this clock, whatever advanced the scene between its frames (an editor
+/// may animate the scene while editing, and run the frame script only in Play).
 #[derive(Default)]
 struct GameClock(f64);
 

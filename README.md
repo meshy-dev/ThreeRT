@@ -171,7 +171,6 @@ npm run test:render                                                      # the r
 | **Zero-Day** | Beeple's Zero-Day (Measure One), animated | [`games/zero-day`](games/zero-day) |
 | **Tokyo** | Shinjuku and Shiba from the PLATEAU city model, with a live time of day | [`games/tokyo`](games/tokyo), [`tools/tokyo`](tools/tokyo) |
 | **Voxel level** | A destructible voxel city: explosions, falling pieces, fire and smoke | [`games/voxel-level`](games/voxel-level), [`docs/VOXEL.md`](docs/VOXEL.md) |
-| **Playground** | A macOS editor around the live viewport: outliner, live editing, Play-in-Editor, A/B against UE5 | `bun playground/build.ts && bun playground/run.ts` |
 
 ## Repository layout
 
@@ -184,7 +183,6 @@ npm run test:render                                                      # the r
 | [`tools/`](tools) | Bundling, benches and gates, the three.js comparison, the Tokyo pipeline |
 | [`compare/`](compare) | Hello-world scenes side by side in three.js and ThreeRT |
 | [`ue5/`](ue5) | UE5 reference captures (Lumen and the Path Tracer): the ground truth the renderer is measured against |
-| [`playground/`](playground) | ThreeRT Playground, the macOS editor |
 | [`site/`](site) | [threert.dev](https://threert.dev): the landing page, Download and Docs (the apps themselves are on [threert.app](https://threert.app)) |
 
 ## Documentation
