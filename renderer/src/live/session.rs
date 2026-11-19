@@ -20,6 +20,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
     // Frame-script cost (script + commit), reported every 2 s.
     let (mut fs_sum, mut fs_max, mut fs_n) = (0.0f32, 0.0f32, 0u32);
     core.bounces = opts.bounces;
+    if let Some(mode) = opts.reconstruction { core.set_reconstruction(mode); }
     core.set_scale(opts.scale.unwrap_or(0.0));
     core.set_display_scale(opts.display_scale);
     eprintln!("live: load {}", serde_json::Value::Object(core.load_timings().iter().map(|(k, v)| (k.clone(), (*v).into())).collect()));
@@ -79,6 +80,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
                 Cmd::Time(t) => core.set_time(t),
                 Cmd::Mode(m) => core.view_mode = m,
                 Cmd::Bounces(b) => core.bounces = b,
+                Cmd::Reconstruction(v) => core.set_reconstruction(v),
                 Cmd::Scale(s) => core.set_scale(s),
                 Cmd::Resize(w, h) => {
                     let t = Instant::now();
@@ -179,7 +181,7 @@ pub fn run(presets: &Path, opts: LiveOpts) -> Result<()> {
             use std::io::Write;
             let line = serde_json::json!({
                 "t": start.elapsed().as_secs_f64() * 1e3, "interval": last_frame.elapsed().as_secs_f64() * 1e3, "start": t_frame.duration_since(prev_start).as_secs_f64() * 1e3,
-                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "build": core.build_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "top": core.top_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved, "kicks": s.kicks }) }), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_count(),
+                "cpu": t_frame.elapsed().as_secs_f64() * 1e3, "script": game.frame_ms, "js": game.js_ms, "commit": game.commit_ms, "skin": core.cpu_skin_ms, "upload": core.cpu_upload_ms, "blas": core.gpu_blas_ms, "wait": core.cpu_wait_ms, "gpu": core.gpu_ms, "trace": core.gpu_trace_ms, "edit": core.edit_ms, "instanced": core.instanced_ms, "build": core.build_ms, "edit_split": [core.edit_split.tris, core.edit_split.upload, core.edit_split.blas, core.edit_split.added, core.edit_split.deformed, core.edit_split.objects], "rebuild": core.rebuild_ms, "fallback": core.fallback, "fallbacks": core.fallbacks, "room": core.room_stats(), "top": core.top_stats(), "voxel": std::mem::take(&mut game.host.voxels.borrow_mut().ticks), "physics": game.host.physics.borrow_mut().as_mut().map(|p| { let s = p.take_stats(); serde_json::json!({ "ticks": s.ticks, "step": s.step_ms, "sync": s.sync_ms, "bodies": s.bodies, "moved": s.moved, "kicks": s.kicks }) }), "reconstruction": core.reconstruction().name(), "scale": core.render_scale, "history": core.history_len, "guard": core.guard_count(),
             });
             writeln!(l, "{line}")?;
         }
@@ -285,6 +287,7 @@ pub fn parse_cmd(line: &str) -> Option<Cmd> {
         "mode" => Cmd::Mode(v["mode"].as_u64()? as u32),
         "bounces" => Cmd::Bounces(v["bounces"].as_u64()?.clamp(1, 16) as u32),
         "spp" => Cmd::SppCap(v["max"].as_u64()?.clamp(1, 16) as u32),
+        "reconstruction" => Cmd::Reconstruction(Reconstruction::parse(v["mode"].as_str()?).ok()?),
         "scale" => Cmd::Scale(v["scale"].as_f64()? as f32),
         "resize" => Cmd::Resize(v["width"].as_u64()? as u32, v["height"].as_u64()? as u32),
         "sync" => Cmd::Sync(v["id"].as_str().map(str::to_string).unwrap_or_else(|| v["id"].to_string()), v["frames"].as_u64().unwrap_or(1) as u32),
@@ -297,6 +300,7 @@ pub fn parse_opts(args: &[String]) -> Result<LiveOpts> {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let num = |name: &str, d: u32| -> Result<u32> { flag(name).map(|v| v.parse().map_err(|_| anyhow!("{name} must be a number"))).transpose().map(|v| v.unwrap_or(d)) };
     Ok(LiveOpts {
+        reconstruction: flag("--reconstruction").map(|v| Reconstruction::parse(&v)).transpose()?,
         width: num("--width", 1280)?,
         height: num("--height", 720)?,
         fps: num("--fps", 60)?,

@@ -1603,6 +1603,103 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
+## Live reconstruction
+
+The native `play` and `live` commands, `serve` live jobs, and the browser share one HDR reconstruction stage.
+It runs before output-resolution effects, exposure, and tonemapping. Offline rendering is unchanged.
+
+```sh
+node tools/bundle-game.ts scenes/neon-reflections.ts
+cargo run --release --manifest-path renderer/Cargo.toml --bin threert-render -- \
+  play out/bundles/neon-reflections.js --scale 0.5 --reconstruction fsr
+```
+
+| `--reconstruction` | Live HDR pipeline |
+|---|---|
+| `builtin` (default) | ThreeRT's diffuse and specular denoisers, reflection resolve and temporal upscaler |
+| `fsr` | AMD FidelityFX Super Resolution **1** (spatial EASU + RCAS) after ThreeRT denoising. Works on native wgpu and WebGPU without a vendor SDK. |
+| `dlss` | NVIDIA DLSS Super Resolution after ThreeRT denoising (DLAA at native resolution). Opt-in x86-64 Linux/Windows, RTX over Vulkan. |
+| `metalfx` | ThreeRT's denoisers and reflection resolve, followed by Apple's temporal upscaler |
+| `metalfx-denoised` | Apple's joint denoising and upscaling of noisy path-traced radiance |
+| `auto` | Tries MetalFX denoised, MetalFX temporal, DLSS, then the built-in path. FSR and custom providers are explicit selections. |
+| `custom:<id>` | A GPU reconstruction provider installed by an embedding host. |
+
+Reconstruction selection does not change `--scale` or the dynamic resolution governor. FSR 1 is spatial, not a
+temporal FSR 2+ implementation; for best results start at a scale of 0.5 or higher. DLSS checks the SDK's supported
+input range at the selected output size. Diagnostic views and unsupported requests use `builtin`. A provider that
+fails while encoding a frame also falls back to `builtin` for that frame.
+
+### TypeScript
+
+```ts
+import { reconstruction, type ReconstructionStatus } from "@threert/scene";
+
+reconstruction.set("auto");  // queues a local choice, not a change to replicated game state
+const status: ReconstructionStatus | undefined = reconstruction.status();
+```
+
+`set` returning `true` means a renderer binding accepted the request, not that the device supports it.
+`status()` returns the current `requested` mode and the `active` provider from the last submitted view frame
+(`null` before the first frame). `fallback` describes that frame: `unavailable`, `diagnostic-view`,
+`provider-error`, or `null`. The normal `auto` choice of `builtin` is not an error. A runtime without the live
+renderer binding returns `false` from `set` and `undefined` from `status`.
+
+### NVIDIA DLSS setup
+
+Install [NVIDIA DLSS SDK 310.9.1](https://github.com/NVIDIA/DLSS/tree/v310.9.1), the Vulkan SDK, and Clang
+(including libclang for bindgen). Set `DLSS_SDK` and `VULKAN_SDK` to their SDK directories, then build:
+
+```sh
+cargo build --release --locked --manifest-path renderer/Cargo.toml --features dlss
+WGPU_BACKEND=vulkan THREERT_DLSS=1 renderer/target/release/threert-render \
+  play out/bundles/neon-reflections.js --scale 0.5 --reconstruction dlss
+```
+
+NVIDIA's matching runtime library must be discoverable. For distribution, follow the
+[DLSS wrapper's deployment instructions](https://github.com/bevyengine/dlss_wgpu/tree/b35069de8640bfae383e65a46b7d16058b2994d2#distributing-your-app).
+The engine does not bundle NVIDIA's SDK or runtime.
+
+### Apple MetalFX
+
+The temporal scaler requires a supporting Metal device and macOS 13 or later. Build with the macOS 26 SDK
+or newer to include the denoised scaler, which also requires macOS 26 or newer at runtime. A plain temporal scaler
+can keep its history across dynamic resolution changes inside its supported range. The denoised scaler starts a new
+history when input dimensions change.
+
+In the Mac scene viewer, press `M` to cycle through the three implementations. The title bar shows the
+active mode. Games that handle keyboard input keep their key bindings.
+
+Both scalers receive scene-linear HDR, reverse-Z depth, camera and object motion, subpixel jitter and a reactive
+mask on systems that support it. The denoised scaler also receives world-space shading normals, diffuse and
+specular reflectance, roughness, a denoising mask and specular hit distance. For smooth mirrors and glass,
+secondary ray queries add the reflected and transmitted surfaces to the material guides. Directly visible
+sky and emission-dominated pixels use the native overlay. The denoise mask is 1 on those pixels and
+0 on surfaces with noisy lighting. Exposure, bloom,
+depth of field and motion blur process the reconstructed HDR image on the GPU.
+
+### Native controls and custom providers
+
+Set `THREERT_RECONSTRUCTION` for a native process that embeds `LiveCore`, call `LiveCore::set_reconstruction`,
+or send `{"cmd":"reconstruction","mode":"fsr"}` to a running `live` or `play` session. An explicit launch flag
+overrides the initial selection. Viewer `stats` report `requested_reconstruction`, the active `reconstruction`,
+and `reconstruction_fallback`. The `live --frame-log` also records the active implementation. Live `serve` jobs
+accept the same mode in `reconstruction` and a numeric `scale`.
+
+An embedding host can implement `ReconstructionProvider` and call
+`LiveCore::register_reconstruction("custom:my-scaler", provider)` before selecting it from Rust or TypeScript.
+IDs after `custom:` are 1–48 lowercase ASCII letters, digits, or hyphens. The provider receives denoised linear HDR,
+reversed-Z depth, current-to-previous motion in input pixels, a reactive mask, jitter and a history reset flag.
+It writes full-output HDR on the live GPU; the engine still owns post-processing and presentation.
+
+Run `node tools/bench-metalfx.ts` after building the release binary to compare the three MetalFX/built-in paths
+against 256-spp offline references for a still camera and a lateral move. It saves the frames, frame timings and
+image metrics under `out/metalfx/` and checks which implementation actually ran.
+Use `--scene glass` for the refraction workbench or `--scene cornell` for the Cornell box.
+On an Apple M1 running macOS 27.2.1, the glass camera move scored 0.909 SSIM with the built-in path,
+0.944 with MetalFX temporal and 0.940 with joint denoising. At the same 320 × 180 input and 640 × 360
+output, median GPU frame times with the camera held still were 9.69, 9.78 and 10.22 ms respectively.
+On the Cornell box the built-in path scored highest for both camera poses.
+
 ## Moving objects in the live view
 
 The live view's histories (the irradiance and specular ones on the traced grid, the upscaler's colour on the output

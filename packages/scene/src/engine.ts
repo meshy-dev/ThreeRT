@@ -17,6 +17,7 @@ import {
 import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
 import { Matrix4, Quaternion, Vector3 } from "./math.ts";
 import { ENGINE_IDS, engineColliders } from "./raycaster.ts";
+import type { ReconstructionBinding } from "./reconstruction.ts";
 
 /** A joint's state in the binding once the engine let go of it (`Joint.broken`). */
 const BROKEN = "broken";
@@ -195,7 +196,7 @@ export interface SettingsDesc {
 }
 
 /** The engine API. Ids are chosen by the caller (`SceneBinding`); every call takes effect at the engine's next commit. */
-export interface Engine {
+export interface Engine extends ReconstructionBinding {
   /** `groups`: (first index, index count, material index) per group, for meshes with several materials. */
   /** `colors`: the vertex colours (three.js's `color` attribute), linear RGB per vertex. */
   geometry(id: number, positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;

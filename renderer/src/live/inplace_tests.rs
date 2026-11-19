@@ -3331,4 +3331,121 @@ fn a_hidden_volumes_passes_are_made_at_load() {
     assert!(!live.commit(&mut w).unwrap(), "shown in place ({:?})", live.fallback);
     picture(&mut live, 2);
     assert_eq!(made(&live), ["media_composite", "media_train"], "the frame that shows it makes none");
+
+/// A bright HDR panel catches clipping before reconstruction, stale bindings after resize, and
+/// carrying temporal history through a cut. MetalFX modes run only where the SDK supports them.
+#[test]
+fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
+    let Ok(gpu) = gpu::Gpu::new() else { return };
+    let mut w = world();
+    w.set_material(5, serde_json::from_value(serde_json::json!({
+        "name": "HDR panel", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1,
+        "emissive": [1, 0.25, 0.5], "emissiveIntensity": 1800, "doubleSided": true,
+    })).unwrap());
+    w.set_transform(12, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY, Vec3::new(5.0, 0.5, 1.0)).unwrap();
+    w.set_camera_desc(4, camera(50.0, None, manual(6.0))).unwrap();
+    let mut core = LiveCore::new(gpu, &w, Path::new("."), &crate::default_presets_dir(), 320, 180).unwrap();
+    let scene_cam = core.cam;
+    let center = |c: &LiveCore| {
+        let hdr = c.read_hdr().unwrap();
+        assert!(hdr.iter().all(|v| v.is_finite() && *v >= 0.0));
+        let p = ((c.h / 2 * c.w + c.w / 2) * 3) as usize;
+        [hdr[p], hdr[p + 1], hdr[p + 2]]
+    };
+    let modes = [
+        Reconstruction::Fsr,
+        #[cfg(target_os = "macos")]
+        Reconstruction::Temporal,
+        #[cfg(target_os = "macos")]
+        Reconstruction::Denoised,
+    ];
+    for mode in modes {
+        core.set_scale(0.5);
+        core.set_reconstruction(mode.clone());
+        core.set_camera(scene_cam);
+        for _ in 0..16 { core.render(1, |_, _| {}); }
+        if *core.reconstruction() == Reconstruction::Builtin {
+            assert_ne!(mode, Reconstruction::Fsr);
+            eprintln!("{} unavailable on this device", mode.name());
+            continue;
+        }
+        for (v, reference) in center(&core).into_iter().zip([1800.0, 450.0, 900.0]) {
+            assert!((v / reference - 1.0).abs() < 0.2, "{}: {v} of {reference}", mode.name());
+        }
+        core.set_scale(0.0);
+        for scale in [0.5, 0.75, 0.625] {
+            core.render_scale = scale;
+            core.render(1, |_, _| {});
+            assert_eq!(core.reconstruction(), &mode);
+            assert!(center(&core)[0] > 1000.0, "{}: missing dynamic input at {scale}", mode.name());
+        }
+        core.set_camera(Camera::look_at(scene_cam.pos, scene_cam.pos + Vec3::Z, scene_cam.tan_half_fov));
+        core.render(1, |_, _| {});
+        assert!(center(&core).iter().all(|v| *v < 1.0), "{}: bright history after cut", mode.name());
+        core.resize(257, 161).unwrap();
+        core.set_camera(scene_cam);
+        core.render(1, |_, _| {});
+        assert!(center(&core)[0] > 1000.0, "{}: missing output after resize", mode.name());
+        core.resize(320, 180).unwrap();
+    }
+}
+
+#[test]
+fn reconstruction_falls_back_in_the_frame_a_custom_provider_fails() {
+    struct FailAfterOne(Option<wgpu::ComputePipeline>);
+    impl ReconstructionProvider for FailAfterOne {
+        fn prepare(&mut self, g: &gpu::Gpu, _: ReconstructionSize) -> Result<bool> {
+            let d = &g.device;
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(r#"
+                    @group(0) @binding(0) var image: texture_storage_2d<rgba16float, write>;
+                    @compute @workgroup_size(8,8) fn put_color(@builtin(global_invocation_id) id: vec3<u32>) {
+                        if (all(id.xy < textureDimensions(image))) {
+                            textureStore(image, id.xy, vec4<f32>(4.0, 8.0, 12.0, 1.0));
+                        }
+                    }
+                "#.into()),
+            });
+            self.0 = Some(d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None, layout: None, module: &module, entry_point: Some("put_color"),
+                compilation_options: Default::default(), cache: None,
+            }));
+            Ok(true)
+        }
+
+        fn encode(&mut self, f: ReconstructionFrame<'_>, e: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
+            let Some(pipe) = self.0.take() else { anyhow::bail!("test provider rejected the frame") };
+            let bg = f.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipe.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(f.output) }],
+            });
+            let mut pass = e.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipe);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(f.size.output[0].div_ceil(8), f.size.output[1].div_ceil(8), 1);
+            Ok(None)
+        }
+    }
+
+    let Ok(g) = gpu::Gpu::new() else { return };
+    let mut live = LiveCore::new(g, &world(), Path::new("."), &crate::default_presets_dir(), 97, 55).unwrap();
+    live.view_mode = 0;
+    live.set_scale(0.5);
+    let control = ReconstructionControl::default();
+    live.attach_reconstruction_control(control.clone());
+    live.register_reconstruction("custom:test", FailAfterOne(None)).unwrap();
+    control.request(Reconstruction::parse("custom:test").unwrap());
+    live.render(1, |_, _| {});
+    let p = ((live.h / 2 * live.w + live.w / 2) * 3) as usize;
+    assert_eq!(&live.read_hdr().unwrap()[p..p+3], &[128.0, 256.0, 384.0]);
+    assert_eq!(control.status()["active"], "custom:test");
+
+    live.render(1, |_, _| {});
+    let hdr = live.read_hdr().unwrap();
+    assert!(hdr[p] > 0.01 && hdr[p] < 32.0, "expected scene radiance after failure, got {}", hdr[p]);
+    assert_eq!(control.status(), serde_json::json!({
+        "requested": "custom:test", "active": "builtin", "fallback": "provider-error"
+    }));
 }

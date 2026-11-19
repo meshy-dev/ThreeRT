@@ -256,6 +256,9 @@ impl LiveCore {
         self.take_emitters();
         let (w, h) = (self.w, self.h);
         let (iw, ih) = self.internal_size();
+        let size = ReconstructionSize { input: [iw, ih], output: [w, h], dynamic: self.dynamic_res };
+        self.reset |= self.reconstructor.prepare(&self.g, &self.targets, size, self.view_mode != 0);
+        let reconstruction = self.reconstructor.active;
         self.ensure_deferred(iw as u64 * ih as u64);
         if self.sc.up.translucent.is_some() {
             self.targets.translucent_low(&self.g);
@@ -348,6 +351,7 @@ impl LiveCore {
         let g = &self.g;
         let t_submit = Instant::now();
         let pipeline = g.pipeline(&self.sc.up.kernel, true);
+        let guides = reconstruction.denoises().then(|| g.kernel_pass(&self.sc.up.kernel, "metalfx_surface_guides"));
         // (No media pass while every medium is hidden: a pool of idle fireballs costs the frame nothing.)
         let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
         let media_train = (media && self.cache.is_some()).then(|| g.kernel_pass(&self.sc.up.kernel, "media_train"));
@@ -357,9 +361,13 @@ impl LiveCore {
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
-        let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
-        let quant = |v: f32| (v * 4095.0).round() / 4095.0;
-        let jitter = (quant(halton(self.frame % phases + 1, 2)), quant(halton(self.frame % phases + 1, 3)));
+        let jitter = if reconstruction == Active::Fsr {
+            (0.5, 0.5)
+        } else {
+            let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
+            let quant = |v: f32| (v * 4095.0).round() / 4095.0;
+            (quant(halton(self.frame % phases + 1, 2)), quant(halton(self.frame % phases + 1, 3)))
+        };
         // The light tiles (pathtrace.wgsl "Light tiles"), in a scene whose local lights are resampled (gpu::F_LISTS):
         // the lists the last frame built, for this frame's paths (none after a reset: its reports were another
         // view's), and this frame's grid offset, a pixel of 8 x 8.
@@ -372,6 +380,7 @@ impl LiveCore {
         let moving = !self.sc.dynamic.1.is_empty() || self.sc.moving_instances;
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
+            p.motion[1] = reconstruction.denoises() as u32 as f32;
             if let Some((row, at, size, cam)) = self.light_tiles {
                 (p.ltile[0], p.ltile[1], p.ltile[2]) = (1, row, at);
                 p.ltile2 = [size.0, size.1, 0, 0];
@@ -484,6 +493,10 @@ impl LiveCore {
                     pass.set_bind_group(0, &self.sc.up.bg, &[]);
                     pass.set_bind_group(1, &self.kernel_bg, &[]);
                 }
+                if let (Some(guides), true) = (&guides, last) {
+                    pass.set_pipeline(guides);
+                    pass.dispatch_workgroups(iw.div_ceil(8), ih.div_ceil(8), 1);
+                }
                 if let (Some(mt), 0) = (&media_train, k) {
                     pass.set_pipeline(mt);
                     pass.dispatch_workgroups(MEDIA_TRAIN_POINTS.div_ceil(64), 1, 1);
@@ -526,7 +539,7 @@ impl LiveCore {
             // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
             // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
             misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
-            mode: [self.view_mode, 0, self.live_lighting() as u32, 0],
+            mode: [self.view_mode, 0, self.live_lighting() as u32, reconstruction.denoises() as u32],
             post: self.post,
             ae: self.view.exposure_settings.ae,
             ae2: self.view.exposure_settings.ae2,
@@ -589,18 +602,46 @@ impl LiveCore {
             pass.set_bind_group(1, &self.kernel_bg, &[]);
             pass.dispatch_workgroups((gpu::CACHE_SIZE / 256) as u32, 1, 1);
         }
+        let mut before_post: Option<[wgpu::CommandBuffer; 2]> = None;
+        let use_provider = reconstruction != Active::Builtin;
+        let mut provider_failed = false;
+        let mut reconstruct = |e: &mut wgpu::CommandEncoder| {
+            match self.reconstructor.encode(g, e, size, cam, self.aspect, jitter, self.view.exposure, self.reset || cut) {
+                Ok(buffers) => buffers,
+                Err(_) => {
+                    provider_failed = true;
+                    // Only the normal denoised-input providers can fail here. Start fresh rather than read
+                    // a built-in history from before the switch. With reset, lock_carry does no work.
+                    let at = (std::mem::offset_of!(LiveParams, size) + 3 * std::mem::size_of::<u32>()) as u64;
+                    g.queue.write_buffer(&self.targets.params, at, bytemuck::bytes_of(&1u32));
+                    let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("builtin reconstruction fallback"), ..Default::default() });
+                    for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
+                        if !matches!(*name, "track" | "judge" | "reject" | "upscale") { continue; }
+                        pass.set_pipeline(pipe);
+                        pass.set_bind_group(0, &self.targets.bgs[k], &[]);
+                        let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
+                        pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
+                    }
+                    None
+                }
+            }
+        };
         if let Some(p) = &self.profile {
             // One compute pass per stage, each timed.
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
                 let q = (k as u32 + 1) * 2;
-                let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: Some(q + 1) }) });
-                if (self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name)) && (tiles_on || *name != layout::LIGHT_TILES_PASS) {
+                let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(name), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(q), end_of_pass_write_index: (!(use_provider && *name == "upscale")).then_some(q + 1) }) });
+                if !reconstruction.skips(name) && (self.view_mode != 0 || !layout::VIEW_MODE_PASSES.contains(name)) && (tiles_on || *name != layout::LIGHT_TILES_PASS) {
                     pass.set_pipeline(pipe);
                     pass.set_bind_group(0, &self.targets.bgs[k], &[]);
                     let (gw, gh) = grid.size((w, h), (iw, ih), self.prev_isz);
                     pass.dispatch_workgroups(gw.div_ceil(8), gh.div_ceil(8), 1);
                 }
                 drop(pass);
+                if use_provider && *name == "upscale" {
+                    before_post = reconstruct(&mut e);
+                    drop(e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("reconstruction end"), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(q + 1) }) }));
+                }
                 if *name == "upscale" && tl.is_some() {
                     for (j, train) in [(0u32, false), (1, true)] {
                         let q = (self.passes.pipes.len() as u32 + 4 + j) * 2;
@@ -614,9 +655,17 @@ impl LiveCore {
             e.copy_buffer_to_buffer(&p.resolve, 0, &p.read, 0, p.read.size());
         } else {
             let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
-            let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw });
+            let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live post"), timestamp_writes: tw.clone().map(|mut t| { if use_provider { t.end_of_pass_write_index = None; } t }) });
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
-                if (self.view_mode == 0 && layout::VIEW_MODE_PASSES.contains(name)) || (!tiles_on && *name == layout::LIGHT_TILES_PASS) {
+                if use_provider && *name == "upscale" {
+                    drop(pass);
+                    before_post = reconstruct(&mut e);
+                    pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("post after reconstruction"), timestamp_writes: tw.clone().map(|mut t| { t.beginning_of_pass_write_index = None; t }) });
+                    tl_dispatch(&mut pass, false);
+                    tl_dispatch(&mut pass, true);
+                    continue;
+                }
+                if reconstruction.skips(name) || (self.view_mode == 0 && layout::VIEW_MODE_PASSES.contains(name)) || (!tiles_on && *name == layout::LIGHT_TILES_PASS) {
                     continue;
                 }
                 pass.set_pipeline(pipe);
@@ -640,7 +689,9 @@ impl LiveCore {
             e.copy_buffer_to_buffer(&count.buffer, count.offset, read, 0, 4);
         }
         extra(&mut e, &self.targets.out);
-        let done = g.queue.submit([e.finish()]);
+        let done = g.queue.submit(before_post.into_iter().flatten().chain([e.finish()]));
+        if provider_failed { self.history_len = 1.0; }
+        self.reconstructor.publish();
         self.inflight.push_back(done);
         self.cpu_wait_ms = waited;
         if let (Some((read, state)), true) = (&self.guard_read, guard_free) {

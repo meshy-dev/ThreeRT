@@ -44,6 +44,7 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 pub struct ViewArgs {
+    pub reconstruction: Option<crate::live::Reconstruction>,
     /// Game bundle to run in-process.
     pub bundle: PathBuf,
     /// Asset root the scene's model / texture paths resolve against.
@@ -235,6 +236,7 @@ impl App {
             eprintln!("view: the game reads input (pointer: {p}){}", if p == "look" { ": click to capture the pointer, Esc lets go" } else { "" });
         }
         core.bounces = a.bounces;
+        if let Some(mode) = &a.reconstruction { core.set_reconstruction(mode.clone()); }
         core.set_scale(a.scale.unwrap_or(0.0));
         core.set_display_scale(window.scale_factor() as f32);
         let d = &core.g.device;
@@ -444,6 +446,13 @@ impl ApplicationHandler for App {
                             "Escape" => el.exit(),
                             "R" => s.orbit = s.home,
                             "P" => s.snapshot = Some(PathBuf::from(format!("view-{}.png", s.core.frame))),
+                            #[cfg(target_os = "macos")]
+                            "M" => {
+                                use crate::live::Reconstruction::*;
+                                s.core.set_reconstruction(match s.core.requested_reconstruction() {
+                                    Builtin => Temporal, Temporal => Denoised, _ => Builtin,
+                                });
+                            }
                             "0" => s.spp_cap = 16,
                             "1" | "2" | "4" | "8" => s.spp_cap = name.parse().unwrap(),
                             // F1..F6 style view modes on the number row with Alt held
@@ -593,6 +602,7 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
                 s.core.bounces = b;
             }
             Cmd::SppCap(n) => s.spp_cap = n,
+            Cmd::Reconstruction(v) => s.core.set_reconstruction(v),
             Cmd::Scale(v) => s.core.set_scale(v),
             Cmd::Resize(w, h) => {
                 // The window's size; the view follows it (`fit`).
@@ -733,10 +743,11 @@ fn frame(s: &mut State, cmds: &mpsc::Receiver<Cmd>, services: &mut dyn HostServi
         let g = &s.game;
         let status = [s.status.as_str(), g.status.as_str()].iter().filter(|t| !t.is_empty()).map(|t| format!("{t} · ")).collect::<String>() + &format!("frame script {:.2} ms", g.frame_ms);
         s.window.set_title(&format!(
-            "ThreeRT live · {:.0} fps · {} spp/frame · GPU {:.1} ms · {conv}{}",
+            "ThreeRT live · {:.0} fps · {} spp/frame · GPU {:.1} ms · {} · {conv}{}",
             s.fps,
             s.spp,
             s.core.gpu_ms,
+            s.core.reconstruction().name(),
             if status.is_empty() { String::new() } else { format!(" · {status}") }
         ));
         let mut st = s.core.meta();
@@ -838,6 +849,7 @@ pub fn parse_args(args: &[String], presets: &Path) -> Result<ViewArgs> {
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let num = |name: &str, d: u32| flag(name).and_then(|v| v.parse().ok()).unwrap_or(d);
     Ok(ViewArgs {
+        reconstruction: flag("--reconstruction").map(|v| crate::live::Reconstruction::parse(&v)).transpose()?,
         bundle: PathBuf::from(args.get(2).filter(|a| !a.starts_with("--")).ok_or_else(|| anyhow::anyhow!("game bundle required"))?),
         assets: PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())),
         room: flag("--room").unwrap_or_else(|| "local".into()),

@@ -234,6 +234,7 @@ pub struct ScriptHost {
     pub voxels: Rc<RefCell<crate::voxel::VoxelWorld>>,
     /// The physics world (`__engine.physics`; renderer/src/physics.rs): None until scene code makes a physics call.
     pub physics: Rc<RefCell<Option<crate::physics::PhysicsWorld>>>,
+    reconstruction: crate::live::ReconstructionControl,
     /// What the game posted for the app (`host.post`: JSON texts), until `take_posts`.
     posts: Rc<RefCell<Vec<String>>>,
     /// The promises rejected with no handler in the entry running now (`Rejected`); empty between entries.
@@ -303,9 +304,17 @@ fn thrown(ctx: &Ctx, e: crate::api::Error) -> rquickjs::Error {
 
 /// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts: each call's arguments out of QuickJS,
 /// then what the call does (api.rs: the same code a browser's exports run, renderer/web).
-fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>, budget: &Arc<Budget>) -> rquickjs::Result<()> {
+fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>, budget: &Arc<Budget>, reconstruction: &crate::live::ReconstructionControl) -> rquickjs::Result<()> {
     use crate::api;
     let e = Object::new(ctx.clone())?;
+    let control = reconstruction.clone();
+    e.set("setReconstruction", Function::new(ctx.clone(), move |ctx: Ctx, mode: String| -> rquickjs::Result<()> {
+        let mode = crate::live::Reconstruction::parse(&mode).map_err(|e| Exception::throw_type(&ctx, &e.to_string()))?;
+        control.request(mode);
+        Ok(())
+    })?)?;
+    let control = reconstruction.clone();
+    e.set("reconstructionStatus", Function::new(ctx.clone(), move || control.status().to_string())?)?;
     // Physics (renderer/src/physics.rs): one call, `physics(op, args)`, answering in JSON. The world is made by the
     // first call; the engine steps it, scene code cannot.
     let (p, w) = (physics.clone(), world.clone());
@@ -490,7 +499,7 @@ impl ScriptHost {
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), posts: Default::default(), rejected };
+        let mut h = ScriptHost { rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), reconstruction: Default::default(), posts: Default::default(), rejected };
         let (w, v, ph, d2, posts) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone(), h.posts.clone());
         let (info, rejections) = h.enter(SETUP_MS, |ctx| {
             let g = ctx.globals();
@@ -514,7 +523,7 @@ impl ScriptHost {
             // tens of megabytes that the script would take seconds over. packages/gameplay/src/files.ts uses them.
             g.set("__host_base64_encode", Function::new(ctx.clone(), base64_encode)?)?;
             g.set("__host_base64_decode", Function::new(ctx.clone(), base64_decode)?)?;
-            install_engine(ctx, &w, &v, &ph, &d2)?;
+            install_engine(ctx, &w, &v, &ph, &d2, &h.reconstruction)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
             host(ctx)?.get::<_, Function>("describe")?.call::<_, String>(())
@@ -536,6 +545,10 @@ impl ScriptHost {
             game_log("error", line);
         }
         r
+    }
+
+    pub fn attach_reconstruction(&self, core: &mut crate::live::LiveCore) {
+        core.attach_reconstruction_control(self.reconstruction.clone());
     }
 
     /// One entry into the script: `f` under a time budget, then the promise jobs the entry left (`run_jobs`), within
@@ -841,7 +854,8 @@ impl GameSession {
     /// Opens the first live view of a loaded session (`load_code`).
     pub fn start_loaded(self, assets: &std::path::Path, g: crate::gpu::Gpu, presets: &std::path::Path, w: u32, h: u32) -> Result<(GameSession, crate::live::LiveCore)> {
         self.realize_voxels(assets)?;
-        let core = crate::live::LiveCore::new(g, &self.host.world.borrow(), assets, presets, w, h)?;
+        let mut core = crate::live::LiveCore::new(g, &self.host.world.borrow(), assets, presets, w, h)?;
+        self.host.attach_reconstruction(&mut core);
         Ok((self, core))
     }
 
@@ -849,6 +863,7 @@ impl GameSession {
     pub fn open_loaded(self, assets: &std::path::Path, core: &mut crate::live::LiveCore) -> Result<GameSession> {
         self.realize_voxels(assets)?;
         core.open(&self.host.world.borrow(), assets)?;
+        self.host.attach_reconstruction(core);
         core.seq = 0;
         Ok(self)
     }

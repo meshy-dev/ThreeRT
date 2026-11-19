@@ -3,10 +3,12 @@
 // function the native runtime installs (renderer/src/script.rs `install_engine`), under the same name; this file only
 // turns a descriptor into JSON text, the one thing an export cannot take as it is. Typed arrays cross as they are
 // (copied into the module's memory by wasm-bindgen's glue).
-import type { Engine } from "@threert/scene";
+import type { Engine, ReconstructionMode } from "@threert/scene";
 
 /** The module's exports this file calls (wasm-bindgen's JavaScript for renderer/web: `threert_web.js`). */
 export interface EngineExports {
+  setReconstruction(mode: ReconstructionMode): void;
+  reconstructionStatus(): string;
   physics(op: string, args: string): string;
   physicsPoses(): Float32Array;
   voxelLevel(d: string): void;
@@ -71,6 +73,8 @@ const json = (d: unknown) => JSON.stringify(d ?? null);
 /** `__engine` for the page: every call goes to the export of its name. */
 export function webEngine(w: EngineExports): WebEngine {
   return {
+    setReconstruction: (mode) => w.setReconstruction(mode),
+    reconstructionStatus: () => w.reconstructionStatus(),
     physics: (op, args) => w.physics(op, json(args)),
     physicsPoses: () => w.physicsPoses(),
     voxelLevel: (d) => w.voxelLevel(json(d)),

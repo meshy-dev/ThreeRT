@@ -63,12 +63,18 @@ cpal = { version = "0.17", optional = true }
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libloading = { version = "0.8", optional = true }
 
+# DLSS Super Resolution (Vulkan). This wgpu 30 release is not published on crates.io.
+[target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))'.dependencies]
+dlss_wgpu = { git = "https://github.com/bevyengine/dlss_wgpu.git", rev = "b35069de8640bfae383e65a46b7d16058b2994d2", optional = true }
+uuid = { version = "1", optional = true }
+
 # The performance cores' count (src/physics.rs: the physics' threads).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
 # build.rs reads shaders/live.wgsl's bindings with the compiler wgpu uses (its version: 30), when the crate is built.
 [build-dependencies]
+cc = "1"
 naga = { version = "30", features = ["wgsl-in"] }
 
 # src/merged.rs's tests read the generated shaders with the compiler wgpu uses: they are valid, and no stage binds more
@@ -97,6 +103,8 @@ audio = ["dep:symphonia", "dep:cpal", "dep:libloading"]
 net = ["dep:tungstenite", "dep:ureq", "dep:rustls"]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
 oidn = ["dep:oidn"]
+# NVIDIA DLSS Super Resolution (needs DLSS_SDK and VULKAN_SDK at build time).
+dlss = ["dep:dlss_wgpu", "dep:uuid"]
 
 [profile.release]
 opt-level = 3

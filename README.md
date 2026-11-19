@@ -156,6 +156,10 @@ node tools/three/open.ts scenes/bistro.ts # the same scene in three.js, in your 
 
 In the window: drag to orbit, right-drag to pan, wheel to zoom, WASD/QE to fly, `R` to reset, `P` for a snapshot.
 
+`play` and `live` accept `--reconstruction fsr`, `dlss`, `metalfx`, `metalfx-denoised`, `auto`, or `builtin`.
+FSR 1 also runs on WebGPU. DLSS requires an opt-in NVIDIA SDK build; MetalFX requires supported Apple hardware.
+See [live reconstruction and the TypeScript API](docs/RUNTIME.md#live-reconstruction).
+
 ```bash
 npm test && npm run typecheck && (cd renderer && cargo test --release)   # scene API, gameplay, runtime and engine tests
 npm run test:render                                                      # the render test suite, on the GPU

@@ -66,6 +66,7 @@ This package builds the scene. A ThreeRT client draws it:
 - **Models and environments**: `GLTFModel`, `HDRIEnvironment`, `SkyAtmosphere` (a physical sky lit by the sun), height fog.
 - **What a path tracer adds**: emissive surfaces that light the room, `RectAreaLight`, volumes (`FogVolume`, `Fireball`, smoke), water, material functions (a WGSL body run at every hit) and procedural geometry.
 - **Physics**: `mesh.physics = "dynamic"`, joints as objects, `Raycaster.intersectPhysics`, `Shapecaster`.
+- **Live reconstruction**: `reconstruction.set("auto")` selects the local upscaler; `reconstruction.status()` reports the provider that actually ran. See [modes and SDK support](https://github.com/meshy-dev/ThreeRT/blob/main/docs/RUNTIME.md#live-reconstruction).
 
 Games add state and input with [`@threert/gameplay`](https://www.npmjs.com/package/@threert/gameplay); destructible voxel worlds use [`@threert/voxel`](https://www.npmjs.com/package/@threert/voxel).
 

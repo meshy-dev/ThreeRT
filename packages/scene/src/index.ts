@@ -2,6 +2,7 @@ export * from "./math.ts";
 export * from "./geometry.ts";
 export * from "./core.ts";
 export * from "./engine.ts";
+export { reconstruction, type ReconstructionMode, type ActiveReconstructionMode, type ReconstructionStatus } from "./reconstruction.ts";
 export * from "./materials.ts";
 export { PyRandom } from "./pyrandom.ts";
 export { encodePNG, contentHash, packGLB } from "./encode.ts";

@@ -9,6 +9,12 @@ use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, 
 use std::fmt::Write;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rerun-if-changed=src/live/metalfx.m");
+        cc::Build::new().file("src/live/metalfx.m").flag("-fobjc-arc").compile("threert_metalfx");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Metal");
+    }
     let files = ["shaders/records.wgsl", "shaders/live.wgsl"];
     for path in files {
         println!("cargo:rerun-if-changed={path}");
