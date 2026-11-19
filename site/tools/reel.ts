@@ -1,5 +1,5 @@
 // Lays the landing page's reel out and encodes it, from the clips tools/site-reel.ts recorded (out/site-reel/<clip>):
-//   node tools/site-reel.ts all      (and the OpenStrike clips: site/README.md, Media)
+//   node tools/site-reel.ts all      (and the OpenStrike clip: site/README.md, Media)
 //   bun site/tools/reel.ts [--crf 27] [--crf-sm 28]
 // -> site/media/reel/reel.mp4      the grid for a wide screen: 4 x 3 clips, 1920 x 1080, 60 fps, an 8 s loop
 //    site/media/reel/reel-tall.mp4 the grid for a phone held upright: 2 x 4 clips, 720 x 1440
@@ -20,8 +20,8 @@ const args = process.argv.slice(2);
 const opt = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 
 /** The grids, row by row. The page's words sit over the left of the wide one and the top of the tall one. */
-const WIDE = { cols: 4, rows: 3, tile: [480, 360], clips: ["crowd", "os-assault", "tokyo", "kabukicho", "home", "jewellery", "os-inferno", "museum", "voxels", "colour", "showroom", "os-dust2"] };
-const TALL = { cols: 2, rows: 4, tile: [360, 360], clips: ["kabukicho", "os-assault", "home", "jewellery", "crowd", "os-inferno", "museum", "colour"] };
+const WIDE = { cols: 4, rows: 3, tile: [480, 360], clips: ["crowd", "openstrike", "tokyo", "zero-day", "home", "jewellery", "cascade", "museum", "voxels", "colour", "wreck", "lanterns"] };
+const TALL = { cols: 2, rows: 4, tile: [360, 360], clips: ["zero-day", "openstrike", "home", "cascade", "crowd", "wreck", "museum", "voxels"] };
 /** Between tiles: the page's ink, a pixel on each side. */
 const GAP = 1, INK = "0x060709";
 
