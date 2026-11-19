@@ -1742,6 +1742,86 @@ fn a_mesh_of_several_materials_is_edited_in_place() {
     against_a_build("meshes of several materials removed", &mut live, &w);
 }
 
+/// A material that becomes a cutout, or stops being one, in place: the instances with a row of it say so (a mesh, a
+/// mesh of several materials, an instanced object's copies), and the picture is a build's. In a scene without a
+/// cutout the kernel has no alpha test: the first one is a rebuild's. A material created after the build, of any
+/// class (a cutout, glass, one that emits), is added in place with the mesh that is drawn with it.
+#[test]
+fn a_materials_alpha_test_comes_and_goes_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let plain = |extra: serde_json::Value| {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.9, 0.9, 0.9], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<crate::desc::Material>(m).unwrap()
+    };
+    let two = || Geometry { positions: vec![-0.5, -0.3, 0.0, 0.0, -0.3, 0.0, 0.5, -0.3, 0.0, -0.5, 0.3, 0.0, 0.0, 0.3, 0.0, 0.5, 0.3, 0.0], normals: [0.0, 0.0, 1.0].repeat(6), uvs: vec![0.0; 12], indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4], groups: vec![[0, 6, 0], [6, 6, 1]], colors: vec![] };
+    // (`cutout`: a material of the scene is a cutout at the build, so the kernel has the alpha test.)
+    let scene = |cutout: bool| {
+        let mut w = world();
+        // (Opacity 0.3: with an alpha test at 0.5, nothing of it is there.)
+        w.set_material(61, plain(serde_json::json!({ "opacity": 0.3, "color": [0.2, 0.6, 0.9] })));
+        w.set_material(62, plain(serde_json::json!({})));
+        w.set_material(63, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": if cutout { 0.5 } else { 0.0 } })));
+        w.set_object(40, "tile".into(), None, Kind::Mesh { geometry: 3, material: 61, own_blas: true, materials: vec![] }, true, false).unwrap();
+        w.set_transform(40, Vec3::new(-0.6, 0.5, 0.6), glam::Quat::IDENTITY, Vec3::splat(1.6)).unwrap();
+        w.set_geometry(30, two()).unwrap();
+        w.set_object(41, "pair".into(), None, Kind::Mesh { geometry: 30, material: 62, own_blas: false, materials: vec![62, 61] }, true, false).unwrap();
+        w.set_transform(41, Vec3::new(0.5, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.set_object(42, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![61], capacity: 2 }, true, false).unwrap();
+        let at = |x: f32| glam::Mat4::from_translation(Vec3::new(x, -0.5, 0.8)).to_cols_array();
+        w.set_instances(42, 2, Some([at(-0.4), at(0.4)].concat()), None, None).unwrap();
+        w.set_object(43, "other".into(), None, Kind::Mesh { geometry: 3, material: 63, own_blas: false, materials: vec![] }, true, false).unwrap();
+        w.set_transform(43, Vec3::new(1.2, -0.5, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        w
+    };
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| -> Vec<u8> {
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let mut w = scene(true);
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let bits = |c: &LiveCore, name: &str| c.sc.instances.iter().filter(|i| i.name == name && (!i.hidden || i.masked)).map(|i| i.bits & scene::INST_CUTOUT).collect::<Vec<u32>>();
+    let before = picture(&mut live, 64);
+    w.set_material(61, plain(serde_json::json!({ "opacity": 0.3, "color": [0.2, 0.6, 0.9], "alphaTest": 0.5 })));
+    assert!(!live.commit(&mut w).unwrap(), "a material becomes a cutout: in place ({:?})", live.fallback);
+    assert_eq!((bits(&live, "tile"), bits(&live, "pair"), bits(&live, "copies")), (vec![scene::INST_CUTOUT], vec![scene::INST_CUTOUT], vec![scene::INST_CUTOUT; 2]), "their records say they have a cutout");
+    let holes = against_a_build("a material becomes a cutout", &mut live, &w);
+    assert!(apart(&before, &holes) > 0.5, "what was drawn with it is gone ({:.2} steps)", apart(&before, &holes));
+    w.set_material(61, plain(serde_json::json!({ "opacity": 0.3, "color": [0.2, 0.6, 0.9] })));
+    assert!(!live.commit(&mut w).unwrap(), "it stops being one: in place ({:?})", live.fallback);
+    assert_eq!((bits(&live, "tile"), bits(&live, "pair"), bits(&live, "copies")), (vec![0], vec![0], vec![0; 2]), "their records say they have none");
+    let back = against_a_build("a material stops being a cutout", &mut live, &w);
+    assert!(apart(&before, &back) < 0.5, "it is drawn again ({:.2} steps)", apart(&before, &back));
+    // Materials made after the build, of every class, and a mesh drawn with them.
+    w.set_material(71, plain(serde_json::json!({ "opacity": 0.3, "alphaTest": 0.5 })));
+    w.set_material(72, plain(serde_json::json!({ "color": [0.5, 0.9, 0.5], "roughness": 0, "transmission": 1, "ior": 1.5 })));
+    w.set_material(73, plain(serde_json::json!({ "color": [0.0, 0.0, 0.0], "emissive": [1.0, 0.6, 0.2], "emissiveIntensity": 30 })));
+    for (i, material) in [71, 72, 73].into_iter().enumerate() {
+        w.set_object(50 + i as u32, format!("late{i}"), None, Kind::Mesh { geometry: 3, material, own_blas: false, materials: vec![] }, true, false).unwrap();
+        w.set_transform(50 + i as u32, Vec3::new(-1.0 + i as f32, 0.0, 1.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "materials of every class made after the build, and meshes of them: in place ({:?})", live.fallback);
+    list_is_its_triangles("a material that emits, made after the build", &live);
+    lit_as_a_build("materials of every class made after the build", &mut live, &mut open(&w).unwrap());
+    // Without a cutout at the build, the first is a rebuild's.
+    let mut w = scene(false);
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    assert_eq!(live.sc.up.kernel.features & gpu::F_MASKED, 0, "no cutout: the kernel has no alpha test");
+    w.set_material(61, plain(serde_json::json!({ "opacity": 0.3, "color": [0.2, 0.6, 0.9], "alphaTest": 0.5 })));
+    live.commit(&mut w).unwrap();
+    against_a_build("the scene's first cutout", &mut live, &w);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_MASKED, 0, "the kernel has it now");
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.
