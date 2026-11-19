@@ -52,7 +52,7 @@ function linkNodeModules(dir: string) {
 
 /**
  * The commit `sha` built: renderer (release) and the bundles of `games` (paths relative to the commit's root, e.g.
- * games/kabukicho/kabukicho.game.ts) plus `extra` game / scene files from this checkout (copied in at the same path,
+ * games/bistro-slice/bistro-slice.game.ts) plus `extra` game / scene files from this checkout (copied in at the same path,
  * replacing the commit's own, so relative imports between them hold; bundled against the commit's packages; one that
  * does not build there is left out). Reuses whatever an earlier call built.
  */

@@ -8,7 +8,7 @@ rain ...), optional manual exposure, Lumen or the path tracer. Used as the refer
 
 job.json: {"map": "/Game/.../L_X", "out": "/abs/dir", "method": "lumen" | "pathtracer", "width": 1280, "height": 720,
            "views": [{"name": "v0", "location": [x, y, z] (UE cm), "rotation": [pitch, yaw, roll], "fov": vertical deg}],
-           "hide": ["KabukichoCrowd"], "ev100": null | number, "spp": 1024, "warmup": 64, "temporal": 16,
+           "hide": ["MyCrowdActor"], "ev100": null | number, "spp": 1024, "warmup": 64, "temporal": 16,
            "cvars": {"r.Lumen.HardwareRayTracing": 1}}
 """
 import json

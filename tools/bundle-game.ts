@@ -6,7 +6,7 @@
 // A plain scene module (scenes/*.ts: default export () => {scene, camera, options}) bundles as a game without state or
 // handlers.
 //
-//   node tools/bundle-game.ts games/kabukicho/kabukicho.game.ts [-o out/bundles/kabukicho.js]
+//   node tools/bundle-game.ts games/bistro-slice/bistro-slice.game.ts [-o out/bundles/bistro-slice.js]
 import { build } from "esbuild";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";

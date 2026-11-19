@@ -1,6 +1,6 @@
 // Downloads CC0 Poly Haven PBR texture sets and models into assets/polyhaven/ (not committed; scenes reference them by
 // repo-relative path and the packaging tools copy them into render packages).
-//   node tools/fetch-polyhaven.ts [--res 1k|2k] [--textures a,b] [--models c,d] [--set kabukicho]
+//   node tools/fetch-polyhaven.ts [--res 1k|2k] [--textures a,b] [--models c,d] [--set default|street]
 // Textures: assets/polyhaven/tex/<id>/<id>_<map>_<res>.jpg   (diff, nor_gl, rough, ao, metal when available)
 // Models:   assets/polyhaven/models/<id>_<res>.glb           (glTF + bin + textures packed into one GLB)
 // Licence: CC0 (https://polyhaven.com/license); assets/polyhaven/manifest.json records every source URL.
@@ -9,27 +9,16 @@ import { dirname, join } from "node:path";
 import { packGLB } from "@threert/scene";
 import { repoRoot } from "./bundle-game.ts";
 
-/** Curated lists (the UE 5.8 Kabukichō session's choices: wet asphalt, pavers, tiled/clad facades, shutters + street clutter). */
+/** Curated lists. `default`: what the repo's own scenes, games, tests and benches reference (games/bistro-slice's
+ *  plant, tools/foliage-scene.ts, tools/perf/voxel-level-spawn.game.ts, packages/scene/test/engine.test.ts).
+ *  `street`: a starter kit for night street scenes (wet asphalt, pavers, tiled / clad facades, shutters + street
+ *  clutter; the scene-authoring skill's set). */
 export const SETS: Record<string, { textures: string[]; models: string[] }> = {
-  // The UE 5.8 session's exact lists (kabukicho-ue5/Tools/scripts/fetch_polyhaven.py), fetched at 2k for the port.
-  "kabukicho-ue": {
-    textures: [
-      "asphalt_02", "asphalt_04", "clean_asphalt", "worn_asphalt", "asphalt_track", "interlocking_concrete_pavers", "concrete_pavers",
-      "square_tiles", "concrete_floor_02", "rectangular_facade_tiles", "rectangular_facade_tiles_02", "concrete_tile_facade",
-      "long_white_tiles", "square_tiled_wall", "grey_tiles", "exterior_wall_cladding", "exterior_wall_cladding_02",
-      "precast_concrete_wall", "concrete_wall_008", "painted_concrete", "beige_wall_001", "brushed_concrete", "painted_metal_shutter",
-      "rusty_metal_shutter", "metal_plate", "corrugated_iron_02", "blue_metal_plate", "dirty_concrete", "white_plaster_02",
-    ],
-    models: [
-      "exterior_aircon_unit", "modular_electricity_poles", "modular_electric_cables", "trashbag", "metal_trash_can", "fire_hydrant",
-      "utility_box_01", "utility_box_02", "power_box_01", "plastic_crate_01", "plastic_crate_02", "plastic_crate_03", "security_camera_01",
-      "street_lamp_01", "street_lamp_02", "water_manhole_cover", "modular_airduct_rectangular_01", "modular_pipes", "rollershutter_door",
-      "rollershutter_window_01", "concrete_road_barrier", "WetFloorSign_01", "cardboard_box_01", "modular_metal_gutter",
-      "plastic_monobloc_chair_01", "bar_chair_round_01", "industrial_wall_lamp", "mounted_fluorescent_lights", "modular_fire_escape",
-      "metal_stool_01", "hand_truck", "propane_tank", "caged_hanging_light", "compost_bags",
-    ],
+  default: {
+    textures: ["asphalt_02"],
+    models: ["potted_plant_02", "potted_plant_04", "fern_02", "cardboard_box_01"],
   },
-  kabukicho: {
+  street: {
     textures: [
       "asphalt_02", "clean_asphalt", "interlocking_concrete_pavers", "concrete_pavers", "rectangular_facade_tiles",
       "rectangular_facade_tiles_02", "concrete_tile_facade", "long_white_tiles", "square_tiled_wall", "grey_tiles",
@@ -155,7 +144,8 @@ if (import.meta.main) {
     return i > 0 ? process.argv[i + 1] : undefined;
   };
   const res = arg("--res") ?? "1k";
-  const set = SETS[arg("--set") ?? "kabukicho"];
+  const set = SETS[arg("--set") ?? "default"];
+  if (!set) throw new Error(`--set: ${Object.keys(SETS).join(" | ")}`);
   const textures = arg("--textures")?.split(",") ?? set.textures;
   const models = arg("--models")?.split(",") ?? set.models;
   const mfile = join(out, "manifest.json");

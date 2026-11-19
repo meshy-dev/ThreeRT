@@ -581,7 +581,7 @@ export class Object3D {
   }
 
   getWorldPosition(target = new Vector3()): Vector3 {
-    // The ancestors and this node only (three.js): a whole-scene update cost Kabukichō 12 ms per call in a frame script.
+    // The ancestors and this node only (three.js): a whole-scene update cost a 2,665-node street 12 ms per call in a frame script.
     this.updateWorldMatrix(true, false);
     return target.setFromMatrixPosition(this.matrixWorld);
   }

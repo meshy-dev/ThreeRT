@@ -1,7 +1,7 @@
 // ThreeRT native path tracer. One sample per pixel per dispatch, accumulated in `accum`.
 // Shading model mirrors UE5 DefaultLit: Lambert diffuse + GGX / Smith-joint-approx / Schlick(F90 = saturate(50 F0.g)),
 // with UE's GGX multi-scattering energy conservation and diffuse energy preservation.
-// Material / atmosphere extensions (docs/PARITY.md): texture pages with ray-cone LOD, alpha cutout, world mapping,
+// Material / atmosphere extensions: texture pages with ray-cone LOD, alpha cutout, world mapping,
 // wetness / puddles / ripples / grime, procedural facade windows, emissive animation, RIS many-light sampling, height
 // fog with volumetric single scattering. Each is compiled out when the scene does not use it (FEAT).
 //

@@ -3,8 +3,8 @@ import { DensityGrid, GridProgram, Group, MaterialFunction, Mesh, MeshPhysicalMa
 import { BoxGeometry, PlaneGeometry } from "./geometry.ts";
 
 /**
- * Falling rain around the camera, UE's camera-wrapped rain curtain line for line (the Kabukichō level's
- * AKabukichoRain + M_Rain: 16 000 streaks in a 32 x 32 x 22 m box that follows the camera; each falls at its own speed
+ * Falling rain around the camera, UE's camera-wrapped rain curtain line for line (a UE 5.8 night-street level's rain
+ * actor + M_Rain: 16 000 streaks in a 32 x 32 x 22 m box that follows the camera; each falls at its own speed
  * with the wind, wraps around the box, and turns its long side along its velocity and its face to the camera). Units
  * are metres (UE's centimetres / 100), y up. The drops shown follow `scene.rain` (0..1): a drop shows while its random
  * number is below it, as in UE.

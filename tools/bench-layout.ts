@@ -4,7 +4,7 @@
 // floor: GPU ms a frame and its trace pass (timestamp queries), the frame interval, and the guard's count (0, or the
 // numbers mean nothing). A still view, so nothing rebuilds. The GPU lock is held.
 //
-//   node tools/bench-layout.ts [hello | kabukicho] [--seconds 8] [--variants a,b] [--json out.json]
+//   node tools/bench-layout.ts [hello | bistro] [--seconds 8] [--variants a,b] [--json out.json]
 //
 // Every variant but the first runs the kernel in a form this machine may not have run before. After 2026-11-11 (a
 // dispatch that did not end took the display down): the first frame of each variant is waited for with a timeout,
@@ -18,7 +18,7 @@ import { gpuUtilization, startLive } from "./lib/live.ts";
 
 const args = process.argv.slice(2);
 const opt = (f: string, d: string) => (args.includes(f) ? args[args.indexOf(f) + 1] : d);
-const scene = args.find((a) => a === "hello" || a === "kabukicho") ?? "hello";
+const scene = args.find((a) => a === "hello" || a === "bistro") ?? "hello";
 const seconds = Number(opt("--seconds", "8"));
 const GUARD = "65536";
 const variants: Record<string, Record<string, string>> = {
@@ -35,8 +35,9 @@ const order = ["written+guard", "merged+guard", "written", "merged", "merged", "
 const holder = acquireGpuLock("bench-layout");
 if (holder) { console.log(`not measured: GPU lock held by ${holder.tool} (pid ${holder.pid})`); process.exit(2); }
 const b = branchBuild(rendererBin);
-const bundle = join(repoRoot, scene === "hello" ? "out/bundles/physics-hello.js" : "out/bundles/kabukicho.js");
-if (scene === "hello") execFileSync("node", [join(repoRoot, "tools/bundle-game.ts"), join(repoRoot, "games/physics/hello.game.ts"), "-o", bundle], { stdio: "ignore" });
+const bundle = join(repoRoot, scene === "hello" ? "out/bundles/physics-hello.js" : "out/bundles/bistro.js");
+const source = scene === "hello" ? "games/physics/hello.game.ts" : "scenes/bistro.ts";
+execFileSync("node", [join(repoRoot, "tools/bundle-game.ts"), join(repoRoot, source), "-o", bundle], { stdio: "ignore" });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const q = (xs: number[], p: number) => { const s = [...xs].sort((a, c) => a - c); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : NaN; };
 const r2 = (v: number) => Math.round(v * 100) / 100;

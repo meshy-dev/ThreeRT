@@ -438,7 +438,7 @@ pub struct AutoExposure {
     /// lens attenuation 0.78 is the same log2 luminance: Scene.cpp, r.DefaultFeature.AutoExposure.
     /// ExtendDefaultLuminanceRange, on in every UE 5 project template). UE's legacy range, -8 .. 4, saturates in
     /// daylight (a 3000-nit sky would pin the exposure at EV 6.5); scenes ported from a project without the extended
-    /// range set it explicitly (Kabukichō).
+    /// range set it explicitly.
     pub histogram_log_min: f32,
     pub histogram_log_max: f32,
     /// Eye adaptation speed toward brighter / darker targets, EV per second (UE defaults 3 / 1; real-time only).

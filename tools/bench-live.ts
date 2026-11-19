@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const bin = join(root, "renderer/target/release/threert-render");
 const arg = (k: string, d: string) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : d);
-const scenes = arg("--scenes", "cornell-box,material-grid,sun-room,neon-reflections,glb-asset,kabukicho").split(",");
+const scenes = arg("--scenes", "cornell-box,material-grid,sun-room,neon-reflections,glb-asset").split(",");
 const ks = arg("--frames", "1,4,16,64,256").split(",").map(Number);
 const scale = arg("--scale", "1");
 const out = join(root, "out/bench/live");

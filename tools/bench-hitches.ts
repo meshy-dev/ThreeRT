@@ -2,8 +2,10 @@
 // while a scenario of game events plays, each spike attributed to the event before it (first compile of a kernel
 // variant, a structural rebuild, a heavy handler).
 //
-//   node tools/bench-hitches.ts [--bundle out/bundles/kabukicho.js] [--assets DIR] [--scale auto]
-//                               [--events '[[2,"lights"],[4,"mood"],[6,"rain"]]'] [--seconds 9] [--force]
+//   node tools/bench-hitches.ts --bundle out/bundles/<id>.js [--assets DIR] [--scale auto]
+//                               [--events '[[2,"spawn"],[4,"rain"]]'] [--seconds 12] [--force]
+//
+// --events: [seconds after the warm-up, game event type] pairs (the bundle's handlers); none by default.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -11,8 +13,12 @@ import { frameStats, rendererBin, repoRoot, requireQuietGpu, summary } from "./l
 
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const bundle = resolve(flag("--bundle", join(repoRoot, "out/bundles/kabukicho.js")));
-const events: [number, string][] = JSON.parse(flag("--events", '[[3,"lights"],[5,"mood"],[7,"rain"],[9,"viewpoint"]]'));
+if (!args.includes("--bundle")) {
+  console.error("usage: node tools/bench-hitches.ts --bundle out/bundles/<id>.js [--events '[[2,\"spawn\"]]'] [--seconds 12] [--scale auto]");
+  process.exit(2);
+}
+const bundle = resolve(flag("--bundle", ""));
+const events: [number, string][] = JSON.parse(flag("--events", "[]"));
 const seconds = Number(flag("--seconds", "12"));
 const warmup = 2; // s after the scene is up: dropped
 requireQuietGpu();

@@ -4,12 +4,12 @@
 // out/cache/window-truth, keyed by the renderer's binary, the bundle and the shot; --fresh-truth renders them again),
 // or, for the dusk, with the same moment held.
 //
-//   node tools/bench-window.ts [--shots still-bistro,still-kabukicho,still-rooms,still-rooms-wide,still-glass,
+//   node tools/bench-window.ts [--shots still-bistro,still-rooms,still-rooms-wide,still-glass,
 //                               rooms-turn,slice,tokyo-dusk,tokyo-turn,tokyo-orbit]
 //                              [--tag NAME] [--fresh-truth]
 //
 // Shots (the bin is THREERT_BIN, else the release build):
-//   still-bistro, still-kabukicho  the scene held still at 2560 x 1440 (render scale 0.5, 0.375), animation frozen,
+//   still-bistro  the scene held still at 2560 x 1440 (render scale 0.5), animation frozen,
 //       300 frames, then two consecutive frames: detail (the gradients' regression on offline's: 1 keeps every edge),
 //       ΔE, SSIM against offline (512 samples), and the RMS change of luma from one frame to the next (flicker).
 //   still-rooms, still-rooms-wide  the same for scenes/lamp-rooms.ts and lamp-rooms-wide.ts (96 and 768 shadow-casting
@@ -41,7 +41,7 @@ import { startLive, type Build, type Live } from "./lib/live.ts";
 
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const ALL = ["still-bistro", "still-kabukicho", "still-rooms", "still-rooms-wide", "still-glass", "rooms-turn", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
+const ALL = ["still-bistro", "still-rooms", "still-rooms-wide", "still-glass", "rooms-turn", "slice", "tokyo-dusk", "tokyo-turn", "tokyo-orbit"];
 const shots = flag("--shots", ALL.join(",")).split(",");
 const tag = flag("--tag", new Date().toISOString().replace(/[:.]/g, "-"));
 const freshTruth = args.includes("--fresh-truth");
@@ -242,7 +242,6 @@ for (const s of shots) {
     continue;
   }
   if (s === "still-bistro") await still(s, "scenes/bistro.ts", "0.5", {});
-  else if (s === "still-kabukicho") await still(s, "games/kabukicho/kabukicho.game.ts", "0.375", { THREERT_NO_GRAIN: "1" });
   else if (s === "still-rooms") await still(s, "scenes/lamp-rooms.ts", "0.5", {}, 4096);
   else if (s === "still-rooms-wide") await still(s, "scenes/lamp-rooms-wide.ts", "0.5", {}, 4096);
   else if (s === "still-glass") await still(s, "scenes/khronos-transmission.ts", "0.5", {});

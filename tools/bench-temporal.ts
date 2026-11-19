@@ -1,19 +1,17 @@
 // Temporal quality of the live viewport against converged references (same renderer, same pose, same state):
-// frames during camera motion (ghosting + noise), right after it stops, and after a lighting change (noise + lag).
+// frames during camera motion (ghosting + noise), right after it stops, and after a lighting change (noise + lag;
+// --shot edit).
 // References are the live renderer itself converged for 1024 frames at 100% scale, cached per renderer build, bundle
-// and THREERT_* switch (out/bench-temporal/refs/<key>), so
-// every build is measured against its own converged frames: comparing with another build's mixes the change in what it
-// converges to (bias: judge that against UE or the path tracer) into the temporal error. With UE
-// references (--refs-ue, default out/bench-temporal/refs-ue when present: UE 5.8 MRQ frames of the same shots at 60 fps,
-// 1 temporal sample per frame, rendered by ue5/temporal.ts), each shot is also compared with UE's frame at the same
-// moment (ue_dE / ue_ssim: dominated by the port's own difference from the UE level, dE ~11). The column to judge temporal
-// behaviour by is the self-referenced one: UE's motion frame vs UE's settled frame of the same pose (ue_self, rendered by
-// ue5/temporal.ts) next to ours vs our converged frame (dE); excess_over_ue = dE - ue_self.
+// and THREERT_* switch (out/bench-temporal/refs/<key>), so every build is measured against its own converged frames:
+// comparing with another build's mixes the change in what it converges to (bias: judge that against the path tracer)
+// into the temporal error.
 //
-//   node tools/bench-temporal.ts [--bundle out/bundles/kabukicho.js] [--out out/bench-temporal/<tag>] [--refs DIR]
-//                                [--refs-ue out/bench-temporal/refs-ue | none] [--bin renderer/target/release/threert-render]
-//                                [--tag name] [--scale auto|0.6|1] [--list-refs] [--motion-blur] [--region signs|ground|facades|u0,v0,u1,v1]
-//                                [--shot kabukicho|volumes|water|foliage|edit]
+//   node tools/bench-temporal.ts [--bundle out/bundles/bistro.js] [--out out/bench-temporal/<tag>] [--refs DIR]
+//                                [--bin renderer/target/release/threert-render] [--tag name] [--scale auto|0.6|1]
+//                                [--region ground|shop|facades|u0,v0,u1,v1] [--shot bistro|volumes|water|foliage|edit]
+// --shot bistro (the default): Bistro night (scenes/bistro.ts, out/bundles/bistro.js, bundled here unless a bundle is
+// given) from its street camera, the perf smoke's move: a dolly 2.5 m down the street while the view turns 12° over
+// 1 s, then still. Regions ground (the wet street) | shop | facades (bench-ghosting's).
 // --shot volumes: tools/volume-scene.ts (bundle out/bundles/volume-scene.js) at frozen scene time, the camera strafing 3 m
 // across the fog, smoke and fireball in 1 s; no lighting change. Regions fog | smoke | fire.
 // --shot water | foliage: motion in the scene, the camera still. water: tools/water-scene.ts (out/bundles/water-scene.js),
@@ -29,11 +27,7 @@
 // state after (a view with no memory of the state before). Where the edit's dE is above `fresh` the history holds the
 // old lighting; `settled` is the first k from which the luminance is within 2 % of the reference's for good (0: not
 // within the 256 frames). Lockstep: two runs of a build agree to 0.01.
-// --motion-blur: motion blur in both (UE: MB=1 bun ue5/temporal.ts -> refs-ue-mb, amount 0.5 / max 5 % / target 30 fps). Movie
-// Render Queue overrides the amount with its shutter fraction (the same 0.5) and the target FPS with the output rate (60;
-// MoviePipelineImagePassBase.cpp), half the blur of the real-time viewport, so ours runs with what MRQ rendered
-// (THREERT_MOTION_BLUR=0.5,5,60). The converged references don't move, so they are the same; excess_over_ue then also says
-// whether our blur matches UE's.
+// Motion blur is off throughout (THREERT_MOTION_BLUR=0,5,30): the converged references do not move.
 import { spawn, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
@@ -41,29 +35,35 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bundleGame } from "./bundle-game.ts";
 import { rendererVersion } from "./lib/bench.ts";
+import { bistroMove, movePose } from "./lib/live.ts";
+import { STREET } from "../scenes/bistro.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
 const bin = resolve(flag("--bin", join(root, "renderer/target/release/threert-render")));
-const volumes = flag("--shot", "kabukicho") === "volumes";
+const shot = flag("--shot", "bistro");
+if (!["bistro", "volumes", "water", "foliage", "edit"].includes(shot)) throw new Error(`--shot: bistro | volumes | water | foliage | edit`);
+const volumes = shot === "volumes";
 // Shots with motion in the scene (camera still): their bundle and the regions they are judged by.
 const TIME_SHOTS: Record<string, { bundle: string; regions: string[] }> = {
   water: { bundle: "water-scene.js", regions: ["water", "reflections"] },
   foliage: { bundle: "foliage-scene.js", regions: ["plants", "ferns"] },
 };
-const timeShot = TIME_SHOTS[flag("--shot", "kabukicho")];
-const editShot = flag("--shot", "kabukicho") === "edit";
-// (Its scene is one file: bundled here, unless a bundle is given.)
+const timeShot = TIME_SHOTS[shot];
+const editShot = shot === "edit";
+// (Their scenes are one file: bundled here, unless a bundle is given.)
 if (editShot && !args.includes("--bundle")) await bundleGame(join(root, "tools/light-edit-scene.ts"), join(root, "out/bundles/light-edit-scene.js"));
+if (shot === "bistro" && !args.includes("--bundle")) await bundleGame(join(root, "scenes/bistro.ts"), join(root, "out/bundles/bistro.js"));
 // The volume scene's media animate with scene time: frozen, references and test frames show the same smoke.
 if (volumes) process.env.THREERT_FREEZE_TIME = "1";
-const bundle = resolve(flag("--bundle", join(root, "out/bundles", volumes ? "volume-scene.js" : timeShot ? timeShot.bundle : editShot ? "light-edit-scene.js" : "kabukicho.js")));
+const bundle = resolve(flag("--bundle", join(root, "out/bundles", volumes ? "volume-scene.js" : timeShot ? timeShot.bundle : editShot ? "light-edit-scene.js" : "bistro.js")));
 const tag = flag("--tag", "run");
-// --region: every comparison (ours and UE's) over one part of the frame, by name (bench-ghosting's regions of view v1)
-// or as u0,v0,u1,v1.
+// --region: every comparison over one part of the frame, by name or as u0,v0,u1,v1.
 const REGIONS: Record<string, string> = {
-  ground: "0,0.62,1,1", signs: "0.2,0,0.8,0.45", facades: "0,0.1,0.25,0.62", fog: "0.08,0.42,0.38,0.72", smoke: "0.4,0.15,0.6,0.65", fire: "0.7,0.42,0.86,0.62",
+  // Bistro's street view (bench-ghosting's regions).
+  ground: "0.156,0.667,0.859,1", shop: "0.258,0.167,0.508,0.611", facades: "0,0.083,0.258,0.556",
+  fog: "0.08,0.42,0.38,0.72", smoke: "0.4,0.15,0.6,0.65", fire: "0.7,0.42,0.86,0.62",
   water: "0.3,0.55,1,1", reflections: "0.5,0.6,0.8,0.85", plants: "0,0.35,0.75,0.8", ferns: "0.12,0.55,0.75,0.8",
   // The lighting-edit scene: the spot's pool on the back wall, the floor its bounce lights, the floor beside the sign.
   pool: "0.6,0.28,0.8,0.58", bounce: "0.75,0.68,0.98,0.88", signfloor: "0.03,0.75,0.3,0.95", room: "0,0,1,1",
@@ -71,18 +71,15 @@ const REGIONS: Record<string, string> = {
 const region = args.includes("--region") ? (REGIONS[flag("--region", "")] ?? flag("--region", "")) : null;
 const scale = flag("--scale", "auto"); // test-run render scale (references are always 100%)
 const out = resolve(flag("--out", join(root, "out/bench-temporal", tag)));
-// Without it, none (games may switch UE's default on; the UE references have r.MotionBlurQuality 0).
-process.env.THREERT_MOTION_BLUR = args.includes("--motion-blur") ? "0.5,5,60" : "0,5,30";
+// No motion blur (games may switch UE's default on): the converged references do not move.
+process.env.THREERT_MOTION_BLUR = "0,5,30";
 const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_BIN", "THREERT_MOTION_BLUR"].includes(k)).sort();
 const refKey = createHash("sha256").update(rendererVersion(bin)).update(readFileSync(bundle)).update(JSON.stringify(switches)).digest("hex").slice(0, 12);
 const refs = resolve(flag("--refs", join(root, "out/bench-temporal/refs", refKey)));
-const refsUeArg = flag("--refs-ue", join(root, "out/bench-temporal", args.includes("--motion-blur") ? "refs-ue-mb" : "refs-ue"));
-const refsUe = refsUeArg !== "none" && existsSync(resolve(refsUeArg)) ? resolve(refsUeArg) : null;
 
 type V3 = [number, number, number];
-// Kabukichō view v1 (eye height, looking down Ichiban-gai): dolly 2.5 m forward while turning 12° right over 1 s.
-const P0: V3 = [-11.5, 1.7, -1.8];
-const yaw0 = Math.atan2(0.07, 0.995);
+// Bistro's street camera: dolly 2.5 m down the street while turning 12° right over 1 s (the perf smoke's move).
+const MOVE = bistroMove(STREET);
 const pose = (k: number, n: number) => {
   const f = k / n;
   if (volumes) {
@@ -90,28 +87,12 @@ const pose = (k: number, n: number) => {
     const pos: V3 = [-1.5 + 3 * f, 1.6, 7];
     return { pos, target: [pos[0], 1.4, 0] as V3 };
   }
-  const yaw = yaw0 - f * (12 * Math.PI) / 180;
-  const pos: V3 = [P0[0] + 2.5 * f, P0[1], P0[2] + 0.3 * f];
-  const fwd: V3 = [Math.cos(yaw), 0.07, Math.sin(yaw)];
-  return { pos, target: pos.map((p, i) => p + fwd[i] * 10) as V3 };
+  const { pos, target } = movePose(MOVE, f);
+  return { pos: pos as V3, target: target as V3 };
 };
 const N = 60;
-const TAN = Math.tan(((volumes ? 50 : 55) * Math.PI) / 360);
+const TAN = Math.tan(((volumes ? 50 : STREET.fov) * Math.PI) / 360);
 const refPoses = [20, 40, 59];
-/** Snapshots after the lighting change: wait (ms) since the previous one, shot name (cumulative 0.3 / 1 / 2 / 4 s). */
-const CLOSING = [[300, "closing-0.3s"], [700, "closing-1s"], [1000, "closing-2s"], [2000, "closing-4s"]] as const;
-const SHOTS = [...refPoses.map((k) => `move${k}`), "stopped-0.5s", ...(volumes ? [] : CLOSING.map(([, name]) => name))];
-/** UE's own converged frame for each shot (ue5/temporal.ts holds each pose 3 s; closing settles after 10 s). */
-const UE_SETTLED: Record<string, string> = {
-  move20: "settled20", move40: "settled40", move59: "settled59", "stopped-0.5s": "settled59",
-  "closing-0.3s": "closing-settled", "closing-1s": "closing-settled", "closing-2s": "closing-settled", "closing-4s": "closing-settled",
-};
-const ueRef = (name: string) => (refsUe && existsSync(join(refsUe, `${name}.png`)) ? join(refsUe, `${name}.png`) : null);
-if (refsUe) console.log(`UE references: ${refsUe} (${SHOTS.filter(ueRef).length}/${SHOTS.length} shots)`);
-if (args.includes("--list-refs")) {
-  console.table(SHOTS.map((s) => ({ shot: s, ue: ueRef(s) ?? "-" })));
-  process.exit(0);
-}
 mkdirSync(out, { recursive: true });
 mkdirSync(refs, { recursive: true });
 
@@ -145,7 +126,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function start(scale: string) {
   const live = new Live(scale);
   await live.wait((l) => l.includes("fps on"));
-  live.send({ cmd: "event", type: "rain" }); // rain off: no ripple animation (the street stays wet)
   await sleep(2500);
   return live;
 }
@@ -277,7 +257,7 @@ if (editShot) {
 }
 
 // ------------------------------------------------------------------------------------------------ references
-const refFiles = [...refPoses.map((k) => join(refs, `pose${k}.png`)), ...(volumes ? [] : [join(refs, "closing.png")])];
+const refFiles = refPoses.map((k) => join(refs, `pose${k}.png`));
 if (!refFiles.every(existsSync)) {
   console.log("rendering converged references (1024 frames each at 100% scale)…");
   const live = await start("1");
@@ -286,14 +266,6 @@ if (!refFiles.every(existsSync)) {
     live.send({ cmd: "camera", pos, target, tan: TAN });
     live.send({ cmd: "reset" });
     await live.snapshot(join(refs, `pose${k}.png`), 1024);
-  }
-  if (!volumes) {
-    const p0 = pose(0, N);
-    live.send({ cmd: "camera", pos: p0.pos, target: p0.target, tan: TAN });
-    live.send({ cmd: "event", type: "lights" });
-    await sleep(4000); // flicker transitions settle
-    live.send({ cmd: "reset" });
-    await live.snapshot(join(refs, "closing.png"), 1024);
   }
   live.quit();
 }
@@ -318,18 +290,6 @@ for (let k = 0; k < N; k++) {
 await sleep(500);
 await live.snapshot(join(out, "stopped-0.5s.png"));
 shots.push({ name: "stopped-0.5s", ref: join(refs, "pose59.png") });
-// Lighting change at the start pose (the closing reference is there).
-if (!volumes) {
-  const { pos, target } = pose(0, N);
-  live.send({ cmd: "camera", pos, target, tan: TAN });
-  await sleep(3000);
-  live.send({ cmd: "event", type: "lights" });
-  for (const [ms, name] of CLOSING) {
-    await sleep(ms);
-    await live.snapshot(join(out, `${name}.png`));
-    shots.push({ name, ref: join(refs, "closing.png") });
-  }
-}
 live.quit();
 await sleep(300);
 
@@ -338,23 +298,9 @@ const rows = shots.map((s) => {
   const img = join(out, `${s.name}.png`);
   const m = compare(s.ref, img);
   const row: Record<string, string | number> = { shot: s.name, dE: m.mean_delta_e, p95: m.p95_delta_e, ssim: m.ssim, psnr: m.psnr_db };
-  const ue = ueRef(s.name);
-  if (ue) {
-    const u = compare(ue, img);
-    // Each renderer against its own converged frame: UE's motion frame vs UE's settled frame of the same pose / state
-    // (ue_self) next to ours vs our converged reference (dE). That cancels the port's differences entirely (Kabukicho's
-    // port differs from the UE level by dE ~11 everywhere, which drowns temporal error in a direct comparison: ue_dE).
-    const settled = ueRef(UE_SETTLED[s.name] ?? "");
-    const self = settled ? compare(settled, ue) : null;
-    Object.assign(row, {
-      ue_dE: u.mean_delta_e, ue_ssim: u.ssim,
-      ...(self ? { ue_self: self.mean_delta_e, ue_self_ssim: self.ssim, excess_over_ue: +(m.mean_delta_e - self.mean_delta_e).toFixed(2) } : {}),
-    });
-  }
   return row;
 });
 console.table(rows);
 writeFileSync(join(out, "metrics.json"), JSON.stringify(rows, null, 1));
 execFileSync(bin, ["montage", join(out, "move.jpg"), "--width", "640", ...["move40", "move59", "stopped-0.5s"].map((n) => join(out, `${n}.png`)), join(refs, "pose59.png")]);
-if (!volumes) execFileSync(bin, ["montage", join(out, "closing.jpg"), "--width", "640", ...["closing-0.3s", "closing-1s", "closing-4s"].map((n) => join(out, `${n}.png`)), join(refs, "closing.png")]);
-console.log(`${out}/move.jpg${volumes ? "" : ", closing.jpg"}`);
+console.log(`${out}/move.jpg`);

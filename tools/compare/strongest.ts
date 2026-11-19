@@ -1,5 +1,5 @@
 // docs/COMPARE.md part 1: three.js pushed as far as it goes vs ThreeRT, on the same scene code, the same camera and
-// the same exposure, both measured against UE5 (path tracer for the reference scenes, Lumen for Kabukichō).
+// the same exposure, both measured against UE5 (its path tracer).
 //
 //   node tools/compare/strongest.ts [--scenes a,b] [--steps ours,three,report]
 //
@@ -18,15 +18,11 @@ import { requireQuietGpu } from "../lib/bench.ts";
 import { bundlePage, launch, root, serve } from "../three/browser.ts";
 import { bin, compare, montage, outDir, readJson, runLive } from "./lib.ts";
 
-/** tools/kabukicho/views.py: UE location (cm, Z up) + rotator (pitch, yaw) -> eye + look-at target (m, Y up). */
-function ueView(loc: number[], rot: number[], fov: number) {
-  const p = (rot[0] * Math.PI) / 180, y = (rot[1] * Math.PI) / 180;
-  const fwd = [Math.cos(p) * Math.cos(y), Math.cos(p) * Math.sin(y), Math.sin(p)];
-  const pos = [loc[0] / 100, loc[2] / 100, loc[1] / 100];
-  return { position: pos, target: [pos[0] + fwd[0], pos[1] + fwd[2], pos[2] + fwd[1]], fov };
-}
+/** A scene: catalog id, view name, montage title, the UE reference and, where it is not the scene's own, a camera
+ *  (eye, look-at target in m, Y up; vertical fov in degrees). */
+type Shot = { id: string; view: string; title: string; ref: string; refName: string; camera?: { position: number[]; target: number[]; fov: number } };
 const pt = (id: string) => join(root, "out/ue/pathtracer", `${id}.png`);
-const SCENES = [
+const SCENES: Shot[] = [
   { id: "material-grid", view: "material-grid", title: "材质球 · 日光", ref: pt("material-grid"), refName: "UE 路径追踪" },
   { id: "sun-room", view: "sun-room", title: "室内 · 窗外日光", ref: pt("sun-room"), refName: "UE 路径追踪" },
   { id: "neon-reflections", view: "neon-reflections", title: "夜景 · 霓虹 + 反射", ref: pt("neon-reflections"), refName: "UE 路径追踪" },
@@ -35,8 +31,6 @@ const SCENES = [
   { id: "bistro", view: "bistro", title: "Bistro · 夜", ref: pt("bistro"), refName: "UE 路径追踪" },
   // Zero Day, Measure One, static (ROADMAP § 0 step 6): its reference is the UE Path Tracer too.
   { id: "zero-day", view: "zero-day", title: "Zero Day · 静态", ref: pt("zero-day"), refName: "UE 路径追踪" },
-  // Kabukichō: the game, at UE camera view v1, against UE Lumen on the actual UE level (auto exposure).
-  { id: "kabukicho", view: "kabukicho-v1", title: "歌舞伎町 · 夜", ref: join(root, "out/ue-kb/lumen-auto/v1.png"), refName: "UE Lumen", camera: ueView([-1150, -180, 170], [4, 4, 0], 55) },
 ];
 const arg = (k: string, d: string) => (process.argv.includes(k) ? process.argv[process.argv.indexOf(k) + 1] : d);
 const ids = arg("--scenes", SCENES.map((s) => s.id).join(",")).split(",");
@@ -125,7 +119,7 @@ if (steps.has("report")) {
   const fps = (ms: number) => (ms > 0 ? Math.min(999, Math.round(1000 / ms)) : 0);
   const dropped = (x: any) => Object.values((x?.dropped ?? {}) as Record<string, number>).reduce((a, b) => a + b, 0);
   const md = [
-    "Mean ΔE76 vs UE (path tracer; Lumen for Kabukichō) · frame cost at 1280 x 720 (ThreeRT at 60 fps: GPU ms at its dynamic render scale). three.js: the better of its sky / scene-probe environment per scene.",
+    "Mean ΔE76 vs the UE path tracer · frame cost at 1280 x 720 (ThreeRT at 60 fps: GPU ms at its dynamic render scale). three.js: the better of its sky / scene-probe environment per scene.",
     "",
     "| scene | three.js tuned (WebGL) | three.js strongest (WebGPU + SSGI + SSR + TRAA) | ThreeRT live, 60 fps | ThreeRT live, full res | ThreeRT offline 256 spp |",
     "|---|---|---|---|---|---|",

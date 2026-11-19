@@ -1,16 +1,16 @@
-// The R1 / R2 perf smoke (docs/WORKFLOW.md, "The merge gate"): Bistro night live at the 0.5 floor (Kabukichō until
-// 2026-11-08: --scene kabukicho), after a warm-up about 15 s still at the scene's camera and 15 s on the scripted move
+// The R1 / R2 perf smoke (docs/WORKFLOW.md, "The merge gate"): Bistro night live at the 0.5 floor (until 2026-11-08 the
+// smoke ran on a scene since removed), after a warm-up about 15 s still at the scene's camera and 15 s on the scripted move
 // (GPU timestamps), for this checkout's release renderer and for main at the branch's merge base. Bistro also drives its
 // FBX camera path (the first --drive-seconds, camera commands at 60 Hz, at the 0.5 floor, which is where dynamic
 // resolution sits on Bistro): GPU and frame-interval p50 / p95 from the frame log, the frame rate a player sees (60 fps =
 // an interval of 16.7 ms).
 //
-//   node tools/perf-smoke.ts [--scene bistro|kabukicho] [--base <rev>] [--seconds 15] [--drive-seconds 20] [--force]
+//   node tools/perf-smoke.ts [--scene bistro] [--base <rev>] [--seconds 15] [--drive-seconds 20] [--force]
 //                            [--refresh-baseline]
 //
 // Each build gets one launch to its first frame before it is measured (a cold shader cache reads slower). The main
-// baseline is measured once per commit and cached (out/bench/perf-baseline/bistro-<sha>.json, Kabukichō's
-// <sha>.json; a perf-suite run of that commit serves too). A base commit without scenes/bistro.ts gets this
+// baseline is measured once per commit and cached (out/bench/perf-baseline/bistro-<sha>.json; a perf-suite run
+// of that commit serves too). A base commit without scenes/bistro.ts gets this
 // checkout's (tools/lib/build-at.ts `extra`). When it is missing, the merge base is built in out/perf-base (tools/lib/build-at.ts) and
 // measured first. Pass: still and moving each ≤ baseline + 0.3 ms and ≤ 16.7 ms; the drive's GPU p50 / p95 ≤ baseline
 // + 0.3 ms and its interval p50 / p95 ≤ baseline + max(1.5 ms, 7.5 %) (wall-clock pacing); otherwise the PR moves up
@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot, rendererBin } from "./lib/bench.ts";
 import { branchBuild, buildAt, resolveSha } from "./lib/build-at.ts";
-import { bistroDrive, bistroMove, district, firstFrame, kabukicho, quietGpu, stillAndMoving, takeGpu, type Build } from "./lib/live.ts";
+import { bistroDrive, bistroMove, district, firstFrame, quietGpu, stillAndMoving, takeGpu, type Build } from "./lib/live.ts";
 import { BISTRO, STREET } from "../scenes/bistro.ts";
 
 const args = process.argv.slice(2);
@@ -44,14 +44,13 @@ const GATES: Record<string, { src: string; title: string; drive: boolean; measur
       return { ...r, drive: { gpu_p50_ms: d.gpu_p50_ms, gpu_p95_ms: d.gpu_p95_ms, interval_p50_ms: d.interval_p50_ms, interval_p95_ms: d.interval_p95_ms, start_p95_ms: d.start_p95_ms, seconds: driveSeconds } };
     },
   },
-  kabukicho: { src: "games/kabukicho/kabukicho.game.ts", title: "Kabukichō", drive: false, measure: (b, bundle) => kabukicho(b, bundle, { seconds }) },
 };
 const gate = GATES[scene];
 if (!gate) throw new Error(`--scene: ${Object.keys(GATES).join(" | ")}`);
 const bundleName = `${gate.src.split("/").pop()!.replace(/\.(game\.)?ts$/, "")}.js`;
 
 const base = resolveSha(args.includes("--base") ? opt("--base", "") : execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: repoRoot, encoding: "utf8" }).trim());
-const baseFile = join(repoRoot, "out/bench/perf-baseline", scene === "kabukicho" ? `${base}.json` : `${scene}-${base}.json`);
+const baseFile = join(repoRoot, "out/bench/perf-baseline", `${scene}-${base}.json`);
 const suiteFile = join(repoRoot, "out/bench/perf-suite", `${base}.json`);
 
 async function quiet(when: string): Promise<boolean> {
