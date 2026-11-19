@@ -1971,8 +1971,8 @@ impl LiveCore {
     /// (gpu.rs `EditRoom`) as the build would make it (`scene::proc_object`, `scene::own_mesh_tris`), new BLASes are
     /// built for new geometry only, its TLAS instance is set (cleared for a removed or hidden object) and the TLAS
     /// rebuilt, one submit. Nothing is moved: what an edit replaces stays behind until the next rebuild. Err: why it
-    /// cannot (software traversal, the room is full, a kernel feature the scene lacks, an emitting / glass / function
-    /// material, ...); the caller rebuilds the scene then. `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
+    /// cannot (software traversal without units, the room is full, a kernel feature the scene lacks, ...); the caller
+    /// rebuilds the scene then. `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
     pub(super) fn edit_geometry(&mut self, world: &World, ch: &crate::world::Changes, build: &mut gpu::TopBuild) -> std::result::Result<(), String> {
         use crate::world::Kind;
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
