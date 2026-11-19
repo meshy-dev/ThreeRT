@@ -2788,15 +2788,18 @@ emitters, in the light tree, until the object first moves; that move makes them 
 first move does (`emitters_start_moving`).
 Measured: every node an instance of a mesh of its own (no part merged; `THREERT_RIGID_NODES=all`) costs 4 % of GPU
 time a frame on a street of 1,300 nodes and 8 to 10 % on an interior of 7,300, four alternated pairs each, so the
-nodes that do not move relative to each other are merged. With them merged: NUMBERS. The two scenes hold 2.8 M and
-3.5 M triangles fewer in world space; meshes, instances and memory otherwise as before.
+nodes that do not move relative to each other are merged. With them merged, against the build before: the street
++0.2 to +1.1 % (six pairs), the interior -0.5 and -0.7 %, ten other scenes within 1.0 %. The two scenes hold
+2.8 M and 3.5 M triangles fewer in world space; meshes, instances and memory otherwise as before.
 Tried and set right: the part left alone with moving emitters from the build where the object is movable. An
 interior's six thousand emitters were then sampled without the light tree: 7 % faster and worse against its
 reference (two pairs).
 Still a rebuild: such a model hidden, shown, removed or placed a second time; a pose change under software
 traversal. Two nodes of one mesh of the file do not share it.
 Tests: the parts' meshes shared by two placements, the part left alone in the model's space; a new pose, a move,
-both at once, a move of one that is not movable, each against a build's light list and picture; the floor under a
+both at once, a move of one that is not movable, each against a build's light list and picture; a new pose of a
+model under two groups (the build's product of its transforms and an update's differ in their last bits: it is
+not taken for moved); the floor under a
 panel on a node its clip leaves alone (`geometry/emitter-rigid`), and under one moved 300 m in place with its clip
 playing (`geometry/emitter-rigid-moved-live`: it read nothing before).
 
