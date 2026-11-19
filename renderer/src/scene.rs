@@ -795,6 +795,9 @@ pub struct Retained {
     /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
     /// place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
+    /// A model's mesh's rows as every instance of it has them (the file's materials, `model_sections`; where a
+    /// section's triangles and emitters are is each instance's to fill).
+    pub mesh_rows: HashMap<u32, Vec<Row>>,
 }
 
 /// Where what one object of the world draws landed in the GPU's tables: its entry in the objects table and how its
@@ -959,8 +962,8 @@ pub struct PoseGroup {
     pub nodes: Option<Vec<String>>,
     /// The pose the mesh holds.
     pub animation: desc::Animation,
-    /// Per pool triangle of the mesh, in order: its index in the model's triangles and its material.
-    pub order: Vec<(u32, u32)>,
+    /// Per pool triangle of the mesh, in order: its index in the model's triangles, its section and its index in it.
+    pub order: Vec<(u32, u32, u32)>,
     /// (object, instance) of each member.
     pub members: Vec<(u32, u32)>,
 }
@@ -1778,20 +1781,18 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             }
                         }
                         flatten_coincident(&mut classed, &emitting, &|k| local[k].1.p);
-                        let emitters = pool_emitters(&classed, &emitting);
                         if classed[..FLAT].iter().any(|l| !l.is_empty()) {
                             let first_pool = pool_tris.len() as u32;
                             let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                            for list in &classed[..FLAT] {
-                                for &(k, mat) in list {
-                                    let t = &local[k].1;
-                                    for v in t.p {
-                                        lo = lo.min(v.into());
-                                        hi = hi.max(v.into());
-                                    }
-                                    pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                    pool_attrs.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
+                            let (order, sects, mine) = model_sections(&kept(&classed));
+                            for &(k, section, rank) in &order {
+                                let t = &local[k].1;
+                                for v in t.p {
+                                    lo = lo.min(v.into());
+                                    hi = hi.max(v.into());
                                 }
+                                pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                                pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                             }
                             for c in 0..8 {
                                 let p = Vec3A::new(if c & 1 == 0 { lo.x } else { hi.x }, if c & 2 == 0 { lo.y } else { hi.y }, if c & 4 == 0 { lo.z } else { hi.z });
@@ -1799,10 +1800,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 olo = olo.min(q);
                                 ohi = ohi.max(q);
                             }
-                            let count = classed[..FLAT].iter().map(Vec::len).sum::<usize>() as u32;
-                            meshes.push(InstMesh { first: first_pool, count, opaque: classed[0].len() as u32, glass: classed[2].len() as u32, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emitters, sect_first: 0, sect_count: 0, colored: false });
+                            meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool, 0) });
+                            sections.extend(sects);
                             rigid.instances.push((*ni, instances.len() as u32));
-                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: meshes[meshes.len() - 1].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 });
+                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
+                            rows.extend(mine);
                         }
                         for &(k, mat) in &classed[FLAT] {
                             let t = &local[k].1;
@@ -1853,22 +1855,22 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             let g = (classed[FLAT].is_empty() && !local.is_empty()).then(|| {
                                 let first = pool_tris.len() as u32;
                                 let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                                let mut tri_order = Vec::with_capacity(local.len());
-                                for list in &classed[..FLAT] {
-                                    for &(k, mat) in list {
-                                        let t = &local[k];
-                                        for v in t.p {
-                                            lo = lo.min(v.into());
-                                            hi = hi.max(v.into());
-                                        }
-                                        pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                        pool_attrs.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
-                                        tri_order.push((k as u32, mat));
+                                let (order, sects, mine) = model_sections(&kept(&classed));
+                                for &(k, section, rank) in &order {
+                                    let t = &local[k];
+                                    for v in t.p {
+                                        lo = lo.min(v.into());
+                                        hi = hi.max(v.into());
                                     }
+                                    pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                                 }
+                                let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
                                 // Other poses reach further (a stride, a swing): object bounds a quarter wider each way.
                                 let pad = (hi - lo) * 0.25;
-                                meshes.push(InstMesh { first, count: tri_order.len() as u32, opaque: classed[0].len() as u32, glass: classed[2].len() as u32, rest_first: 0, rest_count: 0, lo: lo - pad, hi: hi + pad, deforms: true, emitters: 0, sect_first: 0, sect_count: 0, colored: false });
+                                meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first, 0) });
+                                sections.extend(sects);
+                                retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
                                 retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![] });
                                 retained.pose_groups.len() as u32 - 1
                             });
@@ -1884,7 +1886,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 });
+                        let mine = retained.mesh_rows[&mesh].clone();
+                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
+                        rows.extend(mine);
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Pose(g), moves: true }) };
                         retained.pose_groups[g as usize].members.push((*id, i));
                         continue;
@@ -1918,17 +1922,21 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                         hi = hi.max(v.into());
                                     }
                                 }
-                                for (class, list) in classed.iter().enumerate() {
-                                    let (pt, pa) = if class < FLAT { (&mut pool_tris, &mut pool_attrs) } else { (&mut rest_tris, &mut rest_attrs) };
-                                    for &(k, mat) in list {
-                                        let t = &local[k];
-                                        pt.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                        pa.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
-                                    }
+                                let (order, sects, mine) = model_sections(&kept(&classed));
+                                for &(k, section, rank) in &order {
+                                    let t = &local[k];
+                                    pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                                 }
-                                let count = classed[..FLAT].iter().map(Vec::len).sum::<usize>() as u32;
-                                let emitters = pool_emitters(&classed, &emitting);
-                                meshes.push(InstMesh { first, count, opaque: classed[0].len() as u32, glass: classed[2].len() as u32, rest_first, rest_count: classed[FLAT].len() as u32, lo, hi, deforms: false, emitters, sect_first: 0, sect_count: 0, colored: false });
+                                // (What leaves the mesh keeps its material on the triangle: each placement flattens it.)
+                                for &(k, mat) in &classed[FLAT] {
+                                    let t = &local[k];
+                                    rest_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                                    rest_attrs.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
+                                }
+                                meshes.push(InstMesh { rest_first, rest_count: classed[FLAT].len() as u32, lo, hi, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first, 0) });
+                                sections.extend(sects);
+                                retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
                                 meshes.len() as u32 - 1
                             });
                             if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
@@ -1936,7 +1944,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             }
                             // (What an edit can place another instance of: a mesh whole in the pool. One with emitters is
                             // not: an edit does not make a model's instance its emitters yet.)
-                            if let Some(k) = k.filter(|&k| meshes[k as usize].rest_count == 0 && meshes[k as usize].emitters == 0) {
+                            if let Some(k) = k.filter(|&k| meshes[k as usize].rest_count == 0 && pool_emitters(&classed, &emitting) == 0) {
                                 retained.model_mesh.insert(key.clone(), k);
                             }
                             mesh_of.insert(key, k);
@@ -1952,7 +1960,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         retained.proxy(*id).object = Some(oi);
-                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: meshes[mesh as usize].casts(n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 };
+                        let mine = retained.mesh_rows[&mesh].clone();
+                        let inst = Instance { mesh, world: m, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) };
+                        rows.extend(mine);
                         // Its glass / function triangles as ordinary world-space ones (same object).
                         for k in im.rest_first..im.rest_first + im.rest_count {
                             let (t, a, _) = inst.flat(&rest_tris[k as usize], &rest_attrs[k as usize], None);
@@ -2526,6 +2536,45 @@ pub fn rank_in_sections(attrs: &mut [GpuTriAttr]) {
         a.x[3] = f32::from_bits(seen[s]);
         seen[s] += 1;
     }
+}
+
+/// A model's mesh laid out by section, a section a material in the order the materials first appear among the
+/// triangles that stay in the mesh (`kept`: each one's index in the model's list, its GPU material and that
+/// material's class, `mesh_class`), a section's triangles in the list's order. Returns the pool's order (the index
+/// in the model's list, the triangle's section and its index in it), the sections, and an instance's rows for them
+/// (`Retained::mesh_rows`: every instance of the mesh has the file's materials).
+#[allow(clippy::type_complexity)]
+pub fn model_sections(kept: &[(usize, u32, u32)]) -> (Vec<(usize, u32, u32)>, Vec<Section>, Vec<Row>) {
+    let mut sorted = kept.to_vec();
+    sorted.sort_unstable_by_key(|k| k.0);
+    let mut section_of: HashMap<u32, u32> = HashMap::new();
+    let (mut lists, mut rows): (Vec<Vec<usize>>, Vec<Row>) = (vec![], vec![]);
+    for &(k, mat, class) in &sorted {
+        let at = *section_of.entry(mat).or_insert_with(|| {
+            lists.push(vec![]);
+            rows.push([mat | [0, ROW_CUTOUT, ROW_GLASS][class as usize], 0, NO_EMITTER, 0]);
+            lists.len() as u32 - 1
+        });
+        lists[at as usize].push(k);
+    }
+    let (mut order, mut sections) = (Vec::with_capacity(sorted.len()), Vec::with_capacity(lists.len()));
+    for (at, list) in lists.iter().enumerate() {
+        sections.push(Section { first: order.len() as u32, count: list.len() as u32, slot: at as u32 });
+        order.extend(list.iter().enumerate().map(|(rank, &k)| (k, at as u32, rank as u32)));
+    }
+    (order, sections, rows)
+}
+
+/// A model's triangle as its mesh holds it: its attributes with its section and its index in it.
+pub fn section_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3, f32)>, section: u32, rank: u32) -> GpuTriAttr {
+    let mut a = tri_attr(p, n, uv, tangent, section);
+    a.x[3] = f32::from_bits(rank);
+    a
+}
+
+/// The triangles of `classed` that stay in a mesh (`FLAT`'s leave it), for `model_sections`.
+fn kept(classed: &[Vec<(usize, u32)>; 4]) -> Vec<(usize, u32, u32)> {
+    classed[..FLAT].iter().enumerate().flat_map(|(class, list)| list.iter().map(move |&(k, mat)| (k, mat, class as u32))).collect()
 }
 
 /// An instance's rows for `sections`, drawn with the object's materials `mats` (GPU indices; a slot past the last is

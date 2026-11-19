@@ -1759,18 +1759,15 @@ pub fn instance_features(scene: &Scene) -> u32 {
     if scene.gpu_instances.is_empty() {
         return media | particles;
     }
-    // (A model's mesh has its materials on its triangles and its classes in its counts; a mesh with sections has
-    // them in its instances' rows.)
+    // (An instance's rows say its materials and their classes.)
     let function = |mat: u32| scene.materials.get(mat as usize).is_some_and(|m| m.tex1[3] != 0);
-    let on_triangles = scene.meshes.iter().filter(|m| m.sect_count == 0).flat_map(|m| &scene.pool_attrs[m.first as usize..(m.first + m.count) as usize]).any(|a| function(a.uv[3].to_bits()));
     let rows = |i: &crate::scene::Instance| &scene.rows[i.rows as usize..][..scene.meshes[i.mesh as usize].sect_count as usize];
     let any_row = |bit: u32| scene.instances.iter().any(|i| rows(i).iter().any(|r| r[0] & bit != 0));
     let mixed_glass = scene.instances.iter().any(|i| i.bits & crate::scene::INST_GLASS != 0 && i.cast_shadow);
-    let ifunc = if on_triangles || scene.rows.iter().any(|r| function(crate::scene::row_material(r))) { F_IFUNC } else { 0 };
-    let iglass = if mixed_glass || scene.meshes.iter().any(|m| m.glass > 0 && m.glass < m.count) { F_IGLASS } else { 0 };
-    let masked = any_row(crate::scene::ROW_CUTOUT) || scene.meshes.iter().any(|m| m.opaque + m.glass < m.count);
-    let with_rows = if scene.instances.iter().any(|i| i.bits & crate::scene::INST_ROWS != 0) { F_ROWS } else { 0 };
-    media | particles | ifunc | iglass | with_rows | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    let ifunc = if scene.rows.iter().any(|r| function(crate::scene::row_material(r))) { F_IFUNC } else { 0 };
+    let iglass = if mixed_glass { F_IGLASS } else { 0 };
+    let masked = any_row(crate::scene::ROW_CUTOUT);
+    media | particles | ifunc | iglass | F_ROWS | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the

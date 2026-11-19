@@ -71,7 +71,6 @@ fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
 override FEAT: u32 = 0xffffffffu;
 const F_MASKED: u32 = 1u;
-const F_ROWS: u32 = 2u; // an instance has rows (`row_word`): a section's material is its row's
 const F_FOG: u32 = 64u;
 const F_VOLUME: u32 = 128u;
 const F_TEX: u32 = 256u;
@@ -91,7 +90,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
-const F_IGLASS: u32 = 536870912u; // glass among an instance's other triangles: shadow rays pass it by its row, or cull a model's glass geometry (trace_hw.wgsl); a unit's glass triangles by their flag
+const F_IGLASS: u32 = 536870912u; // glass among an instance's other sections: a shadow ray steps through it by its row (trace_hw.wgsl), a unit's walk skips it
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
 
@@ -159,7 +158,7 @@ fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
 // The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
-// Model instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, LOD offset bits, -).
+// Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, LOD offset bits, its rows' first).
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
 // (volume function, shape: 0 box / 1 sphere / 2 none while its node is hidden, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
@@ -296,31 +295,26 @@ fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
 }
 // An instance's rows (scene.rs `Row`): four words a section of its mesh, from the record's info.w on. The material
-// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). A record's
-// n1.w says whether it has rows (INST_ROWS: its mesh is its geometry's alone, and a triangle's attributes hold its
-// section in uv.w and its index in the section in x.w), and whether a row of it is a cutout's or glass.
-const INST_ROWS: u32 = 8u;
+// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). A triangle of
+// a mesh holds its section in its attributes' uv.w and its index in the section in x.w; a record's n1.w says whether
+// a row of it is a cutout's or glass.
 const INST_CUTOUT: u32 = 16u;
 const INST_GLASS: u32 = 32u;
 const ROW_MATERIAL: u32 = 0xffffffu;
 const ROW_CUTOUT: u32 = 0x1000000u;
 const ROW_GLASS: u32 = 0x2000000u;
 const NO_EMITTER: u32 = 0xffffffffu;
-fn has_rows(r: Instance) -> bool { return has(F_ROWS) && (bitcast<u32>(r.n1.w) & INST_ROWS) != 0u; }
 fn row_word(first: u32, section: u32, k: u32) -> u32 { return words[P.word_first.w + (first + section) * 4u + k]; }
 
 // The material of a triangle, given its attributes and the instance that places it (NO_INST: none). Every read of a
-// hit's material goes through here: where the material is kept is this function's alone. On the triangle; with rows,
-// in the row of the triangle's section.
+// hit's material goes through here: where the material is kept is this function's alone. In the row of the triangle's
+// section, which its instance has; on the triangle itself where no instance places it.
 fn material_of(a: TriAttr, inst: u32) -> u32 {
     let m = triangle_material(a);
-    if (has(F_ROWS) && inst != NO_INST) {
-        let r = instance_at(inst);
-        if (has_rows(r)) { return row_word(r.info.w, m, 0u) & ROW_MATERIAL; }
-    }
+    if (has(F_INST) && inst != NO_INST) { return row_word(instance_at(inst).info.w, m, 0u) & ROW_MATERIAL; }
     return m;
 }
-// The material a triangle itself holds: one that no instance with rows places.
+// The material a triangle itself holds: one that no instance places.
 fn triangle_material(a: TriAttr) -> u32 { return bitcast<u32>(a.uv.w); }
 
 // A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
@@ -1889,22 +1883,14 @@ fn emitter_attrs(em: EmitterTri) -> TriAttr {
 // surface) is the BSDF ray's alone.
 fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
     if (is_proc(hit) || P.counts.y == 0u) { return 1.0; }
-    // The hit triangle's emitter: its attributes' x.w is the entry + 1 (0: it is not light-sampled), counted from its
-    // instance's first entry (the record's n2.w) when an instance places it. With rows: x.w is the triangle's index
-    // in its section, counted from the section's first entry (its row's).
+    // The hit triangle's emitter: its attributes' x.w is the entry + 1 (0: it is not light-sampled). A triangle an
+    // instance places: x.w is its index in its section, counted from the section's first entry (its row's).
     let a = attrs[hit.tri];
     var entry = bitcast<u32>(a.x.w);
-    var rows = false;
     if (has(F_INST) && hit.inst != NO_INST) {
-        let r = instance_at(hit.inst);
-        rows = has_rows(r);
-        if (rows) {
-            let first = row_word(r.info.w, bitcast<u32>(a.uv.w), 2u);
-            if (first == NO_EMITTER) { return 1.0; }
-            entry += first + 1u;
-        } else if (entry != 0u) {
-            entry += bitcast<u32>(r.n2.w);
-        }
+        let first = row_word(instance_at(hit.inst).info.w, bitcast<u32>(a.uv.w), 2u);
+        if (first == NO_EMITTER) { return 1.0; }
+        entry += first + 1u;
     }
     if (entry == 0u) { return 1.0; }
     let em = emitter_tri_at(entry - 1u);

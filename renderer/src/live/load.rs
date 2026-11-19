@@ -15,8 +15,8 @@ pub(super) struct LoadedScene {
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
     pub(super) meshes: Vec<scene::InstMesh>,
     pub(super) instances: Vec<scene::Instance>,
-    /// The meshes' sections and the instances' rows as the GPU has them (`scene::Scene::sections`, `rows`); a record
-    /// an edit places has its row at `EditState::row_at`.
+    /// The meshes' sections and the instances' rows as the GPU has them (`scene::Scene::sections`, `rows`); what an
+    /// edit places takes its rows from the room (`EditState::take_rows`).
     pub(super) sections: Vec<scene::Section>,
     pub(super) rows: Vec<scene::Row>,
     /// The instances' kernel records as uploaded (movable ones are rewritten when they move), then the procedural
@@ -293,7 +293,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         rebind: false,
         uniform_said: false,
         base: room_base,
-        row_base: rows.len(),
+        rows: Holes::new(rows.len(), rows.len() + room.records),
+        row_runs: Default::default(),
         pool_first: prep.groups.iter().sum(),
         blobs,
     };

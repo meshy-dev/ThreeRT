@@ -107,8 +107,10 @@ pub(super) struct EditState {
     pub(super) uniform_said: bool,
     /// (triangles, records, objects, words, TLAS instances) the scene itself has: the room starts there.
     pub(super) base: (usize, usize, usize, usize, usize),
-    /// The rows the scene itself has: the room's follow, one a record of the room (`row_at`).
-    pub(super) row_base: usize,
+    /// The instances' rows (`scene::Row`) edits can place, as the records are, and the run each record an edit placed
+    /// has (its first row, how many): given back with the record, kept where an object is placed again with as many.
+    pub(super) rows: Holes,
+    pub(super) row_runs: std::collections::HashMap<usize, (usize, usize)>,
     /// The first pool triangle (instanced meshes' triangles are counted from it).
     pub(super) pool_first: usize,
     /// Procedural blobs in the region by hash: their first word (the build's and those edits wrote).
@@ -121,10 +123,32 @@ impl EditState {
         record >= self.base.1
     }
 
-    /// The row of what an edit places at `record` (one section: one row): the room's own for a record of the room,
-    /// else the first of the rows the build gave the instance there.
-    pub(super) fn row_at(&self, instances: &[scene::Instance], record: usize) -> usize {
-        if self.in_room(record) { self.row_base + record - self.base.1 } else { instances.get(record).map_or(0, |i| i.rows as usize) }
+    /// `n` rows for what an edit places at `record`: the run it placed there before, if as long; the rows the build
+    /// gave the instance there, if it has as many; else a hole or the room's end. None: no room (the caller grows it).
+    pub(super) fn take_rows(&mut self, instances: &[scene::Instance], meshes: &[scene::InstMesh], record: usize, n: usize) -> Option<usize> {
+        match self.row_runs.get(&record) {
+            Some(&(at, len)) if len == n => return Some(at),
+            Some(&(at, len)) => {
+                self.rows.give(at, len);
+                self.row_runs.remove(&record);
+            }
+            None => {
+                let built = instances.get(record).filter(|_| !self.in_room(record));
+                if let Some(i) = built.filter(|i| meshes.get(i.mesh as usize).is_some_and(|m| m.sect_count as usize >= n)) {
+                    return Some(i.rows as usize);
+                }
+            }
+        }
+        let at = self.rows.take(n)?;
+        self.row_runs.insert(record, (at, n));
+        Some(at)
+    }
+
+    /// The rows an edit placed at `record` go back to the room.
+    pub(super) fn give_rows(&mut self, record: usize) {
+        if let Some((at, len)) = self.row_runs.remove(&record) {
+            self.rows.give(at, len);
+        }
     }
 }
 
@@ -254,18 +278,29 @@ impl Grow<'_> {
         true
     }
 
-    /// Kernel records and the TLAS (a record's instance is `inst_base` + it), and the room's rows, one a record
-    /// (`row_base`: the scene's own before them).
-    pub(super) fn records(&self, h: &mut Holes, extra: usize, heap: &mut Heap<Table>, accel: &mut gpu::Accel, words: &mut Heap<Stream>, row_base: usize) -> bool {
+    /// The instances' rows.
+    pub(super) fn rows(&self, h: &mut Holes, extra: usize, words: &mut Heap<Stream>) -> bool {
         if !self.ok {
             return false;
         }
         let cap = Self::cap(h, extra);
-        let row_bytes = ((row_base + cap - h.base) * 16) as u64;
-        if !self.fits(&[words.size_with(Stream::Rows, row_bytes)]) || !self.table(heap, Table::Instances, (cap * std::mem::size_of::<scene::GpuInstance>()) as u64) {
+        if !self.fits(&[words.size_with(Stream::Rows, (cap * 16) as u64)]) {
             return false;
         }
-        words.grow(&self.g.device, &self.g.queue, Stream::Rows, row_bytes);
+        words.grow(&self.g.device, &self.g.queue, Stream::Rows, (cap * 16) as u64);
+        h.cap = cap;
+        true
+    }
+
+    /// Kernel records and the TLAS (a record's instance is `inst_base` + it).
+    pub(super) fn records(&self, h: &mut Holes, extra: usize, heap: &mut Heap<Table>, accel: &mut gpu::Accel) -> bool {
+        if !self.ok {
+            return false;
+        }
+        let cap = Self::cap(h, extra);
+        if !self.table(heap, Table::Instances, (cap * std::mem::size_of::<scene::GpuInstance>()) as u64) {
+            return false;
+        }
         self.g.grow_tlas(accel, accel.inst_base + cap);
         h.cap = cap;
         true
@@ -297,6 +332,20 @@ impl Grow<'_> {
         words.grow(&self.g.device, &self.g.queue, Stream::Procs, (new * 4) as u64);
         true
     }
+}
+
+/// `n` rows for what an edit places at `record` (`EditState::take_rows`), their section grown where it has no room.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rows_for(edit: &mut EditState, grow: &Grow, words: &mut Heap<Stream>, instances: &[scene::Instance], meshes: &[scene::InstMesh], record: usize, n: usize) -> Result<usize, String> {
+    if let Some(at) = edit.take_rows(instances, meshes, record, n) {
+        return Ok(at);
+    }
+    if !grow.rows(&mut edit.rows, n, words) {
+        return Err("edit room: rows (particles, or the device's limits)".into());
+    }
+    edit.grows += 1;
+    edit.rebind = true;
+    edit.take_rows(instances, meshes, record, n).ok_or_else(|| "edit room: rows".to_string())
 }
 
 /// Whether an object's instance is all of it, so that an edit can hide, move or take out the object by it: a mesh's,
@@ -1542,12 +1591,12 @@ impl LiveCore {
                 }
                 let n = pg.order.len();
                 let (mut v, mut at, mut b, mut t) = (Vec::with_capacity(n * 3), Vec::with_capacity(n), Vec::with_capacity(n * 3), Vec::with_capacity(n));
-                for &(k, mat) in &pg.order {
+                for &(k, section, rank) in &pg.order {
                     let q = &tris[k as usize];
                     let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
                     // The flag word keeps TRI_DYNAMIC: the kernel takes a deforming mesh's motion from `prev_verts`.
                     v.extend_from_slice(&[[q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC)], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
-                    at.push(scene::tri_attr(q.p, q.n, q.uv, q.tangent, mat));
+                    at.push(scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank));
                     b.extend(scene::blas_tri(q.p.map(|p| p.to_array())));
                     t.push(q.p.map(glam::Vec3A::from));
                 }
@@ -1866,6 +1915,7 @@ impl LiveCore {
                 }
                 if edit.in_room(r0) {
                     edit.records.give(r0, cap);
+                    edit.give_rows(r0);
                     edit.objects.give(place.object as usize, cap);
                     drop_mesh_user(mesh, edit, tables, meshes);
                 }
@@ -1889,6 +1939,7 @@ impl LiveCore {
                 // What it held goes back to the room (the build's records and entries stay until the next rebuild).
                 if edit.in_room(record) {
                     edit.records.give(record, 1);
+                    edit.give_rows(record);
                 }
             }
             if let Some(k) = proxy.and_then(|p| p.object).filter(|&k| k as usize >= edit.base.2) {
@@ -2019,8 +2070,10 @@ impl LiveCore {
                     if let Some(k) = was {
                         drop_mesh_user(k, edit, tables, meshes);
                     }
-                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: im.casts(o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, im.part_offsets()), mesh, inst.cast_shadow);
+                    // (Its rows, the mesh's own, are placed with its record below.)
+                    let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?;
+                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(mine) };
+                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, inst.parts(&im)), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
@@ -2231,7 +2284,7 @@ impl LiveCore {
                         edit.objects.give(object, 1);
                         let r0 = match edit.records.take(cap) {
                             Some(r) => r,
-                            None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, cap, &mut up.heap, accel, &mut up.words, edit.row_base), gpu::Top::Sw(_) => false } => {
+                            None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, cap, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
                                 edit.grows += 1;
                                 edit.rebind = true;
                                 edit.records.take(cap).ok_or("edit room: records")?
@@ -2258,9 +2311,10 @@ impl LiveCore {
                         if tables.objects.len() < (o0 + cap) * st {
                             tables.objects.resize((o0 + cap) * st, [0.0; 4]);
                         }
+                        // (A row a copy, the copies' in a run as their records are.)
+                        let run = rows_for(edit, &grow, &mut up.words, instances, meshes, r0, cap)?;
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
-                            // (Its row: the room's, as its record is.)
-                            let row_at = edit.row_at(instances, r0 + i);
+                            let row_at = run + i;
                             let mut row = scene::row_of(mat, &tables.materials);
                             row[1] = edit.pool_first as u32 + im.first;
                             let mut inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: scene::rows_cast(&[row], o.cast_shadow), name: o.name.clone(), sub: Some(i as u32), hidden, masked: false, first_emitter: 0, rows: row_at as u32, bits: scene::rows_bits(&[row]) };
@@ -2313,7 +2367,7 @@ impl LiveCore {
                 _ => {
                     let r = match edit.records.take(1) {
                         Some(r) => r,
-                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, 1, &mut up.heap, accel, &mut up.words, edit.row_base), gpu::Top::Sw(_) => false } => {
+                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, 1, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
                             edit.grows += 1;
                             edit.rebind = true;
                             edit.records.take(1).ok_or("edit room: records")?
@@ -2327,18 +2381,30 @@ impl LiveCore {
             // has as many and none is the light tree's (those keep their place there, at no weight); else a new one at
             // the list's end. Its first goes in its record.
             let (mut gpu, mut blas) = (gpu, blas);
-            if let (Placed::Mesh(inst), Kind::Mesh { material, .. }) = (&mut blas, &o.kind) {
+            if let Placed::Mesh(inst) = &mut blas {
                 let im = meshes[inst.mesh as usize];
-                let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
-                // Its row (one section: the geometry whole), where its record's is.
-                let row_at = edit.row_at(instances, record);
-                let mut row = scene::row_of(mat, &tables.materials);
-                row[1] = edit.pool_first as u32 + im.first;
+                // Its rows: a mesh's one (the geometry whole, with the object's material), a model's as its mesh has
+                // them; each with where its section's triangles start.
+                let material = match &o.kind {
+                    Kind::Mesh { material, .. } => Some(*tables.retained.materials.get(material).ok_or("unknown material")?),
+                    _ => None,
+                };
+                let mut mine: Vec<scene::Row> = match material {
+                    Some(mat) => vec![scene::row_of(mat, &tables.materials)],
+                    None => tables.retained.mesh_rows.get(&inst.mesh).cloned().ok_or("a model's mesh without its rows")?,
+                };
+                for (s, row) in im.sections(sections).iter().zip(&mut mine) {
+                    row[1] = edit.pool_first as u32 + im.first + s.first;
+                }
+                let row_at = rows_for(edit, &grow, &mut up.words, instances, meshes, record, mine.len())?;
                 (inst.rows, gpu.info[3]) = (row_at as u32, row_at as u32);
-                if tables.materials.get(mat as usize).is_some_and(scene::emissive) {
+                // A mesh whose material emits: its emitters, a run of the light list. The run its record had, if that
+                // has as many and none is the light tree's (those keep their place there, at no weight); else a new
+                // one at the list's end. Its first goes in its row. (A model placed here has none: `model_mesh`.)
+                if let Some(mat) = material.filter(|&mat| tables.materials.get(mat as usize).is_some_and(scene::emissive)) {
                     let old = emitter_run(&tables.emitter_tris, instances, record as u32);
                     let first = if old.len() == im.count as usize && tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { tables.emitter_tris.len() };
-                    (inst.first_emitter, row[2]) = (first as u32, first as u32);
+                    (inst.first_emitter, mine[0][2]) = (first as u32, first as u32);
                     gpu.n[2][3] = f32::from_bits(first as u32);
                     let (a, b) = (im.first as usize, (im.first + im.count) as usize);
                     let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.count as usize, &tables.materials, o.driven || world.movable(id));
@@ -2352,11 +2418,11 @@ impl LiveCore {
                     tables.emissive.insert(mat);
                     emitters_changed = true;
                 }
-                w_rows.put((row_at * 16) as u64, bytemuck::bytes_of(&row));
-                if rows.len() <= row_at {
-                    rows.resize(row_at + 1, [0; 4]);
+                w_rows.put((row_at * 16) as u64, bytemuck::cast_slice(&mine));
+                if rows.len() < row_at + mine.len() {
+                    rows.resize(row_at + mine.len(), [0; 4]);
                 }
-                rows[row_at] = row;
+                rows[row_at..row_at + mine.len()].copy_from_slice(&mine);
             }
             w_records.put((record * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(&gpu));
             if record >= gpu_instances.len() {

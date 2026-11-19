@@ -112,7 +112,7 @@ const UNIT_SHIFTED: u32 = 2u;
                 let x = intersect_tri(ro, rd, ti, hit.t);
                 if (x.x < hit.t) {
                     var flags = bitcast<u32>(tri_verts[ti * 3u].w);
-                    if (has(F_ROWS) && (ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags |= row_flags(urows, ti); }
+                    if ((ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags |= row_flags(urows, ti); }
                     if (has(F_IGLASS) && mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
                     if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, rec, x.y, x.z, x.x)) { shadow_hole = true; continue; }
                     hit = Hit(x.x, ti, x.y, x.z, rec);
