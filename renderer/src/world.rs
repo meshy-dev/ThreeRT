@@ -418,7 +418,7 @@ impl Default for World {
 fn same_texture_refs(a: &desc::Material, b: &desc::Material) -> bool {
     let maps = |m: &desc::Material| [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map];
     let func = |m: &desc::Material| m.shader.as_ref().map(|s| (s.id.clone(), s.textures.clone()));
-    maps(a) == maps(b) && func(a) == func(b) && a.alpha_test.unwrap_or(0.0) == b.alpha_test.unwrap_or(0.0)
+    maps(a) == maps(b) && func(a) == func(b)
 }
 
 fn light_class(l: &desc::Light) -> (u8, bool, bool) {
@@ -1618,12 +1618,13 @@ mod tests {
         w.set_transform(2, Vec3::X, Quat::IDENTITY, Vec3::ONE).unwrap();
         let c = w.take_changes();
         assert!(!c.structural && c.materials.contains(&1) && c.powers.contains(&1) && c.camera);
-        // An alpha test that comes, changes or goes: a rebuild (an instance's row says whether its material is a
-        // cutout's, and the kernel's variant goes by whether there is one).
+        // An alpha test that comes, changes or goes is the material's change (the tables say whether its triangles
+        // can follow in place: tables.rs `apply`).
         for (test, what) in [(Some(0.5), "an alpha test"), (Some(0.3), "another threshold"), (None, "no alpha test again")] {
             m.alpha_test = test;
             w.set_material(1, m.clone());
-            assert!(w.take_changes().structural, "{what}: structural");
+            let c = w.take_changes();
+            assert!(!c.structural && c.materials.contains(&1), "{what}: the material's change");
         }
         m.map = Some(7);
         w.set_material(1, m);

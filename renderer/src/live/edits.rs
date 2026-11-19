@@ -645,6 +645,15 @@ impl LiveCore {
         // The tables' edits, then what the edits above left to build, once. Either may say the scene is to be rebuilt,
         // and the rebuild builds all of it.
         let mut applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
+        // (Materials whose class changed: their instances' rows, bits and masks, before the build that reads the masks.)
+        if applied.is_some_and(|d| d.reclassed) {
+            if let Err(why) = self.remake_classes(world, &mut top) {
+                self.fallback = Some(why);
+                self.fallbacks += 1;
+                applied = None;
+            }
+        }
+        self.sc.tables.reclassed.clear();
         if applied.is_some() && !self.build_top(top) {
             applied = None;
         }
@@ -672,7 +681,7 @@ impl LiveCore {
             up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&e.objects));
         }
         if d.materials || d.emitters || std::mem::take(&mut self.emitters_reweigh) {
-            let mut new = self.add_material_emitters(world);
+            let mut new = self.add_material_emitters();
             new.append(&mut self.pending_emitters);
             self.write_emitters(&new);
         } else if d.deferred {
@@ -1041,11 +1050,66 @@ impl LiveCore {
         }
     }
 
+    /// Materials whose class changed (`Tables::reclassed`: glass or not, a cutout or not, with a function or not):
+    /// each instance with a row of one has its rows' classes again, its record's bits, and whether it casts a shadow
+    /// (its mask above the triangles; the commit builds what is above them after). Err: the kernel lacks what the
+    /// class needs (the scene's first cutout, its first caster with glass among its sections, its first function
+    /// on an instance); the caller rebuilds.
+    fn remake_classes(&mut self, world: &World, build: &mut gpu::TopBuild) -> std::result::Result<(), String> {
+        let mats: std::collections::HashSet<u32> = self.sc.tables.reclassed.iter().copied().collect();
+        let (features, q) = (self.sc.up.kernel.features, &self.g.queue);
+        let LoadedScene { up, tables, meshes, instances, gpu_instances, rows, .. } = &mut self.sc;
+        // Each drawn record with whether its object casts a shadow.
+        let mut records: Vec<(usize, bool)> = vec![];
+        for (id, p) in &tables.retained.proxies {
+            let Some(o) = world.objects.get(id) else { continue };
+            let of: Vec<u32> = match &p.draw {
+                scene::Draw::Instance(i) => vec![i.instance],
+                scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
+                _ => vec![],
+            };
+            records.extend(of.into_iter().map(|r| (r as usize, o.cast_shadow)));
+        }
+        let mut top = gpu::Top::of(&mut up.accel, &mut up.units);
+        let size = std::mem::size_of::<scene::GpuInstance>() as u64;
+        for (r, casts) in records {
+            let Some(inst) = instances.get_mut(r) else { continue };
+            let (at, n) = (inst.rows as usize, meshes[inst.mesh as usize].sect_count as usize);
+            let Some(mine) = rows.get_mut(at..at + n).filter(|x| x.iter().any(|row| mats.contains(&scene::row_material(row)))) else { continue };
+            for row in mine.iter_mut() {
+                let mat = scene::row_material(row);
+                row[0] = scene::row_of(mat, &tables.materials)[0];
+                if tables.materials.get(mat as usize).is_some_and(|m| m.tex1[3] != 0) && features & gpu::F_IFUNC == 0 {
+                    return Err("the scene's first material function on an instance (kernel feature)".into());
+                }
+            }
+            let (bits, cast) = (scene::rows_bits(mine), scene::rows_cast(mine, casts));
+            if bits & scene::INST_CUTOUT != 0 && features & gpu::F_MASKED == 0 {
+                return Err("the scene's first cutout (kernel feature)".into());
+            }
+            if bits & scene::INST_GLASS != 0 && cast && features & gpu::F_IGLASS == 0 {
+                return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+            }
+            let Some(top) = top.as_mut() else { return Err("software traversal".into()) };
+            (inst.bits, inst.cast_shadow) = (bits, cast);
+            up.words.write(q, Stream::Rows, (at * 16) as u64, bytemuck::cast_slice(mine));
+            let old = gpu_instances[r];
+            let mut rec = top.record(inst.gpu(old.info[0]), inst.mesh, cast);
+            rec.p = old.p;
+            gpu_instances[r] = rec;
+            up.heap.write(q, Table::Instances, r as u64 * size, bytemuck::bytes_of(&rec));
+            top.moved(top.inst_base() + r, inst.world, Some((cast, inst.hidden)));
+            build.instances = true;
+        }
+        Ok(())
+    }
+
     /// Emitter entries for the materials that started emitting (`Tables::started_emitting`): their flattened static
     /// triangles (`mat_runs`), positions from `tris`, in the power-share part of the CDF (path code 0, as the light
     /// tree's moving emitters; ROADMAP § 6 step 3). Returns them (each one's index and triangle) for `write_emitters`.
-    pub(super) fn add_material_emitters(&mut self, world: &World) -> Vec<(u32, crate::GpuEmitterTri)> {
-        let (hwrt, q) = (self.g.hwrt, &self.g.queue);
+    pub(super) fn add_material_emitters(&mut self) -> Vec<(u32, crate::GpuEmitterTri)> {
+        let q = &self.g.queue;
         let sc = &mut self.sc;
         let mut new = vec![];
         let started = std::mem::take(&mut sc.tables.started_emitting);
@@ -1063,42 +1127,43 @@ impl LiveCore {
                 }
             }
         }
-        // The meshes' instances with a row of one of them (`Tables::mesh_mats`): each gets its emitters as a new run
-        // at the list's end, the sections that emit now one after another, where each starts in its row and the
-        // run's first in the instance's record; the run it had, of fewer, stays at no weight.
+        // The instances with a row of one of them (a mesh's, a model's, an instanced object's copies): each gets its
+        // emitters as a new run at the list's end, the sections that emit now one after another, where each starts
+        // in its row and the run's first in the instance's record; the run it had, of fewer, stays at no weight.
         if !started.is_empty() && !sc.meshes.is_empty() {
-            let LoadedScene { tables, instances, meshes, pool_tris, sections, rows, edit, up, .. } = sc;
+            let LoadedScene { tables, instances, meshes, pool_tris, pool_place, sections, rows, edit, up, .. } = sc;
             let moving = tables.retained.moving_records();
-            // Each mesh's triangles as the pool has them: their section and their index in it (`rank_in_sections`).
+            let mut records: Vec<usize> = tables
+                .retained
+                .proxies
+                .values()
+                .flat_map(|p| match &p.draw {
+                    scene::Draw::Instance(i) => vec![i.instance],
+                    scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                    scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
+                    _ => vec![],
+                })
+                .map(|r| r as usize)
+                .collect();
+            records.sort_unstable();
+            // Each mesh's triangles as the pool has them: their section and their index in it (`mesh_places`).
             let mut places: std::collections::HashMap<u32, Vec<(u32, u32)>> = Default::default();
-            for (id, o) in &world.objects {
-                let crate::world::Kind::Mesh { geometry, material, materials: mesh_mats, .. } = &o.kind else { continue };
-                let gpu_of = |k: &u32| tables.retained.materials.get(k).copied();
-                if !std::iter::once(material).chain(mesh_mats).any(|k| gpu_of(k).is_some_and(|m| started.contains(&m))) {
-                    continue;
-                }
-                let Some(r) = tables.retained.instance(*id).filter(|i| i.mesh.own()).map(|i| i.instance as usize) else { continue };
-                // (A record no object draws any more has none; one hidden by its object's visibility has.)
-                let Some(inst) = instances.get(r).filter(|i| !i.hidden || i.masked).cloned() else { continue };
+            let (st, mut dark) = (tables.stride, false);
+            for r in records {
+                // (A record no object draws any more has none; one hidden by its object's visibility has, and a copy
+                // that is not shown.)
+                let Some(inst) = instances.get(r).filter(|i| !i.hidden || i.masked || i.sub.is_some()).cloned() else { continue };
                 let (k, im) = (inst.mesh, meshes[inst.mesh as usize]);
                 let sects = im.sections(sections);
-                if sects.is_empty() {
+                let at = inst.rows as usize;
+                if sects.is_empty() || !rows.get(at..at + sects.len()).is_some_and(|x| x.iter().any(|row| started.contains(&scene::row_material(row)))) {
                     continue;
                 }
-                if !places.contains_key(&k) {
-                    let Some(g) = world.geometries.get(geometry) else { continue };
-                    let mut d = scene::section_mesh(g, scene::by_groups(g, mesh_mats.len()), 0, 0, false);
-                    // (Software traversal: a unit's triangles lie in its tree's order.)
-                    if !hwrt {
-                        let Ok(tree) = crate::units::mesh_tree(&d.tris) else { continue };
-                        d.attrs = tree.order.iter().map(|&i| d.attrs[i as usize]).collect();
-                        scene::rank_in_sections(&mut d.attrs);
-                    }
-                    if d.attrs.len() != im.count as usize {
-                        debug_assert!(false, "mesh {k}: {} triangles made again, {} in the pool", d.attrs.len(), im.count);
-                        continue;
-                    }
-                    places.insert(k, d.attrs.iter().map(|a| (a.uv[3].to_bits(), a.x[3].to_bits())).collect());
+                places.entry(k).or_insert_with(|| mesh_places(&im, sections, pool_place));
+                // (A copy that is not shown: its emitters at no weight by its object's entry, `scene::copy_row`.)
+                if inst.sub.is_some() && inst.hidden {
+                    tables.objects[inst.object as usize * st][3] = 0.0;
+                    dark = true;
                 }
                 let place = &places[&k];
                 let at = inst.rows as usize;
@@ -1125,6 +1190,9 @@ impl LiveCore {
                     new.push((tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                     tables.emitter_tris.push(e);
                 }
+            }
+            if dark {
+                up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&tables.objects));
             }
         }
         new
@@ -2125,14 +2193,6 @@ impl LiveCore {
                     let mat = mats[0];
                     for &mat in &mats {
                         let gm = tables.materials[mat as usize];
-                        // (It covers instances' triangles from here on, `Tables::fixed_mats`: meshes' alone,
-                        // `mesh_mats`, if it covered none before or was theirs alone, and this is a mesh.)
-                        if !matches!(o.kind, Kind::Mesh { .. }) {
-                            tables.mesh_mats.remove(&mat);
-                        } else if !tables.fixed_mats.contains(&mat) {
-                            tables.mesh_mats.insert(mat);
-                        }
-                        tables.fixed_mats.insert(mat);
                         if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
                             return Err("the scene's first material function on an instance (kernel feature)".into());
                         }

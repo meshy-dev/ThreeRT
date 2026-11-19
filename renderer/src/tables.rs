@@ -22,6 +22,9 @@ pub struct Dirty {
     /// Power edits held back (`Tables::defer_powers`): the live view's emitter worker rebuilds the CDF and the tree's
     /// powers for them, and they land together.
     pub deferred: bool,
+    /// A material's class changed (glass or not, a cutout or not): the instances with a row of one have their rows
+    /// remade (live/edits.rs `remake_classes`).
+    pub reclassed: bool,
 }
 
 impl Dirty {
@@ -40,15 +43,20 @@ pub struct Tables {
     pub light_tree: Option<crate::ltree::LightTree>,
     /// Materials that have emitter triangles (others cannot start emitting without a rebuild).
     pub(crate) emissive: HashSet<u32>,
-    /// A material that starts emitting gets emitter entries in place (the live view sets these up, `prepare`'s
-    /// `mat_runs` / `fixed_mats`): it is queued in `started_emitting` for live/edits.rs `add_material_emitters`, unless its
-    /// triangles include a model's, an instanced object's or dynamic ones (`fixed_mats` less `mesh_mats`, the materials
-    /// whose pool triangles are meshes' alone). Off: such a material rebuilds. `fixed_mats` are also the materials of
-    /// instances' triangles, whose class a rebuild sorts by (`apply`).
+    /// A material that starts emitting gets emitter entries in place (the live view sets this up): it is queued in
+    /// `started_emitting` for live/edits.rs `add_material_emitters`, which gives them to its still world-space
+    /// triangles (`prepare`'s `mat_runs`) and to the instances with a row of it. Off: such a material rebuilds.
     pub emit_in_place: bool,
-    pub fixed_mats: HashSet<u32>,
-    pub mesh_mats: HashSet<u32>,
+    /// Materials of still world-space triangles (what the build flattened): whether one is a cutout decides its
+    /// triangles' traversal group, so that changing is a rebuild's.
+    pub static_mats: HashSet<u32>,
+    /// Materials of what moves without an instance's rows to say so in place: dynamic world-space triangles (their
+    /// class is on the triangle), and the rows of meshes that deform (the build flattens their emitters). One that
+    /// starts emitting, or whose class changes, rebuilds.
+    pub moving_mats: HashSet<u32>,
     pub started_emitting: Vec<u32>,
+    /// Materials whose class changed in the last `apply` (`Dirty::reclassed`).
+    pub reclassed: Vec<u32>,
     /// Object -> its entries in `lights`.
     pub light_index: HashMap<u32, Vec<usize>>,
     /// vec4s an object in `objects` (`scene::object_stride`).
@@ -75,9 +83,10 @@ impl Tables {
             emitter_tris,
             light_tree,
             emit_in_place: false,
-            fixed_mats: HashSet::new(),
-            mesh_mats: HashSet::new(),
+            static_mats: HashSet::new(),
+            moving_mats: HashSet::new(),
             started_emitting: vec![],
+            reclassed: vec![],
             light_index,
             stride: sc.object_stride(),
             defer_powers: false,
@@ -154,13 +163,19 @@ impl Tables {
             if !self.can_emit(mi, &gm) {
                 return Ok(None);
             }
-            // (A material of instances' triangles that gets a function, or loses it: the kernel's variant goes by
-            // whether there is one, `gpu::F_IFUNC`, which the build decides. One that turns glass, or stops being
-            // glass: an instance's row and mask say so, a model's mesh has its triangles in a geometry apart by it. One
-            // whose alpha test changes never comes here: that is structural, world.rs `same_texture_refs`.)
+            // A material whose class changes (it turns glass or stops being glass, becomes a cutout or stops being
+            // one, gets a function or loses it): the instances with a row of it say so again, in place
+            // (`Dirty::reclassed`). Its world-space triangles cannot: still ones are in a traversal group by whether
+            // they are cutouts, dynamic ones carry their class.
             let old = &self.materials[mi as usize];
-            if ((gm.tex1[3] != 0) != (old.tex1[3] != 0) || (gm.layer[0] > 0.0) != (old.layer[0] > 0.0)) && self.fixed_mats.contains(&mi) {
+            let cutout = (gm.uv2[3] > 0.0) != (old.uv2[3] > 0.0);
+            let other = (gm.tex1[3] != 0) != (old.tex1[3] != 0) || (gm.layer[0] > 0.0) != (old.layer[0] > 0.0);
+            if (cutout && self.static_mats.contains(&mi)) || ((cutout || other) && self.moving_mats.contains(&mi)) {
                 return Ok(None);
+            }
+            if cutout || other {
+                self.reclassed.push(mi);
+                d.reclassed = true;
             }
             self.materials[mi as usize] = gm;
             d.materials = true;
@@ -226,8 +241,8 @@ impl Tables {
     /// Whether a material may emit without a rebuild: it already has emitter entries, or (`emit_in_place`) its
     /// triangles can get them in place, queued in `started_emitting` (ROADMAP § 6 step 3).
     /// Materials created since the build (`Changes::new_materials`: no texture, no function), as entries after the
-    /// scene's. False, and nothing added, if one of them cannot be: it emits, is glass or layered, or a cutout (the
-    /// build sorts triangles by those; the caller rebuilds).
+    /// scene's, whatever their class: what an edit draws with one is an instance, whose rows say it. False, and
+    /// nothing added, if one of them cannot be made.
     pub fn add_materials(&mut self, w: &World, ids: &std::collections::BTreeSet<u32>) -> bool {
         let mut fresh = vec![];
         for id in ids {
@@ -236,17 +251,12 @@ impl Tables {
             }
             let Some(m) = w.materials.get(id) else { return false };
             let Ok(gm) = scene::build_material(*id, m, &w.textures, &self.retained.shaders, &mut |_, _| Err(anyhow!("a texture"))) else { return false };
-            if scene::material_class(&gm) != 0 {
-                return false;
-            }
             fresh.push((*id, gm));
         }
         for (id, gm) in fresh {
             let mi = self.materials.len() as u32;
             self.retained.materials.insert(id, mi);
             self.materials.push(gm);
-            // (What is drawn with it are instances' triangles: it cannot start emitting in place, `can_emit`.)
-            self.fixed_mats.insert(mi);
         }
         true
     }
@@ -256,7 +266,7 @@ impl Tables {
         if lum <= 0.0 || self.emissive.contains(&mi) {
             return true;
         }
-        if !self.emit_in_place || (self.fixed_mats.contains(&mi) && !self.mesh_mats.contains(&mi)) {
+        if !self.emit_in_place || self.moving_mats.contains(&mi) {
             return false;
         }
         self.emissive.insert(mi);

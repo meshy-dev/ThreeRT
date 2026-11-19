@@ -82,12 +82,12 @@ pub struct Prepared {
     pub emitter_tris: Vec<EmitterTri>,
     /// The light tree over the static emitters (`ltree`).
     pub light_tree: Option<ltree::LightTree>,
-    /// Material -> runs of its flattened static triangles (first, end in the traversal order, object), and the
-    /// materials that also cover pool or dynamic triangles: a material that starts emitting gets emitter entries in
-    /// place from its runs (live/edits.rs `add_material_emitters`), unless fixed.
+    /// Material -> runs of its flattened static triangles (first, end in the traversal order, object): a material
+    /// that starts emitting gets emitter entries in place from its runs (live/edits.rs `add_material_emitters`).
+    /// `moving_mats`: the materials of dynamic world-space triangles and of the rows of meshes that deform
+    /// (`Tables::moving_mats`).
     pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
-    pub fixed_mats: std::collections::HashSet<u32>,
-    pub mesh_mats: std::collections::HashSet<u32>,
+    pub moving_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
     pub tri_order: Vec<u32>,
     /// The brightest sky texel (luminance) from which the environment is light-sampled (`Params::counts2[1]`): 0 when
@@ -745,25 +745,18 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     // Where each material's flattened static triangles are (runs of the traversal order, with their object), for a
     // material that starts emitting in the live view (tables.rs `apply`): its emitter entries are made from them in
-    // place. Materials of pool or dynamic triangles are `fixed_mats`; of those, `mesh_mats` are the ones whose pool
-    // triangles are meshes' alone (`Retained::own_mesh`: no model's, no instanced object's) and that no dynamic
-    // triangle has: each instance of such a mesh gets its emitters in place too (live/edits.rs
-    // `add_material_emitters`).
+    // place, as each instance with a row of it gets its own (live/edits.rs `add_material_emitters`). Not the
+    // materials of dynamic world-space triangles, nor of the rows of meshes that deform (the build flattens their
+    // emitters): `moving_mats`.
     let mut mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>> = std::collections::HashMap::new();
-    // (The materials are in the instances' rows; a model's instance and an instanced object's copies are not a
-    // mesh's instance here.)
-    let own: std::collections::HashSet<u32> = sc.retained.own_mesh.values().copied().collect();
-    let (mut mesh_mats, mut others): (std::collections::HashSet<u32>, std::collections::HashSet<u32>) = Default::default();
-    for i in &sc.instances {
-        let mats = sc.rows[i.rows as usize..][..sc.meshes[i.mesh as usize].sect_count as usize].iter().map(scene::row_material);
-        if i.sub.is_none() && own.contains(&i.mesh) { mesh_mats.extend(mats) } else { others.extend(mats) }
+    let mut moving_mats: std::collections::HashSet<u32> = Default::default();
+    for i in sc.instances.iter().filter(|i| sc.meshes[i.mesh as usize].deforms) {
+        moving_mats.extend(sc.rows[i.rows as usize..][..sc.meshes[i.mesh as usize].sect_count as usize].iter().map(scene::row_material));
     }
-    let mut fixed_mats: std::collections::HashSet<u32> = mesh_mats.union(&others).copied().collect();
     for (k, a) in sc.attrs[..pool_first].iter().enumerate() {
         let (mat, obj) = (a.uv[3].to_bits(), a.x[1].to_bits());
         if tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0 {
-            fixed_mats.insert(mat);
-            others.insert(mat);
+            moving_mats.insert(mat);
             continue;
         }
         let runs = mat_runs.entry(mat).or_default();
@@ -772,7 +765,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             _ => runs.push([k as u32, k as u32 + 1, obj]),
         }
     }
-    mesh_mats.retain(|m| !others.contains(m));
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
     // code with its triangle in the list (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
@@ -894,7 +886,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, fixed_mats, mesh_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.

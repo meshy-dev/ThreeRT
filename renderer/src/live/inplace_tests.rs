@@ -504,14 +504,25 @@ fn a_glass_mesh_added_is_drawn_as_a_build_draws_it() {
         let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
         assert!(apart(&before, &b) > 0.5, "the pane is in the picture ({:.2} steps)", apart(&before, &b));
         assert!(apart(&a, &b) < 0.5, "glass on an instance already: {has}: the picture is {:.2} steps from a build's", apart(&a, &b));
-        // A material of an instance's triangles that turns glass (the mesh of its own, and the wall): by a rebuild, its
-        // instances' masks and its mesh's geometries being the build's.
+        // A material of instances' triangles that turns glass (the mesh of its own, and the wall), and is plain
+        // again: their rows and their masks say so, in place.
         w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.8, 0.4, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true, "transmission": 1, "ior": 1.5 })).unwrap());
-        assert!(live.commit(&mut w).unwrap(), "a material of an instance's triangles turned glass: a rebuild");
+        assert!(!live.commit(&mut w).unwrap(), "a material of instances' triangles turned glass: in place ({:?})", live.fallback);
+        let wall = live.sc.instances.iter().find(|i| i.name == "wall").expect("the wall is an instance");
+        assert!(!wall.cast_shadow && wall.bits & scene::INST_GLASS != 0, "the wall is glass: it casts no shadow");
         let mut fresh = open(&w).unwrap();
         forget(&mut live);
         let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
         assert!(apart(&a, &b) < 0.5, "a material turned glass: the picture is {:.2} steps from a build's", apart(&a, &b));
+        w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.8, 0.4, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
+        assert!(!live.commit(&mut w).unwrap(), "the material plain again: in place ({:?})", live.fallback);
+        let wall = live.sc.instances.iter().find(|i| i.name == "wall").expect("the wall is an instance");
+        assert!(wall.cast_shadow && wall.bits & scene::INST_GLASS == 0, "the wall casts its shadow again");
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (c, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+        assert!(apart(&c, &b) < 0.5, "the material plain again: the picture is {:.2} steps from a build's", apart(&c, &b));
+        assert!(apart(&a, &c) > 0.5, "glass or not is in the picture ({:.2} steps)", apart(&a, &c));
     }
 }
 
@@ -660,12 +671,8 @@ fn an_emitting_instanced_object_added_in_place_is_lit_as_a_build_lights_it() {
         let mut run = 0;
         for (what, edit) in &edits {
             let what = format!("an emitting instanced object {what} in place, {} a light tree", if tree { "with" } else { "without" });
-            // (Its material covers instances' triangles once it is added: `Tables::fixed_mats`.)
-            let covers = |c: &LiveCore| c.sc.tables.fixed_mats.contains(&c.sc.tables.retained.materials[&5]);
-            let before = covers(&live);
             edit(&mut w);
             assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
-            assert!(covers(&live) && (before || what.contains("added")), "{what}: its material is among those of instances' triangles");
             // Its copies' rows: a run of the room's, the room's again once it is removed.
             match live.sc.tables.retained.instanced(15) {
                 Some(place) => {
@@ -1004,6 +1011,23 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         list_is_its_triangles(&what, &live);
         lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        // A material an instanced object added in place has too: its copy's emitters, as the meshes'.
+        if live.g.hwrt {
+            w.set_object(31, "more".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![9], capacity: 1 }, true, false).unwrap();
+            w.set_instances(31, 1, Some(glam::Mat4::from_translation(Vec3::new(0.4, 0.2, 1.1)).to_cols_array().to_vec()), None, None).unwrap();
+            assert!(!live.commit(&mut w).unwrap(), "an instanced object added, {with} a light tree: in place ({:?})", live.fallback);
+            w.set_material(9, late(30.0));
+            let what = format!("a material an instanced object added in place has too started emitting, {with} a light tree");
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            list_is_its_triangles(&what, &live);
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        }
+        // One an instanced object of the build has too: its copies', a copy that is not shown at no weight.
+        w.set_material(7, late(30.0));
+        let what = format!("a material an instanced object has too started emitting, {with} a light tree");
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        list_is_its_triangles(&what, &live);
+        lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         w.set_transform(14, Vec3::new(0.2, -0.3, 1.2), glam::Quat::from_rotation_z(0.6), Vec3::ONE).unwrap();
         let what = format!("the movable one of them moved, {with} a light tree");
         assert!(!(live.commit(&mut w).unwrap() && live.g.hwrt), "{what}: in place ({:?})", live.fallback);
@@ -1012,17 +1036,6 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
         forget(&mut live);
         let (a, b) = (picture(&mut live, 64), picture(&mut open(&w).unwrap(), 64));
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
-        // A material meshes had alone, until an instanced object of it is added in place: a rebuild from then on.
-        if live.g.hwrt {
-            w.set_object(31, "more".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![9], capacity: 1 }, true, false).unwrap();
-            w.set_instances(31, 1, Some(glam::Mat4::from_translation(Vec3::new(0.4, 0.2, 1.1)).to_cols_array().to_vec()), None, None).unwrap();
-            assert!(!live.commit(&mut w).unwrap(), "an instanced object added, {with} a light tree: in place ({:?})", live.fallback);
-            w.set_material(9, late(30.0));
-            assert!(live.commit(&mut w).unwrap(), "a material an instanced object added in place has too started emitting, {with} a light tree: a rebuild");
-        }
-        // (Its copies' emitters are a build's to make.)
-        w.set_material(7, late(30.0));
-        assert!(live.commit(&mut w).unwrap(), "a material an instanced object has too started emitting, {with} a light tree: a rebuild");
     }
 }
 
