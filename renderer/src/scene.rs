@@ -86,8 +86,7 @@ pub struct Section {
 
 /// An instance's row for a section of its mesh, as the kernel reads it (the words' heap, heap.rs `Stream::Rows`):
 /// the material with the class bits `ROW_*`, the section's first triangle in the triangles' table, its first emitter in
-/// the light list (`NO_EMITTER`: it does not emit), and the instance's record. A hardware hit names its row (the TLAS
-/// instance's custom data is the rows' first, its geometry the section), and reads no record to find its triangle.
+/// the light list (`NO_EMITTER`: it does not emit), and a word to spare.
 pub type Row = [u32; 4];
 pub const ROW_MATERIAL: u32 = 0xff_ffff;
 /// The material is alpha-tested; it is glass (shadow rays pass).
@@ -207,8 +206,7 @@ pub struct Instance {
 }
 
 /// Kernel record of an instance (`instances` binding): world matrix rows, normal matrix rows (inverse transpose),
-/// (first triangle in the GPU order, object index, texture-LOD offset bits, its rows' first or, without rows, first
-/// cutout triangle - first), and the
+/// (first triangle in the GPU order, object index, texture-LOD offset bits, its rows' first), and the
 /// world matrix rows of the previous frame (a movable instance's motion vectors; the same rows when it did not move).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]

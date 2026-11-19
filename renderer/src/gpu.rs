@@ -1642,8 +1642,8 @@ pub const F_COAT: u32 = 4096;
 /// triangle (24-bit custom data), and hits look the offset up in `Params::group_first` (~0.2 ms on Kabukicho, so only
 /// when needed).
 pub const F_HUGE: u32 = 8192;
-/// Instances of meshes (scene::Instance): TLAS instances with custom data INSTANCE_BIT | their rows' first, shaded
-/// from model-space triangles through their `instances` record.
+/// Instanced glTF meshes (scene::Instance): TLAS instances with custom data INSTANCE_BIT | record index, shaded from
+/// model-space triangles through their `instances` record.
 pub const F_INST: u32 = 16384;
 /// Bounded participating media (`VolumeMesh`; pathtrace.wgsl `media_track`): compiled out where no scene has one.
 pub const F_MEDIA: u32 = 32768;
@@ -2416,7 +2416,7 @@ impl Gpu {
                 blases.push((blas, i, *first, sizes[i].clone()));
             }
             // Instanced meshes: one opaque model-space BLAS each, a TLAS instance per placement (custom data
-            // INSTANCE_BIT | its rows' first; shadow casters mask 1).
+            // INSTANCE_BIT | record; shadow casters mask 1).
             // Per mesh: (first triangle, count, opaque) geometries: the opaque part, the cutout part, the glass part
             // (`InstMesh::parts`).
             let mesh_parts: Vec<Vec<(u32, u32)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count)| (m.first + at, count)).collect()).collect();
@@ -2461,9 +2461,7 @@ impl Gpu {
                 let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
                 let [r0, r1, r2] = [row(0), row(1), row(2)];
                 let xf = [r0[0], r0[1], r0[2], r0[3], r1[0], r1[1], r1[2], r1[3], r2[0], r2[1], r2[2], r2[3]];
-                // (Its custom data: its rows' first. A hit's geometry is its section, and that row has its record.)
-                anyhow::ensure!(inst.rows < INSTANCE_BIT, "too many instance rows for 23-bit custom data");
-                t[base + k] = Some(wgpu::TlasInstance::new(&meshes[inst.mesh as usize], xf, INSTANCE_BIT | inst.rows, instance_mask(inst.cast_shadow, inst.hidden)));
+                t[base + k] = Some(wgpu::TlasInstance::new(&meshes[inst.mesh as usize], xf, INSTANCE_BIT | k as u32, instance_mask(inst.cast_shadow, inst.hidden)));
             }
             // Procedural geometry: one AABB BLAS per distinct geometry (object space; kept across uploads by the
             // geometry's hash, so a rebuild builds only new ones), and per mesh a TLAS instance of it after the model
