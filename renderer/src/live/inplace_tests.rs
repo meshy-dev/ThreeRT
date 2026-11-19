@@ -2052,6 +2052,8 @@ fn a_posed_rigid_model_is_posed_and_moved_in_place_with_the_nodes_its_clip_leave
     // (Its emitters: a new run of moving ones, the run it had at no weight.)
     let lit = |c: &LiveCore, record: u32| c.sc.tables.emitter_tris.iter().filter(|e| e.inst == record && e.area > 0.0).map(|e| e.moves).collect::<Vec<bool>>();
     assert_eq!((lit(&live, b.still.unwrap()), moves(&live, b.still.unwrap()).len(), lit(&live, a.still.unwrap())), (vec![true; 2], 4, vec![false; 2]), "the moved panel's emitters are moving ones now, the other's are not");
+    let moving = live.sc.tables.retained.moving_records();
+    assert!(moving.contains(&b.still.unwrap()) && !moving.contains(&a.still.unwrap()), "the moved panel is among the records an edit moves, the other is not");
     let moved = against_a_build("a movable posed rigid model moved", &mut live, &w);
     assert!(apart(&before, &moved) > 0.5, "the move is in the picture ({:.2} steps)", apart(&before, &moved));
     // Posed on where it stands now: the node alone again.
