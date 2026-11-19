@@ -1651,6 +1651,23 @@ fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
     let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
     assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
     assert_ne!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "the kernel passes its glass");
+    // So for a mesh of several materials, glass one of them, added where none like it cast a shadow.
+    let mut w = world();
+    w.set_material(65, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.9, 0.5], "opacity": 1, "metalness": 0, "roughness": 0, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "transmission": 1, "ior": 1.5 })).unwrap());
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(0.9, -0.1, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    assert_eq!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "no caster has glass among its sections");
+    w.set_geometry(30, Geometry { positions: vec![-1.0, -0.5, 0.0, 0.0, -0.5, 0.0, 1.0, -0.5, 0.0, -1.0, 0.5, 0.0, 0.0, 0.5, 0.0, 1.0, 0.5, 0.0], normals: [0.0, 0.0, 1.0].repeat(6), uvs: vec![0.0; 12], indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4], groups: vec![[0, 6, 0], [6, 6, 1]], colors: vec![] }).unwrap();
+    w.set_object(31, "pane".into(), None, Kind::Mesh { geometry: 30, material: 1, own_blas: false, materials: vec![1, 65] }, true, false).unwrap();
+    w.set_transform(31, Vec3::new(0.0, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    live.commit(&mut w).unwrap();
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "a mesh with glass among its sections: the picture is {:.2} steps from a build's", apart(&a, &b));
+    assert_ne!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "the kernel passes its glass");
 }
 
 /// A mesh of several materials (a geometry group each) is edited in place as one of a single material is: added
@@ -1870,6 +1887,54 @@ fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
         assert!(apart(&last, &now) > 0.5, "{what}: it is in the picture ({:.2} steps)", apart(&last, &now));
         last = now;
     }
+}
+
+/// What still changes by a rebuild: a material of world-space triangles. Particles' (dynamic triangles: their class
+/// is theirs, and they get no emitters in place) when it starts emitting or becomes a cutout; one that still
+/// triangles have (the build groups them by whether they are cutouts) when it becomes a cutout. The same change of
+/// a material that only instances' rows name is in place.
+#[test]
+fn a_material_of_world_space_triangles_changes_by_a_rebuild() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let plain = |extra: serde_json::Value| {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.9, 0.9, 0.9], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<crate::desc::Material>(m).unwrap()
+    };
+    let mut w = world();
+    w.set_material(62, plain(serde_json::json!({})));
+    w.set_material(63, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": 0.5 })));
+    w.set_material(64, plain(serde_json::json!({ "opacity": 0.9 })));
+    w.set_particle_fn("spark", "fn pf_spark(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.3, 0.2, 1.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
+    w.set_object(18, "sparks".into(), None, Kind::Particles { count: 3, emitter: "spark".into(), params: vec![], material: 62, emitter_area: 0.01 }, true, false).unwrap();
+    // (A cutout at the build: the kernel has the alpha test. And a mesh of a material of its own.)
+    w.set_object(43, "cut".into(), None, Kind::Mesh { geometry: 3, material: 63, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(43, Vec3::new(1.2, -0.5, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_object(44, "tile".into(), None, Kind::Mesh { geometry: 3, material: 64, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(44, Vec3::new(-1.0, -0.5, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let index = |c: &LiveCore, id: u32| c.sc.tables.retained.materials[&id];
+    assert!(live.sc.tables.moving_mats.contains(&index(&live, 62)) && !live.sc.tables.moving_mats.contains(&index(&live, 64)), "the particles' material is dynamic triangles', the tile's is not");
+    // The tile's material, which rows alone name: a cutout and back, in place.
+    for (test, what) in [(0.5, "becomes a cutout"), (0.0, "is none again")] {
+        w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": test })));
+        assert!(!live.commit(&mut w).unwrap(), "a material of rows {what}: in place ({:?})", live.fallback);
+    }
+    // The same, were it still triangles' too: a rebuild.
+    let k = index(&live, 64);
+    live.sc.tables.static_mats.insert(k);
+    w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": 0.5 })));
+    assert!(live.commit(&mut w).unwrap(), "a material of still triangles becomes a cutout: a rebuild");
+    // The particles' material: it starts emitting, it becomes a cutout.
+    w.set_material(62, plain(serde_json::json!({ "emissive": [1.0, 0.8, 0.6], "emissiveIntensity": 20 })));
+    assert!(live.commit(&mut w).unwrap(), "the particles' material starts emitting: a rebuild");
+    w.set_material(62, plain(serde_json::json!({ "emissive": [1.0, 0.8, 0.6], "emissiveIntensity": 20, "opacity": 0.9, "alphaTest": 0.5 })));
+    assert!(live.commit(&mut w).unwrap(), "the particles' material becomes a cutout: a rebuild");
 }
 
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
