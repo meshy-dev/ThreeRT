@@ -199,6 +199,8 @@ export interface Engine {
   /** `colors`: the vertex colours (three.js's `color` attribute), linear RGB per vertex. */
   geometry(id: number, positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, desc: TextureDesc, data: Uint8Array | null): void;
+  postPass(code: string | null, textures: number[]): void;
+  postParams(values: number[]): void;
   shader(name: string, code: string, helpers: string): void;
   /** A particle function's WGSL (`fn pf_<name>`; renderer/shaders/particles.wgsl). */
   particleFunction(name: string, code: string, helpers: string): void;
@@ -349,6 +351,9 @@ export class SceneBinding {
   private readonly gridCode = new Map<string, string>();
   private readonly lights = new Map<Light, Bound>();
   private readonly cameras = new Map<PerspectiveCamera, Bound>();
+  private postCode: string | null = null;
+  private postTextures: number[] = [];
+  private postValues: number[] = [];
   private envKey = "";
   private settingsKey = "";
   private readonly trs = new Float32Array(10);
@@ -387,6 +392,13 @@ export class SceneBinding {
   /** Stops tracking the scene's changes (the binding is not used any more). */
   dispose(): void {
     this.untrack();
+    if (this.postCode !== null) {
+      this.engine.postPass(null, []);
+      this.engine.postParams([]);
+      this.postCode = null;
+      this.postTextures = [];
+      this.postValues = [];
+    }
   }
 
   /** The object the engine knows under `name` (picking reports names). */
@@ -475,6 +487,7 @@ export class SceneBinding {
         stats.updated++;
       }
     }
+    if ((this.scene.postPass || this.postCode !== null) && this.syncPostPass()) stats.updated++;
     const env = this.environmentDesc();
     const envKey = JSON.stringify(env);
     if (envKey !== this.envKey) {
@@ -1128,6 +1141,35 @@ export class SceneBinding {
     return id;
   }
 
+  private syncPostPass(): boolean {
+    const pass = this.scene.postPass;
+    const values = pass?.params ?? [];
+    if (pass && typeof pass.wgsl !== "string") throw new TypeError("postPass.wgsl expects WGSL source");
+    if (values.length > 32) throw new RangeError("postPass.params expects up to 32 floats");
+    for (const v of values) {
+      if (typeof v !== "number" || !Number.isFinite(Math.fround(v))) throw new RangeError("postPass.params expects finite floats");
+    }
+    const textures = pass?.textures ?? [];
+    if (textures.length > 4) throw new RangeError("postPass.textures expects up to four textures");
+    const ids = Array.from(textures, t => {
+      if (!(t instanceof Texture) || t instanceof StreamTexture) throw new TypeError("postPass expects a file or generated texture");
+      return this.textureId(t)!;
+    });
+    const code = pass?.wgsl ?? null;
+    const changed = code !== this.postCode || ids.length !== this.postTextures.length || ids.some((id, k) => id !== this.postTextures[k]);
+    if (changed) {
+      this.engine.postPass(code, ids);
+      this.postCode = code;
+      this.postTextures = ids;
+    }
+    if (values.length !== this.postValues.length || values.some((v, k) => v !== this.postValues[k])) {
+      this.engine.postParams(values);
+      this.postValues = values.slice();
+      return true;
+    }
+    return changed;
+  }
+
   private textureId(t: Texture | null): number | undefined {
     if (!t) return undefined;
     let id = this.textures.get(t);
@@ -1624,6 +1666,8 @@ export class RecordingEngine implements Engine {
   calls: [string, ...unknown[]][] = [];
   geometry(...a: Parameters<Engine["geometry"]>) { this.calls.push(["geometry", ...a.filter((x, k) => k < 5 || x || (k === 5 && a[6]))]); }
   texture(...a: Parameters<Engine["texture"]>) { this.calls.push(["texture", ...a]); }
+  postPass(...a: Parameters<Engine["postPass"]>) { this.calls.push(["postPass", ...a]); }
+  postParams(...a: Parameters<Engine["postParams"]>) { this.calls.push(["postParams", [...a[0]]]); }
   shader(...a: Parameters<Engine["shader"]>) { this.calls.push(["shader", ...a]); }
   material(...a: Parameters<Engine["material"]>) { this.calls.push(["material", ...a]); }
   object(...a: Parameters<Engine["object"]>) { this.calls.push(["object", ...a]); }

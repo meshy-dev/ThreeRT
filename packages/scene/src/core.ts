@@ -901,9 +901,20 @@ export class RopeJoint extends Joint {
   }
 }
 
+/** A live full-screen effect after tone mapping. WGSL supplies `fn post(uv: vec2f, color: vec3f) -> vec3f`.
+ *  Read neighboring display colors with sceneColor(uv), and the scene clock and output size with screen.time and screen.size.
+ *  Up to 32 parameter floats (screen.params, eight vec4s) and four textures (sample0(uv) … sample3(uv)). */
+export interface PostPass {
+  wgsl: string;
+  params?: number[];
+  textures?: Texture[];
+}
+
 export class Scene extends Object3D {
   readonly isScene = true;
   override type = "Scene";
+  /** Optional game-authored full-screen pass. Edit its parameters in a frame, or assign null to bypass it. */
+  postPass: PostPass | null = null;
   /** The physics world's gravity, m/s². */
   readonly gravity = new Vector3(0, -9.81, 0);
   /** Sky / image based lighting. Defaults to a physical atmosphere when a sun is present. */

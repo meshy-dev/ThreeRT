@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 /// A call that failed: `Type` for an argument of the wrong shape (a `TypeError` to scene code), `Other` for what the
 /// engine refused (an `Error` with its message).
+#[derive(Debug)]
 pub enum Error {
     Type(String),
     Other(anyhow::Error),
@@ -134,6 +135,23 @@ pub fn geometry(w: &mut World, id: u32, p: &[f32], n: &[f32], uv: &[f32], idx: &
     let groups = groups.map_or(vec![], |g| g.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect());
     let g = Geometry { positions: p.to_vec(), normals: n.to_vec(), uvs: uv.to_vec(), indices: idx.to_vec(), groups, colors: colors.map_or(vec![], |c| c.to_vec()) };
     Ok(w.set_geometry(id, g)?)
+}
+
+pub fn post_pass(w: &mut World, code: Option<String>, textures: Vec<u32>) -> Result<()> {
+    if textures.len() > 4 || textures.iter().any(|id| !w.textures.contains_key(id)) {
+        return Err(Error::Type("postPass expects up to four registered textures".into()));
+    }
+    w.post_pass = code.map(|code| crate::live::ScreenShader::new(&code, textures).map(Arc::new)).transpose()?;
+    Ok(())
+}
+
+pub fn post_params(w: &mut World, values: &[f32]) -> Result<()> {
+    if values.len() > 32 || values.iter().any(|x| !x.is_finite()) {
+        return Err(Error::Type("postParams expects up to 32 finite floats".into()));
+    }
+    w.post_params = [0.0; 32];
+    w.post_params[..values.len()].copy_from_slice(values);
+    Ok(())
 }
 
 pub fn texture(w: &mut World, id: u32, j: &Value, data: Option<&[u8]>) -> Result<()> {

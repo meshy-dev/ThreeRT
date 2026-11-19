@@ -519,6 +519,45 @@ Checked on numbers in the renderer with scripted input (`node tools/fps-arena.ts
 numbers on three.js with the engine's physics in Node (`tools/three/test/physics.test.ts`), and in Chrome with the
 events a keyboard and a mouse send (`node tools/three-arena.ts`).
 
+### Full-screen WGSL effects
+
+Assign a `PostPass` to `scene.postPass` in setup or in a game handler. The live renderer runs it once per output pixel
+after upscaling, bloom and tone mapping. The host draws the HUD over the result. The native live view, its PNG
+snapshots and the WebGPU canvas use this pass. Offline stills and linear HDR/signal readbacks use their existing paths.
+
+```ts
+const lens = {
+  textures: [new DataTexture(width, height, normalMapRGBA, "linear")],
+  params: [0.02, 0.3], // refraction distance in UV units, scroll speed in UV units/s
+  wgsl: `
+fn post(uv: vec2f, color: vec3f) -> vec3f {
+    let drop = sample0(fract(uv - vec2f(0.0, screen.time * screen.params[0].y)));
+    let bend = (drop.rg * 2.0 - 1.0) * screen.params[0].x;
+    return mix(color, sceneColor(uv + bend), drop.a);
+}`,
+};
+scene.postPass = lens;
+// In frame(f), for example:
+lens.params[0] = 0.02 * f.scene.rain;
+```
+
+- `uv` is the pixel center in normalized coordinates, top left at (0, 0). `screen.size` is the output size in pixels,
+  and `screen.time` is the scene clock in seconds, including lockstep. `color`, `sceneColor(uv)` and the returned RGB
+  are display-encoded sRGB. Neighbor samples use bilinear filtering and clamp to the edge.
+- Supply up to 32 floats in `params`. Four consecutive floats form one `screen.params[k]` vector. Missing values are
+  zero. Editing values in place updates the uniforms on the next scene sync.
+- Supply up to four file or generated textures in slot order. WGSL receives one function per supplied slot,
+  `sample0(uv)` through `sample3(uv)`. UV (0, 0) is the first image row's left edge. Each sampler honors the texture's
+  wrap, repeat, offset and color space. Use linear textures for masks and normal maps.
+- Replace `wgsl` or assign another pass to change the effect. Assign `null` to bypass it. The renderer validates the
+  WGSL on registration. An ordinary frame edit to `params` keeps the shader and temporal history.
+
+Run either example with `node tools/build-web.ts games/post-pass/damage.game.ts --serve` (or substitute
+`games/post-pass/rain.game.ts`) and open the printed URL. In the damage range, W/A/S/D simulate hits from the front,
+left, back and right. Each hit changes health, tints its edge for 0.7 s and kicks the camera for 0.2 s. R restores
+health. In the neon scene, R toggles the sliding drops. Watch the tubes bend through each drop while the crosshair
+and health bar stay fixed. The examples also bundle for `threert-render play` and `live`.
+
 ### HUD
 
 The engine draws no text. A game describes its HUD and the app draws it its own way (`packages/gameplay/src/hud.ts`):

@@ -363,6 +363,14 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         api::texture(&mut w.borrow_mut(), id, &json, data.as_ref().map(|d| d.as_ref())).map_err(|e| thrown(&ctx, e))
     })?)?;
     let w = world.clone();
+    e.set("postPass", Function::new(ctx.clone(), move |ctx: Ctx, code: Option<String>, textures: Vec<u32>| {
+        api::post_pass(&mut w.borrow_mut(), code, textures).map_err(|e| thrown(&ctx, e))
+    })?)?;
+    let w = world.clone();
+    e.set("postParams", Function::new(ctx.clone(), move |ctx: Ctx, values: Vec<f32>| {
+        api::post_params(&mut w.borrow_mut(), &values).map_err(|e| thrown(&ctx, e))
+    })?)?;
+    let w = world.clone();
     e.set("shader", Function::new(ctx.clone(), move |name: String, code: String, helpers: String| w.borrow_mut().set_shader(&name, code, helpers))?)?;
     let w = world.clone();
     e.set("particleFunction", Function::new(ctx.clone(), move |name: String, code: String, helpers: String| w.borrow_mut().set_particle_fn(&name, code, helpers))?)?;

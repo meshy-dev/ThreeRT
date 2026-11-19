@@ -353,6 +353,10 @@ pub struct World {
     pub objects: BTreeMap<u32, Object>,
     pub geometries: HashMap<u32, Arc<Geometry>>,
     pub textures: HashMap<u32, Texture>,
+    /// Validated full-screen shader and its texture slots. Registered through `api::post_pass`.
+    pub post_pass: Option<Arc<crate::live::ScreenShader>>,
+    /// The active pass reads these as eight consecutive vec4 uniforms.
+    pub post_params: [f32; 32],
     pub materials: HashMap<u32, desc::Material>,
     /// Material functions by name: (WGSL code, helpers).
     pub shaders: BTreeMap<String, (String, String)>,
@@ -393,6 +397,8 @@ impl Default for World {
             objects: BTreeMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
+            post_pass: None,
+            post_params: [0.0; 32],
             materials: HashMap::new(),
             shaders: BTreeMap::new(),
             particle_fns: BTreeMap::new(),
@@ -495,6 +501,10 @@ impl World {
     pub fn set_texture(&mut self, id: u32, t: Texture) -> Result<()> {
         if let TextureSource::File(uri) = &t.source {
             check_uri(uri)?;
+        }
+        if let Some(shader) = self.post_pass.as_mut().filter(|s| s.textures.contains(&id)) {
+            // A live pass retains its description. Give the replacement pixels a new binding on its next commit.
+            Arc::make_mut(shader);
         }
         self.textures.insert(id, t);
         self.changes.structural = true;

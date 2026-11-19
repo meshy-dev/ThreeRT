@@ -107,6 +107,7 @@ export function installNodeHost(game: GameDefinition<unknown>, engine?: Engine):
       hud.reset();
       const eng = engine ?? (globalThis as { __engine?: Engine }).__engine;
       if (!eng) throw new Error("no engine: run the bundle in the renderer (threert-render play / live / render)");
+      binding?.dispose();
       binding = new SceneBinding(eng, s.scene, s.camera, s.options);
       frames.run(0, t0, true);
       const stats = binding.sync();

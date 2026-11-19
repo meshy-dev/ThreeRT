@@ -297,6 +297,12 @@ export class ThreeEngine implements Engine {
     return { width: bmp.width, height: bmp.height, r };
   }
 
+  postPass(code: string | null): void {
+    if (code !== null) this.notes.add("WGSL full-screen post pass");
+  }
+
+  postParams(): void {}
+
   shader(name: string): void {
     // WGSL material functions have no three.js equivalent; materials bound to one keep their standard parameters.
     this.notes.add(`material function ${name}`);

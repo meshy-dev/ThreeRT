@@ -444,3 +444,27 @@ test("density grids: the grid goes before its volume, with its program's WGSL on
   smoke.puff([1, 2, 3], 0.5, { density: 0.7, push: 2 });
   assert.deepEqual([...smoke.grid!.pendingSources[0]].map((v) => +v.toFixed(3)), [1, 2, 3, 0.5, 0.7, 1, 0, 0, 0, 0, 0, 2]);
 });
+
+test("full-screen pass registers resources once and sends parameter-only edits", () => {
+  const scene = new Scene();
+  const { engine, b, calls } = bind(scene, new PerspectiveCamera());
+  assert.equal(ofType(calls, "postPass").length, 0);
+  const pass = { wgsl: "fn post(uv: vec2f, color: vec3f) -> vec3f { return color; }", textures: [checkerTexture(0, 1, 1, 2)], params: [0.25] };
+  scene.postPass = pass;
+  b.sync();
+  const created = engine.take();
+  assert.deepEqual(created.map(c => c[0]), ["texture", "postPass", "postParams"]);
+  assert.deepEqual(created[1], ["postPass", pass.wgsl, [created[0][1]]]);
+  pass.params[0] = 0.5;
+  b.sync();
+  assert.deepEqual(engine.take(), [["postParams", [0.5]]]);
+  b.sync();
+  assert.deepEqual(engine.take(), []);
+  pass.params[0] = NaN;
+  assert.throws(() => b.sync(), /finite/);
+  pass.params.length = 0;
+  scene.postPass = null;
+  b.sync();
+  assert.deepEqual(engine.take(), [["postPass", null, []], ["postParams", []]]);
+  b.dispose();
+});

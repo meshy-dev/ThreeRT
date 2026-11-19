@@ -84,7 +84,11 @@ fn picture(core: &mut LiveCore, frames: u32) -> Vec<u8> {
     for _ in 0..frames {
         core.render(1, |_, _| {});
     }
-    let (d, out) = (&core.g.device, &core.targets.out);
+    read_pixels(core, &core.targets.out)
+}
+
+fn read_pixels(core: &LiveCore, out: &wgpu::Buffer) -> Vec<u8> {
+    let d = &core.g.device;
     let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: out.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
     let mut e = d.create_command_encoder(&Default::default());
     e.copy_buffer_to_buffer(out, 0, &to, 0, out.size());
@@ -1323,4 +1327,53 @@ fn a_hidden_volumes_passes_are_made_at_load() {
     assert!(!live.commit(&mut w).unwrap(), "shown in place ({:?})", live.fallback);
     picture(&mut live, 2);
     assert_eq!(made(&live), ["media_composite", "media_train"], "the frame that shows it makes none");
+}
+
+#[test]
+fn screen_pass_reads_neighbors_and_tracks_params_textures_and_resize() {
+    let Ok(g) = gpu::Gpu::new() else { return eprintln!("skipped: no GPU") };
+    let mut w = world();
+    let color = [31, 101, 237, 255];
+    let texture = |w: &mut World, rgba: &[u8]| crate::api::texture(w, 90, &serde_json::json!({"size":[1,1],"srgb":false}), Some(rgba)).unwrap();
+    texture(&mut w, &color);
+    let shader = "fn post(uv: vec2f, color: vec3f) -> vec3f {
+        return select(sceneColor(1.0 - uv), sample0(uv).rgb * screen.params[0].x, uv.x < 0.5);
+    }";
+    crate::api::post_pass(&mut w, Some(shader.into()), vec![90]).unwrap();
+    crate::api::post_params(&mut w, &[1.0]).unwrap();
+    let mut live = LiveCore::new(g, &w, Path::new("."), &crate::default_presets_dir(), 43, 29).unwrap();
+    w.take_changes();
+    let tinted = picture(&mut live, 1);
+    assert_eq!(&tinted[..4], &[237, 101, 31, 255]);
+    let clean = read_pixels(&live, &live.targets.buf("out_px").buffer);
+    for y in 0..29 {
+        for x in 22..43 {
+            let i = (y * 43 + x) * 4;
+            let source = ((28 - y) * 43 + 42 - x) * 4;
+            for channel in 0..3 {
+                assert!(tinted[i + channel].abs_diff(clean[source + channel]) <= 1, "neighbor at {x},{y}");
+            }
+        }
+    }
+    assert!(crate::api::post_pass(&mut w, Some("broken".into()), vec![]).is_err());
+    crate::api::post_params(&mut w, &[0.0]).unwrap();
+    assert!(!live.commit(&mut w).unwrap());
+    assert_eq!(&picture(&mut live, 1)[..4], &[0, 0, 0, 255]);
+    let other = [55, 66, 77, 255];
+    texture(&mut w, &other);
+    crate::api::post_params(&mut w, &[1.0]).unwrap();
+    live.commit(&mut w).unwrap();
+    live.resize(45, 27).unwrap();
+    assert_eq!(&picture(&mut live, 1)[..4], &[77, 66, 55, 255]);
+
+    crate::api::post_pass(&mut w, Some("fn post(uv: vec2f, color: vec3f) -> vec3f { return vec3f(0, screen.time, 0); }".into()), vec![]).unwrap();
+    assert!(!live.commit(&mut w).unwrap());
+    live.set_time(0.25);
+    let green = (255.0 * live.scene_time()).round() as u8;
+    assert_eq!(&picture(&mut live, 1)[..4], &[0, green, 0, 255]);
+    crate::api::post_pass(&mut w, None, vec![]).unwrap();
+    assert!(!live.commit(&mut w).unwrap());
+    let reference = picture(&mut live, 1);
+    assert_ne!(&reference[..4], &[77, 66, 55, 255]);
+    assert_eq!(live.targets.buf("out_px").buffer, live.targets.out);
 }

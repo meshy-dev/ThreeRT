@@ -114,7 +114,7 @@ pub struct Targets {
     /// The passes' own buffers (`layout::RESOURCES`' `Own`), by binding: what each holds and when is live.wgsl's
     /// table ("The live passes' buffers").
     pub(super) bufs: Vec<(u32, Buf)>,
-    /// The output (`out_px`: sRGB BGRA8 a pixel), what the hosts draw.
+    /// Final display color (sRGB BGRA8 per pixel), including any game post pass.
     pub out: wgpu::Buffer,
     /// The kernel's group 1 (`gpu::KernelBufs`): the radiance cache, and what the passes here read of
     /// a trace: the specular-lobe rays (`refl`), motion vectors per traced pixel (pathtrace.wgsl `motion_out`) and the
@@ -214,6 +214,13 @@ impl Targets {
             .collect();
         let out = bufs.iter().find(|b| b.0 == layout::binding("out_px").binding).expect("out_px").1.buffer.clone();
         (bufs, out)
+    }
+
+    /// Where the built-in tone map and diagnostic views write. The presentation buffer always stays `out`.
+    pub(super) fn bind_output(&mut self, d: &wgpu::Device, passes: &Passes, output: wgpu::Buffer) {
+        let binding = layout::binding("out_px").binding;
+        self.bufs.iter_mut().find(|(b, _)| *b == binding).expect("out_px").1 = Buf::whole(output);
+        self.bgs = self.bind_groups(d, passes);
     }
 
     /// The buffer translucent particles are drawn into below full resolution, made on first use.

@@ -22,6 +22,8 @@ export interface EngineExports {
   voxelFrame(dt: number): string;
   geometry(id: number, p: Float32Array, n: Float32Array, uv: Float32Array, idx: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, d: string, data?: Uint8Array | null): void;
+  postPass(code: string | undefined, textures: Uint32Array): void;
+  postParams(values: Float32Array): void;
   shader(name: string, code: string, helpers: string): void;
   particleFunction(name: string, code: string, helpers: string): void;
   particleProgram(name: string, emit: string, update: string, helpers: string): void;
@@ -86,6 +88,8 @@ export function webEngine(w: EngineExports): WebEngine {
     voxelFrame: (dt) => w.voxelFrame(dt),
     geometry: (id, p, n, uv, idx, groups, colors) => w.geometry(id, p, n, uv, idx, groups, colors),
     texture: (id, d, data) => w.texture(id, json(d), data),
+    postPass: (code, textures) => w.postPass(code ?? undefined, Uint32Array.from(textures)),
+    postParams: (values) => w.postParams(Float32Array.from(values)),
     shader: (name, code, helpers) => w.shader(name, code, helpers),
     particleFunction: (name, code, helpers) => w.particleFunction(name, code, helpers),
     particleProgram: (name, emit, update, helpers) => w.particleProgram(name, emit, update, helpers),

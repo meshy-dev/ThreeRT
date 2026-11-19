@@ -320,6 +320,7 @@ impl LiveCore {
     /// the GPU scene from the world (history survives, validated per pixel by depth / normal). Returns true on a
     /// rebuild.
     pub fn commit(&mut self, world: &mut World) -> Result<bool> {
+        self.sync_screen_pass(world)?;
         self.cpu_skin_ms = 0.0;
         self.cpu_upload_ms = 0.0;
         self.gpu_blas_ms = 0.0;

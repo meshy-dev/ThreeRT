@@ -14,6 +14,8 @@
 // by itself: `threert.run(n, dt)` runs them, for scripted tests), `guard` (the loop guard's limit, iterations an
 // invocation: default 65536; a new kernel's first runs take less), `bench=1` (no game: `threert.bench()`).
 import { webEngine, type EngineExports } from "./engine.ts";
+import { HudOverlay } from "../../../tools/three/hud.ts";
+import type { Hud, HudChoose } from "@threert/gameplay";
 import { bench } from "./bench.ts";
 import type { FrameRow } from "./frame.ts";
 
@@ -34,6 +36,7 @@ interface Module extends EngineExports {
 
 /** The node host the bundle installs (packages/gameplay/src/node-host.ts). */
 interface NodeHost {
+  hostMessages(list: string, ts: number): void;
   describe(): string;
   setup(roomId: string, seed?: number): string;
   event(type: string, payload: string, ts: number): string;
@@ -85,6 +88,19 @@ async function main() {
     return;
   }
 
+  // Game HUD coordinates cover the canvas, including when the page letterboxes it.
+  let hud: HudOverlay | undefined;
+  const choices: HudChoose[] = [];
+  const globals = globalThis as { __host_post?: (text: string) => boolean };
+  const otherPost = globals.__host_post;
+  globals.__host_post = (text) => {
+    const message = JSON.parse(text) as { t: string; hud?: Hud };
+    if (message.t !== "hud") return otherPost?.(text) ?? false;
+    hud ??= new HudOverlay(document.getElementById("viewport")!, choice => choices.push(choice));
+    hud.set(message.hud ?? {});
+    return true;
+  };
+
   stage("game");
   // The game: one script, as the native runtime evaluates it.
   await new Promise<void>((ok, fail) => {
@@ -121,6 +137,7 @@ async function main() {
   /** One frame, `dt` seconds after the one before. */
   const frame = (dt: number, interval: number): FrameRow => {
     const a = performance.now();
+    if (choices.length) host.hostMessages(JSON.stringify(choices.splice(0)), Date.now());
     const scripted = wasm.frameBegin(dt);
     const b = performance.now();
     const before = { ...counters };

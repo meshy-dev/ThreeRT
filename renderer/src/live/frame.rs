@@ -589,6 +589,9 @@ impl LiveCore {
             pass.set_bind_group(1, &self.kernel_bg, &[]);
             pass.dispatch_workgroups((gpu::CACHE_SIZE / 256) as u32, 1, 1);
         }
+        if let Some(post) = &self.screen_pass {
+            post.write_uniforms(&g.queue, w, h, shader_time(self.time));
+        }
         if let Some(p) = &self.profile {
             // One compute pass per stage, each timed.
             for (k, (name, grid, pipe)) in self.passes.pipes.iter().enumerate() {
@@ -610,7 +613,13 @@ impl LiveCore {
                 }
             }
             let n = self.passes.pipes.len() as u32 + 2 + self.profile_extra();
-            e.resolve_query_set(&p.queries, 0..n * 2, &p.resolve, 0);
+            if let Some(post) = &self.screen_pass {
+                let tw = wgpu::ComputePassTimestampWrites { query_set: &p.queries, beginning_of_pass_write_index: Some(n * 2), end_of_pass_write_index: Some(n * 2 + 1) };
+                let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("game post"), timestamp_writes: Some(tw) });
+                post.dispatch(&mut pass, w, h);
+            }
+            let count = n + u32::from(self.screen_pass.is_some());
+            e.resolve_query_set(&p.queries, 0..count * 2, &p.resolve, 0);
             e.copy_buffer_to_buffer(&p.resolve, 0, &p.read, 0, p.read.size());
         } else {
             let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 2), end_of_pass_write_index: Some(slot as u32 * 8 + 3) });
@@ -627,6 +636,9 @@ impl LiveCore {
                     tl_dispatch(&mut pass, false);
                     tl_dispatch(&mut pass, true);
                 }
+            }
+            if let Some(post) = &self.screen_pass {
+                post.dispatch(&mut pass, w, h);
             }
             drop(pass);
             if let (Some(t), Some(slot)) = (&self.timer, timed) {
@@ -672,6 +684,10 @@ impl LiveCore {
             for (k, s) in p.sums.iter_mut().enumerate().take(n) {
                 *s += t[k * 2 + 1].saturating_sub(t[k * 2]) as f64 * period;
             }
+            if self.screen_pass.is_some() {
+                // The game pass follows the slots used this frame. Keep its sum independent of the scene's particle passes.
+                p.sums[self.passes.pipes.len() + 6] += t[n * 2 + 1].saturating_sub(t[n * 2]) as f64 * period;
+            }
             let (sim, media) = (gpu::Gpu::has_grid_sim(&self.sc.up), media_composite.is_some());
             if sim || media {
                 p.grid.2.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -687,7 +703,7 @@ impl LiveCore {
             }
             p.frames += 1;
             if p.frames == 120 {
-                let names: Vec<&str> = std::iter::once("trace").chain(self.passes.pipes.iter().map(|(n, ..)| *n)).chain(["cache", "particles", "blas", "translucent", "vtrain"]).collect();
+                let names: Vec<&str> = std::iter::once("trace").chain(self.passes.pipes.iter().map(|(n, ..)| *n)).chain(["cache", "particles", "blas", "translucent", "vtrain", "game post"]).collect();
                 let mut rows: Vec<String> = names.iter().zip(&p.sums).map(|(n, s)| format!("{n} {:.2}", s / p.frames as f64)).collect();
                 rows.push(format!("gridsim {:.2}", p.grid_sum / p.frames as f64));
                 rows.push(format!("media {:.2}", p.media_sum / p.frames as f64));

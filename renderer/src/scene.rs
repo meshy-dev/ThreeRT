@@ -1006,7 +1006,7 @@ fn bytes_key(kind: &str, bytes: &[u8]) -> String {
 }
 
 /// Decoded texture image + its cache identity (files: path version; generated: the bytes' content).
-fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image::RgbaImage>)> {
+pub(crate) fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image::RgbaImage>)> {
     match &t.source {
         world::TextureSource::File(uri) => {
             let path = crate::files::asset_path(assets, uri);

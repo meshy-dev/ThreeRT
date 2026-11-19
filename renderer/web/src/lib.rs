@@ -162,6 +162,16 @@ pub fn geometry(id: u32, p: &[f32], n: &[f32], uv: &[f32], idx: &[u32], groups: 
     engine(|e| api::geometry(&mut e.world, id, p, n, uv, idx, groups.as_deref(), colors.as_deref())).map_err(thrown)
 }
 
+#[wasm_bindgen(js_name = postPass)]
+pub fn post_pass(code: Option<String>, textures: Vec<u32>) -> Result<(), JsValue> {
+    engine(|e| api::post_pass(&mut e.world, code, textures)).map_err(thrown)
+}
+
+#[wasm_bindgen(js_name = postParams)]
+pub fn post_params(values: &[f32]) -> Result<(), JsValue> {
+    engine(|e| api::post_params(&mut e.world, values)).map_err(thrown)
+}
+
 #[wasm_bindgen]
 pub fn texture(id: u32, d: &str, data: Option<Vec<u8>>) -> Result<(), JsValue> {
     let d = desc("texture", d)?;
