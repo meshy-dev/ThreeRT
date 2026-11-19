@@ -1029,7 +1029,8 @@ fn a_material_that_starts_emitting_lights_its_meshes_instances_as_a_build_does()
 /// A mesh hidden or shown by its `visible` is drawn and lit as a build draws it, in place: a still mesh, one that
 /// emits, one hidden when the scene was built, a group of two, a movable one moved while it was hidden. With and
 /// without a light tree. After each: no rebuild, the light list is its triangles, the weights and the picture are a
-/// build's. A mesh whose geometry changed while it was hidden is drawn again by a rebuild.
+/// build's. So for what an edit places unseen: a mesh whose geometry changed while it was hidden, one added hidden,
+/// one added without size.
 #[test]
 fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
     let presets = crate::default_presets_dir();
@@ -1109,18 +1110,47 @@ fn meshes_hidden_and_shown_in_place_are_drawn_as_a_build_draws_them() {
             lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         }
         assert_eq!((hidden(&live, 13), hidden(&live, 11), hidden(&live, 21)), ((true, true), (false, false), (false, false)), "{with} a light tree: as the world has them");
-        // Its geometry changed while it was hidden: the instance an edit took out is no longer its own to show.
+        // An edit places a mesh that is hidden, or has no size, as the build does: an instance no ray sees. Its geometry
+        // changed while it was hidden (its old mesh is left without a user), a mesh added hidden, one added without size:
+        // each comes back in place. A hidden mesh removed takes its mesh's user with it.
         if live.g.hwrt {
+            let mesh_of = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].mesh;
             w.set_visible(22, false).unwrap();
             assert!(!live.commit(&mut w).unwrap(), "a mesh the scene edits hidden, {with} a light tree: in place ({:?})", live.fallback);
-            let its = live.sc.instances[live.sc.tables.retained.instance(22).unwrap().instance as usize].mesh;
+            let its = mesh_of(&live, 22);
             w.set_geometry(8, quad(0.35)).unwrap();
-            assert!(!live.commit(&mut w).unwrap(), "its geometry changed while hidden, {with} a light tree: in place ({:?})", live.fallback);
-            assert_eq!(hidden(&live, 22), (true, false), "taken out by the edit");
-            assert_eq!(live.sc.edit.users.get(&its).copied().unwrap_or(0), 0, "and its mesh has no user left");
-            w.set_visible(22, true).unwrap();
-            assert!(live.commit(&mut w).unwrap(), "shown after its geometry changed, {with} a light tree: a rebuild");
-            let what = format!("a mesh shown after its geometry changed while hidden, {with} a light tree");
+            place(&mut w, 23, "added hidden", None, mesh(3, 5, false), false, [0.3, 0.6, 1.0]);
+            w.set_visible(23, false).unwrap();
+            w.set_object(24, "added without size".into(), None, mesh(3, 1, false), true, false).unwrap();
+            w.set_transform(24, Vec3::new(0.6, -0.1, 0.8), glam::Quat::IDENTITY, Vec3::ZERO).unwrap();
+            let what = format!("a hidden mesh's geometry changed, a mesh added hidden, one added without size, {with} a light tree");
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            assert_eq!((hidden(&live, 22), hidden(&live, 23), hidden(&live, 24)), ((true, true), (true, true), (true, true)), "{what}: instances no ray sees");
+            // (As many triangles as before: the mesh is written again where it was, and has its one user.)
+            assert_eq!((mesh_of(&live, 22), live.sc.edit.users.get(&its).copied().unwrap_or(0)), (its, 1), "{what}: its mesh has its one user");
+            lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+            let back: Vec<Edit> = vec![
+                ("a mesh shown after its geometry changed while hidden", show(22, true)),
+                ("a mesh added hidden shown", show(23, true)),
+                ("a mesh added without size given one", Box::new(|w| w.set_transform(24, Vec3::new(0.6, -0.1, 0.8), glam::Quat::from_rotation_y(-0.3), Vec3::ONE).unwrap())),
+                ("the added lamp hidden again", show(23, false)),
+            ];
+            for (what, edit) in &back {
+                let what = format!("{what}, {with} a light tree");
+                edit(&mut w);
+                assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+                if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
+                    list_is_its_triangles(&what, &live);
+                }
+                lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+            }
+            let its = mesh_of(&live, 22);
+            w.set_visible(22, false).unwrap();
+            assert!(!live.commit(&mut w).unwrap(), "hidden once more, {with} a light tree: in place ({:?})", live.fallback);
+            w.remove(22);
+            let what = format!("a hidden mesh removed, {with} a light tree");
+            assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+            assert_eq!(live.sc.edit.users.get(&its).copied().unwrap_or(0), 0, "{what}: its mesh has no user left");
             lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
         }
     }
