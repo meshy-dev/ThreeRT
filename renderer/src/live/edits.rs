@@ -2059,6 +2059,12 @@ impl LiveCore {
                     if !top.has_mesh(mesh) {
                         return Err("a model whose mesh is no unit (it deforms; software traversal flattens it)".into());
                     }
+                    // (Shadow rays pass the glass among a caster's other sections under a kernel feature: a scene where
+                    // no instance of the model cast a shadow was built without it.)
+                    let its = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?;
+                    if scene::rows_bits(its) & scene::INST_GLASS != 0 && scene::rows_cast(its, o.cast_shadow) && features & gpu::F_IGLASS == 0 {
+                        return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                    }
                     *edit.users.entry(mesh).or_default() += 1;
                     if let Some(k) = was {
                         drop_mesh_user(k, edit, tables, meshes);

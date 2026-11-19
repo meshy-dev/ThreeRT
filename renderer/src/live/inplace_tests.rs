@@ -1580,6 +1580,36 @@ fn a_model_of_several_materials_placed_in_place_has_its_rows() {
     assert_eq!(check(&mut live, &w, 32, "another placed after the first was removed"), rows, "it takes the rows the first gave back");
 }
 
+/// A model with glass among its sections, in a scene where no instance of it casts a shadow: the kernel was built
+/// without what has a shadow ray pass such glass, so the first instance that casts is placed by a rebuild.
+#[test]
+fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let model = || Kind::Model { uri: "tests/render/data/frame-pane.glb".into(), nodes: None, animation: None, functions: vec![] };
+    let mut w = world();
+    w.set_object(30, "first".into(), None, model(), false, false).unwrap();
+    w.set_transform(30, Vec3::new(-0.5, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    // (A mesh the scene says it edits: room for what is placed.)
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(0.9, -0.1, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert_eq!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "no caster has glass among its sections");
+    // (Upright before the wall, its pane 1 m wide: the pane's shadow is the sun's light through it.)
+    w.set_object(31, "caster".into(), None, model(), true, false).unwrap();
+    w.set_transform(31, Vec3::new(0.5, 0.0, 0.5), glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), Vec3::splat(2.0)).unwrap();
+    live.commit(&mut w).unwrap();
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+    assert_ne!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "the kernel passes its glass");
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.
