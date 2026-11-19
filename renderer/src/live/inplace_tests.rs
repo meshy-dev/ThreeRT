@@ -20,6 +20,11 @@ fn world() -> World {
     w.set_transform(11, Vec3::new(-0.4, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     w.set_object(12, "lamp".into(), None, mesh(3, 5), true, false).unwrap();
     w.set_transform(12, Vec3::new(0.6, 0.3, 1.5), glam::Quat::from_rotation_y(2.6), Vec3::ONE).unwrap();
+    // (A mesh of two sections behind the camera: an instance's rows are not at its record's index, here and for
+    // everything an edit places after.)
+    w.set_geometry(9, Geometry { groups: vec![[0, 3, 0], [3, 3, 1]], ..quad(0.05) }).unwrap();
+    w.set_object(9, "two".into(), None, Kind::Mesh { geometry: 9, material: 1, own_blas: false, materials: vec![1, 1] }, true, false).unwrap();
+    w.set_transform(9, Vec3::new(0.0, 0.0, 9.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     let sun = serde_json::from_value(serde_json::json!({ "type": "directional", "color": [1.0, 0.9, 0.8], "castShadow": true, "intensity": 2.0, "angularDiameter": 0.5 })).unwrap();
     w.set_object(20, "sun".into(), None, Kind::Light(sun), true, false).unwrap();
     w.set_transform(20, Vec3::ZERO, glam::Quat::from_rotation_x(-0.5) * glam::Quat::from_rotation_y(0.4), Vec3::ONE).unwrap();
@@ -93,6 +98,13 @@ fn picture(core: &mut LiveCore, frames: u32) -> Vec<u8> {
     d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
     bytes
+}
+
+/// Whether rows `at .. at + n` are the room's to give again (a hole holds them, or they are past what is in use): what
+/// an object an edit placed gives back when it goes.
+fn rows_free(c: &LiveCore, at: u32, n: u32) -> bool {
+    let rows = &c.sc.edit.rows;
+    at as usize >= rows.end || rows.free.iter().any(|(&start, &len)| start <= at as usize && (at + n) as usize <= start + len)
 }
 
 /// The view without its histories (the radiance cache emptied, the frames' histories reset), as a new view is.
@@ -645,6 +657,7 @@ fn an_emitting_instanced_object_added_in_place_is_lit_as_a_build_lights_it() {
                 }),
             ),
         ];
+        let mut run = 0;
         for (what, edit) in &edits {
             let what = format!("an emitting instanced object {what} in place, {} a light tree", if tree { "with" } else { "without" });
             // (Its material covers instances' triangles once it is added: `Tables::fixed_mats`.)
@@ -653,6 +666,14 @@ fn an_emitting_instanced_object_added_in_place_is_lit_as_a_build_lights_it() {
             edit(&mut w);
             assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
             assert!(covers(&live) && (before || what.contains("added")), "{what}: its material is among those of instances' triangles");
+            // Its copies' rows: a run of the room's, the room's again once it is removed.
+            match live.sc.tables.retained.instanced(15) {
+                Some(place) => {
+                    run = live.sc.instances[place.first as usize].rows;
+                    assert!((0..3).all(|i| live.sc.instances[place.first as usize + i].rows == run + i as u32) && !rows_free(&live, run, 3), "{what}: a row a copy, in a run");
+                }
+                None => assert!(rows_free(&live, run, 3), "{what}: its rows are the room's again"),
+            }
             if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
                 list_is_its_triangles(&what, &live);
             }
@@ -1387,13 +1408,16 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     assert!(!live.commit(&mut w).unwrap(), "an object of the geometry placed: in place ({:?})", live.fallback);
     assert_eq!((mesh_of(&live, 46), live.sc.meshes.len(), live.sc.pool_tris.len()), (shared, meshes, triangles), "it shares the mesh: none made");
     against_a_build("an object of the geometry placed in place", &mut live, &w);
-    // Another material for an object: its row. The plain one emits now, the one that emitted is a cutout.
-    for (id, material, at) in [(41, 5, Vec3::new(-1.35, 0.55, 0.6)), (45, 64, Vec3::new(2.25, 0.55, 0.6))] {
+    // Another material for an object: its row, the one it had (the build's, or the room's for the one placed above).
+    // The plain one emits now, the one that emitted is a cutout, the glass one placed in place is plain.
+    for (id, material, at) in [(41, 5, Vec3::new(-1.35, 0.55, 0.6)), (45, 64, Vec3::new(2.25, 0.55, 0.6)), (46, 62, Vec3::new(0.2, -0.5, 0.9))] {
+        let row = placed(&live, id).rows;
         place(&mut w, id, material, at);
         let what = format!("object {id} given material {material}");
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         assert_eq!((mesh_of(&live, id), live.sc.meshes.len(), live.sc.pool_tris.len()), (shared, meshes, triangles), "{what}: it keeps the mesh, none made");
-        assert_eq!(scene::row_material(&live.sc.rows[placed(&live, id).rows as usize]), live.sc.tables.retained.materials[&material], "{what}: its row names it");
+        assert_eq!(placed(&live, id).rows, row, "{what}: it keeps its row");
+        assert_eq!(scene::row_material(&live.sc.rows[row as usize]), live.sc.tables.retained.materials[&material], "{what}: its row names it");
         against_a_build(&what, &mut live, &w);
     }
     // A geometry with colours that no object read at the build: its mesh was made without them, and an object that
@@ -1553,6 +1577,7 @@ fn a_model_of_several_materials_placed_in_place_has_its_rows() {
     let rows = check(&mut live, &w, 31, "a model placed in place");
     w.remove(31);
     assert!(!live.commit(&mut w).unwrap(), "the model removed: in place ({:?})", live.fallback);
+    assert!(rows_free(&live, rows, 3), "the model removed: its rows are the room's again");
     place(&mut w, 32, Vec3::new(0.2, 0.5, 1.0));
     assert!(!live.commit(&mut w).unwrap(), "another placed: in place ({:?})", live.fallback);
     assert_eq!(check(&mut live, &w, 32, "another placed after the first was removed"), rows, "it takes the rows the first gave back");
