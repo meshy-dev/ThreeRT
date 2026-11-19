@@ -441,17 +441,13 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
                 assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
             }
-            if record.n[1][3].to_bits() & scene::INST_ROWS == 0 {
-                assert_eq!((record.n[2][3].to_bits(), record.n[2][3].to_bits() + a.x[3].to_bits()), (inst.first_emitter, i as u32 + 1), "{what}: triangle {} of instance {} finds its emitter", e.tri, e.inst);
-                alive += 1;
-                continue;
-            }
-            // An instance with rows: its section's row as the GPU has it says the material and where the section's
-            // emitters start, the triangle its index among them.
+            // Its section's row as the GPU has it says the material and where the section's emitters start, the
+            // triangle its index among them.
             let at = (record.info[3] + a.uv[3].to_bits()) as usize;
             let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
             assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
-            assert_eq!((record.info[3], record.n[2][3].to_bits()), (inst.rows, inst.first_emitter), "{what}: instance {}'s record has its rows and its first emitter", e.inst);
+            assert_eq!(record.info[3], inst.rows, "{what}: instance {}'s record has its rows", e.inst);
+            assert!(inst.first_emitter <= i as u32, "{what}: emitter {i} is of instance {}'s run, from {}", e.inst, inst.first_emitter);
             assert_eq!((row[2].wrapping_add(a.x[3].to_bits()), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         }
         alive += 1;
@@ -1363,7 +1359,7 @@ fn objects_of_one_geometry_share_its_mesh_whatever_their_materials() {
     assert!((41..46).all(|id| mesh_of(&live, id) == shared), "the six objects of one geometry share its mesh");
     assert!(live.sc.meshes[shared as usize].colored && live.sc.meshes[shared as usize].sect_count == 1);
     let features = live.sc.up.kernel.features;
-    assert_eq!(features & (gpu::F_ROWS | gpu::F_MASKED | gpu::F_VCOLOR), gpu::F_ROWS | gpu::F_MASKED | gpu::F_VCOLOR);
+    assert_eq!(features & (gpu::F_MASKED | gpu::F_VCOLOR), gpu::F_MASKED | gpu::F_VCOLOR);
     let placed = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].clone();
     assert!(!placed(&live, 44).cast_shadow && placed(&live, 43).cast_shadow, "glass alone casts no shadow");
     list_is_its_triangles("objects of one geometry, at the build", &live);
@@ -1480,8 +1476,8 @@ fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
             Err(e) => return eprintln!("skipped: {e}"),
         };
         let window = one.sc.instances.iter().find(|i| i.name == "window").expect("the window is an instance").clone();
-        assert_eq!((window.bits, window.cast_shadow, one.sc.meshes[window.mesh as usize].sect_count), (scene::INST_ROWS | scene::INST_GLASS, true, 2), "glass and a frame: one mesh, which casts");
-        let wanted = gpu::F_ROWS | gpu::F_IGLASS | if cutout { gpu::F_MASKED } else { 0 };
+        assert_eq!((window.bits, window.cast_shadow, one.sc.meshes[window.mesh as usize].sect_count), (scene::INST_GLASS, true, 2), "glass and a frame: one mesh, which casts");
+        let wanted = gpu::F_IGLASS | if cutout { gpu::F_MASKED } else { 0 };
         assert_eq!(one.sc.up.kernel.features & (wanted | gpu::F_MASKED), wanted);
         assert_eq!(one.sc.base.counts2[1], 1, "the sky is sampled as a light");
         let mut two = open(&scene(1, cutout)).unwrap();

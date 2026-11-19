@@ -602,7 +602,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
-    sc.gpu_instances = sc.instances.iter().map(|i| { let m = sc.meshes[i.mesh as usize]; i.gpu(pool_first as u32 + m.first, i.parts(&m)) }).collect();
+    sc.gpu_instances = sc.instances.iter().map(|i| i.gpu(pool_first as u32 + sc.meshes[i.mesh as usize].first)).collect();
     // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
     // primitive counts from there).
     for i in &sc.instances {
@@ -732,9 +732,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         }
         let first = emitter_tris.len() as u32;
         sc.instances[r].first_emitter = first;
-        if let Some(g) = sc.gpu_instances.get_mut(r) {
-            g.n[2][3] = f32::from_bits(first);
-        }
         for (k, start) in starts.iter().enumerate() {
             sc.rows[at + k][2] = start.map_or(scene::NO_EMITTER, |s| first + s);
         }

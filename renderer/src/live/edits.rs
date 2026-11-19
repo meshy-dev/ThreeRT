@@ -851,7 +851,7 @@ impl LiveCore {
         if !sub.iter().all(held) {
             return false;
         }
-        let LoadedScene { tables, instances, gpu_instances, pool_tris, meshes, rows, up, edit, .. } = &mut self.sc;
+        let LoadedScene { tables, instances, pool_tris, meshes, rows, up, edit, .. } = &mut self.sc;
         for k in sub {
             let Some(scene::Draw::Instance(i)) = tables.retained.proxies.get_mut(&k).map(|p| &mut p.draw) else { continue };
             if std::mem::replace(&mut i.moves, true) {
@@ -874,9 +874,6 @@ impl LiveCore {
                 tables.emitter_tris.push(e);
             }
             inst.first_emitter = first;
-            if let Some(rec) = gpu_instances.get_mut(r as usize) {
-                rec.n[2][3] = f32::from_bits(first);
-            }
             // (Its rows say where its sections' emitters start: where the run is now.)
             let at = inst.rows as usize..inst.rows as usize + meshes[inst.mesh as usize].sect_count as usize;
             for row in rows[at.clone()].iter_mut().filter(|row| row[2] != scene::NO_EMITTER) {
@@ -950,7 +947,7 @@ impl LiveCore {
             }
             let old = self.sc.gpu_instances[i as usize];
             inst.world = w;
-            let mut r = top.record(inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]), inst.mesh, inst.cast_shadow);
+            let mut r = top.record(inst.gpu(old.info[0]), inst.mesh, inst.cast_shadow);
             r.p = old.m;
             self.sc.gpu_instances[i as usize] = r;
             if merged {
@@ -1051,7 +1048,7 @@ impl LiveCore {
         // at the list's end, the sections that emit now one after another, where each starts in its row and the
         // run's first in the instance's record; the run it had, of fewer, stays at no weight.
         if !started.is_empty() && !sc.meshes.is_empty() {
-            let LoadedScene { tables, instances, gpu_instances, meshes, pool_tris, sections, rows, edit, up, .. } = sc;
+            let LoadedScene { tables, instances, meshes, pool_tris, sections, rows, edit, up, .. } = sc;
             let moving = tables.retained.moving_records();
             // Each mesh's triangles as the pool has them: their section and their index in it (`rank_in_sections`).
             let mut places: std::collections::HashMap<u32, Vec<(u32, u32)>> = Default::default();
@@ -1095,10 +1092,6 @@ impl LiveCore {
                 }
                 let first = tables.emitter_tris.len() as u32;
                 instances[r].first_emitter = first;
-                if let Some(rec) = gpu_instances.get_mut(r) {
-                    rec.n[2][3] = f32::from_bits(first);
-                    up.heap.write(q, Table::Instances, (r * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(rec));
-                }
                 for (s, start) in starts.iter().enumerate() {
                     rows[at + s][2] = start.map_or(scene::NO_EMITTER, |x| first + x);
                 }
@@ -1383,7 +1376,7 @@ impl LiveCore {
                         emitting.push((rec0 + i) as u32);
                     }
                     let inst = &sc.instances[first + i];
-                    (top.record(inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]), inst.mesh, casts), scene::copy_row(row, emits && hidden))
+                    (top.record(inst.gpu(old.info[0]), inst.mesh, casts), scene::copy_row(row, emits && hidden))
                 };
                 rec.p = old.m;
                 sc.gpu_instances[rec0 + i] = rec;
@@ -1501,7 +1494,7 @@ impl LiveCore {
             // (A node its clip scales to nothing: at a point, where no ray sees it.)
             let (w, gone) = scene::placed_world(w, inst.world.w_axis.truncate());
             inst.world = w;
-            let mut r = inst.gpu(old.info[0], [old.info[3], old.n[0][3].to_bits()]);
+            let mut r = inst.gpu(old.info[0]);
             r.p = old.m;
             self.sc.gpu_instances[i as usize] = r;
             (ilo, ihi) = (ilo.min(i as usize), ihi.max(i as usize + 1));
@@ -2073,7 +2066,7 @@ impl LiveCore {
                     // (Its rows, the mesh's own, are placed with its record below.)
                     let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?;
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(mine) };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, inst.parts(&im)), mesh, inst.cast_shadow);
+                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
@@ -2086,7 +2079,7 @@ impl LiveCore {
                         _ => unreachable!(),
                     };
                     let (geometry, material) = (&geometry, &material);
-                    if features & gpu::F_INST == 0 || features & gpu::F_ROWS == 0 {
+                    if features & gpu::F_INST == 0 {
                         return Err("the scene's first instanced mesh (kernel feature)".into());
                     }
                     // A placement without size (a build places it, unseen at a point), or instancing off (it flattens).
@@ -2201,7 +2194,7 @@ impl LiveCore {
                                         }
                                     };
                                     sections[sect_first as usize] = scene::Section { first: 0, count: t.len() as u32, slot: 0 };
-                                    let im = scene::InstMesh { sect_first, sect_count: 1, colored, ..scene::own_inst_mesh(&t, (first - edit.pool_first) as u32, 0) };
+                                    let im = scene::InstMesh { sect_first, sect_count: 1, colored, ..scene::own_inst_mesh(&t, (first - edit.pool_first) as u32) };
                                     let k = match &mut top {
                                         gpu::Top::Hw(accel) => match dead {
                                             Some(k) => {
@@ -2337,7 +2330,7 @@ impl LiveCore {
                                 rows.resize(row_at + 1, [0; 4]);
                             }
                             rows[row_at] = row;
-                            let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first, inst.parts(&im)), mesh, inst.cast_shadow);
+                            let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                             w_records.put(((r0 + i) * size) as u64, bytemuck::bytes_of(&rec));
                             gpu_instances[r0 + i] = rec;
                             top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | (r0 + i) as u32, inst.cast_shadow, hidden);
@@ -2354,7 +2347,7 @@ impl LiveCore {
                     // casts are the row's.)
                     let row = [scene::row_of(mat, &tables.materials)];
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&row, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&row) };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first, inst.parts(&im)), mesh, inst.cast_shadow);
+                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
@@ -2405,7 +2398,6 @@ impl LiveCore {
                     let old = emitter_run(&tables.emitter_tris, instances, record as u32);
                     let first = if old.len() == im.count as usize && tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { tables.emitter_tris.len() };
                     (inst.first_emitter, mine[0][2]) = (first as u32, first as u32);
-                    gpu.n[2][3] = f32::from_bits(first as u32);
                     let (a, b) = (im.first as usize, (im.first + im.count) as usize);
                     let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.count as usize, &tables.materials, o.driven || world.movable(id));
                     for (j, (e, w)) in made.into_iter().enumerate() {

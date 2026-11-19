@@ -24,8 +24,8 @@
     // renders of Kabukichō differed in 75 % of their pixels). Fewer whole-scene steps (the opaque instances once, then
     // the cutout instances alone; or one candidate loop on them) came out within ±0.4 ms on Bistro: the leaves' alpha
     // tests and the traversal past them cost it, however the queries are arranged. Culling the cutout geometry by its
-    // non-opaque flag (RAY_FLAG_CULL_NO_OPAQUE) was slow on Metal (Bistro's trace +1.7 ms); every geometry but an
-    // instanced mesh's glass is flagged opaque now (`trace_opaque`).
+    // non-opaque flag (RAY_FLAG_CULL_NO_OPAQUE) was slow on Metal (Bistro's trace +1.7 ms); every geometry is flagged
+    // opaque.
     //
     // In order, each query starting past the last cutout hit its alpha let through. Shadow rays take up to 64 of them
     // and count as blocked past that: with 16, as closest hits take, the rest counted as unblocked (light through dense

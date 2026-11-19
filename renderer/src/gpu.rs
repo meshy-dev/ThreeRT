@@ -252,7 +252,7 @@ fn mesh_entries<'a>(accel: &'a Accel, meshes: &[u32]) -> Vec<wgpu::BlasBuildEntr
                     sizes
                         .iter()
                         .zip(parts)
-                        .map(|(size, &(first, _, _))| wgpu::BlasTriangleGeometry {
+                        .map(|(size, &(first, _))| wgpu::BlasTriangleGeometry {
                             size,
                             vertex_buffer: &accel.verts,
                             first_vertex: ((accel.pool_first + first as usize) * 3) as u32,
@@ -819,8 +819,8 @@ pub struct Accel {
     blases: Vec<(wgpu::Blas, usize, usize, wgpu::BlasTriangleGeometrySizeDescriptor)>,
     /// One per instanced mesh (model space), referenced by the TLAS's model instances.
     meshes: Vec<wgpu::Blas>,
-    /// Per mesh: its (first pool triangle, count, opaque) geometries and their sizes (`mesh_entries`).
-    mesh_geo: Vec<(Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)>,
+    /// Per mesh: its (first pool triangle, count) geometries and their sizes (`mesh_entries`).
+    mesh_geo: Vec<(Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)>,
     /// The first pool triangle in the GPU order.
     pool_first: usize,
     /// The TLAS index of model instance 0 (the traversal groups' instances come first).
@@ -1631,8 +1631,6 @@ pub const A_LIVE: u32 = 31;
 
 // Kernel features (`override FEAT` in pathtrace.wgsl).
 pub const F_MASKED: u32 = 1;
-/// An instance has rows (scene.rs `Row`): its mesh is its geometry's alone, a section's material is its row's.
-pub const F_ROWS: u32 = 2;
 pub const F_FOG: u32 = 64;
 pub const F_VOLUME: u32 = 128;
 pub const F_TEX: u32 = 256;
@@ -1680,11 +1678,9 @@ pub const F_LISTS: u32 = 1 << 27;
 /// every call otherwise, taken or not (Kabukicho's 64,224 emitters with a function, none on an instance: frame GPU
 /// +2.7 %).
 pub const F_IFUNC: u32 = 1 << 28;
-/// Glass among an instance's other triangles. With rows: a shadow ray steps through a hit whose row says glass
-/// (trace_hw.wgsl). A model's mesh: its glass geometry is not flagged opaque, and a shadow ray culls such geometry
-/// instead of forcing opacity. (Software traversal skips a unit's glass triangles by their flag, a row's or their
-/// own.) Compiled out where no instance mixes the two: one that is all glass is out of a shadow ray's way by its mask
-/// (`scene::rows_cast`, `scene::InstMesh::casts`).
+/// Glass among an instance's other sections: a shadow ray steps through a hit whose row says glass (trace_hw.wgsl;
+/// software traversal skips such a triangle of a unit). Compiled out where no instance mixes the two: one that is all
+/// glass is out of a shadow ray's way by its mask (`scene::rows_cast`).
 pub const F_IGLASS: u32 = 1 << 29;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
@@ -1767,7 +1763,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     let ifunc = if scene.rows.iter().any(|r| function(crate::scene::row_material(r))) { F_IFUNC } else { 0 };
     let iglass = if mixed_glass { F_IGLASS } else { 0 };
     let masked = any_row(crate::scene::ROW_CUTOUT);
-    media | particles | ifunc | iglass | F_ROWS | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    media | particles | ifunc | iglass | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -1799,7 +1795,7 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     }
 
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
-        f &= mask | F_HUGE | F_INST | F_PROC | F_TINT | F_ROWS; // not optional: they say what the instances' custom data / the object table / the records hold
+        f &= mask | F_HUGE | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' custom data / the object table holds
     }
     // Features compiled in although the scene does not use them (the perf smoke's cost of a contract compiled in but off).
     if let Some(on) = std::env::var("THREERT_FEATURES_ON").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -2398,9 +2394,7 @@ impl Gpu {
                     vertex_count: (count * 3) as u32,
                     index_format: None,
                     index_count: None,
-                    // (Every group's geometry is flagged opaque, the cutout ones' too: a query that forces opacity sees
-                    // them alike, and a shadow ray that culls what is not opaque, an instanced mesh's glass, must
-                    // still meet a cutout: trace_hw.wgsl.)
+                    // (Every geometry is flagged opaque, a cutout's too: every query forces opacity, trace_hw.wgsl.)
                     flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
                 })
                 .collect();
@@ -2425,18 +2419,18 @@ impl Gpu {
             // INSTANCE_BIT | record; shadow casters mask 1).
             // Per mesh: (first triangle, count, opaque) geometries: the opaque part, the cutout part, the glass part
             // (`InstMesh::parts`).
-            let mesh_parts: Vec<Vec<(u32, u32, bool)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count, opaque)| (m.first + at, count, opaque)).collect()).collect();
+            let mesh_parts: Vec<Vec<(u32, u32)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count)| (m.first + at, count)).collect()).collect();
             let mesh_sizes: Vec<Vec<wgpu::BlasTriangleGeometrySizeDescriptor>> = mesh_parts
                 .iter()
                 .map(|parts| {
                     parts
                         .iter()
-                        .map(|&(_, count, opaque)| wgpu::BlasTriangleGeometrySizeDescriptor {
+                        .map(|&(_, count)| wgpu::BlasTriangleGeometrySizeDescriptor {
                             vertex_format: wgpu::VertexFormat::Float32x3,
                             vertex_count: count * 3,
                             index_format: None,
                             index_count: None,
-                            flags: if opaque { wgpu::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::AccelerationStructureGeometryFlags::empty() },
+                            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
                         })
                         .collect()
                 })
@@ -2452,10 +2446,10 @@ impl Gpu {
                 })
                 .collect();
             // What the triangle BLASes hold (Metal's own sizes; each instanced mesh once) and their vertex buffer.
-            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![((first * 3) as u32, (count * 3) as u32, true)]);
-            let mesh_vertex_parts = mesh_parts.iter().map(|ps| ps.iter().map(|&(first, count, opaque)| ((pool_first as u32 + first) * 3, count * 3, opaque)).collect::<Vec<_>>());
+            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![((first * 3) as u32, (count * 3) as u32)]);
+            let mesh_vertex_parts = mesh_parts.iter().map(|ps| ps.iter().map(|&(first, count)| ((pool_first as u32 + first) * 3, count * 3)).collect::<Vec<_>>());
             let mut blas_per_tri = 0.0;
-            let parts: Vec<Vec<(u32, u32, bool)>> = group_parts.chain(mesh_vertex_parts).collect();
+            let parts: Vec<Vec<(u32, u32)>> = group_parts.chain(mesh_vertex_parts).collect();
             if let Some(bytes) = parts.iter().map(|ps| self.tri_blas_bytes(&vbuf, ps)).sum::<Option<u64>>() {
                 timings.push(("tri_blas_mb".into(), (bytes + vbuf.size()) as f64 / (1 << 20) as f64));
                 let tris: u64 = parts.iter().flatten().map(|p| p.1 as u64 / 3).sum();
@@ -2525,7 +2519,7 @@ impl Gpu {
                         sizes
                             .iter()
                             .zip(parts)
-                            .map(|(size, &(first, _, _))| wgpu::BlasTriangleGeometry {
+                            .map(|(size, &(first, _))| wgpu::BlasTriangleGeometry {
                                 size,
                                 vertex_buffer: &vbuf,
                                 first_vertex: ((pool_first + first as usize) * 3) as u32,
@@ -2702,9 +2696,9 @@ impl Gpu {
         }
     }
 
-    /// Bytes Metal allocates for a triangle BLAS over the (first vertex, vertex count, opaque) geometries of `verts`
-    /// (non-indexed Float32x3, as every triangle BLAS here; None on other backends).
-    fn tri_blas_bytes(&self, verts: &wgpu::Buffer, parts: &[(u32, u32, bool)]) -> Option<u64> {
+    /// Bytes Metal allocates for a triangle BLAS over the (first vertex, vertex count) geometries of `verts`
+    /// (non-indexed Float32x3 flagged opaque, as every triangle BLAS here; None on other backends).
+    fn tri_blas_bytes(&self, verts: &wgpu::Buffer, parts: &[(u32, u32)]) -> Option<u64> {
         #[cfg(target_vendor = "apple")]
         {
             use wgpu::hal::{api::Metal, Device as _};
@@ -2713,7 +2707,7 @@ impl Gpu {
             let entries = wgpu::hal::AccelerationStructureEntries::Triangles(
                 parts
                     .iter()
-                    .map(|&(first_vertex, vertex_count, opaque)| wgpu::hal::AccelerationStructureTriangles {
+                    .map(|&(first_vertex, vertex_count)| wgpu::hal::AccelerationStructureTriangles {
                         vertex_buffer: Some(&*b),
                         vertex_format: wgpu::VertexFormat::Float32x3,
                         first_vertex,
@@ -2721,7 +2715,7 @@ impl Gpu {
                         vertex_stride: 12,
                         indices: None,
                         transform: None,
-                        flags: if opaque { wgpu::hal::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::hal::AccelerationStructureGeometryFlags::empty() },
+                        flags: wgpu::hal::AccelerationStructureGeometryFlags::OPAQUE,
                     })
                     .collect(),
             );
@@ -3256,17 +3250,17 @@ impl Gpu {
         accel.mesh_geo[k as usize] = geo;
     }
 
-    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32, bool)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
+    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
         let rel = (first - accel.pool_first) as u32;
-        let parts: Vec<(u32, u32, bool)> = mesh.parts(sections).into_iter().map(|(at, count, opaque)| (rel + at, count, opaque)).collect();
+        let parts: Vec<(u32, u32)> = mesh.parts(sections).into_iter().map(|(at, count)| (rel + at, count)).collect();
         let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = parts
             .iter()
-            .map(|&(_, c, opaque)| wgpu::BlasTriangleGeometrySizeDescriptor {
+            .map(|&(_, c)| wgpu::BlasTriangleGeometrySizeDescriptor {
                 vertex_format: wgpu::VertexFormat::Float32x3,
                 vertex_count: c * 3,
                 index_format: None,
                 index_count: None,
-                flags: if opaque { wgpu::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::AccelerationStructureGeometryFlags::empty() },
+                flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
             })
             .collect();
         let flags = if std::env::var("THREERT_EDIT_BLAS").is_ok_and(|v| v == "trace") { wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE } else { wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD };
@@ -3683,7 +3677,6 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
-            ("F_ROWS", F_ROWS),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

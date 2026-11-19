@@ -52,17 +52,12 @@ pub fn copy_row(mut row: ObjectRow, dark: bool) -> ObjectRow {
 }
 
 /// A mesh its instances place: its triangles once, in model space, in the `pool_*` arrays; one BLAS, one TLAS
-/// instance per placement. A geometry's (`section_mesh`: its materials are its instances'), or a model's.
+/// instance per placement. A geometry's (`section_mesh`) or a model's (`model_sections`); its materials are its
+/// instances' (`Instance::rows`).
 #[derive(Clone, Copy, Debug)]
 pub struct InstMesh {
     pub first: u32,
     pub count: u32,
-    /// The first `opaque` pool triangles are opaque, the last `glass` glass, those between cutout (alpha-tested):
-    /// a BLAS geometry each (`parts`).
-    pub opaque: u32,
-    /// Its last `glass` triangles are of a glass material: shadow rays pass them (their geometry is not flagged
-    /// opaque, and a shadow ray culls such, trace_hw.wgsl), `glass_tr` weighs what they let through.
-    pub glass: u32,
     /// Triangles each placement flattens instead (`flatten_coincident`'s pairs), in the build's rest arrays.
     pub rest_first: u32,
     pub rest_count: u32,
@@ -71,13 +66,7 @@ pub struct InstMesh {
     pub hi: Vec3A,
     /// Its triangles change (a shared pose, `PoseGroup`): its BLAS is rebuilt with them.
     pub deforms: bool,
-    /// A model's mesh: how many emitters an instance of it has in the light list, its triangles of an emitting
-    /// material, numbered in their attributes as they lie in the triangles' table (x.w - 1; `number_emitters`). 0: it
-    /// does not emit. (A mesh with sections: `rows_emitters`, an instance's.)
-    pub emitters: u32,
-    /// Its sections (`Section`), in `Scene::sections`: a mesh of a geometry alone, whose materials are its instances'
-    /// (`Instance::rows`). None (`sect_count` 0): a model's mesh, its materials on its triangles and its triangles
-    /// by class (`opaque`, `glass`, `emitters`; a mesh with sections says all opaque there, and no emitters).
+    /// Its sections (`Section`), in `Scene::sections`: a geometry of its BLAS each, a row of its instances each.
     pub sect_first: u32,
     pub sect_count: u32,
     /// Its triangles carry its geometry's vertex colours (a material says whether it reads them).
@@ -123,10 +112,10 @@ pub fn rows_cast(rows: &[Row], cast_shadow: bool) -> bool {
     cast_shadow && !rows.iter().all(|r| r[0] & ROW_GLASS != 0)
 }
 
-/// The bits of an instance's record for its rows (`INST_ROWS`, and which classes are among them).
+/// The bits of an instance's record for its rows: which classes are among them.
 pub fn rows_bits(rows: &[Row]) -> u32 {
     let any = |bit: u32| rows.iter().any(|r| r[0] & bit != 0);
-    INST_ROWS | if any(ROW_CUTOUT) { INST_CUTOUT } else { 0 } | if any(ROW_GLASS) { INST_GLASS } else { 0 }
+    (if any(ROW_CUTOUT) { INST_CUTOUT } else { 0 }) | if any(ROW_GLASS) { INST_GLASS } else { 0 }
 }
 
 /// How many emitters an instance with these rows has in the light list: every triangle of its sections whose
@@ -164,35 +153,16 @@ pub fn deforming_pool(meshes: &[InstMesh]) -> usize {
 }
 
 impl InstMesh {
-    /// Its BLAS geometries, those with triangles: each one's first triangle in the mesh, how many, and whether it is
-    /// flagged opaque. A mesh with sections (`sections`: the scene's): one a section, all flagged opaque, whatever
-    /// an instance's materials are. A model's mesh: one a class, all flagged opaque but the glass (a query that forces
-    /// opacity sees every one alike, a shadow ray culls the glass).
-    pub fn parts(&self, sections: &[Section]) -> Vec<(u32, u32, bool)> {
-        if self.sect_count > 0 {
-            return self.sections(sections).iter().map(|s| (s.first, s.count, true)).collect();
-        }
-        let cutout = self.count - self.opaque - self.glass;
-        [(0, self.opaque, true), (self.opaque, cutout, true), (self.opaque + cutout, self.glass, false)].into_iter().filter(|p| p.1 > 0).collect()
+    /// Its BLAS geometries (`sections`: the scene's): one a section, its first triangle in the mesh and how many.
+    /// Every one is flagged opaque, whatever an instance's materials are (a query forces opacity; a cutout's and
+    /// glass's hits are told by the instance's rows).
+    pub fn parts(&self, sections: &[Section]) -> Vec<(u32, u32)> {
+        self.sections(sections).iter().map(|s| (s.first, s.count)).collect()
     }
 
-    /// Where its second and its third geometry start in the mesh (0: there is none): the record has them, for a hit's
-    /// triangle from its geometry and primitive (trace_hw.wgsl `hit_tri`).
-    pub fn part_offsets(&self) -> [u32; 2] {
-        let p = self.parts(&[]);
-        [p.get(1).map_or(0, |p| p.0), p.get(2).map_or(0, |p| p.0)]
-    }
-
-    /// Its sections among the scene's (none: a model's mesh).
+    /// Its sections among the scene's.
     pub fn sections<'a>(&self, sections: &'a [Section]) -> &'a [Section] {
         &sections[self.sect_first as usize..(self.sect_first + self.sect_count) as usize]
-    }
-
-    /// Whether an instance of it casts shadows: as its object says, and never when the mesh is all glass. Such an
-    /// instance is out of a shadow ray's way by its mask, as one that casts none is; a mesh with glass among other
-    /// triangles has it culled by its geometry's flag (`parts`, gpu.rs `F_IGLASS`).
-    pub fn casts(&self, cast_shadow: bool) -> bool {
-        cast_shadow && self.glass < self.count
     }
 
     /// World bounds of a placement: the box of the transformed model-space box.
@@ -226,12 +196,11 @@ pub struct Instance {
     /// keep its mesh and its place above the triangles: it comes back in place. (One that an edit took out is hidden
     /// and not this: a rebuild draws it again.)
     pub masked: bool,
-    /// Its first emitter in the light list, if it has emitters (`InstMesh::emitters`; with sections,
-    /// `rows_emitters`): set where the list is made (lib.rs `prepare`, the live edits); the record carries it (n2.w),
-    /// for the rays that hit an emitter of a model's mesh, and a section's row has where the section's start.
+    /// Its first emitter in the light list, if it has emitters (`rows_emitters`): set where the list is made (lib.rs
+    /// `prepare`, the live edits). A section's row has where the section's start, for the rays that hit one.
     pub first_emitter: u32,
     /// Its rows in `Scene::rows`, one a section of its mesh (`InstMesh::sect_count`), and the record's bits for them
-    /// (`rows_bits`; 0: a model's instance, without rows).
+    /// (`rows_bits`).
     pub rows: u32,
     pub bits: u32,
 }
@@ -250,28 +219,19 @@ pub struct GpuInstance {
 }
 
 impl Instance {
-    /// Kernel record with its mesh's first triangle at `first` in the GPU order; `parts` = where its mesh's second
-    /// and third geometry start (`InstMesh::part_offsets`; the third's in n0.w, which hardware traversal leaves
-    /// free and a unit's record takes for its tree's root).
-    pub fn gpu(&self, first: u32, parts: [u32; 2]) -> GpuInstance {
+    /// Kernel record with its mesh's first triangle at `first` in the GPU order. (n0.w is left free: a unit's record
+    /// takes it for its tree's root, units.rs `unit_record`.)
+    pub fn gpu(&self, first: u32) -> GpuInstance {
         let w = self.world;
         let nm = glam::Mat3::from_mat4(w).inverse().transpose();
         let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
         let nrow = |r: usize, w: f32| [nm.x_axis[r], nm.y_axis[r], nm.z_axis[r], w];
-        let mirrored = f32::from_bits(self.bits | if mirrors(w) { INST_MIRRORED } else { 0 });
-        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, f32::from_bits(parts[1])), nrow(1, mirrored), nrow(2, f32::from_bits(self.first_emitter))], info: [first, self.object, lod_offset(w).to_bits(), parts[0]], p: [row(0), row(1), row(2)] }
+        let bits = f32::from_bits(self.bits | if mirrors(w) { INST_MIRRORED } else { 0 });
+        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, bits), nrow(2, 0.0)], info: [first, self.object, lod_offset(w).to_bits(), self.rows], p: [row(0), row(1), row(2)] }
     }
-    /// What `gpu` takes as `parts` for an instance of `m`: its rows' first with sections, else the mesh's part
-    /// offsets.
-    pub fn parts(&self, m: &InstMesh) -> [u32; 2] {
-        if m.sect_count > 0 { [self.rows, 0] } else { m.part_offsets() }
-    }
-    /// A triangle's attributes as a flattened triangle has them: with sections, the material its row names in place
-    /// of the section, and no index in it (`rows`: the instance's).
+    /// A triangle's attributes as a flattened triangle has them: the material its row names in place of the
+    /// section, and no index in it (`rows`: the instance's).
     pub fn resolved(&self, a: &GpuTriAttr, rows: &[Row]) -> GpuTriAttr {
-        if self.bits & INST_ROWS == 0 {
-            return *a;
-        }
         let mat = rows.get(a.uv[3].to_bits() as usize).map_or(0, row_material);
         GpuTriAttr { uv: [a.uv[0], a.uv[1], a.uv[2], f32::from_bits(mat)], x: [a.x[0], a.x[1], a.x[2], 0.0], ..*a }
     }
@@ -307,13 +267,12 @@ pub fn placed_tri(w: Mat4, p: &[Vec3; 3], n: &[Vec3; 3], uv: &[Vec2; 3], tangent
 /// Bit of an instance record's n1.w, beside the units' flags there (units.rs `UNIT_*`): the instance mirrors its mesh
 /// (the kernel's `inst_sign`).
 pub const INST_MIRRORED: u32 = 4;
-/// More bits there: the instance has rows (its record's info.w is their first; `Instance::rows`), and a row of it is
-/// a cutout's, a glass's (what a walk of a unit asks before it reads a triangle's row).
-pub const INST_ROWS: u32 = 8;
+/// More bits there: a row of the instance is a cutout's, a glass's (what a walk of a unit asks before it reads a
+/// triangle's row).
 pub const INST_CUTOUT: u32 = 16;
 pub const INST_GLASS: u32 = 32;
 /// Every bit of n1.w that is the instance's own, not a unit's.
-pub const INST_BITS: u32 = INST_MIRRORED | INST_ROWS | INST_CUTOUT | INST_GLASS;
+pub const INST_BITS: u32 = INST_MIRRORED | INST_CUTOUT | INST_GLASS;
 
 /// Whether a placement mirrors what it places (a negative determinant).
 pub fn mirrors(w: Mat4) -> bool {
@@ -1800,7 +1759,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 olo = olo.min(q);
                                 ohi = ohi.max(q);
                             }
-                            meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool, 0) });
+                            meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool) });
                             sections.extend(sects);
                             rigid.instances.push((*ni, instances.len() as u32));
                             instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
@@ -1868,7 +1827,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
                                 // Other poses reach further (a stride, a swing): object bounds a quarter wider each way.
                                 let pad = (hi - lo) * 0.25;
-                                meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first, 0) });
+                                meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
                                 sections.extend(sects);
                                 retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
                                 retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![] });
@@ -1934,7 +1893,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                     rest_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
                                     rest_attrs.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
                                 }
-                                meshes.push(InstMesh { rest_first, rest_count: classed[FLAT].len() as u32, lo, hi, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first, 0) });
+                                meshes.push(InstMesh { rest_first, rest_count: classed[FLAT].len() as u32, lo, hi, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
                                 sections.extend(sects);
                                 retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
                                 meshes.len() as u32 - 1
@@ -2519,7 +2478,7 @@ pub fn section_mesh(g: &world::Geometry, grouped: bool, first: u32, sect_first: 
         let c = tri_colors(g, false, Some(&group.iter().map(|x| x.map(|_| 1)).collect::<Vec<_>>()));
         order.iter().map(|&k| c[k]).collect()
     });
-    let mesh = InstMesh { sect_first, sect_count: sections.len() as u32, colored, ..own_inst_mesh(&tris, first, 0) };
+    let mesh = InstMesh { sect_first, sect_count: sections.len() as u32, colored, ..own_inst_mesh(&tris, first) };
     MeshData { tris, attrs, colors, mesh, sections }
 }
 
@@ -2604,20 +2563,8 @@ pub fn mesh_class(g: &GpuMaterial) -> u32 {
 /// emitters of a mesh that deforms).
 pub const FLAT: usize = 3;
 
-/// Numbers a mesh's triangles that emit (those of a material that only emits; their attributes' x.w = the number +
-/// 1, the others' 0): an instance's emitter of a triangle is its first plus the number. Returns how many.
-pub fn number_emitters(attrs: &mut [GpuTriAttr], materials: &[GpuMaterial]) -> u32 {
-    let mut n = 0;
-    for a in attrs.iter_mut() {
-        let emits = materials.get(a.uv[3].to_bits() as usize).is_some_and(emissive);
-        n += u32::from(emits);
-        a.x[3] = f32::from_bits(if emits { n } else { 0 });
-    }
-    n
-}
-
-/// The `InstMesh` of triangles at pool index `first`, all of one class (`mesh_class`), without sections.
-pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32, class: u32) -> InstMesh {
+/// The `InstMesh` of triangles at pool index `first`, with their bounds; its sections are the caller's to set.
+pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32) -> InstMesh {
     let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
     for t in tris {
         for v in t {
@@ -2626,7 +2573,7 @@ pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32, class: u32) -> InstMesh {
         }
     }
     let count = tris.len() as u32;
-    InstMesh { first, count, opaque: if class == 0 { count } else { 0 }, glass: if class == 2 { count } else { 0 }, rest_first: 0, rest_count: 0, lo, hi, deforms: false, emitters: 0, sect_first: 0, sect_count: 0, colored: false }
+    InstMesh { first, count, rest_first: 0, rest_count: 0, lo, hi, deforms: false, sect_first: 0, sect_count: 0, colored: false }
 }
 
 /// The GPU material of each triangle of a mesh with several (`Kind::Mesh::materials`, here GPU indices) by its
@@ -2814,7 +2761,7 @@ mod instance_tests {
         for (w, mirrored) in [(keeps, false), (keeps * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)), true)] {
             assert_eq!(mirrors(w), mirrored);
             let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0 };
-            assert_eq!(inst.gpu(0, [0, 0]).n[1][3].to_bits(), if mirrored { INST_MIRRORED } else { 0 }, "the record says whether it mirrors");
+            assert_eq!(inst.gpu(0).n[1][3].to_bits(), if mirrored { INST_MIRRORED } else { 0 }, "the record says whether it mirrors");
             let (placed, got, got_colors) = inst.flat(&[p[0].into(), p[1].into(), p[2].into()], &local, Some(colors));
             // The world-space triangle: its vertices in the order the build flattens a placement in.
             let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
@@ -2880,7 +2827,7 @@ mod instance_tests {
         w.set_instances(2, 3, Some(m), None, None).unwrap();
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "a copy that mirrors the mesh is an instance as the others");
-        assert_eq!(sc.instances.iter().map(|i| i.gpu(0, [0, 0]).n[1][3].to_bits()).collect::<Vec<_>>(), [INST_MIRRORED | INST_ROWS, INST_ROWS, INST_ROWS, INST_ROWS], "and its record says so, beside that it has rows");
+        assert_eq!(sc.instances.iter().map(|i| i.gpu(0).n[1][3].to_bits()).collect::<Vec<_>>(), [INST_MIRRORED, 0, 0, 0], "and its record says so");
     }
 
     /// An instanced object whose material only emits is placed as any other: one shared mesh, which has the emitters,
@@ -2901,7 +2848,7 @@ mod instance_tests {
         w.set_instances(2, 3, Some(m.iter().flat_map(|m| m.to_cols_array()).collect()), None, None).unwrap();
         let mut sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!((sc.meshes.len(), sc.meshes[0].sect_count, sc.instances.len(), sc.tris.len()), (1, 1, 4, 0));
-        assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits)).collect::<Vec<_>>(), [(0, INST_ROWS), (1, INST_ROWS), (2, INST_ROWS), (3, INST_ROWS)], "a row a copy");
+        assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits)).collect::<Vec<_>>(), [(0, 0), (1, 0), (2, 0), (3, 0)], "a row a copy");
         let (st, first) = (sc.object_stride(), sc.retained.instanced(2).unwrap().object as usize);
         assert_eq!((0..4).map(|i| sc.objects[(first + i) * st][3]).collect::<Vec<_>>(), [2.0, 2.0, 0.0, 0.0], "a hidden copy's entry has no power");
         let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
@@ -2933,12 +2880,13 @@ mod instance_tests {
             build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap()
         };
         let (straight, mirrored) = (scene(1.0), scene(-1.0));
-        let meshes = |sc: &Scene| sc.meshes.iter().map(|m| (m.first, m.count, m.opaque, m.rest_count, m.emitters)).collect::<Vec<_>>();
+        let meshes = |sc: &Scene| sc.meshes.iter().map(|m| (m.first, m.count, m.sect_count, m.rest_count)).collect::<Vec<_>>();
         assert_eq!(meshes(&mirrored), meshes(&straight));
         assert_eq!(mirrored.pool_tris, straight.pool_tris, "the meshes' triangles are the model's own, whatever places them");
         assert_eq!((mirrored.instances.len(), mirrored.tris.len()), (straight.instances.len(), straight.tris.len()));
-        assert!(straight.instances.len() >= 2 && straight.instances.iter().all(|i| i.gpu(0, [0, 0]).n[1][3].to_bits() == 0));
-        assert!(mirrored.instances.iter().all(|i| i.gpu(0, [0, 0]).n[1][3].to_bits() == INST_MIRRORED), "every instance of a mirrored model mirrors");
+        assert_eq!((&mirrored.sections, &mirrored.rows), (&straight.sections, &straight.rows), "and their sections and rows");
+        assert!(straight.instances.len() >= 2 && straight.instances.iter().all(|i| i.gpu(0).n[1][3].to_bits() & INST_MIRRORED == 0));
+        assert!(mirrored.instances.iter().all(|i| i.gpu(0).n[1][3].to_bits() & INST_MIRRORED != 0), "every instance of a mirrored model mirrors");
         // What is flattened of them (the cutout on an emitter with its emitter: a still model's, a moving node's) faces
         // as its normals do, mirrored too.
         for (sc, what) in [(&straight, "straight"), (&mirrored, "mirrored")] {
@@ -2973,11 +2921,11 @@ mod instance_tests {
         assert_eq!(d.tris.iter().map(|t| t[0].x.min(t[1].x).min(t[2].x)).collect::<Vec<_>>(), [0.0, 1.0, 1.0, 3.0, 3.0, 4.0, 4.0, 0.0], "each triangle in its last group's section");
         assert_eq!(d.attrs.iter().map(|a| (a.uv[3].to_bits(), a.x[3].to_bits())).collect::<Vec<_>>(), [(0, 0), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1), (4, 0)]);
         let im = d.mesh;
-        assert_eq!((im.first, im.count, im.opaque, im.glass, im.emitters, im.sect_first, im.sect_count, im.colored), (10, 8, 8, 0, 0, 7, 5, false), "no colours: the geometry has none");
+        assert_eq!((im.first, im.count, im.sect_first, im.sect_count, im.colored), (10, 8, 7, 5, false), "no colours: the geometry has none");
         assert_eq!((im.lo, im.hi), (Vec3A::new(0.0, 0.0, 0.0), Vec3A::new(5.0, 1.0, 0.0)), "bounds of what is drawn");
         let mut all = vec![sect(9, 9, 9); 7];
         all.extend(&d.sections);
-        assert_eq!(im.parts(&all), [(0, 1, true), (1, 2, true), (3, 2, true), (5, 2, true), (7, 1, true)], "a geometry a section, all flagged opaque");
+        assert_eq!(im.parts(&all), [(0, 1), (1, 2), (3, 2), (5, 2), (7, 1)], "a geometry a section");
         assert!(d.colors.is_none());
         // Its geometry's colours, where it has them and they are asked for: the drawn triangles', as they lie.
         let tinted = section_mesh(&world::Geometry { colors, ..g.clone() }, true, 0, 0, true);
@@ -2989,19 +2937,19 @@ mod instance_tests {
         let rows = section_rows(&d.sections, &[0, 1, 2, 3], &materials);
         assert_eq!(rows, [[ROW_GLASS, 0, NO_EMITTER, 0], [1 | ROW_CUTOUT, 0, NO_EMITTER, 0], [2, 0, NO_EMITTER, 0], [3, 0, NO_EMITTER, 0], [1 | ROW_CUTOUT, 0, NO_EMITTER, 0]]);
         assert_eq!(rows.iter().map(row_material).collect::<Vec<_>>(), [0, 1, 2, 3, 1]);
-        assert_eq!((rows_cast(&rows, true), rows_cast(&rows, false), rows_bits(&rows)), (true, false, INST_ROWS | INST_CUTOUT | INST_GLASS));
+        assert_eq!((rows_cast(&rows, true), rows_cast(&rows, false), rows_bits(&rows)), (true, false, INST_CUTOUT | INST_GLASS));
         let starts = section_emitters(&d.sections, &rows, &materials);
         assert_eq!((rows_emitters(&d.sections, &rows, &materials), &starts[..]), (2, &[None, None, Some(0), None, None][..]));
         assert_eq!((section_slot(&d.attrs[4], &rows, &starts), section_slot(&d.attrs[5], &rows, &starts)), (Some((1, 2)), None), "an emitter's place: its section's start and its index");
         // Two materials for four slots: a slot past the last is the last. Emitters in two sections, one after another.
         let two = section_rows(&d.sections, &[2, 0], &materials);
         assert_eq!(two.iter().map(row_material).collect::<Vec<_>>(), [2, 0, 0, 0, 0]);
-        assert_eq!((rows_emitters(&d.sections, &two, &materials), rows_bits(&two), rows_cast(&two, true)), (1, INST_ROWS | INST_GLASS, true));
+        assert_eq!((rows_emitters(&d.sections, &two, &materials), rows_bits(&two), rows_cast(&two, true)), (1, INST_GLASS, true));
         let lit = section_rows(&d.sections, &[2, 3, 3, 2], &materials);
         assert_eq!((rows_emitters(&d.sections, &lit, &materials), section_emitters(&d.sections, &lit, &materials)), (3, vec![Some(0), None, None, Some(1), None]));
         // All glass: it casts no shadow, whatever its object says.
         let glass = section_rows(&d.sections, &[0, 0], &materials);
-        assert_eq!((rows_cast(&glass, true), rows_bits(&glass)), (false, INST_ROWS | INST_GLASS));
+        assert_eq!((rows_cast(&glass, true), rows_bits(&glass)), (false, INST_GLASS));
         // Put in another order (a unit's tree's), the triangles are numbered again in their sections.
         let mut back: Vec<GpuTriAttr> = d.attrs.iter().rev().copied().collect();
         rank_in_sections(&mut back);
@@ -3013,11 +2961,12 @@ mod instance_tests {
         assert_eq!(section_rows(&one.sections, &[1], &materials), [[1 | ROW_CUTOUT, 0, NO_EMITTER, 0]]);
     }
 
-    /// A model's glass is a part of its mesh (tests/render/data/frame-pane.glb: an opaque, a cutout and a glass quad;
-    /// placed twice): one mesh of three geometries, the glass the one not flagged opaque, nothing flattened; the
-    /// instances' records say where the second and the third start, and the kernel's feature for it is set.
+    /// A model's mesh lies by section, a section a material of the file (tests/render/data/frame-pane.glb: an opaque,
+    /// a cutout and a glass quad; placed twice): one mesh of three sections, nothing flattened. Each instance has its
+    /// three rows, with the classes, and casts (not all of it is glass); its record has the rows' first, a row where
+    /// its section's triangles start; the kernel's features for a cutout and for glass among other sections are set.
     #[test]
-    fn a_models_glass_is_a_part_of_its_mesh() {
+    fn a_models_mesh_lies_by_section_a_material_of_the_file() {
         let mut w = World::default();
         let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
         w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
@@ -3027,19 +2976,30 @@ mod instance_tests {
             w.set_transform(id, Vec3::new(id as f32 * 5.0, 0.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
         }
         let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!(sc.meshes.iter().map(|m| (m.count, m.opaque, m.glass, m.rest_count)).collect::<Vec<_>>(), [(6, 2, 2, 0)]);
+        assert_eq!(sc.meshes.iter().map(|m| (m.count, m.sect_count, m.rest_count)).collect::<Vec<_>>(), [(6, 3, 0)]);
         assert_eq!((sc.instances.len(), sc.tris.len()), (2, 0));
-        assert_eq!((sc.meshes[0].parts(&sc.sections), sc.meshes[0].part_offsets()), (vec![(0, 2, true), (2, 2, true), (4, 2, false)], [2, 4]));
-        assert!(sc.rows.is_empty() && sc.instances.iter().all(|i| i.bits == 0), "a model's instance has no rows");
+        assert_eq!(sc.meshes[0].parts(&sc.sections), [(0, 2), (2, 2), (4, 2)], "a geometry a section");
+        assert_eq!(sc.pool_attrs.iter().map(|a| (a.uv[3].to_bits(), a.x[3].to_bits())).collect::<Vec<_>>(), [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)], "a triangle's section and its index in it");
+        assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits, i.cast_shadow)).collect::<Vec<_>>(), [(0, INST_CUTOUT | INST_GLASS, true), (3, INST_CUTOUT | INST_GLASS, true)], "rows of its own an instance");
+        for i in &sc.instances {
+            let mine = &sc.rows[i.rows as usize..][..3];
+            let mut classes: Vec<u32> = mine.iter().map(|r| r[0] & (ROW_CUTOUT | ROW_GLASS)).collect();
+            classes.sort_unstable();
+            assert_eq!(classes, [0, ROW_CUTOUT, ROW_GLASS], "an opaque, a cutout and a glass section");
+            assert_eq!(mine, &sc.retained.mesh_rows[&i.mesh][..], "the mesh's rows, the file's materials");
+        }
         crate::prepare_as(true, false, &mut sc, &mut vec![]);
-        assert!(sc.gpu_instances.iter().all(|r| (r.info[3], r.n[0][3].to_bits()) == (2, 4)), "the records have the two starts");
+        for (r, i) in sc.gpu_instances.iter().zip(&sc.instances) {
+            assert_eq!(r.info[3], i.rows, "the record has its rows' first");
+            assert_eq!(sc.rows[i.rows as usize..][..3].iter().map(|row| row[1] - r.info[0]).collect::<Vec<_>>(), [0, 2, 4], "a row has where its section starts");
+        }
         let f = crate::gpu::instance_features(&sc);
         assert_eq!(f & (crate::gpu::F_IGLASS | crate::gpu::F_MASKED), crate::gpu::F_IGLASS | crate::gpu::F_MASKED);
-        // A mesh of one kind, or of two: the geometries it has, in the same order.
-        let t = [[Vec3A::ZERO, Vec3A::X, Vec3A::Y]; 3];
-        assert_eq!((own_inst_mesh(&t, 0, 2).parts(&[]), own_inst_mesh(&t, 0, 2).part_offsets()), (vec![(0, 3, false)], [0, 0]));
-        let two = InstMesh { opaque: 0, glass: 1, ..own_inst_mesh(&t, 0, 1) };
-        assert_eq!((two.parts(&[]), two.part_offsets()), (vec![(0, 2, true), (2, 1, false)], [2, 0]));
+        // The sections of a list of triangles: a material after another as they first appear, the list's order in each.
+        let (order, sections, rows) = model_sections(&[(5, 9, 2), (0, 7, 0), (3, 9, 2), (1, 8, 1), (4, 7, 0)]);
+        assert_eq!(order, [(0, 0, 0), (4, 0, 1), (1, 1, 0), (3, 2, 0), (5, 2, 1)]);
+        assert_eq!(sections, [Section { first: 0, count: 2, slot: 0 }, Section { first: 2, count: 1, slot: 1 }, Section { first: 3, count: 2, slot: 2 }]);
+        assert_eq!(rows, [[7, 0, NO_EMITTER, 0], [8 | ROW_CUTOUT, 0, NO_EMITTER, 0], [9 | ROW_GLASS, 0, NO_EMITTER, 0]]);
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh with it (`flatten_coincident`), in a model that stays
@@ -3056,10 +3016,11 @@ mod instance_tests {
         w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true })), true, false).unwrap();
         let sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         let mesh = |name: &str| {
-            let m = &sc.meshes[sc.instances.iter().find(|i| i.name == name).unwrap().mesh as usize];
-            (m.count, m.rest_count, m.emitters)
+            let i = sc.instances.iter().find(|i| i.name == name).unwrap();
+            let m = &sc.meshes[i.mesh as usize];
+            (m.count, m.rest_count, rows_emitters(m.sections(&sc.sections), &sc.rows[i.rows as usize..][..m.sect_count as usize], &sc.materials))
         };
-        assert_eq!((mesh("still"), mesh("posed")), ((2, 4, 0), (2, 0, 0)), "(triangles in the mesh, flattened a placement, emitters in the mesh)");
+        assert_eq!((mesh("still"), mesh("posed")), ((2, 4, 0), (2, 0, 0)), "(triangles in the mesh, flattened a placement, emitters of the instance)");
         let count = |f: &dyn Fn(usize) -> bool| (0..sc.tris.len()).filter(|&k| f(k)).count();
         let emits = |k: usize| sc.materials[sc.attrs[k].uv[3].to_bits() as usize].emissive[..3].iter().any(|e| *e > 0.0);
         let flattened = (sc.tris.len(), count(&emits), count(&|k| sc.tri_flags[k] & TRI_MASKED != 0), count(&|k| sc.tri_flags[k] & TRI_DYNAMIC != 0));
