@@ -552,7 +552,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
         "scene": sc.name,
         "out": job.out,
         "width": w, "height": h, "spp": spp,
-        "triangles": sc.stats.get("triangles").map_or(sc.tris.len(), |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "pool_triangles": sc.pool_tris.len(),
+        "triangles": sc.stats.get("triangles").map_or(sc.tris.len(), |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "sections": sc.sections.len(), "rows": sc.rows.len(), "pool_triangles": sc.pool_tris.len(),
         "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "flat_triangles": sc.tris.len(), "bvh_nodes": prep.nodes.len(), "emitters": prep.emitter_tris.len(), "lights": sc.lights.len(), "textures": sc.textures.len(),
         "adapter": g.adapter_info.name, "backend": format!("{:?}", g.adapter_info.backend), "hwrt": g.hwrt,
         "ev100": ev100, "denoise": denoiser, "preset": preset.name,
