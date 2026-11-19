@@ -34,13 +34,16 @@ Engine (renderer + DSL; at the time also the scene IR and its UE adapter, both s
 1. **Textures** (`renderer/src/texpack.rs`): any number and size of textures shelf-packed into 4096² array pages with
    wrapped / clamped 16 px gutters and a 5-level box mip chain (rects aligned so mips never mix textures); a per-texture
    table drives manual wrap / clamp; ray-cone LOD (Akenine-Möller 2019) picks the mip per hit; `texture.offset`;
-   alpha-cutout materials (`alphaTest`) through four BLAS groups (opaque / cutout × shadow / no-shadow) with ray-query
-   candidate confirmation, and the same test in the software BVH. Pages are cached across live re-uploads.
-   Meshes and static glTF models are instances (`scene::Instance`; a mesh shared by the objects of the same geometry
-   and materials, one that moves moved by its transform): each unique mesh's triangles once in model
-   space with one BLAS (an opaque, a cutout and a glass geometry), one TLAS instance per placement (transform, shadow
-   mask, custom data = instance record), shading transforms the hit triangle; a shadow ray passes a mesh that is all glass by the
-   instance's mask and culls the glass geometry of a mixed mesh (the one not flagged opaque); `glass_tr` weighs what it lets through. A mirrored placement is an instance whose record says so. A model's
+   alpha-cutout materials (`alphaTest`) through four BLAS groups (opaque / cutout × shadow / no-shadow), every
+   geometry flagged opaque and a cutout hit that fails its alpha test stepped through, and the same test in the
+   software BVH. Pages are cached across live re-uploads.
+   Meshes and static glTF models are instances (`scene::Instance`; a mesh is its geometry's or its model's alone,
+   one that moves moved by its transform): each unique mesh's triangles once in model space, by section (a geometry
+   group, or a material of the file), with one BLAS (a geometry a section), one TLAS instance per placement
+   (transform, shadow mask, custom data = instance record) with a row a section (`scene::Row`: the material and its
+   class, the section's first triangle, its first emitter); shading transforms the hit triangle; a shadow ray passes
+   a mesh that is all glass by the instance's mask and steps through the glass among an instance's other sections;
+   `glass_tr` weighs what it lets through. A mirrored placement is an instance whose record says so. A model's
    triangles that only emit stay in its mesh: each placement's are a run of the light list. `THREERT_INSTANCING=0` flattens everything, `=log` lists what each model instances.
    `node tools/check-instancing.ts` renders instanced cutout props (scaled and not) instanced, flattened and through
    software traversal, and fails when they differ (crops: `docs/img/bugbot-instanced-cutouts.jpg`).

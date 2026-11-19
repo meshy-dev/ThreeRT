@@ -2737,14 +2737,14 @@ keyed by its geometry (`Retained::own_mesh`, `scene::section_mesh`). Its triangl
 or the whole geometry, each a geometry of the BLAS, all flagged opaque, and hold their section and their index in
 it. An instance has a row a section in the words' heap (`scene::Row`, heap.rs `Stream::Rows`; its record has their
 first): the material with its class, the section's first triangle, its first emitter. The kernel reads a hit's
-material, whether it is a cutout or glass, and its emitter through the row (`material_of`, `row_word`; kernel
-feature `F_ROWS`); the trace's test of a hit reads no attribute and no material. Whether an instance casts a shadow,
+material, whether it is a cutout or glass, and its emitter through the row (`material_of`, `row_word`); the
+trace's test of a hit reads no attribute and no material. Whether an instance casts a shadow,
 has a cutout or glass, emits: its rows say (`rows_cast`, `rows_bits`, `rows_emitters`). Glass among an instance's
 other sections is stepped through by a shadow ray, as a cutout that lets it pass is; an instance that is all glass
 is out of its way by its mask, as before. Vertex colours are the geometry's, and a material says whether it reads
 them, where they were baked white for one that did not. Software traversal: a unit's cutouts and glass by its rows,
 asked only of a unit that has some.
-Models keep their layout until the next part (materials on triangles, a BLAS geometry a class). Edits place what
+Models kept their layout until the next part (materials on triangles, a BLAS geometry a class). Edits place what
 they placed (one section; a row a record of the room). A material that starts emitting gives the instances with a
 row of it their emitters, and writes no attribute. Still a rebuild: a several-material mesh edited, a material that
 turns glass or cutout, vertex colours asked of a mesh made without them.
@@ -2752,6 +2752,27 @@ Tests: a geometry's sections and an instance's rows; six objects of one geometry
 vertex colours, cutouts, glass, an emitter) against a geometry an object, at the build, one placed in place, two
 given another material; a pane and its frame as one mesh against a mesh each, under a sky sampled as a light; the
 light list's emitters found through the rows.
+
+**Every mesh has sections and rows: models too (2026-11-19, the material on the instance, second part).** A glTF
+model's mesh kept the old layout: its materials on its triangles, a BLAS geometry a class. Now it lies by section
+as a scene mesh does, a section a material of the file (`scene::model_sections`): a still model's mesh, a posed
+rigid model's moving nodes, a shared pose's mesh (skinned again with each triangle in its section). Its instances
+have its rows (`Retained::mesh_rows`). With one layout left the kernel has no feature for it: an instance's hit
+reads its material, its class and its emitter through its row, and only world-space triangles hold their material
+(the still scene's, what is flattened).
+An instance's rows are a run of the rows' room, as many as its mesh's sections (`EditState::rows`, `take_rows`,
+`give_rows`): a model of several materials is placed and removed in place, and what is removed gives its rows back.
+As before: a model is one mesh with one BLAS; a posed rigid model's still nodes are flattened; a deforming mesh's
+emitters are flattened.
+Measured: the meshes and their memory as before (Bistro one mesh of 132 sections, its BLAS 390.3 MB); frame time on
+the heavy scenes NUMBERS.
+Tried and dropped: a TLAS instance's custom data its rows' first, the record in the row (the trace then reads no
+record). About 1 % slower where instances have one section: such a hit reads a row it has no other need of. The
+custom data stays the record.
+Tests: a model's sections and rows at the build (`a_models_mesh_lies_by_section_a_material_of_the_file`); a model of
+three materials placed, removed and placed again in place, its rows on the GPU; rows apart from records in the
+in-place tests' world, rows given back; two models in a shared pose posed again in place
+(tests/render/data/arm.glb, a skinned strip of two materials).
 
 **Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
 scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
