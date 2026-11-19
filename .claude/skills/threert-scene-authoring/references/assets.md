@@ -3,7 +3,7 @@
 ## Poly Haven (CC0)
 
 ```bash
-node tools/fetch-polyhaven.ts --set kabukicho                 # curated street set (18 texture sets, 19 models)
+node tools/fetch-polyhaven.ts --set street                    # curated street kit (18 texture sets, 19 models)
 node tools/fetch-polyhaven.ts --textures a,b --models c,d --res 1k
 ```
 
@@ -27,8 +27,8 @@ the scene's triangles (no instancing): budget ~1–2 M triangles for 60 fps live
 
 ## Generated textures
 
-- Sign faces / typography: render with headless Chrome (DOM text, system Japanese fonts) like
-  `tools/kabukicho-atlas.ts`; one atlas or many separate PNGs both work (no size limits).
+- Sign faces / typography: draw them in a page and screenshot it with headless Chrome (DOM text, system Japanese
+  fonts; `playwright-core` is a dev dependency); one atlas or many separate PNGs both work (no size limits).
 - `DataTexture` / `checkerTexture` for code-generated maps; generated textures are embedded as content-addressed PNGs.
 
 ## Licences

@@ -159,93 +159,24 @@ lighting changes converge within a few frames.
 | sun-room | 17.3 | 14.00 / 0.662 | 6.10 / 0.678 | 4.22 / 0.933 | 4.36 / 0.934 |
 | neon-reflections | 12.8 | 1.81 / 0.913 | 2.45 / 0.861 | 2.73 / 0.862 | 2.35 / 0.882 |
 | glb-asset | 12.0 | 5.42 / 0.873 | 4.19 / 0.945 | 4.10 / 0.950 | 4.39 / 0.914 |
-| Kabukichō (UE port, 60 % scale) | 15.8–16.7 | 11.91 / 0.610 | 10.84 / 0.637 | 10.38 / 0.689 | – |
 
 (mean ΔE76 / SSIM.) Findings:
 
-* All scenes run at 60 fps at 1280×720 on the M5 (sun-room, 17 ms at 100 %, and the Kabukichō port, 34 ms at 100 %,
-  through dynamic resolution; §8).
+* All scenes run at 60 fps at 1280×720 on the M5 (sun-room, 17 ms at 100 %, through dynamic resolution).
   With the game host driving it, frame rate stays at 60 fps (median) while transactions hot-reload the scene.
 * Holding still, the real-time path converges to the same distance from Lumen as the offline renderer (ΔE 2.4–4.9 vs
   2.3–4.1 offline) and is closer to UE's path tracer than Lumen itself on cornell-box / neon.
 * Weak spot: indirect-dominated interiors right after a disocclusion (sun-room k = 1: SSIM 0.62). Lumen's radiance
   cache keeps those stable; here they need ~0.25–1 s of history. A world-space irradiance cache is the next step.
 
-## 8. Kabukichō Night: a procedural, photo-referenced interactive scene
-
-`games/kabukicho/kabukicho.game.ts` is an agent-style game written only against the Three-like DSL and the
-transactional gameplay API: the Kabukichō Ichiban-gai gate (swept red frame, ~330 marquee bulbs, the
-「歌舞伎町一番街」 light box), ~24 buildings, storefronts, awnings, lanterns, ~120 signs (stacked tategaki blade signs,
-light boxes, fascia boards, rooftop billboards, an LED screen), the crossing with signals, vending machines, lamps,
-cables, pedestrians with umbrellas and a taxi. Art direction follows night photos of the gate (Wikimedia Commons, e.g.
-Basile Morin's featured picture, CC BY-SA 4.0; not redistributed here). Sign typography (Hiragino, generic shop
-names), storefronts and the vending machine come from one 2048² atlas drawn by headless Chrome
-(`tools/kabukicho-atlas.ts`, embedded in the game). Interaction (Play): click a sign / the gate / lanterns / lamps to
-switch them, a vending machine to buy a drink, the taxi to drive it; `rain` (wetness + rain on / off), `lights`
-(closing time) and `viewpoint` handlers. Each click is a transaction on the game state; the frame script updates the
-scene.
-
-**v2 (engine parity, §9)** rebuilt the look with the new engine features: Poly Haven CC0 asphalt, bone pavers and ten
-facade sets in world mapping, procedural lit windows on every building, rain (wet ground, puddles, ripples), height fog
-with volumetric halos, a night sky with light-pollution glow and clouds, 21 coloured shop spill lights, flickering /
-blinking signs, 19 kinds of Poly Haven street props and the UE session's grade. 477 nodes, 1.16 M triangles, 97
-textures, 22 k emissive triangles.
-
-| 1280×720, M5 (v2) | mean ΔE / SSIM vs UE5 Lumen | vs UE5 Path Tracer | time |
-|---|---|---|---|
-| UE5 Lumen (MRQ cinematic) | – | 12.83 / 0.667 | 18.0 s / frame (+58 s level build) |
-| UE5 Path Tracer (1024 spp) | 12.83 / 0.667 | – | 181.9 s / frame |
-| ThreeRT offline (256 spp + OIDN) | **9.60 / 0.738** | **10.34 / 0.835** | 4.7 s at 128 spp |
-| ThreeRT real-time, 256 frames still | 10.36 / 0.643 | 11.95 / 0.621 | 23.2 ms GPU / frame |
-| ThreeRT real-time, 1 frame (disocclusion) | 11.70 / 0.589 | 15.40 / 0.403 | |
-
-The UE references are renders of the same IR by the extended adapter (since removed; every v2 feature was mirrored in UE: a Custom-HLSL
-master for world mapping / wetness / windows / emissive animation, the gradient sky dome, height + volumetric fog with
-an exact unit mapping, the grade). The native renderer sits between UE's two renderers: Lumen's volumetric fog only
-scatters point / spot lights (no glow around emissive signs) and its far haze is darker, while UE's path tracer treats
-the fog as a full multiple-scattering medium (brighter). v2 runs at ~42 fps in the real-time viewport (median 41.3 in
-the Playground tour; v1: 60 fps) — the UE session ran its own version at 35–43 fps at 1080p with TSR at 60 %.
-
-![ThreeRT real-time (256 frames) · UE5 Lumen · UE5 Path Tracer](images/kabukicho-compare.jpg)
-
-**v3 (the UE session's level, ported 1:1; [PARITY.md](PARITY.md#round-2-converge-on-the-ue-level-itself-ground-truth))**
-replaces the street with a line-by-line port of the UE 5.8 session's level generator (`games/kabukicho/street.ts`;
-our own gate stays). It uses the same seed and RNG, the same generated sign textures and masks, the same Poly Haven
-2k sets and props, and the session's nine master materials as WGSL material functions. The result is 2665 nodes,
-4.0 M triangles, 147 lights and 78 k emissive triangles. The reference is the UE level itself, captured with Movie
-Render Queue from six cameras (`ue5/capture.ts`). Offline, mean ΔE / SSIM vs UE Lumen is 10.5–13.2 / 0.67–0.76 per
-view, and the radiometric luminance ratio is 0.86–1.04. Real time runs at 60 fps through TSR-style upsampling
-(15.8–16.7 ms at 60 %), at 10.38 / 0.689 vs UE Lumen and 5.12 / 0.856 vs our offline render.
-
-![The session's level, view v1: UE 5.8 Lumen · ThreeRT offline · ThreeRT real-time](images/kabukicho-v3-v1.jpg)
-
-## 9. Engine parity with the UE 5.8 session
-
-A separate session built the same brief directly in Unreal Engine 5.8 and reached richer detail than v1. Its trajectory
-shows the detail did not come from skill text (the installed UE skill covers MCP plumbing only) but from engine
-capabilities driven with Python + Custom HLSL. [PARITY.md](PARITY.md) lists each technique and what we added:
-mip-mapped texture pages with ray-cone LOD and alpha cutout, world-space mapping, wetness / puddles / ripples / grime,
-procedural facade windows with interior mapping, emissive animation (flicker, blink, marquee pan, LED), RIS many-light
-sampling, exponential height fog with volumetric scattering, a night-sky gradient, UE-style grading / fringe / grain,
-Poly Haven CC0 fetching + packaging, and a kernel specialised per scene feature mask (plain scenes pay nothing; the
-five reference scenes keep their metrics and render 8–30 % faster offline). The authoring workflow the UE session
-applied implicitly is now a skill, `.claude/skills/threert-scene-authoring/` (workflow, material / lighting value
-tables, failure patterns, measured feature costs).
-
-![v1 · v2 · the UE 5.8 session (its own camera and layout)](images/kabukicho-v2-street.jpg)
-
 ## Reproduce
 
 ```bash
 npm install && bun scripts/setup.ts && node tools/build-scenes.ts      # scenes + games -> out/bundles/<id>.js
-node tools/fetch-polyhaven.ts --set kabukicho-ue --res 2k                 # Kabukichō (UE port): Poly Haven 2k sets + props
-node tools/kabukicho-assets.ts                                            # its generated sign textures + masks (Pillow)
 bun renderer/build.ts                                                     # native renderer (+OIDN if present)
 node tools/bench-quality.ts && node tools/bench-throughput.ts && node tools/cost-model.ts
 node cloud/test/e2e-local.ts                                              # gameplay + cloud closed loop (local)
 renderer/target/release/threert-render play out/bundles/light-room.js    # local 60 fps native demo (window)
 node tools/bench-live.ts                                                  # real-time viewport vs UE5
-node tools/kabukicho-atlas.ts                                             # Kabukichō gate atlas (headless Chrome)
 bun ue5/capture.ts <scratch-copy>.uproject <job.json>                    # UE ground truth of an existing level (MRQ)
-python3 tools/kabukicho/views.py out/bundles/kabukicho.js out/kb-views 55   # ours at the six UE cameras
 ```

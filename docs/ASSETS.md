@@ -1,6 +1,6 @@
 # Assets and third-party content
 
-The assets are not committed: Poly Haven, Kabukichō's generated textures, Khronos and Quaternius models, the ORCA scenes and the compiled Tokyo tiles. That is ~1.8 GB, plus the 2 GB of ORCA archives.
+The assets are not committed: Poly Haven, Khronos and Quaternius models, the ORCA scenes and the compiled Tokyo tiles. That is ~1.8 GB, plus the 2 GB of ORCA archives.
 - They live once per machine in `<main clone>/../threert-assets`.
 - Every checkout's `assets/` is a relative link to it, made by `bun scripts/setup.ts`. Run it in each new clone or worktree; it never deletes anything.
 - Scripts run with Bun.

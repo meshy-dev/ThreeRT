@@ -7,8 +7,9 @@ description: Author high-fidelity ThreeRT scenes and games (Three-like DSL in pa
 
 Detail comes from **systems, not hand-placed meshes**: a material system that weathers every surface the same way,
 procedural detail where geometry would be too expensive (windows, puddles, grime, LED pixels), many small coloured
-lights, atmosphere, and clutter at human scale. The UE 5.8 Kabukichō session (docs/PARITY.md) got its richness this
-way; every one of those techniques exists in our DSL and renders natively in real time.
+lights, atmosphere, and clutter at human scale. A UE 5.8 night-street session got its richness this way, from engine
+capabilities driven by code rather than from skill text; every one of those techniques exists in our DSL and renders
+natively in real time.
 
 ## Workflow (follow in order; do not skip the review loop)
 
@@ -64,7 +65,7 @@ render of your own approximation.
 ## Commands
 
 ```bash
-node tools/fetch-polyhaven.ts --set kabukicho            # CC0 textures + models -> assets/polyhaven/
+node tools/fetch-polyhaven.ts --set street               # CC0 street kit (textures + props) -> assets/polyhaven/
 node tools/build-scenes.ts <id>                          # scenes/*.ts + games -> out/bundles/<id>.js
 renderer/target/release/threert-render render out/bundles/x.js -o /tmp/x.png --spp 128 [--camera '{"position":[..],"target":[..],"fov":55}']
 renderer/target/release/threert-render compare ref.png /tmp/x.png   # ΔE / PSNR / SSIM

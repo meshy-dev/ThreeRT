@@ -1,7 +1,7 @@
 # Porting an Unreal level (ground-truth loop)
 
-Use this when a UE project already has the look you want, as with the UE 5.8 Kabukichō session. The target is the UE
-level as UE renders it, from fixed cameras. Don't aim at a UE render of your own approximation: per-feature parity
+Use this when a UE project already has the look you want. The target is the UE level as UE renders it, from fixed
+cameras. Don't aim at a UE render of your own approximation: per-feature parity
 does not converge on the content's look. Work on a scratch copy of the UE project (`cp -R`); the capture script saves
 the level.
 
@@ -48,16 +48,18 @@ frame to frame. Use `cvars: {}` when the project uses software Lumen (check its 
 - Post: copy the PostProcessVolume overrides (bloom, exposure, local exposure, grading). Check
   `r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange`: without it the min / max brightness are luminances,
   not EV100 (use EV = log2(value)).
-- Verify the port actor by actor against the dump before looking at any image (compare positions, scales, rotations
-  and material assignments; e.g. `node tools/kabukicho/dump-street.ts > ours.json && python3
-  tools/kabukicho/verify-port.py level.json ours.json`).
+- Verify the port actor by actor against the dump before looking at any image: a small script that runs your level
+  builder and prints each node's position, rotation, scale and material as JSON, diffed against `level.json` with a
+  tolerance (convert the dump to our axes first).
 
 ## 3. Converge
 
+Render ours at each UE camera. A UE view (location cm, Z up; rotator pitch / yaw in degrees) is, in ours,
+`position = [x, z, y] / 100` and `target = position + [cos p · cos y, sin p, cos p · sin y]`:
+
 ```bash
-python3 tools/kabukicho/views.py out/bundles/x.js out/x-views 55 --spp 256   # v1..v6.png at the UE cameras
-renderer/target/release/threert-render compare ue/v1.png out/x-views/v1.png   # display ΔE / SSIM / luminance ratio
-renderer/target/release/threert-render render out/bundles/x.js -o v1.png --camera '{"position":[..],"target":[..],"fov":55}' --hdr v1.raw
+renderer/target/release/threert-render render out/bundles/x.js -o v1.png --spp 256 --camera '{"position":[..],"target":[..],"fov":55}' --hdr v1.raw
+renderer/target/release/threert-render compare ue/v1.png v1.png                   # display ΔE / SSIM / luminance ratio
 renderer/target/release/threert-render compare-hdr ue-linear/v1.exr v1.raw 1.5 --heat heat.png   # radiometric
 ```
 

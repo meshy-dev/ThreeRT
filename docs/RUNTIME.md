@@ -4,8 +4,8 @@
 
 ThreeRT's goal is that an agent writes script-like code and gets a UE-quality world it can play at 60 fps. The
 measure is how good the final work is for a given creative intent, so the platform does not need a cross-engine
-interchange format. Round 2 (docs/PARITY.md) showed where expressiveness comes from: code. The UE session's look came
-from Custom-HLSL materials, a C++ Director ticking every frame and gameplay switching material parameters. A field in
+interchange format. An early comparison with a UE 5.8 session built to the same brief showed where expressiveness comes
+from: code. The UE session's look came from Custom-HLSL materials, a C++ Director ticking every frame and gameplay switching material parameters. A field in
 a scene schema is a ceiling.
 
 So there is no scene document. The scene code runs where the scene is rendered, in the renderer's embedded JS
@@ -37,7 +37,7 @@ runtime, and drives the engine directly, the way a UE game drives its actors:
   after every commit. After setup or a replaced state `f.snap` is true: the scene shows the state settled, so a render
   of any room state is right.
 * **No interchange format.** Nothing is exported. The UE ground truth for a level comes from that level in UE
-  (docs/PARITY.md § Round 2); the old IR → UE adapter is gone.
+  (`ue5/capture.ts`); the old IR → UE adapter is gone.
 
 ## Pieces
 
@@ -1096,7 +1096,8 @@ page's 105 KiB (brotli 17 KiB), hello world's bundle 230 KiB (brotli 53 KiB).
 **Not measured:** any scene but hello world in a browser; Safari and Firefox (nothing Chrome-only was written:
 WebGPU through wgpu, default limits except buffer sizes, timestamp queries only if the adapter has them). Measured
 since, natively (below, "Software traversal with units"): the merged layout's and the guard's cost on a scene whose
-trace is the frame (Kabukichō), and the atomic tests under software traversal as a suite, in both layouts.
+trace is the frame (Kabukichō, a street demo since removed), and the atomic tests under software traversal as a
+suite, in both layouts.
 
 ## Software traversal with units (in-place edits without ray queries)
 
@@ -1864,45 +1865,33 @@ source under ThreeRT for Android 0.4.0, which sets `THREERT_PIPELINE_CACHE` and 
 
 ## Correctness
 
+Checked when the runtime landed, on the reference scenes and on Kabukichō, the UE-port street demo of the time (since
+removed from the repository).
+
 * `threert-render edit-check` builds the GPU tables both ways for a list of events: edited in place, and built fresh
   from the edited world. For Kabukichō (three moods, closing time, the gate, rain) materials, lights, object power, the
-  emitter distribution and wetness / rain are bit-identical, and none of the edits is structural.
-* Every reference scene and Kabukichō render from their bundles like they did from the old IR packages (same
+  emitter distribution and wetness / rain were bit-identical, and none of the edits was structural.
+* Every reference scene and Kabukichō rendered from their bundles like they did from the old IR packages (same
   triangle, light, emitter and texture counts; at 64 spp mean ΔE 0.0 (material-grid, bit-identical) to 0.99, and
-  1.43 for Kabukichō, where the error map is sampling noise only). The six UE cameras (`tools/kabukicho/views.py`,
-  now `render --camera`) frame identically.
-* `tools/kabukicho/verify-port.py` (against `node tools/kabukicho/dump-street.ts`) still matches every UE actor
-  (2,158 shapes, 0.0000 m).
+  1.43 for Kabukichō, where the error map is sampling noise only). The six UE cameras (`render --camera`) framed
+  identically.
+* The port still matched every UE actor (2,158 shapes, 0.0000 m).
 * Playground UI test (`threert-playground --uitest`): 14/14, including Play / Stop in Light Room.
 * Cloud: `node cloud/test/e2e-local.ts` and `play-smoke.ts` pass (rooms hold state only; nodes run the game code
   against the room's state; a cold job fetched code, runtime and the missing asset, then rendered; a warm event →
   PNG takes 124 ms with 0.5 ms of script).
-* Live temporal bench (`tools/bench-temporal.ts --scale 1`, same converged references as PR #9): camera motion
-  unchanged (ΔE 5.29–6.25 vs 5.21–6.38); 4 s after closing time ΔE 4.00 vs 3.90. The earlier closing shots differ
-  by design: each sign group now stays lit until its staggered delay and then flickers off, like the UE Director,
-  where before the handler switched every group off at once.
+* Live temporal bench (`tools/bench-temporal.ts --scale 1` on Kabukichō, same converged references as PR #9):
+  camera motion unchanged (ΔE 5.29–6.25 vs 5.21–6.38); 4 s after closing time ΔE 4.00 vs 3.90. The earlier closing
+  shots differed by design: each sign group then stayed lit until its staggered delay and flickered off, like the UE
+  Director, where before the handler switched every group off at once.
 
-## Kabukichō: the UE Director as a frame script
-
-The UE session's `AKabukichoDirector` (C++) ticks every frame. Rain eases at 0.6 / s. Streets get wet at 0.35 / s
-and dry at 0.06 / s. Fog eases toward the mood. Power groups that change state flicker like failing neon for
-0.35–1.1 s (on) or 0.08–0.3 s (off), and switch with staggered delays when many change at once: moods, the 3 AM
-closing, the power cut. `games/kabukicho/kabukicho.game.ts` ports it line for line:
-
-- **Handlers** commit the Director's targets as game state: `rain` (R), `mood` (M), `blackout` (B), `lights` (L),
-  `click` (a sign's power group, the gate), `viewpoint` (V).
-- **`frame(f)`** makes the street follow them: group powers, gate emission, wetness / rain / fog, the camera marker;
-  settled at once when `f.snap`.
-
-![Kabukichō in the node runtime: start · power cut 0.15 s · 1.3 s · restoring 4.8 s](images/runtime-blackout.jpg)
-
-## Measurements (Apple M5, 1280×720, Kabukichō: 4.0 M triangles, 2,665 objects, 147 lights)
+## Measurements (Apple M5, 1280×720, on Kabukichō: 4.0 M triangles, 2,665 objects, 147 lights)
 
 | | IR patches (PR #8) | no IR |
 |---|---:|---:|
 | Scene setup in QuickJS | 345–381 ms (IR + generated GLBs / PNGs) | 255–266 ms (engine calls, no encoding) |
 | Gameplay event → scene updated | patch 0.01–4.8 ms | handler + frame(0) + sync 6–13 ms; commit in place 0.00–0.45 ms |
-| Frame script (Director port) + sync + commit, per frame | 0.12–1.1 ms (presentation writes) | 0.4–0.8 ms average, 2.1 ms max (7–8 ms before change tracking) |
+| Frame script (a port of the UE level's C++ Director) + sync + commit, per frame | 0.12–1.1 ms (presentation writes) | 0.4–0.8 ms average, 2.1 ms max (7–8 ms before change tracking) |
 | Generated-texture scene setup (glb-asset) | — | 43 ms (732 ms when DataTexture still encoded PNG in JS) |
 | One-shot render of another room state (`serve`, warm, 640×360, 16 spp) | 0.88 s | 1.23 s (3.6 ms script) |
 | Live open (playground) | 5.2 s | 5.8 s (setup 0.26 s, build 3.1 s, texture pages 1.3 s, upload 1.7 s) |

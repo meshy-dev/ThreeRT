@@ -67,7 +67,7 @@ highest tier any of its changes needs.
 | **D** docs | only `docs/`, READMEs, comments | CI |
 | **T** tools / TypeScript | `tools/`, `tests/` harness, `ue5/` scripts, `packages/*` without effect on what the renderer draws | `npm run typecheck`, `npm test`; `npm run test:render` if `packages/scene`, `packages/gameplay` or `tests/render` changed |
 | **R1** renderer, existing scenes unchanged | new kernel / live code behind a feature bit, new DSL features, new passes that only run when a scene uses them | T, plus `cargo test --release`, `test:render` (no new failures against main), byte-identity of the catalog scenes (offline, software traversal) and of every `test:render` output (`node tools/render-identity.ts --a <main> --b <branch>`: live tests included), **perf smoke**, crops of the new feature |
-| **R2** renderer, existing scenes change | anything that changes what existing scenes render, or the live passes they run (denoising, temporal, reflections, post) | R1 without byte-identity, plus `node tools/bench-ghosting.ts --quick --check` (Bistro) and `--scene kabukicho` (wet signs: the reflection stress case), `test:layer-b`, crops before / after; a change to the live passes also `node tools/bench-window.ts` on main and the branch (the play window against offline: still, the Bistro slice, Tokyo at dusk and in motion), and a change to the temporal passes `node tools/bench-object-ghosting.ts --repeat 3` on both (the camera still, an object moving: a dragged device, a thrown light over a polished floor) |
+| **R2** renderer, existing scenes change | anything that changes what existing scenes render, or the live passes they run (denoising, temporal, reflections, post) | R1 without byte-identity, plus `node tools/bench-ghosting.ts --quick --check` (Bistro), `test:layer-b`, crops before / after; a change to the live passes also `node tools/bench-window.ts` on main and the branch (the play window against offline: still, the Bistro slice, Tokyo at dusk and in motion), and a change to the temporal passes `node tools/bench-object-ghosting.ts --repeat 3` on both (the camera still, an object moving: a dragged device, a thrown light over a polished floor) |
 | **R3** hot path or perf claim | the PR claims a speed-up, or changes the cost of work existing scenes do every frame (trace loop, light sampling, filter passes, resolution control) | R2, plus **full A/B timing** (Bistro night still and moving and the 3 × 3 Bistro district along its camera path at the 0.5 floor, main and branch alternated: `node tools/bench-district.ts`) |
 
 - **render-identity** (R1, and any change that says it changes no picture): test-render whole, twice on each build,
@@ -80,7 +80,7 @@ highest tier any of its changes needs.
 - **Perf smoke** (R1, R2):
   - Bistro night (`scenes/bistro.ts`) live at the fixed 0.5 floor, after warm-up: about 15 s still at its camera
     and 15 s on a scripted move (2.5 m down the street with 12° of yaw, ping-pong), GPU timestamps. Until 2026-11-08
-    it was Kabukichō (`--scene kabukicho` still measures it).
+    it was Kabukichō, a street demo since removed.
   - Then Bistro's own FBX camera path, the first 20 s (camera commands at 60 Hz, the 0.5 floor): GPU time and frame
     interval, p50 / p95, from the frame log. The interval is the frame rate a player sees: "60 fps" means an interval
     ≤ 16.7 ms, not GPU time within budget at one pose (2026-11-08: GPU 16.1 ms at the first pose, 18.6 ms p50 along
@@ -198,7 +198,8 @@ a later run compares against the previous one.
   - **Culprit:** the author fixes it forward from main. If main is still over budget at the next check, the
     supervisor merges a revert PR.
 - **Parity suite**, every ~12 h:
-  - `bench-temporal` against the UE references;
+  - `bench-temporal` (Bistro's camera move and stop; the volume, water, foliage and lighting-edit shots), each against
+    the same build's converged frames;
   - `bench-ghosting` (full);
   - `test:layer-b`;
   - an unbiasedness spot check against the cached offline truth (`node tools/unbiased-check.ts`: the offline path
@@ -217,7 +218,7 @@ a later run compares against the previous one.
   unbiased offline render (no clamps, no denoiser, high spp; UE only in milestone audits, ROADMAP "How we are judged").
   Never quote only 100 % scale or frame means.
 - Never run a GPU benchmark while another GPU job runs (UE, the Studio render farm, a second bench).
-  On a quiet GPU, Kabukichō repeated within ±0.05 ms and Bistro within ±0.03 ms. A busy one has shown +3 ms and worse.
+  On a quiet GPU, Bistro repeated within ±0.03 ms. A busy one has shown +3 ms and worse.
 - A/B pairs come from the same run where they can, because lockstep shader time follows the wall clock and separate
   runs differ by about ±2 %.
 - **Caches** (no re-render of what cannot have changed):
@@ -229,7 +230,7 @@ a later run compares against the previous one.
 
 ## Tooling this workflow uses
 
-- **`node tools/perf-smoke.ts [--base <rev>] [--scene bistro|kabukicho] [--drive-seconds 20]`:** the R1 / R2 perf smoke
+- **`node tools/perf-smoke.ts [--base <rev>] [--drive-seconds 20]`:** the R1 / R2 perf smoke
   (Bistro night).
   - Measures this checkout's release renderer against the cached baseline of its merge base with `origin/main`.
   - When the baseline is missing, it builds the merge base in `out/perf-base` and measures it first; a perf-suite
@@ -239,8 +240,7 @@ a later run compares against the previous one.
 - **`node tools/perf-suite.ts [--rev <rev>]`:** the scheduled perf suite.
   - Measures a main commit, cached per commit in `out/bench/perf-suite/<sha>.json`, and compares it with the nearest
     earlier first-parent commit that has results.
-  - `tools/perf/kabukicho-sparks.game.ts` and `kabukicho-smoke.game.ts` provide the rain + sparks and rain + smoke
-    lines.
+  - `tools/perf/bistro-sparks.ts` and `bistro-smoke.ts` provide the rain + sparks and rain + smoke lines.
 - **`node tools/perf-suite.ts --bisect <from>..<to> [--line <line>]`:** halves the first-parent merges in between until
   it finds the first one with the regression.
 - **`node tools/perf-suite.ts --recheck-first-frames <a>..<b>`:** both commits' first frames alternated, as the
