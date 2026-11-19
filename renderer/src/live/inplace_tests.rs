@@ -1640,6 +1640,95 @@ fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
     assert_ne!(live.sc.up.kernel.features & gpu::F_IGLASS, 0, "the kernel passes its glass");
 }
 
+/// A mesh of several materials (a geometry group each) is edited in place as one of a single material is: added
+/// (its mesh made with its sections), given other materials (its rows: nothing made), another of its geometry added
+/// (the mesh shared), its geometry changed (the same sections: where it lies; others: a new mesh), removed (its rows
+/// the room's again). Each time the light list, the weights and the picture are a build's.
+#[test]
+fn a_mesh_of_several_materials_is_edited_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let plain = |extra: serde_json::Value| {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.9, 0.9, 0.9], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<crate::desc::Material>(m).unwrap()
+    };
+    // Bands side by side, `w` wide each, a group for each run of `groups` of them.
+    let bands = |w: f32, groups: &[u32]| {
+        let n: u32 = groups.iter().sum();
+        let positions: Vec<f32> = (0..=n).flat_map(|i| { let x = (i as f32 - n as f32 / 2.0) * w; [x, -0.4, 0.0, x, 0.4, 0.0] }).collect();
+        let indices: Vec<u32> = (0..n).flat_map(|i| [2 * i, 2 * i + 2, 2 * i + 3, 2 * i, 2 * i + 3, 2 * i + 1]).collect();
+        let mut at = 0;
+        let groups = groups.iter().enumerate().map(|(k, &g)| { at += g * 6; [at - g * 6, g * 6, k as u32] }).collect();
+        Geometry { normals: [0.0, 0.0, 1.0].repeat(2 * (n as usize + 1)), uvs: vec![0.0; 4 * (n as usize + 1)], positions, indices, groups, colors: vec![] }
+    };
+    let mut w = world();
+    w.set_material(62, plain(serde_json::json!({})));
+    w.set_material(63, plain(serde_json::json!({ "opacity": 0.3, "alphaTest": 0.5 })));
+    w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": 0.5, "color": [0.2, 0.6, 0.9] })));
+    w.set_material(65, plain(serde_json::json!({ "color": [0.5, 0.9, 0.5], "roughness": 0, "transmission": 1, "ior": 1.5 })));
+    // (At the build: a caster with a cutout and glass among its sections, so the kernel has both; a mesh the scene
+    // says it edits, for the room.)
+    w.set_geometry(30, bands(0.3, &[1, 1, 1])).unwrap();
+    w.set_object(40, "bands".into(), None, Kind::Mesh { geometry: 30, material: 62, own_blas: true, materials: vec![62, 63, 65] }, true, false).unwrap();
+    w.set_transform(40, Vec3::new(-0.9, 0.6, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let placed = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).expect("a mesh is an instance").instance as usize].clone();
+    let rows_of = |c: &LiveCore, id: u32| { let i = placed(c, id); c.sc.rows[i.rows as usize..][..c.sc.meshes[i.mesh as usize].sect_count as usize].to_vec() };
+    let materials = |c: &LiveCore, id: u32| rows_of(c, id).iter().map(scene::row_material).collect::<Vec<u32>>();
+    let of = |c: &LiveCore, ids: &[u32]| ids.iter().map(|k| c.sc.tables.retained.materials[k]).collect::<Vec<u32>>();
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        list_is_its_triangles(what, live);
+        let mut fresh = open(w).unwrap();
+        lit_as_a_build(what, live, &mut fresh);
+    };
+    let place = |w: &mut World, id: u32, geometry: u32, materials: &[u32], at: Vec3| {
+        w.set_object(id, format!("bands{id}"), None, Kind::Mesh { geometry, material: materials[0], own_blas: false, materials: materials.to_vec() }, true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_y(0.2), Vec3::ONE).unwrap();
+    };
+    // Added: an emitter, a cutout, a plain band.
+    w.set_geometry(31, bands(0.25, &[1, 1, 1])).unwrap();
+    place(&mut w, 41, 31, &[5, 64, 62], Vec3::new(0.3, -0.5, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "a mesh of three materials added: in place ({:?})", live.fallback);
+    let (mesh, first) = (placed(&live, 41).mesh, placed(&live, 41).rows);
+    assert_eq!((live.sc.meshes[mesh as usize].sect_count, materials(&live, 41)), (3, of(&live, &[5, 64, 62])), "its mesh has three sections, its rows their materials");
+    against_a_build("a mesh of three materials added in place", &mut live, &w);
+    // Other materials: its rows where they are, no mesh made, no triangle written. The emitter is another section's.
+    let (meshes, triangles) = (live.sc.meshes.len(), live.sc.pool_tris.len());
+    place(&mut w, 41, 31, &[62, 65, 5], Vec3::new(0.3, -0.5, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "its materials changed: in place ({:?})", live.fallback);
+    assert_eq!((placed(&live, 41).mesh, placed(&live, 41).rows, live.sc.meshes.len(), live.sc.pool_tris.len()), (mesh, first, meshes, triangles), "it keeps its mesh and its rows: nothing made");
+    assert_eq!(materials(&live, 41), of(&live, &[62, 65, 5]));
+    against_a_build("a mesh of three materials given others", &mut live, &w);
+    // Another object of the geometry, with its own materials: the mesh shared.
+    place(&mut w, 42, 31, &[64, 5, 62], Vec3::new(-0.2, 0.55, 1.2));
+    assert!(!live.commit(&mut w).unwrap(), "another of the geometry: in place ({:?})", live.fallback);
+    assert_eq!((placed(&live, 42).mesh, live.sc.meshes.len()), (mesh, meshes), "it shares the mesh");
+    against_a_build("another object of a geometry of three materials", &mut live, &w);
+    // The geometry changed, its sections as they were: the mesh rewritten where it lies.
+    w.set_geometry(31, bands(0.2, &[1, 1, 1])).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "its geometry changed: in place ({:?})", live.fallback);
+    assert_eq!((placed(&live, 41).mesh, placed(&live, 42).mesh, live.sc.meshes.len()), (mesh, mesh, meshes), "the same sections: the mesh where it lies");
+    against_a_build("a geometry of three materials changed, its sections as they were", &mut live, &w);
+    // Other sections (two groups, the first of two bands): a new mesh, the rows as many as it has now.
+    w.set_geometry(31, bands(0.2, &[2, 1])).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "its geometry's groups changed: in place ({:?})", live.fallback);
+    let mesh = placed(&live, 41).mesh;
+    assert_eq!((live.sc.meshes[mesh as usize].sect_count, placed(&live, 42).mesh, materials(&live, 41), materials(&live, 42)), (2, mesh, of(&live, &[62, 65]), of(&live, &[64, 5])), "two sections: two rows an object");
+    against_a_build("a geometry whose groups changed", &mut live, &w);
+    // Removed: their rows are the room's again.
+    let (a, b) = (placed(&live, 41).rows, placed(&live, 42).rows);
+    w.remove(41);
+    w.remove(42);
+    assert!(!live.commit(&mut w).unwrap(), "the two removed: in place ({:?})", live.fallback);
+    assert!(rows_free(&live, a, 2) && rows_free(&live, b, 2), "their rows are the room's again");
+    against_a_build("meshes of several materials removed", &mut live, &w);
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.

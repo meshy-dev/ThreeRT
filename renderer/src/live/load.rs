@@ -13,6 +13,9 @@ pub(super) struct LoadedScene {
     /// Flattened instances of instanced objects: (first, end, instance index), for picking.
     pub(super) tri_instances: Vec<(u32, u32, u32)>,
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
+    /// Software traversal: each pool triangle's section and its index in it (a unit's tree orders its mesh's
+    /// triangles; live/edits.rs `mesh_places`). Empty under hardware traversal, where they lie by section.
+    pub(super) pool_place: Vec<[u32; 2]>,
     pub(super) meshes: Vec<scene::InstMesh>,
     pub(super) instances: Vec<scene::Instance>,
     /// The meshes' sections and the instances' rows as the GPU has them (`scene::Scene::sections`, `rows`); what an
@@ -253,6 +256,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
     let instanced = !sc.gpu_instances.is_empty() || !sc.procs.is_empty();
     let instance_features = gpu::instance_features(&sc);
+    let pool_place: Vec<[u32; 2]> = if up.units.is_some() { sc.pool_attrs.iter().map(|a| [a.uv[3].to_bits(), a.x[3].to_bits()]).collect() } else { vec![] };
     let (pool_tris, meshes, instances) = (std::mem::take(&mut sc.pool_tris), std::mem::take(&mut sc.meshes), std::mem::take(&mut sc.instances));
     let (sections, rows) = (std::mem::take(&mut sc.sections), std::mem::take(&mut sc.rows));
     let mut gpu_instances = std::mem::take(&mut sc.gpu_instances);
@@ -298,5 +302,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         pool_first: prep.groups.iter().sum(),
         blobs,
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
 }

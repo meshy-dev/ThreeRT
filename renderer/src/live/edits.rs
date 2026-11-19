@@ -213,7 +213,24 @@ impl Holes {
 /// of a mesh.
 pub(super) enum Placed {
     Proc(wgpu::Blas, scene::ProcObject),
-    Mesh(scene::Instance),
+    /// An instance and its rows (its mesh's sections' materials, classes and emitters).
+    Mesh(scene::Instance, Vec<scene::Row>),
+}
+
+/// Each of a mesh's pool triangles' section and its index in it: as they lie (a section after another), or, where a
+/// unit's tree ordered them (software traversal), as kept (`LoadedScene::pool_place`).
+pub(super) fn mesh_places(im: &scene::InstMesh, sections: &[scene::Section], pool_place: &[[u32; 2]]) -> Vec<(u32, u32)> {
+    let (a, b) = (im.first as usize, (im.first + im.count) as usize);
+    if let Some(kept) = pool_place.get(a..b).filter(|_| !pool_place.is_empty()) {
+        return kept.iter().map(|p| (p[0], p[1])).collect();
+    }
+    let mut out = vec![(0, 0); im.count as usize];
+    for (s, x) in im.sections(sections).iter().enumerate() {
+        for i in 0..x.count {
+            out[(x.first + i) as usize] = (s as u32, i);
+        }
+    }
+    out
 }
 
 /// One object fewer draws instanced mesh `k`: a mesh edits manage that none draws any more is freed (its triangles a
@@ -1846,7 +1863,7 @@ impl LiveCore {
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
             return Err("THREERT_EDIT_REBUILD=1".into());
         }
-        let LoadedScene { up, tables, edit, meshes, pool_tris, instances, gpu_instances, sections, rows, procs, proc_first, moving_instances, .. } = &mut self.sc;
+        let LoadedScene { up, tables, edit, meshes, pool_tris, pool_place, instances, gpu_instances, sections, rows, procs, proc_first, moving_instances, .. } = &mut self.sc;
         let (g, assets) = (&self.g, &self.assets);
         let features = up.kernel.features;
         let grow = Grow { g: &self.g, ok: up.particles.is_none() && up.gpu_particles.is_none() };
@@ -2049,7 +2066,6 @@ impl LiveCore {
                     let gpu = p.gpu(header as u32);
                     (at.map(|(_, r)| r), gpu, Placed::Proc(blas, p), entry)
                 }
-                Kind::Mesh { materials, .. } if materials.len() > 1 => return Err("a mesh with several materials".into()),
                 Kind::Model { uri, nodes, animation, functions } => {
                     // A static model already in the scene: another instance of its mesh (one not in it brings materials
                     // and textures, which load with a rebuild).
@@ -2083,59 +2099,67 @@ impl LiveCore {
                     let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
-                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
+                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst, mine.clone()), entry)
                 }
                 Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. } => {
-                    // An own-BLAS mesh, or (added in place) an instanced mesh: their mesh made alike.
-                    let (geometry, material, capacity) = match &o.kind {
-                        Kind::Mesh { geometry, material, .. } => (*geometry, *material, None),
-                        Kind::Instanced { geometry, materials, capacity, .. } => (*geometry, *materials.first().ok_or("an instanced mesh without a material")?, Some(*capacity as usize)),
+                    // A mesh, or (added in place) an instanced mesh: their mesh made alike. A mesh with several
+                    // materials has a geometry group's triangles with each (`scene::by_groups`); an instanced mesh
+                    // its first.
+                    let (geometry, ids, capacity) = match &o.kind {
+                        Kind::Mesh { geometry, material, materials, .. } => (*geometry, if materials.len() > 1 { materials.clone() } else { vec![*material] }, None),
+                        Kind::Instanced { geometry, materials, capacity, .. } => (*geometry, vec![*materials.first().ok_or("an instanced mesh without a material")?], Some(*capacity as usize)),
                         _ => unreachable!(),
                     };
-                    let (geometry, material) = (&geometry, &material);
+                    let geo = world.geometries.get(&geometry).ok_or("unknown geometry")?;
+                    let grouped = scene::by_groups(geo, ids.len());
+                    let ids = if grouped { ids } else { ids[..1].to_vec() };
+                    let geometry = &geometry;
                     if features & gpu::F_INST == 0 {
                         return Err("the scene's first instanced mesh (kernel feature)".into());
                     }
                     // An instanced object placed without size, or instancing off (the build flattens).
-                    if m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
+                    if (capacity.is_some() && m.determinant() == 0.0) || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("an instanced object without size, or instancing off".into());
                     }
-                    let mat = *tables.retained.materials.get(material).ok_or("unknown material")?;
-                    let gm = tables.materials[mat as usize];
-                    // (It covers instances' triangles from here on, `Tables::fixed_mats`: meshes' alone, `mesh_mats`,
-                    // if it covered none before or was theirs alone, and this is a mesh.)
-                    if !matches!(o.kind, Kind::Mesh { .. }) {
-                        tables.mesh_mats.remove(&mat);
-                    } else if !tables.fixed_mats.contains(&mat) {
-                        tables.mesh_mats.insert(mat);
+                    let mats = ids.iter().map(|k| tables.retained.materials.get(k).copied().ok_or("unknown material")).collect::<std::result::Result<Vec<u32>, _>>()?;
+                    let mat = mats[0];
+                    for &mat in &mats {
+                        let gm = tables.materials[mat as usize];
+                        // (It covers instances' triangles from here on, `Tables::fixed_mats`: meshes' alone,
+                        // `mesh_mats`, if it covered none before or was theirs alone, and this is a mesh.)
+                        if !matches!(o.kind, Kind::Mesh { .. }) {
+                            tables.mesh_mats.remove(&mat);
+                        } else if !tables.fixed_mats.contains(&mat) {
+                            tables.mesh_mats.insert(mat);
+                        }
+                        tables.fixed_mats.insert(mat);
+                        if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
+                            return Err("the scene's first material function on an instance (kernel feature)".into());
+                        }
+                        if scene::mesh_class(&gm) == 1 && features & gpu::F_MASKED == 0 {
+                            return Err("the scene's first cutout (kernel feature)".into());
+                        }
                     }
-                    tables.fixed_mats.insert(mat);
                     // An emitting material: a mesh as any other, each instance's emitters in the light list (given
                     // below, where its record is known; scene.rs; ROADMAP § 6 step 3).
-                    let emits = scene::emissive(&gm);
-                    let class = scene::mesh_class(&gm);
-                    if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
-                        return Err("the scene's first material function on an instance (kernel feature)".into());
-                    }
-                    if class == 1 && features & gpu::F_MASKED == 0 {
-                        return Err("the scene's first cutout (kernel feature)".into());
-                    }
-                    let colored = world.materials.get(material).is_some_and(|m| m.vertex_colors) && world.geometries.get(geometry).is_some_and(|g| !g.colors.is_empty());
+                    let emits = scene::emissive(&tables.materials[mat as usize]);
+                    let colored = ids.iter().any(|k| world.materials.get(k).is_some_and(|m| m.vertex_colors)) && !geo.colors.is_empty();
                     if colored && !vcolors {
                         return Err("the scene's first vertex colours (kernel feature)".into());
                     }
-                    // (The geometry whole, with one material: the mesh every such object of the geometry shares; its
-                    // material is this instance's row.)
-                    let key = (*geometry, false);
+                    // (The mesh every such object of the geometry shares, by section: the geometry whole, or its groups.
+                    // Its materials are this instance's rows.)
+                    let key = (*geometry, grouped);
                     let kept = (!ch.geometries.contains(geometry)).then(|| tables.retained.own_mesh.get(&key).copied()).flatten();
                     let mesh = match fresh.get(&key).copied().or(kept) {
                         // (A mesh made without its geometry's colours, for objects that read none.)
                         Some(k) if colored && !meshes[k as usize].colored => return Err("vertex colours on a mesh made without them".into()),
                         Some(k) => k,
                         None => {
-                            let geo = world.geometries.get(geometry).ok_or("unknown geometry")?;
                             let t0 = Instant::now();
-                            let scene::MeshData { tris: mut t, attrs: mut a, .. } = scene::section_mesh(geo, false, 0, 0, false);
+                            // (With its colours where an object of it reads them: this one, or one that shares the mesh.)
+                            let had = tables.retained.own_mesh.get(&key).is_some_and(|&k| meshes[k as usize].colored);
+                            let scene::MeshData { tris: mut t, attrs: mut a, colors: mut c, sections: sects, .. } = scene::section_mesh(geo, grouped, 0, 0, colored || had);
                             if t.is_empty() {
                                 if let Some((slot, _)) = at {
                                     top.clear(slot);
@@ -2154,6 +2178,7 @@ impl LiveCore {
                                     let tree = crate::units::mesh_tree(&t)?;
                                     t = tree.order.iter().map(|&i| t[i as usize]).collect();
                                     a = tree.order.iter().map(|&i| a[i as usize]).collect();
+                                    c = c.map(|c| tree.order.iter().map(|&i| c[i as usize]).collect());
                                     scene::rank_in_sections(&mut a);
                                     Some(tree)
                                 }
@@ -2164,10 +2189,11 @@ impl LiveCore {
                             let verts: Vec<[f32; 4]> = t.iter().flat_map(|&[a, b, c]| [[a.x, a.y, a.z, flags], [b.x - a.x, b.y - a.y, b.z - a.z, 0.0], [c.x - a.x, c.y - a.y, c.z - a.z, 0.0]]).collect();
                             let blas_verts: Vec<[f32; 3]> = t.iter().flat_map(|&[a, b, c]| [[a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]]).collect();
                             split.tris += t0.elapsed().as_secs_f64() * 1e3;
-                            // The same triangle count as the mesh it replaces: rewritten where it is, its BLAS rebuilt (no
-                            // room used; a geometry that moves every frame, three.js's dynamic draw usage). Otherwise new
-                            // triangles in the room and a new BLAS.
-                            let same = tables.retained.own_mesh.get(&key).copied().filter(|&k| meshes[k as usize].count as usize == t.len() );
+                            // The same sections as the mesh it replaces (as many triangles in each: a BLAS's geometries keep
+                            // their sizes): rewritten where it is, its BLAS rebuilt (no room used; a geometry that moves
+                            // every frame, three.js's dynamic draw usage). Otherwise new triangles in the room and a new
+                            // BLAS.
+                            let same = tables.retained.own_mesh.get(&key).copied().filter(|&k| meshes[k as usize].sections(sections) == sects.as_slice());
                             let (k, first, im) = match same {
                                 Some(k) => {
                                     // (Its colours stay its own while another object of it reads them.)
@@ -2198,17 +2224,18 @@ impl LiveCore {
                                         None => return Err(if matches!(top, gpu::Top::Sw(_)) { "edit room: triangles (software traversal's does not grow)" } else { "edit room: triangles (particles, or the device's limits)" }.into()),
                                     };
                                     let t1 = Instant::now();
-                                    // A freed mesh's slot (and its section's), else a new one.
+                                    // A freed mesh's slot (and its sections', where they are as many at least), else new ones.
                                     let dead = edit.dead_meshes.pop();
-                                    let sect_first = match dead.map(|k| meshes[k as usize]).filter(|m| m.sect_count > 0) {
+                                    let n = sects.len();
+                                    let sect_first = match dead.map(|k| meshes[k as usize]).filter(|m| m.sect_count as usize >= n) {
                                         Some(m) => m.sect_first,
                                         None => {
-                                            sections.push(scene::Section { first: 0, count: 0, slot: 0 });
-                                            sections.len() as u32 - 1
+                                            sections.resize(sections.len() + n, scene::Section { first: 0, count: 0, slot: 0 });
+                                            (sections.len() - n) as u32
                                         }
                                     };
-                                    sections[sect_first as usize] = scene::Section { first: 0, count: t.len() as u32, slot: 0 };
-                                    let im = scene::InstMesh { sect_first, sect_count: 1, colored, ..scene::own_inst_mesh(&t, (first - edit.pool_first) as u32) };
+                                    sections[sect_first as usize..][..n].copy_from_slice(&sects);
+                                    let im = scene::InstMesh { sect_first, sect_count: n as u32, colored, ..scene::own_inst_mesh(&t, (first - edit.pool_first) as u32) };
                                     let k = match &mut top {
                                         gpu::Top::Hw(accel) => match dead {
                                             Some(k) => {
@@ -2252,11 +2279,7 @@ impl LiveCore {
                             }
                             if vcolors {
                                 // White where it has none: the room's slots may hold an earlier mesh's.
-                                let colored = im.colored;
-                                let mut c = if colored { scene::tri_colors(geo, false, None) } else { vec![scene::WHITE; t.len()] };
-                                if let (Some(tree), true) = (&tree, colored) {
-                                    c = tree.order.iter().map(|&i| c[i as usize]).collect();
-                                }
+                                let c = c.filter(|_| im.colored).unwrap_or_else(|| vec![scene::WHITE; t.len()]);
                                 w_colors.put((first * 12) as u64, bytemuck::cast_slice(&c));
                             }
                             split.upload += t2.elapsed().as_secs_f64() * 1e3;
@@ -2265,6 +2288,15 @@ impl LiveCore {
                                 pool_tris.resize(rel + t.len(), [glam::Vec3A::ZERO; 3]);
                             }
                             pool_tris[rel..rel + t.len()].copy_from_slice(&t);
+                            // (Software traversal: where its tree left each triangle of its sections, `mesh_places`.)
+                            if top.sw() {
+                                if pool_place.len() < rel + t.len() {
+                                    pool_place.resize(rel + t.len(), [0; 2]);
+                                }
+                                for (j, x) in a.iter().enumerate() {
+                                    pool_place[rel + j] = [x.uv[3].to_bits(), x.x[3].to_bits()];
+                                }
+                            }
                             let _ = im;
                             new_meshes.push(k);
                             fresh.insert(key.clone(), k);
@@ -2357,14 +2389,18 @@ impl LiveCore {
                         *tables.retained.proxy(id) = scene::Proxy { object: None, card: None, draw: scene::Draw::Instanced(scene::InstancedPlace { first: r0 as u32, capacity: cap as u32, object: o0 as u32, mesh: Some(mesh), drawn: t.count }) };
                         continue;
                     }
-                    // (Its row, which says its material, is placed with its record below; its bits and whether it
-                    // casts are the row's.)
-                    let row = [scene::row_of(mat, &tables.materials)];
-                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&row, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&row) };
+                    // (Its rows, which say its materials, are placed with its record below; its bits and whether it casts
+                    // are theirs.)
+                    let mine = scene::section_rows(im.sections(sections), &mats, &tables.materials);
+                    // (Shadow rays pass the glass among a caster's other sections under a kernel feature.)
+                    if scene::rows_bits(&mine) & scene::INST_GLASS != 0 && scene::rows_cast(&mine, o.cast_shadow) && features & gpu::F_IGLASS == 0 {
+                        return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                    }
+                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine) };
                     let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), if unseen { 0.0 } else { o.power }, hi - lo, o.custom, [1.0; 3]);
-                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst), entry)
+                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst, mine), entry)
                 }
                 _ => return Err("not an object an edit places".into()),
             };
@@ -2388,32 +2424,34 @@ impl LiveCore {
             // has as many and none is the light tree's (those keep their place there, at no weight); else a new one at
             // the list's end. Its first goes in its record.
             let (mut gpu, mut blas) = (gpu, blas);
-            if let Placed::Mesh(inst) = &mut blas {
+            if let Placed::Mesh(inst, mine) = &mut blas {
                 let im = meshes[inst.mesh as usize];
-                // Its rows: a mesh's one (the geometry whole, with the object's material), a model's as its mesh has
-                // them; each with where its section's triangles start.
-                let material = match &o.kind {
-                    Kind::Mesh { material, .. } => Some(*tables.retained.materials.get(material).ok_or("unknown material")?),
-                    _ => None,
-                };
-                let mut mine: Vec<scene::Row> = match material {
-                    Some(mat) => vec![scene::row_of(mat, &tables.materials)],
-                    None => tables.retained.mesh_rows.get(&inst.mesh).cloned().ok_or("a model's mesh without its rows")?,
-                };
-                for (s, row) in im.sections(sections).iter().zip(&mut mine) {
+                let sects = im.sections(sections);
+                // Its rows, each with where its section's triangles start.
+                for (s, row) in sects.iter().zip(mine.iter_mut()) {
                     row[1] = edit.pool_first as u32 + im.first + s.first;
                 }
                 let row_at = rows_for(edit, &grow, &mut up.words, instances, meshes, record, mine.len())?;
                 (inst.rows, gpu.info[3]) = (row_at as u32, row_at as u32);
-                // A mesh whose material emits: its emitters, a run of the light list. The run its record had, if that
-                // has as many and none is the light tree's (those keep their place there, at no weight); else a new
-                // one at the list's end. Its first goes in its row. (A model placed here has none: `model_mesh`.)
-                if let Some(mat) = material.filter(|&mat| tables.materials.get(mat as usize).is_some_and(scene::emissive)) {
+                // Its sections whose material emits: its emitters, a run of the light list, a section after another.
+                // The run its record had, if that has as many and none is the light tree's (those keep their place
+                // there, at no weight); else a new one at the list's end. A section's start goes in its row.
+                let n = scene::rows_emitters(sects, mine, &tables.materials) as usize;
+                if n > 0 {
+                    let starts = scene::section_emitters(sects, mine, &tables.materials);
                     let old = emitter_run(&tables.emitter_tris, instances, record as u32);
-                    let first = if old.len() == im.count as usize && tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { tables.emitter_tris.len() };
-                    (inst.first_emitter, mine[0][2]) = (first as u32, first as u32);
+                    let first = if old.len() == n && tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { tables.emitter_tris.len() };
+                    inst.first_emitter = first as u32;
+                    for (row, start) in mine.iter_mut().zip(&starts) {
+                        row[2] = start.map_or(scene::NO_EMITTER, |x| first as u32 + x);
+                    }
+                    let (place, of) = (mesh_places(&im, sections, pool_place), mine.iter().map(scene::row_material).collect::<Vec<u32>>());
+                    let numbered = |j: usize| {
+                        let (s, i) = place[j];
+                        starts.get(s as usize).copied().flatten().map(|x| ((x + i) as usize, of[s as usize]))
+                    };
                     let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-                    let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat)), im.count as usize, &tables.materials, o.driven || world.movable(id));
+                    let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &numbered, n, &tables.materials, o.driven || world.movable(id));
                     for (j, (e, w)) in made.into_iter().enumerate() {
                         new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                         match tables.emitter_tris.get_mut(first + j) {
@@ -2421,14 +2459,18 @@ impl LiveCore {
                             None => tables.emitter_tris.push(e),
                         }
                     }
-                    tables.emissive.insert(mat);
+                    for (&mat, start) in of.iter().zip(&starts) {
+                        if start.is_some() {
+                            tables.emissive.insert(mat);
+                        }
+                    }
                     emitters_changed = true;
                 }
-                w_rows.put((row_at * 16) as u64, bytemuck::cast_slice(&mine));
+                w_rows.put((row_at * 16) as u64, bytemuck::cast_slice(mine));
                 if rows.len() < row_at + mine.len() {
                     rows.resize(row_at + mine.len(), [0; 4]);
                 }
-                rows[row_at..row_at + mine.len()].copy_from_slice(&mine);
+                rows[row_at..row_at + mine.len()].copy_from_slice(mine);
             }
             w_records.put((record * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(&gpu));
             if record >= gpu_instances.len() {
@@ -2447,7 +2489,7 @@ impl LiveCore {
                     procs[j] = p;
                     scene::Draw::Procedural(j as u32)
                 }
-                Placed::Mesh(inst) => {
+                Placed::Mesh(inst, _) => {
                     top.place(slot, inst.mesh, m, gpu::INSTANCE_BIT | record as u32, inst.cast_shadow, inst.hidden);
                     if instances.len() <= record {
                         instances.resize(record + 1, scene::Instance { name: String::new(), hidden: true, ..inst.clone() });
