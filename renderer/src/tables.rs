@@ -50,9 +50,8 @@ pub struct Tables {
     /// Materials of still world-space triangles (what the build flattened): whether one is a cutout decides its
     /// triangles' traversal group, so that changing is a rebuild's.
     pub static_mats: HashSet<u32>,
-    /// Materials of what moves without an instance's rows to say so in place: dynamic world-space triangles (their
-    /// class is on the triangle), and the rows of meshes that deform (the build flattens their emitters). One that
-    /// starts emitting, or whose class changes, rebuilds.
+    /// Materials of dynamic world-space triangles (particles'): their class is the triangle's, and they get no
+    /// emitters in place. One that starts emitting, or whose class changes, rebuilds.
     pub moving_mats: HashSet<u32>,
     pub started_emitting: Vec<u32>,
     /// Materials whose class changed in the last `apply` (`Dirty::reclassed`).

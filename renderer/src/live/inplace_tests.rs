@@ -1750,12 +1750,20 @@ fn a_mesh_of_several_materials_is_edited_in_place() {
     let mesh = placed(&live, 41).mesh;
     assert_eq!((live.sc.meshes[mesh as usize].sect_count, placed(&live, 42).mesh, materials(&live, 41), materials(&live, 42)), (2, mesh, of(&live, &[62, 65]), of(&live, &[64, 5])), "two sections: two rows an object");
     against_a_build("a geometry whose groups changed", &mut live, &w);
+    // Three sections again, then four: a freed mesh's sections are the next one's only where they are as many.
+    for groups in [&[1, 1, 1][..], &[1, 1, 1, 1]] {
+        w.set_geometry(31, bands(0.2, groups)).unwrap();
+        let what = format!("a geometry of {} groups after one of fewer", groups.len());
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert_eq!(live.sc.meshes[placed(&live, 41).mesh as usize].sect_count as usize, groups.len(), "{what}: as many sections");
+        against_a_build(&what, &mut live, &w);
+    }
     // Removed: their rows are the room's again.
     let (a, b) = (placed(&live, 41).rows, placed(&live, 42).rows);
     w.remove(41);
     w.remove(42);
     assert!(!live.commit(&mut w).unwrap(), "the two removed: in place ({:?})", live.fallback);
-    assert!(rows_free(&live, a, 2) && rows_free(&live, b, 2), "their rows are the room's again");
+    assert!(rows_free(&live, a, 4) && rows_free(&live, b, 4), "their rows are the room's again");
     against_a_build("meshes of several materials removed", &mut live, &w);
 }
 
@@ -1887,6 +1895,14 @@ fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
         assert!(apart(&last, &now) > 0.5, "{what}: it is in the picture ({:.2} steps)", apart(&last, &now));
         last = now;
     }
+    // Its material starts emitting while a copy is not shown: that copy's emitters weigh nothing.
+    shown(&mut w, 2);
+    assert!(!live.commit(&mut w).unwrap(), "a copy hidden: in place ({:?})", live.fallback);
+    w.set_material(62, plain(serde_json::json!({ "color": [0.2, 0.6, 0.9], "emissive": [1.0, 0.7, 0.4], "emissiveIntensity": 25 })));
+    let what = "the copies' material starts emitting, a copy not shown";
+    assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+    list_is_its_triangles(what, &live);
+    lit_as_a_build(what, &mut live, &mut open(&w).unwrap());
 }
 
 /// What still changes by a rebuild: a material of world-space triangles. Particles' (dynamic triangles: their class
@@ -1935,6 +1951,44 @@ fn a_material_of_world_space_triangles_changes_by_a_rebuild() {
     assert!(live.commit(&mut w).unwrap(), "the particles' material starts emitting: a rebuild");
     w.set_material(62, plain(serde_json::json!({ "emissive": [1.0, 0.8, 0.6], "emissiveIntensity": 20, "opacity": 0.9, "alphaTest": 0.5 })));
     assert!(live.commit(&mut w).unwrap(), "the particles' material becomes a cutout: a rebuild");
+}
+
+/// A material that turns glass takes its instances' shadows with it, in place, and gives them back when it is
+/// plain again: a screen before the wall in the sun, of a material of its own. The picture is a build's each time.
+#[test]
+fn a_material_turned_glass_stops_casting_its_shadow_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let screen = |glass: bool| {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.9, 0.9, 0.9], "opacity": 1, "metalness": 0, "roughness": if glass { 0.0 } else { 1.0 }, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        if glass {
+            m.as_object_mut().unwrap().extend(serde_json::json!({ "transmission": 1, "ior": 1.5 }).as_object().unwrap().clone());
+        }
+        serde_json::from_value::<crate::desc::Material>(m).unwrap()
+    };
+    let mut w = world();
+    w.set_material(66, screen(false));
+    w.set_object(45, "screen".into(), None, Kind::Mesh { geometry: 2, material: 66, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(45, Vec3::new(0.3, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let casts = |c: &LiveCore| c.sc.instances.iter().find(|i| i.name == "screen").expect("the screen is an instance").cast_shadow;
+    let mut last = picture(&mut live, 64);
+    for glass in [true, false, true] {
+        w.set_material(66, screen(glass));
+        let what = if glass { "the screen's material turns glass" } else { "it is plain again" };
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert_eq!(casts(&live), !glass, "{what}: whether it casts a shadow");
+        let mut fresh = open(&w).unwrap();
+        forget(&mut live);
+        let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &a) > 0.5, "{what}: it is in the picture ({:.2} steps)", apart(&last, &a));
+        last = a;
+    }
 }
 
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light

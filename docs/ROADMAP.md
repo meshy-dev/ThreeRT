@@ -2776,6 +2776,35 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**Materials are edited through the rows (2026-11-19, the material on the instance, third part).** With a
+material on its instances' rows, what changes one is no longer the triangles' business. In place now, each a
+rebuild before:
+- a mesh of several materials added, re-created, given another geometry or other materials: its mesh made with its
+  geometry's sections, placed by the code that places a mesh of one material (`edit_geometry`);
+- a material that turns glass or stops being glass, becomes a cutout or stops being one: the rows, the record's
+  bits and the shadow mask of every instance with a row of it (`Tables::reclassed`, live/edits.rs
+  `remake_classes`);
+- a material of any class made after the build (`Tables::add_materials`);
+- a material that starts emitting on any instance, a mesh's or an instanced object's copies, one made after the
+  build too (`add_material_emitters`, by the instances' rows);
+- an instanced object given another material: its copies' rows (`update_instanced`);
+- a mesh an edit places while it is hidden or has no size: an instance no ray sees, as the build has it.
+The sets that said which materials were triangles' go (`fixed_mats`, `mesh_mats`). Software traversal keeps each
+pool triangle's section and its index in it (`LoadedScene::pool_place`: a unit's tree orders them), where an edit
+made the mesh again to find them. A geometry rewritten where it lies needs the same sections, not only as many
+triangles (a BLAS's geometries keep their sizes).
+Still a rebuild: a class change or emission starting for a material of world-space triangles (still ones are
+grouped by whether they are cutouts, dynamic ones as particles' carry their class); the scene's first cutout, first material function on an instance, first vertex colours, first shadow caster with glass
+among its sections (kernel features); a texture or a material function that comes or goes. An instanced object is
+drawn with its first material only.
+Tests, each against a build's light list, weights and picture, natively and under software traversal: a mesh of
+three materials added, given others, shared, its geometry changed with and without its sections, removed; an alpha
+test that comes and goes on a mesh, a mesh of two materials and an instanced object's copies, and the scene's first
+cutout; a material turned glass and plain again; materials of every class made after the build; emission starting
+on an instanced object's material, with a copy that is not shown; an instanced object given a material that emits,
+a cutout, glass, a plain one; a material turned glass that takes its instance's shadow with it; what still
+rebuilds. (A model's materials are the file's: no edit names them.)
+
 **Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
 scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
 instance's mask; a hidden mesh is built as an instance no ray sees, its row without power (`Instance::masked`,

@@ -84,8 +84,7 @@ pub struct Prepared {
     pub light_tree: Option<ltree::LightTree>,
     /// Material -> runs of its flattened static triangles (first, end in the traversal order, object): a material
     /// that starts emitting gets emitter entries in place from its runs (live/edits.rs `add_material_emitters`).
-    /// `moving_mats`: the materials of dynamic world-space triangles and of the rows of meshes that deform
-    /// (`Tables::moving_mats`).
+    /// `moving_mats`: the materials of dynamic world-space triangles (`Tables::moving_mats`).
     pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub moving_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
@@ -746,13 +745,10 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // Where each material's flattened static triangles are (runs of the traversal order, with their object), for a
     // material that starts emitting in the live view (tables.rs `apply`): its emitter entries are made from them in
     // place, as each instance with a row of it gets its own (live/edits.rs `add_material_emitters`). Not the
-    // materials of dynamic world-space triangles, nor of the rows of meshes that deform (the build flattens their
-    // emitters): `moving_mats`.
+    // materials of dynamic world-space triangles: `moving_mats`. (A mesh that deforms is a model's, whose materials
+    // are the file's: no edit names them.)
     let mut mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>> = std::collections::HashMap::new();
     let mut moving_mats: std::collections::HashSet<u32> = Default::default();
-    for i in sc.instances.iter().filter(|i| sc.meshes[i.mesh as usize].deforms) {
-        moving_mats.extend(sc.rows[i.rows as usize..][..sc.meshes[i.mesh as usize].sect_count as usize].iter().map(scene::row_material));
-    }
     for (k, a) in sc.attrs[..pool_first].iter().enumerate() {
         let (mat, obj) = (a.uv[3].to_bits(), a.x[1].to_bits());
         if tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0 {
