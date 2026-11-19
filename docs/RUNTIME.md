@@ -296,9 +296,7 @@ crate.position.set(0, 5, 0);                     // a write moves the body there
   in when bodies are cut (its `bodyA` / `anchorA`, or `bodyB` / `anchorB`, then name the part it is on), and is
   `broken` (a "broken" event) when that cell is carved or its body goes. An explosion's blast pushes the bodies near
   it, and kicks the parts it cuts loose (`push`; docs/VOXEL.md "Joints, the level's anchor and the blast", step 10
-  c1). An explosion's fire and smoke are
-  `Explosions` (`packages/voxel`, step 10 b; docs/VOXEL.md "Fire and smoke"): scene objects pooled in setup, no engine
-  call of their own. A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
+  c1). A voxel shape's limits: cells of 1 cm to 100 m, at most 2^24
   cells, each within 2^20 cells and 100 km of the shape's origin.
   - Two things the world does itself for voxel shapes, because Rapier 0.36 and parry 0.31 do them wrongly
     (`physics-core/src/world.rs` has the tests): rays are walked cell by cell (parry's ray misses every cell when it
