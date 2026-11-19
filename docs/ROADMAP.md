@@ -2767,9 +2767,9 @@ emitters are flattened.
 Measured: the meshes and their memory as before (Bistro one mesh of 132 sections, its BLAS 390.3 MB). GPU time a
 frame on twelve scenes, four alternated pairs against main: Kabukichō -1.5 to -2.1 %, a crowd of skinned models
 +0.1 to +1.5 %, the voxel level +0.1 to +0.6 %, the other nine within 0.8 %.
-Tried and dropped: a TLAS instance's custom data its rows' first, the record in the row (the trace then reads no
-record). About 1 % slower where instances have one section: such a hit reads a row it has no other need of. The
-custom data stays the record.
+Tried and dropped: a TLAS instance's custom data its rows' first, with the record in the row. About 1 % slower on
+two scenes, not explained. Not tried: the same with the record from the hit's instance index, which reads no row
+for it.
 Tests: a model's sections and rows at the build (`a_models_mesh_lies_by_section_a_material_of_the_file`); a model of
 three materials placed, removed and placed again in place, its rows on the GPU; rows apart from records in the
 in-place tests' world, rows given back; two models in a shared pose posed again in place
