@@ -906,10 +906,10 @@ pub struct InstancedPlace {
 pub struct RigidModel {
     /// (glTF node, instance index): the nodes the clip moves.
     pub instances: Vec<(usize, u32)>,
-    /// The instance of the nodes it leaves alone, if any is drawn. It moves with the object, where the object is
-    /// movable (`movable`: its emitters are moving ones then, as a movable model's are).
+    /// The instance of the nodes it leaves alone, if any is drawn. It moves with the object alone; its emitters are
+    /// still ones until the object first moves (`still_moves`: live/edits.rs `repose_rigid`).
     pub still: Option<u32>,
-    pub movable: bool,
+    pub still_moves: bool,
     /// The object's transform its parts are placed by.
     pub world: Mat4,
     pub rest: DynamicModel,
@@ -927,9 +927,9 @@ impl RigidModel {
         self.instances.iter().map(|&(_, i)| i).chain(self.still).collect()
     }
 
-    /// Those an update of the model moves: its nodes', and the still part's where the object is movable.
+    /// Those whose emitters are moving ones: its nodes', and the still part's once the object has moved.
     pub fn moving(&self) -> Vec<u32> {
-        self.instances.iter().map(|&(_, i)| i).chain(self.still.filter(|_| self.movable)).collect()
+        self.instances.iter().map(|&(_, i)| i).chain(self.still.filter(|_| self.still_moves)).collect()
     }
 
     /// A part's transform for the object's `m` and the pose's node transforms.
@@ -1799,7 +1799,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let base_flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
                     let oi = (objects.len() / stride) as u32;
                     let (mut olo, mut ohi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                    let mut rigid = RigidModel { movable, world: m, ..Default::default() };
+                    let mut rigid = RigidModel { world: m, ..Default::default() };
                     rigid.rest.first = tris.len() as u32;
                     rigid.rest.object = oi;
                     for part in parts.iter() {
@@ -3079,7 +3079,7 @@ mod instance_tests {
     /// A posed rigid model is its parts (tests/render/data/panel-slider.glb: a node its clip leaves alone, a grey quad
     /// and an emitting one, and a node it moves, a grey quad): the nodes left alone one mesh in the model's space,
     /// the moved node a mesh in its own, both shared by the placements of the model with the clip, whatever its time.
-    /// Nothing is flattened. The part left alone is one an update moves only where the object is movable.
+    /// Nothing is flattened. The part left alone's emitters are still ones, movable object or not.
     #[test]
     fn a_posed_rigid_model_is_instances_of_its_parts_meshes() {
         let mut w = World::default();
@@ -3105,14 +3105,14 @@ mod instance_tests {
             assert_eq!((r.instances.len(), r.instances[0].0, still.mesh, node.mesh), (1, 1, 0, 1), "model {id}: the meshes every placement shares");
             let at = id as f32 * 20.0;
             assert_eq!((still.world.w_axis.truncate(), node.world.w_axis.truncate()), (Vec3::new(at, 0.0, 0.0), Vec3::new(at + 11.0, y, 0.0)), "model {id}: the object's place, and the node's by the clip");
-            assert_eq!((r.records().len(), r.moving().len()), (2, if movable { 2 } else { 1 }), "model {id}: the part left alone moves with a movable object");
+            assert_eq!((r.records().len(), r.moving(), movable), (2, vec![r.instances[0].1], id == 2), "model {id}: the node alone has moving emitters at the build");
             assert_eq!(&sc.rows[still.rows as usize..][..2], &sc.retained.mesh_rows[&0][..], "model {id}: its rows are the mesh's");
         }
-        // Its emitters are its instances': the part left alone's two triangles a placement, moving ones where the
-        // object is movable.
+        // Its emitters are its instances': the part left alone's two triangles a placement, still ones (in the light
+        // tree) until the object first moves.
         let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
         let of = |id: u32| { let r = rigid(&sc, id); prep.emitter_tris.iter().filter(|e| Some(e.inst) == r.still).map(|e| e.moves).collect::<Vec<bool>>() };
-        assert_eq!((of(1), of(2)), (vec![false; 2], vec![true; 2]));
+        assert_eq!((of(1), of(2)), (vec![false; 2], vec![false; 2]));
     }
 
     #[test]
