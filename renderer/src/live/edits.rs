@@ -1455,6 +1455,8 @@ impl LiveCore {
                     let mut row = scene::row_of(mat, &sc.tables.materials);
                     row[1] = sc.rows[inst.rows as usize][1];
                     (inst.bits, inst.first_emitter) = (scene::rows_bits(&[row]), 0);
+                    // (Where this update places the copy: its emitters are made there, as the records below have it.)
+                    (inst.world, inst.hidden) = scene::instance_world(m, t, r - first);
                     if emits {
                         let at = sc.tables.emitter_tris.len();
                         (inst.first_emitter, row[2]) = (at as u32, at as u32);

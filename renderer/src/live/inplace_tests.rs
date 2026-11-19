@@ -1865,7 +1865,9 @@ fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
     w.set_material(65, plain(serde_json::json!({ "color": [0.5, 0.9, 0.5], "roughness": 0, "transmission": 1, "ior": 1.5 })));
     let copies = |w: &mut World, material: u32| w.set_object(42, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![material], capacity: 3 }, true, false).unwrap();
     let at = |x: f32, y: f32| glam::Mat4::from_translation(Vec3::new(x, y, 0.8)).to_cols_array();
-    let shown = |w: &mut World, count: u32| w.set_instances(42, count, Some([at(-0.5, -0.5), at(0.4, -0.5), at(0.0, 0.5)].concat()), None, None).unwrap();
+    // (`by`: the copies moved that far along x.)
+    let placed = |w: &mut World, count: u32, by: f32| w.set_instances(42, count, Some([at(-0.5 + by, -0.5), at(0.4 + by, -0.5), at(by, 0.5)].concat()), None, None).unwrap();
+    let shown = |w: &mut World, count: u32| placed(w, count, 0.0);
     copies(&mut w, 62);
     shown(&mut w, 2);
     // (A cutout at the build: the kernel has the alpha test.)
@@ -1895,6 +1897,15 @@ fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
         assert!(apart(&last, &now) > 0.5, "{what}: it is in the picture ({:.2} steps)", apart(&last, &now));
         last = now;
     }
+    // Another material and another place in one commit: the emitters are where the copies are now.
+    copies(&mut w, 5);
+    placed(&mut w, 3, 0.35);
+    let what = "an instanced object given a material that emits and moved at once";
+    assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+    list_is_its_triangles(what, &live);
+    lit_as_a_build(what, &mut live, &mut open(&w).unwrap());
+    copies(&mut w, 62);
+    assert!(!live.commit(&mut w).unwrap(), "plain again: in place ({:?})", live.fallback);
     // Its material starts emitting while a copy is not shown: that copy's emitters weigh nothing.
     shown(&mut w, 2);
     assert!(!live.commit(&mut w).unwrap(), "a copy hidden: in place ({:?})", live.fallback);
