@@ -340,8 +340,9 @@ pub(super) fn rows_for(edit: &mut EditState, grow: &Grow, words: &mut Heap<Strea
     if let Some(at) = edit.take_rows(instances, meshes, record, n) {
         return Ok(at);
     }
-    if !grow.rows(&mut edit.rows, n, words) {
-        return Err("edit room: rows (particles, or the device's limits)".into());
+    // (A TLAS instance's custom data is its rows' first: 23 bits.)
+    if Grow::cap(&edit.rows, n) >= gpu::INSTANCE_BIT as usize || !grow.rows(&mut edit.rows, n, words) {
+        return Err("edit room: rows (particles, the device's limits, or more than a TLAS instance can name)".into());
     }
     edit.grows += 1;
     edit.rebind = true;
@@ -2309,7 +2310,7 @@ impl LiveCore {
                         for (i, &(wm, hidden)) in placed.iter().enumerate() {
                             let row_at = run + i;
                             let mut row = scene::row_of(mat, &tables.materials);
-                            row[1] = edit.pool_first as u32 + im.first;
+                            (row[1], row[3]) = (edit.pool_first as u32 + im.first, (r0 + i) as u32);
                             let mut inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: scene::rows_cast(&[row], o.cast_shadow), name: o.name.clone(), sub: Some(i as u32), hidden, masked: false, first_emitter: 0, rows: row_at as u32, bits: scene::rows_bits(&[row]) };
                             // A copy whose material emits: its emitters, a run at the light list's end; moving ones
                             // (`update_instanced` changes the copies in place), a hidden copy's at no weight.
@@ -2333,7 +2334,7 @@ impl LiveCore {
                             let rec = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                             w_records.put(((r0 + i) * size) as u64, bytemuck::bytes_of(&rec));
                             gpu_instances[r0 + i] = rec;
-                            top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | (r0 + i) as u32, inst.cast_shadow, hidden);
+                            top.place(inst_base + r0 + i, mesh, wm, gpu::INSTANCE_BIT | row_at as u32, inst.cast_shadow, hidden);
                             let (lo, hi) = im.placed_bounds(wm);
                             let entry = scene::copy_row(scene::object_row(wm.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, t.custom(i, o.custom), t.color(i)), emits && hidden);
                             w_objects.put(((o0 + i) * st * 16) as u64, bytemuck::cast_slice(&entry[..st]));
@@ -2387,7 +2388,7 @@ impl LiveCore {
                     None => tables.retained.mesh_rows.get(&inst.mesh).cloned().ok_or("a model's mesh without its rows")?,
                 };
                 for (s, row) in im.sections(sections).iter().zip(&mut mine) {
-                    row[1] = edit.pool_first as u32 + im.first + s.first;
+                    (row[1], row[3]) = (edit.pool_first as u32 + im.first + s.first, record as u32);
                 }
                 let row_at = rows_for(edit, &grow, &mut up.words, instances, meshes, record, mine.len())?;
                 (inst.rows, gpu.info[3]) = (row_at as u32, row_at as u32);
@@ -2434,7 +2435,7 @@ impl LiveCore {
                     scene::Draw::Procedural(j as u32)
                 }
                 Placed::Mesh(inst) => {
-                    top.place(slot, inst.mesh, m, gpu::INSTANCE_BIT | record as u32, inst.cast_shadow, false);
+                    top.place(slot, inst.mesh, m, gpu::INSTANCE_BIT | inst.rows, inst.cast_shadow, false);
                     if instances.len() <= record {
                         instances.resize(record + 1, scene::Instance { name: String::new(), hidden: true, ..inst.clone() });
                     }

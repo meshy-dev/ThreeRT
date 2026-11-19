@@ -604,11 +604,11 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     sc.gpu_instances = sc.instances.iter().map(|i| i.gpu(pool_first as u32 + sc.meshes[i.mesh as usize].first)).collect();
     // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
-    // primitive counts from there).
-    for i in &sc.instances {
+    // primitive counts from there), and its instance's record is this one.
+    for (r, i) in sc.instances.iter().enumerate() {
         let m = sc.meshes[i.mesh as usize];
         for (s, row) in m.sections(&sc.sections).iter().zip(&mut sc.rows[i.rows as usize..]) {
-            row[1] = pool_first as u32 + m.first + s.first;
+            (row[1], row[3]) = (pool_first as u32 + m.first + s.first, r as u32);
         }
     }
     // A scene whose triangles are all units': the still tree is then the leaf of one triangle, triangle 0 (bvh.rs

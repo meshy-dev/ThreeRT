@@ -99,7 +99,7 @@
     if (has(F_PROC) && it.kind == RAY_QUERY_INTERSECTION_GENERATED) { return proc_hit(it.t, pg, pprim, it.instance_custom_data); }
     let ti = hit_tri(it.instance_custom_data, it.geometry_index, it.primitive_index);
     // Model instance (F_INST, custom data bit 23 | record): ti is its model-space pool triangle.
-    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, hit_inst(it.instance_custom_data));
+    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, hit_inst(it.instance_custom_data, it.geometry_index));
 }
 
 // The first word of the row of the hit `trace_opaque` last found (its material and class bits), NO_ROW where its
@@ -113,23 +113,23 @@
     return material_at(triangle_material(attrs[h.tri])).uv2.w > 0.0;
 }
 
-// The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
-@if(hwrt) fn hit_inst(custom: u32) -> u32 {
-    return select(NO_INST, custom & (INSTANCE_BIT - 1u), has(F_INST) && (custom & INSTANCE_BIT) != 0u);
+// The record of the instance a hit is of (F_INST): its row has it (an instance's custom data is its rows' first, its
+// geometry a section: the trace reads the hit's row and no record). NO_INST for a traversal group.
+@if(hwrt) fn hit_inst(custom: u32, geometry: u32) -> u32 {
+    if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) { return row_word(custom & (INSTANCE_BIT - 1u), geometry, 3u); }
+    return NO_INST;
 }
 
 @if(hwrt) const INSTANCE_BIT: u32 = 0x800000u;
 
 // Global triangle of a hit: an instance's pool triangle, or a traversal group's. An instance's geometry is a section
-// of its mesh, and its row has where the section's triangles start (the first section starts where the mesh does);
-// the row's class is read where the trace tests a hit by it.
+// of its mesh, and its row has where the section's triangles start; the row's class is read where the trace tests a
+// hit by it.
 @if(hwrt) fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
     if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) {
-        let rec = instance_at(custom & (INSTANCE_BIT - 1u));
-        if (has(F_MASKED) || has(F_IGLASS)) { hit_row = row_word(rec.info.w, geometry, 0u); }
-        var first = rec.info.x;
-        if (geometry != 0u) { first = row_word(rec.info.w, geometry, 1u); }
-        return first + prim;
+        let rows = custom & (INSTANCE_BIT - 1u);
+        if (has(F_MASKED) || has(F_IGLASS)) { hit_row = row_word(rows, geometry, 0u); }
+        return row_word(rows, geometry, 1u) + prim;
     }
     return group_tri(custom, prim);
 }

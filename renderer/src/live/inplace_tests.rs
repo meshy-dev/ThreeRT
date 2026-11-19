@@ -1527,11 +1527,14 @@ fn a_model_of_several_materials_placed_in_place_has_its_rows() {
         assert_eq!((it.mesh, im.sect_count), (first.mesh, 3), "{what}: an instance of the model's mesh, of three sections");
         assert!(it.rows as usize >= built, "{what}: its rows are the room's");
         let rows = |i: &scene::Instance| live.sc.rows[i.rows as usize..][..3].to_vec();
-        assert_eq!((rows(&it), it.bits, it.cast_shadow), (rows(&first), first.bits, first.cast_shadow), "{what}: the mesh's rows, as the first has them");
+        let record = live.sc.tables.retained.instance(id).unwrap().instance as u64;
+        // (A row's first three words are the mesh's and the section's; its last is its instance's record.)
+        let of_mesh = |i: &scene::Instance| rows(i).iter().map(|r| [r[0], r[1], r[2]]).collect::<Vec<_>>();
+        assert_eq!((of_mesh(&it), it.bits, it.cast_shadow), (of_mesh(&first), first.bits, first.cast_shadow), "{what}: the mesh's rows, as the first has them");
+        assert!(rows(&it).iter().all(|r| r[3] as u64 == record), "{what}: its rows name its record");
         let up = &live.sc.up;
         let on_gpu: Vec<scene::Row> = bytemuck::pod_collect_to_vec(&read(live, &up.words.buffer, up.words.at(crate::heap::Stream::Rows) + it.rows as u64 * 16, 48));
         assert_eq!(on_gpu, rows(&it), "{what}: its rows on the GPU");
-        let record = live.sc.tables.retained.instance(id).unwrap().instance as u64;
         let size = std::mem::size_of::<scene::GpuInstance>() as u64;
         let rec: scene::GpuInstance = bytemuck::pod_read_unaligned(&read(live, &up.heap.buffer, up.heap.at(Table::Instances) + record * size, size));
         assert_eq!(rec.info[3], it.rows, "{what}: its record names its rows");
