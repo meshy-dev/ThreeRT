@@ -1583,6 +1583,37 @@ fn a_model_of_several_materials_placed_in_place_has_its_rows() {
     assert_eq!(check(&mut live, &w, 32, "another placed after the first was removed"), rows, "it takes the rows the first gave back");
 }
 
+/// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
+/// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
+/// a build's.
+#[test]
+fn models_in_a_shared_pose_posed_again_keep_their_sections() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true });
+    let mut w = world();
+    for (id, x) in [(30, -0.7), (31, 0.7)] {
+        w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: bend(0.0), functions: vec![] }, true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -1.0, 0.8), glam::Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let groups = &live.sc.tables.retained.pose_groups;
+    assert_eq!((groups.len(), live.sc.meshes[groups[0].mesh as usize].sect_count), (1, 2), "the two share a pose's mesh, of two sections");
+    for id in [30, 31] {
+        w.set_animation(id, bend(0.75)).unwrap();
+    }
+    let rebuilt = live.commit(&mut w).unwrap();
+    assert!(!(rebuilt && live.g.hwrt), "the pose changed in place ({:?})", live.fallback);
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+}
+
 /// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume
 /// compiles nothing (an idle fireball's first fire).
 #[test]
