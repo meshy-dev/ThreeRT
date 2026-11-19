@@ -1822,6 +1822,56 @@ fn a_materials_alpha_test_comes_and_goes_in_place() {
     assert_ne!(live.sc.up.kernel.features & gpu::F_MASKED, 0, "the kernel has it now");
 }
 
+/// An instanced object given another material, in place: every copy's row names it (a copy that is not shown too),
+/// with its class, and the copies' emitters go or are made with it. Plain, then one that emits, a third copy shown,
+/// a cutout, glass, plain again: each time the light list, the weights and the picture are a build's.
+#[test]
+fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let plain = |extra: serde_json::Value| {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.9, 0.9, 0.9], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<crate::desc::Material>(m).unwrap()
+    };
+    let mut w = world();
+    w.set_material(62, plain(serde_json::json!({ "color": [0.2, 0.6, 0.9] })));
+    w.set_material(63, plain(serde_json::json!({ "opacity": 0.3, "alphaTest": 0.5 })));
+    w.set_material(65, plain(serde_json::json!({ "color": [0.5, 0.9, 0.5], "roughness": 0, "transmission": 1, "ior": 1.5 })));
+    let copies = |w: &mut World, material: u32| w.set_object(42, "copies".into(), None, Kind::Instanced { geometry: 3, procedural: false, materials: vec![material], capacity: 3 }, true, false).unwrap();
+    let at = |x: f32, y: f32| glam::Mat4::from_translation(Vec3::new(x, y, 0.8)).to_cols_array();
+    let shown = |w: &mut World, count: u32| w.set_instances(42, count, Some([at(-0.5, -0.5), at(0.4, -0.5), at(0.0, 0.5)].concat()), None, None).unwrap();
+    copies(&mut w, 62);
+    shown(&mut w, 2);
+    // (A cutout at the build: the kernel has the alpha test.)
+    w.set_object(43, "other".into(), None, Kind::Mesh { geometry: 3, material: 63, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(43, Vec3::new(1.3, 0.6, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let named = |c: &LiveCore, material: u32| {
+        let place = *c.sc.tables.retained.instanced(42).expect("the copies are instances");
+        (0..3).all(|i| scene::row_material(&c.sc.rows[c.sc.instances[place.first as usize + i].rows as usize]) == c.sc.tables.retained.materials[&material])
+    };
+    let mut last = picture(&mut live, 64);
+    for (material, count, what) in [(5, 2, "one that emits"), (5, 3, "the third copy shown"), (63, 3, "a cutout"), (65, 3, "glass"), (62, 3, "a plain one again")] {
+        copies(&mut w, material);
+        shown(&mut w, count);
+        let what = format!("an instanced object given {what}");
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert!(named(&live, material), "{what}: its copies' rows name it, the one not shown too");
+        if live.sc.tables.emitter_tris.iter().any(|e| e.area > 0.0) {
+            list_is_its_triangles(&what, &live);
+        }
+        lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+        let now = picture(&mut live, 64);
+        assert!(apart(&last, &now) > 0.5, "{what}: it is in the picture ({:.2} steps)", apart(&last, &now));
+        last = now;
+    }
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.

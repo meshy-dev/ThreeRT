@@ -1396,8 +1396,10 @@ impl LiveCore {
     /// object's records and entries written as one range; the commit builds what is above them. No triangles or
     /// BLASes change. Copies that emit: their emitters in the light list follow (`fill_moved`), a hidden copy's object
     /// without power, and the emitters are weighed again when a copy's size or power changed (`emitters_reweigh`).
+    /// An object given another material (`World::set_object`): every copy's row names it, with its class, and the
+    /// copies' emitters go or are made with it.
     /// Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
-    /// flattened or did not place this way), and the caller rebuilds.
+    /// flattened or did not place this way, a kernel feature the material needs), and the caller rebuilds.
     /// `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
     pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> std::result::Result<usize, String> {
         use crate::world::Kind;
@@ -1414,7 +1416,8 @@ impl LiveCore {
         for &id in ids {
             // (Removed or hidden: nothing is drawn; a structural change rebuilds.)
             let Some(n) = world.objects.get(&id).filter(|_| world.shown(id)) else { continue };
-            let Kind::Instanced { capacity, procedural, .. } = n.kind else { continue };
+            let Kind::Instanced { capacity, procedural, materials, .. } = &n.kind else { continue };
+            let (capacity, procedural) = (*capacity, *procedural);
             let Some(&place) = sc.tables.retained.instanced(id) else { return Err("an instanced mesh the build flattened".into()) };
             if place.capacity != capacity || place.mesh.is_none() != procedural {
                 return Err("an instanced mesh the build placed otherwise".into());
@@ -1427,6 +1430,50 @@ impl LiveCore {
             // traversal walks every record there is: the build leaves them out.)
             if procedural && top.sw() {
                 return Err("a procedural instanced mesh (software traversal)".into());
+            }
+            // Another material: every copy's row (a copy that is not shown too: it is shown without its rows made
+            // again), its record's bits with it below; the emitters the copies had at no weight, those of a material
+            // that emits a run each at the list's end.
+            let mut cap = cap;
+            let mat = if procedural { None } else { materials.first().and_then(|k| sc.tables.retained.materials.get(k)).copied() };
+            if let Some(mat) = mat.filter(|&mat| sc.instances.get(first).is_some_and(|i| scene::row_material(&sc.rows[i.rows as usize]) != mat)) {
+                let (gm, features) = (sc.tables.materials[mat as usize], sc.up.kernel.features);
+                if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
+                    return Err("the scene's first material function on an instance (kernel feature)".into());
+                }
+                if scene::mesh_class(&gm) == 1 && features & gpu::F_MASKED == 0 {
+                    return Err("the scene's first cutout (kernel feature)".into());
+                }
+                let emits = scene::emissive(&gm);
+                let mut w_rows = Gather::default();
+                for r in first..first + capacity as usize {
+                    let run = emitter_run(&sc.tables.emitter_tris, &sc.instances, r as u32);
+                    reweigh |= !run.is_empty();
+                    sc.tables.emitter_tris[run].iter_mut().for_each(|e| e.area = 0.0);
+                    let inst = &mut sc.instances[r];
+                    let mesh = sc.meshes[inst.mesh as usize];
+                    let mut row = scene::row_of(mat, &sc.tables.materials);
+                    row[1] = sc.rows[inst.rows as usize][1];
+                    (inst.bits, inst.first_emitter) = (scene::rows_bits(&[row]), 0);
+                    if emits {
+                        let at = sc.tables.emitter_tris.len();
+                        (inst.first_emitter, row[2]) = (at as u32, at as u32);
+                        let (a, b) = (mesh.first as usize, (mesh.first + mesh.count) as usize);
+                        let made = crate::instance_emitters(inst, r as u32, &sc.pool_tris[a..b], (sc.edit.pool_first + a) as u32, &|k| Some((k, mat)), mesh.count as usize, &sc.tables.materials, true);
+                        for (j, (e, w)) in made.into_iter().enumerate() {
+                            self.pending_emitters.push(((at + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
+                            sc.tables.emitter_tris.push(e);
+                        }
+                        reweigh = true;
+                    }
+                    sc.rows[inst.rows as usize] = row;
+                    w_rows.put(inst.rows as u64 * 16, bytemuck::bytes_of(&row));
+                }
+                if emits {
+                    sc.tables.emissive.insert(mat);
+                }
+                w_rows.flush_section(&self.g.queue, &sc.up.words, Stream::Rows);
+                cap = capacity as usize;
             }
             // (A record's slot is `inst_base` + it, a procedural copy's record the first procedural one + its index.)
             let rec0 = if procedural { sc.proc_first + first } else { first };

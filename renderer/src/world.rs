@@ -558,6 +558,14 @@ impl World {
                 None => true,
                 Some(o) => (mesh || !self.movable(id)) && o.parent == parent && o.cast_shadow == cast_shadow && std::mem::discriminant(&o.kind) == std::mem::discriminant(&kind) && edits_in_place(&o.kind),
             };
+        // An instanced mesh given other materials (the same geometry and capacity, the same parent and shadow flag): its
+        // copies' rows say them, in place (live/edits.rs `update_instanced`).
+        let rematerialed = match (self.objects.get(&id), &kind) {
+            (Some(o), Kind::Instanced { geometry, procedural: false, capacity, .. }) => {
+                matches!(&o.kind, Kind::Instanced { geometry: g, procedural: false, capacity: c, .. } if g == geometry && c == capacity) && o.parent == parent && o.cast_shadow == cast_shadow && (o.movable || !movable)
+            }
+            _ => false,
+        };
         match &kind {
             Kind::Instanced { capacity, .. } => {
                 if self.instanced.get(&id).is_some_and(|t| t.matrices.len() != *capacity as usize * 16) {
@@ -575,6 +583,8 @@ impl World {
         self.objects.insert(id, o);
         if fresh {
             self.changes.added.insert(id);
+        } else if rematerialed {
+            self.changes.instanced.insert(id);
         } else {
             self.changes.structural = true;
         }
