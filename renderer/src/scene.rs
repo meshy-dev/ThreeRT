@@ -910,7 +910,8 @@ pub struct RigidModel {
     /// still ones until the object first moves (`still_moves`: live/edits.rs `repose_rigid`).
     pub still: Option<u32>,
     pub still_moves: bool,
-    /// The object's transform its parts are placed by.
+    /// The object's transform its parts were last placed by, as `World::world_matrix` gives it (an update compares
+    /// with it to tell a move from a new pose).
     pub world: Mat4,
     pub rest: DynamicModel,
     /// Per `rest` triangle: its node (`STILL_NODES`: the model's own space) and its triangle there (positions,
@@ -1799,7 +1800,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let base_flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
                     let oi = (objects.len() / stride) as u32;
                     let (mut olo, mut ohi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                    let mut rigid = RigidModel { world: m, ..Default::default() };
+                    // (Where the object stands as an update finds it, `World::world_matrix`: the same product as `m`,
+                    // multiplied in another order, so not always the same bits.)
+                    let mut rigid = RigidModel { world: w.world_matrix(*id), ..Default::default() };
                     rigid.rest.first = tris.len() as u32;
                     rigid.rest.object = oi;
                     for part in parts.iter() {

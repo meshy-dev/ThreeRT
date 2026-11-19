@@ -2072,6 +2072,42 @@ fn a_posed_rigid_model_is_posed_and_moved_in_place_with_the_nodes_its_clip_leave
     against_a_build("a posed rigid model that is not movable, moved", &mut live, &w);
 }
 
+/// A posed rigid model under groups is not moved by a new pose, though the build and an update multiply its
+/// transforms in another order (their products differ in their last bits here): the part its clip leaves alone stays
+/// where it is, its emitters still ones.
+#[test]
+fn a_posed_rigid_model_under_groups_is_not_moved_by_a_new_pose() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let mut w = world();
+    w.set_object(50, "a".into(), None, Kind::Group, true, false).unwrap();
+    w.set_transform(50, Vec3::new(0.13, -0.27, 0.31), glam::Quat::from_euler(glam::EulerRot::XYZ, 0.37, -0.53, 0.71), Vec3::new(1.1, 0.9, 1.3)).unwrap();
+    w.set_object(51, "b".into(), Some(50), Kind::Group, true, false).unwrap();
+    w.set_transform(51, Vec3::new(-0.21, 0.17, 0.09), glam::Quat::from_euler(glam::EulerRot::XYZ, -0.29, 0.61, 0.23), Vec3::new(0.7, 1.2, 0.8)).unwrap();
+    w.set_object(32, "posed".into(), Some(51), Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: slide(0.25), functions: vec![] }, true, false).unwrap();
+    w.set_transform(32, Vec3::new(-0.9, 0.3, 0.4), glam::Quat::from_rotation_y(0.4), Vec3::splat(0.08)).unwrap();
+    let local = |id: u32| w.objects[&id].local();
+    assert_ne!((local(50) * local(51)) * local(32), w.world_matrix(32), "the test's transforms: the two products differ");
+    let mut live = match open(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let still = live.sc.tables.retained.rigid(32).expect("a posed rigid model").still.expect("it has nodes left alone");
+    w.set_animation(32, slide(0.75)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a new pose: in place ({:?})", live.fallback);
+    assert!(!live.sc.tables.retained.rigid(32).unwrap().still_moves && !live.inst_moving.contains(&still), "the object did not move: the part left alone is not placed again");
+    let moves: Vec<bool> = live.sc.tables.emitter_tris.iter().filter(|e| e.inst == still).map(|e| e.moves).collect();
+    assert_eq!(moves, vec![false; 2], "its emitters are still ones");
+    list_is_its_triangles("a posed rigid model under groups, posed again", &live);
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 48), picture(&mut fresh, 48));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.

@@ -2776,6 +2776,30 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A posed rigid model is its parts' instances (2026-11-20).** A model posed by a clip that moves nodes, without
+skins, was built in two ways at once: the nodes the clip leaves alone flattened into world-space triangles a
+placement, each node it moves an instance of a mesh made a placement. Now the model is parts (`scene::RigidModel`),
+each an instance of a mesh every placement of the model with the clip shares: the nodes left alone merged into one
+mesh in the model's space, each moved node a mesh in its own. Nothing of it is flattened (but what
+`flatten_coincident` takes out).
+A movable one moved in place left the nodes its clip does not move where they were built: they move with the object
+now (`repose_rigid`), and one that is not movable moves in place the same way. The part left alone has still
+emitters, in the light tree, until the object first moves; that move makes them moving ones, as a still mesh's
+first move does (`emitters_start_moving`).
+Measured: every node an instance of a mesh of its own (no part merged; `THREERT_RIGID_NODES=all`) costs 4 % of GPU
+time a frame on a street of 1,300 nodes and 8 to 10 % on an interior of 7,300, four alternated pairs each, so the
+nodes that do not move relative to each other are merged. With them merged: NUMBERS. The two scenes hold 2.8 M and
+3.5 M triangles fewer in world space; meshes, instances and memory otherwise as before.
+Tried and set right: the part left alone with moving emitters from the build where the object is movable. An
+interior's six thousand emitters were then sampled without the light tree: 7 % faster and worse against its
+reference (two pairs).
+Still a rebuild: such a model hidden, shown, removed or placed a second time; a pose change under software
+traversal. Two nodes of one mesh of the file do not share it.
+Tests: the parts' meshes shared by two placements, the part left alone in the model's space; a new pose, a move,
+both at once, a move of one that is not movable, each against a build's light list and picture; the floor under a
+panel on a node its clip leaves alone (`geometry/emitter-rigid`), and under one moved 300 m in place with its clip
+playing (`geometry/emitter-rigid-moved-live`: it read nothing before).
+
 **Materials are edited through the rows (2026-11-19, the material on the instance, third part).** With a
 material on its instances' rows, what changes one is no longer the triangles' business. In place now, each a
 rebuild before:

@@ -1198,8 +1198,9 @@ its BLASes, or the units), so the engine's path is the same under both traversal
 | a mesh is removed | its record cleared, its tree given back and filled, the top tree |
 
 The scene is rebuilt, as before this step, by: the first instanced mesh of a scene that has none (its kernel has no
-unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a posed model or
-a rigid group's pose (their triangles are in the still tree); an instance of a mesh that deforms; **room that is
+unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a posed model's
+pose (its triangles are in the still tree) and a rigid group's (its parts are units, placed again by a rebuild
+still); an instance of a mesh that deforms; **room that is
 full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
 triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
 edit replaces stays behind until the next rebuild, under both; a scene with units and no geometry of its own to
