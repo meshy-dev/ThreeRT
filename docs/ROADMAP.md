@@ -2764,15 +2764,17 @@ An instance's rows are a run of the rows' room, as many as its mesh's sections (
 `give_rows`): a model of several materials is placed and removed in place, and what is removed gives its rows back.
 As before: a model is one mesh with one BLAS; a posed rigid model's still nodes are flattened; a deforming mesh's
 emitters are flattened.
-Measured: the meshes and their memory as before (Bistro one mesh of 132 sections, its BLAS 390.3 MB); frame time on
-the heavy scenes NUMBERS.
+Measured: the meshes and their memory as before (Bistro one mesh of 132 sections, its BLAS 390.3 MB). GPU time a
+frame on twelve scenes, four alternated pairs against main: Kabukichō -1.5 to -2.1 %, a crowd of skinned models
++0.1 to +1.5 %, the voxel level +0.1 to +0.6 %, the other nine within 0.8 %.
 Tried and dropped: a TLAS instance's custom data its rows' first, the record in the row (the trace then reads no
 record). About 1 % slower where instances have one section: such a hit reads a row it has no other need of. The
 custom data stays the record.
 Tests: a model's sections and rows at the build (`a_models_mesh_lies_by_section_a_material_of_the_file`); a model of
 three materials placed, removed and placed again in place, its rows on the GPU; rows apart from records in the
 in-place tests' world, rows given back; two models in a shared pose posed again in place
-(tests/render/data/arm.glb, a skinned strip of two materials).
+(tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
+section that is not its first, the model a unit under software traversal).
 
 **Meshes are edited in place (2026-11-18, scene step E, second part).** With every mesh an instance, what the
 scene does to one is a change of its instance, not a rebuild. Hidden or shown (itself, or a group above it): the
