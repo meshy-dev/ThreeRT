@@ -2417,8 +2417,7 @@ impl Gpu {
             }
             // Instanced meshes: one opaque model-space BLAS each, a TLAS instance per placement (custom data
             // INSTANCE_BIT | record; shadow casters mask 1).
-            // Per mesh: (first triangle, count, opaque) geometries: the opaque part, the cutout part, the glass part
-            // (`InstMesh::parts`).
+            // Per mesh: its geometries, one a section (`InstMesh::parts`): first triangle, count.
             let mesh_parts: Vec<Vec<(u32, u32)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count)| (m.first + at, count)).collect()).collect();
             let mesh_sizes: Vec<Vec<wgpu::BlasTriangleGeometrySizeDescriptor>> = mesh_parts
                 .iter()

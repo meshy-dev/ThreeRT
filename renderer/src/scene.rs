@@ -1857,9 +1857,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let mesh = match mesh_of.get(&key) {
                         Some(k) => *k,
                         None => {
-                            // Model-space triangles by class: opaque and cutout ones go to the pool (one BLAS, opaque
-                            // geometry then cutout geometry), those that only emit among them (each instance has its
-                            // emitters in the light list: `InstMesh::emitters`), its glass the mesh's glass part.
+                            // Model-space triangles go to the pool by section, a material of the file (one BLAS),
+                            // those that only emit among them (each instance has its emitters in the light list).
                             let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), None)?;
                             let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
                             let mut emitting: std::collections::HashSet<u32> = Default::default();
@@ -2547,8 +2546,8 @@ pub fn emissive(g: &GpuMaterial) -> bool {
     g.emissive[..3].iter().any(|e| *e > 0.0)
 }
 
-/// The class of a material's triangles in a mesh, a BLAS geometry each (`InstMesh::parts`): 0 opaque, 1 cutout
-/// (alpha-tested), 2 glass (shadow rays pass). A material function or emission is no class: the kernel places a
+/// The class of a material, which an instance's row of it says (`row_of`): 0 opaque, 1 cutout (alpha-tested),
+/// 2 glass (shadow rays pass). A material function or emission is no class: the kernel places a
 /// function's inputs by the instance (`mat_in_at`), and the light list has an instance's emitters.
 pub fn mesh_class(g: &GpuMaterial) -> u32 {
     if g.layer[0] > 0.0 {
