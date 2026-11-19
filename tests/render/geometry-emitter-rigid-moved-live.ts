@@ -26,7 +26,7 @@ export default defineGame<Record<string, never>>({
   },
   frame(f) {
     const panel = f.object("panel") as GLTFModel;
-    if (f.time >= 0.08) panel.position.set(0, 1, 0);
+    if (f.time >= 0.08) panel.position.set(-5, 1, 0);
     panel.animation = { clip: "slide", time: 0.25 + (f.time % 0.5) };
   },
   handlers: {},

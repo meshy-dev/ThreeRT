@@ -3093,6 +3093,7 @@ mod instance_tests {
         }
         let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!(sc.meshes.iter().map(|m| (m.count, m.sect_count, m.rest_count)).collect::<Vec<_>>(), [(4, 2, 0), (2, 1, 0)], "the part left alone (two materials), the moved node");
+        assert_eq!((sc.meshes[0].lo.x, sc.meshes[0].hi.x, sc.meshes[1].lo.x, sc.meshes[1].hi.x), (1.0, 9.0, -1.0, 1.0), "the part left alone in the model's space (its node 5 m along x), the moved node in its own");
         assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "two instances a placement, nothing flattened");
         let rigid = |sc: &Scene, id: u32| match &sc.retained.proxies[&id].draw {
             Draw::Rigid(r) => r.clone(),
@@ -3103,7 +3104,7 @@ mod instance_tests {
             let (still, node) = (&sc.instances[r.still.expect("it has nodes left alone") as usize], &sc.instances[r.instances[0].1 as usize]);
             assert_eq!((r.instances.len(), r.instances[0].0, still.mesh, node.mesh), (1, 1, 0, 1), "model {id}: the meshes every placement shares");
             let at = id as f32 * 20.0;
-            assert_eq!((still.world.w_axis.truncate(), node.world.w_axis.truncate()), (Vec3::new(at, 0.0, 0.0), Vec3::new(at + 6.0, y, 0.0)), "model {id}: the object's place, and the node's by the clip");
+            assert_eq!((still.world.w_axis.truncate(), node.world.w_axis.truncate()), (Vec3::new(at, 0.0, 0.0), Vec3::new(at + 11.0, y, 0.0)), "model {id}: the object's place, and the node's by the clip");
             assert_eq!((r.records().len(), r.moving().len()), (2, if movable { 2 } else { 1 }), "model {id}: the part left alone moves with a movable object");
             assert_eq!(&sc.rows[still.rows as usize..][..2], &sc.retained.mesh_rows[&0][..], "model {id}: its rows are the mesh's");
         }
