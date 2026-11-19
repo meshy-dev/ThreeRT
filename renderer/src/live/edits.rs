@@ -1065,7 +1065,7 @@ impl LiveCore {
             let Some(o) = world.objects.get(id) else { continue };
             let of: Vec<u32> = match &p.draw {
                 scene::Draw::Instance(i) => vec![i.instance],
-                scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                scene::Draw::Rigid(r) => r.records(),
                 scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
                 _ => vec![],
             };
@@ -1139,7 +1139,7 @@ impl LiveCore {
                 .values()
                 .flat_map(|p| match &p.draw {
                     scene::Draw::Instance(i) => vec![i.instance],
-                    scene::Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                    scene::Draw::Rigid(r) => r.records(),
                     scene::Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
                     _ => vec![],
                 })
@@ -1581,14 +1581,16 @@ impl LiveCore {
     }
 
     /// Posed rigid models (`scene::RigidModel`): each moving node's instance takes object x node transform from the clip
-    /// (previous rows kept for motion vectors) and their flattened triangles are re-transformed in place; the commit
-    /// builds the dynamic BLASes (if they have such triangles) and the TLAS. False when it cannot (no hardware RT, a
-    /// model hidden or changed): the caller rebuilds.
+    /// (previous rows kept for motion vectors), the instance of the nodes left alone the object's where the object
+    /// moved, and their flattened triangles are re-transformed in place; the commit builds the dynamic BLASes (if
+    /// they have such triangles) and the TLAS. False when it cannot (no hardware RT, a model hidden or changed, one
+    /// that is not movable moved with nodes left alone): the caller rebuilds.
     pub(super) fn repose_rigid(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> Result<bool> {
         if self.sc.up.accel.is_none() {
             return Ok(false);
         }
         let mut placements: Vec<(u32, glam::Mat4)> = vec![];
+        let mut worlds: Vec<(u32, glam::Mat4)> = vec![];
         let (mut lo, mut hi) = (usize::MAX, 0usize);
         for id in ids {
             let Some(o) = world.objects.get(id) else { return Ok(false) };
@@ -1599,14 +1601,24 @@ impl LiveCore {
             let globals = scene::model_gltf(uri, &self.assets)?.node_globals(animation.as_ref())?;
             let m = world.world_matrix(*id);
             let r = self.sc.tables.retained.rigid(*id).expect("a rigid model (`commit`)");
+            // (The nodes its clip leaves alone move with the object alone: their instance is one an update moves
+            // where the object is movable, `RigidModel::moving`.)
+            let moved = m != r.world;
+            if moved && r.still.is_some() && !r.movable {
+                return Ok(false);
+            }
             placements.extend(r.instances.iter().map(|&(node, i)| (i, m * globals[node])));
+            if moved {
+                placements.extend(r.still.map(|i| (i, m)));
+                worlds.push((*id, m));
+            }
             let d = &r.rest;
             if d.finals.len() != d.mats.len() {
                 return Ok(false);
             }
             let (first, verts, attrs, blas) = &mut self.sc.dynamic;
             for (j, (node, p, n, uv, tg)) in r.rest_local.iter().enumerate() {
-                let (pw, nw, uvw, tw) = scene::placed_tri(m * globals[*node], p, n, uv, *tg);
+                let (pw, nw, uvw, tw) = scene::placed_tri(scene::RigidModel::part_world(m, *node, &globals), p, n, uv, *tg);
                 let a = scene::tri_attr(pw, nw, uvw, tw, d.mats[j]);
                 let k = d.finals[j] as usize - *first;
                 let (e1, e2) = (pw[1] - pw[0], pw[2] - pw[0]);
@@ -1619,6 +1631,11 @@ impl LiveCore {
             let pivot = m.transform_point3(glam::Vec3::ZERO);
             let o = &mut self.sc.tables.objects[d.object as usize * self.sc.tables.stride];
             (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
+        }
+        for (id, m) in worlds {
+            if let Some(scene::Draw::Rigid(r)) = self.sc.tables.retained.proxies.get_mut(&id).map(|p| &mut p.draw) {
+                r.world = m;
+            }
         }
         // The instances: rows, previous rows (motion vectors), TLAS transforms.
         let size = std::mem::size_of::<scene::GpuInstance>() as u64;

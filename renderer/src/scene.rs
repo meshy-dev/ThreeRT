@@ -856,13 +856,13 @@ impl Retained {
     }
 
     /// The records of the instances an edit moves in place: a mesh's or a model's that moves (a body's, a movable
-    /// one's), a posed rigid model's nodes', an instanced object's copies.
+    /// one's), a posed rigid model's parts that move (`RigidModel::moving`), an instanced object's copies.
     pub fn moving_records(&self) -> std::collections::HashSet<u32> {
         self.proxies
             .values()
             .flat_map(|p| match &p.draw {
                 Draw::Instance(i) if i.moves => vec![i.instance],
-                Draw::Rigid(r) => r.instances.iter().map(|&(_, i)| i).collect(),
+                Draw::Rigid(r) => r.moving(),
                 Draw::Instanced(c) if c.mesh.is_some() => (c.first..c.first + c.capacity).collect(),
                 _ => vec![],
             })
@@ -896,18 +896,55 @@ pub struct InstancedPlace {
     pub drawn: u32,
 }
 
-/// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects): the nodes the
-/// clip leaves alone are ordinary static triangles; each moving mesh node is an instance of its own mesh (its triangles
-/// in the node's space, one BLAS built once), placed at object x node transform, so a new pose moves instances
-/// only (a node's emitters are its instance's in the light list, filled again when it moves). What
-/// `flatten_coincident` takes out of a node's mesh is flattened: `rest`, re-transformed in place from `rest_local`.
+/// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects), in parts
+/// (`RigidPart`), each an instance of a mesh every placement of the model shares: the nodes the clip leaves alone
+/// merged into one mesh in the model's space, placed by the object's transform; each node it moves a mesh in the
+/// node's space, placed at object x node transform, so a new pose moves instances only (a part's emitters are its
+/// instance's in the light list, filled again when it moves). What `flatten_coincident` takes out of a part's mesh
+/// is flattened: `rest`, re-transformed in place from `rest_local`.
 #[derive(Clone, Default)]
 pub struct RigidModel {
-    /// (glTF node, instance index).
+    /// (glTF node, instance index): the nodes the clip moves.
     pub instances: Vec<(usize, u32)>,
+    /// The instance of the nodes it leaves alone, if any is drawn. It moves with the object, where the object is
+    /// movable (`movable`: its emitters are moving ones then, as a movable model's are).
+    pub still: Option<u32>,
+    pub movable: bool,
+    /// The object's transform its parts are placed by.
+    pub world: Mat4,
     pub rest: DynamicModel,
-    /// Per `rest` triangle: its node and its node-space triangle (positions, normals, uvs, tangent).
+    /// Per `rest` triangle: its node (`STILL_NODES`: the model's own space) and its triangle there (positions,
+    /// normals, uvs, tangent).
     pub rest_local: Vec<(usize, [Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>)>,
+}
+
+/// In place of a node: the nodes a rigid model's clip leaves alone, merged (their space is the model's).
+pub const STILL_NODES: usize = usize::MAX;
+
+impl RigidModel {
+    /// The records of all its instances.
+    pub fn records(&self) -> Vec<u32> {
+        self.instances.iter().map(|&(_, i)| i).chain(self.still).collect()
+    }
+
+    /// Those an update of the model moves: its nodes', and the still part's where the object is movable.
+    pub fn moving(&self) -> Vec<u32> {
+        self.instances.iter().map(|&(_, i)| i).chain(self.still.filter(|_| self.movable)).collect()
+    }
+
+    /// A part's transform for the object's `m` and the pose's node transforms.
+    pub fn part_world(m: Mat4, node: usize, globals: &[Mat4]) -> Mat4 {
+        if node == STILL_NODES { m } else { m * globals[node] }
+    }
+}
+
+/// A part of a rigid model as the build makes it once for the placements of the model with a clip: its node
+/// (`STILL_NODES`), its mesh (None: nothing of it stays in a mesh), and what `flatten_coincident` took out, in the
+/// part's space with its material.
+struct RigidPart {
+    node: usize,
+    mesh: Option<u32>,
+    rest: Vec<([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>, u32)>,
 }
 
 /// Posed skinned models in the same pose (the same model, nodes, clip and time: a crowd whose game shares a few walk
@@ -1474,6 +1511,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         .map(|(g, _, grouped)| (*g, grouped))
         .collect();
     let mut mesh_of: HashMap<(String, Option<Vec<String>>), Option<u32>> = HashMap::new();
+    // A posed rigid model's parts, by (model, clip): its placements share their meshes.
+    let mut rigid_parts: HashMap<(String, String), std::rc::Rc<Vec<RigidPart>>> = HashMap::new();
     // Posed skinned models that share a pose with another share its mesh (`PoseGroup`). THREERT_POSE_SHARE=0 skins
     // each model alone (A/B).
     let mut pose_key_of: HashMap<u32, PoseKey> = HashMap::new();
@@ -1696,101 +1735,111 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let movable = w.movable(*id);
                 let dynamic = posed || movable;
                 let flags = if dynamic { flags | TRI_DYNAMIC } else { flags };
-                // Posed rigid model: static nodes as triangles, moving nodes as instances (`RigidModel`); a movable one
-                // too (each update re-places its instances from the object's transform).
+                // Posed rigid model: its parts as instances (`RigidModel`: the nodes its clip leaves alone merged into
+                // one mesh, each node it moves a mesh); a movable one too (each update re-places its instances from
+                // the object's transform).
                 if instancing && posed && nodes.is_none() && glb.rigid() {
                     let a = animation.as_ref().unwrap();
-                    let moving = glb.moving_nodes(&a.clip)?;
                     let globals = glb.node_globals(Some(a))?;
-                    let static_tris = glb.node_triangles(m, Some(a), &|ni| !moving[ni], false)?;
-                    let base_flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
-                    for (_, t) in &static_tris {
-                        let mat = resolve(t.material.and_then(|i| doc.materials().nth(i)))?.0;
-                        push_tri(&mut tris, &mut tri_flags, &mut attrs, t.p, t.n, t.uv, t.tangent, mat, base_flags);
-                    }
-                    let local = glb.node_triangles(Mat4::IDENTITY, None, &|ni| moving[ni], true)?;
-                    // Group by node (the order within a node is the file's).
-                    let mut by_node: Vec<(usize, Vec<usize>)> = vec![];
-                    for (k, (ni, _)) in local.iter().enumerate() {
-                        match by_node.last_mut() {
-                            Some((last, list)) if *last == *ni => list.push(k),
-                            _ => by_node.push((*ni, vec![k])),
+                    let pkey = (key.clone(), a.clip.clone());
+                    if !rigid_parts.contains_key(&pkey) {
+                        let moving = glb.moving_nodes(&a.clip)?;
+                        // (THREERT_RIGID_NODES=all: no node merged, every one an instance of a mesh of its own: the A/B
+                        // against the merged still part.)
+                        let all = std::env::var("THREERT_RIGID_NODES").is_ok_and(|v| v == "all");
+                        let apart = |ni: usize| all || moving[ni];
+                        // The nodes left alone, in the model's space as the pose has them (the pose does not move
+                        // them); then each node apart, in its own (the order within a node is the file's).
+                        let mut lists: Vec<(usize, Vec<crate::skin::ModelTri>)> = vec![];
+                        let still: Vec<_> = glb.node_triangles(Mat4::IDENTITY, Some(a), &|ni| !apart(ni), false)?.into_iter().map(|(_, t)| t).collect();
+                        if !still.is_empty() {
+                            lists.push((STILL_NODES, still));
                         }
+                        for (ni, t) in glb.node_triangles(Mat4::IDENTITY, None, &apart, true)? {
+                            match lists.last_mut() {
+                                Some((last, list)) if *last == ni => list.push(t),
+                                _ => lists.push((ni, vec![t])),
+                            }
+                        }
+                        let mut parts = vec![];
+                        for (node, local) in &lists {
+                            let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
+                            let mut emitting: std::collections::HashSet<u32> = Default::default();
+                            for (k, t) in local.iter().enumerate() {
+                                let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
+                                classed[class as usize].push((k, mat));
+                                if emits {
+                                    emitting.insert(mat);
+                                }
+                            }
+                            flatten_coincident(&mut classed, &emitting, &|k| local[k].p);
+                            let mesh = classed[..FLAT].iter().any(|l| !l.is_empty()).then(|| {
+                                let first_pool = pool_tris.len() as u32;
+                                let (order, sects, mine) = model_sections(&kept(&classed));
+                                for &(k, section, rank) in &order {
+                                    let t = &local[k];
+                                    pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
+                                }
+                                meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool) });
+                                sections.extend(sects);
+                                retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
+                                meshes.len() as u32 - 1
+                            });
+                            let rest = classed[FLAT].iter().map(|&(k, mat)| (local[k].p, local[k].n, local[k].uv, local[k].tangent, mat)).collect();
+                            parts.push(RigidPart { node: *node, mesh, rest });
+                        }
+                        if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
+                            let (merged, rest) = (lists.iter().filter(|l| l.0 == STILL_NODES).map(|l| l.1.len()).sum::<usize>(), parts.iter().map(|p| p.rest.len()).sum::<usize>());
+                            eprintln!("rigid: {uri} ({}): {merged} triangles of the nodes left alone in one mesh, {} nodes apart, {rest} triangles flattened a placement", a.clip, lists.iter().filter(|l| l.0 != STILL_NODES).count());
+                        }
+                        rigid_parts.insert(pkey.clone(), std::rc::Rc::new(parts));
                     }
+                    let parts = rigid_parts[&pkey].clone();
+                    let base_flags = if n.cast_shadow { 0 } else { TRI_NO_SHADOW };
                     let oi = (objects.len() / stride) as u32;
                     let (mut olo, mut ohi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
+                    let mut rigid = RigidModel { movable, world: m, ..Default::default() };
+                    rigid.rest.first = tris.len() as u32;
+                    rigid.rest.object = oi;
+                    for part in parts.iter() {
+                        // (A part placed without size, a node its clip scales to nothing: at a point; `repose_rigid`
+                        // keeps it from the rays.)
+                        let (w_n, _) = placed_world(RigidModel::part_world(m, part.node, &globals), m.w_axis.truncate());
+                        if let Some(mesh) = part.mesh {
+                            let (lo, hi) = meshes[mesh as usize].placed_bounds(w_n);
+                            (olo, ohi) = (olo.min(lo.into()), ohi.max(hi.into()));
+                            let mine = retained.mesh_rows[&mesh].clone();
+                            let i = instances.len() as u32;
+                            if part.node == STILL_NODES {
+                                rigid.still = Some(i);
+                            } else {
+                                rigid.instances.push((part.node, i));
+                            }
+                            instances.push(Instance { mesh, world: w_n, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
+                            rows.extend(mine);
+                        }
+                        for (p, nn, uv, tg, mat) in &part.rest {
+                            let (p, nn, uv, tg) = placed_tri(w_n, p, nn, uv, *tg);
+                            push_tri(&mut tris, &mut tri_flags, &mut attrs, p, nn, uv, tg, *mat, base_flags | TRI_DYNAMIC);
+                            rigid.rest.mats.push(*mat);
+                        }
+                        rigid.rest_local.extend(part.rest.iter().map(|&(p, nn, uv, tg, _)| (part.node, p, nn, uv, tg)));
+                    }
                     for t in &tris[first as usize..] {
                         for v in t {
                             olo = olo.min(*v);
                             ohi = ohi.max(*v);
                         }
                     }
-                    let mut rigid = RigidModel::default();
-                    let rest_first = tris.len() as u32;
-                    for (ni, list) in &by_node {
-                        let w_n = m * globals[*ni];
-                        let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
-                        let mut emitting: std::collections::HashSet<u32> = Default::default();
-                        for &k in list {
-                            let (mat, class, emits) = resolve(local[k].1.material.and_then(|i| doc.materials().nth(i)))?;
-                            classed[class as usize].push((k, mat));
-                            if emits {
-                                emitting.insert(mat);
-                            }
-                        }
-                        flatten_coincident(&mut classed, &emitting, &|k| local[k].1.p);
-                        if classed[..FLAT].iter().any(|l| !l.is_empty()) {
-                            let first_pool = pool_tris.len() as u32;
-                            let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                            let (order, sects, mine) = model_sections(&kept(&classed));
-                            for &(k, section, rank) in &order {
-                                let t = &local[k].1;
-                                for v in t.p {
-                                    lo = lo.min(v.into());
-                                    hi = hi.max(v.into());
-                                }
-                                pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
-                            }
-                            for c in 0..8 {
-                                let p = Vec3A::new(if c & 1 == 0 { lo.x } else { hi.x }, if c & 2 == 0 { lo.y } else { hi.y }, if c & 4 == 0 { lo.z } else { hi.z });
-                                let q = w_n.transform_point3a(p);
-                                olo = olo.min(q);
-                                ohi = ohi.max(q);
-                            }
-                            meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool) });
-                            sections.extend(sects);
-                            rigid.instances.push((*ni, instances.len() as u32));
-                            instances.push(Instance { mesh: meshes.len() as u32 - 1, world: w_n, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
-                            rows.extend(mine);
-                        }
-                        for &(k, mat) in &classed[FLAT] {
-                            let t = &local[k].1;
-                            let (p, nn, uv, tg) = placed_tri(w_n, &t.p, &t.n, &t.uv, t.tangent);
-                            push_tri(&mut tris, &mut tri_flags, &mut attrs, p, nn, uv, tg, mat, base_flags | TRI_DYNAMIC);
-                            rigid.rest.mats.push(mat);
-                            rigid.rest_local.push((*ni, t.p, t.n, t.uv, t.tangent));
-                        }
-                    }
-                    for t in &tris[rest_first as usize..] {
-                        for v in t {
-                            olo = olo.min(*v);
-                            ohi = ohi.max(*v);
-                        }
-                    }
                     let pivot = m.transform_point3(Vec3::ZERO);
-                    let size = ohi - olo;
+                    let size = (ohi - olo).max(Vec3A::ZERO);
                     objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                     for a in &mut attrs[first as usize..] {
                         a.x[1] = f32::from_bits(oi);
                     }
-                    rigid.rest.first = rest_first;
-                    rigid.rest.object = oi;
                     if tris.len() as u32 > first {
                         tri_nodes.push((n.name.clone(), first, tris.len() as u32));
-                    }
-                    if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
-                        eprintln!("rigid: {uri}: {} static triangles, {} moving nodes as instances, {} flattened moving triangles", static_tris.len(), rigid.instances.len(), rigid.rest.mats.len());
                     }
                     *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Rigid(rigid) };
                     continue;
@@ -3025,6 +3074,44 @@ mod instance_tests {
         assert_eq!(flattened, (8, 4, 4, 4), "flattened: (triangles, emitting, cutout, the moving node's)");
         let Draw::Rigid(r) = &sc.retained.proxies[&2].draw else { panic!("the posed model is rigid") };
         assert_eq!((r.instances.len(), r.rest.mats.len()), (1, 4));
+    }
+
+    /// A posed rigid model is its parts (tests/render/data/panel-slider.glb: a node its clip leaves alone, a grey quad
+    /// and an emitting one, and a node it moves, a grey quad): the nodes left alone one mesh in the model's space,
+    /// the moved node a mesh in its own, both shared by the placements of the model with the clip, whatever its time.
+    /// Nothing is flattened. The part left alone is one an update moves only where the object is movable.
+    #[test]
+    fn a_posed_rigid_model_is_instances_of_its_parts_meshes() {
+        let mut w = World::default();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+        for (id, time, movable) in [(1, 0.25, false), (2, 0.75, true)] {
+            let animation = Some(desc::Animation { clip: "slide".into(), time, r#loop: true });
+            w.set_object(id, format!("model{id}"), None, Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation, functions: vec![] }, true, movable).unwrap();
+            w.set_transform(id, Vec3::new(id as f32 * 20.0, 0.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
+        let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
+        assert_eq!(sc.meshes.iter().map(|m| (m.count, m.sect_count, m.rest_count)).collect::<Vec<_>>(), [(4, 2, 0), (2, 1, 0)], "the part left alone (two materials), the moved node");
+        assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "two instances a placement, nothing flattened");
+        let rigid = |sc: &Scene, id: u32| match &sc.retained.proxies[&id].draw {
+            Draw::Rigid(r) => r.clone(),
+            _ => panic!("a posed rigid model"),
+        };
+        for (id, y, movable) in [(1, 0.75, false), (2, 2.25, true)] {
+            let r = rigid(&sc, id);
+            let (still, node) = (&sc.instances[r.still.expect("it has nodes left alone") as usize], &sc.instances[r.instances[0].1 as usize]);
+            assert_eq!((r.instances.len(), r.instances[0].0, still.mesh, node.mesh), (1, 1, 0, 1), "model {id}: the meshes every placement shares");
+            let at = id as f32 * 20.0;
+            assert_eq!((still.world.w_axis.truncate(), node.world.w_axis.truncate()), (Vec3::new(at, 0.0, 0.0), Vec3::new(at + 6.0, y, 0.0)), "model {id}: the object's place, and the node's by the clip");
+            assert_eq!((r.records().len(), r.moving().len()), (2, if movable { 2 } else { 1 }), "model {id}: the part left alone moves with a movable object");
+            assert_eq!(&sc.rows[still.rows as usize..][..2], &sc.retained.mesh_rows[&0][..], "model {id}: its rows are the mesh's");
+        }
+        // Its emitters are its instances': the part left alone's two triangles a placement, moving ones where the
+        // object is movable.
+        let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let of = |id: u32| { let r = rigid(&sc, id); prep.emitter_tris.iter().filter(|e| Some(e.inst) == r.still).map(|e| e.moves).collect::<Vec<bool>>() };
+        assert_eq!((of(1), of(2)), (vec![false; 2], vec![true; 2]));
     }
 
     #[test]
