@@ -1489,6 +1489,72 @@ fn glass_among_an_instances_sections_is_lit_through_as_glass_alone() {
     }
 }
 
+/// A model of several materials placed in place has its rows from the room: as many as its mesh's sections, the
+/// file's materials, each where its section's triangles start, on the GPU as here, its record naming their first.
+/// It is drawn as a build draws it. Removed, it gives the rows back, and the next one placed takes them.
+#[test]
+fn a_model_of_several_materials_placed_in_place_has_its_rows() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    // (An opaque, a cutout and a glass quad: three sections.)
+    let model = || Kind::Model { uri: "tests/render/data/frame-pane.glb".into(), nodes: None, animation: None, functions: vec![] };
+    let mut w = world();
+    w.set_object(30, "first".into(), None, model(), true, false).unwrap();
+    w.set_transform(30, Vec3::new(-0.5, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    // (A mesh the scene says it edits: room for what is placed.)
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(0.9, -0.1, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let built = live.sc.rows.len();
+    let placed = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).expect("a model is an instance").instance as usize].clone();
+    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
+        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = c.g.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
+        c.g.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
+        bytes
+    };
+    let mut check = |live: &mut LiveCore, w: &World, id: u32, what: &str| -> u32 {
+        let (first, it) = (placed(live, 30), placed(live, id));
+        let im = live.sc.meshes[it.mesh as usize];
+        assert_eq!((it.mesh, im.sect_count), (first.mesh, 3), "{what}: an instance of the model's mesh, of three sections");
+        assert!(it.rows as usize >= built, "{what}: its rows are the room's");
+        let rows = |i: &scene::Instance| live.sc.rows[i.rows as usize..][..3].to_vec();
+        assert_eq!((rows(&it), it.bits, it.cast_shadow), (rows(&first), first.bits, first.cast_shadow), "{what}: the mesh's rows, as the first has them");
+        let up = &live.sc.up;
+        let on_gpu: Vec<scene::Row> = bytemuck::pod_collect_to_vec(&read(live, &up.words.buffer, up.words.at(crate::heap::Stream::Rows) + it.rows as u64 * 16, 48));
+        assert_eq!(on_gpu, rows(&it), "{what}: its rows on the GPU");
+        let record = live.sc.tables.retained.instance(id).unwrap().instance as u64;
+        let size = std::mem::size_of::<scene::GpuInstance>() as u64;
+        let rec: scene::GpuInstance = bytemuck::pod_read_unaligned(&read(live, &up.heap.buffer, up.heap.at(Table::Instances) + record * size, size));
+        assert_eq!(rec.info[3], it.rows, "{what}: its record names its rows");
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        it.rows
+    };
+    let place = |w: &mut World, id: u32, at: Vec3| {
+        w.set_object(id, format!("m{id}"), None, model(), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::splat(0.5)).unwrap();
+    };
+    place(&mut w, 31, Vec3::new(0.5, -0.3, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "a model placed: in place ({:?})", live.fallback);
+    let rows = check(&mut live, &w, 31, "a model placed in place");
+    w.remove(31);
+    assert!(!live.commit(&mut w).unwrap(), "the model removed: in place ({:?})", live.fallback);
+    place(&mut w, 32, Vec3::new(0.2, 0.5, 1.0));
+    assert!(!live.commit(&mut w).unwrap(), "another placed: in place ({:?})", live.fallback);
+    assert_eq!(check(&mut live, &w, 32, "another placed after the first was removed"), rows, "it takes the rows the first gave back");
+}
+
 /// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume
 /// compiles nothing (an idle fireball's first fire).
 #[test]
