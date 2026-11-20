@@ -1329,7 +1329,7 @@ impl LiveCore {
     pub(super) fn write_emitters(&mut self, new: &[(u32, crate::GpuEmitterTri)]) {
         self.land_powers_now();
         let g = &self.g;
-        let LoadedScene { tables: e, base: b, up, pool_tris, tris: flat, tri_order, edit, instances, .. } = &mut self.sc;
+        let LoadedScene { tables: e, base: b, up, pool_tris, tris: flat, tri_order, edit, instances, codes_sent: sent, .. } = &mut self.sc;
         let size = std::mem::size_of::<crate::GpuEmitterTri>();
         let (mut w_tris, mut w_attrs) = (Gather::default(), Gather::default());
         for (i, t) in new {
@@ -1369,8 +1369,18 @@ impl LiveCore {
         // written over the code the new ones were made with.
         let codes = crate::emitter_codes(&e.emitter_tris, &order, e.light_tree.as_ref());
         let fixed = e.light_tree.as_ref().map_or(0, |t| t.dynamic.map_or(t.order.len(), |(_, ns)| ns as usize));
+        // Only the codes that changed since the last write (a power edit leaves them all as they were; each is a
+        // write of its own, the list's records being 48 bytes apart): a new emitter's record was made with code 0.
+        sent.resize(e.emitter_tris.len(), u32::MAX);
+        for &(i, _) in new {
+            sent[i as usize] = u32::MAX;
+        }
         for &i in &order[fixed.min(order.len())..] {
-            w_tris.put((i as usize * size + std::mem::offset_of!(crate::GpuEmitterTri, code)) as u64, bytemuck::bytes_of(&codes[i as usize]));
+            let c = codes[i as usize];
+            if sent[i as usize] != c {
+                w_tris.put((i as usize * size + std::mem::offset_of!(crate::GpuEmitterTri, code)) as u64, bytemuck::bytes_of(&c));
+                sent[i as usize] = c;
+            }
         }
         let (em, total, power) = crate::emitter_cdf(&e.emitter_tris, &order, &e.materials, &e.objects, e.stride, b.light_lod, crate::EmitterCull::of(b));
         if let Some(t) = e.light_tree.as_mut() {

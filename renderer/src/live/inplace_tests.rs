@@ -755,6 +755,59 @@ fn an_emitter_scaled_in_place_is_lit_as_a_build_lights_it() {
     }
 }
 
+/// Power edits of emitters (a game flashing its glowing bodies every frame) write only the light list's codes that
+/// changed (`LoadedScene::codes_sent`: each code is a write of its own, and rewriting a list of 133 k moving emitters
+/// cost a frame 470 ms). After several, an emitter moved between them, and two materials of still meshes that start
+/// emitting one after the other (emitters added in place, their records made with code 0), every emitter on the GPU
+/// has its code: with emitters that move (their codes stay), and in a scene whose emitters all stand still, where the
+/// light tree has a slot for the added ones and the second material's regrows it (the first one's codes change).
+#[test]
+fn power_edits_keep_the_light_lists_codes() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let late = |emissive: f32| serde_json::from_value(serde_json::json!({ "name": "late", "color": [0.2, 0.2, 0.2], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1.0, 0.6, 0.3], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
+    for (tree, moving) in [(true, true), (false, true), (true, false)] {
+        let what = |s: &str| format!("{s}, {}, {} a light tree", if moving { "emitters that move" } else { "still emitters" }, if tree { "with" } else { "without" });
+        let mut w = world();
+        w.set_material(6, late(0.0));
+        w.set_material(7, late(0.0));
+        // Two that emit (moving or not), and two still meshes of the materials that emit later, of their own BLASes
+        // (the scene edits meshes: a tree without moving emitters has a slot for emitters added in place).
+        for (id, x, material, movable) in [(13u32, 0.35f32, 5u32, moving), (14, -0.35, 5, moving), (15, 0.0, 6, false), (16, -0.7, 7, false)] {
+            w.set_object(id, format!("mesh{id}"), None, Kind::Mesh { geometry: 3, material, own_blas: !movable, materials: vec![] }, true, movable).unwrap();
+            w.set_transform(id, Vec3::new(x, -0.45, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
+        if tree {
+            strip(&mut w);
+        }
+        let mut live = match open(&w) {
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        w.take_changes();
+        if !live.g.hwrt {
+            return;
+        }
+        assert_eq!(live.sc.tables.light_tree.as_ref().map(|t| t.dynamic.is_some()), tree.then_some(!moving), "{}: the tree's slot", what("as loaded"));
+        list_is_its_triangles(&what("as loaded"), &live);
+        for (k, power) in [3.0f32, 0.5, 2.0].into_iter().enumerate() {
+            if k > 0 {
+                w.set_material(5 + k as u32, late(30.0));
+            }
+            w.set_power(13, power).unwrap();
+            if moving {
+                w.set_transform(14, Vec3::new(-0.35 + 0.1 * k as f32, -0.45, 0.6), glam::Quat::from_rotation_z(0.3 * k as f32), Vec3::ONE).unwrap();
+            }
+            live.commit(&mut w).unwrap();
+            live.land_powers_now();
+            list_is_its_triangles(&what(&format!("power {power}{}", if k > 0 { " and a material that starts emitting" } else { "" })), &live);
+        }
+        let t = &live.sc.tables;
+        let emitting = t.emitter_tris.iter().filter(|e| crate::emitter_power(e, &t.materials, &t.objects, t.stride) > 0.0).count();
+        assert!(emitting >= 8, "{}: the late materials' emitters were added ({emitting} emit)", what("at the end"));
+    }
+}
+
 /// The light list's copies of its emitters' triangles follow them: as loaded, after an emitter the CPU moves has
 /// moved (in the light tree's moving subtree, and without a tree), after an emitting mesh a body drives has moved,
 /// after a model's placement or its clip has moved its emitters, after a particle's pass has placed it, and after
