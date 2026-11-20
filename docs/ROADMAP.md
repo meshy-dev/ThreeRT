@@ -2785,8 +2785,9 @@ or the units' top tree): under software traversal a new pose or a move was a reb
 An edit places an instance by one function now (`place_instance`: its rows, its emitters, its record, its place
 above the triangles), for a mesh, a still model and a rigid model's part alike. With it a still model whose mesh
 emits is placed again in place, where that was a rebuild's.
-Still a rebuild: one with triangles flattened beside its parts (`flatten_coincident`'s) hidden or removed; a model
-hidden when the scene was built, shown; a skinned model added, hidden or removed; a model the scene has not, added.
+Still a rebuild: one with triangles flattened beside its parts (`flatten_coincident`'s) hidden, removed or placed
+again; a model hidden when the scene was built, shown; a skinned model added, hidden or removed; a model the scene
+has not, added.
 Measured, software traversal, an interior of 7,300 nodes whose clip plays (4,181 units): every frame rebuilt the
 scene, 2.9 s a frame; now none does, a frame's commit is 1.2 ms and the frame 19 ms (1280 x 720 at half scale).
 Tests, natively and under software traversal, each against a build's light list and picture: a posed rigid model
