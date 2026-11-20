@@ -796,8 +796,8 @@ impl World {
             let in_place = match &o.kind {
                 Kind::Particles { emitter_area, .. } => *emitter_area <= 0.0,
                 Kind::Volume { .. } => true,
-                // (A mesh's or a still model's instance by its mask, a group's each: the renderer says whether it can.)
-                Kind::Mesh { .. } | Kind::Model { animation: None, .. } | Kind::Group => true,
+                // (A mesh's or a model's instances by their masks, a group's each: the renderer says whether it can.)
+                Kind::Mesh { .. } | Kind::Model { .. } | Kind::Group => true,
                 Kind::Light(l) => !sun && !matches!(l, desc::Light::Rect { visible: true, .. }),
                 _ => false,
             };
@@ -960,10 +960,10 @@ impl World {
             doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
             k += 1;
         }
-        // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or static
+        // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or
         // model (or never added, if it came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot
         // take out).
-        let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
+        let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
         if doomed.iter().all(|d| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || (doomed.len() > 1 && matches!(o.kind, Kind::Group)))) {
             for d in &doomed {
                 self.instanced.remove(d);
