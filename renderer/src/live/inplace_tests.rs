@@ -2016,6 +2016,96 @@ fn a_material_turned_glass_stops_casting_its_shadow_in_place() {
 /// node's instance alone; one moved takes the part left alone with it, whose emitters are moving ones from that
 /// first move (still ones, in the light tree, until then), movable object or not. Each time the light list is its
 /// triangles and the picture a build's. Under software traversal too, where its parts are units.
+/// A posed rigid model given another clip of its file, which moves another node (tests/render/data/two-clips.glb), is
+/// posed in place: its parts are the nodes any clip moves, so they are the same ones.
+#[test]
+fn a_posed_rigid_model_given_another_clip_is_posed_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let pose = |clip: &str, time| Some(crate::desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() });
+    let mut w = world();
+    w.set_object(32, "posed".into(), None, Kind::Model { uri: "tests/render/data/two-clips.glb".into(), nodes: None, animation: pose("raise-left", 0.5), functions: vec![] }, true, false).unwrap();
+    w.set_transform(32, Vec3::new(-0.2, 0.1, 0.6), glam::Quat::IDENTITY, Vec3::splat(0.12)).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let parts = |c: &LiveCore| {
+        let r = c.sc.tables.retained.rigid(32).expect("a posed rigid model");
+        (r.instances.iter().map(|&(node, i)| (node, c.sc.instances[i as usize].world)).collect::<Vec<_>>(), r.still.map(|i| c.sc.instances[i as usize].world))
+    };
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        assert_eq!(parts(live), parts(&fresh), "{what}: its parts and where they stand, as a build's");
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+    };
+    let loaded = parts(&live);
+    let at = |p: &(Vec<(usize, glam::Mat4)>, Option<glam::Mat4>), node: usize| p.0.iter().find(|q| q.0 == node).expect("the node's part").1;
+    assert_eq!((loaded.0.len(), loaded.1.is_some()), (2, true), "a part each node a clip moves, and the node none does");
+    against_a_build("a posed rigid model, as loaded", &mut live, &w);
+    w.set_animation(32, pose("raise-right", 0.75)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "another clip of the file: in place ({:?})", live.fallback);
+    let other = parts(&live);
+    assert!(at(&other, 1) != at(&loaded, 1) && at(&other, 2) != at(&loaded, 2) && other.1 == loaded.1, "the first clip's node is back where the file has it, the other's is raised, the third stays");
+    against_a_build("another clip of the file", &mut live, &w);
+}
+
+/// A pose that moves other nodes than the one its parts were made for (it names a node the clip leaves alone): the
+/// parts are a build's to make again. In place the named node would stay where the part it is merged into stands.
+#[test]
+fn a_posed_rigid_model_whose_new_pose_moves_other_nodes_is_rebuilt() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let pose = |time, nodes: &[(&str, [f32; 7])]| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: nodes.iter().map(|(n, v)| (n.to_string(), v.to_vec())).collect() });
+    let model = |a| Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: a, functions: vec![] };
+    let mut w = world();
+    w.set_object(32, "posed".into(), None, model(pose(0.25, &[])), true, false).unwrap();
+    w.set_transform(32, Vec3::new(-0.6, 0.2, 0.6), glam::Quat::IDENTITY, Vec3::splat(0.08)).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        list_is_its_triangles(what, live);
+        let mut fresh = open(w).unwrap();
+        let parts = |c: &LiveCore| c.sc.tables.retained.rigid(32).map(|r| (r.instances.iter().map(|&(node, i)| (node, c.sc.instances[i as usize].world)).collect::<Vec<_>>(), r.still.map(|i| c.sc.instances[i as usize].world)));
+        assert_eq!(parts(live), parts(&fresh), "{what}: its parts and where they stand, as a build's");
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let before = against_a_build("a posed rigid model, as loaded", &mut live, &w);
+    // The panel, a node the clip leaves alone, named by the pose: lifted and turned.
+    let lifted = [("panel", [2.0, 4.0, 0.0, 0.0, 0.0, 0.38268343, 0.92387953])];
+    w.set_animation(32, pose(0.25, &lifted)).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "a pose that names a node the clip leaves alone: a rebuild");
+    let named = against_a_build("a pose that names a node the clip leaves alone", &mut live, &w);
+    assert!(apart(&before, &named) > 0.5, "the named node's pose is in the picture ({:.2} steps)", apart(&before, &named));
+    // The same nodes named, posed on: in place.
+    w.set_animation(32, pose(0.75, &[("panel", [3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0])])).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the same nodes posed on: in place ({:?})", live.fallback);
+    against_a_build("the same nodes posed on", &mut live, &w);
+    // Another placed with the same node named: the scene's parts, in place; posed on in place; named no more, a rebuild.
+    w.set_object(33, "second".into(), None, model(pose(0.5, &lifted)), true, false).unwrap();
+    w.set_transform(33, Vec3::new(0.5, -0.4, 0.7), glam::Quat::IDENTITY, Vec3::splat(0.08)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "another with the same node named: in place ({:?})", live.fallback);
+    w.set_animation(33, pose(0.9, &lifted)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "it, posed on: in place ({:?})", live.fallback);
+    against_a_build("another with the same node named, posed on", &mut live, &w);
+    w.set_animation(33, pose(0.9, &[])).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "it, its node named no more: a rebuild");
+    against_a_build("another, its node named no more", &mut live, &w);
+    // Named no more: a rebuild again.
+    w.set_animation(32, pose(0.75, &[])).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "a pose that names the node no more: a rebuild");
+    against_a_build("a pose that names the node no more", &mut live, &w);
+}
+
 #[test]
 fn a_posed_rigid_model_is_posed_and_moved_in_place_with_the_nodes_its_clip_leaves_alone() {
     let presets = crate::default_presets_dir();

@@ -224,12 +224,16 @@ impl Model {
         self.prims.iter().all(|p| p.skin.is_none())
     }
 
-    /// Per node: whether the pose moves it (a channel of its clip or a node it poses is it or one of its ancestors).
+    /// Per node: whether a pose may move it (a channel of any clip of the file, or a node this pose names, is it or one
+    /// of its ancestors). Any clip, not the pose's alone: the model is the same parts whichever clip it plays.
     pub fn moving_nodes(&self, pose: &desc::Animation) -> Result<Vec<bool>> {
         let mut direct = vec![false; self.parents.len()];
         if !pose.clip.is_empty() {
-            for ch in &self.clip(&pose.clip)?.channels {
-                direct[ch.node] = true;
+            self.clip(&pose.clip)?;
+        }
+        for ch in self.gltf.0.animations().flat_map(|a| a.channels()) {
+            if ch.target().property() != gltf::animation::Property::MorphTargetWeights {
+                direct[ch.target().node().index()] = true;
             }
         }
         for name in pose.nodes.keys() {
@@ -436,6 +440,18 @@ mod tests {
         assert!(m.triangles(mirrored, None, None).unwrap().iter().all(|t| hand(t) == -1.0));
         assert!(m.node_triangles(mirrored, None, &|_| true, false).unwrap().iter().all(|(_, t)| hand(t) == -1.0));
         assert!(m.node_triangles(Mat4::IDENTITY, None, &|_| true, true).unwrap().iter().all(|(_, t)| hand(t) == 1.0));
+    }
+
+    /// Which nodes are parts does not depend on the clip that plays (tests/render/data/two-clips.glb: a clip for the
+    /// node "left", another for "right", none for "base").
+    #[test]
+    fn the_nodes_any_clip_moves_are_moving_whichever_plays() {
+        let m = Model::new(gltf::import("../tests/render/data/two-clips.glb").unwrap()).unwrap();
+        let pose = |clip: &str| desc::Animation { clip: clip.into(), time: 0.5, r#loop: true, nodes: Default::default() };
+        assert_eq!(m.moving_nodes(&pose("raise-left")).unwrap(), vec![false, true, true]);
+        assert_eq!(m.moving_nodes(&pose("raise-right")).unwrap(), vec![false, true, true]);
+        assert_eq!(m.moving_nodes(&pose("")).unwrap(), vec![false, true, true]);
+        assert!(m.moving_nodes(&pose("raise-both")).is_err(), "no such clip");
     }
 
     #[test]

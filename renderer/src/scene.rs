@@ -899,15 +899,16 @@ pub struct InstancedPlace {
     pub drawn: u32,
 }
 
-/// A posed glTF model without skins whose clip moves some of its nodes (Zero Day's 551 moving objects), in parts
-/// (`RigidPart`), each an instance of a mesh every placement of the model shares: the nodes the clip leaves alone
-/// merged into one mesh in the model's space, placed by the object's transform; each node it moves a mesh in the
-/// node's space, placed at object x node transform, so a new pose moves instances only (a part's emitters are its
+/// A posed glTF model without skins whose clips move some of its nodes (Zero Day's 551 moving objects), in parts
+/// (`RigidPart`), each an instance of a mesh every placement of the model shares: the nodes no clip of the file
+/// moves and the pose does not name merged into one mesh in the model's space, placed by the object's transform;
+/// each other node a mesh in the node's space, placed at object x node transform, so a new pose, of whichever clip,
+/// moves instances only (a part's emitters are its
 /// instance's in the light list, filled again when it moves). What `flatten_coincident` takes out of a part's mesh
 /// is flattened: `rest`, re-transformed in place from `rest_local`.
 #[derive(Clone, Default)]
 pub struct RigidModel {
-    /// (glTF node, instance index): the nodes the clip moves.
+    /// (glTF node, instance index): the nodes a pose may move.
     pub instances: Vec<(usize, u32)>,
     /// The instance of the nodes it leaves alone, if any is drawn. It moves with the object alone; its emitters are
     /// still ones until the object first moves (`still_moves`: live/edits.rs `repose_rigid`).
@@ -920,14 +921,17 @@ pub struct RigidModel {
     /// Per `rest` triangle: its node (`STILL_NODES`: the model's own space) and its triangle there (positions,
     /// normals, uvs, tangent).
     pub rest_local: Vec<(usize, [Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>)>,
+    /// `rigid_pose_key` of the pose its parts were made for: a pose with another is other parts (a build's to make).
+    pub pose: String,
 }
 
-/// In place of a node: the nodes a rigid model's clip leaves alone, merged (their space is the model's).
+/// In place of a node: the nodes no pose of a rigid model moves, merged (their space is the model's).
 pub const STILL_NODES: usize = usize::MAX;
 
-/// What a rigid model's parts go by, beside the model: which nodes its pose moves, the clip's and those it names.
+/// What a rigid model's parts go by, beside the model: the nodes its pose names (`skin::Model::moving_nodes`: they
+/// are parts with the nodes the file's clips move, whichever clip plays).
 pub fn rigid_pose_key(a: &desc::Animation) -> String {
-    format!("{}\u{0}{}", a.clip, a.nodes.keys().cloned().collect::<Vec<_>>().join("\u{0}"))
+    a.nodes.keys().cloned().collect::<Vec<_>>().join("\u{0}")
 }
 
 impl RigidModel {
@@ -1819,7 +1823,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let (mut olo, mut ohi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
                     // (Where the object stands as an update finds it, `World::world_matrix`: the same product as `m`,
                     // multiplied in another order, so not always the same bits.)
-                    let mut rigid = RigidModel { world: w.world_matrix(*id), ..Default::default() };
+                    let mut rigid = RigidModel { world: w.world_matrix(*id), pose: rigid_pose_key(a), ..Default::default() };
                     rigid.rest.first = tris.len() as u32;
                     rigid.rest.object = oi;
                     for part in parts.iter() {

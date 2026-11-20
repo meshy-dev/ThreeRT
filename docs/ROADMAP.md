@@ -2779,21 +2779,27 @@ section that is not its first, the model a unit under software traversal).
 **A posed rigid model is edited in place (2026-11-20).** As a mesh and a still model are. Hidden, its parts are
 instances no ray sees, their emitters at no weight, and it is posed and moved on; shown, it is placed where it
 stands (`show_meshes`, `repose_rigid`). Removed, its instances are no object's (`edit_geometry`). One the scene has
-with the clip is placed again as an instance of each of its parts' meshes (`Retained::rigid_meshes`), a part a record
-of the room, in a run. Its pose update goes through what is above the instances under either traversal (the TLAS,
+is placed again as an instance of each of its parts' meshes (`Retained::rigid_meshes`), a part a record of the room,
+in a run. Its pose update goes through what is above the instances under either traversal (the TLAS,
 or the units' top tree): under software traversal a new pose or a move was a rebuild's.
 An edit places an instance by one function now (`place_instance`: its rows, its emitters, its record, its place
 above the triangles), for a mesh, a still model and a rigid model's part alike. With it a still model whose mesh
 emits is placed again in place, where that was a rebuild's.
+Its parts are the nodes any clip of the file moves, not those of the clip it plays (`skin::Model::moving_nodes`),
+and the nodes its pose names: another clip is posed in place. Until now the parts were the playing clip's, and a
+model given another clip, or a pose that named another node, was posed in place with the wrong parts (the nodes
+the new pose moves stayed in the part merged for the old one). A pose that names other nodes is a rebuild's
+(`RigidModel::pose`).
 Still a rebuild: one with triangles flattened beside its parts (`flatten_coincident`'s) hidden, removed or placed
-again; a model hidden when the scene was built, shown; a skinned model added, hidden or removed; a model the scene
-has not, added.
+again; a pose that names other nodes than the last; a model hidden when the scene was built, shown; a skinned model
+added, hidden or removed; a model the scene has not, added.
 Measured, software traversal, an interior of 7,300 nodes whose clip plays (4,181 units): every frame rebuilt the
 scene, 2.9 s a frame; now none does, a frame's commit is 1.2 ms and the frame 19 ms (1280 x 720 at half scale).
 Tests, natively and under software traversal, each against a build's light list and picture: a posed rigid model
 hidden, posed and moved while hidden, shown, removed; a still and a posed rigid model with emitters placed again,
 the latter then posed, moved, hidden, shown and removed, its records and rows the room's again and the next one's;
-one with flattened triangles hidden and removed by a rebuild.
+one with flattened triangles hidden and removed by a rebuild; one given another clip of its file, in place
+(`tests/render/data/two-clips.glb`); one whose pose names a node no clip moves, by a rebuild.
 
 **A posed rigid model is its parts' instances (2026-11-20).** A model posed by a clip that moves nodes, without
 skins, was built in two ways at once: the nodes the clip leaves alone flattened into world-space triangles a

@@ -1706,14 +1706,19 @@ impl LiveCore {
     /// are re-transformed in place; the commit builds the dynamic BLASes (if they have such triangles) and what is
     /// above the instances (the TLAS, or software traversal's top tree over its units). A hidden model's parts are
     /// placed as a shown one's, unseen. False when it cannot (software traversal without units, a part that is no
-    /// unit, or flattened triangles there; a model changed): the caller rebuilds.
+    /// unit, or flattened triangles there; a pose that names other nodes; a model changed): the caller rebuilds.
     pub(super) fn repose_rigid(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> Result<bool> {
         // (Nothing is changed unless all of it can be.)
         {
             let Some(top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return Ok(false) };
             let (retained, instances) = (&self.sc.tables.retained, &self.sc.instances);
             let placed = |id: &u32| retained.rigid(*id).is_some_and(|r| r.rest.finals.len() == r.rest.mats.len() && r.records().iter().all(|&i| instances.get(i as usize).is_some_and(|x| top.has_mesh(x.mesh))));
-            if !ids.iter().all(placed) {
+            // (A pose that names other nodes is other parts.)
+            let same_parts = |id: &u32| match world.objects.get(id).map(|o| &o.kind) {
+                Some(crate::world::Kind::Model { animation, .. }) => retained.rigid(*id).is_some_and(|r| animation.as_ref().map_or(String::new(), scene::rigid_pose_key) == r.pose),
+                _ => false,
+            };
+            if !ids.iter().all(|id| placed(id) && same_parts(id)) {
                 return Ok(false);
             }
         }
@@ -2752,10 +2757,14 @@ impl LiveCore {
                     let mesh = if matches!(o.kind, Kind::Model { .. }) { scene::MeshKind::Model } else { scene::MeshKind::Own };
                     scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves })
                 }
-                // A posed rigid model: a part a record, the nodes its clip moves with moving emitters; where it
+                // A posed rigid model: a part a record, the nodes a pose may move with moving emitters; where it
                 // stands as an update finds it (`repose_rigid` tells a move by that).
                 Placed::Parts(parts) => {
-                    let mut rigid = scene::RigidModel { world: world.world_matrix(id), ..Default::default() };
+                    let pose = match &o.kind {
+                        Kind::Model { animation: Some(a), .. } => scene::rigid_pose_key(a),
+                        _ => String::new(),
+                    };
+                    let mut rigid = scene::RigidModel { world: world.world_matrix(id), pose, ..Default::default() };
                     for (j, (node, mut inst, mut mine)) in parts.into_iter().enumerate() {
                         place(record + j, &mut inst, &mut mine, node != scene::STILL_NODES)?;
                         if node == scene::STILL_NODES {
