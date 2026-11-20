@@ -578,6 +578,7 @@ pub struct EnvSettings {
     pub fog: Option<desc::Fog>,
     /// three.js `scene.background` (`desc::Environment::background`): the kernel's F_BACKGROUND, `Params::background`.
     pub background: Option<[f32; 3]>,
+    pub background_panorama: Option<desc::BackgroundPanorama>,
     /// The sky's aerial perspective (`aerial_params`): the kernel's F_AERIAL, `Params::aerial`.
     pub aerial: [f32; 4],
     /// Global wetness and rain intensity (0..1).
@@ -590,21 +591,25 @@ pub struct EnvSettings {
 impl EnvSettings {
     pub fn of(w: &World) -> EnvSettings {
         let e = &w.environment;
-        EnvSettings { fog: e.fog.clone(), background: e.background, aerial: aerial_params(&e.sky), wetness: e.wetness.clamp(0.0, 1.0), rain: e.rain.clamp(0.0, 1.0), cloud_cover: e.cloud_cover.clamp(0.0, 1.0) }
+        EnvSettings { fog: e.fog.clone(), background: e.background, background_panorama: e.background_panorama.clone(), aerial: aerial_params(&e.sky), wetness: e.wetness.clamp(0.0, 1.0), rain: e.rain.clamp(0.0, 1.0), cloud_cover: e.cloud_cover.clamp(0.0, 1.0) }
     }
 
     /// The kernel's parameters for them.
     pub fn write(&self, p: &mut crate::gpu::Params) {
         p.time[1] = self.wetness;
         p.time[2] = self.rain;
-        p.background = self.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]);
+        p.background = if let Some(b) = &self.background_panorama {
+            [panorama_offset(b.rotation), b.intensity.max(0.0), 0.0, 2.0]
+        } else {
+            self.background.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0])
+        };
         p.aerial = self.aerial;
         [p.fog, p.fog_color, p.vol, p.vol2] = crate::fog_params(self.fog.as_ref());
     }
 
     /// The kernel features they ask for (`gpu::environment_features`).
     pub fn features(&self) -> u32 {
-        crate::gpu::environment_features(self.fog.as_ref(), self.background.is_some(), self.aerial)
+        crate::gpu::environment_features(self.fog.as_ref(), self.background.is_some() || self.background_panorama.is_some(), self.aerial)
     }
 }
 
@@ -614,6 +619,12 @@ pub enum SkyData {
     /// `dynamic`: baked at `sky::DYNAMIC_SKY` (the live view re-bakes it as the sun moves); `glow`: night-sky radiance.
     Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, dynamic: bool, glow: crate::sky::Glow },
     Gradient(crate::sky::Gradient),
+    Hdri { map: crate::gpu::EnvMap, rotation: f32, intensity: f32, sky_light_intensity: f32 },
+}
+
+/// The file uses three.js longitude (u = atan2(z, x) / 2pi + 0.5).
+pub fn panorama_offset(rotation: f32) -> f32 {
+    (rotation / std::f32::consts::TAU - 0.25).rem_euclid(1.0)
 }
 
 /// The atmosphere's sun as the scene sees it now: the direction toward it (Y up) and its illuminance above the
@@ -655,6 +666,7 @@ pub struct Scene {
     pub lights: Vec<GpuLight>,
     pub camera: CameraData,
     pub sky: SkyData,
+    pub background_map: Option<crate::gpu::EnvMap>,
     /// The environment beside its sky (`EnvSettings::of`).
     pub environment: EnvSettings,
     pub preset: desc::Preset,
@@ -1332,7 +1344,12 @@ pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Resul
         }
         Sky::Color { color, intensity, .. } if *intensity > 0.0 => SkyData::Color(Vec3::from(*color) * *intensity),
         Sky::Color { .. } => SkyData::None,
-        Sky::Hdri { .. } => return Err(anyhow!("hdri environments are not supported by the native renderer yet")),
+        Sky::Hdri { texture, intensity, rotation, sky_light_intensity } => SkyData::Hdri {
+            map: panorama(w, assets, *texture).context("HDRI environment")?,
+            rotation: *rotation,
+            intensity: intensity.max(0.0),
+            sky_light_intensity: sky_light_intensity.max(0.0),
+        },
         Sky::Gradient { zenith, horizon, ground, intensity, horizon_exponent, glow, clouds, .. } => {
             let cloud_map = match clouds.as_ref().and_then(|c| c.map.map(|m| (c, m))) {
                 Some((c, tid)) => {
@@ -1363,6 +1380,32 @@ pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Resul
         }
     };
     Ok((sky, sun_id))
+}
+
+fn panorama(w: &World, assets: &Path, id: u32) -> Result<crate::gpu::EnvMap> {
+    let t = w.textures.get(&id).ok_or_else(|| anyhow!("unknown texture {id}"))?;
+    let image = match &t.source {
+        world::TextureSource::File(uri) => crate::files::image_data(&crate::files::asset_path(assets, uri))
+            .with_context(|| format!("texture {uri}"))?,
+        world::TextureSource::Encoded(bytes) => image::load_from_memory(bytes).context("generated panorama")?,
+        _ => image::DynamicImage::ImageRgba8((*texture_image(t, assets)?.1).clone()),
+    };
+    // OpenEXR and Radiance HDR store linear values. Apply the texture's colour space to integer images.
+    let srgb = t.srgb && !matches!(&image, image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_));
+    let image = image.into_rgba32f();
+    let (width, height) = image.dimensions();
+    anyhow::ensure!(width != 0 && height != 0, "empty panorama");
+    let texels = image.pixels().map(|p| {
+        let rgb = [p[0], p[1], p[2]].map(|c| {
+            if srgb {
+                if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            } else {
+                c.max(0.0).min(65000.0)
+            }
+        });
+        [rgb[0], rgb[1], rgb[2], 1.0]
+    }).collect();
+    Ok(crate::gpu::EnvMap { width, height, texels })
 }
 
 /// A world's render preset: the preset its settings name, the settings' overrides over it, then `overrides`.
@@ -2241,6 +2284,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         lights,
         camera: camera.ok_or_else(|| anyhow!("no camera (settings.camera must name a camera object)"))?,
         sky,
+        background_map: w.environment.background_panorama.as_ref()
+            .map(|b| panorama(w, assets, b.texture).context("background panorama")).transpose()?,
         environment: EnvSettings::of(w),
         preset,
         stats,
@@ -2730,6 +2775,30 @@ pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3
         t: [t.x, t.y, t.z, sign],
         x: [lod_k, 0.0, 0.0, 0.0],
     }
+}
+
+#[cfg(test)]
+#[test]
+fn hdri_keeps_openexr_radiance_and_separates_lighting_intensity() {
+    let image = image::Rgb32FImage::from_fn(4, 2, |x, y| image::Rgb([x as f32 * 4.0, y as f32 * 2.0, 0.25]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::OpenExr).unwrap();
+    let mut w = World::default();
+    w.set_texture(1, world::Texture {
+        source: world::TextureSource::Encoded(Arc::new(bytes.into_inner())),
+        srgb: false, wrap: true, repeat: [1.0; 2], offset: [0.0; 2],
+    }).unwrap();
+    w.environment.sky = Sky::Hdri { texture: 1, intensity: 2.0, rotation: std::f32::consts::FRAC_PI_2, sky_light_intensity: 0.25 };
+
+    let (sky, sun) = sky_data(&w, Path::new("."), &|_| Mat4::IDENTITY).unwrap();
+    let baked = crate::bake_sky(&sky, 0.0, 0.0);
+    assert!(sun.is_none());
+    assert_eq!((baked.env.width, baked.env.height), (4, 2));
+    assert_eq!(baked.env.texels[3], [12.0, 0.0, 0.25, 1.0]);
+    assert_eq!(baked.env.texels[7], [12.0, 2.0, 0.25, 1.0]);
+    let mut params = crate::gpu::Params::default();
+    baked.write(&mut params, 0.0);
+    assert_eq!(params.hdri, [0.0, 0.5, 2.0, 1.0]);
 }
 
 #[cfg(test)]

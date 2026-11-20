@@ -842,6 +842,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         env: [0.0, 0.0, 0.0, -1.0],
         misc: [0.0, total, 0.0, 0.0],
         sky_color: [0.0; 4],
+        hdri: [0.0; 4],
         counts2: [n_dir, 0, 0, first_shadowed],
         time: [sc.time, 0.0, 0.0, sc.media.len() as f32],
         fog: [0.0; 4],
@@ -1021,6 +1022,7 @@ pub struct SkyBaked {
     pub env: gpu::EnvMap,
     pub color: Vec3,
     pub has_env: bool,
+    pub hdri: [f32; 4],
     pub sun: Option<Vec3>,
 }
 
@@ -1047,7 +1049,7 @@ pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBak
                     b
                 }
             };
-            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: Some(bake.sun_illuminance) }
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone().into() }, color: Vec3::ZERO, has_env: true, hdri: [0.0; 4], sun: Some(bake.sun_illuminance) }
         }
         scene::SkyData::Gradient(gr) => {
             static LAST: std::sync::Mutex<Option<(sky::Gradient, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
@@ -1060,10 +1062,15 @@ pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBak
                     b
                 }
             };
-            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: None }
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone().into() }, color: Vec3::ZERO, has_env: true, hdri: [0.0; 4], sun: None }
         }
-        scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, color: *c, has_env: false, sun: None },
-        scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, color: Vec3::ZERO, has_env: false, sun: None },
+        scene::SkyData::Hdri { map, rotation, intensity, sky_light_intensity } => SkyBaked {
+            env: map.clone(), color: Vec3::ZERO, has_env: true,
+            hdri: [scene::panorama_offset(*rotation), intensity * sky_light_intensity, *intensity, 1.0],
+            sun: None,
+        },
+        scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: [[c.x, c.y, c.z, 1.0]].into() }, color: *c, has_env: false, hdri: [0.0; 4], sun: None },
+        scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: [[0.0; 4]].into() }, color: Vec3::ZERO, has_env: false, hdri: [0.0; 4], sun: None },
     }
 }
 
@@ -1073,7 +1080,10 @@ impl SkyBaked {
     pub fn write(&self, p: &mut gpu::Params, floor: f32) {
         p.env = [if self.has_env { 1.0 } else { 0.0 }, self.env.width as f32, self.env.height as f32, p.env[3]];
         p.sky_color = [self.color.x, self.color.y, self.color.z, 0.0];
-        p.counts2[1] = sky_sampled(sky_brightest(&self.env, self.color), floor, self.has_env) as u32;
+        p.hdri = self.hdri;
+        let brightest = sky_brightest(&self.env, self.color);
+        let brightest = if self.hdri[3] > 0.0 { brightest * self.hdri[1] } else { brightest };
+        p.counts2[1] = (brightest > 0.0 && sky_sampled(brightest, floor, self.has_env)) as u32;
     }
 }
 

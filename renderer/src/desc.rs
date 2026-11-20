@@ -137,6 +137,8 @@ pub struct Environment {
     /// three.js `scene.background`: what camera rays that miss see (radiance, linear rgb), lighting nothing.
     #[serde(default)]
     pub background: Option<Vec3>,
+    #[serde(default, rename = "backgroundPanorama")]
+    pub background_panorama: Option<BackgroundPanorama>,
     /// Global surface wetness 0..1 (material functions' `i.wetness`).
     #[serde(default)]
     pub wetness: f32,
@@ -147,6 +149,14 @@ pub struct Environment {
     /// in place.
     #[serde(default, rename = "cloudCover")]
     pub cloud_cover: f32,
+}
+
+/// Equirectangular background radiance for camera rays.
+#[derive(Deserialize, Debug, Clone)]
+pub struct BackgroundPanorama {
+    pub texture: u32,
+    pub intensity: f32,
+    pub rotation: f32,
 }
 
 /// Exponential height fog (UE ExponentialHeightFog): extinction `density * exp(-heightFalloff * (y - height))`.

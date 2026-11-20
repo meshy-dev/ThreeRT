@@ -93,7 +93,7 @@ impl DynamicSky {
                 };
                 let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
                     let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
-                    let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
+                    let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels.into() };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
                     (env, cdf, max)

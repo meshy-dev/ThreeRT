@@ -104,6 +104,7 @@ struct Params {
     env: vec4<f32>,       // has env map, env width, env height, sun light index (-1 none)
     misc: vec4<f32>,      // clamp (absolute radiance), emitter total weight, env total weight, _
     sky_color: vec4<f32>, // constant sky radiance when no env map
+    hdri: vec4<f32>,      // longitude offset in turns, lighting scale, visible scale, enabled
     counts2: vec4<u32>,   // directional lights (first in `lights`), environment NEE on, output height for texture LOD (0 = traced height), first shadowed local light
     time: vec4<f32>,      // scene time (s), wetness, rain, -
     fog: vec4<f32>,       // density at fog height (1/m), height falloff (1/m), fog height, start distance (m)
@@ -120,7 +121,7 @@ struct Params {
     ltree: vec4<f32>,      // light tree (ltree.rs): -, its entry count (bits: the moving emitters' first), P(pick a moving one), candidates at camera hits (0 = off)
     procs: vec4<u32>,      // procedural geometry (F_PROC): -, object count, first record in `instances`, -
     aerial: vec4<f32>,     // the sky's aerial perspective (F_AERIAL): density multiple, Rayleigh scale, Mie scale, -
-    background: vec4<f32>, // three.js scene.background (radiance), 1 (F_BACKGROUND)
+    background: vec4<f32>, // colour (RGB, 1) or panorama (longitude offset, intensity, 0, 2)
     ltile: vec4<u32>,      // live light tiles (`lt_list_start`): 1 with last frame's lists (0: none), tiles a row, the grid's offset when they were built (x | y << 16), candidates a vertex the camera sees takes from its list
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
@@ -148,6 +149,7 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
+@group(0) @binding(20) var background_tex: texture_2d<f32>;
 // The scene's flat arrays, sections of one buffer of 32-bit words (heap.rs `Stream`), each from the word
 // `P.word_first` names: the environment's CDF (floats: [0, H) the rows' marginal CDF, then H rows of W conditional
 // entries; `env_cdf_at`), the procedural data (`pword`, `gdata`), the vertex colours (`vcolor_word`), the instances'
@@ -1774,8 +1776,20 @@ fn env_uv(d: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(u, v);
 }
 
+// The sampler wraps longitude. Clamp to the edge rows so opposite poles do not blend.
+fn panorama_radiance(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let edge = 0.5 / f32(textureDimensions(tex).y);
+    return textureSampleLevel(tex, samp, vec2<f32>(uv.x, clamp(uv.y, edge, 1.0 - edge)), 0.0).rgb;
+}
+
+fn hdri_uv(d: vec3<f32>, offset: f32) -> vec2<f32> {
+    let uv = env_uv(d);
+    return vec2<f32>(fract(uv.x + offset), uv.y);
+}
+
 fn env_radiance(d: vec3<f32>) -> vec3<f32> {
     if (P.env.x < 0.5) { return P.sky_color.rgb; }
+    if (P.hdri.w > 0.0) { return panorama_radiance(env_tex, hdri_uv(d, P.hdri.x)) * P.hdri.y; }
     return textureSampleLevel(env_tex, samp, env_uv(d), 0.0).rgb;
 }
 
@@ -1783,7 +1797,8 @@ fn env_pdf(d: vec3<f32>) -> f32 {
     if (P.env.x < 0.5) { return 1.0 / (4.0 * PI); }
     let w = u32(P.env.y); let h = u32(P.env.z);
     let uv = env_uv(d);
-    let x = min(u32(uv.x * f32(w)), w - 1u);
+    let u = select(uv.x, fract(uv.x + P.hdri.x), P.hdri.w > 0.0);
+    let x = min(u32(u * f32(w)), w - 1u);
     let y = min(u32(uv.y * f32(h)), h - 1u);
     @if(!strict) let row_p = env_cdf_at(y) - select(0.0, env_cdf_at(y - 1u), y > 0u);
     @if(strict) let row_p = env_cdf_at(y) - select(0.0, env_cdf_at(max(y, 1u) - 1u), y > 0u);
@@ -1818,7 +1833,7 @@ fn sample_env(rd: u32) -> vec3<f32> {
     let u = (f32(x) + u4.z) / f32(w);
     let v = (f32(y) + u4.w) / f32(h);
     let theta = v * PI;
-    let phi = (u - 0.5) * 2.0 * PI;
+    let phi = (u - P.hdri.x - 0.5) * 2.0 * PI;
     return vec3<f32>(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
 }
 
@@ -1840,11 +1855,21 @@ fn offset_origin(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return p + n * (1e-4 * max(1.0, max(abs(p.x), max(abs(p.y), abs(p.z)))));
 }
 
-// What a BSDF-sampled ray (solid-angle pdf `pdf`; 0 = the camera ray, no MIS) that left the scene brings back: the
-// environment and the directional lights' disks, MIS-weighted against their sampling in `direct_light`.
-fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
+// What a ray that left the scene brings back. A solid-angle PDF of zero disables MIS.
+// The environment and the directional lights' disks are weighed against their sampling in `direct_light`.
+fn sky_mis(d: vec3<f32>, pdf: f32, camera: bool) -> vec3<f32> {
     // three.js scene.background: what camera rays (and paths bent straight through glass) see where nothing is.
-    if (has(F_BACKGROUND) && pdf <= 0.0) { return P.background.rgb; }
+    if (camera) {
+        if (has(F_BACKGROUND)) {
+            if (P.background.w > 1.0) {
+                return panorama_radiance(background_tex, hdri_uv(d, P.background.x)) * P.background.y;
+            }
+            return P.background.rgb;
+        }
+        if (P.hdri.w > 0.0) {
+            return panorama_radiance(env_tex, hdri_uv(d, P.hdri.x)) * P.hdri.z;
+        }
+    }
     var wgt = 1.0;
     if (pdf > 0.0 && P.counts2.y != 0u) {
         wgt = power_heuristic(pdf, env_pdf(d));
@@ -3345,7 +3370,7 @@ fn cache_train(s0: Surface, d0: vec3<f32>, cone0: vec2<f32>, depth: u32, insert:
             tr *= mh.tr;
         }
         if (miss) {
-            gather[k] = g + tr * sky_mis(l, pdf);
+            gather[k] = g + tr * sky_mis(l, pdf, false);
             break;
         }
         cur_depth = 3u + k;
@@ -3787,7 +3812,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (hit.tri == 0xffffffffu) {
-            var c = thr * sky_mis(d, select(0.0, last_pdf, depth > 0u && !bent));
+            let camera_sky = depth == 0u || (straight && behind_glass);
+            var c = thr * sky_mis(d, select(0.0, last_pdf, depth > 0u && !bent), camera_sky);
             if (depth > 1u && !straight) {
                 let lum = luminance(c);
                 if (lum > clamp_v) { c *= clamp_v / lum; }
