@@ -1253,7 +1253,8 @@ export interface AnimationPose {
    * Local transforms of nodes (joints) by name, over the clip's: 4 numbers, a rotation (quaternion x, y, z, w), or 7,
    * a translation (x, y, z, in the node's parent's space) and then the rotation. A skinned mesh follows its joints
    * (aim, look, procedural steps). Each model posed this way is skinned on its own; set a new object (or change these
-   * numbers and set it again) for a new pose.
+   * numbers and set it again) for a new pose. A model without skins is drawn in parts by the nodes that move: name the
+   * same nodes in every pose (one that names others rebuilds the scene).
    */
   nodes?: Record<string, ArrayLike<number>>;
 }
