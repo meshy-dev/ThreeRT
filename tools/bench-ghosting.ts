@@ -1,23 +1,21 @@
-// Ghosting, trails and recovery of the live viewport (temporal history): Bistro night's street view (Kabukichō's view v1
-// until 2026-11-08: --scene kabukicho; the voxel benchmark level at night, lit by its lamps: --scene voxel-night, ROADMAP
-// § 6 step 4) while the camera turns, strafes and stops. Each shot is compared with a converged frame of the same pose (history reset, then accumulated),
+// Ghosting, trails and recovery of the live viewport (temporal history): Bistro night's street view (the voxel benchmark
+// level at night, lit by its lamps: --scene voxel-night, ROADMAP § 6 step 4) while the camera turns, strafes and stops. Each shot is compared with a converged frame of the same pose (history reset, then accumulated),
 // so whatever the moving camera leaves behind (smeared or doubled reflections, trails, history that never catches up)
 // is measured, not just noise. Scene time is frozen (THREERT_FREEZE_TIME: signs and screens hold still), auto exposure
 // snaps to its target every frame (THREERT_EXPOSURE_SNAP: no adaptation lag, which would otherwise read as error on every
 // bright pixel) and motion blur is off, so frames taken at different times and poses compare.
 //
-//   node tools/bench-ghosting.ts [--scene bistro|kabukicho|voxel-night] [--quick] [--scale 0.5|1|auto] [--repeat n] [--tag name]
-//                                [--bin path] [--check] [--ue out/bench-temporal/refs-ue-strafe] [--mrq-blur]
+//   node tools/bench-ghosting.ts [--scene bistro|voxel-night] [--quick] [--scale 0.5|1|auto] [--repeat n] [--tag name]
+//                                [--bin path] [--check]
 //
 // --quick (the middle loop, ~75 s): the 0.5 dynamic-resolution floor the game runs at, references at that scale from
 // 256 frames, no 2 s shots, every move five times (the checks take the median). Without it: --scale (default auto = dynamic resolution, as played), references at 100 %
 // from 1024 frames.
 //
-// Moves (camera commands at 60 Hz, like a mouse or a stick); Kabukichō's in brackets where Bistro's narrow street
-// differs:
-//   turn:   yaw 20 deg (40 deg to the right) in 0.5 s, hold 0.5 s, back in 0.5 s. A pure rotation: every surface's
+// Moves (camera commands at 60 Hz, like a mouse or a stick):
+//   turn:   yaw 20 deg in 0.5 s, hold 0.5 s, back in 0.5 s. A pure rotation: every surface's
 //           history reprojects exactly, so what is left is the history's own blur, lag or doubling;
-//   strafe: 2.5 m to the left (3 m to the right) in 0.4 s, hold, back (parallax, disocclusion, reflections moving
+//   strafe: 2.5 m to the left in 0.4 s, hold, back (parallax, disocclusion, reflections moving
 //           against their surface);
 //   stop:   8 m/s forward for 0.5 s, then still (what the history drags into the first frames after a sudden stop);
 //   orbit:  the play window's left drag (view.rs `Orbit`: about a point ahead of the camera as far as the camera is
@@ -29,10 +27,6 @@
 // the facades): mean dE, p95, p99, trail_px (p95 over rows of the longest horizontal run of pixels off by dE > 10) and
 // the excess of mean dE / p95 over the settled frame at the start pose (the live noise floor).
 // --check fails when a guarded value exceeds its limit (docs/ROADMAP.md § 2c).
-// --ue DIR: UE 5.8's own strafe (MOVE=strafe bun ue5/temporal.ts: the same moves at 60 fps, MRQ with 1 temporal sample
-// per frame) next to ours, per shot and region: each renderer's moving frame against its own converged frame of the
-// pose, which cancels the port's differences from the UE level. --mrq-blur: ours with the motion blur MRQ renders
-// (amount 0.5, max 5 %, target 60 fps; see bench-temporal.ts), for the refs-ue-strafe-mb references.
 import { spawn, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
@@ -65,7 +59,7 @@ type V3 = [number, number, number];
 type Limit = { shot: string; region: string; mean: number; p95: number; trail: number };
 /** A view: its camera (position, look direction's yaw in the xz plane and pitch as y of the unit direction), the moves'
  *  sizes, regions ([u0, v0, u1, v1], v down) and --quick limits. */
-interface View { bundle: string; p0: V3; yaw0: number; dirY: number; tan: number; turn: number; strafe: number; regions: Record<string, string>; limits: Limit[]; rainOff: boolean }
+interface View { bundle: string; p0: V3; yaw0: number; dirY: number; tan: number; turn: number; strafe: number; regions: Record<string, string>; limits: Limit[] }
 const SCENES: Record<string, View> = {
   // Bistro's street from its FBX camera (scenes/bistro.ts STREET); limits in BISTRO_LIMITS.
   bistro: (() => {
@@ -74,29 +68,9 @@ const SCENES: Record<string, View> = {
     return {
       bundle: "out/bundles/bistro.js", p0, yaw0: Math.atan2(d[2], d[0]), dirY: d[1] / n, tan: Math.tan((33.97 * Math.PI) / 360), turn: 20, strafe: -2.5,
       regions: { ground: "0.156,0.667,0.859,1", shop: "0.258,0.167,0.508,0.611", facades: "0,0.083,0.258,0.556" },
-      limits: BISTRO_LIMITS, rainOff: false,
+      limits: BISTRO_LIMITS,
     };
   })(),
-  kabukicho: {
-    bundle: "out/bundles/kabukicho.js", p0: [-11.5, 1.7, -1.8], yaw0: Math.atan2(0.07, 0.995), dirY: 0.07, tan: Math.tan((55 * Math.PI) / 360), turn: 40, strafe: 3,
-    regions: { ground: "0,0.62,1,1", signs: "0.2,0,0.8,0.45", facades: "0,0.1,0.25,0.62" },
-    // Set from the renderer of 2026-11-06 with ~0.3 dE of margin (runs repeat to ~0.1); the shots the translation clamp
-    // improved are set below the old renderer's values, so it fails them.
-    // The two return shots' mean and p95 were set again on 2026-11-12 (the frame at render resolution with one
-    // upscaler, ROADMAP § 1a): two runs read 1.25 / 5.11-5.15 / 22 px and 1.30 / 5.12-5.13 / 23 px, set with 0.3 dE and
-    // 1.35 p95 of margin (what the old limits, 1.3 / 4.2 and 1.35 / 4.5, stood over the old renderer's 0.83 / 2.84 and
-    // 0.97 / 3.35). An excess is the shot's error less the settled frame's, and the settled frame got cleaner (all
-    // regions: dE 1.83 -> 1.09, p95 7.9 -> 4.2), which raises the excess of shots whose own error fell (dE 2.66 -> 2.34
-    // and 2.80 -> 2.39, p95 10.8 -> 9.3 and 11.3 -> 9.3). The trails' limits and the other shots' stand.
-    limits: [
-      { shot: "turn-mid", region: "ground", mean: 3.2, p95: 12.5, trail: 80 },
-      { shot: "strafe-mid", region: "ground", mean: 4.1, p95: 17.5, trail: 75 },
-      { shot: "turn-return+0.5s", region: "all", mean: 1.55, p95: 6.5, trail: 30 },
-      { shot: "strafe-return+0.5s", region: "all", mean: 1.6, p95: 6.5, trail: 28 },
-      { shot: "stop+0.1s", region: "ground", mean: 2.95, p95: 11.2, trail: 35 },
-    ],
-    rainOff: true,
-  },
   // The voxel level at night (games/voxel-level/level-night.game.ts), shot 0: down the first road past a lamp. Judged
   // against Bistro's limits (the bench's), the step's acceptance (ROADMAP § 6 step 4).
   "voxel-night": (() => {
@@ -105,7 +79,7 @@ const SCENES: Record<string, View> = {
     return {
       bundle: "out/bundles/voxel-level-night.js", p0: k.pos, yaw0: Math.atan2(d[2], d[0]), dirY: d[1] / n, tan: Math.tan((55 * Math.PI) / 360), turn: 20, strafe: -2.5,
       regions: { ground: "0,0.62,1,1", lamp: "0.2,0.2,0.55,0.62", facades: "0.35,0,0.9,0.5" },
-      limits: BISTRO_LIMITS, rainOff: false,
+      limits: BISTRO_LIMITS,
     };
   })(),
 };
@@ -119,11 +93,10 @@ const bundle = resolve(flag("--bundle", join(root, view.bundle)));
 const scale = quick ? "0.5" : flag("--scale", "auto");
 const refScale = quick ? "0.5" : "1";
 const refFrames = quick ? 256 : 1024;
-const out = resolve(join(root, "out/bench-ghosting", sceneName === "kabukicho" ? "" : sceneName, flag("--tag", quick ? "quick" : `run-${scale}`)));
+const out = resolve(join(root, "out/bench-ghosting", sceneName, flag("--tag", quick ? "quick" : `run-${scale}`)));
 // --with-motion-blur: the game's own motion blur stays on (as played), to see how much of a trail is the blur.
-const blur = args.includes("--mrq-blur") ? { THREERT_MOTION_BLUR: "0.5,5,60" } : args.includes("--with-motion-blur") ? {} : { THREERT_MOTION_BLUR: "0,5,30" };
+const blur = args.includes("--with-motion-blur") ? {} : { THREERT_MOTION_BLUR: "0,5,30" };
 const env = { ...process.env, THREERT_FREEZE_TIME: "1", THREERT_EXPOSURE_SNAP: "1", ...blur };
-const ueDir = args.includes("--ue") ? resolve(flag("--ue", "")) : null;
 const switches = Object.entries(process.env).filter(([k]) => k.startsWith("THREERT_") && !["THREERT_BIN", "THREERT_MOTION_BLUR", "THREERT_FREEZE_TIME", "THREERT_EXPOSURE_SNAP"].includes(k)).sort();
 const key = createHash("sha256").update(rendererVersion(bin)).update(readFileSync(bundle)).update(JSON.stringify(switches)).update(`${refScale}/${refFrames}`).digest("hex").slice(0, 12);
 const refs = join(root, "out/bench-ghosting/refs", key);
@@ -135,11 +108,10 @@ mkdirSync(refs, { recursive: true });
 const REGIONS = view.regions;
 const LIMITS = view.limits;
 
-/** The view turned `yaw` degrees (positive: to the right of +y-up, as Kabukichō's v1 turns), moved `side` metres to its
+/** The view turned `yaw` degrees (positive: to the right of +y-up), moved `side` metres to its
  *  right and `fwd` metres forward. */
 function pose(yaw: number, side = 0, fwd = 0) {
-  // Kabukichō's v1 direction was (cos a, 0.07, sin a), unnormalized: kept as it was (its references and limits).
-  const h = sceneName === "kabukicho" ? 1 : Math.sqrt(1 - view.dirY * view.dirY);
+  const h = Math.sqrt(1 - view.dirY * view.dirY);
   const a = view.yaw0 - (yaw * Math.PI) / 180;
   const right: V3 = [-Math.sin(view.yaw0), 0, Math.cos(view.yaw0)];
   const ahead: V3 = [Math.cos(view.yaw0), 0, Math.sin(view.yaw0)];
@@ -198,7 +170,6 @@ async function start(s: string) {
   const live = new Live(s);
   await live.wait((l) => l.includes("fps on"));
   live.send({ cmd: "lockstep", dt: 1 / 60 });
-  if (view.rainOff) live.send({ cmd: "event", type: "rain" }); // Kabukichō: rain off, no ripples (the street stays wet)
   await live.frames(150);
   return live;
 }
@@ -293,24 +264,8 @@ for (const l of quick ? LIMITS : []) {
   const spread = repeats > 1 ? `, median of ${repeats} [${all.mean.join(" ")} | ${all.trail.join(" ")} px]` : "";
   console.log(`${bad ? "FAIL" : "ok  "} ${l.shot} ${l.region}: excess ${v.mean} (≤ ${l.mean}), p95 excess ${v.p95} (≤ ${l.p95}), trail ${v.trail} px (≤ ${l.trail})${spread}`);
 }
-// UE's strafe: its moving frames against its own settled frame of the same pose (settled-strafe-mid, start).
-const ueRows: Record<string, string | number>[] = [];
-if (ueDir) {
-  const ueSettled: Record<string, string> = { "strafe-mid": "settled-strafe-mid", "strafe-return+0.1s": "start", "strafe-return+0.5s": "start", "strafe-return+2s": "start" };
-  for (const [shot, settled] of Object.entries(ueSettled)) {
-    if (!per[`${shot}/all`] || !existsSync(join(ueDir, `${shot}.png`))) continue;
-    for (const [r, g] of Object.entries(regions)) {
-      const u: M = JSON.parse(execFileSync(bin, ["compare", join(ueDir, `${settled}.png`), join(ueDir, `${shot}.png`), ...(g ? ["--region", g] : [])]).toString().trim().split("\n").pop()!);
-      const ours = rows.filter((x) => String(x.shot).replace(/@\d+$/, "") === shot && x.region === r).map((x) => Number(x.dE));
-      const v = value[`${shot}/${r}`];
-      ueRows.push({ shot, region: r, ours_dE: median(ours), ours_excess: v.mean, ue_dE: u.mean_delta_e, ours_trail: v.trail, ue_trail: u.trail_px, ue_p95: u.p95_delta_e });
-    }
-  }
-  console.log(`UE ${ueDir} (each renderer against its own converged frame)${args.includes("--mrq-blur") ? ", ours with MRQ's motion blur" : ""}:`);
-  console.table(ueRows);
-}
-writeFileSync(join(out, "metrics.json"), JSON.stringify({ scale, refScale, refFrames, floor, rows, ue: ueDir ? { dir: ueDir, rows: ueRows } : undefined }, null, 1));
-const tag = (sceneName === "kabukicho" ? "" : `${sceneName}-`) + (quick ? "ghosting-quick" : `ghosting-${scale}`);
+writeFileSync(join(out, "metrics.json"), JSON.stringify({ scale, refScale, refFrames, floor, rows }, null, 1));
+const tag = `${sceneName}-` + (quick ? "ghosting-quick" : `ghosting-${scale}`);
 summary(`${tag} turn-mid ground excess`, value["turn-mid/ground"].mean, { unit: " dE" });
 summary(`${tag} turn-mid ground trail`, value["turn-mid/ground"].trail, { unit: " px", digits: 0 });
 summary(`${tag} strafe-return+0.5s excess`, value["strafe-return+0.5s/all"].mean, { unit: " dE" });

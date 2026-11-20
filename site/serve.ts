@@ -58,7 +58,7 @@ Bun.serve({
     }
     if (!isFile(file)) return new Response("not found", { status: 404 });
     const headers: Record<string, string> = { "cache-control": "no-cache", "content-type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream" };
-    // Packages are fetched by native clients and by pages on other origins (a playground, a game's own site).
+    // Packages are fetched by native clients and by pages on other origins (a game's own site).
     if (rel.startsWith("play/")) headers["access-control-allow-origin"] = "*";
     // The clients' files are downloads, as the Worker serves them.
     const client = clientFile(`/${rel}`);

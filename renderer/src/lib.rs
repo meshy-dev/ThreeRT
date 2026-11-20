@@ -1,5 +1,5 @@
 //! threert-render as a library: scene loading, the GPU path tracer, the real-time LiveCore (used by the
-//! `threert-render` CLI and by the native playground client).
+//! `threert-render` CLI and by the native clients).
 
 pub mod api;
 #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]

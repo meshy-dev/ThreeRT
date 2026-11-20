@@ -1,7 +1,7 @@
 // Bundles every catalog entry (the reference scenes in scenes/*.ts and the games) for the renderer:
 // out/bundles/<id>.js, run with `threert-render play | live | render <bundle> --assets <repo root>`.
 //
-//   node tools/build-scenes.ts [cornell-box kabukicho ...]
+//   node tools/build-scenes.ts [cornell-box bistro ...]
 import { join } from "node:path";
 import { bundleGame, repoRoot } from "./bundle-game.ts";
 import { bundlesDir, sources } from "./catalog.ts";

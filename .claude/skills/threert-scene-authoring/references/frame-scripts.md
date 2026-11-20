@@ -13,7 +13,8 @@ A game has two kinds of logic. Put each behaviour on the right side.
 Handlers never touch the scene: the world is the state. The scene is a function of it, computed by `frame` on every
 node that renders the room.
 
-Pattern (the UE Kabukichō Director, `games/kabukicho/kabukicho.game.ts`):
+Pattern (what a UE "Director" actor does in its Tick; `showcase/daylight-home/daylight-home.game.ts` eases its sun
+and camera this way):
 
 - The handler commits a **target** in the state:
   ```ts
@@ -24,6 +25,8 @@ Pattern (the UE Kabukichō Director, `games/kabukicho/kabukicho.game.ts`):
 - The frame script eases toward it, and shows it settled when `f.snap` (after setup or a replaced state, e.g. a
   render of a room's state):
   ```ts
+  // UE's FInterpConstantTo: move toward `to` at `speed` per second, without overshooting.
+  const constTo = (x: number, to: number, dt: number, speed: number) => x + Math.sign(to - x) * Math.min(Math.abs(to - x), speed * dt);
   frame(f) {
     cur = f.snap ? f.state.rain : constTo(cur, f.state.rain, f.dt, 0.6);
     f.scene.rain = cur;
@@ -39,7 +42,7 @@ Cost on the renderer (objects report their own changes, so untouched objects cos
   `roughness` / …, material-function parameters (`material.shader.params`, `needsUpdate`), `scene.wetness` / `rain`,
   fog density / extinction, the camera. These rewrite GPU table entries in place.
 - **Expensive, avoid per frame on big scenes:** `position` / `quaternion` / `scale` / `visible`, adding or removing
-  objects. These rebuild the GPU scene (about 0.7 s for Kabukichō; milliseconds for small rooms).
+  objects. These rebuild the GPU scene (about 0.7 s for a 4 M-triangle street; milliseconds for small rooms).
 
 Run and measure:
 

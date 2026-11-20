@@ -2,7 +2,7 @@
 parameters, lights, fog, sky light, post-process overrides and markers. Used to port UE scenes to the ThreeRT IR and to
 check a port actor by actor.
 
-    THREERT_DUMP='{"map": "/Game/Kabukicho/Maps/L_Kabukicho", "out": "/abs/path/level.json"}' \
+    THREERT_DUMP='{"map": "/Game/MyProject/Maps/L_Street", "out": "/abs/path/level.json"}' \
       UnrealEditor <project>.uproject -ExecCmds="py ue5/scripts/ue_dump_level.py" -unattended -nosplash -NoSound
 """
 import json

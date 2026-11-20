@@ -49,7 +49,7 @@ export interface GameDefinition<S = JsonObject> {
    * handler, a world handler, or both (the world handler first).
    */
   on?: Record<string, WorldHandler<S>>;
-  /** Keyboard shortcuts of the native viewer and the playground: key ("R", "Space") -> handler or world handler. */
+  /** Keyboard shortcuts of the native viewer and the clients: key ("R", "Space") -> handler or world handler. */
   keys?: Record<string, string>;
   /**
    * The game reads input every frame (`f.input`, `world.input`; input.ts) and its camera is its own: the app that

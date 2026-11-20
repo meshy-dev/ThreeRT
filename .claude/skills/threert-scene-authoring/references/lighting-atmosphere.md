@@ -1,6 +1,6 @@
 # Lighting, atmosphere, post
 
-## Night street recipe (Kabukichō-like)
+## Night street recipe (neon, rain, a narrow shopping street)
 
 | Element | Setting |
 |---|---|

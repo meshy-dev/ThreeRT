@@ -1,5 +1,5 @@
-// The C slice of docs/ROADMAP.md § 3 on Bistro night (§ 0 step 9; the Kabukichō version, games/slice, stays as
-// history): one fixed 60 s shot down Bistro's street with what item 6 of § 5 brought.
+// The C slice of docs/ROADMAP.md § 3 on Bistro night (§ 0 step 9): one fixed 60 s shot down Bistro's street with
+// what item 6 of § 5 brought.
 //   0 s   wet street, no rain falling; people walk, potted plants sway, Bistro's lanterns and string lights swing (its
 //         FBX take, played through the rigid-node path)
 //   15 s  the rain starts

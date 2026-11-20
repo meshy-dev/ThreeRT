@@ -11,8 +11,7 @@
 // `report` = compare with UE, tables, montages. `--calibrate-sky` re-derives sky.ts SKY_NITS_PER_LUX.
 // Outputs: out/three/<view>.png (three.js, ACES + vignette; -probe / -agx / -neutral / -novignette variants),
 // out/three/ours/*, out/bench/three.{json,md}, montages out/bench/three/<view>.jpg (three.js | ThreeRT live @16 |
-// ThreeRT offline | UE). Kabukichō is benchmarked at UE view v1 (out/ue-kb); its game-camera three.js render
-// (out/three/kabukicho.png) is the playground's reference.
+// ThreeRT offline | UE).
 import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
@@ -35,21 +34,13 @@ const assets = resolve(arg("--assets", root));
 const outThree = join(root, "out/three"), outOurs = join(root, "out/three/ours"), outBench = join(root, "out/bench");
 for (const d of [outThree, outOurs, join(outBench, "three")]) mkdirSync(d, { recursive: true });
 
-/** Kabukichō is measured against the UE ground truth of the actual UE level (out/ue-kb), camera view v1. */
-const UE_KB_V1 = { loc: [-1150, -180, 170], rot: [4, 4, 0], fov: 55 };
-function ueView(loc: number[], rot: number[], fov: number) {
-  // tools/kabukicho/views.py: UE location (cm, Z up) + rotator (pitch, yaw) -> our eye + look-at target (m, Y up)
-  const p = (rot[0] * Math.PI) / 180, y = (rot[1] * Math.PI) / 180;
-  const fwd = [Math.cos(p) * Math.cos(y), Math.cos(p) * Math.sin(y), Math.sin(p)];
-  const pos: [number, number, number] = [loc[0] / 100, loc[2] / 100, loc[1] / 100];
-  return { position: pos, target: [pos[0] + fwd[0], pos[1] + fwd[2], pos[2] + fwd[1]] as [number, number, number], fov };
-}
-/** Views per catalog id: the scene's own camera, plus v1 for Kabukichō. */
-const VIEWS: Record<string, { view: string; camera?: ReturnType<typeof ueView>; refs: { pt: string | null; lumen: string | null } }[]> = {};
+/** A view's camera when it is not the scene's own: eye, look-at target (m, Y up) and vertical fov (degrees). */
+type Camera = { position: [number, number, number]; target: [number, number, number]; fov: number };
+/** Views per catalog id: the scene's own camera. */
+const VIEWS: Record<string, { view: string; camera?: Camera; refs: { pt: string | null; lumen: string | null } }[]> = {};
 for (const id of ids) {
   const ref = (m: string) => (existsSync(join(root, "out/ue", m, `${id}.png`)) ? join(root, "out/ue", m, `${id}.png`) : null);
   VIEWS[id] = [{ view: id, refs: { pt: ref("pathtracer"), lumen: ref("lumen") } }];
-  if (id === "kabukicho") VIEWS[id].push({ view: "kabukicho-v1", camera: ueView(UE_KB_V1.loc, UE_KB_V1.rot, UE_KB_V1.fov), refs: { pt: null, lumen: join(root, "out/ue-kb/lumen-auto/v1.png") } });
 }
 
 const compare = (ref: string | null, img: string) => (ref && existsSync(ref) && existsSync(img) ? JSON.parse(execFileSync(bin, ["compare", ref, img]).toString()) : null);
@@ -75,7 +66,7 @@ async function runOurs(id: string) {
   writeFileSync(join(outOurs, "ours.json"), JSON.stringify(res, null, 1));
 }
 
-async function runLive(bundle: string, view: string, w: number, h: number, camera?: ReturnType<typeof ueView>) {
+async function runLive(bundle: string, view: string, w: number, h: number, camera?: Camera) {
   const p = spawn(bin, ["live", bundle, "--assets", assets, "--width", String(w), "--height", String(h), "--fps", "60", "--scale", liveScale], { stdio: ["pipe", "ignore", "pipe"] });
   const send = (c: object) => p.stdin.write(JSON.stringify(c) + "\n");
   const got: Record<number, { spp: number; gpu_ms: number; scale: number }> = {};
@@ -218,8 +209,6 @@ function report() {
     for (const v of VIEWS[id]) {
       const t = three[v.view], o = ours[v.view];
       if (!t?.ok) continue;
-      const kb = v.view === "kabukicho-v1";
-      if (id === "kabukicho" && !kb) continue; // the game camera has no ground truth: only v1 is benchmarked
       const row = (renderer: string, img: string, extra: Record<string, unknown> = {}) => {
         if (!existsSync(img)) return null;
         const r = { scene: v.view, renderer, image: img.replace(root + "/", ""), vs_pt: compare(v.refs.pt, img), vs_lumen: compare(v.refs.lumen, img), ...extra };
@@ -256,13 +245,12 @@ function report() {
   const ms = (r: any) => (r.frame_ms !== undefined ? `${r.frame_ms}${r.render_scale !== undefined ? ` (scale ${r.render_scale})` : r.frame_ms_no_shadows !== undefined ? ` (${r.frame_ms_no_shadows} w/o shadows)` : ""}` : r.time_ms !== undefined && Number.isFinite(r.time_ms) ? `${(r.time_ms / 1000).toFixed(1)} s` : "–");
   const md: string[] = [
     `three.js r187 WebGLRenderer on ${any3?.webgl ?? "?"} (headless Chrome), ThreeRT native renderer on the same machine. Metrics: mean ΔE76 / SSIM / PSNR dB (1280x720; light-room 960x540).`,
-    "Kabukichō: camera view v1 against the UE ground truth of the actual UE level (UE Lumen, auto exposure; three.js uses the EV100 ThreeRT settled on).",
     "",
     "| scene | renderer | vs UE Path Tracer (ΔE / SSIM / PSNR) | vs UE Lumen (ΔE / SSIM) | frame ms (or time) |",
     "|---|---|---|---|---:|",
     ...rows.filter((r) => !r.tonemap_variant).map((r) => `| ${r.scene} | ${r.renderer} | ${f2(r.vs_pt)} | ${f1(r.vs_lumen)} | ${ms(r)} |`),
     "",
-    "three.js post variants (vs UE Path Tracer, or UE Lumen for Kabukichō; ΔE / SSIM):",
+    "three.js post variants (vs UE Path Tracer, or UE Lumen where there is no path-traced reference; ΔE / SSIM):",
     "",
     "| scene | ACES | AgX | Neutral | ACES without the vignette |",
     "|---|---|---|---|---|",

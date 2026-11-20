@@ -5,7 +5,7 @@
 //! The rays are made once from the flattened scene and kept (`/tmp/units-cost`), with its answers: every layout must
 //! give them again.
 //!
-//!   UNITS_COST=out/bundles/kabukicho.js cargo test --release --lib units_cost -- --ignored --nocapture
+//!   UNITS_COST=out/bundles/bistro.js cargo test --release --lib units_cost -- --ignored --nocapture
 //!
 //! `UNITS_COST_FLAT=1`: the flattened scene's counts too (it is built anyway when the rays are not there yet).
 //! `UNITS_COST_VIEW=WxH` (192x108). `UNITS_COST_ASSETS` (`.`).

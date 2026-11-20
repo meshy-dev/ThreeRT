@@ -1,5 +1,5 @@
 {
- "at": "2026-11-13T00:46:52.456Z",
+ "at": "2026-11-19T19:52:15.022Z",
  "wide": {
   "width": 1920,
   "height": 1080,
@@ -22,14 +22,17 @@
     }
    },
    {
-    "id": "os-assault",
-    "what": "OpenStrike, path traced: a bot's match on cs_assault (frames 2170 to 2679 of a 75 s recording)",
-    "width": 960,
-    "height": 540,
-    "scale": 0.8,
-    "machine": null,
-    "commit": null,
-    "gpu_ms": null
+    "id": "openstrike",
+    "what": "OpenStrike on Foundry, its own map: first person in the hall's sun shafts, a firefight with bots",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
+    "machine": "Apple M3 Max",
+    "commit": "e9ca434",
+    "gpu_ms": {
+     "p50": 11.25,
+     "p95": 11.65
+    }
    },
    {
     "id": "tokyo",
@@ -45,16 +48,16 @@
     }
    },
    {
-    "id": "kabukicho",
-    "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
+    "id": "zero-day",
+    "what": "Beeple's Zero-Day (Measure One), animated: the room lit only by its ~10,000 glowing strips, the camera on the opening of its own move",
     "width": 1280,
     "height": 720,
-    "scale": 0.5,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 8.1,
-     "p95": 8.32
+     "p50": 14.17,
+     "p95": 15.13
     }
    },
    {
@@ -84,14 +87,17 @@
     }
    },
    {
-    "id": "os-inferno",
-    "what": "OpenStrike, path traced: a bot's match on de_inferno (frames 2485 to 2994 of a 75 s recording)",
-    "width": 960,
-    "height": 540,
-    "scale": 0.8,
-    "machine": null,
-    "commit": null,
-    "gpu_ms": null
+    "id": "cascade",
+    "what": "Four hundred balls, a third of them glowing, poured down a polished staircase: each lights the steps it lands on",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
+    "machine": "Apple M3 Max",
+    "commit": "86855fd",
+    "gpu_ms": {
+     "p50": 6.16,
+     "p95": 6.48
+    }
    },
    {
     "id": "museum",
@@ -108,15 +114,15 @@
    },
    {
     "id": "voxels",
-    "what": "The voxel level under explosions, each with its fireball and light: what is cut loose falls",
+    "what": "The voxel city demolished: a street of buildings brought down one after another, every piece a rigid body, the dust thrown out as GPU particles",
     "width": 1280,
     "height": 720,
     "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 8.33,
-     "p95": 9.06
+     "p50": 8.31,
+     "p95": 8.69
     }
    },
    {
@@ -133,27 +139,30 @@
     }
    },
    {
-    "id": "showroom",
-    "what": "Boutique Showroom in the evening: walking to the sneaker, then the sunglasses",
+    "id": "wreck",
+    "what": "A wrecking ball through a round tower of bricks at last light, a quarter of them glowing: they light the floor as they fall",
     "width": 1280,
     "height": 720,
     "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 9.65,
-     "p95": 13.48
+     "p50": 5.24,
+     "p95": 6.01
     }
    },
    {
-    "id": "os-dust2",
-    "what": "OpenStrike, path traced: a bot's match on de_dust2 (frames 60 to 569 of a 75 s recording)",
-    "width": 960,
-    "height": 540,
-    "scale": 0.8,
-    "machine": null,
-    "commit": null,
-    "gpu_ms": null
+    "id": "lanterns",
+    "what": "Four hundred lanterns in a dark hall over a polished floor: every one lights and shadows",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
+    "machine": "Apple M3 Max",
+    "commit": "86855fd",
+    "gpu_ms": {
+     "p50": 8.61,
+     "p95": 8.96
+    }
    }
   ]
  },
@@ -166,27 +175,30 @@
   "seconds": 8,
   "clips": [
    {
-    "id": "kabukicho",
-    "what": "Kabukicho Ichiban-gai at night in the rain: about 300 signs and their lights, a taxi",
+    "id": "zero-day",
+    "what": "Beeple's Zero-Day (Measure One), animated: the room lit only by its ~10,000 glowing strips, the camera on the opening of its own move",
     "width": 1280,
     "height": 720,
-    "scale": 0.5,
+    "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 8.1,
-     "p95": 8.32
+     "p50": 14.17,
+     "p95": 15.13
     }
    },
    {
-    "id": "os-assault",
-    "what": "OpenStrike, path traced: a bot's match on cs_assault (frames 2170 to 2679 of a 75 s recording)",
-    "width": 960,
-    "height": 540,
-    "scale": 0.8,
-    "machine": null,
-    "commit": null,
-    "gpu_ms": null
+    "id": "openstrike",
+    "what": "OpenStrike on Foundry, its own map: first person in the hall's sun shafts, a firefight with bots",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
+    "machine": "Apple M3 Max",
+    "commit": "e9ca434",
+    "gpu_ms": {
+     "p50": 11.25,
+     "p95": 11.65
+    }
    },
    {
     "id": "home",
@@ -202,16 +214,16 @@
     }
    },
    {
-    "id": "jewellery",
-    "what": "Jeweller's Window: the display turning under the soft boxes",
+    "id": "cascade",
+    "what": "Four hundred balls, a third of them glowing, poured down a polished staircase: each lights the steps it lands on",
     "width": 1280,
     "height": 720,
     "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 9,
-     "p95": 9.39
+     "p50": 6.16,
+     "p95": 6.48
     }
    },
    {
@@ -228,14 +240,17 @@
     }
    },
    {
-    "id": "os-inferno",
-    "what": "OpenStrike, path traced: a bot's match on de_inferno (frames 2485 to 2994 of a 75 s recording)",
-    "width": 960,
-    "height": 540,
-    "scale": 0.8,
-    "machine": null,
-    "commit": null,
-    "gpu_ms": null
+    "id": "wreck",
+    "what": "A wrecking ball through a round tower of bricks at last light, a quarter of them glowing: they light the floor as they fall",
+    "width": 1280,
+    "height": 720,
+    "scale": 0.75,
+    "machine": "Apple M3 Max",
+    "commit": "86855fd",
+    "gpu_ms": {
+     "p50": 5.24,
+     "p95": 6.01
+    }
    },
    {
     "id": "museum",
@@ -251,16 +266,16 @@
     }
    },
    {
-    "id": "colour",
-    "what": "Colour Lab: the three lamps switched one by one",
+    "id": "voxels",
+    "what": "The voxel city demolished: a street of buildings brought down one after another, every piece a rigid body, the dust thrown out as GPU particles",
     "width": 1280,
     "height": 720,
     "scale": 0.75,
     "machine": "Apple M3 Max",
-    "commit": "2d4e88a",
+    "commit": "86855fd",
     "gpu_ms": {
-     "p50": 9.36,
-     "p95": 9.9
+     "p50": 8.31,
+     "p95": 8.69
     }
    }
   ]

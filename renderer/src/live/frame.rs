@@ -269,7 +269,7 @@ impl LiveCore {
         // A camera cut (a jump no camera makes in one frame: 2 m or 30 degrees) is not motion: no blur (UE: bCameraCut).
         let cut = (self.cam.pos - self.prev_cam.pos).length() > 2.0 || self.cam.fwd.dot(self.prev_cam.fwd) < 0.866;
         // (Objects moved this frame: re-posed triangles or moved instances, e.g. walkers in a shared pose.)
-        let blur = !self.motion_blur_off && self.blur.0 > 0.0 && (moved || self.reposed || self.pose_reposed || self.inst_moved) && !cut;
+        let blur = self.blur.0 > 0.0 && (moved || self.reposed || self.pose_reposed || self.inst_moved) && !cut;
         // Camera motion is reprojected exactly (disocclusions are rejected per pixel), so history survives motion;
         // the cap only bounds smearing of view-dependent shading (glossy reflections).
         // Diffuse lighting reprojects exactly with the camera; view-dependent specular is handled per pixel (temporal pass).

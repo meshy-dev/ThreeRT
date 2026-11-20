@@ -71,7 +71,8 @@ macOS · iPhone · Steam Deck · Android"). One filled button a row; three equal
 the clients do not get buttons here.
 
 1. **Hero:** a reel behind the headline: a grid of short clips of this repository's demos (Bistro with a crowd,
-   Tokyo at dusk, Kabukichō, the voxel level, the showcase cases) and of OpenStrike, all ThreeRT live, ray traced,
+   Tokyo at dusk, Zero-Day, the voxel city demolished, the showreel's light-and-physics scenes, the showcase cases)
+   and of OpenStrike on its own map, all ThreeRT live, ray traced,
    nothing compared (`media/reel/`: 4 x 3 clips for a wide screen, 2 x 4 for a phone held upright; 60 fps, an 8 s
    loop). Nothing in it takes a touch, so a finger scrolling the page passes over it. Its first frame is what shows
    until it plays, and where it does not: reduced motion, a data saver, autoplay refused. A button pauses it.
@@ -239,7 +240,7 @@ bun site/tools/device-stills.ts    # the 3D device rows -> site/media/devices (h
 
 The landing page's reel is recorded on the machine at hand, a clip a demo (`node tools/site-reel.ts` lists them and
 what each needs: Bistro and the Quaternius mannequin, the Tokyo tiles, `tools/voxel-level/generate.ts` at mesh,
-region and object granularity, the Kabukichō assets), then laid out and encoded:
+region and object granularity, Zero-Day), then laid out and encoded:
 
 ```bash
 node tools/site-reel.ts <clip> --probe   # one frame a second, to compose a clip
@@ -247,14 +248,11 @@ node tools/site-reel.ts all              # every clip, 8.5 s at 1280 x 720 (rend
 bun site/tools/reel.ts                   # out/site-reel -> site/media/reel/reel*.mp4, reel*.webp, reel.json
 ```
 
-The three OpenStrike clips (`os-assault`, `os-inferno`, `os-dust2`) come from OpenStrike's own repository (the game
-is not in this one; its maps are Counter-Strike's, brought by whoever builds it): its headless Mac host with
-`tools/site-reel/openstrike-record.patch` applied saves every frame of a bot's match in lockstep
-(`OPENSTRIKE_RECORD=<dir> OPENSTRIKE_RECORD_FRAMES=4500 OPENSTRIKE_SCALE=0.8 openstrike-mac --headless --play
---autopilot --squad 6 --skill 2 --map <map> --size 960x540`); 510 consecutive frames of each (the stretch with the
-most shooting; for de_dust2 the opening run) go to `out/site-reel/os-<map>/` with a `meta.json` like the others'.
-The committed ones are still the 2026-11-12 recordings (OpenStrike's renderer before #30): on 2d4e88a the same
-match at 1280 x 720, scale 0.6, boiled in large blotches on the walls and the ground at every muzzle flash and blast.
+The OpenStrike clip (`openstrike`) comes from OpenStrike's own repository
+([pocket-nexus/openstrike](https://github.com/pocket-nexus/openstrike); the game is not in this one): first person in
+practice mode on its own map, Foundry, recorded in lockstep (a local recorder built on that repository's
+`tools/shots.ts`, not committed there), 510 frames to `out/site-reel/openstrike/` with a
+`meta.json` like the others'. It was recorded on 2026-11-20 at OpenStrike e9ca434.
 
 The Bistro comparison clip (the landing page's camera move) is recorded apart (it needs Bistro in the asset store: `bun scripts/orca.ts
 bistro`, and ffmpeg):

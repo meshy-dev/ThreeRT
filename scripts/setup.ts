@@ -2,7 +2,7 @@
 //
 //   bun scripts/setup.ts [--no-fetch] [--store DIR]
 //
-// Assets (Poly Haven textures, generated Kabukichō textures, Khronos / Quaternius models; ~0.7 GB, not committed) live
+// Assets (Poly Haven textures and models, Khronos / Quaternius models, the ORCA scenes; not committed) live
 // once per machine in a store next to the main clone, `<main clone>/../threert-assets` (THREERT_ASSET_STORE or --store to
 // put it elsewhere). Each checkout's `assets/` is a relative symlink to it, so scenes keep referencing repo-relative
 // `assets/...` paths and every worktree sees the same files. Nothing is deleted: files from the old layout (a real
@@ -78,8 +78,7 @@ for (const wt of worktrees) {
 
 if (args.includes("--no-fetch")) process.exit(0);
 
-// Fetchers (each skips what exists). Kabukichō's generated textures need python3; Quaternius needs Google Chrome; the
-// ORCA scenes need Blender.
+// Fetchers (each skips what exists). Quaternius needs Google Chrome; the ORCA scenes need Blender.
 const a = (p: string) => join(root, "assets", p);
 const helmet = a("DamagedHelmet.glb");
 if (!existsSync(helmet)) {
@@ -87,8 +86,6 @@ if (!existsSync(helmet)) {
   await $`curl -fL -C - --retry 5 -o ${helmet} https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb`;
 }
 await $`node tools/fetch-polyhaven.ts`.cwd(root);
-await $`node tools/fetch-polyhaven.ts --set kabukicho-ue --res 2k`.cwd(root);
-if (!existsSync(a("kabukicho/textures"))) await $`node tools/kabukicho-assets.ts`.cwd(root);
 await $`node tools/fetch-khronos.ts`.cwd(root);
 const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 if (existsSync(chrome) || existsSync(a("quaternius/ual/UAL1_Standard.glb"))) await $`node tools/fetch-quaternius.ts`.cwd(root);

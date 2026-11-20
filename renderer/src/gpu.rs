@@ -4057,7 +4057,7 @@ mod tests {
         assert!(huge([M, 5, 0, 0, 0, 0, 0, 0], false));
         // Empty groups past 2^24 have no instance.
         assert!(!huge([M + 7, 0, 0, 0, 0, 0, 0, 0], false));
-        // The 3 x 3 Kabukicho district (37.75 M triangles, opaque shadow casters first).
+        // A 3 x 3 street district of 37.75 M triangles (opaque shadow casters first).
         assert!(huge([36_000_000, 900_000, 500_000, 352_799, 0, 0, 0, 0], false));
         // With model instances, group custom data must stay below the instance bit (2^23).
         assert!(!huge([M - 1, 5, 0, 0, 0, 0, 0, 0], false));

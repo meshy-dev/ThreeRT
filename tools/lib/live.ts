@@ -1,5 +1,5 @@
 // Live-viewport measurements shared by the perf smoke and the perf suite (docs/WORKFLOW.md): the quiet-GPU check,
-// a renderer run with its profile lines and frame log, Kabukichō still and on a scripted move, and the district drive.
+// a renderer run with its profile lines and frame log, a scene still and on a scripted move, and the district drive.
 // Every function takes the renderer binary and its paths, so the same measurement runs on a branch build and on a
 // main commit built elsewhere (tools/lib/build-at.ts).
 import { gltfCameraPath } from "./gltf-camera.ts";
@@ -49,7 +49,7 @@ export async function gpuUtilization(ms = 2000): Promise<number | null> {
 }
 
 /**
- * Whether the GPU is quiet enough to time: no known GPU process (UE, another live renderer, a playground) and the
+ * Whether the GPU is quiet enough to time: no known GPU process (UE, another live renderer) and the
  * device under 15 % busy over 3 s (that also catches a render farm or a hung job). Returns the reasons it is not.
  */
 export async function quietGpu(): Promise<string[]> {
@@ -136,7 +136,7 @@ const profileTotals = (lines: string[]) => lines.map((l) => /^profile ms\/frame:
  *  along the view (and `side` m across it) while the view yaws `yawDeg` degrees; `fovDeg` = vertical field of view. */
 export interface GateMove { pos: number[]; fwd: number[]; dist: number; side: number; yawDeg: number; fovDeg: number }
 
-function movePose(m: GateMove, f: number) {
+export function movePose(m: GateMove, f: number) {
   const yaw0 = Math.atan2(m.fwd[2], m.fwd[0]);
   const yaw = yaw0 - (f * m.yawDeg * Math.PI) / 180;
   const h = Math.hypot(m.fwd[0], m.fwd[2]);
@@ -182,19 +182,6 @@ export function bistroMove(street: { position: readonly number[]; target: readon
   return { pos: [...street.position], fwd: d.map((v) => v / n), dist: 2.5, side: 0, yawDeg: 12, fovDeg: street.fov };
 }
 
-/** Kabukichō (or a variant bundle of it) at the 0.5 floor, still then on its scripted move (`stillAndMoving`). */
-export function kabukicho(b: Build, bundle: string, o: { seconds?: number; warmupS?: number; events?: string[]; settleS?: number; env?: Record<string, string> } = {}) {
-  // The move as it always was: yaw from atan2(0.07, 0.995), 2.5 m along x and 0.3 m along z, y kept.
-  const P0 = [-11.5, 1.7, -1.8], YAW0 = Math.atan2(0.07, 0.995), TAN = Math.tan((55 * Math.PI) / 360);
-  const pose = (f: number) => {
-    const yaw = YAW0 - (f * 12 * Math.PI) / 180;
-    const pos = [P0[0] + 2.5 * f, P0[1], P0[2] + 0.3 * f];
-    const fwd = [Math.cos(yaw), 0.07, Math.sin(yaw)];
-    return { pos, target: pos.map((v, i) => v + fwd[i] * 10), tan: TAN };
-  };
-  return stillAndMoving(b, bundle, pose, { ...o, label: "kabukicho" });
-}
-
 /** Launches the bundle and quits at its first frame (warms the shader caches); returns ms to that frame. */
 export async function firstFrame(b: Build, bundle: string): Promise<number> {
   const live = startLive(b, bundle);
@@ -218,20 +205,6 @@ export interface Drive {
   at(t: number): { pos: number[]; target: number[]; tan: number };
 }
 
-/** Kabukichō's district drive: down the middle street (x from -10 to 515 m at z = 0, eye 1.7 m) at 15 m/s (a car in
- *  town), then back at 30 m/s. */
-export const KABUKICHO_DRIVE: Drive = (() => {
-  const X0 = -10, X1 = 515, EYE = 1.7, T = Math.tan((55 * Math.PI) / 360);
-  const out = (X1 - X0) / 15, back = (X1 - X0) / 30;
-  return {
-    seconds: out + back,
-    at(t: number) {
-      const [x, dir] = t <= out ? [X0 + 15 * t, 1] : [X1 - 30 * (t - out), -1];
-      return { pos: [x, EYE, 0], target: [x + dir * 30, EYE, 0], tan: T };
-    },
-  };
-})();
-
 /** Bistro's district drive (games/bistro-district): its own FBX camera path through the middle copy, the first 50 s
  *  (about 2 m/s, through the street, the square and back towards the bistro). */
 export function bistroDrive(gltf: string, seconds = 50): Drive {
@@ -240,11 +213,11 @@ export function bistroDrive(gltf: string, seconds = 50): Drive {
 }
 
 /**
- * A district (or any scene) driven along `drive` (tools/bench-district.ts; default Kabukichō's): camera commands at
+ * A district (or any scene) driven along `drive` (tools/bench-district.ts): camera commands at
  * 60 Hz. GPU p50 / p95 and frame-interval p50 / p95 / p99 from the frame log, frames over 50 ms, first frame; the
  * frame-start interval p50 / p95 (`start`: start to start, what the pacer sets) where the frame log has it.
  */
-export async function district(b: Build, bundle: string, frameLog: string, drive: Drive = KABUKICHO_DRIVE, o: { room?: string; profile?: boolean; env?: Record<string, string> } = {}) {
+export async function district(b: Build, bundle: string, frameLog: string, drive: Drive, o: { room?: string; profile?: boolean; env?: Record<string, string> } = {}) {
   const launch = performance.now();
   const live = startLive(b, bundle, { frameLog, room: o.room, profile: o.profile, env: o.env });
   const first = await live.firstFrame;

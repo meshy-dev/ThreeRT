@@ -1,13 +1,10 @@
 // LOD / streaming acceptance (docs/ROADMAP.md § 5, item 5): the district in the live viewport. Bistro tiled 3 x 3
-// (games/bistro-district, 25.5 M triangles; ROADMAP § 0 step 10) along Bistro's own camera path through the middle copy;
-// --scene kabukicho: the Kabukichō district of before (games/kabukicho/district.game.ts, 3 x 3 blocks of distinct
-// streets; --row: its middle row only) driven down its middle street.
+// (games/bistro-district, 25.5 M triangles; ROADMAP § 0 step 10) along Bistro's own camera path through the middle copy.
 //
-//   node tools/bench-district.ts [--scene bistro|kabukicho] [--row] [--scale 0.5|auto] [--set-baseline]
+//   node tools/bench-district.ts [--scale 0.5|auto] [--set-baseline]
 //
-// Startup: time from launch to the first frame. Drive (camera commands at 60 Hz): Bistro: the FBX camera path's first
-// 50 s (about 2 m/s); Kabukichō: down the middle street at 15 m/s (a car in town), eye 1.7 m, then back at 30 m/s
-// (tools/lib/live.ts `Drive`). Per frame (live --frame-log): GPU time and the frame interval -> p50 / p95 / p99 / max
+// Startup: time from launch to the first frame. Drive (camera commands at 60 Hz): the FBX camera path's first 50 s
+// (about 2 m/s; tools/lib/live.ts `bistroDrive`). Per frame (live --frame-log): GPU time and the frame interval -> p50 / p95 / p99 / max
 // and spikes (> 2 x the median). Memory: the process's physical footprint (`footprint`; on Apple silicon it includes
 // GPU resources) at the end of the drive.
 import { spawn, execFileSync } from "node:child_process";
@@ -15,17 +12,15 @@ import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { frameStats, requireQuietGpu, summary } from "./lib/bench.ts";
-import { bistroDrive, KABUKICHO_DRIVE } from "./lib/live.ts";
+import { bistroDrive } from "./lib/live.ts";
 import { BISTRO } from "../scenes/bistro.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
 const flag = (k: string, d: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
-const row = args.includes("--row");
-const bistro = flag("--scene", "bistro") === "bistro";
-const name = bistro ? "bistro-district" : row ? "kabukicho-district-row" : "kabukicho-district";
-const source = bistro ? "games/bistro-district/bistro-district.game.ts" : `games/kabukicho/${row ? "district-row" : "district"}.game.ts`;
-const driveOf = bistro ? bistroDrive(join(root, BISTRO)) : KABUKICHO_DRIVE;
+const name = "bistro-district";
+const source = "games/bistro-district/bistro-district.game.ts";
+const driveOf = bistroDrive(join(root, BISTRO));
 const bundle = join(root, "out/bundles", `${name}.js`);
 const scale = flag("--scale", "0.5");
 const bin = process.env.THREERT_BIN ?? join(root, "renderer/target/release/threert-render");

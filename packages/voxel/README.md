@@ -37,7 +37,6 @@ for (const body of voxelBodies()) console.log(body.position);
 - **Edits**: `voxelExplode`, `voxelCarve`, `voxelPaint`, `voxelAdd`, as shapes in world metres. They are applied in fixed point, so the same commands give the same voxels on every machine (`voxelHash`).
 - **Destruction**: after an edit, what no chain of voxels joins to an anchor is cut loose as a rigid body (`VoxelBody`) of the physics world. It tumbles, lands and can be carved again.
 - **Collision**: the level is a collider without being asked, so `Raycaster.intersectPhysics`, shape casts and the game's own bodies meet it.
-- **Fire and smoke**: `Explosions` adds fireballs, their light and smoke to a blast.
 - **In JavaScript too**: `VoxelGrid` (sparse 8³ bricks), `parseVox` / `encodeVox` for MagicaVoxel files, and `greedyMesh` / `voxelMesh` for meshing a grid as ordinary geometry.
 
 The native functions need a ThreeRT client or the engine built from source; they throw elsewhere. The design and its measurements are in [VOXEL.md](https://github.com/meshy-dev/ThreeRT/blob/main/docs/VOXEL.md).

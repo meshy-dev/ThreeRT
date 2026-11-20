@@ -1,5 +1,5 @@
 // Bistro night in the rain plus a 2 x 5 x 2 m SmokeColumn on the street ahead of the camera: the perf suite's
-// "bistro rain + smoke" lines (Kabukichō's kabukicho-smoke.game.ts on Bistro).
+// "bistro rain + smoke" lines (ROADMAP § 5 item 6.3's budget case).
 import { SmokeColumn } from "@threert/scene";
 import { AHEAD, rainyBistro } from "./bistro-rain.ts";
 

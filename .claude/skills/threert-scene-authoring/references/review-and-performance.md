@@ -3,7 +3,7 @@
 ## Review loop (every round)
 
 1. Build the bundle, render each hero view offline (`--spp 128`, OIDN) and grab a live snapshot
-   (`threert-render live out/bundles/x.js` + `{"cmd":"snapshot","path":...,"after":64}` on stdin, or the playground).
+   (`threert-render live out/bundles/x.js` + `{"cmd":"snapshot","path":...,"after":64}` on stdin).
 2. Put renders next to the reference photos; also render close-ups (`render --camera
    '{"position":[..],"target":[..],"fov":..}'`) of a facade, the ground, a sign cluster.
 3. Write the three largest differences, ranked by how much of the frame they cover; fix those first. Typical order:
@@ -25,8 +25,9 @@ Failure patterns and the fix:
 
 ## Performance (Apple M5, 1280x720 live viewport, 1 spp/frame + temporal + denoise)
 
-Kabukichō v2 (1.16 M triangles, 97 textures, 23 lights, 22 k emissive triangles): 23.8 ms/frame (~42 fps).
-Costs measured by masking kernel features (`THREERT_FEATURES`, gpu::F_* bits):
+A neon night street (1.16 M triangles, 97 textures, 23 lights, 22 k emissive triangles; an early street demo since
+removed from the repository): 23.8 ms/frame (~42 fps). Costs measured by masking kernel features (`THREERT_FEATURES`,
+gpu::F_* bits):
 
 | Feature | ms | Notes |
 |---|---:|---|
@@ -38,7 +39,7 @@ Costs measured by masking kernel features (`THREERT_FEATURES`, gpu::F_* bits):
 | procedural windows | 1.3 | interiors only on camera / mirror paths |
 | grime | 0.6 | |
 
-Kabukichō v3 (the UE session's level ported 1:1: 4.0 M triangles, 147 lights, 78 k emissive triangles, nine material
+The same street ported 1:1 from a UE 5.8 level (4.0 M triangles, 147 lights, 78 k emissive triangles, nine material
 functions): 34 ms/frame at 100 %, **15.8–16.7 ms at 60 % render scale** (TSR-style upsampling, closer to UE's TSR
 capture than 100 %: SSIM 0.689 vs 0.649). Material functions cost ~20 % of its frame. Use cheaper bodies at
 `i.depth > 0` where the detail is invisible. The à-trous denoiser is 2.6 ms at 1280×720, bloom 0.3 ms.
@@ -56,7 +57,8 @@ THREERT_FEATURES=383 node tools/bench-live.ts --scenes x   # e.g. without volume
 ## Motion and lighting-change quality (live viewport)
 
 Static snapshots hide the two artefacts players notice: smearing while the camera moves and noise after lights
-switch. `node tools/bench-temporal.ts --tag x [--scale 1|auto]` measures both against converged references. It runs a
-dolly + turn, a stop, and a closing-time event with flicker on Kabukichō's bundle. Compare a change at `--scale 1`
-first, so resolution does not confound it, then at `auto`. Look at the crops (`out/bench-temporal/<tag>/*.jpg`),
+switch. `node tools/bench-temporal.ts --tag x [--scale 1|auto]` measures the first against converged references: a
+dolly + turn and a stop on Bistro night's street. `--shot edit` measures the second: a lamp and an emissive sign
+switched off and on, frame by frame. Compare a change at `--scale 1` first, so resolution does not confound it, then
+at `auto`. Look at the crops (`out/bench-temporal/<tag>/*.jpg`),
 not only ΔE: ΔE prefers blur to noise. `THREERT_PROFILE=1 threert-render live . --game <bundle>` prints GPU ms per pass.
