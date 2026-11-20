@@ -67,6 +67,50 @@ pub struct ModelTri {
     pub material: Option<usize>,
 }
 
+/// A corner of a model's triangle as the skinning pass reads it (skin.wgsl `Corner`): where it is in the file, and
+/// the matrices of the model's palette (`Model::palette`) that place it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinCorner {
+    /// Position; w: the first two palette indices (16 bits each).
+    pub p: [f32; 4],
+    /// Normal; w: the other two.
+    pub n: [f32; 4],
+    /// Tangent; w: `CORNER_NORMAL` | `CORNER_TANGENT` (bits): which of the two the file has.
+    pub t: [f32; 4],
+    /// The four weights, summing to one.
+    pub w: [f32; 4],
+}
+
+pub const CORNER_NORMAL: u32 = 1;
+pub const CORNER_TANGENT: u32 = 2;
+
+/// A palette matrix: the three rows of an affine transform.
+pub type PaletteRows = [[f32; 4]; 3];
+
+fn palette_rows(m: Mat4) -> PaletteRows {
+    let t = m.transpose().to_cols_array_2d();
+    [t[0], t[1], t[2]]
+}
+
+/// A corner placed by a palette, as skin.wgsl places it: its position, and its normal and tangent (zero where the
+/// file has none). The four matrices blended by the weights; the normal by the blend's inverse transpose.
+pub fn skin_corner(c: &SkinCorner, palette: &[PaletteRows]) -> (Vec3, Vec3, Vec3) {
+    let (a, b) = (c.p[3].to_bits(), c.n[3].to_bits());
+    let joints = [a & 0xffff, a >> 16, b & 0xffff, b >> 16];
+    let mut rows = [glam::Vec4::ZERO; 3];
+    for (j, w) in joints.iter().zip(c.w) {
+        for (r, m) in rows.iter_mut().zip(palette[*j as usize]) {
+            *r += glam::Vec4::from(m) * w;
+        }
+    }
+    let (p, n, t) = (Vec3::new(c.p[0], c.p[1], c.p[2]), Vec3::new(c.n[0], c.n[1], c.n[2]), Vec3::new(c.t[0], c.t[1], c.t[2]));
+    let r = rows.map(|r| r.truncate());
+    let det = r[0].dot(r[1].cross(r[2]));
+    let normal = (Vec3::new(r[1].cross(r[2]).dot(n), r[2].cross(r[0]).dot(n), r[0].cross(r[1]).dot(n)) * det.signum()).normalize_or_zero();
+    (Vec3::new(rows[0].dot(p.extend(1.0)), rows[1].dot(p.extend(1.0)), rows[2].dot(p.extend(1.0))), normal, Vec3::new(r[0].dot(t), r[1].dot(t), r[2].dot(t)).normalize_or_zero())
+}
+
 impl Model {
     pub fn new(gltf: Gltf) -> Result<Model> {
         let (doc, bufs, _) = &gltf;
@@ -253,6 +297,101 @@ impl Model {
             .collect())
     }
 
+    /// Where each matrix of the palette is: the first of each skin's joints, each node that holds a primitive without
+    /// a skin, and the palette's length. Entry 0 is the identity (a vertex no joint holds).
+    fn palette_layout(&self) -> (Vec<usize>, HashMap<usize, usize>, usize) {
+        let mut at = 1;
+        let mut skins = vec![];
+        for skin in self.gltf.0.skins() {
+            skins.push(at);
+            at += skin.joints().count();
+        }
+        let mut nodes = HashMap::new();
+        for p in self.prims.iter().filter(|p| p.skin.is_none()) {
+            nodes.entry(p.node).or_insert_with(|| {
+                at += 1;
+                at - 1
+            });
+        }
+        (skins, nodes, at)
+    }
+
+    /// The matrices that place the model's vertices in its own space for `pose` (None = rest pose): what
+    /// `skin_source`'s corners index. A skin's joints (joint x inverse bind), then the nodes of primitives without a
+    /// skin.
+    pub fn palette(&self, pose: Option<&desc::Animation>) -> Result<Vec<PaletteRows>> {
+        let (doc, bufs, _) = &self.gltf;
+        let globals = self.globals(pose)?;
+        let (_, nodes, len) = self.palette_layout();
+        let mut out = vec![palette_rows(Mat4::IDENTITY); len];
+        let mut at = 1;
+        for skin in doc.skins() {
+            let ibm: Vec<Mat4> = skin.reader(|b| Some(&bufs[b.index()])).read_inverse_bind_matrices().map(|it| it.map(|m| Mat4::from_cols_array_2d(&m)).collect()).unwrap_or_default();
+            for (k, j) in skin.joints().enumerate() {
+                out[at] = palette_rows(globals[j.index()] * ibm.get(k).copied().unwrap_or(Mat4::IDENTITY));
+                at += 1;
+            }
+        }
+        for (node, k) in nodes {
+            out[k] = palette_rows(globals[node]);
+        }
+        Ok(out)
+    }
+
+    /// The model's triangles as the skinning pass reads them, three corners each, in `triangles`' order (restricted
+    /// to the mesh nodes named in `only`, as there): skinned by `palette`'s matrices they are `triangles` in the
+    /// model's own space.
+    pub fn skin_source(&self, only: Option<&[String]>) -> Result<Vec<[SkinCorner; 3]>> {
+        let (doc, _, _) = &self.gltf;
+        let rest = self.globals(None)?;
+        let nodes: Vec<gltf::Node> = doc.nodes().collect();
+        let (skins, of_node, _) = self.palette_layout();
+        let mut out = vec![];
+        for p in &self.prims {
+            let node = &nodes[p.node];
+            if only.is_some_and(|names| !node.name().is_some_and(|nm| names.iter().any(|x| x == nm))) {
+                continue;
+            }
+            let skin = p.skin.as_ref().zip(node.skin());
+            let corner = |v: usize, tangent: Option<[f32; 4]>| {
+                let (joints, weights) = match &skin {
+                    Some(((joints, weights), skin)) => {
+                        let (j, w) = (joints[v], weights[v]);
+                        let sum = w[0] + w[1] + w[2] + w[3];
+                        let count = skin.joints().count();
+                        if sum > 0.0 {
+                            // (A weight that is not positive holds nothing; a joint the skin has not is the identity.)
+                            let held = |c: usize| w[c] > 0.0;
+                            ([0, 1, 2, 3].map(|c| if held(c) && (j[c] as usize) < count { skins[skin.index()] + j[c] as usize } else { 0 }), [0, 1, 2, 3].map(|c| if held(c) { w[c] / sum } else { 0.0 }))
+                        } else {
+                            ([0; 4], [1.0, 0.0, 0.0, 0.0])
+                        }
+                    }
+                    None => ([of_node[&p.node], 0, 0, 0], [1.0, 0.0, 0.0, 0.0]),
+                };
+                let pos = p.positions[v];
+                let n = p.normals.as_ref().map(|n| n[v]);
+                let flags = if n.is_some() { CORNER_NORMAL } else { 0 } | if tangent.is_some() { CORNER_TANGENT } else { 0 };
+                let (n, t) = (n.unwrap_or(Vec3::ZERO), tangent.unwrap_or([0.0; 4]));
+                SkinCorner {
+                    p: [pos.x, pos.y, pos.z, f32::from_bits(joints[0] as u32 | (joints[1] as u32) << 16)],
+                    n: [n.x, n.y, n.z, f32::from_bits(joints[2] as u32 | (joints[3] as u32) << 16)],
+                    t: [t[0], t[1], t[2], f32::from_bits(flags)],
+                    w: weights,
+                }
+            };
+            // (A node that mirrors: the winding stays front-facing, as `triangles` has it, by the file's transforms.)
+            let mirrored = skin.is_none() && rest[p.node].determinant() < 0.0;
+            for t in p.indices.chunks_exact(3) {
+                let (a, b, c) = if mirrored { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
+                // (A triangle's tangent is its first corner's.)
+                let tangent = p.tangents.as_ref().map(|tv| tv[a as usize]);
+                out.push([corner(a as usize, tangent), corner(b as usize, tangent), corner(c as usize, tangent)]);
+            }
+        }
+        Ok(out)
+    }
+
     /// Node transforms relative to the glTF scene root for `pose` (None = rest pose).
     pub fn node_globals(&self, pose: Option<&desc::Animation>) -> Result<Vec<Mat4>> {
         self.globals(pose)
@@ -297,11 +436,14 @@ impl Model {
         let nodes: Vec<gltf::Node> = doc.nodes().collect();
         let mut skins: HashMap<usize, Vec<Mat4>> = HashMap::new();
         let mut out = vec![];
+        // (A skinned primitive's matrix a vertex, where it has tangents: they follow their joints as its normals do.)
+        let mut blends: Vec<Mat4> = vec![];
         for p in &self.prims {
             let node = &nodes[p.node];
             if only.is_some_and(|names| !node.name().is_some_and(|nm| names.iter().any(|x| x == nm))) {
                 continue;
             }
+            blends.clear();
             let (pos, nrm): (Vec<Vec3>, Option<Vec<Vec3>>) = match (&p.skin, node.skin()) {
                 (Some((joints, weights)), Some(skin)) => {
                     // glTF: a skinned mesh ignores its node's transform; joints place it (relative to the scene root).
@@ -311,6 +453,7 @@ impl Model {
                     });
                     let mut pos = Vec::with_capacity(p.positions.len());
                     let mut nrm = p.normals.as_ref().map(|n| Vec::with_capacity(n.len()));
+                    blends.clear();
                     for (v, (j, w)) in joints.iter().zip(weights).enumerate() {
                         let sum = w[0] + w[1] + w[2] + w[3];
                         let k = if sum > 0.0 { 1.0 / sum } else { 0.0 };
@@ -324,6 +467,9 @@ impl Model {
                             m = world;
                         }
                         pos.push(m.transform_point3(p.positions[v]));
+                        if p.tangents.is_some() {
+                            blends.push(m);
+                        }
                         if let (Some(out), Some(src)) = (nrm.as_mut(), &p.normals) {
                             out.push((Mat3::from_mat4(m).inverse().transpose() * src[v]).normalize_or_zero());
                         }
@@ -346,7 +492,8 @@ impl Model {
                 let n = nrm.as_ref().map(|n| [n[a], n[b], n[c]]).unwrap_or([gn; 3]);
                 let tangent = p.tangents.as_ref().map(|tv| {
                     let tt = tv[a];
-                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if mirrored { -tt[3] } else { tt[3] })
+                    let by = blends.get(a).copied().unwrap_or(m);
+                    (by.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if mirrored { -tt[3] } else { tt[3] })
                 });
                 out.push(ModelTri { p: tp, n, uv: [p.uvs[a], p.uvs[b], p.uvs[c]], tangent, material: p.material });
             }
@@ -452,6 +599,41 @@ mod tests {
         assert_eq!(m.moving_nodes(&pose("raise-right")).unwrap(), vec![false, true, true]);
         assert_eq!(m.moving_nodes(&pose("")).unwrap(), vec![false, true, true]);
         assert!(m.moving_nodes(&pose("raise-both")).is_err(), "no such clip");
+    }
+
+    /// The skinning pass's inputs give the triangles the CPU skin gives: a model's corners placed by its palette are
+    /// `triangles` in the model's own space, for a skinned strip of two materials (tests/render/data/arm.glb) and for
+    /// primitives on nodes (`RIGID`), at rest and posed.
+    #[test]
+    fn corners_placed_by_the_palette_are_the_models_triangles() {
+        let arm = Model::new(gltf::import("../tests/render/data/arm.glb").unwrap()).unwrap();
+        let rigid = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
+        let pose = |clip: &str, time| desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
+        let mut seen = 0;
+        for (m, poses) in [(&arm, vec![None, Some(pose("bend", 0.3)), Some(pose("bend", 0.8))]), (&rigid, vec![None, Some(pose("move", 0.5))])] {
+            let source = m.skin_source(None).unwrap();
+            for a in &poses {
+                let (tris, palette) = (m.triangles(Mat4::IDENTITY, None, a.as_ref()).unwrap(), m.palette(a.as_ref()).unwrap());
+                assert_eq!(source.len(), tris.len());
+                for (corners, t) in source.iter().zip(&tris) {
+                    for (k, c) in corners.iter().enumerate() {
+                        let (p, n, tg) = skin_corner(c, &palette);
+                        assert!((p - t.p[k]).length() < 1e-5, "position {p} against {}", t.p[k]);
+                        if c.t[3].to_bits() & CORNER_NORMAL != 0 {
+                            assert!((n - t.n[k]).length() < 1e-5, "normal {n} against {}", t.n[k]);
+                        }
+                        if let (0, Some((tt, _))) = (k, t.tangent) {
+                            assert!((tg - tt).length() < 1e-5, "tangent {tg} against {tt}");
+                        }
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        assert!(seen > 30, "corners compared: {seen}");
+        // A pose bends the strip: its corners are not where the file has them.
+        let (source, bent) = (arm.skin_source(None).unwrap(), arm.palette(Some(&pose("bend", 0.8))).unwrap());
+        assert!(source.iter().flatten().any(|c| (skin_corner(c, &bent).0 - Vec3::new(c.p[0], c.p[1], c.p[2])).length() > 0.05), "the pose moves corners");
     }
 
     #[test]
