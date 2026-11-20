@@ -209,12 +209,99 @@ impl Holes {
     }
 }
 
-/// What an edit places at an object's record: a procedural object with its BLAS (hardware traversal), or an instance
-/// of a mesh.
+/// What an edit places for an object: a procedural object with its BLAS (hardware traversal) and its record, an
+/// instance of a mesh, or a posed rigid model's parts.
 pub(super) enum Placed {
-    Proc(wgpu::Blas, scene::ProcObject),
+    Proc(wgpu::Blas, scene::ProcObject, scene::GpuInstance),
     /// An instance and its rows (its mesh's sections' materials, classes and emitters).
     Mesh(scene::Instance, Vec<scene::Row>),
+    /// A part: its node (`scene::STILL_NODES`: those its clip leaves alone), its instance and its rows. Their records
+    /// follow each other.
+    Parts(Vec<(usize, scene::Instance, Vec<scene::Row>)>),
+}
+
+/// What `place_instance` writes to.
+pub(super) struct Placing<'a, 'b> {
+    edit: &'a mut EditState,
+    grow: &'a Grow<'a>,
+    words: &'a mut Heap<Stream>,
+    tables: &'a mut tables::Tables,
+    instances: &'a mut Vec<scene::Instance>,
+    gpu_instances: &'a mut Vec<scene::GpuInstance>,
+    meshes: &'a [scene::InstMesh],
+    sections: &'a [scene::Section],
+    rows: &'a mut Vec<scene::Row>,
+    pool_tris: &'a [[glam::Vec3A; 3]],
+    pool_place: &'a [[u32; 2]],
+    w_rows: &'a mut Gather,
+    w_records: &'a mut Gather,
+    new_emitters: &'a mut Vec<(u32, crate::GpuEmitterTri)>,
+    emitters_changed: &'a mut bool,
+    top: &'a mut gpu::Top<'b>,
+    inst_base: usize,
+}
+
+/// An instance placed at `record` by an edit: its rows in the room, each with where its section's triangles start;
+/// its emitters, if a section's material emits (`moves`: as moving ones); its kernel record; its place above the
+/// triangles; its value where the build's are (`instances[record]`).
+pub(super) fn place_instance(cx: &mut Placing, record: usize, inst: &mut scene::Instance, mine: &mut [scene::Row], moves: bool) -> std::result::Result<(), String> {
+    let im = cx.meshes[inst.mesh as usize];
+    let sects = im.sections(cx.sections);
+    for (s, row) in sects.iter().zip(mine.iter_mut()) {
+        row[1] = cx.edit.pool_first as u32 + im.first + s.first;
+    }
+    let row_at = rows_for(cx.edit, cx.grow, cx.words, cx.instances, cx.meshes, record, mine.len())?;
+    inst.rows = row_at as u32;
+    // Its sections whose material emits: its emitters, a run of the light list, a section after another. The run its
+    // record had, if that has as many and none is the light tree's (those keep their place there, at no weight); else
+    // a new one at the list's end. A section's start goes in its row.
+    let n = scene::rows_emitters(sects, mine, &cx.tables.materials) as usize;
+    if n > 0 {
+        let starts = scene::section_emitters(sects, mine, &cx.tables.materials);
+        let old = emitter_run(&cx.tables.emitter_tris, cx.instances, record as u32);
+        let first = if old.len() == n && cx.tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { cx.tables.emitter_tris.len() };
+        inst.first_emitter = first as u32;
+        for (row, start) in mine.iter_mut().zip(&starts) {
+            row[2] = start.map_or(scene::NO_EMITTER, |x| first as u32 + x);
+        }
+        let (place, of) = (mesh_places(&im, cx.sections, cx.pool_place), mine.iter().map(scene::row_material).collect::<Vec<u32>>());
+        let numbered = |j: usize| {
+            let (s, i) = place[j];
+            starts.get(s as usize).copied().flatten().map(|x| ((x + i) as usize, of[s as usize]))
+        };
+        let (a, b) = (im.first as usize, (im.first + im.count) as usize);
+        let made = crate::instance_emitters(inst, record as u32, &cx.pool_tris[a..b], (cx.edit.pool_first + a) as u32, &numbered, n, &cx.tables.materials, moves);
+        for (j, (e, w)) in made.into_iter().enumerate() {
+            cx.new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
+            match cx.tables.emitter_tris.get_mut(first + j) {
+                Some(old) => *old = e,
+                None => cx.tables.emitter_tris.push(e),
+            }
+        }
+        for (&mat, start) in of.iter().zip(&starts) {
+            if start.is_some() {
+                cx.tables.emissive.insert(mat);
+            }
+        }
+        *cx.emitters_changed = true;
+    }
+    cx.w_rows.put((row_at * 16) as u64, bytemuck::cast_slice(mine));
+    if cx.rows.len() < row_at + mine.len() {
+        cx.rows.resize(row_at + mine.len(), [0; 4]);
+    }
+    cx.rows[row_at..row_at + mine.len()].copy_from_slice(mine);
+    let gpu = cx.top.record(inst.gpu(cx.edit.pool_first as u32 + im.first), inst.mesh, inst.cast_shadow);
+    cx.w_records.put((record * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(&gpu));
+    if record >= cx.gpu_instances.len() {
+        cx.gpu_instances.resize(record + 1, scene::GpuInstance::default());
+    }
+    cx.gpu_instances[record] = gpu;
+    cx.top.place(cx.inst_base + record, inst.mesh, inst.world, gpu::INSTANCE_BIT | record as u32, inst.cast_shadow, inst.hidden);
+    if cx.instances.len() <= record {
+        cx.instances.resize(record + 1, scene::Instance { name: String::new(), hidden: true, ..inst.clone() });
+    }
+    cx.instances[record] = inst.clone();
+    Ok(())
 }
 
 /// Each of a mesh's pool triangles' section and its index in it: as they lie (a section after another), or, where a
@@ -2207,7 +2294,7 @@ impl LiveCore {
                     None => return Err("edit room: objects (particles, or the device's limits)".into()),
                 },
             };
-            let (record, gpu, blas, entry) = match &o.kind {
+            let (record, blas, entry) = match &o.kind {
                 Kind::Procedural { .. } => {
                     // (Software traversal walks procedural objects by their count and their own trees in the region:
                     // the build lays those out.)
@@ -2261,42 +2348,66 @@ impl LiveCore {
                     let blas = g.proc_blas(&p.blob, &mut pending_procs);
                     let entry = p.object_entry(o);
                     let gpu = p.gpu(header as u32);
-                    (at.map(|(_, r)| r), gpu, Placed::Proc(blas, p), entry)
+                    (at.map(|(_, r)| r), Placed::Proc(blas, p, gpu), entry)
                 }
                 Kind::Model { uri, nodes, animation, functions } => {
-                    // A static model already in the scene: another instance of its mesh (one not in it brings materials
-                    // and textures, which load with a rebuild).
-                    if animation.is_some() {
-                        return Err("an animated model".into());
-                    }
+                    // A model already in the scene: another instance of its mesh, or of each of its parts' meshes if it
+                    // is a posed rigid one (one not in the scene brings materials and textures, which load with a
+                    // rebuild).
                     if !functions.is_empty() {
                         return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
                     if features & gpu::F_INST == 0 || m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("a model the build would flatten (no size, instancing off, or the scene's first instance)".into());
                     }
-                    let mesh = *tables.retained.model_mesh.get(&(uri.clone(), nodes.clone())).ok_or("a model not in the scene (its materials and textures load with a rebuild)")?;
-                    let im = meshes[mesh as usize];
-                    if !top.has_mesh(mesh) {
-                        return Err("a model whose mesh is no unit (it deforms; software traversal flattens it)".into());
-                    }
                     // (Shadow rays pass the glass among a caster's other sections under a kernel feature: a scene where
                     // no instance of the model cast a shadow was built without it.)
-                    let its = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?;
-                    if scene::rows_bits(its) & scene::INST_GLASS != 0 && scene::rows_cast(its, o.cast_shadow) && features & gpu::F_IGLASS == 0 {
-                        return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                    let glass_caster = |its: &[scene::Row]| scene::rows_bits(its) & scene::INST_GLASS != 0 && scene::rows_cast(its, o.cast_shadow) && features & gpu::F_IGLASS == 0;
+                    if let Some(a) = animation {
+                        let parts = nodes.is_none().then(|| tables.retained.rigid_meshes.get(&(uri.clone(), a.clip.clone()))).flatten().ok_or("an animated model that is no rigid one of the scene's with this clip (its meshes are a build's to make)")?.clone();
+                        let globals = scene::model_gltf(uri, assets).and_then(|g| g.node_globals(Some(a))).map_err(|e| e.to_string())?;
+                        let (mut lo, mut hi) = (glam::Vec3A::splat(f32::MAX), glam::Vec3A::splat(f32::MIN));
+                        let mut placed = vec![];
+                        for &(node, mesh) in &parts {
+                            if !top.has_mesh(mesh) {
+                                return Err("a model whose mesh is no unit (software traversal flattens it)".into());
+                            }
+                            let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();
+                            if glass_caster(&mine) {
+                                return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                            }
+                            // (A part without size, a node its clip scales to nothing: at a point, as the build has it.)
+                            let (w_n, _) = scene::placed_world(scene::RigidModel::part_world(m, node, &globals), m.w_axis.truncate());
+                            let (plo, phi) = meshes[mesh as usize].placed_bounds(w_n);
+                            (lo, hi) = (lo.min(plo), hi.max(phi));
+                            let inst = scene::Instance { mesh, world: w_n, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine) };
+                            placed.push((node, inst, mine));
+                        }
+                        for &(_, mesh) in &parts {
+                            *edit.users.entry(mesh).or_default() += 1;
+                        }
+                        let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, (hi - lo).max(glam::Vec3A::ZERO), o.custom, [1.0; 3]);
+                        (None, Placed::Parts(placed), entry)
+                    } else {
+                        let mesh = *tables.retained.model_mesh.get(&(uri.clone(), nodes.clone())).ok_or("a model not in the scene (its materials and textures load with a rebuild)")?;
+                        let im = meshes[mesh as usize];
+                        if !top.has_mesh(mesh) {
+                            return Err("a model whose mesh is no unit (it deforms; software traversal flattens it)".into());
+                        }
+                        // (Its rows, the mesh's own, are placed with its record below.)
+                        let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();
+                        if glass_caster(&mine) {
+                            return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                        }
+                        *edit.users.entry(mesh).or_default() += 1;
+                        if let Some(k) = was {
+                            drop_mesh_user(k, edit, tables, meshes);
+                        }
+                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine) };
+                        let (lo, hi) = im.placed_bounds(m);
+                        let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
+                        (at.map(|(_, r)| r), Placed::Mesh(inst, mine), entry)
                     }
-                    *edit.users.entry(mesh).or_default() += 1;
-                    if let Some(k) = was {
-                        drop_mesh_user(k, edit, tables, meshes);
-                    }
-                    // (Its rows, the mesh's own, are placed with its record below.)
-                    let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?;
-                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(mine) };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
-                    let (lo, hi) = im.placed_bounds(m);
-                    let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
-                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst, mine.clone()), entry)
                 }
                 Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. } => {
                     // A mesh, or (added in place) an instanced mesh: their mesh made alike. A mesh with several
@@ -2586,90 +2697,48 @@ impl LiveCore {
                         return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
                     }
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine) };
-                    let gpu = top.record(inst.gpu((edit.pool_first as u32) + im.first), mesh, inst.cast_shadow);
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), if unseen { 0.0 } else { o.power }, hi - lo, o.custom, [1.0; 3]);
-                    (at.map(|(_, r)| r), gpu, Placed::Mesh(inst, mine), entry)
+                    (at.map(|(_, r)| r), Placed::Mesh(inst, mine), entry)
                 }
                 _ => return Err("not an object an edit places".into()),
             };
-            // Its record, TLAS instance and object entry: where it had them, or new ones from the room.
+            // Its record (a posed rigid model's: a part each, in a run), TLAS instance and object entry: where it had
+            // them, or new ones from the room.
+            let n = match &blas {
+                Placed::Parts(parts) => parts.len(),
+                _ => 1,
+            };
             let (slot, record) = match (at, record) {
                 (Some((slot, _)), Some(r)) => (slot, r),
                 _ => {
-                    let r = match edit.records.take(1) {
+                    let r = match edit.records.take(n) {
                         Some(r) => r,
-                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, 1, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
+                        None if match &mut top { gpu::Top::Hw(accel) => grow.records(&mut edit.records, n, &mut up.heap, accel), gpu::Top::Sw(_) => false } => {
                             edit.grows += 1;
                             edit.rebind = true;
-                            edit.records.take(1).ok_or("edit room: records")?
+                            edit.records.take(n).ok_or("edit room: records")?
                         }
                         None => return Err(if matches!(top, gpu::Top::Sw(_)) { "edit room: records (software traversal's does not grow)" } else { "edit room: records (particles, or the device's limits)" }.into()),
                     };
                     (inst_base + r, r)
                 }
             };
-            // An instance of a mesh that emits: its emitters, a run of the light list. The run its record had, if that
-            // has as many and none is the light tree's (those keep their place there, at no weight); else a new one at
-            // the list's end. Its first goes in its record.
-            let (mut gpu, mut blas) = (gpu, blas);
-            if let Placed::Mesh(inst, mine) = &mut blas {
-                let im = meshes[inst.mesh as usize];
-                let sects = im.sections(sections);
-                // Its rows, each with where its section's triangles start.
-                for (s, row) in sects.iter().zip(mine.iter_mut()) {
-                    row[1] = edit.pool_first as u32 + im.first + s.first;
-                }
-                let row_at = rows_for(edit, &grow, &mut up.words, instances, meshes, record, mine.len())?;
-                (inst.rows, gpu.info[3]) = (row_at as u32, row_at as u32);
-                // Its sections whose material emits: its emitters, a run of the light list, a section after another.
-                // The run its record had, if that has as many and none is the light tree's (those keep their place
-                // there, at no weight); else a new one at the list's end. A section's start goes in its row.
-                let n = scene::rows_emitters(sects, mine, &tables.materials) as usize;
-                if n > 0 {
-                    let starts = scene::section_emitters(sects, mine, &tables.materials);
-                    let old = emitter_run(&tables.emitter_tris, instances, record as u32);
-                    let first = if old.len() == n && tables.emitter_tris[old.clone()].iter().all(|e| !e.in_tree) { old.start } else { tables.emitter_tris.len() };
-                    inst.first_emitter = first as u32;
-                    for (row, start) in mine.iter_mut().zip(&starts) {
-                        row[2] = start.map_or(scene::NO_EMITTER, |x| first as u32 + x);
-                    }
-                    let (place, of) = (mesh_places(&im, sections, pool_place), mine.iter().map(scene::row_material).collect::<Vec<u32>>());
-                    let numbered = |j: usize| {
-                        let (s, i) = place[j];
-                        starts.get(s as usize).copied().flatten().map(|x| ((x + i) as usize, of[s as usize]))
-                    };
-                    let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-                    let made = crate::instance_emitters(inst, record as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &numbered, n, &tables.materials, o.driven || world.movable(id));
-                    for (j, (e, w)) in made.into_iter().enumerate() {
-                        new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
-                        match tables.emitter_tris.get_mut(first + j) {
-                            Some(old) => *old = e,
-                            None => tables.emitter_tris.push(e),
-                        }
-                    }
-                    for (&mat, start) in of.iter().zip(&starts) {
-                        if start.is_some() {
-                            tables.emissive.insert(mat);
-                        }
-                    }
-                    emitters_changed = true;
-                }
-                w_rows.put((row_at * 16) as u64, bytemuck::cast_slice(mine));
-                if rows.len() < row_at + mine.len() {
-                    rows.resize(row_at + mine.len(), [0; 4]);
-                }
-                rows[row_at..row_at + mine.len()].copy_from_slice(mine);
-            }
-            w_records.put((record * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(&gpu));
-            if record >= gpu_instances.len() {
-                gpu_instances.resize(record + 1, scene::GpuInstance::default());
-            }
-            gpu_instances[record] = gpu;
             // Above the triangles, and the record's value where the build's are: `instances[record]`, or `procs` at the
             // record less the first procedural one (hidden fillers at the records between, which are other objects').
+            // (A mesh a body drives moves as an instance does, as the build's: `commit`.)
+            let moves = o.driven || world.movable(id);
+            let mut place = |record: usize, inst: &mut scene::Instance, mine: &mut [scene::Row], moves: bool| {
+                let mut cx = Placing { edit: &mut *edit, grow: &grow, words: &mut up.words, tables: &mut *tables, instances: &mut *instances, gpu_instances: &mut *gpu_instances, meshes: &meshes[..], sections: &sections[..], rows: &mut *rows, pool_tris: &pool_tris[..], pool_place: &pool_place[..], w_rows: &mut w_rows, w_records: &mut w_records, new_emitters: &mut new_emitters, emitters_changed: &mut emitters_changed, top: &mut top, inst_base };
+                place_instance(&mut cx, record, inst, mine, moves)
+            };
             let draw = match blas {
-                Placed::Proc(blas, p) => {
+                Placed::Proc(blas, p, gpu) => {
+                    w_records.put((record * std::mem::size_of::<scene::GpuInstance>()) as u64, bytemuck::bytes_of(&gpu));
+                    if record >= gpu_instances.len() {
+                        gpu_instances.resize(record + 1, scene::GpuInstance::default());
+                    }
+                    gpu_instances[record] = gpu;
                     top.place_blas(slot, &blas, m, record as u32, mask(o.cast_shadow));
                     let j = record - proc_first;
                     if procs.len() <= j {
@@ -2678,15 +2747,24 @@ impl LiveCore {
                     procs[j] = p;
                     scene::Draw::Procedural(j as u32)
                 }
-                Placed::Mesh(inst, _) => {
-                    top.place(slot, inst.mesh, m, gpu::INSTANCE_BIT | record as u32, inst.cast_shadow, inst.hidden);
-                    if instances.len() <= record {
-                        instances.resize(record + 1, scene::Instance { name: String::new(), hidden: true, ..inst.clone() });
-                    }
+                Placed::Mesh(mut inst, mut mine) => {
+                    place(record, &mut inst, &mut mine, moves)?;
                     let mesh = if matches!(o.kind, Kind::Model { .. }) { scene::MeshKind::Model } else { scene::MeshKind::Own };
-                    instances[record] = inst;
-                    // (A mesh a body drives moves as an instance does, as the build's: `commit`.)
-                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves: o.driven || world.movable(id) })
+                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves })
+                }
+                // A posed rigid model: a part a record, the nodes its clip moves with moving emitters; where it
+                // stands as an update finds it (`repose_rigid` tells a move by that).
+                Placed::Parts(parts) => {
+                    let mut rigid = scene::RigidModel { world: world.world_matrix(id), ..Default::default() };
+                    for (j, (node, mut inst, mut mine)) in parts.into_iter().enumerate() {
+                        place(record + j, &mut inst, &mut mine, node != scene::STILL_NODES)?;
+                        if node == scene::STILL_NODES {
+                            rigid.still = Some((record + j) as u32);
+                        } else {
+                            rigid.instances.push((node, (record + j) as u32));
+                        }
+                    }
+                    scene::Draw::Rigid(rigid)
                 }
             };
             let st = tables.stride;

@@ -549,9 +549,9 @@ impl World {
         // (Movable as the build sees it: the object or any ancestor, `movable`.)
         let static_parent = parent.is_none_or(|p| !self.objects.contains_key(&p) || !self.movable(p));
         let mesh = matches!(kind, Kind::Mesh { .. });
-        // A new instanced mesh or static model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
+        // A new instanced mesh or model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
         // says when it cannot); changing one still rebuilds, but for an instanced mesh's materials (`rematerialed`).
-        let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
+        let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
         let fresh = (edits_in_place(&kind) || placed_new)
             && (mesh || (!movable && static_parent))
             && match self.objects.get(&id) {

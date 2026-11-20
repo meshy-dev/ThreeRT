@@ -753,6 +753,9 @@ pub struct Retained {
     /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
     /// place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
+    /// Posed rigid models' parts by (uri, clip), each its node (`STILL_NODES`) and its mesh, where every part is a
+    /// mesh with nothing flattened beside: one added in place is an instance of each.
+    pub rigid_meshes: HashMap<(String, String), Vec<(usize, u32)>>,
     /// A model's mesh's rows as every instance of it has them (the file's materials, `model_sections`; where a
     /// section's triangles and emitters are is each instance's to fill).
     pub mesh_rows: HashMap<u32, Vec<Row>>,
@@ -1794,6 +1797,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             let (merged, rest) = (lists.iter().filter(|l| l.0 == STILL_NODES).map(|l| l.1.len()).sum::<usize>(), parts.iter().map(|p| p.rest.len()).sum::<usize>());
                             eprintln!("rigid: {uri} ({}): {merged} triangles of the nodes left alone in one mesh, {} nodes apart, {rest} triangles flattened a placement", a.clip, lists.iter().filter(|l| l.0 != STILL_NODES).count());
                         }
+                        // (What an edit can place again: every part a mesh whole in the pool, the file's own materials.)
+                        if functions.is_empty() && parts.iter().all(|p| p.mesh.is_some() && p.rest.is_empty()) {
+                            retained.rigid_meshes.insert((uri.clone(), a.clip.clone()), parts.iter().filter_map(|p| Some((p.node, p.mesh?))).collect());
+                        }
                         rigid_parts.insert(pkey.clone(), std::rc::Rc::new(parts));
                     }
                     let parts = rigid_parts[&pkey].clone();
@@ -1951,9 +1958,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             if std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "log") {
                                 eprintln!("instancing: {uri} {nodes:?}: {} opaque, {} cutout, {} glass instanced; {} flattened per placement", classed[0].len(), classed[1].len(), classed[2].len(), classed[FLAT].len());
                             }
-                            // (What an edit can place another instance of: a mesh whole in the pool. One with emitters is
-                            // not: an edit does not make a model's instance its emitters yet.)
-                            if let Some(k) = k.filter(|&k| meshes[k as usize].rest_count == 0 && pool_emitters(&classed, &emitting) == 0) {
+                            // (What an edit can place another instance of: a mesh whole in the pool.)
+                            if let Some(k) = k.filter(|&k| meshes[k as usize].rest_count == 0) {
                                 retained.model_mesh.insert(key.clone(), k);
                             }
                             mesh_of.insert(key, k);
@@ -2417,11 +2423,6 @@ fn flatten_coincident(classed: &mut [Vec<(usize, u32)>; 4], emitting: &std::coll
         classed[c] = stay;
         classed[FLAT].extend(go);
     }
-}
-
-/// The emitting triangles a mesh keeps (`InstMesh::emitters`): those of `classed` that stay in the pool.
-fn pool_emitters(classed: &[Vec<(usize, u32)>; 4], emitting: &std::collections::HashSet<u32>) -> u32 {
-    classed[..FLAT].iter().flatten().filter(|(_, mat)| emitting.contains(mat)).count() as u32
 }
 
 /// Whether a material created since the build can be drawn in place (tables.rs `add_materials`): 0 only when it is

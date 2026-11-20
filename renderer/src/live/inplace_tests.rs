@@ -2182,6 +2182,96 @@ fn a_posed_rigid_model_is_hidden_shown_and_removed_in_place() {
     against_a_build("the other model posed on after the removal", &mut live, &w);
 }
 
+/// A model the scene has is placed again in place, with its emitters: a still one (tests/render/data/panel.glb), and
+/// a posed rigid one (panel-slider.glb), a part a record of the room in a run, each an instance of the mesh the
+/// build's placement has. The one placed is then posed, moved, hidden, shown and removed as one a build placed; its
+/// records and rows are the room's again, and the next one placed takes them. Each time the light list is its
+/// triangles and the picture a build's.
+#[test]
+fn a_model_with_emitters_is_placed_again_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let still = || Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation: None, functions: vec![] };
+    let posed = |time| Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: slide(time), functions: vec![] };
+    let mut w = world();
+    w.set_object(30, "still".into(), None, still(), true, false).unwrap();
+    w.set_transform(30, Vec3::new(-1.4, 0.7, 0.4), glam::Quat::from_rotation_y(0.4), Vec3::splat(0.05)).unwrap();
+    w.set_object(32, "posed".into(), None, posed(0.25), true, false).unwrap();
+    w.set_transform(32, Vec3::new(-1.3, -0.6, 0.5), glam::Quat::IDENTITY, Vec3::splat(0.08)).unwrap();
+    // (A mesh the scene says it edits: room for what is placed.)
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(1.4, -0.7, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let pictured = |what: &str, live: &mut LiveCore, w: &World| {
+        list_is_its_triangles(what, live);
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let lit = |c: &LiveCore, of: &[u32]| c.sc.tables.emitter_tris.iter().filter(|e| of.contains(&e.inst) && crate::emitter_power(e, &c.sc.tables.materials, &c.sc.tables.objects, c.sc.tables.stride) > 0.0).count();
+    let before = pictured("as loaded", &mut live, &w);
+    // The still model again.
+    w.set_object(31, "still again".into(), None, still(), true, false).unwrap();
+    w.set_transform(31, Vec3::new(1.2, 0.7, 0.5), glam::Quat::from_rotation_y(-0.3), Vec3::splat(0.05)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a still model with emitters placed again: in place ({:?})", live.fallback);
+    let (first, again) = (*live.sc.tables.retained.instance(30).unwrap(), *live.sc.tables.retained.instance(31).expect("it is an instance"));
+    assert_eq!((live.sc.instances[again.instance as usize].mesh, lit(&live, &[again.instance])), (live.sc.instances[first.instance as usize].mesh, 2), "an instance of the model's mesh, its two emitters its own");
+    list_is_its_triangles("a still model with emitters placed again", &live);
+    lit_as_a_build("a still model with emitters placed again", &mut live, &mut open(&w).unwrap());
+    // The posed rigid model again, elsewhere in its clip.
+    let place = |w: &mut World, id: u32, time: f32, at: Vec3| {
+        w.set_object(id, format!("posed{id}"), None, posed(time), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_z(0.3), Vec3::splat(0.08)).unwrap();
+    };
+    place(&mut w, 33, 0.75, Vec3::new(0.2, 0.3, 0.8));
+    assert!(!live.commit(&mut w).unwrap(), "a posed rigid model placed again: in place ({:?})", live.fallback);
+    let (built, r) = (live.sc.tables.retained.rigid(32).unwrap().clone(), live.sc.tables.retained.rigid(33).expect("a posed rigid model").clone());
+    let (records, mesh) = (r.records(), |c: &LiveCore, i: u32| c.sc.instances[i as usize].mesh);
+    assert_eq!((r.instances.len(), mesh(&live, r.still.unwrap()), mesh(&live, r.instances[0].1)), (1, mesh(&live, built.still.unwrap()), mesh(&live, built.instances[0].1)), "its parts are instances of the meshes the build's placement has");
+    let run: Vec<u32> = (0..2).map(|j| records.iter().min().unwrap() + j).collect();
+    assert!(records.iter().all(|&i| live.sc.edit.in_room(i as usize) && run.contains(&i)), "a part a record of the room, in a run ({records:?})");
+    assert_eq!((lit(&live, &[r.still.unwrap()]), r.moving()), (2, vec![r.instances[0].1]), "its panel's emitters are its own, still ones");
+    list_is_its_triangles("a posed rigid model placed again", &live);
+    lit_as_a_build("a posed rigid model placed again", &mut live, &mut open(&w).unwrap());
+    let placed = pictured("a posed rigid model placed again", &mut live, &w);
+    assert!(apart(&before, &placed) > 0.5, "the models placed are in the picture ({:.2} steps)", apart(&before, &placed));
+    // Posed on, moved, hidden and shown, as one the build placed.
+    w.set_animation(33, slide(0.4)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one placed posed on: in place ({:?})", live.fallback);
+    pictured("the one placed posed on", &mut live, &w);
+    w.set_transform(33, Vec3::new(-0.3, 0.1, 1.0), glam::Quat::from_rotation_z(-0.4), Vec3::splat(0.08)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one placed moved: in place ({:?})", live.fallback);
+    let moved = pictured("the one placed moved", &mut live, &w);
+    assert!(apart(&placed, &moved) > 0.5, "the move is in the picture ({:.2} steps)", apart(&placed, &moved));
+    w.set_visible(33, false).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one placed hidden: in place ({:?})", live.fallback);
+    pictured("the one placed hidden", &mut live, &w);
+    w.set_visible(33, true).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one placed shown: in place ({:?})", live.fallback);
+    let shown = pictured("the one placed shown", &mut live, &w);
+    assert!(apart(&moved, &shown) < 0.5, "as before it was hidden ({:.2} steps)", apart(&moved, &shown));
+    // Removed: its records and rows are the room's again, and the next one placed takes the records.
+    let rows: Vec<(u32, u32)> = records.iter().map(|&i| (live.sc.instances[i as usize].rows, live.sc.meshes[live.sc.instances[i as usize].mesh as usize].sect_count)).collect();
+    w.remove(33);
+    assert!(!live.commit(&mut w).unwrap(), "the one placed removed: in place ({:?})", live.fallback);
+    assert!(rows.iter().all(|&(at, n)| rows_free(&live, at, n)) && lit(&live, &records) == 0, "its rows are the room's again, its emitters weigh nothing");
+    pictured("the one placed removed", &mut live, &w);
+    place(&mut w, 34, 0.5, Vec3::new(0.4, -0.2, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "another placed after: in place ({:?})", live.fallback);
+    let mut next = live.sc.tables.retained.rigid(34).unwrap().records();
+    next.sort_unstable();
+    assert_eq!(next, run, "it takes the records the first gave back");
+    list_is_its_triangles("another posed rigid model placed after one was removed", &live);
+    lit_as_a_build("another posed rigid model placed after one was removed", &mut live, &mut open(&w).unwrap());
+}
+
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light
 /// half that a joint swings): their mesh is skinned where it lies, each triangle still in its section. The picture is
 /// a build's.
