@@ -103,13 +103,20 @@ pub struct Dof {
     pub sensor_width: f32,
 }
 
-/// Pose of an animated model: clip (by name) sampled at `time` s.
+/// Pose of an animated model: clip (by name) sampled at `time` s, then the nodes the game poses itself (`nodes`).
+/// Without a clip the nodes not named stay as the file has them.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Animation {
+    #[serde(default)]
     pub clip: String,
+    #[serde(default)]
     pub time: f32,
     #[serde(default = "yes")]
     pub r#loop: bool,
+    /// Local transforms of nodes by name, over the clip's: 4 numbers (rotation, quaternion xyzw) or 7 (translation xyz,
+    /// then the rotation). A skeleton posed by the game: aim, look, procedural steps, ragdolls.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, Vec<f32>>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

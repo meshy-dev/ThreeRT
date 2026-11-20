@@ -174,11 +174,12 @@ type ObjectKindDesc =
   /** `InstancedMesh`: `count` instances (its capacity) of triangle geometry (`materials[0]`) or procedural geometry. */
   | { name: string; parent: number | null; castShadow: boolean; movable?: boolean; kind: "instanced"; geometry: number; procedural?: boolean; materials: number[]; count: number };
 
-/** Pose of an animated model: clip name, time (s), looping. */
+/** Pose of an animated model: clip name ("" for none), time (s), looping, nodes posed by name (4 or 7 numbers). */
 export interface AnimationDesc {
   clip: string;
   time: number;
   loop: boolean;
+  nodes?: Record<string, number[]>;
 }
 
 export interface SettingsDesc {
@@ -591,7 +592,7 @@ export class SceneBinding {
     }
     if (o instanceof GLTFModel) {
       const a = animationDesc(o);
-      if (a?.clip !== b.anim?.clip || a?.time !== b.anim?.time || a?.loop !== b.anim?.loop) {
+      if (!samePose(a, b.anim)) {
         b.anim = a;
         this.engine.animation(b.id, a);
         stats.updated++;
@@ -1560,8 +1561,37 @@ function lightValues(l: Light, out: Float64Array): Float64Array {
 function animationDesc(m: GLTFModel): AnimationDesc | null {
   const a = m.animation;
   if (!a) return null;
-  if (typeof a.clip !== "string" || !Number.isFinite(a.time)) throw new TypeError(`${m.name || m.uri}: animation needs a clip name and a finite time`);
-  return { clip: a.clip, time: a.time, loop: a.loop ?? true };
+  const who = m.name || m.uri;
+  if (a.clip !== undefined && typeof a.clip !== "string") throw new TypeError(`${who}: animation's clip is a name`);
+  if (a.time !== undefined && !Number.isFinite(a.time)) throw new TypeError(`${who}: animation's time must be finite`);
+  if (!a.clip && !a.nodes) throw new TypeError(`${who}: animation needs a clip or nodes`);
+  const d: AnimationDesc = { clip: a.clip ?? "", time: a.time ?? 0, loop: a.loop ?? true };
+  if (a.nodes) {
+    // (A copy: the game may change its arrays in place for the next frame.)
+    const nodes: Record<string, number[]> = {};
+    for (const [name, v] of Object.entries(a.nodes)) {
+      const n = Array.from(v);
+      if ((n.length !== 4 && n.length !== 7) || !n.every(Number.isFinite)) throw new TypeError(`${who}: animation node "${name}" needs 4 finite numbers (a rotation) or 7 (a translation, a rotation)`);
+      nodes[name] = n;
+    }
+    d.nodes = nodes;
+  }
+  return d;
+}
+
+function samePose(a: AnimationDesc | null, b: AnimationDesc | null): boolean {
+  if (!a || !b) return a === b;
+  if (a.clip !== b.clip || a.time !== b.time || a.loop !== b.loop) return false;
+  const an = a.nodes, bn = b.nodes;
+  if (!an || !bn) return an === bn;
+  const keys = Object.keys(an);
+  if (keys.length !== Object.keys(bn).length) return false;
+  for (const k of keys) {
+    const x = an[k]!, y = bn[k];
+    if (!y || x.length !== y.length) return false;
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+  }
+  return true;
 }
 
 export function cameraDesc(c: PerspectiveCamera): CameraDesc {

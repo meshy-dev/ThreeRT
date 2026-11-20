@@ -1241,11 +1241,21 @@ export class Mesh extends Object3D {
   }
 }
 
-/** A pose of an animated glTF asset: clip (by name) sampled at `time` seconds; looping by default. */
+/**
+ * A pose of an animated glTF asset: a clip (by name) sampled at `time` seconds (looping by default), then the nodes the
+ * game poses itself. Either may be left out: a skeleton posed by the game alone has only `nodes`.
+ */
 export interface AnimationPose {
-  clip: string;
-  time: number;
+  clip?: string;
+  time?: number;
   loop?: boolean;
+  /**
+   * Local transforms of nodes (joints) by name, over the clip's: 4 numbers, a rotation (quaternion x, y, z, w), or 7,
+   * a translation (x, y, z, in the node's parent's space) and then the rotation. A skinned mesh follows its joints
+   * (aim, look, procedural steps). Each model posed this way is skinned on its own; set a new object (or change these
+   * numbers and set it again) for a new pose.
+   */
+  nodes?: Record<string, ArrayLike<number>>;
 }
 
 /**
@@ -1818,8 +1828,9 @@ export class InstancedMesh extends Object3D {
 
 /**
  * Instance of an external glTF/GLB asset (path under the asset root). Skinned / animated assets (characters) are posed
- * by `animation`: set it once for a still, or every frame from a frame script (`{ clip: "Walk_Loop", time: f.time }`);
- * the engine samples the clip and skins the meshes. null = the file's rest pose.
+ * by `animation`: set it once for a still, or every frame from a frame script (`{ clip: "Walk_Loop", time: f.time }`,
+ * or joint by joint: `{ nodes: { spine: [x, y, z, w], ... } }`); the engine samples the clip, poses the named nodes and
+ * skins the meshes. null = the file's rest pose.
  */
 export class GLTFModel extends Object3D {
   override type = "GLTFModel";

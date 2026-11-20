@@ -648,14 +648,30 @@ export class ThreeEngine implements Engine {
     if (!root || !clips) return;
     if (!n.mixer) n.mixer = new THREE.AnimationMixer(root);
     n.mixer.stopAllAction();
+    // Nodes the last pose named go back to the file's transforms first.
+    const rest = (root.userData.rest ??= new Map()) as Map<THREE.Object3D, [THREE.Vector3, THREE.Quaternion]>;
+    for (const [o, [p, q]] of rest) {
+      o.position.copy(p);
+      o.quaternion.copy(q);
+    }
     if (!n.anim) return;
-    const clip = THREE.AnimationClip.findByName(clips, n.anim.clip);
-    if (!clip) throw new Error(`${n.desc.name}: no animation clip "${n.anim.clip}" (has ${clips.map((c) => c.name).join(", ")})`);
-    const action = n.mixer.clipAction(clip);
-    action.setLoop(n.anim.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-    action.clampWhenFinished = true;
-    action.play();
-    n.mixer.setTime(n.anim.time);
+    if (n.anim.clip) {
+      const clip = THREE.AnimationClip.findByName(clips, n.anim.clip);
+      if (!clip) throw new Error(`${n.desc.name}: no animation clip "${n.anim.clip}" (has ${clips.map((c) => c.name).join(", ")})`);
+      const action = n.mixer.clipAction(clip);
+      action.setLoop(n.anim.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+      action.clampWhenFinished = true;
+      action.play();
+      n.mixer.setTime(n.anim.time);
+    }
+    for (const [name, v] of Object.entries(n.anim.nodes ?? {})) {
+      const o = root.getObjectByName(name);
+      if (!o) throw new Error(`${n.desc.name}: animation: no node "${name}"`);
+      if (!rest.has(o)) rest.set(o, [o.position.clone(), o.quaternion.clone()]);
+      if (v.length === 7) o.position.set(v[0]!, v[1]!, v[2]!);
+      const r = v.length === 7 ? 3 : 0;
+      o.quaternion.set(v[r]!, v[r + 1]!, v[r + 2]!, v[r + 3]!).normalize();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------- lights

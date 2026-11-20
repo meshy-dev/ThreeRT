@@ -1599,9 +1599,9 @@ none of them it traces its light there. Two limits are known and held by tests s
 ## Moving objects in the live view
 
 The live view's histories (the irradiance and specular ones on the traced grid, the upscaler's colour on the output
-grid) follow a moving object by its motion vectors (`motion_in`), and three rules keep it from leaving copies of
+grid) follow a moving object by its motion vectors (`motion_in`), and four rules keep it from leaving copies of
 itself where it was (`live.wgsl`; measured by `node tools/bench-object-ghosting.ts`: a dragged device, a light thrown
-over a polished floor, the camera still):
+over a polished floor, a character running over a sunlit floor, the camera still):
 
 - **What it uncovers starts again.** The g-buffer says whether a surface is a moving object's that crossed a traced
   sample this frame (`GB.moves`; one that moved less, a leaf in the wind or a far walker, is left to a still edge's
@@ -1617,6 +1617,14 @@ over a polished floor, the camera still):
 - **Reflections follow what moves past them.** While the lighting is live (a moving object sets it), a still
   surface's specular history is clipped to this frame's neighbourhood (`SPEC_CLIP` deviations plus `SPEC_CLIP_REL`
   of its luminance): a light carried past a polished floor left its reflection along its path.
+- **Where the light changed, the history waits for it.** While the lighting is live, a traced sample whose light
+  jumped since the previous frame (by `LIGHT_CHANGE` of itself and `LIGHT_FLICKER` times its own flicker: a shadow's
+  edge passed, a lamp's pool moved) starts its flicker count again (`track`), and the output pixels around it hold
+  their history to this frame's samples until it has settled (`LIGHT_SETTLE` frames, `upscale`). The floor under a
+  running character stands still, so nothing else clamped it: its sun shadow left a line of its edge a frame, rippling
+  behind it.
+
+![A character running over a sunlit floor, before (left) and after (right): the ripples its shadow's edge left behind](images/shadow-ghosting.jpg)
 
 ![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
 

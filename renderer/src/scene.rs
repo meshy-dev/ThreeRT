@@ -967,8 +967,9 @@ pub struct PoseGroup {
     pub members: Vec<(u32, u32)>,
 }
 
-/// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop.
-type PoseKey = (String, Option<Vec<String>>, String, u32, bool);
+/// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop; for a model whose pose names
+/// nodes (posed by the game, its own), the object.
+type PoseKey = (String, Option<Vec<String>>, String, u32, bool, Option<u32>);
 
 /// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape or
 /// `MEDIUM_HIDDEN`, homogeneous, animated),
@@ -1534,11 +1535,15 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             }
             // (Copies with material functions share a pose only with the same functions: their own materials.)
             let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
-            let key: PoseKey = (file, nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop);
+            // A model the game poses node by node is a group of its own: its mesh (and BLAS) is skinned again when its
+            // pose changes, and moves as an instance, whatever the other models do (a player's body). It comes apart
+            // from no other, so no new pose rebuilds the scene.
+            let own = (!a.nodes.is_empty()).then_some(*id);
+            let key: PoseKey = (file, nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop, own);
             *count.entry(key.clone()).or_default() += 1;
             pose_key_of.insert(*id, key);
         }
-        pose_key_of.retain(|_, k| count[k] >= 2);
+        pose_key_of.retain(|_, k| count[k] >= 2 || k.5.is_some());
     }
     let mut pose_group_of: HashMap<PoseKey, Option<u32>> = HashMap::new();
     // Flattened instances' triangle ranges.
@@ -1745,9 +1750,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if instancing && posed && nodes.is_none() && glb.rigid() {
                     let a = animation.as_ref().unwrap();
                     let globals = glb.node_globals(Some(a))?;
-                    let pkey = (key.clone(), a.clip.clone());
+                    // (What moves is the clip's nodes and the nodes the pose names.)
+                    let pkey = (key.clone(), format!("{}\u{0}{}", a.clip, a.nodes.keys().cloned().collect::<Vec<_>>().join("\u{0}")));
                     if !rigid_parts.contains_key(&pkey) {
-                        let moving = glb.moving_nodes(&a.clip)?;
+                        let moving = glb.moving_nodes(a)?;
                         // (THREERT_RIGID_NODES=all: no node merged, every one an instance of a mesh of its own: the A/B
                         // against the merged still part.)
                         let all = std::env::var("THREERT_RIGID_NODES").is_ok_and(|v| v == "all");
@@ -1883,8 +1889,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                     pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                                 }
                                 let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
-                                // Other poses reach further (a stride, a swing): object bounds a quarter wider each way.
-                                let pad = (hi - lo) * 0.25;
+                                // Other poses reach further (a stride, a swing): object bounds a quarter wider each way;
+                                // one the game poses may take any pose (lie down): as far as its size each way.
+                                let pad = if key.5.is_some() { Vec3A::splat((hi - lo).length()) } else { (hi - lo) * 0.25 };
                                 meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
                                 sections.extend(sects);
                                 retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
@@ -2924,7 +2931,7 @@ mod instance_tests {
             w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
             let model = |animation| Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation, functions: vec![] };
             w.set_object(1, "still".into(), None, model(None), true, false).unwrap();
-            w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true })), true, false).unwrap();
+            w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() })), true, false).unwrap();
             for id in [1, 2] {
                 w.set_transform(id, Vec3::new(id as f32, 0.0, 0.0), glam::Quat::from_rotation_y(0.4), Vec3::new(x, 1.0, 1.0)).unwrap();
             }
@@ -3064,7 +3071,7 @@ mod instance_tests {
         w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
         let model = |animation| Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation, functions: vec![] };
         w.set_object(1, "still".into(), None, model(None), true, false).unwrap();
-        w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true })), true, false).unwrap();
+        w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() })), true, false).unwrap();
         let sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         let mesh = |name: &str| {
             let i = sc.instances.iter().find(|i| i.name == name).unwrap();
@@ -3091,7 +3098,7 @@ mod instance_tests {
         w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
         w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
         for (id, time, movable) in [(1, 0.25, false), (2, 0.75, true)] {
-            let animation = Some(desc::Animation { clip: "slide".into(), time, r#loop: true });
+            let animation = Some(desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
             w.set_object(id, format!("model{id}"), None, Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation, functions: vec![] }, true, movable).unwrap();
             w.set_transform(id, Vec3::new(id as f32 * 20.0, 0.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
         }

@@ -52,6 +52,8 @@ pub struct Model {
     /// In the order the renderer emits them (depth first, as before posing existed).
     prims: Vec<Prim>,
     parents: Vec<Option<usize>>,
+    /// Nodes by name (the first of a name), for poses that name them (`desc::Animation::nodes`).
+    names: HashMap<String, usize>,
     clips: Mutex<HashMap<String, Arc<Clip>>>,
 }
 
@@ -109,7 +111,13 @@ impl Model {
                 });
             }
         }
-        Ok(Model { gltf, prims, parents, clips: Mutex::new(HashMap::new()) })
+        let mut names = HashMap::new();
+        for n in doc.nodes() {
+            if let Some(name) = n.name() {
+                names.entry(name.to_string()).or_insert(n.index());
+            }
+        }
+        Ok(Model { gltf, prims, parents, names, clips: Mutex::new(HashMap::new()) })
     }
 
     /// Whether the file can be posed (has skins or animations).
@@ -163,7 +171,7 @@ impl Model {
                 (Vec3::from(t), Quat::from_array(r), Vec3::from(s))
             })
             .collect();
-        if let Some(a) = pose {
+        if let Some(a) = pose.filter(|a| !a.clip.is_empty()) {
             let clip = self.clip(&a.clip)?;
             let t = if clip.duration <= 0.0 { 0.0 } else if a.r#loop { a.time.rem_euclid(clip.duration) } else { a.time.clamp(0.0, clip.duration) };
             for ch in &clip.channels {
@@ -174,6 +182,24 @@ impl Model {
                     Path::Rotation => l.1 = Quat::from_array(v).normalize(),
                     Path::Scale => l.2 = Vec3::new(v[0], v[1], v[2]),
                 }
+            }
+        }
+        // The nodes the game poses itself, over the clip.
+        for (name, v) in pose.map(|a| &a.nodes).into_iter().flatten() {
+            let &i = self.names.get(name).ok_or_else(|| anyhow!("pose: no node \"{name}\""))?;
+            let (t, r) = match v.len() {
+                4 => (None, [v[0], v[1], v[2], v[3]]),
+                7 => (Some(Vec3::new(v[0], v[1], v[2])), [v[3], v[4], v[5], v[6]]),
+                n => return Err(anyhow!("pose: node \"{name}\" has {n} numbers (4: a rotation, 7: a translation and a rotation)")),
+            };
+            let q = Quat::from_array(r);
+            if !q.is_finite() || q.length_squared() < 1e-12 || t.is_some_and(|t| !t.is_finite()) {
+                return Err(anyhow!("pose: node \"{name}\" is not a transform ({v:?})"));
+            }
+            let l = &mut local[i];
+            l.1 = q.normalize();
+            if let Some(t) = t {
+                l.0 = t;
             }
         }
         let mut global: Vec<Option<Mat4>> = vec![None; local.len()];
@@ -198,12 +224,16 @@ impl Model {
         self.prims.iter().all(|p| p.skin.is_none())
     }
 
-    /// Per node: whether clip `clip` moves it (a channel targets it or one of its ancestors).
-    pub fn moving_nodes(&self, clip: &str) -> Result<Vec<bool>> {
-        let c = self.clip(clip)?;
+    /// Per node: whether the pose moves it (a channel of its clip or a node it poses is it or one of its ancestors).
+    pub fn moving_nodes(&self, pose: &desc::Animation) -> Result<Vec<bool>> {
         let mut direct = vec![false; self.parents.len()];
-        for ch in &c.channels {
-            direct[ch.node] = true;
+        if !pose.clip.is_empty() {
+            for ch in &self.clip(&pose.clip)?.channels {
+                direct[ch.node] = true;
+            }
+        }
+        for name in pose.nodes.keys() {
+            direct[*self.names.get(name).ok_or_else(|| anyhow!("pose: no node \"{name}\""))?] = true;
         }
         Ok((0..self.parents.len())
             .map(|i| {
@@ -371,8 +401,8 @@ mod tests {
     fn rigid_split_moves_the_animated_subtree() {
         let m = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
         assert!(m.rigid());
-        assert_eq!(m.moving_nodes("move").unwrap(), vec![true, true, false]);
-        let pose = desc::Animation { clip: "move".into(), time: 0.5, r#loop: false };
+        let pose = desc::Animation { clip: "move".into(), time: 0.5, r#loop: false, nodes: Default::default() };
+        assert_eq!(m.moving_nodes(&pose).unwrap(), vec![true, true, false]);
         let g = m.node_globals(Some(&pose)).unwrap();
         assert!((g[1].transform_point3(Vec3::ZERO) - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
         // Static part in world space (the object at x = 10), the moving part in its node's space.
@@ -406,6 +436,30 @@ mod tests {
         assert!(m.triangles(mirrored, None, None).unwrap().iter().all(|t| hand(t) == -1.0));
         assert!(m.node_triangles(mirrored, None, &|_| true, false).unwrap().iter().all(|(_, t)| hand(t) == -1.0));
         assert!(m.node_triangles(Mat4::IDENTITY, None, &|_| true, true).unwrap().iter().all(|(_, t)| hand(t) == 1.0));
+    }
+
+    #[test]
+    fn nodes_posed_by_name_over_the_clip() {
+        let m = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
+        let q = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        // A rotation over the clip's translation; a translation and a rotation; a node the clip does not move.
+        let pose = |nodes: &[(&str, Vec<f32>)]| desc::Animation { clip: "move".into(), time: 0.5, r#loop: false, nodes: nodes.iter().map(|(k, v)| (k.to_string(), v.clone())).collect() };
+        let g = m.node_globals(Some(&pose(&[("arm", q.to_array().to_vec())]))).unwrap();
+        assert!((g[1].transform_point3(Vec3::ZERO) - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-5, "hand turned about the arm, the arm where the clip has it");
+        let mut tr = vec![3.0, 0.0, 0.0];
+        tr.extend(Quat::IDENTITY.to_array());
+        let g = m.node_globals(Some(&pose(&[("arm", tr), ("base", q.to_array().to_vec())]))).unwrap();
+        assert!((g[1].transform_point3(Vec3::ZERO) - Vec3::new(4.0, 0.0, 0.0)).length() < 1e-5, "the translation replaces the clip's");
+        assert!((g[2].transform_point3(Vec3::X) - Vec3::new(0.0, 1.0, 5.0)).length() < 1e-5);
+        let a = pose(&[("base", q.to_array().to_vec())]);
+        assert_eq!(m.moving_nodes(&a).unwrap(), vec![true, true, true], "a posed node moves");
+        // Without a clip: the file's transforms and the named nodes.
+        let a = desc::Animation { clip: String::new(), time: 0.0, r#loop: true, nodes: [("arm".to_string(), q.to_array().to_vec())].into() };
+        assert!((m.node_globals(Some(&a)).unwrap()[1].transform_point3(Vec3::ZERO) - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert_eq!(m.moving_nodes(&a).unwrap(), vec![true, true, false]);
+        assert!(m.node_globals(Some(&pose(&[("elbow", q.to_array().to_vec())]))).is_err(), "no such node");
+        assert!(m.node_globals(Some(&pose(&[("arm", vec![0.0, 0.0, 0.0])]))).is_err(), "3 numbers");
+        assert!(m.node_globals(Some(&pose(&[("arm", vec![0.0; 4])]))).is_err(), "not a rotation");
     }
 
     fn ch(interpolation: gltf::animation::Interpolation, path: Path, times: Vec<f32>, values: Vec<[f32; 4]>) -> Channel {
@@ -443,11 +497,11 @@ mod bench {
         let t0 = web_time::Instant::now();
         let mut n = 0;
         for k in 0..100 {
-            let a = crate::desc::Animation { clip: clip.clone(), time: k as f32 * 0.016, r#loop: true };
+            let a = crate::desc::Animation { clip: clip.clone(), time: k as f32 * 0.016, r#loop: true, nodes: Default::default() };
             n = m.triangles(glam::Mat4::IDENTITY, None, Some(&a)).unwrap().len();
         }
         eprintln!("{n} triangles: {:.3} ms per pose", t0.elapsed().as_secs_f64() * 1000.0 / 100.0);
-        let a = crate::desc::Animation { clip, time: 0.3, r#loop: true };
+        let a = crate::desc::Animation { clip, time: 0.3, r#loop: true, nodes: Default::default() };
         let tris = m.triangles(glam::Mat4::IDENTITY, None, Some(&a)).unwrap();
         let t0 = web_time::Instant::now();
         let mut x = 0.0;

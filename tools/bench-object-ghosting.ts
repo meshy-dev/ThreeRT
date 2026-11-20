@@ -2,7 +2,9 @@
 // object moves, the way an app's drag or a physics body moves it: a pose a frame, by host message. Two scenes:
 //   device: a device dragged over a workbench (object-ghosting/device.game.ts, Pocket Bench's Tab5 made of boxes);
 //   orb:    a glowing orb thrown across a dark room with a polished floor (object-ghosting/orb.game.ts, the Atrium of
-//           threert/native-app-template at night): a moving light, seen directly and in the floor's reflection. What the moving object leaves behind (copies
+//           threert/native-app-template at night): a moving light, seen directly and in the floor's reflection;
+//   walker: a round character running over a sunlit plank floor (object-ghosting/walker.game.ts, Mochi Party's
+//           mochi seen as the game sees it): its hard sun shadow sweeping over a still floor. What the moving object leaves behind (copies
 // of its edges where it was, its screen smeared over the wall) is measured against a converged frame of the same pose
 // (history reset, then accumulated), as bench-ghosting does.
 //
@@ -11,7 +13,8 @@
 // Moves (one pose a frame at 60 fps):
 //   device slide: x -0.18 -> +0.18 m in 0.5 s (about 13 px a frame at 1280 x 720), then held;
 //   device lift:  y 0.2 -> 0.34 m and a quarter turn of yaw in 0.4 s, then held;
-//   orb throw:    x -0.6 -> +0.6 m, 0.12 m over the floor, in 0.5 s (2.4 m/s), then held.
+//   orb throw:    x -0.6 -> +0.6 m, 0.12 m over the floor, in 0.5 s (2.4 m/s), then held;
+//   walker run:   x -2 -> +2 m in 0.9 s (4.4 m/s, a mochi running), then held.
 // Shots: the move's midpoint, and 0 / 0.1 / 0.3 s after it ends. Per shot, over the band the device sweeps: mean dE,
 // p95, and trail_px (p95 over rows of the longest horizontal run of pixels off by dE > 10).
 import { spawn, execFileSync } from "node:child_process";
@@ -44,6 +47,9 @@ const SCENES: Record<string, Record<string, Move>> = {
   },
   orb: {
     throw: { from: { x: -0.6, y: 0.12, z: -0.1, ry: 0 }, to: { x: 0.6, y: 0.12, z: -0.1, ry: 0 }, frames: 30, band: "0,0.3,1,1" },
+  },
+  walker: {
+    run: { from: { x: -2, y: 0, z: 0.6, ry: 0 }, to: { x: 2, y: 0, z: 0.6, ry: 0 }, frames: 54, band: "0,0.35,1,0.95" },
   },
 };
 const sceneArg = flag("--scene", "all");
