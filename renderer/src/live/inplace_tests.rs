@@ -2238,6 +2238,7 @@ fn a_model_with_emitters_is_placed_again_in_place() {
     let run: Vec<u32> = (0..2).map(|j| records.iter().min().unwrap() + j).collect();
     assert!(records.iter().all(|&i| live.sc.edit.in_room(i as usize) && run.contains(&i)), "a part a record of the room, in a run ({records:?})");
     assert_eq!((lit(&live, &[r.still.unwrap()]), r.moving()), (2, vec![r.instances[0].1]), "its panel's emitters are its own, still ones");
+    assert!(live.sc.tables.emitter_tris.iter().filter(|e| e.inst == r.still.unwrap()).all(|e| !e.moves), "they are no moving emitters");
     list_is_its_triangles("a posed rigid model placed again", &live);
     lit_as_a_build("a posed rigid model placed again", &mut live, &mut open(&w).unwrap());
     let placed = pictured("a posed rigid model placed again", &mut live, &w);
@@ -2245,6 +2246,7 @@ fn a_model_with_emitters_is_placed_again_in_place() {
     // Posed on, moved, hidden and shown, as one the build placed.
     w.set_animation(33, slide(0.4)).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the one placed posed on: in place ({:?})", live.fallback);
+    assert!(!live.sc.tables.retained.rigid(33).unwrap().still_moves, "a new pose is no move: its panel stays, its emitters still ones");
     pictured("the one placed posed on", &mut live, &w);
     w.set_transform(33, Vec3::new(-0.3, 0.1, 1.0), glam::Quat::from_rotation_z(-0.4), Vec3::splat(0.08)).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the one placed moved: in place ({:?})", live.fallback);
@@ -2263,13 +2265,59 @@ fn a_model_with_emitters_is_placed_again_in_place() {
     assert!(!live.commit(&mut w).unwrap(), "the one placed removed: in place ({:?})", live.fallback);
     assert!(rows.iter().all(|&(at, n)| rows_free(&live, at, n)) && lit(&live, &records) == 0, "its rows are the room's again, its emitters weigh nothing");
     pictured("the one placed removed", &mut live, &w);
+    // (Made visible in the commit that adds it: placed as it is, by the edit that places it.)
     place(&mut w, 34, 0.5, Vec3::new(0.4, -0.2, 0.9));
+    w.set_visible(34, false).unwrap();
+    w.set_visible(34, true).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "another placed after: in place ({:?})", live.fallback);
     let mut next = live.sc.tables.retained.rigid(34).unwrap().records();
     next.sort_unstable();
     assert_eq!(next, run, "it takes the records the first gave back");
     list_is_its_triangles("another posed rigid model placed after one was removed", &live);
     lit_as_a_build("another posed rigid model placed after one was removed", &mut live, &mut open(&w).unwrap());
+}
+
+/// A posed rigid model with triangles flattened beside its parts (tests/render/data/panel-decal.glb: a cutout on
+/// exactly an emitter's vertices leaves the mesh with it) is hidden, and removed, by a rebuild: an instance's mask
+/// hides no world-space triangle. The picture is a build's.
+#[test]
+fn a_posed_rigid_model_with_flattened_triangles_is_hidden_and_removed_by_a_rebuild() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let model = || Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation: Some(crate::desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true }), functions: vec![] };
+    let scene = || {
+        let mut w = world();
+        w.set_object(32, "posed".into(), None, model(), true, false).unwrap();
+        w.set_transform(32, Vec3::new(-0.4, 0.3, 0.6), glam::Quat::IDENTITY, Vec3::splat(0.08)).unwrap();
+        w
+    };
+    let pictured = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let mut w = scene();
+    let mut live = match open(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert!(!live.sc.tables.retained.rigid(32).expect("a posed rigid model").rest.mats.is_empty(), "the model has triangles flattened beside its part");
+    let before = picture(&mut live, 48);
+    w.set_visible(32, false).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "hidden: a rebuild");
+    let hidden = pictured("a posed rigid model with flattened triangles hidden", &mut live, &w);
+    assert!(apart(&before, &hidden) > 0.5, "it is gone from the picture ({:.2} steps)", apart(&before, &hidden));
+    let mut w = scene();
+    let mut live = open(&w).unwrap();
+    w.take_changes();
+    w.remove(32);
+    assert!(live.commit(&mut w).unwrap(), "removed: a rebuild");
+    let removed = pictured("a posed rigid model with flattened triangles removed", &mut live, &w);
+    assert!(apart(&hidden, &removed) < 0.5, "as when it was hidden ({:.2} steps)", apart(&hidden, &removed));
 }
 
 /// Models in a shared pose posed again in place (tests/render/data/arm.glb: a skinned strip, a dark half and a light

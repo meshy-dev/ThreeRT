@@ -1020,7 +1020,7 @@ impl LiveCore {
             match &world.objects[&k].kind {
                 crate::world::Kind::Group | crate::world::Kind::Camera(_) => {}
                 // (One this commit adds is placed as it is, shown or not: `edit_geometry`.)
-                crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } if changes.added.contains(&k) => {}
+                crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { .. } if changes.added.contains(&k) => {}
                 crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } => {
                     let Some(r) = self.sc.tables.retained.instance(k).filter(|i| whole(i, &self.sc.instances, &self.sc.meshes)).map(|i| i.instance as usize) else { return false };
                     let Some(inst) = self.sc.instances.get_mut(r) else { return false };
