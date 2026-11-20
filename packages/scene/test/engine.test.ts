@@ -444,3 +444,30 @@ test("density grids: the grid goes before its volume, with its program's WGSL on
   smoke.puff([1, 2, 3], 0.5, { density: 0.7, push: 2 });
   assert.deepEqual([...smoke.grid!.pendingSources[0]].map((v) => +v.toFixed(3)), [1, 2, 3, 0.5, 0.7, 1, 0, 0, 0, 0, 0, 2]);
 });
+
+test("a model posed node by node: the nodes reach the engine as a copy, again only when a number changes", async () => {
+  const { GLTFModel, PerspectiveCamera, RecordingEngine, Scene, SceneBinding } = await import("../src/index.ts");
+  const scene = new Scene();
+  const cam = new PerspectiveCamera();
+  scene.add(cam);
+  const spine = new Float32Array([0, 0, 0, 1]);
+  const body = new GLTFModel("assets/body.glb", { animation: { nodes: { spine, hip: [0, 1, 0, 0, 0, 0, 1] } } });
+  scene.add(body);
+  const engine = new RecordingEngine();
+  const b = new SceneBinding(engine, scene, cam);
+  b.sync();
+  const object = engine.take().find((c) => c[0] === "object" && (c[2] as { kind?: string }).kind === "model") as unknown as [string, number, { animation: unknown }];
+  assert.deepEqual(object[2].animation, { clip: "", time: 0, loop: true, nodes: { spine: [0, 0, 0, 1], hip: [0, 1, 0, 0, 0, 0, 1] } });
+  const poses = () => engine.take().filter((c) => c[0] === "animation").map((c) => c[2]);
+  body.animation = { nodes: { spine, hip: [0, 1, 0, 0, 0, 0, 1] } };
+  b.sync();
+  assert.deepEqual(poses(), [], "the same numbers: not sent again");
+  spine[2] = 0.5;
+  body.animation = { nodes: { spine, hip: [0, 1, 0, 0, 0, 0, 1] } };
+  b.sync();
+  assert.deepEqual(poses(), [{ clip: "", time: 0, loop: true, nodes: { spine: [0, 0, 0.5, 1], hip: [0, 1, 0, 0, 0, 0, 1] } }]);
+  body.animation = { nodes: { spine: [0, 0, 1] } };
+  assert.throws(() => b.sync(), /4 finite numbers/);
+  body.animation = {};
+  assert.throws(() => b.sync(), /a clip or nodes/);
+});

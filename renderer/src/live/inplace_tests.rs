@@ -795,7 +795,7 @@ fn the_light_list_holds_its_triangles() {
     // moves its node (a rigid model: the node is an instance), each against a build's picture.
     let open_at_root = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
     let model = |animation| Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation, functions: vec![] };
-    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
     let small = Vec3::splat(0.05);
     let mut w = world();
     w.set_object(30, "still".into(), None, model(None), true, false).unwrap();
@@ -2011,7 +2011,7 @@ fn a_material_turned_glass_stops_casting_its_shadow_in_place() {
 fn a_posed_rigid_model_is_posed_and_moved_in_place_with_the_nodes_its_clip_leaves_alone() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
     let model = |time| Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: slide(time), functions: vec![] };
     let size = Vec3::splat(0.08);
     let mut w = world();
@@ -2081,7 +2081,7 @@ fn a_posed_rigid_model_is_posed_and_moved_in_place_with_the_nodes_its_clip_leave
 fn a_posed_rigid_model_under_groups_is_not_moved_by_a_new_pose() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
     let mut w = world();
     w.set_object(50, "a".into(), None, Kind::Group, true, false).unwrap();
     w.set_transform(50, Vec3::new(0.13, -0.27, 0.31), glam::Quat::from_euler(glam::EulerRot::XYZ, 0.37, -0.53, 0.71), Vec3::new(1.1, 0.9, 1.3)).unwrap();
@@ -2117,7 +2117,7 @@ fn a_posed_rigid_model_under_groups_is_not_moved_by_a_new_pose() {
 fn models_in_a_shared_pose_posed_again_keep_their_sections() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true });
+    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
     let mut w = world();
     for (id, x) in [(30, -0.7), (31, 0.7)] {
         w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: bend(0.0), functions: vec![] }, true, false).unwrap();
@@ -2139,6 +2139,42 @@ fn models_in_a_shared_pose_posed_again_keep_their_sections() {
     forget(&mut live);
     let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
     assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+}
+
+/// Models the game poses node by node (tests/render/data/arm.glb's joint `tip`, no clip): each is a pose of its own, even
+/// in the same pose as another, so posing them apart is in place; the picture is a build's.
+#[test]
+fn models_posed_node_by_node_are_posed_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let turn = |a: f32| {
+        let q = glam::Quat::from_rotation_z(a);
+        Some(crate::desc::Animation { clip: String::new(), time: 0.0, r#loop: true, nodes: [("tip".to_string(), q.to_array().to_vec())].into() })
+    };
+    let mut w = world();
+    for (id, x) in [(30, -0.7), (31, 0.7)] {
+        w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: turn(0.0), functions: vec![] }, true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -1.0, 0.8), glam::Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    if !live.g.hwrt {
+        return eprintln!("skipped: no hardware ray tracing");
+    }
+    assert_eq!(live.sc.tables.retained.pose_groups.len(), 2, "each its own pose, though the same");
+    let before = picture(&mut live, 64);
+    for (id, a) in [(30, 0.9), (31, -1.2)] {
+        w.set_animation(id, turn(a)).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "posed apart in place ({:?})", live.fallback);
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+    assert!(apart(&before, &a) > 0.5, "the new poses are in the picture ({:.2} steps)", apart(&before, &a));
 }
 
 /// A scene whose only volume is hidden has its media passes made when it is loaded: the frame that shows the volume
