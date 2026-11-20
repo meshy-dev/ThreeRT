@@ -2125,7 +2125,7 @@ fn a_posed_rigid_model_under_groups_is_not_moved_by_a_new_pose() {
 fn a_posed_rigid_model_is_hidden_shown_and_removed_in_place() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
     let model = |time| Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: slide(time), functions: vec![] };
     let size = Vec3::splat(0.08);
     let mut w = world();
@@ -2213,7 +2213,7 @@ fn a_posed_rigid_model_is_hidden_shown_and_removed_in_place() {
 fn a_model_with_emitters_is_placed_again_in_place() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true });
+    let slide = |time| Some(crate::desc::Animation { clip: "slide".into(), time, r#loop: true, nodes: Default::default() });
     let still = || Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation: None, functions: vec![] };
     let posed = |time| Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: slide(time), functions: vec![] };
     let mut w = world();
@@ -2252,6 +2252,13 @@ fn a_model_with_emitters_is_placed_again_in_place() {
         w.set_object(id, format!("posed{id}"), None, posed(time), true, false).unwrap();
         w.set_transform(id, at, glam::Quat::from_rotation_z(0.3), Vec3::splat(0.08)).unwrap();
     };
+    // (One whose pose names a node moves other nodes: other parts, a build's to make.)
+    let named = crate::desc::Animation { clip: "slide".into(), time: 0.75, r#loop: true, nodes: [("panel".to_string(), vec![0.0, 0.0, 0.0, 1.0])].into() };
+    w.set_object(35, "named".into(), None, Kind::Model { uri: "tests/render/data/panel-slider.glb".into(), nodes: None, animation: Some(named), functions: vec![] }, true, false).unwrap();
+    w.set_transform(35, Vec3::new(0.2, 0.3, 0.8), glam::Quat::from_rotation_z(0.3), Vec3::splat(0.08)).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "a model whose pose names a node the clip leaves alone: a rebuild");
+    w.remove(35);
+    live.commit(&mut w).unwrap();
     place(&mut w, 33, 0.75, Vec3::new(0.2, 0.3, 0.8));
     assert!(!live.commit(&mut w).unwrap(), "a posed rigid model placed again: in place ({:?})", live.fallback);
     let (built, r) = (live.sc.tables.retained.rigid(32).unwrap().clone(), live.sc.tables.retained.rigid(33).expect("a posed rigid model").clone());
@@ -2316,7 +2323,7 @@ fn a_model_with_emitters_is_placed_again_in_place() {
 fn a_posed_rigid_model_with_flattened_triangles_is_hidden_and_removed_by_a_rebuild() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let model = || Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation: Some(crate::desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true }), functions: vec![] };
+    let model = || Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation: Some(crate::desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() }), functions: vec![] };
     let scene = || {
         let mut w = world();
         w.set_object(32, "posed".into(), None, model(), true, false).unwrap();

@@ -753,8 +753,8 @@ pub struct Retained {
     /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
     /// place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
-    /// Posed rigid models' parts by (uri, clip), each its node (`STILL_NODES`) and its mesh, where every part is a
-    /// mesh with nothing flattened beside: one added in place is an instance of each.
+    /// Posed rigid models' parts by (uri, `rigid_pose_key`), each its node (`STILL_NODES`) and its mesh, where every
+    /// part is a mesh with nothing flattened beside: one added in place is an instance of each.
     pub rigid_meshes: HashMap<(String, String), Vec<(usize, u32)>>,
     /// A model's mesh's rows as every instance of it has them (the file's materials, `model_sections`; where a
     /// section's triangles and emitters are is each instance's to fill).
@@ -924,6 +924,11 @@ pub struct RigidModel {
 
 /// In place of a node: the nodes a rigid model's clip leaves alone, merged (their space is the model's).
 pub const STILL_NODES: usize = usize::MAX;
+
+/// What a rigid model's parts go by, beside the model: which nodes its pose moves, the clip's and those it names.
+pub fn rigid_pose_key(a: &desc::Animation) -> String {
+    format!("{}\u{0}{}", a.clip, a.nodes.keys().cloned().collect::<Vec<_>>().join("\u{0}"))
+}
 
 impl RigidModel {
     /// The records of all its instances.
@@ -1750,8 +1755,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if instancing && posed && nodes.is_none() && glb.rigid() {
                     let a = animation.as_ref().unwrap();
                     let globals = glb.node_globals(Some(a))?;
-                    // (What moves is the clip's nodes and the nodes the pose names.)
-                    let pkey = (key.clone(), format!("{}\u{0}{}", a.clip, a.nodes.keys().cloned().collect::<Vec<_>>().join("\u{0}")));
+                    let pkey = (key.clone(), rigid_pose_key(a));
                     if !rigid_parts.contains_key(&pkey) {
                         let moving = glb.moving_nodes(a)?;
                         // (THREERT_RIGID_NODES=all: no node merged, every one an instance of a mesh of its own: the A/B
@@ -1805,7 +1809,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         }
                         // (What an edit can place again: every part a mesh whole in the pool, the file's own materials.)
                         if functions.is_empty() && parts.iter().all(|p| p.mesh.is_some() && p.rest.is_empty()) {
-                            retained.rigid_meshes.insert((uri.clone(), a.clip.clone()), parts.iter().filter_map(|p| Some((p.node, p.mesh?))).collect());
+                            retained.rigid_meshes.insert((uri.clone(), rigid_pose_key(a)), parts.iter().filter_map(|p| Some((p.node, p.mesh?))).collect());
                         }
                         rigid_parts.insert(pkey.clone(), std::rc::Rc::new(parts));
                     }

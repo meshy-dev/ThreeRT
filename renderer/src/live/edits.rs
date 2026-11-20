@@ -2364,7 +2364,7 @@ impl LiveCore {
                     // no instance of the model cast a shadow was built without it.)
                     let glass_caster = |its: &[scene::Row]| scene::rows_bits(its) & scene::INST_GLASS != 0 && scene::rows_cast(its, o.cast_shadow) && features & gpu::F_IGLASS == 0;
                     if let Some(a) = animation {
-                        let parts = nodes.is_none().then(|| tables.retained.rigid_meshes.get(&(uri.clone(), a.clip.clone()))).flatten().ok_or("an animated model that is no rigid one of the scene's with this clip (its meshes are a build's to make)")?.clone();
+                        let parts = nodes.is_none().then(|| tables.retained.rigid_meshes.get(&(uri.clone(), scene::rigid_pose_key(a)))).flatten().ok_or("an animated model that is no rigid one of the scene's with this pose's nodes (its meshes are a build's to make)")?.clone();
                         let globals = scene::model_gltf(uri, assets).and_then(|g| g.node_globals(Some(a))).map_err(|e| e.to_string())?;
                         let (mut lo, mut hi) = (glam::Vec3A::splat(f32::MAX), glam::Vec3A::splat(f32::MIN));
                         let mut placed = vec![];
