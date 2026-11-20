@@ -1193,9 +1193,9 @@ its BLASes, or the units), so the engine's path is the same under both traversal
 | a mesh is removed | its record cleared, its tree given back and filled, the top tree |
 
 The scene is rebuilt, as before this step, by: the first instanced mesh of a scene that has none (its kernel has no
-unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a posed model's
-pose (its triangles are in the still tree) and a rigid group's (its parts are units, placed again by a rebuild
-still); an instance of a mesh that deforms; **room that is
+unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a skinned
+model's pose (its triangles are in the still tree; a rigid group's parts are units, posed in place); an instance of
+a mesh that deforms; **room that is
 full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
 triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
 edit replaces stays behind until the next rebuild, under both; a scene with units and no geometry of its own to
@@ -1407,7 +1407,7 @@ guard's 1.2 ms there is not its form). In Chrome (`tools/web-hello.ts --frames`)
 | `instancing` (1,000, all moving) | 3.39 / 7.89; flat rebuilds the scene every frame (276 ms of CPU a frame; units 6.5) | offline at one instant, 64 spp: ΔE 0.37, SSIM 0.995 |
 | `bistro` (1 unit of 2.83 M triangles) | 23.1 / 22.2 | ΔE 0.69, SSIM 0.990 |
 | `zero-day` (1 unit of 5.87 M) | 14.5 / 12.8 | ΔE 1.20, SSIM 0.963: the scene's own spread, see below |
-| `zero-day-animated` (3,991) | every frame rebuilds the scene (2.6 s), with units as flat: a rigid group's pose, as before step 7b | – |
+| `zero-day-animated` (4,181) | posed in place since 2026-11-20: 16.3 ms at 1280 × 720, half scale, a frame's commit 1.2 ms (before: every frame rebuilt the scene, 2.9 s) | – |
 
 `zero-day`'s picture: two runs of the flat kernel are ΔE 0.11 apart, so units' 1.20 is not noise of one kernel.
 Offline at 1,024 spp the three traversals are as far from one another: units against flat ΔE 0.97, hardware
