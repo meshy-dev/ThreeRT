@@ -2765,6 +2765,8 @@ impl LiveCore {
                         _ => String::new(),
                     };
                     let mut rigid = scene::RigidModel { world: world.world_matrix(id), pose, ..Default::default() };
+                    // (Its row of the object table: where a new pose or a move writes its pivot.)
+                    rigid.rest.object = object as u32;
                     for (j, (node, mut inst, mut mine)) in parts.into_iter().enumerate() {
                         place(record + j, &mut inst, &mut mine, node != scene::STILL_NODES)?;
                         if node == scene::STILL_NODES {

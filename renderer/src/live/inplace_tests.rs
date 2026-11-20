@@ -2379,6 +2379,19 @@ fn a_model_with_emitters_is_placed_again_in_place() {
     pictured("the one placed posed on", &mut live, &w);
     w.set_transform(33, Vec3::new(-0.3, 0.1, 1.0), glam::Quat::from_rotation_z(-0.4), Vec3::splat(0.08)).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the one placed moved: in place ({:?})", live.fallback);
+    // (Every model's row of the object table as a build's: the moved one's pivot in its own row, no other's touched.
+    // Its world bounds' size apart: a move in place keeps the size the object was placed with, for every kind.)
+    let object_rows = |c: &LiveCore| {
+        let st = c.sc.tables.stride;
+        [30u32, 31, 32, 33].map(|id| {
+            c.sc.tables.retained.proxies[&id].object.map(|o| {
+                let mut row = c.sc.tables.objects[o as usize * st..(o as usize + 1) * st].to_vec();
+                row[1] = [0.0; 4];
+                row
+            })
+        })
+    };
+    assert_eq!(object_rows(&live), object_rows(&open(&w).unwrap()), "the one placed moved: each model's row of the object table, as a build's");
     let moved = pictured("the one placed moved", &mut live, &w);
     assert!(apart(&placed, &moved) > 0.5, "the move is in the picture ({:.2} steps)", apart(&placed, &moved));
     w.set_visible(33, false).unwrap();
