@@ -342,6 +342,7 @@ export class BufferGeometry {
     this.groups = g.groups.map((x) => ({ ...x }));
     this.parameters = { ...g.parameters };
     this.name = g.name;
+    this.userData = g.userData;
     this.boundingBox = g.boundingBox?.clone() ?? null;
     this.boundingSphere = g.boundingSphere?.clone() ?? null;
     return this;
