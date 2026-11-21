@@ -2776,6 +2776,29 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A posed skinned model is posed in place under software traversal (2026-11-22).** Under software traversal a mesh
+that deforms was written out into the still scene's tree, so every pose rebuilt the scene. Now it is a unit as any
+mesh. Its tree has the shape of a tree built once over its model's bind pose, one shape for every placement of the
+model (the pass's corners and each such mesh's triangles are in that tree's order), and the boxes of its pose. A new
+pose places the model's corners on the CPU, takes the boxes again (`units::refit`), writes the nodes where they lie
+and gives the top tree the unit's new bounds; the skinning pass writes the triangles and attributes as under
+hardware traversal, without the BLAS input. Hidden, shown and removed, it goes as any unit.
+Why the boxes alone: a tree made again for a pose costs sixty times as much (a character of 13,744 triangles, one
+core: 3.0 ms against 0.05) and walks 4 to 11 % shorter by its nodes' areas; the clip's first pose is no better a
+shape than the bind pose.
+Still a rebuild under software traversal: a skinned model added (its triangles and its tree need room, which a
+scene has there only with geometry of its own to edit, and which does not grow there).
+Measured, software traversal. A game with a character posed every frame: every frame rebuilt the scene, 30.6 ms of
+CPU; now none does, 3.2 ms. A crowd of 150 walkers: 2.0 s a frame; now no rebuild, 7.6 ms of commit. What a frame's
+trace pays, nothing moving, at 1280 x 720: four characters filling the view, 4.67 ms before and 5.20 now (+11 %),
+of which 6.5 % is the scene having units at all (its kernel had no unit walk) and 4.9 % the kept shape (the same
+units with trees built for the pose: 4.97); the crowd standing in a street, 85 ms either way.
+Tests, under both traversals: four models of two files, each mesh's triangles, attributes and previous vertices on
+the GPU against the CPU skin; under software traversal each mesh's tree read back (its model's links, a leaf's box
+its triangles', an interior node's its children's), its bounds its root's, its unit's leaf of the top tree; the
+motion vectors of a pose no longer than the furthest a corner went; one hidden, posed while hidden, shown; one
+removed.
+
 **A posed skinned model is added and removed in place (2026-11-21).** A character that comes or goes while the game
 runs rebuilt the scene. Now one of a model the scene has is added as the build makes one: a mesh of its own in the
 room for edits, its triangles skinned on the CPU once for the pose it comes in, a job of the skinning pass for its
