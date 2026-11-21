@@ -596,7 +596,8 @@ export class Object3D {
     this.updateWorldMatrix(true, false);
     const pos = new Vector3().setFromMatrixPosition(this.matrixWorld);
     const m = new Matrix4();
-    if (this.looksDownNegativeZ) m.lookAt(pos, target, this.up);
+    // Ambient and hemisphere lights are isLight objects without inheriting our Light base.
+    if (this.looksDownNegativeZ || ("isLight" in this && this.isLight === true)) m.lookAt(pos, target, this.up);
     else m.lookAt(target, pos, this.up);
     this.quaternion.setFromRotationMatrix(m);
     if (this.parent) {
