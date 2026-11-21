@@ -647,6 +647,8 @@ export class Object3D {
     const m = new Matrix4().copy(this.matrixWorld).invert().multiply(object.matrixWorld);
     object.parent?.remove(object);
     m.decompose(object.position, object.quaternion, object.scale);
+    // With automatic updates off, keep the explicit matrix in sync with the new local transform.
+    if (!object.matrixAutoUpdate) object.matrix.copy(m);
     this.add(object);
     object.updateWorldMatrix(false, true);
     return this;
