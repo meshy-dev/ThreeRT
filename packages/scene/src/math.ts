@@ -400,6 +400,18 @@ export class Matrix4 {
       n44 * (-n13 * n22 * n31 - n11 * n23 * n32 + n11 * n22 * n33 + n13 * n21 * n32 - n12 * n21 * n33 + n12 * n23 * n31)
     );
   }
+  /** Transpose in place, as three.js does. */
+  transpose(): this {
+    const te = this.elements;
+    let tmp: number;
+    tmp = te[1]; te[1] = te[4]; te[4] = tmp;
+    tmp = te[2]; te[2] = te[8]; te[8] = tmp;
+    tmp = te[6]; te[6] = te[9]; te[9] = tmp;
+    tmp = te[3]; te[3] = te[12]; te[12] = tmp;
+    tmp = te[7]; te[7] = te[13]; te[13] = tmp;
+    tmp = te[11]; te[11] = te[14]; te[14] = tmp;
+    return this;
+  }
   /** Row-major arguments, as three.js. */
   set(n11: number, n12: number, n13: number, n14: number, n21: number, n22: number, n23: number, n24: number, n31: number, n32: number, n33: number, n34: number, n41: number, n42: number, n43: number, n44: number): this {
     this.elements = [n11, n21, n31, n41, n12, n22, n32, n42, n13, n23, n33, n43, n14, n24, n34, n44];
