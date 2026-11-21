@@ -344,11 +344,23 @@ export class Object3D {
   userData: Record<string, unknown> = {};
   /**
    * The local transform as a matrix (three.js): `updateMatrix()` composes it from position / quaternion / scale, which
-   * `updateWorldMatrix` does first while `matrixAutoUpdate` is on. The engine is always sent position / rotation /
-   * scale, so a matrix set by hand moves only what reads it (`matrixWorld`, `setMatrixAt(i, o.matrix)`).
+   * `updateWorldMatrix` does first while `matrixAutoUpdate` is on. Normally the engine is sent local position /
+   * rotation / scale. With `matrixWorldAutoUpdate = false`, the binding instead derives a local transform from the
+   * authored world matrix for the renderer. Editing `matrix` alone still affects only readers of that matrix.
    */
   readonly matrix = new Matrix4();
   matrixAutoUpdate = true;
+  private _matrixWorldAutoUpdate = true;
+  /** Set false to retain and render a manually supplied matrixWorld, as in three.js. */
+  get matrixWorldAutoUpdate(): boolean {
+    return this._matrixWorldAutoUpdate;
+  }
+  set matrixWorldAutoUpdate(value: boolean) {
+    if (value !== this._matrixWorldAutoUpdate) {
+      this._matrixWorldAutoUpdate = value;
+      touched(this);
+    }
+  }
   readonly matrixWorld = new Matrix4();
 
   /**
@@ -575,8 +587,10 @@ export class Object3D {
   updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void {
     if (updateParents && this.parent) this.parent.updateWorldMatrix(true, false);
     if (this.matrixAutoUpdate) this.updateMatrix();
-    if (this.parent) this.matrixWorld.multiplyMatrices(this.parent.matrixWorld, this.matrix);
-    else this.matrixWorld.copy(this.matrix);
+    if (this.matrixWorldAutoUpdate) {
+      if (this.parent) this.matrixWorld.multiplyMatrices(this.parent.matrixWorld, this.matrix);
+      else this.matrixWorld.copy(this.matrix);
+    }
     if (updateChildren) for (const c of this.children) c.updateWorldMatrix(false, true);
   }
 

@@ -126,6 +126,31 @@ test("Object3D: clone (geometry shared, own id), attach (world transform kept), 
   assert.ok(o.getWorldDirection(new THREE.Vector3()).distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-9);
 });
 
+test("Object3D.matrixWorldAutoUpdate: manual world matrices survive updates and world helpers", () => {
+  const parent = new THREE.Group();
+  const child = new THREE.Object3D();
+  parent.position.set(1, 2, 3);
+  child.position.set(2, 0, 0);
+  parent.add(child);
+  parent.matrixWorldAutoUpdate = false;
+  parent.matrixWorld.makeTranslation(10, 20, 30);
+
+  parent.updateWorldMatrix(true, true);
+  assert.deepEqual(parent.getWorldPosition(new THREE.Vector3()).toArray(), [10, 20, 30], "preserves the authored parent matrix");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [12, 20, 30], "children inherit the authored parent matrix");
+  assert.deepEqual(child.localToWorld(new THREE.Vector3(0, 0, 1)).toArray(), [12, 20, 31]);
+  assert.deepEqual(child.worldToLocal(new THREE.Vector3(12, 20, 31)).toArray(), [0, 0, 1]);
+
+  const copy = parent.clone(false);
+  assert.equal(copy.matrixWorldAutoUpdate, false, "clones retain the manual-world setting");
+  assert.deepEqual(copy.getWorldPosition(new THREE.Vector3()).toArray(), [10, 20, 30]);
+
+  parent.matrixWorldAutoUpdate = true;
+  parent.updateWorldMatrix(true, true);
+  assert.deepEqual(parent.getWorldPosition(new THREE.Vector3()).toArray(), [1, 2, 3], "automatic world updates resume");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [3, 2, 3]);
+});
+
 test("Raycaster: the nearest hit first, front faces of single-sided materials, instanceId, near / far", () => {
   const scene = new THREE.Scene();
   const near = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshStandardMaterial());

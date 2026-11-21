@@ -355,6 +355,8 @@ export class SceneBinding {
   private readonly trs = new Float32Array(10);
   private readonly scratch = new Float64Array(Math.max(HOT, LIGHT_VALUES));
   private readonly changes: SceneChanges = { objects: new Set(), structure: true };
+  /** In-place Matrix4 edits have no setter to report a change. Revisit only opted-in objects each sync. */
+  private readonly manualWorld = new Set<Object3D>();
   private readonly untrack: () => void;
   private epoch = 0;
   // Physics: ids of bodies (a body's collider has its id) and joints, the slots of the engine's pose table, the joints
@@ -388,6 +390,7 @@ export class SceneBinding {
   /** Stops tracking the scene's changes (the binding is not used any more). */
   dispose(): void {
     this.untrack();
+    this.manualWorld.clear();
   }
 
   /** The object the engine knows under `name` (picking reports names). */
@@ -412,6 +415,7 @@ export class SceneBinding {
   sync(): SyncStats {
     const stats: SyncStats = { created: 0, updated: 0, removed: 0 };
     const ch = this.changes;
+    for (const o of this.manualWorld) ch.objects.add(o);
     if (ch.structure || !this.objects.has(this.camera)) {
       // Objects were added or removed: walk the graph (creates new objects, re-parents, removes what is gone).
       ch.structure = false;
@@ -430,6 +434,7 @@ export class SceneBinding {
         if (o instanceof Joint) this.dropJoint(o);
         this.engine.remove(b.id);
         this.objects.delete(o);
+        this.manualWorld.delete(o);
         this.byName.delete(b.name);
         const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
         if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
@@ -563,6 +568,8 @@ export class SceneBinding {
     // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
     // object's scale in the world): those under it are made anew at the new size, once the sync has sent every
     // transform.
+    if (o.matrixWorldAutoUpdate) this.manualWorld.delete(o);
+    else this.manualWorld.add(o);
     if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
@@ -665,11 +672,34 @@ export class SceneBinding {
 
   /** Sends the object's transform if it changed. True if its scale did (and it had been sent before). */
   private sendTransform(o: Object3D, b: Bound, stats: SyncStats): boolean {
-    const q = resolveOrientation(o);
     const t = this.trs;
-    t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
-    t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
-    t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    if (o.matrixWorldAutoUpdate) {
+      const q = resolveOrientation(o);
+      t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    } else {
+      // The renderer's object tree stores local TRS, while matrixWorld is authored in world space.
+      // Its parent is the engine parent, not necessarily Object3D.parent (the scene root is not bound).
+      const local = o.matrixWorld.clone();
+      if (b.parent !== null && o.parent) {
+        o.parent.updateWorldMatrix(true, false);
+        local.premultiply(o.parent.matrixWorld.clone().invert());
+      }
+      const p = new Vector3(), q = new Quaternion(), s = new Vector3();
+      local.decompose(p, q, s);
+      // A sheared or singular matrix cannot be represented by the renderer's TRS API.
+      // Fail explicitly rather than silently draw it somewhere different from matrixWorld.
+      const recomposed = new Matrix4().compose(p, q, s).elements;
+      for (let i = 0; i < 16; i++) {
+        const expected = local.elements[i], actual = recomposed[i];
+        if (!Number.isFinite(expected) || !Number.isFinite(actual) || Math.abs(expected - actual) > 1e-6 * Math.max(1, Math.abs(expected)))
+          throw new TypeError(`${b.name}: matrixWorld must be a finite, decomposable TRS matrix to render`);
+      }
+      t[0] = p.x; t[1] = p.y; t[2] = p.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = s.x; t[8] = s.y; t[9] = s.z;
+    }
     let moved = false, posed = false, scaled = false;
     for (let k = 0; k < 10; k++) {
       if (b.trs[k] !== t[k]) {
