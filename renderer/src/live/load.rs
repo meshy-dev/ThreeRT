@@ -57,6 +57,9 @@ pub(super) struct LoadedScene {
     /// and the flattened triangles' build indices in traversal order (positions in `tris`).
     pub(super) mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub(super) tri_order: Vec<u32>,
+    /// The light list's path codes as the last `write_emitters` wrote them (`GpuEmitterTri::code`, by emitter): it
+    /// writes only those that changed since. Empty after a load or a rebuild (the next write sends them all).
+    pub(super) codes_sent: Vec<u32>,
 }
 
 /// Cores the sky's worker thread bakes with: the rest stay with the frame (scripts, uploads, the GPU's driver).
@@ -303,5 +306,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         pool_first: prep.groups.iter().sum(),
         blobs,
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }
