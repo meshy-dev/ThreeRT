@@ -1980,3 +1980,68 @@ mod tests {
         assert_eq!(rec(Mat4::IDENTITY).n[2][3].to_bits(), 0, "the third word is not the unit's");
     }
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// What a posed skinned model's tree costs a new pose (THREERT_SKIN_GLB: the model): made again, or its boxes
+    /// taken again in the tree of an earlier pose (the bind pose's, the clip's first), and how much worse the walk of
+    /// such a tree is (its surface-area cost against the new tree's).
+    #[test]
+    #[ignore]
+    fn deforming_tree_cost() {
+        let path = std::env::var("THREERT_SKIN_GLB").unwrap();
+        let m = crate::skin::Model::new(gltf::import(&path).unwrap()).unwrap();
+        let area = |n: &GpuNode| {
+            let d = Vec3A::from(n.bmax) - Vec3A::from(n.bmin);
+            2.0 * (d.x * d.y + d.y * d.z + d.z * d.x) as f64
+        };
+        // (A walk's expected cost: each node's chance of being entered, an interior node a step, a leaf a test a triangle.)
+        let cost = |nodes: &[GpuNode]| nodes.iter().map(|n| area(n) * if n.count == 0 { 1.0 } else { n.count as f64 }).sum::<f64>() / area(&nodes[0]);
+        // The boxes again, the tree's shape and its triangles' order kept: children lie after their parent.
+        let refit = |nodes: &mut [GpuNode], tris: &[[Vec3A; 3]], order: &[u32]| {
+            for k in (0..nodes.len()).rev() {
+                let n = nodes[k];
+                let (lo, hi) = if n.count > 0 {
+                    order[n.left_or_first as usize..(n.left_or_first + n.count) as usize].iter().flat_map(|&i| tris[i as usize]).fold((Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY)), |(lo, hi), v| (lo.min(v), hi.max(v)))
+                } else {
+                    let (a, b) = (nodes[n.left_or_first as usize], nodes[n.left_or_first as usize + 1]);
+                    (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into()))
+                };
+                (nodes[k].bmin, nodes[k].bmax) = (lo.into(), hi.into());
+            }
+        };
+        let pose = |clip: &str, time: f32| crate::desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
+        let tris_of = |a: Option<&crate::desc::Animation>| -> Vec<[Vec3A; 3]> { m.triangles(glam::Mat4::IDENTITY, None, a).unwrap().iter().map(|t| t.p.map(Vec3A::from)).collect() };
+        let bind = mesh_tree(&tris_of(None)).unwrap();
+        for clip in std::env::var("THREERT_SKIN_CLIPS").unwrap_or_else(|_| m.clip_names()[0].clone()).split(',') {
+            let first = mesh_tree(&tris_of(Some(&pose(clip, 0.0)))).unwrap();
+            let (mut skin, mut build, mut fit) = (0.0, 0.0, 0.0);
+            let (mut worst, mut mean) = ([0.0f64; 2], [0.0f64; 2]);
+            let poses = 40;
+            for k in 0..poses {
+                let a = pose(clip, 0.05 + k as f32 * 0.07);
+                let t0 = web_time::Instant::now();
+                let tris = tris_of(Some(&a));
+                skin += t0.elapsed().as_secs_f64() * 1e3;
+                let t0 = web_time::Instant::now();
+                let fresh = mesh_tree(&tris).unwrap();
+                build += t0.elapsed().as_secs_f64() * 1e3;
+                for (j, kept) in [&bind, &first].into_iter().enumerate() {
+                    let mut nodes = kept.nodes.clone();
+                    let t0 = web_time::Instant::now();
+                    refit(&mut nodes, &tris, &kept.order);
+                    fit += t0.elapsed().as_secs_f64() * 1e3 / 2.0;
+                    let r = cost(&nodes) / cost(&fresh.nodes);
+                    (worst[j], mean[j]) = (worst[j].max(r), mean[j] + r / poses as f64);
+                }
+            }
+            let n = poses as f64;
+            eprintln!(
+                "{clip}: {} triangles, {} nodes; a pose: skin {:.2} ms, tree made again {:.2} ms, boxes taken again {:.3} ms; a kept tree's walk against a new one's: the bind pose's x{:.2} (worst x{:.2}), the clip's first x{:.2} (worst x{:.2})",
+                first.order.len(), first.nodes.len(), skin / n, build / n, fit / n, mean[0], worst[0], mean[1], worst[1]
+            );
+        }
+    }
+}
