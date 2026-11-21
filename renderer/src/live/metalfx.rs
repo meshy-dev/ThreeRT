@@ -22,6 +22,7 @@ unsafe extern "C" {
         scales: *mut f32,
     ) -> *mut c_void;
     fn threert_fx_release(scaler: *mut c_void);
+    fn threert_fx_gpu_ms() -> f32;
     fn threert_fx_bind(scaler: *mut c_void, denoise: bool, inputs: *const *const c_void, output: *const c_void);
     fn threert_fx_encode(
         scaler: *mut c_void,
@@ -300,6 +301,11 @@ impl MetalFx {
         self.resources.as_ref().map(|r| {
             if r.guide_group.is_some() { Active::MetalFxDenoised } else { Active::MetalFx }
         })
+    }
+
+    /// GPU time (ms) of the scaler's own command buffer, last frame that finished (outside the frame timer's passes).
+    pub(super) fn gpu_ms(&self) -> f32 {
+        if self.resources.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 }
     }
 
     pub(super) fn encode(

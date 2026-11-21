@@ -313,7 +313,7 @@ impl LiveCore {
             Some(t) => {
                 let (latest, slot) = t.harvest(period);
                 if let Some((ms, frame, trace)) = latest {
-                    (self.gpu_ms, self.gpu_frame, self.gpu_trace_ms) = (ms, frame, trace);
+                    (self.gpu_ms, self.gpu_frame, self.gpu_trace_ms) = (ms + self.reconstructor.untimed_gpu_ms(), frame, trace);
                 }
                 if let Some(k) = slot {
                     t.frames[k] = self.frame;

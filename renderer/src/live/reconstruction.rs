@@ -331,6 +331,16 @@ impl Reconstructor {
         self.reported = false;
     }
 
+    /// GPU time (ms) a provider spends outside the frame timer's passes (MetalFX encodes into a command buffer of its
+    /// own): added to the frame's GPU time, which the dynamic-resolution governor steers by.
+    pub(super) fn untimed_gpu_ms(&self) -> f32 {
+        match self.active {
+            #[cfg(target_os = "macos")]
+            Active::MetalFx | Active::MetalFxDenoised => self.metalfx.gpu_ms(),
+            _ => 0.0,
+        }
+    }
+
     pub(super) fn publish(&mut self) {
         if self.reported { return; }
         if let Some(c) = &self.control {

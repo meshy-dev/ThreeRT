@@ -43,7 +43,7 @@ struct FxDenoisedInputs {
     // Directly visible sky and emitters are deterministic. The native overlay upscales them with
     // the same jitter and visibility as the denoised frame. A mixed or moving medium stays in color.
     let direct = sample_emission(q);
-    let overlay = medium_share(q) == 0.0 && (px.color.w == 0.0 || lum(direct) > max(0.001, 0.98 * lum(fb[q].rgb)));
+    let overlay = medium_share(q) == 0.0 && (px.color.w == 0.0 || lum(direct) > max(0.001, 0.5 * lum(fb[q].rgb)));
     let layer = select(vec3<f32>(0.0), base.color.rgb, overlay);
     let lighting = base.color.rgb - layer;
     // The SDK's denoise-strength texture takes 1 where denoising should be bypassed.

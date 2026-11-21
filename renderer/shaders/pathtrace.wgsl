@@ -1476,6 +1476,9 @@ struct Lobes {
 // Not here: the radiance scaling by the indices' ratio squared (as Cycles and glTF's formula: it cancels over a
 // closed solid, and a single-sheet pane, which refracts as a solid here, would be scaled once); thin walls;
 // absorption by distance.
+// Smoother than this a reflection or refraction is sharp enough that an emitter seen through it needs no denoising
+// (`delta_path`; a polished floor's 0.035 still spreads it over pixels).
+const DELTA_ROUGHNESS: f32 = 0.025;
 const GLASS_DELTA: f32 = 0.05; // roughness (RTXPT 0.04, Falcor 0.08)
 
 // Unpolarised Fresnel reflectance: `c` the cosine on the incident side, `eta` = n(far) / n(incident); 1 at total
@@ -3778,6 +3781,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dl_det = vec3<f32>(0.0);
     dl_det_spec = vec3<f32>(0.0);
     var specular_bounce = true;
+    // Every bounce so far a delta sample off a smooth mirror or clear glass: an emitter the path then hits is seen
+    // sharply (MetalFX denoised takes it as emission: upscaled, not denoised).
+    var delta_path = true;
     // Glass passed since the last scattering vertex: any (behind_glass), and whether an odd number of surfaces (bent).
     // The vertex's shadow rays toward emitters stopped at the glass and those toward the sky at bending glass, so
     // what the path finds there counts in full; behind glass that does not bend (a pane) the sky and the directional
@@ -3882,6 +3888,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 bent = false;
                 straight = false;
                 mirror_path = false;
+                delta_path = false;
                 cone_w += cone_a * tk.t;
                 cone_a += 2.0;
                 if (depth >= P.counts.w) {
@@ -3962,7 +3969,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let lum = luminance(c);
                 if (lum > clamp_v) { c *= clamp_v / lum; }
             }
-            if (depth == 0u) { e0 += c; }
+            if (depth == 0u || (LIVE && P.motion.y > 0.5 && delta_path)) { e0 += c; }
             radiance += c;
         }
         if (s.card) { break; }
@@ -4094,6 +4101,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cone_w = width;
         cone_a += 2.0 * s.roughness * s.roughness;
         mirror_path = (depth == 0u || mirror_path) && s.roughness < MIRROR_ROUGHNESS && (sampled_spec || sampled_trans);
+        delta_path = delta_path && s.roughness < DELTA_ROUGHNESS && (sampled_spec || sampled_trans);
         if (depth >= P.counts.w) {
             let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
             if (rng1(rng_dim(D_RR)) > q) { break; }
