@@ -341,7 +341,7 @@ pub struct LiveCore {
     pending_emitters: Vec<(u32, crate::GpuEmitterTri)>,
     /// Objects whose instance a move hid or brought back this commit (a placement without size): their rows' power.
     flipped: Vec<u32>,
-    /// Likewise for the deforming meshes of shared poses (`repose_groups`): the span they took (relative to the dynamic
+    /// Likewise for posed skinned models' meshes (`repose_skinned`): the span they took (relative to the dynamic
     /// tail, past its end) and whether this frame re-skinned any.
     pose_span: Option<(usize, usize)>,
     pose_reposed: bool,
@@ -927,7 +927,7 @@ impl LiveCore {
         if !m.deforms || self.sc.up.skin.is_none() {
             return pool;
         }
-        let Some(pg) = self.sc.tables.retained.pose_groups.iter().find(|g| g.mesh == mesh) else { return pool };
+        let Some(pg) = self.sc.tables.retained.skinned.iter().find(|g| g.mesh == mesh) else { return pool };
         if !posed.contains_key(&mesh) {
             let tris = scene::model_gltf(&pg.uri, &self.assets).and_then(|model| model.triangles(glam::Mat4::IDENTITY, pg.nodes.as_deref(), Some(&pg.animation)));
             match tris {

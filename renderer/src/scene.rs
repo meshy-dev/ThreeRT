@@ -64,7 +64,7 @@ pub struct InstMesh {
     /// Model-space bounds (object bounds of its instances, picking).
     pub lo: Vec3A,
     pub hi: Vec3A,
-    /// Its triangles change (a shared pose, `PoseGroup`): its BLAS is rebuilt with them.
+    /// Its triangles change (a posed skinned model's, `Skinned`): its BLAS is rebuilt with them.
     pub deforms: bool,
     /// Its sections (`Section`), in `Scene::sections`: a geometry of its BLAS each, a row of its instances each.
     pub sect_first: u32,
@@ -672,8 +672,8 @@ pub struct Scene {
     pub pool_attrs: Vec<GpuTriAttr>,
     pub meshes: Vec<InstMesh>,
     pub instances: Vec<Instance>,
-    /// What the skinning pass reads of the models whose meshes deform (`PoseGroup::source`): a model's triangles as
-    /// its file has them, in its mesh's order. One a model, whatever its poses.
+    /// What the skinning pass reads of the models whose meshes deform (`Skinned::source`): a model's triangles as
+    /// its file has them, in its mesh's order. One a model, whatever its placements and poses.
     pub skin_sources: Vec<Vec<[skin::SkinCorner; 3]>>,
     /// The meshes' sections (`InstMesh::sect_first`) and the instances' rows (`Instance::rows`): as the kernel reads
     /// the rows once `prepare` has set where each section's triangles and emitters are.
@@ -744,8 +744,8 @@ pub struct Retained {
     pub light_nodes: Vec<u32>,
     /// Atmosphere sun: its colour comes from the sky bake.
     pub sun: Option<u32>,
-    /// Posed models sharing a pose (`PoseGroup`: its members' proxies name it, `MeshKind::Pose`).
-    pub pose_groups: Vec<PoseGroup>,
+    /// Posed skinned models' meshes (`Skinned`: a model's proxy names its own, `MeshKind::Skinned`).
+    pub skinned: Vec<Skinned>,
     /// Meshes and instanced objects: (geometry, whether by its groups: `by_groups`) -> the shared mesh (objects of the
     /// same geometry share its BLAS, whatever their materials: those are their instances' rows). live/edits.rs
     /// `edit_geometry` keeps it.
@@ -810,8 +810,8 @@ pub struct InstanceRef {
 pub enum MeshKind {
     /// A model's.
     Model,
-    /// A shared pose's (`Retained::pose_groups`): the group's mesh is re-skinned, its members move as instances.
-    Pose(u32),
+    /// A posed skinned model's own (`Retained::skinned`): skinned again at a new pose; the model moves as its instance.
+    Skinned(u32),
     /// A geometry's mesh, shared by the objects of the geometry (`Retained::own_mesh`).
     Own,
 }
@@ -963,11 +963,12 @@ struct RigidPart {
     rest: Vec<([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>, u32)>,
 }
 
-/// Posed skinned models in the same pose (the same model, nodes, clip and time: a crowd whose game shares a few walk
-/// phases). One model-space mesh holds the pose, skinned once per new pose and its BLAS rebuilt; each model is an
-/// instance of it, moved by its transform (hardware RT). Only meshes without triangles flattened per placement.
+/// A posed skinned model's mesh: the model's triangles in its own space, a mesh a model. The skinning pass skins it at
+/// each new pose (gpu.rs `skin`: the CPU sends the pose's matrices) and its BLAS is built again; the model moves as
+/// its instance (hardware RT). Never shared: two models in one pose are two meshes (a mesh shared came apart when
+/// one of them took another pose, and that was a rebuild). Only meshes without triangles flattened per placement.
 #[derive(Clone, Debug)]
-pub struct PoseGroup {
+pub struct Skinned {
     pub mesh: u32,
     pub uri: String,
     pub nodes: Option<Vec<String>>,
@@ -975,8 +976,9 @@ pub struct PoseGroup {
     pub animation: desc::Animation,
     /// Per pool triangle of the mesh, in order: its index in the model's triangles, its section and its index in it.
     pub order: Vec<(u32, u32, u32)>,
-    /// (object, instance) of each member.
-    pub members: Vec<(u32, u32)>,
+    /// Its object, and its instance.
+    pub object: u32,
+    pub instance: u32,
     /// What the skinning pass skins it from (`Scene::skin_sources`), how many matrices its pose is
     /// (`skin::Model::palette`), and the primitives the pose its mesh was made for mirrors (`skin::Model::mirrored`:
     /// a pose that mirrors others has its triangles in another order, a build's to make).
@@ -984,10 +986,6 @@ pub struct PoseGroup {
     pub palette_len: u32,
     pub mirrors: Vec<bool>,
 }
-
-/// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop; for a model whose pose names
-/// nodes (posed by the game, its own), the object.
-type PoseKey = (String, Option<Vec<String>>, String, u32, bool, Option<u32>);
 
 /// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape or
 /// `MEDIUM_HIDDEN`, homogeneous, animated),
@@ -1536,35 +1534,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut mesh_of: HashMap<(String, Option<Vec<String>>), Option<u32>> = HashMap::new();
     // A posed rigid model's parts, by (model, clip): its placements share their meshes.
     let mut rigid_parts: HashMap<(String, String), std::rc::Rc<Vec<RigidPart>>> = HashMap::new();
-    // Posed skinned models that share a pose with another share its mesh (`PoseGroup`). THREERT_POSE_SHARE=0 skins
-    // each model alone (A/B).
-    let mut pose_key_of: HashMap<u32, PoseKey> = HashMap::new();
-    if instancing && std::env::var("THREERT_POSE_SHARE").map_or(true, |v| v != "0") {
-        let mut count: HashMap<PoseKey, usize> = HashMap::new();
-        for id in &order {
-            let Kind::Model { uri, nodes, animation: Some(a), functions } = &w.objects[id].kind else { continue };
-            if !w.shown(*id) || worlds[id].determinant() == 0.0 {
-                continue;
-            }
-            // (Rigid models whose nodes move are `RigidModel`s.)
-            let glb = model_gltf(uri, assets)?;
-            if !glb.animated() || (nodes.is_none() && glb.rigid()) {
-                continue;
-            }
-            // (Copies with material functions share a pose only with the same functions: their own materials.)
-            let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
-            // A model the game poses node by node is a group of its own: its mesh (and BLAS) is skinned again when its
-            // pose changes, and moves as an instance, whatever the other models do (a player's body). It comes apart
-            // from no other, so no new pose rebuilds the scene.
-            let own = (!a.nodes.is_empty()).then_some(*id);
-            let key: PoseKey = (file, nodes.clone(), a.clip.clone(), a.time.to_bits(), a.r#loop, own);
-            *count.entry(key.clone()).or_default() += 1;
-            pose_key_of.insert(*id, key);
-        }
-        pose_key_of.retain(|_, k| count[k] >= 2 || k.5.is_some());
-    }
-    let mut pose_group_of: HashMap<PoseKey, Option<u32>> = HashMap::new();
-    // What the skinning pass reads, by (model, nodes, the primitives mirrored): shared by the model's pose groups.
+    // What the skinning pass reads, by (model, nodes, the primitives mirrored): shared by the model's placements.
     let mut skin_sources: Vec<Vec<[skin::SkinCorner; 3]>> = vec![];
     let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), u32> = HashMap::new();
     // Flattened instances' triangle ranges.
@@ -1880,70 +1850,61 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Rigid(rigid) };
                     continue;
                 }
-                // A model in a shared pose: an instance of the pose's mesh (`PoseGroup`), made by the group's first.
-                if let Some(key) = pose_key_of.get(id) {
-                    let group = match pose_group_of.get(key) {
-                        Some(g) => *g,
-                        None => {
-                            let a = animation.as_ref().unwrap();
-                            let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), Some(a))?;
-                            let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
-                            for (k, t) in local.iter().enumerate() {
-                                // (A mesh that deforms does not keep its emitters: the light list does not follow a
-                                // pose yet.)
-                                let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
-                                classed[if emits { FLAT } else { class as usize }].push((k, mat));
-                            }
-                            // Triangles flattened per placement (emissive): each model skinned alone.
-                            let shared = classed[FLAT].is_empty() && !local.is_empty();
-                            let (order, sects, mine) = model_sections(&kept(&classed));
-                            // (The model's corners in the mesh's order: the same for every pose group of the model.)
-                            let mirrors = if shared { glb.mirrored(Some(a))? } else { vec![] };
-                            let skey = (key.0.clone(), nodes.clone(), mirrors.clone());
-                            if shared && !skin_source_of.contains_key(&skey) {
+                // A posed skinned model is an instance of a mesh of its own, in its own space, which the skinning pass
+                // skins at each new pose (`Skinned`). One with emitting triangles is not yet: skinned alone, below.
+                if instancing && posed && m.determinant() != 0.0 && !(nodes.is_none() && glb.rigid()) {
+                    let a = animation.as_ref().unwrap();
+                    let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), Some(a))?;
+                    let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
+                    for (k, t) in local.iter().enumerate() {
+                        // (A mesh that deforms does not keep its emitters: the light list does not follow a pose yet.)
+                        let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
+                        classed[if emits { FLAT } else { class as usize }].push((k, mat));
+                    }
+                    if classed[FLAT].is_empty() && !local.is_empty() {
+                        let (order, sects, mine) = model_sections(&kept(&classed));
+                        // (The model's corners in its mesh's order: one copy for every placement of the model.)
+                        let mirrors = glb.mirrored(Some(a))?;
+                        let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+                        let skey = (file, nodes.clone(), mirrors.clone());
+                        let source = match skin_source_of.get(&skey) {
+                            Some(k) => *k,
+                            None => {
                                 let corners = glb.skin_source(nodes.as_deref(), Some(a))?;
                                 skin_sources.push(order.iter().map(|&(k, _, _)| corners[k]).collect());
-                                skin_source_of.insert(skey.clone(), skin_sources.len() as u32 - 1);
+                                skin_source_of.insert(skey, skin_sources.len() as u32 - 1);
+                                skin_sources.len() as u32 - 1
                             }
-                            let g = shared.then(|| {
-                                let first = pool_tris.len() as u32;
-                                let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                                for &(k, section, rank) in &order {
-                                    let t = &local[k];
-                                    for v in t.p {
-                                        lo = lo.min(v.into());
-                                        hi = hi.max(v.into());
-                                    }
-                                    pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
-                                }
-                                let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
-                                // Other poses reach further (a stride, a swing): object bounds a quarter wider each way;
-                                // one the game poses may take any pose (lie down): as far as its size each way.
-                                let pad = if key.5.is_some() { Vec3A::splat((hi - lo).length()) } else { (hi - lo) * 0.25 };
-                                meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
-                                sections.extend(sects);
-                                retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
-                                retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![], source: skin_source_of[&skey], palette_len: glb.palette_len() as u32, mirrors });
-                                retained.pose_groups.len() as u32 - 1
-                            });
-                            pose_group_of.insert(key.clone(), g);
-                            g
+                        };
+                        let first = pool_tris.len() as u32;
+                        let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
+                        for &(k, section, rank) in &order {
+                            let t = &local[k];
+                            for v in t.p {
+                                lo = lo.min(v.into());
+                                hi = hi.max(v.into());
+                            }
+                            pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
+                            pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                         }
-                    };
-                    if let Some(g) = group {
-                        let mesh = retained.pose_groups[g as usize].mesh;
+                        let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
+                        // Other poses reach further (a stride, a swing): object bounds a quarter wider each way; one
+                        // the game poses may take any pose (lie down): as far as its size each way.
+                        let pad = if a.nodes.is_empty() { (hi - lo) * 0.25 } else { Vec3A::splat((hi - lo).length()) };
+                        meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
+                        let mesh = meshes.len() as u32 - 1;
+                        sections.extend(sects);
+                        retained.mesh_rows.insert(mesh, mine.clone());
                         let (lo, hi) = meshes[mesh as usize].placed_bounds(m);
                         let pivot = m.transform_point3(Vec3::ZERO);
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
                         objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
-                        let mine = retained.mesh_rows[&mesh].clone();
                         instances.push(Instance { mesh, world: m, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) });
                         rows.extend(mine);
-                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Pose(g), moves: true }) };
-                        retained.pose_groups[g as usize].members.push((*id, i));
+                        retained.skinned.push(Skinned { mesh, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, object: *id, instance: i, source, palette_len: glb.palette_len() as u32, mirrors });
+                        *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Skinned(retained.skinned.len() as u32 - 1), moves: true }) };
                         continue;
                     }
                 }

@@ -615,10 +615,10 @@ impl LiveCore {
                         let inst = self.sc.tables.retained.instance(k).filter(|i| i.moves).copied();
                         let masked = inst.is_some_and(|i| self.sc.instances.get(i.instance as usize).is_some_and(|x| x.masked));
                         if world.shown(k) || masked {
-                            // Movable models placed as instances move their transform (with a shared pose too); the rest
+                            // Movable models placed as instances move their transform (a posed skinned model too); the rest
                             // re-transform triangles.
                             match inst.map(|i| i.instance) {
-                                Some(i) if !changes.poses.contains(&k) || inst.is_some_and(|i| matches!(i.mesh, scene::MeshKind::Pose(_))) => placed.push((k, i)),
+                                Some(i) if !changes.poses.contains(&k) || inst.is_some_and(|i| matches!(i.mesh, scene::MeshKind::Skinned(_))) => placed.push((k, i)),
                                 _ => {
                                     dynamic.insert(k);
                                 }
@@ -659,12 +659,12 @@ impl LiveCore {
         for k in &rigid {
             dynamic.remove(k);
         }
-        // Models in a shared pose re-skin their group's mesh (`repose_groups`, its BLAS only); their moves place instances.
-        let shared: Vec<u32> = dynamic.iter().copied().filter(|k| self.sc.tables.retained.instance(*k).is_some_and(|i| matches!(i.mesh, scene::MeshKind::Pose(_)))).collect();
+        // Posed skinned models: their meshes skinned again (`repose_skinned`, their BLASes only); their moves place instances.
+        let shared: Vec<u32> = dynamic.iter().copied().filter(|k| self.sc.tables.retained.instance(*k).is_some_and(|i| matches!(i.mesh, scene::MeshKind::Skinned(_)))).collect();
         for k in &shared {
             dynamic.remove(k);
         }
-        let shared_ok = shared.is_empty() || (!changes.structural && self.repose_groups(world, &shared, &mut top)?);
+        let shared_ok = shared.is_empty() || (!changes.structural && self.repose_skinned(world, &shared, &mut top)?);
         // Procedural geometry moves its records and TLAS transforms.
         if !procs_moved.is_empty() && !changes.structural {
             self.move_procs(world, &procs_moved, &mut top);
@@ -1010,7 +1010,8 @@ impl LiveCore {
     }
 
     /// An object shown or hidden by its `visible`, in place: the meshes and models under it (itself, if it is one)
-    /// each by its instance's mask above the triangles (a posed rigid model's every part's), where no ray sees a
+    /// each by its instance's mask above the triangles (a posed rigid model's every part's; a posed skinned model's
+    /// own), where no ray sees a
     /// hidden one, and its row's power (`Tables::apply`: a hidden mesh's emitters at no weight). False where
     /// something under it is drawn another way, or a mesh is not such an instance (the build flattened it, or an edit
     /// took it out while it was hidden): the caller rebuilds.
@@ -1021,8 +1022,12 @@ impl LiveCore {
                 crate::world::Kind::Group | crate::world::Kind::Camera(_) => {}
                 // (One this commit adds is placed as it is, shown or not: `edit_geometry`.)
                 crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { .. } if changes.added.contains(&k) => {}
-                crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { animation: None, .. } => {
-                    let Some(r) = self.sc.tables.retained.instance(k).filter(|i| whole(i, &self.sc.instances, &self.sc.meshes)).map(|i| i.instance as usize) else { return false };
+                // A mesh, a still model, or a posed skinned model (an instance of its own mesh): its instance.
+                kind @ (crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { .. })
+                    if !matches!(kind, crate::world::Kind::Model { animation: Some(_), .. }) || self.sc.tables.retained.instance(k).is_some_and(|i| matches!(i.mesh, scene::MeshKind::Skinned(_))) =>
+                {
+                    let skinned = matches!(kind, crate::world::Kind::Model { animation: Some(_), .. });
+                    let Some(r) = self.sc.tables.retained.instance(k).filter(|i| skinned || whole(i, &self.sc.instances, &self.sc.meshes)).map(|i| i.instance as usize) else { return false };
                     let Some(inst) = self.sc.instances.get_mut(r) else { return false };
                     if inst.hidden && !inst.masked {
                         return false;
@@ -1034,11 +1039,19 @@ impl LiveCore {
                         continue;
                     }
                     let Some(mut top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return false };
+                    // (Software traversal has a skinned model's triangles in its still tree: no instance to mask.)
+                    if !top.has_mesh(inst.mesh) {
+                        return false;
+                    }
                     (inst.hidden, inst.masked) = (unseen, unseen);
                     top.moved(top.inst_base() + r, w, Some((inst.cast_shadow, unseen)));
                     build.instances = true;
                     changes.powers.insert(k);
                     self.weigh_run(r as u32);
+                    // (A skinned model shown is skinned as it is posed now: its mesh kept the pose it was hidden in.)
+                    if skinned && !unseen {
+                        changes.poses.insert(k);
+                    }
                 }
                 // A posed rigid model: every part's instance. Shown, it is placed where it stands and posed as it is
                 // now (`repose_rigid`, this commit: a move while it was hidden placed nothing).
@@ -1824,52 +1837,42 @@ impl LiveCore {
         Ok(true)
     }
 
-    /// Models in a shared pose (`scene::PoseGroup`): each group whose pose changed is skinned once, in model space, by
-    /// the skinning pass (gpu.rs `skin`: the CPU sends its pose's matrices); the commit builds their BLASes and the
-    /// TLAS over their new bounds. False when a group's members no longer share one pose, one is hidden or changed,
-    /// or its new pose mirrors other primitives than the one its mesh was made for: the caller rebuilds, which groups
-    /// them again. (The CPU keeps no triangles of such a mesh's pose: `LiveCore::mesh_tris` skins it when asked.)
-    pub(super) fn repose_groups(&mut self, world: &World, members: &[u32], build: &mut gpu::TopBuild) -> Result<bool> {
+    /// Posed skinned models (`scene::Skinned`): each whose pose changed is skinned in its own space by the skinning
+    /// pass (gpu.rs `skin`: the CPU sends its pose's matrices); the commit builds their BLASes and the TLAS over their
+    /// new bounds. One that is hidden keeps the pose its mesh has: it is skinned when it is shown (`show_meshes`).
+    /// False when one is another model now, or its new pose mirrors other primitives than the one its mesh was made
+    /// for: the caller rebuilds. (The CPU keeps no triangles of such a pose: `LiveCore::mesh_tris` skins it when asked.)
+    pub(super) fn repose_skinned(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> Result<bool> {
         use rayon::prelude::*;
         if self.sc.up.accel.is_none() || self.sc.up.skin.is_none() {
             return Ok(false);
         }
         let r = &self.sc.tables.retained;
-        let group = |k: &u32| match r.instance(*k).map(|i| i.mesh) {
-            Some(scene::MeshKind::Pose(g)) => g,
-            _ => unreachable!("a pose group's member (`commit`)"),
-        };
-        let mut touched: Vec<u32> = members.iter().map(group).collect();
-        touched.sort_unstable();
-        touched.dedup();
         let mut jobs: Vec<(u32, crate::desc::Animation)> = vec![];
-        for &g in &touched {
-            let pg = &r.pose_groups[g as usize];
-            let mut pose: Option<&crate::desc::Animation> = None;
-            for (id, _) in &pg.members {
-                let Some(o) = world.objects.get(id) else { return Ok(false) };
-                let crate::world::Kind::Model { uri, nodes, animation: Some(a), .. } = &o.kind else { return Ok(false) };
-                if !world.shown(*id) || *uri != pg.uri || *nodes != pg.nodes || pose.is_some_and(|p| p != a) {
-                    return Ok(false);
-                }
-                pose = Some(a);
+        for id in ids {
+            let Some(scene::MeshKind::Skinned(g)) = r.instance(*id).map(|i| i.mesh) else { unreachable!("a posed skinned model (`commit`)") };
+            let sk = &r.skinned[g as usize];
+            let Some(o) = world.objects.get(id) else { return Ok(false) };
+            let crate::world::Kind::Model { uri, nodes, animation: Some(a), .. } = &o.kind else { return Ok(false) };
+            if *uri != sk.uri || *nodes != sk.nodes {
+                return Ok(false);
             }
-            if let Some(a) = pose.filter(|a| **a != pg.animation) {
+            if world.shown(*id) && *a != sk.animation {
                 jobs.push((g, a.clone()));
             }
         }
         if jobs.is_empty() {
             return Ok(true);
         }
-        // The poses' matrices (the groups in parallel).
+        // The poses' matrices (the models in parallel).
         let t_skin = Instant::now();
         let assets = &self.assets;
         let palettes: Vec<Result<Option<Vec<crate::skin::PaletteRows>>>> = jobs
             .par_iter()
             .map(|(g, a)| {
-                let pg = &r.pose_groups[*g as usize];
-                let model = scene::model_gltf(&pg.uri, assets)?;
-                if model.mirrored(Some(a))? != pg.mirrors {
+                let sk = &r.skinned[*g as usize];
+                let model = scene::model_gltf(&sk.uri, assets)?;
+                if model.mirrored(Some(a))? != sk.mirrors {
                     return Ok(None);
                 }
                 Ok(Some(model.palette(Some(a))?))
@@ -1887,9 +1890,9 @@ impl LiveCore {
         let df = self.sc.dynamic.0;
         let (mut lo, mut hi) = (usize::MAX, 0usize);
         for (g, _) in &jobs {
-            let pg = &self.sc.tables.retained.pose_groups[*g as usize];
-            let k = self.sc.gpu_instances[pg.members[0].1 as usize].info[0] as usize - df;
-            (lo, hi) = (lo.min(k), hi.max(k + pg.order.len()));
+            let sk = &self.sc.tables.retained.skinned[*g as usize];
+            let k = self.sc.gpu_instances[sk.instance as usize].info[0] as usize - df;
+            (lo, hi) = (lo.min(k), hi.max(k + sk.order.len()));
         }
         self.keep_prev(self.pose_span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
         if !self.g.skin(&self.sc.up, &work) {
@@ -1898,9 +1901,9 @@ impl LiveCore {
         self.pose_span = Some((lo, hi));
         self.pose_reposed = true;
         for (g, a) in jobs {
-            let pg = &mut self.sc.tables.retained.pose_groups[g as usize];
-            pg.animation = a;
-            build.meshes.push(pg.mesh);
+            let sk = &mut self.sc.tables.retained.skinned[g as usize];
+            sk.animation = a;
+            build.meshes.push(sk.mesh);
         }
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)

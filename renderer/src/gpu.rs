@@ -747,7 +747,7 @@ struct SkinJob {
     palette: u32,
 }
 
-/// The skinning pass of a scene (shaders/skin.wgsl): the meshes that deform (a job each, `scene::PoseGroup`'s index)
+/// The skinning pass of a scene (shaders/skin.wgsl): the meshes that deform (a job each, `scene::Skinned`'s index)
 /// are skinned from their models' corners and their poses' palettes into the scene's triangles, attributes and BLAS
 /// input. Hardware RT.
 pub struct SkinGpu {
@@ -2705,7 +2705,7 @@ impl Gpu {
         };
         // The skinning pass (hardware RT: it writes the BLASes' input), a job each mesh that deforms.
         let skin = match &accel {
-            Some(a) if !scene.retained.pose_groups.is_empty() => Some(self.skin_pass(scene, a.pool_first, &b_verts, &b_attrs, &a.verts)),
+            Some(a) if !scene.retained.skinned.is_empty() => Some(self.skin_pass(scene, a.pool_first, &b_verts, &b_attrs, &a.verts)),
             _ => None,
         };
         self.queue.submit([]);
@@ -3401,7 +3401,7 @@ impl Gpu {
         }
     }
 
-    /// The skinning pass of `scene`: its pipeline, the models' corners, a job each pose group, and room for a frame's
+    /// The skinning pass of `scene`: its pipeline, the models' corners, a job each skinned model, and room for a frame's
     /// work and every job's palette.
     fn skin_pass(&self, scene: &Scene, pool_first: usize, verts: &wgpu::Buffer, attrs: &wgpu::Buffer, blas_verts: &wgpu::Buffer) -> SkinGpu {
         let d = &self.device;
@@ -3415,7 +3415,7 @@ impl Gpu {
         }
         let corners: Vec<crate::skin::SkinCorner> = scene.skin_sources.iter().flatten().flatten().copied().collect();
         let (mut jobs, mut matrices, mut blocks) = (vec![], 0u32, 0u32);
-        for g in &scene.retained.pose_groups {
+        for g in &scene.retained.skinned {
             let m = &scene.meshes[g.mesh as usize];
             jobs.push((SkinJob { first: pool_first as u32 + m.first, count: m.count, source: source_first[g.source as usize], palette: matrices }, g.palette_len));
             matrices += g.palette_len;
