@@ -747,7 +747,7 @@ mod bench {
         let mut x = 0.0;
         for _ in 0..100 {
             for t in &tris {
-                x += crate::scene::tri_attr(t.p, t.n, t.uv, t.tangent, 0).x[0];
+                x += crate::scene::tri_attr(t.p, t.n, t.uv, t.tangent, 0).t[0];
             }
         }
         eprintln!("tri_attr: {:.3} ms per pose ({x})", t0.elapsed().as_secs_f64() * 1000.0 / 100.0);

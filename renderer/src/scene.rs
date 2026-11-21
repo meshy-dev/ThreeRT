@@ -209,7 +209,7 @@ pub struct Instance {
 }
 
 /// Kernel record of an instance (`instances` binding): world matrix rows, normal matrix rows (inverse transpose),
-/// (first triangle in the GPU order, object index, texture-LOD offset bits, its rows' first), and the
+/// (first triangle in the GPU order, object index, a spare word, its rows' first), and the
 /// world matrix rows of the previous frame (a movable instance's motion vectors; the same rows when it did not move).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -229,7 +229,7 @@ impl Instance {
         let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
         let nrow = |r: usize, w: f32| [nm.x_axis[r], nm.y_axis[r], nm.z_axis[r], w];
         let bits = f32::from_bits(self.bits | if mirrors(w) { INST_MIRRORED } else { 0 });
-        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, bits), nrow(2, f32::from_bits(self.prev))], info: [first, self.object, lod_offset(w).to_bits(), self.rows], p: [row(0), row(1), row(2)] }
+        GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, bits), nrow(2, f32::from_bits(self.prev))], info: [first, self.object, 0, self.rows], p: [row(0), row(1), row(2)] }
     }
     /// A triangle's attributes as a flattened triangle has them: the material its row names in place of the
     /// section, and no index in it (`rows`: the instance's).
@@ -497,14 +497,8 @@ pub fn node_ranges<'a>(tri_nodes: &'a [(String, u32, u32)], id: &'a str) -> impl
     tri_nodes.iter().filter(move |(n, _, _)| n == id).map(|(_, a, b)| *a as usize..*b as usize)
 }
 
-/// Texture-LOD constant change of a transform: texel density per metre scales with 1 / linear size, approximated by
-/// the cube root of the volume scale (exact for uniform scale).
-pub fn lod_offset(w: Mat4) -> f32 {
-    -glam::Mat3::from_mat4(w).determinant().abs().max(1e-30).log2() / 3.0
-}
-
 /// Model-space shading attributes of a pool triangle placed by `w` (normals by the inverse transpose, tangent by the
-/// matrix, its frame's hand changed by a mirroring one, texture-LOD constant by the scale), object `object`.
+/// matrix, its frame's hand changed by a mirroring one), object `object`.
 pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
     let m3 = glam::Mat3::from_mat4(w);
     let nm = m3.inverse().transpose();
@@ -514,7 +508,7 @@ pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
     };
     let t = (m3 * Vec3::new(a.t[0], a.t[1], a.t[2])).normalize_or_zero();
     let hand = if mirrors(w) { -a.t[3] } else { a.t[3] };
-    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: [t.x, t.y, t.z, hand], x: [a.x[0] + lod_offset(w), f32::from_bits(object), a.x[2], a.x[3]] }
+    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: [t.x, t.y, t.z, hand], x: [a.x[0], f32::from_bits(object), a.x[2], a.x[3]] }
 }
 
 #[repr(C)]
@@ -525,7 +519,7 @@ pub struct GpuTriAttr {
     pub n2: [f32; 4], // normal2, w = uv1.x
     pub uv: [f32; 4], // uv1.y, uv2.x, uv2.y, material (bits)
     pub t: [f32; 4],  // tangent (dP/du), w = bitangent sign
-    pub x: [f32; 4],  // texture LOD constant 0.5*log2(uv area / world area), object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
+    pub x: [f32; 4],  // a spare word, object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
 }
 
 #[repr(C)]
@@ -2729,18 +2723,14 @@ pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3
         let w = if n[0].cross(t).dot(b) < 0.0 { 1.0 } else { -1.0 };
         (t, w)
     });
-    // Texel density for ray-cone mip selection: lod = log2(cone width) + 0.5*log2(uv area / world area) + log2(size).
-    let world_area = 0.5 * (p[1] - p[0]).cross(p[2] - p[0]).length();
-    let (d1, d2) = (uv[1] - uv[0], uv[2] - uv[0]);
-    let uv_area = 0.5 * (d1.x * d2.y - d2.x * d1.y).abs();
-    let lod_k = if world_area > 1e-12 && uv_area > 1e-14 { 0.5 * (uv_area / world_area).log2() } else { 0.0 };
+    // (Its texel density, for the mip choice, is the hit's to compute: pathtrace.wgsl `mesh_lod`.)
     GpuTriAttr {
         n0: [n[0].x, n[0].y, n[0].z, uv[0].x],
         n1: [n[1].x, n[1].y, n[1].z, uv[0].y],
         n2: [n[2].x, n[2].y, n[2].z, uv[1].x],
         uv: [uv[1].y, uv[2].x, uv[2].y, f32::from_bits(mat)],
         t: [t.x, t.y, t.z, sign],
-        x: [lod_k, 0.0, 0.0, 0.0],
+        x: [0.0, 0.0, 0.0, 0.0],
     }
 }
 
@@ -2847,9 +2837,6 @@ mod instance_tests {
             }
             assert_eq!(got.uv, flat.uv, "mirrored {mirrored}");
             assert_eq!(got_colors, Some(order.map(|k| colors[k])), "mirrored {mirrored}: the vertex colours follow their vertices");
-            // Uniform scale 2: texel density per metre halves (LOD constant - 1), exactly as the world-space triangle.
-            assert!((got.x[0] - flat.x[0]).abs() < 1e-5);
-            assert!((lod_offset(w) + 1.0).abs() < 1e-5);
             assert_eq!(got.x[1].to_bits(), 3);
         }
     }

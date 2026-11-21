@@ -152,18 +152,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
             }
         }
     }
-    // Texel density for the mip choice: 0.5 log2(uv area / area).
-    let area = 0.5 * length(area2);
-    let uv_area = 0.5 * abs(det);
-    var lod = 0.0;
-    if area > 1e-12 && uv_area > 1e-14 {
-        lod = 0.5 * log2(uv_area / area);
-    }
     at.n0 = vec4<f32>(n0, at.n0.w);
     at.n1 = vec4<f32>(n1, at.n1.w);
     at.n2 = vec4<f32>(n2, at.n2.w);
     at.t = vec4<f32>(t, hand);
-    at.x.x = lod;
     attrs[k] = at;
     // (The flag word: the kernel takes a deforming mesh's motion from the previous frame's vertices.)
     verts[k * 3u] = vec4<f32>(c0.p, bitcast<f32>(TRI_DYNAMIC));

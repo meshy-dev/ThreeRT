@@ -3,8 +3,8 @@
 // `live_source`, build.rs).
 
 // A triangle's shading attributes (scene.rs GpuTriAttr): normals (w: uv parts), uv parts (w: material index, bits),
-// tangent (w: bitangent sign), x: (texel density, object (bits), a particle's area, its emitter entry + 1 (bits; 0: it
-// is not light-sampled)). A triangle of a mesh with sections: uv.w its section, x.w its index in it (its instance's
+// tangent (w: bitangent sign), x: (a spare word, object (bits), a particle's area, its emitter entry + 1 (bits; 0: it
+// is not light-sampled)). (Its texel density is computed where it is hit: pathtrace.wgsl `mesh_lod`.) A triangle of a mesh with sections: uv.w its section, x.w its index in it (its instance's
 // row has the material and where the section's emitters start: pathtrace.wgsl `material_of`, `row_word`).
 struct TriAttr { n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, uv: vec4<f32>, t: vec4<f32>, x: vec4<f32> };
 

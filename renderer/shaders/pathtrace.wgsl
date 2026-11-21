@@ -159,7 +159,7 @@ fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
 // The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
-// Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, LOD offset bits, its rows' first).
+// Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, a spare word, its rows' first).
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
 // (volume function, shape: 0 box / 1 sphere / 2 none while its node is hidden, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
@@ -290,10 +290,9 @@ fn inst_sign(r: Instance) -> f32 { return select(1.0, -1.0, (bitcast<u32>(r.n1.w
 fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(vec3<f32>(dot(r.n0.xyz, n.xyz), dot(r.n1.xyz, n.xyz), dot(r.n2.xyz, n.xyz))), n.w);
 }
-// A model-space triangle's `x` (texel density, object, ...) as its instance has it: the instance's texture LOD offset
-// and object (the record's `info`).
+// A model-space triangle's `x` as its instance has it: the instance's object (the record's `info`).
 fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
+    return vec4<f32>(x.x, bitcast<f32>(info.y), x.z, x.w);
 }
 // An instance's rows (scene.rs `Row`): four words a section of its mesh, from the record's info.w on. The material
 // with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). A triangle of
@@ -911,8 +910,7 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     if (has(F_VCOLOR) && m.uv.w > 0.0) { g.tint *= vcolor(h.tri, h.u, h.v); }
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
-        var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-        if (has(F_INST) && h.inst != NO_INST) { lod += bitcast<f32>(instance_at(h.inst).info.z); }
+        let lod = mesh_lod(e1, e2, a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
         if (m.tex0.x >= 0) { g.tint *= srgb_to_linear(tex(m.tex0.x, uv, lod).rgb); }
         if (m.uv.z > 0.5) { tr *= tex(i32(m.uv.z) - 1, uv, lod).r; }
     }
@@ -1083,9 +1081,18 @@ fn mesh_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
     return (vec2<f32>(a.n0.w, a.n1.w) * w + vec2<f32>(a.n2.w, a.uv.x) * u + a.uv.yz * v) * m.uv.xy + m.uv2.xy;
 }
 
-// log2(texture-UV units per metre) of a triangle's mesh UVs (incl. material repeat).
-fn mesh_lod(a: TriAttr, m: Material) -> f32 {
-    return a.x.x + 0.5 * log2(max(abs(m.uv.x * m.uv.y), 1e-12));
+// log2(texture-UV units per metre) of a triangle's mesh UVs (incl. material repeat), from the triangle where it is
+// hit: its edges e1, e2 as it stands in the world, its UVs: 0.5 log2(uv area / area), 0 where one of the two has no
+// size.
+fn mesh_lod(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> f32 {
+    let uv0 = vec2<f32>(a.n0.w, a.n1.w);
+    let d1 = vec2<f32>(a.n2.w, a.uv.x) - uv0;
+    let d2 = a.uv.yz - uv0;
+    let uv_area = 0.5 * abs(d1.x * d2.y - d2.x * d1.y);
+    let area = 0.5 * length(cross(e1, e2));
+    var k = 0.0;
+    if (area > 1e-12 && uv_area > 1e-14) { k = 0.5 * log2(uv_area / area); }
+    return k + 0.5 * log2(max(abs(m.uv.x * m.uv.y), 1e-12));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1190,7 +1197,7 @@ fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> M
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
     let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
-    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(a, m), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
+    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(e1, e2, a, m), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
                  P.time.x, P.time.y, P.time.z, lod, cur_depth, object_at(oi * OBJECT_STRIDE).w, cur_depth == 0u || mirror_path,
                  object_at(oi * OBJECT_STRIDE + 2u));
 }
@@ -1225,14 +1232,20 @@ var<private> nee_alone: bool = false;
 var<private> lights_only: bool = false;
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
-// the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
+// the model instance a pool triangle belongs to (it places the triangle's edges: its texel density), or NO_INST.
 fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
     let a = attrs[ti];
     let m = material_at(material_of(a, inst));
     var alpha = m.base_color.a;
-    var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-    if (has(F_INST) && inst != NO_INST) { lod += bitcast<f32>(instance_at(inst).info.z); }
     if (has(F_TEX) && m.tex0.x >= 0) {
+        var e1 = tri_verts[ti * 3u + 1u].xyz;
+        var e2 = tri_verts[ti * 3u + 2u].xyz;
+        if (has(F_INST) && inst != NO_INST) {
+            let r = instance_at(inst);
+            e1 = inst_vec(r, e1);
+            e2 = inst_vec(r, e2);
+        }
+        let lod = mesh_lod(e1, e2, a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
@@ -1278,7 +1291,8 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let p = o + d * h.t;
 
     let uv = mesh_uv(a, m, h.u, h.v);
-    let lod = mesh_lod(a, m) + log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
+    let mesh_k = mesh_lod(e1, e2, a, m);
+    let lod = mesh_k + log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
 
     var s: Surface;
     s.p = p;
@@ -1321,7 +1335,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         let oi = object_of(a);
         var t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
         let nv = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v) * select(-1.0, 1.0, front || dot(a.n0.xyz, ng) > 0.0);
-        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_lod(a, m), -d,
+        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_k, -d,
                       object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz, P.time.x, P.time.y, P.time.z,
                       log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth, object_at(oi * OBJECT_STRIDE).w, near,
                       object_at(oi * OBJECT_STRIDE + 2u));
@@ -1869,9 +1883,9 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     return c;
 }
 
-// What light sampling reads of an emitter's attributes (UVs, material, object, texel density), as shading has them
-// at a hit of it: its triangle's, with its instance's object and texture LOD offset if it has one. (Not the normals
-// and the tangent, which stay the mesh's: a light sample reads none, and placing them is work a sample.)
+// What light sampling reads of an emitter's attributes (UVs, material, object), as shading has them at a hit of it:
+// its triangle's, with its instance's object if it has one. (Not the normals and the tangent, which stay the mesh's:
+// a light sample reads none, and placing them is work a sample. Its texel density is from the list's own edges.)
 fn emitter_attrs(em: EmitterTri) -> TriAttr {
     var a = attrs[em.tri];
     if (has(F_INST) && em.inst != NO_INST) { a.x = inst_x(instance_at(em.inst).info, a.x); }
@@ -2146,7 +2160,7 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     let m = material_at(material_of(a, em.inst));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
-    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
+    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(em.e1, em.e2, a, m) + log2(0.05)) * pw;
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;

@@ -74,11 +74,11 @@ fn unit(h: u32) -> f32 { return f32(h >> 8u) * (1.0 / 16777216.0); }
 fn particle_function(f: u32, i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(i.pivot, vec3<f32>(0.0), vec3<f32>(0.0), false, vec4<f32>(0.0)); }
 // @particle-functions-end
 
-// One triangle of a quad: positions, last frame's as prev_verts, shading normal / tangent / texel density (`lod_k`, as
-// scene.rs tri_attr), BLAS input.
+// One triangle of a quad: positions, last frame's as prev_verts, shading normal / tangent (as scene.rs tri_attr),
+// BLAS input.
 // Translucent triangles (`trans` = first translucent triangle) have no motion vectors (the pass draws them over the
 // image each frame) and their own BLAS input.
-fn put_tri(t: u32, dyn_first: u32, trans: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, lod_k: f32, first: bool) {
+fn put_tri(t: u32, dyn_first: u32, trans: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
     let flags = verts[t * 3u].w;
     let now = array<vec4<f32>, 3>(vec4<f32>(a, flags), vec4<f32>(b - a, 0.0), vec4<f32>(c - a, 0.0));
     for (var k = 0u; k < 3u; k++) {
@@ -100,7 +100,6 @@ fn put_tri(t: u32, dyn_first: u32, trans: u32, a: vec3<f32>, b: vec3<f32>, c: ve
     attrs[t].n2.y = n.y;
     attrs[t].n2.z = n.z;
     attrs[t].t = vec4<f32>(tg, 1.0);
-    attrs[t].x.x = lod_k;
     let corners = array<vec3<f32>, 3>(a, b, c);
     for (var k = 0u; k < 3u; k++) {
         for (var j = 0u; j < 3u; j++) {
@@ -141,17 +140,16 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c10 = o.center + o.u - o.v;
     let c11 = o.center + o.u + o.v;
     let c01 = o.center - o.u + o.v;
-    // Normal u x v, tangent (dP/du) along u, bitangent (image up) along v; uv area 1 over world area 4 |u x v|.
+    // Normal u x v, tangent (dP/du) along u, bitangent (image up) along v.
     let uxv = cross(o.u, o.v);
     let area = length(uxv);
     let n = select(vec3<f32>(0.0, 0.0, 1.0), uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(o.u), dot(o.u, o.u) > 1e-24);
-    let lod_k = select(0.0, 0.5 * log2(1.0 / (4.0 * area)), area > 1e-12);
     let t = s.a.x + 2u * k;
     let trans = select(0xffffffffu, s.b.w, s.b.z == 1u);
     let first = PPS.env.z > 0.5 || s.c.w > 1.5;
-    put_tri(t, s.b.y, trans, c00, c10, c11, n, tg, lod_k, first);
-    put_tri(t + 1u, s.b.y, trans, c00, c11, c01, n, tg, lod_k, first);
+    put_tri(t, s.b.y, trans, c00, c10, c11, n, tg, first);
+    put_tri(t + 1u, s.b.y, trans, c00, c11, c01, n, tg, first);
     let oi = (s.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(o.center, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(2.0 * (abs(o.u) + abs(o.v)), objects[oi + 1u].w);

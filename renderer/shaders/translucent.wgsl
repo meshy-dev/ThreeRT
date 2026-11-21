@@ -61,7 +61,7 @@
     // (A particle's triangle is in the world: no instance.)
     let m = material_at(material_of(a, NO_INST));
     let uv = mesh_uv(a, m, b.x, b.y);
-    let tl = mesh_lod(a, m) + lod - LOD_BIAS;
+    let tl = mesh_lod(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz, a, m) + lod - LOD_BIAS;
     var r = mat_base(m);
     if (has(F_TEX) && m.tex0.x >= 0) {
         let c = tex(m.tex0.x, uv, tl);
