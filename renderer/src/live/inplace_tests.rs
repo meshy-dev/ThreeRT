@@ -2643,6 +2643,229 @@ fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
     assert!(apart(&shown, &again) < 0.5, "as before it was hidden ({:.2} steps)", apart(&shown, &again));
 }
 
+/// A posed skinned model of a model the scene has is added in place: a mesh of its own in the room, skinned as the
+/// build skins one, its previous vertices its own, a job of the pass. It is then posed, moved, hidden, shown and
+/// removed as one a build placed, and the next one added takes what it had. Many added at once make every room grow.
+/// Its motion (the kernel finds a deforming mesh's previous vertices through its instance) is a built one's. One of a
+/// model the scene has not, or in a pose that mirrors otherwise, is a rebuild's; so is any under software traversal.
+#[test]
+fn a_posed_skinned_model_is_added_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let pose = |clip: &str, time| crate::desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
+    let bend = |time| pose("bend", time);
+    let file = |name: &str| format!("tests/render/data/{name}.glb");
+    let model = |name: &str, a: crate::desc::Animation| Kind::Model { uri: file(name), nodes: None, animation: Some(a), functions: vec![] };
+    let mut w = world();
+    for (id, name, x) in [(30, "arm", -1.2), (31, "skin-blend", 1.3)] {
+        w.set_object(id, format!("m{id}"), None, model(name, bend(0.0)), true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -0.8, 0.8), glam::Quat::IDENTITY, Vec3::splat(1.2)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    // (The build's frames counted from the live view's: a frame's samples go by its number, and a picture of many
+    // thin models is two thirds of a step from itself at another count, more than a model that is not drawn.)
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        fresh.frame = live.frame;
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.25, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let loaded = against_a_build("as loaded", &mut live, &w);
+    let add = |w: &mut World, id: u32, name: &str, a: crate::desc::Animation, at: Vec3| {
+        w.set_object(id, format!("m{id}"), None, model(name, a), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::splat(1.2)).unwrap();
+    };
+    if !live.g.hwrt {
+        add(&mut w, 32, "arm", bend(0.3), Vec3::new(-0.2, -0.8, 0.9));
+        assert!(live.commit(&mut w).unwrap(), "added under software traversal: a rebuild");
+        let added = against_a_build("added under software traversal", &mut live, &w);
+        assert!(apart(&loaded, &added) > 0.5, "it is in the picture ({:.2} steps)", apart(&loaded, &added));
+        return;
+    }
+    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> {
+        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = c.g.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
+        c.g.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
+        words
+    };
+    let of = |c: &LiveCore, id: u32| c.sc.tables.retained.skinned.iter().position(|s| s.object == id && s.mesh != u32::MAX).expect("a posed skinned model");
+    // What the CPU skin gives a model's mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
+    let cpu = |c: &LiveCore, id: u32, a: &crate::desc::Animation| {
+        let sk = &c.sc.tables.retained.skinned[of(c, id)];
+        let tris = scene::model_gltf(&sk.uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
+        let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
+        for &(k, section, rank) in sk.order.iter() {
+            let q = &tris[k as usize];
+            let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
+            v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);
+            at.extend(bytemuck::cast_slice::<_, f32>(&[scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank)]));
+            b.extend(q.p.iter().flat_map(|p| p.to_array()));
+        }
+        (v, at, b)
+    };
+    let same = |what: &str, got: &[f32], want: &[f32], words: &[usize], stride: usize| {
+        assert_eq!(got.len(), want.len(), "{what}: its length");
+        for (i, (g, x)) in got.iter().zip(want).enumerate() {
+            let ok = if words.contains(&(i % stride)) { g.to_bits() == x.to_bits() } else { (g - x).abs() <= 2e-5 * x.abs().max(1.0) };
+            assert!(ok, "{what}: word {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
+        }
+    };
+    // A model's mesh on the GPU against the CPU skin of `now`; its previous vertices against that of `before`.
+    let check = |what: &str, c: &LiveCore, id: u32, now: &crate::desc::Animation, before: &crate::desc::Animation| {
+        let sk = &c.sc.tables.retained.skinned[of(c, id)];
+        let inst = &c.sc.instances[sk.instance as usize];
+        let (k, n, prev) = (c.sc.gpu_instances[sk.instance as usize].info[0] as u64, sk.order.len() as u64, inst.prev as u64);
+        assert_eq!(c.sc.gpu_instances[sk.instance as usize].n[2][3].to_bits() as u64, prev, "{what}: the record has where the mesh's previous vertices are");
+        let (up, (cv, cat, cb)) = (&c.sc.up, cpu(c, id, now));
+        same(&format!("{what}: the vertices"), &read(c, &up.verts, k * 48, n * 48), &cv, &[3], 12);
+        same(&format!("{what}: the attributes"), &read(c, &up.attrs, k * 96, n * 96), &cat, &[15, 21, 22, 23], 24);
+        same(&format!("{what}: the BLAS input"), &read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), &cb, &[], 9);
+        same(&format!("{what}: the previous frame's vertices"), &read(c, &up.prev_verts, prev * 48, n * 48), &cpu(c, id, before).0, &[3], 12);
+        let asked: Vec<f32> = c.node_tris(&format!("m{id}")).iter().flatten().flat_map(|p| p.to_array()).collect();
+        let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
+        same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+    };
+    let built = live.sc.tables.retained.skinned.len();
+    let prev_size = live.sc.up.prev_verts.size();
+
+    // One of a model the scene has, in a pose of its own.
+    add(&mut w, 32, "arm", bend(0.3), Vec3::new(-0.2, -0.8, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "added: in place ({:?})", live.fallback);
+    let (g, t) = (of(&live, 32), of(&live, 30));
+    let (sk, its) = (live.sc.tables.retained.skinned[g].clone(), live.sc.tables.retained.skinned[t].clone());
+    assert_eq!((g, sk.source, sk.mesh != its.mesh, live.sc.meshes[sk.mesh as usize].deforms), (built, its.source, true, true), "a mesh of its own that deforms, skinned from the model's one copy of its corners, the next of the skinned");
+    assert!(live.sc.edit.in_room(sk.instance as usize) && live.sc.instances[sk.instance as usize].prev as usize >= live.sc.edit.prev.base && seen_by_rays(&live, sk.instance), "its record and its previous vertices are the room's, and the rays see it");
+    assert!(live.sc.up.prev_verts.size() > prev_size, "the previous vertices' buffer was made again, larger");
+    check("added", &live, 32, &bend(0.3), &bend(0.3));
+    check("the built one beside it", &live, 30, &bend(0.0), &bend(0.0));
+    let added = against_a_build("added", &mut live, &w);
+    assert!(apart(&loaded, &added) > 0.5, "it is in the picture ({:.2} steps)", apart(&loaded, &added));
+
+    // Its motion at a new pose is a built one's: the same world built, both posed on in place, a frame of each.
+    let mut w2 = w.clone();
+    let mut fresh = open(&w2).unwrap();
+    w2.take_changes();
+    for id in [30, 32] {
+        w.set_animation(id, Some(bend(0.8))).unwrap();
+        w2.set_animation(id, Some(bend(0.8))).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap() && !fresh.commit(&mut w2).unwrap(), "posed on: in place ({:?}, {:?})", live.fallback, fresh.fallback);
+    check("posed on", &live, 32, &bend(0.8), &bend(0.3));
+    check("the built one posed on", &live, 30, &bend(0.8), &bend(0.0));
+    let motion = |c: &mut LiveCore| -> Vec<f32> {
+        (c.fixed_dt, c.frame, c.reset) = (Some(1.0 / 60.0), 16, true);
+        c.render(1, |_, _| {});
+        let m = &c.targets.kernel.motion;
+        read(c, &m.buffer, m.offset, m.size)
+    };
+    let (a, b) = (motion(&mut live), motion(&mut fresh));
+    let moving = |m: &[f32]| m.chunks_exact(4).filter(|p| p[3] > 0.5 && (p[0].abs() + p[1].abs() + p[2].abs()) > 1e-3).count();
+    assert!(moving(&a) > 20 && moving(&a) == moving(&b), "pixels that moved: {} here, {} in a build", moving(&a), moving(&b));
+    let off = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    assert!(off < 1e-3, "the motion vectors are a build's (off by {off} at most)");
+    drop(fresh);
+
+    // Moved, hidden and shown, as one a build placed.
+    w.set_transform(32, Vec3::new(0.2, -0.7, 1.0), glam::Quat::from_rotation_y(-0.4), Vec3::splat(1.2)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one added moved: in place ({:?})", live.fallback);
+    assert_eq!(live.sc.instances[sk.instance as usize].world, w.world_matrix(32), "its instance stands where it was moved to");
+    let moved = against_a_build("the one added moved", &mut live, &w);
+    w.set_visible(32, false).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one added hidden: in place ({:?})", live.fallback);
+    assert!(!seen_by_rays(&live, sk.instance), "no ray sees it");
+    against_a_build("the one added hidden", &mut live, &w);
+    w.set_visible(32, true).unwrap();
+    w.set_animation(32, Some(bend(0.5))).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the one added shown and posed: in place ({:?})", live.fallback);
+    check("shown and posed", &live, 32, &bend(0.5), &bend(0.8));
+    let shown = against_a_build("the one added shown", &mut live, &w);
+    assert!(apart(&moved, &shown) > 0.2, "its new pose is in the picture ({:.2} steps)", apart(&moved, &shown));
+
+    // Many at once, of both models (more triangles than the room has): every room grows again, and each is skinned as
+    // the build skins it.
+    let (tris_size, ids) = (live.sc.up.verts.size(), (100..140).collect::<Vec<u32>>());
+    for (k, &id) in ids.iter().enumerate() {
+        add(&mut w, id, if k % 2 == 0 { "skin-blend" } else { "arm" }, bend(0.1 + 0.02 * k as f32), Vec3::new(-1.5 + 0.075 * k as f32, 0.3, 0.6));
+    }
+    assert!(!live.commit(&mut w).unwrap(), "40 added at once: in place ({:?})", live.fallback);
+    assert!(live.sc.up.verts.size() > tris_size, "the triangles' buffer was made again, larger");
+    for (k, &id) in ids.iter().enumerate() {
+        let a = bend(0.1 + 0.02 * k as f32);
+        check(&format!("one of 40 added ({id})"), &live, id, &a, &a);
+    }
+    // (Frames were drawn since its last pose: its previous vertices are that pose's too.)
+    check("the first added, after the rooms grew", &live, 32, &bend(0.5), &bend(0.5));
+    against_a_build("40 added at once", &mut live, &w);
+    // Every other one hidden, and shown again.
+    for &id in ids.iter().step_by(2) {
+        w.set_visible(id, false).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "20 of them hidden: in place ({:?})", live.fallback);
+    against_a_build("20 of them hidden", &mut live, &w);
+    for &id in ids.iter().step_by(2) {
+        w.set_visible(id, true).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "shown again: in place ({:?})", live.fallback);
+    // (A model shown has its power back, and what a power edit touched keeps a short history for half a second of the
+    // scene's clock, which a game's frames advance and a test's do not: past it.)
+    for _ in 0..6 {
+        live.advance_time(0.1);
+    }
+    against_a_build("the 20 shown again", &mut live, &w);
+    for &id in &ids {
+        w.set_animation(id, Some(bend(0.9))).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "the 40 posed on: in place ({:?})", live.fallback);
+    for (k, &id) in ids.iter().enumerate() {
+        check(&format!("one of 40 posed on ({id})"), &live, id, &bend(0.9), &bend(0.1 + 0.02 * k as f32));
+    }
+    against_a_build("the 40 posed on", &mut live, &w);
+
+    // Removed: its slot among the skinned, its record, its triangles and its previous vertices are the room's again,
+    // and the next one added takes them.
+    let (mesh, prev, tri) = (sk.mesh, live.sc.instances[sk.instance as usize].prev, live.sc.gpu_instances[sk.instance as usize].info[0]);
+    w.remove(32);
+    assert!(!live.commit(&mut w).unwrap(), "the one added removed: in place ({:?})", live.fallback);
+    assert!(live.sc.tables.retained.skinned[g].mesh == u32::MAX && live.sc.edit.free_skinned == vec![g as u32] && live.sc.edit.dead_meshes.contains(&mesh) && !seen_by_rays(&live, sk.instance), "its slot and its mesh are free, no ray sees it");
+    assert!(live.sc.edit.prev.free.iter().any(|(&at, &n)| at <= prev as usize && prev as usize + 4 <= at + n), "its previous vertices are the room's again");
+    against_a_build("the one added removed", &mut live, &w);
+    add(&mut w, 34, "arm", bend(0.6), Vec3::new(0.0, -0.8, 0.9));
+    assert!(!live.commit(&mut w).unwrap(), "the next added: in place ({:?})", live.fallback);
+    let next = live.sc.tables.retained.skinned[of(&live, 34)].clone();
+    assert_eq!((of(&live, 34), next.mesh, next.instance, live.sc.instances[next.instance as usize].prev, live.sc.gpu_instances[next.instance as usize].info[0]), (g, mesh, sk.instance, prev, tri), "it has the slot, the mesh, the record, the previous vertices and the triangles of the one removed");
+    check("the next added", &live, 34, &bend(0.6), &bend(0.6));
+    w.set_animation(34, Some(bend(0.2))).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the next added posed on: in place ({:?})", live.fallback);
+    check("the next added posed on", &live, 34, &bend(0.2), &bend(0.6));
+    against_a_build("the next added posed on", &mut live, &w);
+
+    // One the build placed removed, and another of its model added: the build's mesh stays, the model is still the scene's.
+    w.remove(30);
+    add(&mut w, 35, "arm", bend(0.4), Vec3::new(-1.2, -0.8, 0.8));
+    assert!(!live.commit(&mut w).unwrap(), "a built one removed and another of its model added: in place ({:?})", live.fallback);
+    check("another of a removed one's model", &live, 35, &bend(0.4), &bend(0.4));
+    against_a_build("a built one removed and another added", &mut live, &w);
+
+    // A rebuild's: one whose pose mirrors other primitives than the scene's; one of a model the scene has not (by its nodes).
+    add(&mut w, 36, "skin-blend", pose("flip", 0.9), Vec3::new(0.6, 0.4, 0.7));
+    assert!(live.commit(&mut w).unwrap(), "one whose pose mirrors otherwise: a rebuild");
+    against_a_build("one whose pose mirrors otherwise", &mut live, &w);
+    w.set_object(37, "m37".into(), None, Kind::Model { uri: file("skin-blend"), nodes: Some(vec!["strip".into()]), animation: Some(bend(0.2)), functions: vec![] }, true, false).unwrap();
+    w.set_transform(37, Vec3::new(-0.6, 0.5, 0.7), glam::Quat::IDENTITY, Vec3::splat(1.2)).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "one of a model the scene has not: a rebuild");
+    against_a_build("one of a model the scene has not", &mut live, &w);
+}
+
 /// A posed skinned model is removed in place: its instance is no object's and no ray sees it, the others are posed
 /// on as ever, and the picture is a build's. One that is hidden is removed in place too. (Under software traversal,
 /// where it has no instance, by a rebuild.)
@@ -2760,7 +2983,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         let (uri, order, _, _) = &deforming(c)[g];
         let tris = scene::model_gltf(uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
         let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
-        for &(k, section, rank) in order {
+        for &(k, section, rank) in order.iter() {
             let q = &tris[k as usize];
             let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
             v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);

@@ -747,8 +747,12 @@ pub struct Retained {
     pub light_nodes: Vec<u32>,
     /// Atmosphere sun: its colour comes from the sky bake.
     pub sun: Option<u32>,
-    /// Posed skinned models' meshes (`Skinned`: a model's proxy names its own, `MeshKind::Skinned`).
+    /// Posed skinned models' meshes (`Skinned`: a model's proxy names its own, `MeshKind::Skinned`). One an edit took
+    /// out again has no mesh (`u32::MAX`) until the next one placed takes its slot.
     pub skinned: Vec<Skinned>,
+    /// Posed skinned models an edit can place another of: (uri, nodes) -> one of `skinned` that the build placed, with
+    /// the file's own materials (what the pass skins it from, its mesh's sections and rows are the model's).
+    pub skinned_model: HashMap<(String, Option<Vec<String>>), u32>,
     /// Meshes and instanced objects: (geometry, whether by its groups: `by_groups`) -> the shared mesh (objects of the
     /// same geometry share its BLAS, whatever their materials: those are their instances' rows). live/edits.rs
     /// `edit_geometry` keeps it.
@@ -977,8 +981,9 @@ pub struct Skinned {
     pub nodes: Option<Vec<String>>,
     /// The pose the mesh holds.
     pub animation: desc::Animation,
-    /// Per pool triangle of the mesh, in order: its index in the model's triangles, its section and its index in it.
-    pub order: Vec<(u32, u32, u32)>,
+    /// Per pool triangle of the mesh, in order: its index in the model's triangles, its section and its index in it
+    /// (the model's: one list for all its placements).
+    pub order: Arc<Vec<(u32, u32, u32)>>,
     /// Its object, and its instance.
     pub object: u32,
     pub instance: u32,
@@ -1539,7 +1544,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut rigid_parts: HashMap<(String, String), std::rc::Rc<Vec<RigidPart>>> = HashMap::new();
     // What the skinning pass reads, by (model, nodes, the primitives mirrored): shared by the model's placements.
     let mut skin_sources: Vec<Vec<[skin::SkinCorner; 3]>> = vec![];
-    let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), u32> = HashMap::new();
+    let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), (u32, Arc<Vec<(u32, u32, u32)>>)> = HashMap::new();
     // Flattened instances' triangle ranges.
     let mut tri_instances: Vec<(u32, u32, u32)> = vec![];
     // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT.
@@ -1870,13 +1875,14 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let mirrors = glb.mirrored(Some(a))?;
                         let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
                         let skey = (file, nodes.clone(), mirrors.clone());
-                        let source = match skin_source_of.get(&skey) {
-                            Some(k) => *k,
+                        let (source, tri_order) = match skin_source_of.get(&skey) {
+                            Some(s) => s.clone(),
                             None => {
                                 let corners = glb.skin_source(nodes.as_deref(), Some(a))?;
                                 skin_sources.push(order.iter().map(|&(k, _, _)| corners[k]).collect());
-                                skin_source_of.insert(skey, skin_sources.len() as u32 - 1);
-                                skin_sources.len() as u32 - 1
+                                let s = (skin_sources.len() as u32 - 1, Arc::new(order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect::<Vec<_>>()));
+                                skin_source_of.insert(skey, s.clone());
+                                s
                             }
                         };
                         let first = pool_tris.len() as u32;
@@ -1890,7 +1896,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
                             pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
                         }
-                        let tri_order: Vec<(u32, u32, u32)> = order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect();
                         // Other poses reach further (a stride, a swing): object bounds a quarter wider each way; one
                         // the game poses may take any pose (lie down): as far as its size each way.
                         let pad = if a.nodes.is_empty() { (hi - lo) * 0.25 } else { Vec3A::splat((hi - lo).length()) };
@@ -1908,6 +1913,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         rows.extend(mine);
                         retained.skinned.push(Skinned { mesh, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, object: *id, instance: i, source, palette_len: glb.palette_len() as u32, mirrors });
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Skinned(retained.skinned.len() as u32 - 1), moves: true }) };
+                        if functions.is_empty() {
+                            retained.skinned_model.entry((uri.clone(), nodes.clone())).or_insert(retained.skinned.len() as u32 - 1);
+                        }
                         continue;
                     }
                 }

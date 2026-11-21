@@ -115,6 +115,11 @@ pub(super) struct EditState {
     pub(super) pool_first: usize,
     /// Procedural blobs in the region by hash: their first word (the build's and those edits wrote).
     pub(super) blobs: std::collections::HashMap<[u8; 32], usize>,
+    /// The previous frame's vertices (`prev_verts`, in triangles) of the deforming meshes edits place: the build's
+    /// before them, then room that grows. And the `scene::Skinned` slots (the skinning pass's jobs) of those an edit
+    /// took out again: the next one placed takes one.
+    pub(super) prev: Holes,
+    pub(super) free_skinned: Vec<u32>,
 }
 
 impl EditState {
@@ -218,6 +223,8 @@ pub(super) enum Placed {
     /// A part: its node (`scene::STILL_NODES`: those its clip leaves alone), its instance and its rows. Their records
     /// follow each other.
     Parts(Vec<(usize, scene::Instance, Vec<scene::Row>)>),
+    /// A posed skinned model: the instance of its own mesh, its rows, and its slot among `Retained::skinned`.
+    Skinned(scene::Instance, Vec<scene::Row>, u32),
 }
 
 /// What `place_instance` writes to.
@@ -320,6 +327,21 @@ pub(super) fn mesh_places(im: &scene::InstMesh, sections: &[scene::Section], poo
     out
 }
 
+/// Spans (first triangle, first of the previous vertices, how many) in order, the same one once, neighbours in both
+/// as one: the copies `keep_prev_spans` makes.
+pub(super) fn merge_spans(mut spans: Vec<(usize, usize, usize)>) -> Vec<(usize, usize, usize)> {
+    spans.sort_unstable();
+    spans.dedup();
+    let mut out: Vec<(usize, usize, usize)> = vec![];
+    for s in spans {
+        match out.last_mut() {
+            Some(l) if l.0 + l.2 == s.0 && l.1 + l.2 == s.1 => l.2 += s.2,
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
 /// One object fewer draws instanced mesh `k`: a mesh edits manage that none draws any more is freed (its triangles a
 /// hole the next new mesh can take, its slot reused, its BLAS dropped with it).
 pub(super) fn drop_mesh_user(k: u32, edit: &mut EditState, tables: &mut tables::Tables, meshes: &[scene::InstMesh]) {
@@ -369,6 +391,20 @@ impl Grow<'_> {
         if colors {
             words.grow(&self.g.device, &self.g.queue, Stream::VertexColors, color_bytes);
         }
+        h.cap = cap;
+        true
+    }
+
+    /// The previous frame's vertices of deforming meshes.
+    pub(super) fn prev(&self, h: &mut Holes, extra: usize, prev: &mut wgpu::Buffer) -> bool {
+        if !self.ok {
+            return false;
+        }
+        let cap = Self::cap(h, extra);
+        if !self.fits(&[(cap * 48) as u64]) {
+            return false;
+        }
+        *prev = self.g.grown(prev, (cap * 48) as u64, "prev verts");
         h.cap = cap;
         true
     }
@@ -1886,19 +1922,19 @@ impl LiveCore {
         self.cpu_skin_ms += t_skin.elapsed().as_secs_f32() * 1000.0;
         let t_up = Instant::now();
         // Motion vectors: the GPU still holds the previous pose of these meshes (and of the last re-skin's, if others):
-        // keep it in `prev_verts` before the pass writes the new one.
-        let df = self.sc.dynamic.0;
-        let (mut lo, mut hi) = (usize::MAX, 0usize);
-        for (g, _) in &jobs {
-            let sk = &self.sc.tables.retained.skinned[*g as usize];
-            let k = self.sc.gpu_instances[sk.instance as usize].info[0] as usize - df;
-            (lo, hi) = (lo.min(k), hi.max(k + sk.order.len()));
-        }
-        self.keep_prev(self.pose_span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        // keep it in `prev_verts`, each mesh's where its instance says, before the pass writes the new one.
+        let posed: Vec<(usize, usize, usize)> = jobs
+            .iter()
+            .map(|(g, _)| {
+                let sk = &self.sc.tables.retained.skinned[*g as usize];
+                (self.sc.gpu_instances[sk.instance as usize].info[0] as usize, self.sc.instances[sk.instance as usize].prev as usize, sk.order.len())
+            })
+            .collect();
+        self.keep_prev_spans(&posed.iter().chain(&self.pose_spans).copied().collect::<Vec<_>>());
         if !self.g.skin(&self.sc.up, &work) {
             return Ok(false);
         }
-        self.pose_span = Some((lo, hi));
+        self.pose_spans = posed;
         self.pose_reposed = true;
         for (g, a) in jobs {
             let sk = &mut self.sc.tables.retained.skinned[g as usize];
@@ -2003,6 +2039,20 @@ impl LiveCore {
         let first = self.sc.dynamic.0;
         let mut e = self.g.device.create_command_encoder(&Default::default());
         e.copy_buffer_to_buffer(&up.verts, ((first + lo) * 48) as u64, &up.prev_verts, (lo * 48) as u64, ((hi - lo) * 48) as u64);
+        self.g.queue.submit([e.finish()]);
+    }
+
+    /// Likewise for deforming meshes, each where it lies: (its first triangle in the scene's, the first of its
+    /// previous vertices, how many).
+    pub(super) fn keep_prev_spans(&self, spans: &[(usize, usize, usize)]) {
+        if spans.is_empty() {
+            return;
+        }
+        let up = &self.sc.up;
+        let mut e = self.g.device.create_command_encoder(&Default::default());
+        for (verts, prev, n) in merge_spans(spans.to_vec()) {
+            e.copy_buffer_to_buffer(&up.verts, (verts * 48) as u64, &up.prev_verts, (prev * 48) as u64, (n * 48) as u64);
+        }
         self.g.queue.submit([e.finish()]);
     }
 
@@ -2232,6 +2282,21 @@ impl LiveCore {
             if at.is_none() && tables.retained.proxies.contains_key(id) {
                 return Err("an object the build placed otherwise (a model in parts, something it flattened) removed".into());
             }
+            // (A skinned model an edit placed: with its mesh's triangles go the room of its previous vertices and its
+            // slot among the skinned, which the next one placed takes. The build's stay until the next rebuild.)
+            if let Some((g, rec)) = tables.retained.instance(*id).and_then(|i| match i.mesh {
+                scene::MeshKind::Skinned(g) if edit.in_room(i.instance as usize) => Some((g as usize, i.instance as usize)),
+                _ => None,
+            }) {
+                let mesh = tables.retained.skinned[g].mesh;
+                if let (Some(inst), Some(im)) = (instances.get(rec), meshes.get(mesh as usize)) {
+                    edit.prev.give(inst.prev as usize, im.count as usize);
+                    let first = edit.pool_first + im.first as usize;
+                    self.pose_spans.retain(|s| s.0 != first);
+                }
+                tables.retained.skinned[g].mesh = u32::MAX;
+                edit.free_skinned.push(g as u32);
+            }
             let proxy = tables.retained.proxies.remove(id);
             if let Some((slot, record)) = at {
                 top.clear(slot);
@@ -2357,9 +2422,9 @@ impl LiveCore {
                     (at.map(|(_, r)| r), Placed::Proc(blas, p, gpu), entry)
                 }
                 Kind::Model { uri, nodes, animation, functions } => {
-                    // A model already in the scene: another instance of its mesh, or of each of its parts' meshes if it
-                    // is a posed rigid one (one not in the scene brings materials and textures, which load with a
-                    // rebuild).
+                    // A model already in the scene: another instance of its mesh, of each of its parts' meshes if it is
+                    // a posed rigid one, or of a mesh of its own if it is a posed skinned one (one not in the scene
+                    // brings materials and textures, which load with a rebuild).
                     if !functions.is_empty() {
                         return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
@@ -2369,7 +2434,126 @@ impl LiveCore {
                     // (Shadow rays pass the glass among a caster's other sections under a kernel feature: a scene where
                     // no instance of the model cast a shadow was built without it.)
                     let glass_caster = |its: &[scene::Row]| scene::rows_bits(its) & scene::INST_GLASS != 0 && scene::rows_cast(its, o.cast_shadow) && features & gpu::F_IGLASS == 0;
-                    if let Some(a) = animation {
+                    let glb = scene::model_gltf(uri, assets).map_err(|e| e.to_string())?;
+                    if let Some(a) = animation.as_ref().filter(|_| glb.animated() && !(nodes.is_none() && glb.rigid())) {
+                        // A posed skinned model the scene has: a mesh of its own in the room, as the build makes one. Its
+                        // triangles are skinned here once, for the pose it comes in; the pass skins it from its next
+                        // pose on, from the corners the scene's others of the model are skinned from.
+                        if top.sw() {
+                            return Err("a skinned model (software traversal has its triangles in the still tree)".into());
+                        }
+                        if at.is_some() {
+                            return Err("a skinned model placed again".into());
+                        }
+                        let t = *tables.retained.skinned_model.get(&(uri.clone(), nodes.clone())).ok_or("a skinned model not in the scene (its materials and textures load with a rebuild)")?;
+                        let (order, source, palette_len, its_mesh, mirrors) = {
+                            let s = &tables.retained.skinned[t as usize];
+                            (s.order.clone(), s.source, s.palette_len, s.mesh, s.mirrors.clone())
+                        };
+                        if glb.mirrored(Some(a)).map_err(|e| e.to_string())? != mirrors {
+                            return Err("a skinned model whose pose mirrors other primitives than the scene's (its triangles are a build's to order)".into());
+                        }
+                        let mine = tables.retained.mesh_rows.get(&its_mesh).ok_or("a model's mesh without its rows")?.clone();
+                        if glass_caster(&mine) {
+                            return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                        }
+                        let posed = glb.triangles(glam::Mat4::IDENTITY, nodes.as_deref(), Some(a)).map_err(|e| e.to_string())?;
+                        let n = order.len();
+                        if order.iter().any(|&(k, _, _)| k as usize >= posed.len()) {
+                            return Err("a skinned model whose triangles are not the scene's".into());
+                        }
+                        let (mut verts, mut a_tris, mut blas_verts, mut t) = (Vec::with_capacity(n * 3), Vec::with_capacity(n), Vec::with_capacity(n * 3), Vec::with_capacity(n));
+                        for &(k, section, rank) in order.iter() {
+                            let q = &posed[k as usize];
+                            let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
+                            verts.extend_from_slice(&[[q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC)], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
+                            a_tris.push(scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank));
+                            blas_verts.extend(scene::blas_tri(q.p.map(|p| p.to_array())));
+                            t.push(q.p.map(glam::Vec3A::from));
+                        }
+                        // Its triangles, and their previous frame's vertices: holes that fit, else the rooms' ends.
+                        let first = match edit.tris.take(n) {
+                            Some(f) => f,
+                            None if match &mut top { gpu::Top::Hw(accel) => grow.tris(&mut edit.tris, n, &mut up.verts, &mut up.attrs, &mut up.words, vcolors, accel), gpu::Top::Sw(_) => false } => {
+                                edit.grows += 1;
+                                edit.rebind = true;
+                                edit.tris.take(n).ok_or("edit room: triangles")?
+                            }
+                            None => return Err("edit room: triangles (particles, or the device's limits)".into()),
+                        };
+                        let prev = match edit.prev.take(n) {
+                            Some(f) => f,
+                            None if grow.prev(&mut edit.prev, n, &mut up.prev_verts) => {
+                                edit.grows += 1;
+                                edit.rebind = true;
+                                edit.prev.take(n).ok_or("edit room: previous vertices")?
+                            }
+                            None => return Err("edit room: previous vertices (particles, or the device's limits)".into()),
+                        };
+                        // A freed mesh's slot (and its sections', where they are as many at least), else new ones: the
+                        // model's sections, its own copy (a slot's are written over by the next mesh that takes it).
+                        let dead = edit.dead_meshes.pop();
+                        let sects = meshes[its_mesh as usize].sections(sections).to_vec();
+                        let ns = sects.len();
+                        let sect_first = match dead.map(|k| meshes[k as usize]).filter(|m| m.sect_count as usize >= ns) {
+                            Some(m) => m.sect_first,
+                            None => {
+                                sections.resize(sections.len() + ns, scene::Section { first: 0, count: 0, slot: 0 });
+                                (sections.len() - ns) as u32
+                            }
+                        };
+                        sections[sect_first as usize..][..ns].copy_from_slice(&sects);
+                        // (Other poses reach further: its bounds wider, as the build's.)
+                        let own = scene::own_inst_mesh(&t, (first - edit.pool_first) as u32);
+                        let pad = if a.nodes.is_empty() { (own.hi - own.lo) * 0.25 } else { glam::Vec3A::splat((own.hi - own.lo).length()) };
+                        let im = scene::InstMesh { lo: own.lo - pad, hi: own.hi + pad, deforms: true, sect_first, sect_count: ns as u32, ..own };
+                        let mesh = match &mut top {
+                            gpu::Top::Hw(accel) => match dead {
+                                Some(k) => {
+                                    g.set_mesh(accel, k, first, &im, sections);
+                                    k
+                                }
+                                None => g.add_mesh(accel, first, &im, sections),
+                            },
+                            gpu::Top::Sw(_) => unreachable!("refused above"),
+                        };
+                        if mesh as usize == meshes.len() {
+                            meshes.push(im);
+                        } else {
+                            meshes[mesh as usize] = im;
+                        }
+                        edit.managed.insert(mesh);
+                        *edit.users.entry(mesh).or_default() += 1;
+                        new_meshes.push(mesh);
+                        split.added += 1;
+                        w_verts.put((first * 48) as u64, bytemuck::cast_slice(&verts));
+                        w_attrs.put((first * std::mem::size_of::<scene::GpuTriAttr>()) as u64, bytemuck::cast_slice(&a_tris));
+                        w_blas.put((first * 36) as u64, bytemuck::cast_slice(&blas_verts));
+                        if vcolors {
+                            w_colors.put((first * 12) as u64, bytemuck::cast_slice(&vec![scene::WHITE; n]));
+                        }
+                        // (It has not moved yet: its previous vertices are its own.)
+                        q.write_buffer(&up.prev_verts, (prev * 48) as u64, bytemuck::cast_slice(&verts));
+                        let rel = first - edit.pool_first;
+                        if pool_tris.len() < rel + n {
+                            pool_tris.resize(rel + n, [glam::Vec3A::ZERO; 3]);
+                        }
+                        pool_tris[rel..rel + n].copy_from_slice(&t);
+                        // Its slot among the skinned (one an edit took out again, else a new one), and the pass's job.
+                        let slot = edit.free_skinned.pop().unwrap_or(tables.retained.skinned.len() as u32);
+                        let sk = scene::Skinned { mesh, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order, object: id, instance: 0, source, palette_len, mirrors };
+                        if slot as usize == tables.retained.skinned.len() {
+                            tables.retained.skinned.push(sk);
+                        } else {
+                            tables.retained.skinned[slot as usize] = sk;
+                        }
+                        let pass = up.skin.as_mut().ok_or("a scene without a skinning pass")?;
+                        edit.rebind |= pass.set_job(&g.device, q, slot as usize, first as u32, n as u32, source, palette_len);
+                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: prev as u32 };
+                        let (lo, hi) = im.placed_bounds(m);
+                        let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
+                        (None, Placed::Skinned(inst, mine, slot), entry)
+                    } else if let Some(a) = animation {
                         let parts = nodes.is_none().then(|| tables.retained.rigid_meshes.get(&(uri.clone(), scene::rigid_pose_key(a)))).flatten().ok_or("an animated model that is no rigid one of the scene's with this pose's nodes (its meshes are a build's to make)")?.clone();
                         let globals = scene::model_gltf(uri, assets).and_then(|g| g.node_globals(Some(a))).map_err(|e| e.to_string())?;
                         let (mut lo, mut hi) = (glam::Vec3A::splat(f32::MAX), glam::Vec3A::splat(f32::MIN));
@@ -2757,6 +2941,12 @@ impl LiveCore {
                     place(record, &mut inst, &mut mine, moves)?;
                     let mesh = if matches!(o.kind, Kind::Model { .. }) { scene::MeshKind::Model } else { scene::MeshKind::Own };
                     scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh, moves })
+                }
+                // A posed skinned model: the instance of its own mesh; a move is its transform's.
+                Placed::Skinned(mut inst, mut mine, g) => {
+                    place(record, &mut inst, &mut mine, true)?;
+                    tables.retained.skinned[g as usize].instance = record as u32;
+                    scene::Draw::Instance(scene::InstanceRef { instance: record as u32, mesh: scene::MeshKind::Skinned(g), moves: true })
                 }
                 // A posed rigid model: a part a record, the nodes a pose may move with moving emitters; where it
                 // stands as an update finds it (`repose_rigid` tells a move by that).

@@ -305,6 +305,13 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         row_runs: Default::default(),
         pool_first: prep.groups.iter().sum(),
         blobs,
+        // (What `prev_verts` holds at the build: the dynamic triangles and the deforming meshes after them. No room:
+        // it grows with the first deforming mesh an edit places.)
+        prev: {
+            let n = prep.groups.iter().sum::<usize>() + scene::deforming_pool(&meshes) - up.dynamic_first;
+            Holes::new(n, n)
+        },
+        free_skinned: vec![],
     };
     Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

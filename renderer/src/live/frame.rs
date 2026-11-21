@@ -330,9 +330,9 @@ impl LiveCore {
             self.prev_span = None;
         }
         self.reposed = false;
-        if let (false, Some(span)) = (self.pose_reposed, self.pose_span) {
-            self.keep_prev(span);
-            self.pose_span = None;
+        if !self.pose_reposed && !self.pose_spans.is_empty() {
+            let spans = std::mem::take(&mut self.pose_spans);
+            self.keep_prev_spans(&spans);
         }
         self.pose_reposed = false;
         // Likewise the instances the last update moved: their previous-frame rows become the current ones.
