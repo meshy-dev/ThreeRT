@@ -748,6 +748,25 @@ export class Sphere {
     this.radius = Math.sqrt(r2);
     return this;
   }
+  /** Grow the sphere to include a point, as three.js Sphere.expandByPoint does. */
+  expandByPoint(point: Vector3): this {
+    if (this.radius < 0) {
+      this.center.copy(point);
+      this.radius = 0;
+      return this;
+    }
+
+    const offset = new Vector3().subVectors(point, this.center);
+    const lengthSq = offset.lengthSq();
+    if (lengthSq > this.radius * this.radius) {
+      const length = Math.sqrt(lengthSq);
+      const delta = (length - this.radius) * 0.5;
+      this.center.addScaledVector(offset, delta / length);
+      this.radius += delta;
+    }
+    return this;
+  }
+
   clone(): Sphere {
     return new Sphere(this.center.clone(), this.radius);
   }
