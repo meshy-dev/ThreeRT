@@ -166,7 +166,8 @@ export class Raycaster {
     if (local.intersectBox(g.boundingBox!) === null) return;
     const p = g.positions, uv = g.uvs, idx = g.triangleIndices();
     const a = new Vector3(), b = new Vector3(), c = new Vector3();
-    const groups = g.groups.length ? g.groups : [{ start: 0, count: idx.length, materialIndex: 0 }];
+    // The faces the engine draws: by group only for several materials on a geometry with groups (meshMaterials).
+    const groups = materials.length > 1 && g.groups.length ? g.groups : [{ start: 0, count: idx.length, materialIndex: 0 }];
     for (const grp of groups) {
       const mat = materials[Math.min(grp.materialIndex, materials.length - 1)];
       for (let i = grp.start; i + 2 < Math.min(grp.start + grp.count, idx.length); i += 3) {

@@ -184,6 +184,37 @@ test("the binding: ambient lights as the environment, black background, three.js
   assert.ok(compatNotes().some((n) => n.startsWith("mapped: MeshPhongMaterial")));
 });
 
+test("Raycaster: a single-material mesh is hit outside its geometry groups, as three.js does and the engine draws it", () => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    -3, -1, 0, -1, -1, 0, -3, 1, 0,
+     1, -1, 0,  3, -1, 0,  1, 1, 0,
+  ], 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute([
+    0, 0, 1, 0, 0, 1,
+    0, 0, 1, 0, 0, 1,
+  ], 2));
+  geometry.setIndex([0, 1, 2, 3, 4, 5]);
+  geometry.addGroup(0, 3, 0); // only triangle 0 is in a group; triangle 1 must still be hit for one material
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+  const rc = new THREE.Raycaster(new THREE.Vector3(1.5, -0.3, 5), new THREE.Vector3(0, 0, -1));
+  const target: THREE.Intersection[] = [];
+  const hits = rc.intersectObject(mesh, false, target);
+  assert.equal(hits, target, "the optional target array is returned by identity");
+  assert.equal(hits.length, 1, "a single-material mesh raycasts faces outside geometry groups");
+  assert.equal(hits[0].object, mesh);
+  assert.equal(hits[0].faceIndex, 1);
+  assert.equal(hits[0].face!.materialIndex, 0);
+  assert.ok(Math.abs(hits[0].distance - 5) < 1e-9);
+  assert.deepEqual(hits[0].point.toArray(), [1.5, -0.3, 0]);
+  assert.ok(hits[0].uv!.distanceTo(new THREE.Vector2(0.25, 0.35)) < 1e-9);
+  const twoMaterials = [new THREE.MeshStandardMaterial(), new THREE.MeshStandardMaterial()];
+  assert.equal(rc.intersectObject(new THREE.Mesh(geometry, twoMaterials)).length, 0, "several materials: only grouped faces");
+  const ungrouped = geometry.clone();
+  ungrouped.clearGroups();
+  assert.equal(rc.intersectObject(new THREE.Mesh(ungrouped, twoMaterials)).length, 1, "several materials, no groups: drawn with the first, so hit");
+});
+
 test("Bugbot on #125: exposure edited in place is the scene's; a transformed geometry's faceted copy is made again; a cloned InstancedMesh has its own tables", () => {
   const scene = new THREE.Scene();
   scene.add(new THREE.AmbientLight(0xffffff, 1));
