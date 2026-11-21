@@ -2800,10 +2800,10 @@ the GPU against the CPU skin; under software traversal each mesh's tree read bac
 its triangles', an interior node's its children's), its bounds its root's, its unit's leaf of the top tree; the
 motion vectors of a pose no longer than the furthest a corner went; one hidden, posed while hidden, shown; one
 removed. A unit test of the boxes taken again (corners that are not finite too).
-23 mutations of the new logic: 20 fail a test under software traversal, two natively (code both traversals share),
-and one is equivalent (the pass writing the BLAS input under software traversal: the writes fall in a spare word no
-one reads; the constant saves the work). Two did not at first: branches by traversal that no test could tell apart,
-taken out.
+22 mutations of the new logic: 20 fail a test under software traversal, one natively (the pass bound again when the
+scene's buffers grow, which they do under hardware traversal alone), and one is equivalent (the pass writing the
+BLAS input under software traversal: the writes fall in a spare word no one reads; the constant saves the work).
+Three lines that told the traversals apart where no test could were taken out: the pose path is one for both.
 
 **A posed skinned model is added and removed in place (2026-11-21).** A character that comes or goes while the game
 runs rebuilt the scene. Now one of a model the scene has is added as the build makes one: a mesh of its own in the
