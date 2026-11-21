@@ -622,7 +622,8 @@ mod tests {
     fn corners_placed_by_the_palette_are_the_models_triangles() {
         let arm = Model::new(gltf::import("../tests/render/data/arm.glb").unwrap()).unwrap();
         // (Vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without
-        // normals, a mesh on a node beside the skin.)
+        // normals, a mesh on a node beside the skin that mirrors it; a joint turned about an axis that is neither
+        // the normals' nor the tangents'.)
         let blend = Model::new(gltf::import("../tests/render/data/skin-blend.glb").unwrap()).unwrap();
         let rigid = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
         let pose = |clip: &str, time| desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
@@ -649,8 +650,28 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen, 138, "corners compared");
-        assert_eq!((blend.palette_len(), blend.skin_source(None, None).unwrap().len()), (4, 10), "the identity, two joints and the badge's node; ten triangles");
+        assert_eq!(seen, 36 + 648 + 12, "corners compared");
+        assert_eq!((blend.palette_len(), blend.skin_source(None, None).unwrap().len()), (4, 72), "the identity, two joints and the badge's node; 72 triangles");
+        // The badge's node mirrors it: its corners are in the order that keeps it front-facing, and a pose that does
+        // not mirror it has them in another.
+        // (Primitives in the order the model emits them: the badge's node first.)
+        assert_eq!(blend.mirrored(None).unwrap(), vec![true, false, false]);
+        assert_eq!(blend.mirrored(Some(&pose("flip", 0.9))).unwrap(), vec![false, false, false]);
+        assert!(blend.skin_source(None, None).unwrap() != blend.skin_source(None, Some(&pose("flip", 0.9))).unwrap());
+        // A blended vertex's normal is not its matrix's: the matrix of two joints is no rotation.
+        let turned = blend.palette(Some(&pose("bend", 0.8))).unwrap();
+        let by_the_matrix = |c: &SkinCorner| {
+            let (a, b) = (c.p[3].to_bits(), c.n[3].to_bits());
+            let mut rows = [glam::Vec4::ZERO; 3];
+            for (j, w) in [a & 0xffff, a >> 16, b & 0xffff, b >> 16].iter().zip(c.w) {
+                for (r, m) in rows.iter_mut().zip(turned[*j as usize]) {
+                    *r += glam::Vec4::from(m) * w;
+                }
+            }
+            let n = Vec3::new(c.n[0], c.n[1], c.n[2]);
+            Vec3::new(rows[0].truncate().dot(n), rows[1].truncate().dot(n), rows[2].truncate().dot(n)).normalize_or_zero()
+        };
+        assert!(blend.skin_source(None, None).unwrap().iter().flatten().any(|c| c.t[3].to_bits() & CORNER_NORMAL != 0 && (skin_corner(c, &turned).1 - by_the_matrix(c)).length() > 0.01), "the fixture tells a normal by the inverse transpose from one by the matrix");
         // A pose bends the strip: its corners are not where the file has them.
         let (source, bent) = (arm.skin_source(None, None).unwrap(), arm.palette(Some(&pose("bend", 0.8))).unwrap());
         assert_eq!(bent.len(), arm.palette_len());

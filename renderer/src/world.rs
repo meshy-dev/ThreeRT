@@ -699,7 +699,9 @@ impl World {
             // So are an instanced object's instances (`LiveCore::update_instanced`).
             self.changes.instanced.insert(id);
         } else if posed && self.leaf(id) {
-            self.changes.poses.insert(id);
+            // A posed model moves in place however it is drawn: an instance of its mesh by its transform, world-space
+            // triangles by being skinned again where it stands (the renderer's to tell: live/edits.rs `commit`).
+            self.changes.moved.insert(id);
         } else if light && !sun && self.leaf(id) {
             self.changes.lights.insert(id);
         } else if sun && self.leaf(id) {

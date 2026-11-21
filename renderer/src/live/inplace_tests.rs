@@ -2559,21 +2559,23 @@ fn models_in_a_shared_pose_posed_again_keep_their_sections() {
     assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
 }
 
-/// The skinning pass writes what the CPU skin writes (tests/render/data/skin-blend.glb: vertices two joints hold,
-/// weights that do not sum to one, a primitive with tangents and one without normals, a mesh on a node beside the
-/// skin): after each new pose the GPU's triangles, shading attributes and BLAS input of the shared mesh are the
-/// model's triangles for the pose, the previous frame's vertices are the pose before, and the CPU has the mesh as
-/// it is now when asked.
+/// The skinning pass writes what the CPU skin writes. Two models (tests/render/data/skin-blend.glb: 72 triangles,
+/// vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without normals, a
+/// mesh on a node beside the skin that mirrors it, a joint turned about an axis that is neither the normals' nor the
+/// tangents'; and arm.glb), two of each in a pose: after each new pose the GPU's triangles, shading attributes and
+/// BLAS input of each mesh are its model's triangles for the pose, the previous frame's vertices are the pose
+/// before, and the CPU has the mesh as it is now when asked. Also after the scene's buffers were made again larger,
+/// and a pose that mirrors other primitives than the mesh was made for is a rebuild's.
 #[test]
 fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
-    let uri = "tests/render/data/skin-blend.glb";
-    let bend = |time| crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() };
+    let pose = |clip: &str, time| crate::desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
+    let bend = |time| pose("bend", time);
     let mut w = world();
-    for (id, x) in [(30, -0.7), (31, 0.7)] {
-        w.set_object(id, format!("strip{id}"), None, Kind::Model { uri: uri.into(), nodes: None, animation: Some(bend(0.0)), functions: vec![] }, true, false).unwrap();
-        w.set_transform(id, Vec3::new(x, -0.6, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(1.2)).unwrap();
+    for (id, uri, x) in [(30, "skin-blend", -0.5), (31, "skin-blend", 0.9), (32, "arm", -1.5), (33, "arm", 1.6)] {
+        w.set_object(id, format!("m{id}"), None, Kind::Model { uri: format!("tests/render/data/{uri}.glb"), nodes: None, animation: Some(bend(0.0)), functions: vec![] }, true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -0.6, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(1.1)).unwrap();
     }
     let mut live = match open(&w) {
         Ok(c) => c,
@@ -2583,7 +2585,9 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     if !live.g.hwrt {
         return eprintln!("skipped: no hardware ray tracing");
     }
-    assert_eq!(live.sc.tables.retained.pose_groups.len(), 1, "the two share a pose's mesh");
+    // (A mesh, its first instance and its object, for each deforming mesh of the scene.)
+    let deforming = |c: &LiveCore| c.sc.tables.retained.pose_groups.iter().map(|g| (g.uri.clone(), g.order.clone(), g.members[0].1, g.members[0].0)).collect::<Vec<_>>();
+    assert_eq!(deforming(&live).len(), 2, "two models, each a pose its two placements share");
     let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> {
         let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mut e = c.g.device.create_command_encoder(&Default::default());
@@ -2594,13 +2598,12 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
         words
     };
-    // What the CPU skin gives the mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
-    let model = scene::model_gltf(uri, Path::new("..")).unwrap();
-    let cpu = |c: &LiveCore, a: &crate::desc::Animation| {
-        let pg = &c.sc.tables.retained.pose_groups[0];
-        let tris = model.triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
+    // What the CPU skin gives a mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
+    let cpu = |c: &LiveCore, g: usize, a: &crate::desc::Animation| {
+        let (uri, order, _, _) = &deforming(c)[g];
+        let tris = scene::model_gltf(uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
         let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
-        for &(k, section, rank) in &pg.order {
+        for &(k, section, rank) in order {
             let q = &tris[k as usize];
             let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
             v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);
@@ -2617,47 +2620,86 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
             assert!(ok, "{what}: word {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
         }
     };
-    let gpu = |c: &LiveCore| {
-        let pg = &c.sc.tables.retained.pose_groups[0];
-        let (k, n) = (c.sc.gpu_instances[pg.members[0].1 as usize].info[0] as u64, pg.order.len() as u64);
+    let gpu = |c: &LiveCore, g: usize| {
+        let (_, order, instance, _) = &deforming(c)[g];
+        let (k, n) = (c.sc.gpu_instances[*instance as usize].info[0] as u64, order.len() as u64);
         let up = &c.sc.up;
         (read(c, &up.verts, k * 48, n * 48), read(c, &up.attrs, k * 96, n * 96), read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), read(c, &up.prev_verts, (k - c.sc.dynamic.0 as u64) * 48, n * 48))
     };
     let check = |what: &str, c: &LiveCore, now: &crate::desc::Animation, before: &crate::desc::Animation| {
-        let ((v, at, b, prev), (cv, cat, cb)) = (gpu(c), cpu(c, now));
-        same(&format!("{what}: the vertices"), &v, &cv, &[3], 12);
-        // (An attribute's words: the section in `uv.w` (15), the rank in `x.w` (23), the object and a spare beside.)
-        same(&format!("{what}: the attributes"), &at, &cat, &[15, 21, 22, 23], 24);
-        same(&format!("{what}: the BLAS input"), &b, &cb, &[], 9);
-        same(&format!("{what}: the previous frame's vertices"), &prev, &cpu(c, before).0, &[3], 12);
-        // The CPU's own: the build's pose in the pool, the pose as it is now when asked.
-        let inst = &c.sc.instances[c.sc.tables.retained.instance(30).unwrap().instance as usize];
-        let asked: Vec<f32> = c.node_tris("strip30").iter().flatten().flat_map(|p| p.to_array()).collect();
-        let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
-        same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+        for g in 0..deforming(c).len() {
+            let what = format!("{what}, {}", deforming(c)[g].0);
+            let ((v, at, b, prev), (cv, cat, cb)) = (gpu(c, g), cpu(c, g, now));
+            same(&format!("{what}: the vertices"), &v, &cv, &[3], 12);
+            // (An attribute's words: the section in `uv.w` (15), the rank in `x.w` (23), the object and a spare beside.)
+            same(&format!("{what}: the attributes"), &at, &cat, &[15, 21, 22, 23], 24);
+            same(&format!("{what}: the BLAS input"), &b, &cb, &[], 9);
+            same(&format!("{what}: the previous frame's vertices"), &prev, &cpu(c, g, before).0, &[3], 12);
+            // The CPU's own: the build's pose in the pool, the pose as it is now when asked.
+            let (instance, id) = (deforming(c)[g].2, deforming(c)[g].3);
+            let inst = &c.sc.instances[instance as usize];
+            let asked: Vec<f32> = c.node_tris(&format!("m{id}")).iter().flatten().flat_map(|p| p.to_array()).collect();
+            let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
+            same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+        }
+    };
+    let all = |w: &mut World, a: &crate::desc::Animation| {
+        for id in [30, 31, 32, 33] {
+            w.set_animation(id, Some(a.clone())).unwrap();
+        }
     };
     let (first, second, third) = (bend(0.0), bend(0.75), bend(0.4));
-    let (loaded, _, _) = cpu(&live, &first);
+    let loaded: Vec<Vec<f32>> = (0..2).map(|g| cpu(&live, g, &first).0).collect();
     for (what, now, before) in [("a new pose", &second, &first), ("the next", &third, &second)] {
-        for id in [30, 31] {
-            w.set_animation(id, Some(now.clone())).unwrap();
-        }
+        all(&mut w, now);
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         check(what, &live, now, before);
     }
-    assert!(cpu(&live, &third).0.iter().zip(&loaded).any(|(a, b)| (a - b).abs() > 0.05), "the pose moves the mesh");
-    // A click finds the strip where its pose has it now, and a build pictures the same.
-    let mut fresh = open(&w).unwrap();
-    forget(&mut live);
-    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
-    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+    assert!((0..2).all(|g| cpu(&live, g, &third).0.iter().zip(&loaded[g]).any(|(a, b)| (a - b).abs() > 0.05)), "the pose moves both meshes");
+    // The picture is a build's.
+    let pictured = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+    };
+    pictured("posed in place", &mut live, &w);
+    // Moved alone (a model the scene did not call movable): its instance, in place, and the picture a build's.
+    w.set_transform(31, Vec3::new(1.1, -0.4, 0.9), glam::Quat::from_rotation_y(0.5), Vec3::splat(1.1)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a posed model moved: in place ({:?})", live.fallback);
+    let stands = |c: &LiveCore, id: u32| c.sc.instances[c.sc.tables.retained.instance(id).unwrap().instance as usize].world;
+    assert_eq!(stands(&live, 31), w.world_matrix(31), "its instance stands where the model was moved to");
+    pictured("a posed model moved", &mut live, &w);
     // Posed in the same frame as moved: in place, the mesh skinned, the instance moved.
-    w.set_transform(30, Vec3::new(-0.9, -0.5, 0.9), glam::Quat::from_rotation_y(-0.2), Vec3::splat(1.2)).unwrap();
-    for id in [30, 31] {
-        w.set_animation(id, Some(bend(0.9))).unwrap();
-    }
+    w.set_transform(30, Vec3::new(-0.9, -0.5, 0.9), glam::Quat::from_rotation_y(-0.2), Vec3::splat(1.1)).unwrap();
+    all(&mut w, &bend(0.9));
     assert!(!live.commit(&mut w).unwrap(), "posed and moved at once: in place ({:?})", live.fallback);
     check("posed and moved at once", &live, &bend(0.9), &third);
+    assert_eq!(stands(&live, 30), w.world_matrix(30), "its instance stands where the model was moved to");
+    pictured("posed and moved at once", &mut live, &w);
+    // The scene's buffers made again, larger (a mesh of more triangles than the room for edits has, added in place,
+    // far below the view): the pass writes the new ones.
+    let size = live.sc.up.verts.size();
+    let n = 200u32;
+    let positions: Vec<f32> = (0..=n).flat_map(|y| (0..=n).flat_map(move |x| [x as f32, y as f32, 0.0])).collect();
+    let indices: Vec<u32> = (0..n).flat_map(|y| (0..n).flat_map(move |x| { let k = y * (n + 1) + x; [k, k + 1, k + n + 2, k, k + n + 2, k + n + 1] })).collect();
+    let corners = ((n + 1) * (n + 1)) as usize;
+    w.set_geometry(7, Geometry { normals: [0.0, 0.0, 1.0].repeat(corners), uvs: vec![0.0; corners * 2], positions, indices, groups: vec![], colors: vec![] }).unwrap();
+    w.set_object(40, "sheet".into(), None, Kind::Mesh { geometry: 7, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(40, Vec3::new(0.0, -80.0, 0.0), glam::Quat::IDENTITY, Vec3::splat(0.001)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a large mesh added: in place ({:?})", live.fallback);
+    assert!(live.sc.up.verts.size() > size, "the triangles' buffer was made again, larger ({} -> {})", size, live.sc.up.verts.size());
+    all(&mut w, &bend(0.25));
+    assert!(!live.commit(&mut w).unwrap(), "posed after the buffers grew: in place ({:?})", live.fallback);
+    check("posed after the buffers grew", &live, &bend(0.25), &bend(0.9));
+    pictured("posed after the buffers grew", &mut live, &w);
+    // A pose that mirrors other primitives than the mesh was made for (the clip `flip` turns the badge's node the
+    // other way round): its triangles are in another order, a build's to make.
+    for id in [30, 31] {
+        w.set_animation(id, Some(pose("flip", 0.9))).unwrap();
+    }
+    assert!(live.commit(&mut w).unwrap(), "a pose that mirrors other primitives: a rebuild");
+    pictured("a pose that mirrors other primitives", &mut live, &w);
 }
 
 /// Models the game poses node by node (tests/render/data/arm.glb's joint `tip`, no clip): each is a pose of its own, even
