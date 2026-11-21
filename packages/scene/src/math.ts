@@ -373,11 +373,20 @@ export class Matrix4 {
   }
   decompose(p: Vector3, q: Quaternion, s: Vector3): this {
     const te = this.elements;
+    p.set(te[12], te[13], te[14]);
+    // three.js r187 uses the affine determinant and leaves a singular matrix undecomposed.
+    const det = te[0] * (te[5] * te[10] - te[6] * te[9])
+      - te[4] * (te[1] * te[10] - te[2] * te[9])
+      + te[8] * (te[1] * te[6] - te[2] * te[5]);
+    if (det === 0) {
+      s.set(1, 1, 1);
+      q.set(0, 0, 0, 1);
+      return this;
+    }
     let sx = Math.hypot(te[0], te[1], te[2]);
     const sy = Math.hypot(te[4], te[5], te[6]);
     const sz = Math.hypot(te[8], te[9], te[10]);
-    if (this.determinant() < 0) sx = -sx;
-    p.set(te[12], te[13], te[14]);
+    if (det < 0) sx = -sx;
     const m = this.clone();
     const me = m.elements;
     me[0] /= sx; me[1] /= sx; me[2] /= sx;
