@@ -109,7 +109,7 @@ export interface PhysicsDesc {
 /** An event of an object (`addEventListener`). */
 export interface ObjectEvent {
   type: string;
-  target?: Object3D;
+  target?: Object3D | null;
   [key: string]: unknown;
 }
 
@@ -444,6 +444,7 @@ export class Object3D {
     if (!l?.length) return;
     event.target = this;
     for (const f of [...l]) f(event);
+    event.target = null;
   }
   set id(v: string | number | undefined) {
     this._id = v === undefined ? undefined : String(v);
