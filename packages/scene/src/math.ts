@@ -850,5 +850,6 @@ export const MathUtils = {
   degToRad: (d: number) => (d * Math.PI) / 180,
   radToDeg: (r: number) => (r * 180) / Math.PI,
   clamp: (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v)),
+  euclideanModulo: (n: number, m: number) => ((n % m) + m) % m,
   lerp: (a: number, b: number, t: number) => a + (b - a) * t,
 };
