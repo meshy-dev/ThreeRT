@@ -2953,6 +2953,54 @@ fn a_posed_skinned_model_is_added_in_place() {
     against_a_build("one of a model the scene has not", &mut live, &w);
 }
 
+/// In a scene with particle systems the rooms for edits do not grow (the particle passes hold the scene's buffers),
+/// and a skinned model added needs room for its previous vertices: a rebuild's, as a mesh larger than the room is
+/// there. Posed on and removed, the build's are in place as anywhere.
+#[test]
+fn a_posed_skinned_model_added_beside_particles_is_a_rebuilds() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
+    let arm = |time| Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: bend(time), functions: vec![] };
+    let mut w = world();
+    w.set_particle_fn("spark", "fn pf_spark(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.3, 0.2, 1.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
+    w.set_object(18, "sparks".into(), None, Kind::Particles { count: 3, emitter: "spark".into(), params: vec![], material: 5, emitter_area: 0.01 }, true, false).unwrap();
+    // (A mesh the scene says it edits: room for triangles and records, which a model's instance would take.)
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(1.4, -0.7, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    for (id, x) in [(30, -0.9), (31, 0.0)] {
+        w.set_object(id, format!("arm{id}"), None, arm(0.0), true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -1.0, 0.8), glam::Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    if !live.g.hwrt {
+        return eprintln!("skipped: no hardware ray tracing");
+    }
+    assert!(live.sc.up.particles.is_some() && live.sc.edit.tris.cap >= live.sc.edit.tris.end + 4, "a scene with a particle pass, and room for a model's triangles");
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        fresh.frame = live.frame;
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.35, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+    };
+    w.set_animation(30, bend(0.6)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a built one posed: in place ({:?})", live.fallback);
+    against_a_build("a built one posed", &mut live, &w);
+    w.set_object(32, "arm32".into(), None, arm(0.3), true, false).unwrap();
+    w.set_transform(32, Vec3::new(0.9, -1.0, 0.8), glam::Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+    assert!(live.commit(&mut w).unwrap(), "one added beside particles: a rebuild");
+    assert!(live.fallback.as_deref().is_some_and(|f| f.contains("previous vertices")), "for its previous vertices' room ({:?})", live.fallback);
+    against_a_build("one added beside particles", &mut live, &w);
+    w.remove(31);
+    assert!(!live.commit(&mut w).unwrap(), "one removed beside particles: in place ({:?})", live.fallback);
+    against_a_build("one removed beside particles", &mut live, &w);
+}
+
 /// A posed skinned model is removed in place: its instance is no object's and no ray sees it, the others are posed
 /// on as ever, and the picture is a build's. One that is hidden is removed in place too. (Under software traversal,
 /// where it has no instance, by a rebuild.)

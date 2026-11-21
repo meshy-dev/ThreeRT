@@ -2790,7 +2790,9 @@ city, five pairs of five).
 A fault found on the way: what a batch changed of an object (a pose, a move, its visibility) stayed when the same
 batch removed it, and the renderer rebuilt for an object it could not find. It goes with the object now.
 Still a rebuild: a skinned model the scene has not (its materials and textures load with one), one whose pose
-mirrors other primitives than the scene's, one added hidden and shown later, and any under software traversal.
+mirrors other primitives than the scene's, one added hidden and shown later, one added in a scene with particle
+systems (the rooms for edits do not grow there, for any edit: the particle passes hold the scene's buffers), and
+any under software traversal.
 Measured, hardware traversal, a game that spawns a character every half second and takes the oldest away (twelve
 at most): each spawn and each despawn rebuilt the scene, 31 times in 16 s, 46 ms each (the longest frame 79 ms);
 now none does, a frame that spawns or despawns commits in 3.5 ms (4.9 at most) and the longest frame is 21 ms. The
