@@ -3892,6 +3892,96 @@ mod tests {
         }
     }
 
+    /// The kernel's texel density of a triangle (`mesh_lod`, its own text, run on the GPU): half the log of its UV area
+    /// over its area, from its two edges and its UVs, with the material's repeat; 0 for the first term where the
+    /// triangle or its UVs have no area. Triangles of every size and UV scale against the same in 64-bit floats.
+    #[test]
+    fn the_kernels_texel_density_is_the_triangles() {
+        use wgpu::util::DeviceExt;
+        let g = match super::Gpu::new() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let part = |src: &'static str, from: &str, to: &str| {
+            let at = src.find(from).unwrap_or_else(|| panic!("the kernel has `{from}`"));
+            &src[at..at + src[at..].find(to).expect("its end") + to.len()]
+        };
+        let attr = part(include_str!("../shaders/records.wgsl"), "struct TriAttr {", "};");
+        let density = part(include_str!("../shaders/pathtrace.wgsl"), "fn mesh_lod(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> f32 {", "\n}\n");
+        let src = format!(
+            "{attr}\nstruct Material {{ uv: vec4<f32> }};\nstruct In {{ e1: vec4<f32>, e2: vec4<f32>, a: TriAttr, m: vec4<f32> }};\n\
+             @group(0) @binding(0) var<storage, read> input: array<In>;\n@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n{density}\n\
+             @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n    if (id.x >= arrayLength(&input)) {{ return; }}\n    let i = input[id.x];\n    out[id.x] = mesh_lod(i.e1.xyz, i.e2.xyz, i.a, Material(i.m));\n}}\n"
+        );
+        // A deterministic stream in [0, 1).
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut f = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 40) as f32) / (1u64 << 24) as f32
+        };
+        let (mut rows, mut want): (Vec<[f32; 36]>, Vec<f64>) = (vec![], vec![]);
+        for k in 0..512 {
+            // Sizes from a millimetre to a hundred metres, UVs from a hundredth of the texture to a hundred repeats.
+            let (size, uvs) = (10f32.powf(f() * 5.0 - 3.0), 10f32.powf(f() * 4.0 - 2.0));
+            let mut v = |s: f32| [(f() - 0.5) * s, (f() - 0.5) * s, (f() - 0.5) * s];
+            let (mut e1, mut e2) = (v(size), v(size));
+            let (uv0, mut uv1, mut uv2) = ([f() * uvs, f() * uvs], [f() * uvs, f() * uvs], [f() * uvs, f() * uvs]);
+            let rep = if k % 4 == 0 { [10f32.powf(f() * 2.0 - 1.0), -10f32.powf(f() * 2.0 - 1.0)] } else { [1.0, 1.0] };
+            match k % 16 {
+                // A triangle without area (its edges along one line, or none), UVs without area.
+                5 => e2 = e1.map(|x| x * 2.0),
+                6 => (e1, e2) = ([0.0; 3], [0.0; 3]),
+                7 => (uv1, uv2) = (uv0, uv0),
+                8 => uv2 = [uv0[0] + (uv1[0] - uv0[0]) * 3.0, uv0[1] + (uv1[1] - uv0[1]) * 3.0],
+                _ => {}
+            }
+            let mut row = [0f32; 36];
+            row[..3].copy_from_slice(&e1);
+            row[4..7].copy_from_slice(&e2);
+            // (The attributes' UV words: n0.w, n1.w = uv0; n2.w, uv.x = uv1; uv.y, uv.z = uv2.)
+            (row[8 + 3], row[8 + 7], row[8 + 11], row[8 + 12], row[8 + 13], row[8 + 14]) = (uv0[0], uv0[1], uv1[0], uv1[1], uv2[0], uv2[1]);
+            (row[32], row[33]) = (rep[0], rep[1]);
+            rows.push(row);
+            let d = |a: [f32; 3]| a.map(|x| x as f64);
+            let (a, b) = (d(e1), d(e2));
+            let cross = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            let area = 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+            let (d1, d2) = ([(uv1[0] - uv0[0]) as f64, (uv1[1] - uv0[1]) as f64], [(uv2[0] - uv0[0]) as f64, (uv2[1] - uv0[1]) as f64]);
+            let uv_area = 0.5 * (d1[0] * d2[1] - d2[0] * d1[1]).abs();
+            let k0 = if area > 1e-12 && uv_area > 1e-14 { 0.5 * (uv_area / area).log2() } else { 0.0 };
+            want.push(k0 + 0.5 * ((rep[0] * rep[1]).abs() as f64).max(1e-12).log2());
+        }
+        let d = &g.device;
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("texel density"), source: wgpu::ShaderSource::Wgsl(src.into()) });
+        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: None, layout: None, module: &module, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+        let input = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&rows), usage: wgpu::BufferUsages::STORAGE });
+        let bytes = (rows.len() * 4) as u64;
+        let out = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipeline.get_bind_group_layout(0), entries: &[wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() }] });
+        let mut e = d.create_command_encoder(&Default::default());
+        {
+            let mut pass = e.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(rows.len().div_ceil(64) as u32, 1, 1);
+        }
+        e.copy_buffer_to_buffer(&out, 0, &to, 0, bytes);
+        g.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let got: Vec<f32> = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
+        let (mut flat, mut spread) = (0, (f64::MAX, f64::MIN));
+        for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+            // (A triangle or UVs at the edge of having an area may fall on either side of it in 32 bits: not those.)
+            let edge = matches!(k % 16, 5 | 8);
+            assert!(edge || (*g as f64 - w).abs() <= 2e-4 + 2e-5 * w.abs(), "triangle {k}: the kernel's {g}, {w} in 64 bits");
+            flat += (k % 16 == 6 || k % 16 == 7) as usize;
+            spread = (spread.0.min(*w), spread.1.max(*w));
+        }
+        assert!(flat > 40 && spread.0 < -8.0 && spread.1 > 8.0, "the triangles span the densities ({spread:?}) and {flat} have no area");
+    }
+
     fn naga_valid(src: &str) {
         let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
