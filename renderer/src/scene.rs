@@ -2182,7 +2182,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     stats.insert("triangles", (tris.len() as u64 + instanced) as f64);
     stats.insert("instances", instances.len() as f64);
     stats.insert("instanced_triangles", instanced as f64);
-    // Deforming meshes (shared poses) first in the pool: the previous frame's vertices (`prev_verts`, motion vectors)
+    // Deforming meshes (posed skinned models') first in the pool: the previous frame's vertices (`prev_verts`, motion vectors)
     // cover the dynamic tail and, right after it, them.
     if meshes.iter().any(|m| m.deforms) {
         let (mut pt, mut pa) = (Vec::with_capacity(pool_tris.len()), Vec::with_capacity(pool_attrs.len()));

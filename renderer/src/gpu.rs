@@ -228,7 +228,7 @@ pub struct TopBuild {
     pub instances: bool,
     /// The dynamic groups' BLASes: their triangles were re-transformed.
     pub dynamic: bool,
-    /// Instanced meshes' BLASes: new meshes, a new shared pose.
+    /// Instanced meshes' BLASes: new meshes, a skinned model's new pose.
     pub meshes: Vec<u32>,
     /// Procedural BLASes an edit made.
     pub procs: Vec<PendingProc>,
@@ -2474,7 +2474,7 @@ impl Gpu {
                         .collect()
                 })
                 .collect();
-            // Deforming meshes (shared poses) are rebuilt every new pose: built fast rather than traced fast, as the dynamic
+            // Deforming meshes (posed skinned models') are rebuilt every new pose: built fast rather than traced fast, as the dynamic
             // groups are.
             let meshes: Vec<wgpu::Blas> = mesh_sizes
                 .iter()

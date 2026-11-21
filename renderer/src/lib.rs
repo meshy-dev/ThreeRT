@@ -923,7 +923,7 @@ fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
     Some(trees)
 }
 
-/// With units: the instances of meshes that deform (a pose a crowd shares) are still written out as world-space
+/// With units: the instances of meshes that deform (a posed skinned model's) are still written out as world-space
 /// triangles, as every instance was. They keep their place among the instances (edits name instances by index) and
 /// are no unit.
 fn flatten_deforming(sc: &mut scene::Scene) {
