@@ -204,7 +204,8 @@ export class Quaternion {
     );
   }
   normalize(): this {
-    const l = Math.hypot(this._x, this._y, this._z, this._w) || 1;
+    const l = Math.hypot(this._x, this._y, this._z, this._w);
+    if (l === 0) return this.set(0, 0, 0, 1);
     return this.set(this._x / l, this._y / l, this._z / l, this._w / l);
   }
   slerp(qb: Quaternion, t: number): this {
