@@ -2776,6 +2776,23 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A posed skinned model is a mesh of its own (2026-11-21).** Models in the same pose (the same clip and time) shared
+one mesh, found by the build; one of them taking another pose had to leave it, and that rebuilt the scene (and a
+rebuild grouped whichever models then happened to be in one pose). A model alone in its pose was no mesh at all:
+world-space triangles, skinned on the CPU. Now every posed skinned model is an instance of a mesh of its own
+(`scene::Skinned`), skinned by the pass at each new pose, never shared: another clip or time is in place whatever the
+others do, and the model is hidden and shown in place by its instance (hidden, a new pose skins nothing; shown, it
+is skinned as it is posed then). What the pass reads of a model is still one copy for all its placements. The
+grouping, its key and the switch that turned it off are gone.
+Still a rebuild: a skinned model added or removed; one hidden when the scene was built, shown; every pose under
+software traversal (the next step). Still world-space triangles skinned on the CPU: a model with emitting triangles.
+Measured, a crowd of 150 walkers (8 walk phases), hardware traversal, the builds in turn at 60 fps: a frame's commit
+3.3 ms with a mesh a walker, against 2.1 with the 8 shared meshes and 2.9 before the pass; the BLAS builds 0.6 ms
+against 0.24. With the CPU skin the same 150 meshes cost 20 ms of commit (40 fps): the reason the pass came first.
+Tests: two models in one pose are two meshes skinned from one copy of the model's corners, posed again in place,
+and one posed alone in place; one hidden, posed and moved while hidden, shown; each mesh's triangles, attributes
+and BLAS input on the GPU against the CPU skin, the other's left as they were.
+
 **Meshes that deform are skinned on the GPU (2026-11-21).** A new pose of a shared pose's mesh was skinned on the
 CPU and every triangle of it sent again: 180 bytes each (its vertices, its shading attributes, the BLAS's input).
 Now the CPU sends the pose's matrices (48 bytes a joint) and a compute pass skins the mesh where it lies

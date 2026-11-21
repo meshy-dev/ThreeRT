@@ -1175,7 +1175,7 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk, a call at the end of the still walk, and the still
   walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
   kernel never does.
-- Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
+- Still flattened, as before: meshes that deform (a posed skinned model's), every instance of a scene with more
   of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
   goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
   step (the A/B).
