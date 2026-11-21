@@ -530,6 +530,9 @@ export class Object3D {
       o.parent?.remove(o);
       o.parent = this;
       this.children.push(o);
+      // Match three.js: observers see the new parent before either notification fires.
+      o.dispatchEvent({ type: "added" });
+      this.dispatchEvent({ type: "childadded", child: o });
     }
     restructured();
     return this;
