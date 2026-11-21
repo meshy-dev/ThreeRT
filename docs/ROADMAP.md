@@ -2776,6 +2776,29 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**Meshes that deform are skinned on the GPU (2026-11-21).** A new pose of a shared pose's mesh was skinned on the
+CPU and every triangle of it sent again: 180 bytes each (its vertices, its shading attributes, the BLAS's input).
+Now the CPU sends the pose's matrices (48 bytes a joint) and a compute pass skins the mesh where it lies
+(`shaders/skin.wgsl`, `Gpu::skin`): a triangle an invocation, from its model's corners as the file has them
+(`skin::SkinCorner`: position, normal, tangent, four matrices and weights; one copy a model, whatever its poses,
+`Scene::skin_sources`) and the pose's matrices (`skin::Model::palette`: a skin's joints, and the nodes of primitives
+beside it), into the triangles, the attributes' normals, tangent and texel density, and the BLAS's input. The
+commit builds the mesh's BLAS after it, as before (a BLAS is built again: wgpu has no update yet).
+The CPU keeps no triangles of such a pose: a click or a query skins the mesh when it asks (`LiveCore::mesh_tris`).
+A pose that mirrors other primitives than the one the mesh was made for has its triangles in another order: a
+rebuild's. An authored tangent of a skinned vertex follows its joints now (it was placed by the object alone).
+Still on the CPU: a posed model alone in its pose (world-space triangles: the next step makes it a mesh of its own),
+and every pose under software traversal (a rebuild there).
+Measured, a crowd of 150 walkers in 8 shared poses, hardware traversal, alternated: a frame's commit 2.9 ms -> 2.1
+(the upload 0.82 -> 0.18, the skin 0.45 -> 0.30); the trace the same. With every walker a mesh of its own (a switch
+of the experiment, not in the tree): the CPU's frame 24 ms with the CPU skin (15 ms of upload: 40 fps), 7.4 ms with
+the pass (60 fps), against 7.1 with the 8 shared poses.
+Tests: the pass's output read back from the GPU and compared word by word with the CPU skin after each new pose
+(`tests/render/data/skin-blend.glb`: vertices two joints hold, weights that do not sum to one, a primitive with
+tangents, one without normals, a mesh on a node beside the skin), the previous frame's vertices, the mesh as the
+CPU has it when asked, the picture against a build's; the corners placed by the palette on the CPU against the
+model's triangles.
+
 **A posed rigid model is edited in place (2026-11-20).** As a mesh and a still model are. Hidden, its parts are
 instances no ray sees, their emitters at no weight, and it is posed and moved on; shown, it is placed where it
 stands (`show_meshes`, `repose_rigid`). Removed, its instances are no object's (`edit_geometry`). One the scene has

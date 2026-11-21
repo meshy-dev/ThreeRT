@@ -1,7 +1,8 @@
 //! glTF models, posed: a clip sampled at a time (node translation / rotation / scale channels with step, linear or
 //! cubic-spline interpolation) and linear blend skinning on the CPU (UE: a skeletal mesh with an animation sequence).
 //! `Model::triangles` yields a model's triangles in world space for a pose, in the same order every time, so a posed
-//! model can be re-skinned in place (`tables.rs`, `LiveCore::commit`).
+//! model can be re-skinned in place (`tables.rs`, `LiveCore::commit`). A mesh that deforms is skinned by the GPU
+//! (shaders/skin.wgsl) from the same triangles as the file has them (`skin_source`) and a pose's matrices (`palette`).
 
 use crate::desc;
 use anyhow::{anyhow, Result};
