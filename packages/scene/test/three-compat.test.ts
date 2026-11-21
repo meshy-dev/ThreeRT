@@ -126,6 +126,34 @@ test("Object3D: clone (geometry shared, own id), attach (world transform kept), 
   assert.ok(o.getWorldDirection(new THREE.Vector3()).distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-9);
 });
 
+test("Mesh.copy and clone: material arrays are independent, but geometry and materials are shared, as three.js does", () => {
+  const geometry = new THREE.BoxGeometry();
+  const red = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+  const blue = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+  const green = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+  const source = new THREE.Mesh(geometry, [red, blue]);
+
+  const clone = source.clone();
+  assert.equal(clone.geometry, geometry, "clone shares the source geometry");
+  assert.notEqual(clone.materials, source.materials, "clone has its own material array");
+  assert.equal(clone.materials[0], red, "first material instance is shared");
+  assert.equal(clone.materials[1], blue, "second material instance is shared");
+  clone.materials[0] = green;
+  assert.equal(source.materials[0], red, "changing the clone's slots does not mutate the source");
+
+  const copy = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
+  assert.equal(copy.copy(source), copy);
+  assert.equal(copy.geometry, geometry, "copy shares the source geometry");
+  assert.notEqual(copy.materials, source.materials, "copy has its own material array");
+  assert.equal(copy.materials[0], red);
+  assert.equal(copy.materials[1], blue);
+  copy.materials[1] = green;
+  assert.equal(source.materials[1], blue, "changing copied slots does not mutate the source");
+
+  const single = new THREE.Mesh(geometry, red);
+  assert.equal(single.clone().material, red, "a single material remains shared");
+});
+
 test("Raycaster: the nearest hit first, front faces of single-sided materials, instanceId, near / far", () => {
   const scene = new THREE.Scene();
   const near = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshStandardMaterial());

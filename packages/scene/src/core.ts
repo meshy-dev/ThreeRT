@@ -1239,6 +1239,12 @@ export class Mesh extends Object3D {
   get materials(): MeshStandardMaterial[] {
     return Array.isArray(this._material) ? this._material : [this._material];
   }
+  /** As in three.js, copy the material array, but share its materials and geometry. */
+  override copy(source: Object3D, recursive = true): this {
+    super.copy(source, recursive);
+    if (source instanceof Mesh) this.material = source._material;
+    return this;
+  }
 }
 
 /**
