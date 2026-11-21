@@ -153,6 +153,41 @@ test("Raycaster: the nearest hit first, front faces of single-sided materials, i
   assert.ok(r2.ray.direction.distanceTo(new THREE.Vector3(0, 0, -1)) < 1e-9);
 });
 
+test("Object3D.remove: notifies the child and then its old parent after unparenting, as three.js does", () => {
+  const [a, b, x, y, z] = ["a", "b", "x", "y", "z"].map((name) => Object.assign(new THREE.Object3D(), { name }));
+  const log: string[] = [];
+  for (const p of [a, b])
+    p.addEventListener("childremoved", (event) => {
+      const c = event.child as THREE.Object3D;
+      assert.equal(event.target, p);
+      assert.ok(c.parent === null && !p.children.includes(c), "the child is detached before childremoved");
+      log.push(`${p.name} childremoved ${c.name}`);
+    });
+  for (const c of [x, y, z])
+    c.addEventListener("removed", (event) => {
+      assert.equal(event.target, c);
+      assert.equal(c.parent, null, "the parent is cleared before removed");
+      log.push(`${c.name} removed`);
+    });
+  const take = () => log.splice(0);
+  a.add(x, y, z);
+  assert.equal(a.remove(x), a);
+  assert.deepEqual(take(), ["x removed", "a childremoved x"]);
+  a.remove(x);
+  b.remove(y);
+  assert.deepEqual(take(), [], "removing a non-child notifies nobody");
+  b.add(y);
+  assert.deepEqual(take(), ["y removed", "a childremoved y"], "add takes it from its old parent first");
+  y.removeFromParent();
+  assert.deepEqual(take(), ["y removed", "b childremoved y"]);
+  b.attach(z);
+  assert.deepEqual(take(), ["z removed", "a childremoved z"]);
+  a.add(x, y);
+  a.clear();
+  assert.deepEqual(take(), ["x removed", "a childremoved x", "y removed", "a childremoved y"]);
+  assert.equal(a.children.length, 0);
+});
+
 test("the binding: ambient lights as the environment, black background, three.js exposure; background, fog, groups, unlit", () => {
   const scene = new THREE.Scene();
   scene.add(new THREE.AmbientLight(0xffffff, Math.PI), new THREE.HemisphereLight(0xffffff, 0x000000, 0));

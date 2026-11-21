@@ -541,6 +541,9 @@ export class Object3D {
       if (i >= 0) {
         this.children.splice(i, 1);
         o.parent = null;
+        // Match three.js: observers see the child detached before either notification fires.
+        o.dispatchEvent({ type: "removed" });
+        this.dispatchEvent({ type: "childremoved", child: o });
       }
     }
     restructured();
