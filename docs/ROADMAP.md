@@ -2776,6 +2776,27 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
+choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
+its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it
+from the triangle where it is hit, from its two edges as it stands in the world and its UVs (`mesh_lod`), and
+nothing stores or writes it: the attributes' first `x` word and the record's third `info` word are spare.
+What changes in a picture: nothing under a uniform scale but rounding (five scenes offline against the build
+before: four the same bytes, one with 21 of 921,600 pixels off by 6 steps at most). An instance scaled otherwise
+has its triangles' own density now; its offset was the cube root of its volume's scale.
+A fault found on the way: a shadow ray through glass on a scaled instance added the instance's offset twice, so a
+pane's colour or transmission map was read some levels off (a pane scaled to 1 / 32: five too high).
+The cutout test of a candidate hit reads its triangle's edges now too, where its material has an alpha map.
+Tests: the kernel's own `mesh_lod`, its text run on the GPU for 512 triangles (a millimetre to a hundred metres,
+UVs a hundredth of the texture to a hundred repeats, ones without area) against 64-bit values; a checker on an
+instance scaled 32 times, a square's inside reading its colour (a level five too high reads grey); the checker in
+a cutout's alpha on one scaled 256 times; a shadow through a pane with a colour map, the pane scaled 1 / 32 and 32
+times (the first fails on the build before). Not held by a test: the density a light sample, a material function's input and a
+translucent particle read (a wrong level there changes noise, not a mean).
+10 mutations: six of the formula fail the unit test, four of the places that use it fail a render test. One did not at
+first: a cutout three levels too high still has each square's middle on its side of the test, so that test's
+instance is scaled 256 times.
+
 **A posed skinned model is posed in place under software traversal (2026-11-22).** Under software traversal a mesh
 that deforms was written out into the still scene's tree, so every pose rebuilt the scene. Now it is a unit as any
 mesh. Its tree has the shape of a tree built once over its model's bind pose, one shape for every placement of the
