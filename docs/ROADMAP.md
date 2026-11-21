@@ -2793,11 +2793,20 @@ Measured, a crowd of 150 walkers in 8 shared poses, hardware traversal, alternat
 (the upload 0.82 -> 0.18, the skin 0.45 -> 0.30); the trace the same. With every walker a mesh of its own (a switch
 of the experiment, not in the tree): the CPU's frame 24 ms with the CPU skin (15 ms of upload: 40 fps), 7.4 ms with
 the pass (60 fps), against 7.1 with the 8 shared poses.
-Tests: the pass's output read back from the GPU and compared word by word with the CPU skin after each new pose
-(`tests/render/data/skin-blend.glb`: vertices two joints hold, weights that do not sum to one, a primitive with
-tangents, one without normals, a mesh on a node beside the skin), the previous frame's vertices, the mesh as the
-CPU has it when asked, the picture against a build's; the corners placed by the palette on the CPU against the
-model's triangles.
+A fault found on the way, older than this: a posed model the scene did not call movable was moved by skinning it
+again where it stands, so its move was recorded as a new pose. One that is an instance of a mesh that deforms was
+then not moved at all (no pose had changed), and nothing rebuilt. A posed model's move is a move now
+(`World::note_move`): the renderer moves an instance, and skins world-space triangles again.
+Tests: the pass's output read back from the GPU and compared word by word with the CPU skin after each new pose, for
+two model files in two poses (`tests/render/data/skin-blend.glb`: more triangles than a block of the pass, vertices
+two joints hold, weights that do not sum to one, a primitive with tangents, one without normals, a joint turned
+about an axis that is neither the normals' nor the tangents', a mesh on a node beside the skin that mirrors it,
+materials in an order the mesh does not keep), with world-space triangles before the meshes'; the previous frame's
+vertices, the mesh as the CPU has it when asked, the picture against a build's; a model moved alone, posed and
+moved at once, posed after the scene's buffers grew; a pose that mirrors other primitives, by a rebuild; the
+corners placed by the palette on the CPU against the model's triangles. 27 mutations of the new logic: each fails a
+test (two did not at first: the mesh's triangles were in the model's order and first in the GPU's, in every scene
+the tests had).
 
 **A posed rigid model is edited in place (2026-11-20).** As a mesh and a still model are. Hidden, its parts are
 instances no ray sees, their emitters at no weight, and it is posed and moved on; shown, it is placed where it

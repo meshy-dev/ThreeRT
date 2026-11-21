@@ -2562,7 +2562,8 @@ fn models_in_a_shared_pose_posed_again_keep_their_sections() {
 /// The skinning pass writes what the CPU skin writes. Two models (tests/render/data/skin-blend.glb: 72 triangles,
 /// vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without normals, a
 /// mesh on a node beside the skin that mirrors it, a joint turned about an axis that is neither the normals' nor the
-/// tangents'; and arm.glb), two of each in a pose: after each new pose the GPU's triangles, shading attributes and
+/// tangents', its materials in an order a mesh laid out by material does not keep; and arm.glb), two of each in a
+/// pose, in a scene with world-space triangles before the meshes': after each new pose the GPU's triangles, shading attributes and
 /// BLAS input of each mesh are its model's triangles for the pose, the previous frame's vertices are the pose
 /// before, and the CPU has the mesh as it is now when asked. Also after the scene's buffers were made again larger,
 /// and a pose that mirrors other primitives than the mesh was made for is a rebuild's.
@@ -2577,6 +2578,10 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         w.set_object(id, format!("m{id}"), None, Kind::Model { uri: format!("tests/render/data/{uri}.glb"), nodes: None, animation: Some(bend(0.0)), functions: vec![] }, true, false).unwrap();
         w.set_transform(id, Vec3::new(x, -0.6, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(1.1)).unwrap();
     }
+    // (A rect light's card, far below: world-space triangles, which come before the meshes' in the GPU's order.)
+    let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 0.2, "height": 0.2, "range": 0 })).unwrap();
+    w.set_object(21, "card".into(), None, Kind::Light(card), true, false).unwrap();
+    w.set_transform(21, Vec3::new(0.0, -60.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     let mut live = match open(&w) {
         Ok(c) => c,
         Err(e) => return eprintln!("skipped: {e}"),
@@ -2584,6 +2589,11 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     w.take_changes();
     if !live.g.hwrt {
         return eprintln!("skipped: no hardware ray tracing");
+    }
+    assert!(live.sc.edit.pool_first > 0, "a mesh's first triangle on the GPU is not its first in the pool");
+    {
+        let g = live.sc.tables.retained.pose_groups.iter().find(|g| g.uri.ends_with("skin-blend.glb")).expect("the model's mesh");
+        assert!(g.order.iter().enumerate().any(|(at, &(k, _, _))| at as u32 != k), "the mesh has the model's triangles in another order (by material)");
     }
     // (A mesh, its first instance and its object, for each deforming mesh of the scene.)
     let deforming = |c: &LiveCore| c.sc.tables.retained.pose_groups.iter().map(|g| (g.uri.clone(), g.order.clone(), g.members[0].1, g.members[0].0)).collect::<Vec<_>>();
