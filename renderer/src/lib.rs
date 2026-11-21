@@ -899,7 +899,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
 fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
     // A mesh that deforms (a posed skinned model's) is a unit as any: its tree has the shape of the tree over its
     // model's bind pose, one shape for every mesh skinned from the source, and its boxes are the pose's (taken again
-    // at each new one: `units::refit`; a tree made again a pose costs sixty times that, and walks a tenth better).
+    // at each new one: `units::refit`; a tree made again a pose costs sixty times that, and traces 5 % faster).
     // The source's corners are put in that tree's order, and so are each such mesh's triangles: the skinning pass
     // writes a triangle where its corners are.
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().map(|k| (k.mesh, k.source)).collect();
