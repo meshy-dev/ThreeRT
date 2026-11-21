@@ -601,6 +601,13 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
+    // (A deforming mesh's previous vertices lie as its triangles do, counted from the first dynamic triangle: what
+    // gpu.rs `prev_verts` holds at the build. Its instance's record says where.)
+    let first_dynamic: usize = groups[..4].iter().sum();
+    for i in &mut sc.instances {
+        let m = &sc.meshes[i.mesh as usize];
+        i.prev = if m.deforms { (pool_first - first_dynamic) as u32 + m.first } else { 0 };
+    }
     sc.gpu_instances = sc.instances.iter().map(|i| i.gpu(pool_first as u32 + sc.meshes[i.mesh as usize].first)).collect();
     // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
     // primitive counts from there).

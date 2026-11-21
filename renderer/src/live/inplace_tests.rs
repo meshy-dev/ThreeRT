@@ -2781,7 +2781,10 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         let (_, order, instance, _) = &deforming(c)[g];
         let (k, n) = (c.sc.gpu_instances[*instance as usize].info[0] as u64, order.len() as u64);
         let up = &c.sc.up;
-        (read(c, &up.verts, k * 48, n * 48), read(c, &up.attrs, k * 96, n * 96), read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), read(c, &up.prev_verts, (k - c.sc.dynamic.0 as u64) * 48, n * 48))
+        // (Its previous vertices: where its instance's record says, on the CPU and on the GPU.)
+        let prev = c.sc.instances[*instance as usize].prev;
+        assert_eq!(c.sc.gpu_instances[*instance as usize].n[2][3].to_bits(), prev, "the record has where the mesh's previous vertices are");
+        (read(c, &up.verts, k * 48, n * 48), read(c, &up.attrs, k * 96, n * 96), read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), read(c, &up.prev_verts, prev as u64 * 48, n * 48))
     };
     let check_one = |what: &str, c: &LiveCore, g: usize, now: &crate::desc::Animation, before: &crate::desc::Animation| {
         let what = format!("{what}, {} (object {})", deforming(c)[g].0, deforming(c)[g].3);

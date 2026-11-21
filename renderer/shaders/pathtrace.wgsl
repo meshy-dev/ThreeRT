@@ -3804,7 +3804,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ti = hit.tri;
             // The first dynamic triangle is the first of traversal group 4 (a u32: an index carried as f32 bits would be a
             // denormal below 2^23, which a driver may flush to zero).
-            // Dynamic triangles (and deforming instanced meshes, in model space) keep their previous vertices.
+            // Dynamic triangles keep their previous vertices, as they lie from the first dynamic one (`kp`); a deforming
+            // instanced mesh keeps its own in model space, where its instance's record says.
             let deforms = LIVE && P.motion.x > 0.5 && !is_proc(hit) && ti >= P.group_first[1].x && (bitcast<u32>(tri_verts[ti * 3u].w) & TRI_DYNAMIC) != 0u;
             let kp = (ti - P.group_first[1].x) * 3u;
             if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
@@ -3820,7 +3821,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let r = instance_at(hit.inst);
                 if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
                     var lp = vec4<f32>(tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * hit.u + tri_verts[ti * 3u + 2u].xyz * hit.v, 1.0);
-                    if (deforms) { lp = vec4<f32>(prev_verts[kp].xyz + prev_verts[kp + 1u].xyz * hit.u + prev_verts[kp + 2u].xyz * hit.v, 1.0); }
+                    // (A deforming mesh's previous vertices are where its record says, n2.w, in its triangles' order:
+                    // a mesh an edit placed has them elsewhere than its triangles lie.)
+                    if (deforms) {
+                        let kq = (bitcast<u32>(r.n2.w) + ti - r.info.x) * 3u;
+                        lp = vec4<f32>(prev_verts[kq].xyz + prev_verts[kq + 1u].xyz * hit.u + prev_verts[kq + 2u].xyz * hit.v, 1.0);
+                    }
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
                 }
             } else if (deforms) {
