@@ -1778,8 +1778,9 @@ export class InstancedMesh extends Object3D {
     this._instData = a && this.own(a);
     touched(this);
   }
-  setMatrixAt(index: number, matrix: Matrix4): void {
+  setMatrixAt(index: number, matrix: Matrix4): this {
     this.instanceMatrix.array.set(matrix.elements, index * 16);
+    return this;
   }
   getMatrixAt(index: number, matrix: Matrix4): Matrix4 {
     return matrix.fromArray(this.instanceMatrix.array, index * 16);
