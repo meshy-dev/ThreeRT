@@ -702,6 +702,13 @@ export class Box3 {
   union(b: Box3): this {
     return this.expandByPoint(b.min).expandByPoint(b.max);
   }
+  /** Narrows this box to its overlap with `b` (three.js). */
+  intersect(b: Box3): this {
+    this.min.set(Math.max(this.min.x, b.min.x), Math.max(this.min.y, b.min.y), Math.max(this.min.z, b.min.z));
+    this.max.set(Math.min(this.max.x, b.max.x), Math.min(this.max.y, b.max.y), Math.min(this.max.z, b.max.z));
+    if (this.isEmpty()) this.makeEmpty();
+    return this;
+  }
   /** The box of the box transformed by `m` (its eight corners). */
   applyMatrix4(m: Matrix4): this {
     if (this.isEmpty()) return this;
