@@ -2793,11 +2793,17 @@ CPU; now none does, 3.2 ms. A crowd of 150 walkers: 2.0 s a frame; now no rebuil
 trace pays, nothing moving, at 1280 x 720: four characters filling the view, 4.67 ms before and 5.20 now (+11 %),
 of which 6.5 % is the scene having units at all (its kernel had no unit walk) and 4.9 % the kept shape (the same
 units with trees built for the pose: 4.97); the crowd standing in a street, 85 ms either way.
+What a pose costs the CPU there: the corners' positions (0.2 ms a character of 13,744 triangles, one core) and the
+boxes (0.05). The crowd's commit is 7.6 ms, against 3.3 under hardware traversal, whose BLASes the GPU builds.
 Tests, under both traversals: four models of two files, each mesh's triangles, attributes and previous vertices on
 the GPU against the CPU skin; under software traversal each mesh's tree read back (its model's links, a leaf's box
 its triangles', an interior node's its children's), its bounds its root's, its unit's leaf of the top tree; the
 motion vectors of a pose no longer than the furthest a corner went; one hidden, posed while hidden, shown; one
-removed.
+removed. A unit test of the boxes taken again (corners that are not finite too).
+23 mutations of the new logic: 20 fail a test under software traversal, two natively (code both traversals share),
+and one is equivalent (the pass writing the BLAS input under software traversal: the writes fall in a spare word no
+one reads; the constant saves the work). Two did not at first: branches by traversal that no test could tell apart,
+taken out.
 
 **A posed skinned model is added and removed in place (2026-11-21).** A character that comes or goes while the game
 runs rebuilt the scene. Now one of a model the scene has is added as the build makes one: a mesh of its own in the
