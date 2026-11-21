@@ -150,6 +150,28 @@ export class Quaternion {
     const s = Math.sin(h);
     return this.set(axis.x * s, axis.y * s, axis.z * s, Math.cos(h));
   }
+  /** Rotation between normalized directions, including antiparallel vectors (three.js r187). */
+  setFromUnitVectors(vFrom: Vector3, vTo: Vector3): this {
+    let r = vFrom.dot(vTo) + 1;
+    if (r < 1e-8) {
+      r = 0;
+      if (Math.abs(vFrom.x) > Math.abs(vFrom.z)) {
+        this._x = -vFrom.y;
+        this._y = vFrom.x;
+        this._z = 0;
+      } else {
+        this._x = 0;
+        this._y = -vFrom.z;
+        this._z = vFrom.y;
+      }
+    } else {
+      this._x = vFrom.y * vTo.z - vFrom.z * vTo.y;
+      this._y = vFrom.z * vTo.x - vFrom.x * vTo.z;
+      this._z = vFrom.x * vTo.y - vFrom.y * vTo.x;
+    }
+    this._w = r;
+    return this.normalize();
+  }
   setFromEuler(e: Euler, notify = true): this {
     const c1 = Math.cos(e.x / 2), c2 = Math.cos(e.y / 2), c3 = Math.cos(e.z / 2);
     const s1 = Math.sin(e.x / 2), s2 = Math.sin(e.y / 2), s3 = Math.sin(e.z / 2);
