@@ -2019,6 +2019,8 @@ export class PerspectiveCamera extends Object3D {
   override type = "PerspectiveCamera";
   /** Vertical FOV in degrees. */
   fov: number;
+  /** Film gauge in millimeters (three.js defaults to 35). */
+  filmGauge = 35;
   aspect: number;
   near: number;
   far: number;
@@ -2052,6 +2054,12 @@ export class PerspectiveCamera extends Object3D {
   setAutoExposure(compensation = 0, minEv100 = -10, maxEv100 = 20): this {
     this.exposure = { mode: "auto", compensation, minEv100, maxEv100 };
     return this;
+  }
+  /** Set the vertical FOV from focal length, using the film height for this aspect ratio (three.js). */
+  setFocalLength(focalLength: number): void {
+    const filmHeight = this.filmGauge / Math.max(this.aspect, 1);
+    this.fov = (2 * Math.atan(0.5 * filmHeight / focalLength) * 180) / Math.PI;
+    this.updateProjectionMatrix();
   }
   /** three.js API; the engine reads fov / aspect / near / far as they are. */
   updateProjectionMatrix(): void {}
