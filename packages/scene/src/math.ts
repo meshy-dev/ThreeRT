@@ -69,6 +69,12 @@ export class Vector3 {
   distanceTo(v: Vector3): number {
     return Math.hypot(this.x - v.x, this.y - v.y, this.z - v.z);
   }
+  angleTo(v: Vector3): number {
+    const denominator = Math.sqrt(this.lengthSq() * v.lengthSq());
+    if (denominator === 0) return Math.PI / 2;
+    const theta = this.dot(v) / denominator;
+    return Math.acos(Math.max(-1, Math.min(1, theta)));
+  }
   lerp(v: Vector3, t: number): this {
     return this.set(this.x + (v.x - this.x) * t, this.y + (v.y - this.y) * t, this.z + (v.z - this.z) * t);
   }
