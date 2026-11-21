@@ -2790,8 +2790,10 @@ Measured, a crowd of 150 walkers (8 walk phases), hardware traversal, the builds
 3.3 ms with a mesh a walker, against 2.1 with the 8 shared meshes and 2.9 before the pass; the BLAS builds 0.6 ms
 against 0.24. With the CPU skin the same 150 meshes cost 20 ms of commit (40 fps): the reason the pass came first.
 Tests: two models in one pose are two meshes skinned from one copy of the model's corners, posed again in place,
-and one posed alone in place; one hidden, posed and moved while hidden, shown; each mesh's triangles, attributes
-and BLAS input on the GPU against the CPU skin, the other's left as they were.
+and one posed alone in place; one hidden, posed and moved while hidden, shown (under software traversal, hidden and
+shown by a rebuild); four models of two files, each mesh's triangles, attributes and BLAS input on the GPU against
+the CPU skin, one posed alone and the others' left as they were, one moved alone. 10 mutations of the new logic:
+nine fail a test natively, the tenth (a model hidden where it has no instance to mask) under software traversal.
 
 **Meshes that deform are skinned on the GPU (2026-11-21).** A new pose of a shared pose's mesh was skinned on the
 CPU and every triangle of it sent again: 180 bytes each (its vertices, its shading attributes, the BLAS's input).
