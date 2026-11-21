@@ -770,9 +770,8 @@ export class Ray {
     return target.set(this.origin.x + this.direction.x * t, this.origin.y + this.direction.y * t, this.origin.z + this.direction.z * t);
   }
   applyMatrix4(m: Matrix4): this {
-    const end = this.at(1).applyMatrix4(m);
     this.origin.applyMatrix4(m);
-    this.direction.subVectors(end, this.origin);
+    this.direction.transformDirection(m);
     return this;
   }
   /** The ray parameter where it enters `b` (0 inside), or null. */
