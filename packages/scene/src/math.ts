@@ -229,6 +229,12 @@ export class Quaternion {
   angleTo(q: Quaternion): number {
     return 2 * Math.acos(Math.min(1, Math.abs(this.dot(q))));
   }
+  /** Rotate toward a unit quaternion by at most `step` radians (three.js). */
+  rotateTowards(q: Quaternion, step: number): this {
+    const angle = this.angleTo(q);
+    if (angle === 0) return this;
+    return this.slerp(q, Math.min(1, step / angle));
+  }
   /** The inverse rotation (of a unit quaternion). */
   invert(): this {
     return this.set(-this._x, -this._y, -this._z, this._w);

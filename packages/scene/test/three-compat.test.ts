@@ -98,6 +98,20 @@ test("vertex colours: the geometry's `color` attribute (RGB, RGBA, normalized by
   assert.deepEqual(compatNotes().slice(before).filter((n) => n.startsWith("unsupported:")), []);
 });
 
+test("Quaternion.rotateTowards: bounded angular step and no overshoot, as three.js does", () => {
+  const current = new THREE.Quaternion();
+  const target = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+  assert.equal(current.rotateTowards(target, Math.PI / 2), current);
+  assert.ok(Math.abs(current.y - Math.SQRT1_2) < 1e-12, "90-degree yaw has sin(pi/4)");
+  assert.ok(Math.abs(current.w - Math.SQRT1_2) < 1e-12, "90-degree yaw has cos(pi/4)");
+  assert.ok(Math.abs(current.angleTo(target) - Math.PI / 2) < 1e-12, "90 degrees remain");
+  assert.equal(current.rotateTowards(target, 4 * Math.PI), current);
+  assert.ok(current.angleTo(target) < 1e-12, "a large step stops at the target");
+  const arrived = current.toArray();
+  assert.equal(current.rotateTowards(target, Math.PI / 8), current);
+  assert.deepEqual(current.toArray(), arrived, "already at the target does not change");
+});
+
 test("Object3D: clone (geometry shared, own id), attach (world transform kept), local moves, world / local", () => {
   const a = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
   a.position.set(1, 2, 3);
