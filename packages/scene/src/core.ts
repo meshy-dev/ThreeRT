@@ -525,6 +525,10 @@ export class Object3D {
   add(...objects: Object3D[]): this {
     for (const o of objects) {
       if (o === this) throw new Error("object can't be added as a child of itself");
+      if (!o?.isObject3D) {
+        console.error("Object3D.add: object not an instance of THREE.Object3D.", o);
+        continue;
+      }
       // (An object the engine draws itself, a voxel body: it is in no scene.)
       if ((o as { engineOwned?: boolean }).engineOwned) throw new TypeError(`${o.name || o.type}: the engine draws it; it is in no scene`);
       o.parent?.remove(o);
