@@ -910,6 +910,8 @@ export class Scene extends Object3D {
   environment: Environment | null = null;
   /** three.js: what camera rays that miss show (a colour, sRGB as given; null: the environment). It lights nothing. */
   background: Color | null = null;
+  /** Equirectangular image for camera rays. Takes precedence over `background` and does not light the scene. */
+  backgroundPanorama: HDRIEnvironment | null = null;
   /** Height fog (three.js's `Fog` / `FogExp2` are kinds of it). */
   fog: ExponentialHeightFog | null = null;
   /** Global surface wetness 0..1 (material functions read it as `i.wetness`: SurfaceMaterial's `wet` / `puddles`,
@@ -2126,11 +2128,13 @@ export class SkyColor {
   }
 }
 
+/** An equirectangular texture in its scene orientation. Rotation is around +Y, in radians. */
 export class HDRIEnvironment {
   readonly kind = "hdri";
   texture: Texture;
   intensity: number;
   rotation: number;
+  /** Lighting and reflections multiplier, in addition to `intensity`. */
   skyLightIntensity = 1;
   constructor(texture: Texture, intensity = 1, rotation = 0) {
     this.texture = texture;

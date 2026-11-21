@@ -103,10 +103,15 @@ pub fn version(path: &Path) -> (u64, u128) {
 
 /// A texture file decoded to RGBA8.
 pub fn image(path: &Path) -> Result<image::RgbaImage> {
+    Ok(image_data(path)?.into_rgba8())
+}
+
+/// Decode a file without reducing its colour depth.
+pub fn image_data(path: &Path) -> Result<image::DynamicImage> {
     #[cfg(not(target_arch = "wasm32"))]
-    return Ok(image::open(path)?.to_rgba8());
+    return Ok(image::open(path)?);
     #[cfg(target_arch = "wasm32")]
-    return Ok(image::load_from_memory(&read(path)?)?.to_rgba8());
+    return Ok(image::load_from_memory(&read(path)?)?);
 }
 
 /// A glTF / GLB file: its document, and the binary chunk of a GLB. (The buffers and images it names beside it are
