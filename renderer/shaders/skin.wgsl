@@ -44,6 +44,9 @@ const CORNER_NORMAL: u32 = 1u;
 const CORNER_TANGENT: u32 = 2u;
 // Workgroups a row of the dispatch (a dimension holds 65,535).
 const ROW: u32 = 32768u;
+// Whether the BLASes' input is written too: hardware traversal. Software traversal has none (its meshes' trees take
+// their boxes on the CPU), and binds a word there.
+override BLAS: bool = true;
 
 @group(0) @binding(0) var<uniform> PP: Params;
 // (mesh, its first triangle of the block)
@@ -166,6 +169,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     verts[k * 3u] = vec4<f32>(c0.p, bitcast<f32>(TRI_DYNAMIC));
     verts[k * 3u + 1u] = vec4<f32>(e1, 0.0);
     verts[k * 3u + 2u] = vec4<f32>(e2, 0.0);
+    if !BLAS {
+        return;
+    }
     // The BLAS's vertices: a triangle that is not finite has no size there.
     var q0 = c0.p;
     var q1 = c1.p;

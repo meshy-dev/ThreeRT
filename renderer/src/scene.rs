@@ -678,6 +678,11 @@ pub struct Scene {
     /// What the skinning pass reads of the models whose meshes deform (`Skinned::source`): a model's triangles as
     /// its file has them, in its mesh's order. One a model, whatever its placements and poses.
     pub skin_sources: Vec<Vec<[skin::SkinCorner; 3]>>,
+    /// Beside each: the model's palette as its file has it (its bind pose), and, under software traversal with units
+    /// (lib.rs `unit_trees`), the tree over that pose's triangles: the shape of the tree of each mesh skinned from the
+    /// source, whose boxes are taken again at each pose (`units::refit`). The source's triangles are in its order.
+    pub skin_rest: Vec<Vec<skin::PaletteRows>>,
+    pub skin_trees: Vec<Vec<crate::bvh::GpuNode>>,
     /// The meshes' sections (`InstMesh::sect_first`) and the instances' rows (`Instance::rows`): as the kernel reads
     /// the rows once `prepare` has set where each section's triangles and emitters are.
     pub sections: Vec<Section>,
@@ -1544,6 +1549,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut rigid_parts: HashMap<(String, String), std::rc::Rc<Vec<RigidPart>>> = HashMap::new();
     // What the skinning pass reads, by (model, nodes, the primitives mirrored): shared by the model's placements.
     let mut skin_sources: Vec<Vec<[skin::SkinCorner; 3]>> = vec![];
+    let mut skin_rest: Vec<Vec<skin::PaletteRows>> = vec![];
     let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), (u32, Arc<Vec<(u32, u32, u32)>>)> = HashMap::new();
     // Flattened instances' triangle ranges.
     let mut tri_instances: Vec<(u32, u32, u32)> = vec![];
@@ -1880,6 +1886,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                             None => {
                                 let corners = glb.skin_source(nodes.as_deref(), Some(a))?;
                                 skin_sources.push(order.iter().map(|&(k, _, _)| corners[k]).collect());
+                                skin_rest.push(glb.palette(None)?);
                                 let s = (skin_sources.len() as u32 - 1, Arc::new(order.iter().map(|&(k, section, rank)| (k as u32, section, rank)).collect::<Vec<_>>()));
                                 skin_source_of.insert(skey, s.clone());
                                 s
@@ -2280,6 +2287,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         meshes,
         instances,
         skin_sources,
+        skin_rest,
+        skin_trees: vec![],
         sections,
         rows,
         gpu_instances: vec![],

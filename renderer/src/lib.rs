@@ -555,7 +555,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     if !hwrt && !sc.instances.is_empty() {
         trees = if units && sc.instances.len() <= units::MAX_UNITS { unit_trees(sc) } else { None };
         match &trees {
-            Some(_) => flatten_deforming(sc),
+            Some(t) => flatten_deforming(sc, t),
             None => flatten_instances(sc),
         }
     }
@@ -897,10 +897,46 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
 /// what goes with them: attributes, vertex colours) put in the tree's order. None: no units (a mesh no tree can be
 /// made of: a vertex that is not a number); the caller flattens every instance then.
 fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
+    // A mesh that deforms (a posed skinned model's) is a unit as any: its tree has the shape of the tree over its
+    // model's bind pose, one shape for every mesh skinned from the source, and its boxes are the pose's (taken again
+    // at each new one: `units::refit`; a tree made again a pose costs sixty times that, and walks a tenth better).
+    // The source's corners are put in that tree's order, and so are each such mesh's triangles: the skinning pass
+    // writes a triangle where its corners are.
+    let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().map(|k| (k.mesh, k.source)).collect();
+    let mut shapes: Vec<Option<(Vec<u32>, usize)>> = vec![None; sc.skin_sources.len()];
+    sc.skin_trees = vec![vec![]; sc.skin_sources.len()];
+    for s in 0..sc.skin_sources.len() {
+        if !source_of.values().any(|&x| x as usize == s) {
+            continue;
+        }
+        let rest = &sc.skin_rest[s];
+        let bind: Vec<[Vec3A; 3]> = sc.skin_sources[s].iter().map(|c| c.map(|c| Vec3A::from(skin::skin_corner(&c, rest).0))).collect();
+        match units::mesh_tree(&bind) {
+            Ok(t) => {
+                sc.skin_sources[s] = t.order.iter().map(|&i| sc.skin_sources[s][i as usize]).collect();
+                sc.skin_trees[s] = t.nodes;
+                shapes[s] = Some((t.order, t.depth));
+            }
+            Err(e) => {
+                eprintln!("units: {e}: the scene's instances are flattened");
+                return None;
+            }
+        }
+    }
     let mut trees = Vec::with_capacity(sc.meshes.len());
-    for m in &sc.meshes {
-        if m.deforms || m.count == 0 {
+    for (k, m) in sc.meshes.iter().enumerate() {
+        if m.count == 0 {
             trees.push(None);
+            continue;
+        }
+        if m.deforms {
+            // (One no source skins: flattened, `flatten_deforming`.)
+            let shape = source_of.get(&(k as u32)).and_then(|&s| shapes[s as usize].as_ref().map(|x| (s as usize, x)));
+            trees.push(shape.filter(|(_, (order, _))| order.len() == m.count as usize).map(|(s, (order, depth))| {
+                let mut nodes = sc.skin_trees[s].clone();
+                let (lo, hi) = units::refit(&mut nodes, |i| sc.pool_tris[m.first as usize + order[i] as usize]);
+                units::MeshTree { nodes, order: order.clone(), depth: *depth, lo, hi }
+            }));
             continue;
         }
         match units::mesh_tree(&sc.pool_tris[m.first as usize..(m.first + m.count) as usize]) {
@@ -927,17 +963,28 @@ fn unit_trees(sc: &mut scene::Scene) -> Option<Vec<Option<units::MeshTree>>> {
             sc.pool_vcolors[r].copy_from_slice(&colors);
         }
     }
+    // A skinned model's list of its mesh's triangles (the model's triangle, its section, its index in it) as they lie
+    // now: one list a source, as before.
+    let mut lists: Vec<Option<std::sync::Arc<Vec<(u32, u32, u32)>>>> = vec![None; shapes.len()];
+    for k in &mut sc.retained.skinned {
+        let (Some((order, _)), Some(Some(_))) = (&shapes[k.source as usize], trees.get(k.mesh as usize)) else { continue };
+        let first = sc.meshes[k.mesh as usize].first as usize;
+        let list = lists[k.source as usize].get_or_insert_with(|| {
+            std::sync::Arc::new(order.iter().enumerate().map(|(at, &i)| (k.order[i as usize].0, sc.pool_attrs[first + at].uv[3].to_bits(), sc.pool_attrs[first + at].x[3].to_bits())).collect())
+        });
+        k.order = list.clone();
+    }
     Some(trees)
 }
 
-/// With units: the instances of meshes that deform (a posed skinned model's) are still written out as world-space
-/// triangles, as every instance was. They keep their place among the instances (edits name instances by index) and
-/// are no unit.
-fn flatten_deforming(sc: &mut scene::Scene) {
+/// With units: the instances of meshes that deform and have no tree (none skins them from a source) are still
+/// written out as world-space triangles, as every instance was. They keep their place among the instances (edits
+/// name instances by index) and are no unit.
+fn flatten_deforming(sc: &mut scene::Scene, trees: &[Option<units::MeshTree>]) {
     for k in 0..sc.instances.len() {
         let inst = sc.instances[k].clone();
         let m = sc.meshes[inst.mesh as usize];
-        if inst.hidden || !m.deforms {
+        if inst.hidden || !m.deforms || trees.get(inst.mesh as usize).is_some_and(|t| t.is_some()) {
             continue;
         }
         let first = sc.tris.len() as u32;

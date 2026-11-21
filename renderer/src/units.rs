@@ -249,6 +249,34 @@ pub fn mesh_tree(tris: &[[Vec3A; 3]]) -> Result<MeshTree, String> {
     Ok(MeshTree { nodes, order, depth, lo, hi })
 }
 
+/// A tree's boxes taken again from its triangles as they are now (`tri`: a triangle of the mesh, in the tree's
+/// order), its shape kept: a mesh that deforms, at a new pose. A leaf's box is its triangles' (a corner that is not
+/// finite is in none), an interior node's its children's, which lie after it. The mesh's bounds.
+pub fn refit(nodes: &mut [GpuNode], tri: impl Fn(usize) -> [Vec3A; 3]) -> (Vec3A, Vec3A) {
+    for k in (0..nodes.len()).rev() {
+        let n = nodes[k];
+        let (mut lo, mut hi) = (Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY));
+        if n.count > 0 {
+            for i in n.left_or_first..n.left_or_first + n.count {
+                for v in tri(i as usize) {
+                    if v.is_finite() {
+                        (lo, hi) = (lo.min(v), hi.max(v));
+                    }
+                }
+            }
+            // (A leaf of nothing finite: a point, which no ray meets through a triangle that is not there.)
+            if lo.x > hi.x {
+                (lo, hi) = (Vec3A::ZERO, Vec3A::ZERO);
+            }
+        } else {
+            let (a, b) = (nodes[n.left_or_first as usize], nodes[n.left_or_first as usize + 1]);
+            (lo, hi) = (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into()));
+        }
+        (nodes[k].bmin, nodes[k].bmax) = (lo.into(), hi.into());
+    }
+    (nodes[0].bmin.into(), nodes[0].bmax.into())
+}
+
 /// A unit for the top tree: its record, and its mesh's model-space bounds under its world transform.
 #[derive(Clone, Copy, Debug)]
 pub struct UnitBox {
@@ -598,8 +626,8 @@ pub struct Tree {
 #[derive(Clone, Debug)]
 pub struct Units {
     pub layout: Layout,
-    /// By instanced mesh (the scene's `meshes` index): its tree. None: no tree (a mesh that deforms or has no
-    /// triangle, or one an edit freed).
+    /// By instanced mesh (the scene's `meshes` index): its tree. None: no tree (a mesh without a triangle, or one an
+    /// edit freed).
     pub trees: Vec<Option<Tree>>,
     /// By kernel record: the unit there, if the record is one's.
     pub slots: Vec<Option<Unit>>,
@@ -691,6 +719,13 @@ impl Units {
         }
         self.trees[k as usize] = Some(Tree { root, len: tree.nodes.len() as u32, lo: tree.lo, hi: tree.hi });
         Some(root)
+    }
+
+    /// Mesh `k`'s bounds, its tree's boxes taken again where they lie (`refit`): what the top tree places its units by.
+    pub fn set_bounds(&mut self, k: u32, lo: Vec3A, hi: Vec3A) {
+        if let Some(t) = self.trees.get_mut(k as usize).and_then(|t| t.as_mut()) {
+            (t.lo, t.hi) = (lo, hi);
+        }
     }
 
     /// Mesh `k`'s tree given back: its root and length (the caller fills them with `FILL`), if it had one.
@@ -1999,18 +2034,9 @@ mod bench {
         };
         // (A walk's expected cost: each node's chance of being entered, an interior node a step, a leaf a test a triangle.)
         let cost = |nodes: &[GpuNode]| nodes.iter().map(|n| area(n) * if n.count == 0 { 1.0 } else { n.count as f64 }).sum::<f64>() / area(&nodes[0]);
-        // The boxes again, the tree's shape and its triangles' order kept: children lie after their parent.
+        // The boxes again, the tree's shape and its triangles' order kept.
         let refit = |nodes: &mut [GpuNode], tris: &[[Vec3A; 3]], order: &[u32]| {
-            for k in (0..nodes.len()).rev() {
-                let n = nodes[k];
-                let (lo, hi) = if n.count > 0 {
-                    order[n.left_or_first as usize..(n.left_or_first + n.count) as usize].iter().flat_map(|&i| tris[i as usize]).fold((Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY)), |(lo, hi), v| (lo.min(v), hi.max(v)))
-                } else {
-                    let (a, b) = (nodes[n.left_or_first as usize], nodes[n.left_or_first as usize + 1]);
-                    (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into()))
-                };
-                (nodes[k].bmin, nodes[k].bmax) = (lo.into(), hi.into());
-            }
+            super::refit(nodes, |i| tris[order[i] as usize]);
         };
         let pose = |clip: &str, time: f32| crate::desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
         let tris_of = |a: Option<&crate::desc::Animation>| -> Vec<[Vec3A; 3]> { m.triangles(glam::Mat4::IDENTITY, None, a).unwrap().iter().map(|t| t.p.map(Vec3A::from)).collect() };

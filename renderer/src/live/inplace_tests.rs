@@ -2548,9 +2548,6 @@ fn posed_skinned_models_are_meshes_of_their_own() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    if !live.g.hwrt {
-        return eprintln!("skipped: no hardware ray tracing");
-    }
     let of = |c: &LiveCore, id: u32| c.sc.tables.retained.skinned.iter().find(|s| s.object == id).expect("a posed skinned model").clone();
     let (a, b) = (of(&live, 30), of(&live, 31));
     assert_eq!((live.sc.tables.retained.skinned.len(), a.mesh != b.mesh, a.source == b.source, live.sc.meshes[a.mesh as usize].sect_count), (2, true, true, 2), "two meshes of two sections, skinned from the model's one copy of its corners");
@@ -2578,8 +2575,8 @@ fn posed_skinned_models_are_meshes_of_their_own() {
 }
 
 /// A posed skinned model is hidden and shown in place: hidden, no ray sees its instance and a new pose skins
-/// nothing; shown, it is skinned as it is posed then, where it stands. The picture is a build's each time. (Under
-/// software traversal, by a rebuild.)
+/// nothing; shown, it is skinned as it is posed then, where it stands. The picture is a build's each time, under
+/// either traversal.
 #[test]
 fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
     let presets = crate::default_presets_dir();
@@ -2604,18 +2601,6 @@ fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
         a
     };
     let loaded = against_a_build("as loaded", &mut live, &w);
-    // Software traversal has a skinned model's triangles in its still tree, and no instance to mask: a rebuild's.
-    if !live.g.hwrt {
-        w.set_visible(31, false).unwrap();
-        assert!(live.commit(&mut w).unwrap(), "hidden under software traversal: a rebuild");
-        let hidden = against_a_build("hidden under software traversal", &mut live, &w);
-        assert!(apart(&loaded, &hidden) > 0.5, "it is out of the picture ({:.2} steps)", apart(&loaded, &hidden));
-        w.set_visible(31, true).unwrap();
-        assert!(live.commit(&mut w).unwrap(), "shown under software traversal: a rebuild");
-        let shown = against_a_build("shown under software traversal", &mut live, &w);
-        assert!(apart(&hidden, &shown) > 0.5, "it is in the picture again ({:.2} steps)", apart(&hidden, &shown));
-        return;
-    }
     let record = of(&live, 31).instance;
     w.set_visible(31, false).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "hidden: in place ({:?})", live.fallback);
@@ -3002,8 +2987,7 @@ fn a_posed_skinned_model_added_beside_particles_is_a_rebuilds() {
 }
 
 /// A posed skinned model is removed in place: its instance is no object's and no ray sees it, the others are posed
-/// on as ever, and the picture is a build's. One that is hidden is removed in place too. (Under software traversal,
-/// where it has no instance, by a rebuild.)
+/// on as ever, and the picture is a build's. One that is hidden is removed in place too. Under either traversal.
 #[test]
 fn a_posed_skinned_model_is_removed_in_place() {
     let presets = crate::default_presets_dir();
@@ -3027,13 +3011,6 @@ fn a_posed_skinned_model_is_removed_in_place() {
         a
     };
     let loaded = against_a_build("as loaded", &mut live, &w);
-    if !live.g.hwrt {
-        w.remove(31);
-        assert!(live.commit(&mut w).unwrap(), "removed under software traversal: a rebuild");
-        let removed = against_a_build("removed under software traversal", &mut live, &w);
-        assert!(apart(&loaded, &removed) > 0.5, "it is out of the picture ({:.2} steps)", apart(&loaded, &removed));
-        return;
-    }
     let record = |c: &LiveCore, id: u32| c.sc.tables.retained.instance(id).expect("a posed skinned model").instance;
     let (r30, r31, r32) = (record(&live, 30), record(&live, 31), record(&live, 32));
     w.remove(31);
@@ -3256,9 +3233,6 @@ fn models_posed_node_by_node_are_posed_in_place() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    if !live.g.hwrt {
-        return eprintln!("skipped: no hardware ray tracing");
-    }
     assert_eq!(live.sc.tables.retained.skinned.len(), 2, "each a mesh of its own, though in the same pose");
     let before = picture(&mut live, 64);
     for (id, a) in [(30, 0.9), (31, -1.2)] {
