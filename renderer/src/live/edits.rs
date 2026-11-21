@@ -1960,13 +1960,10 @@ impl LiveCore {
         }
         self.pose_spans = posed;
         self.pose_reposed = true;
-        let hw = self.sc.up.accel.is_some();
         for (g, a) in jobs {
             let sk = &mut self.sc.tables.retained.skinned[g as usize];
             sk.animation = a;
-            if hw {
-                build.meshes.push(sk.mesh);
-            }
+            build.meshes.push(sk.mesh);
         }
         // (Software traversal: the trees where they lie, and the units' bounds for the top tree.)
         for (mesh, root, nodes, (lo, hi)) in trees {

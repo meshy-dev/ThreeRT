@@ -3445,13 +3445,16 @@ impl Gpu {
     }
 
     /// The bind groups that hold the scene's buffers again, from `up`'s as they are now (one that grew: the tables,
-    /// live/edits.rs): the kernel's, the light list's fills' and the particle passes'.
+    /// live/edits.rs): the kernel's, the light list's fills', the skinning pass's and the particle passes'.
     pub fn rebind_scene(&self, up: &mut Uploaded) {
         for f in [&mut up.fills.moved, &mut up.fills.particles].into_iter().flatten() {
             f.bg = self.emitter_fill_bind_group(&f.runs, &up.verts, &up.heap);
         }
-        if let Some(k) = up.skin.as_mut().filter(|k| k.no_blas.is_some()) {
-            k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, k.no_blas.as_ref().unwrap());
+        if let Some(k) = &mut up.skin {
+            // (The BLASes' input, or what stands there under software traversal.)
+            if let Some(blas) = up.accel.as_ref().map(|a| &a.verts).or(k.no_blas.as_ref()) {
+                k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, blas);
+            }
         }
         up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         let Some(a) = &up.accel else { return };
@@ -3461,9 +3464,6 @@ impl Gpu {
         }
         if let Some(p) = &mut up.gpu_particles {
             p.bg = particle_bind_group(&self.device, &p.pipeline, "gpu particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, &p.state), (9, &p.spawns), (10, &p.grid)], &written);
-        }
-        if let Some(k) = &mut up.skin {
-            k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, &a.verts);
         }
     }
 
