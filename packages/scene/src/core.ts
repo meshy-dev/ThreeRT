@@ -937,8 +937,17 @@ export class Texture {
   wrap: "repeat" | "clamp" = "repeat";
   /** Raw bytes for generated textures (PNG); external textures are fetched from `uri`. */
   data?: Uint8Array;
+  /** Number of times the texture was marked for upload, as in three.js. */
+  version = 0;
+  private dirty = false;
   /** Set after changing a texture the engine already has (new data / uri / repeat). */
-  needsUpdate = false;
+  get needsUpdate(): boolean {
+    return this.dirty;
+  }
+  set needsUpdate(value: boolean) {
+    if (value === true) this.version++;
+    this.dirty = value;
+  }
   constructor(uri: string, colorSpace: "srgb" | "linear" = "srgb") {
     this.uri = uri;
     this.colorSpace = colorSpace;
