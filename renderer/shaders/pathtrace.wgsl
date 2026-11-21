@@ -90,6 +90,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
+const F_DEFORM: u32 = 1073741824u; // a mesh that deforms among the instances: its previous vertices by its record (the first hit's motion)
 const F_IGLASS: u32 = 536870912u; // glass among an instance's other sections: a shadow ray steps through it by its row (trace_hw.wgsl), a unit's walk skips it
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
@@ -3822,9 +3823,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
                     var lp = vec4<f32>(tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * hit.u + tri_verts[ti * 3u + 2u].xyz * hit.v, 1.0);
                     // (A deforming mesh's previous vertices are where its record says, n2.w, in its triangles' order:
-                    // a mesh an edit placed has them elsewhere than its triangles lie.)
+                    // a mesh an edit placed has them elsewhere than its triangles lie. F_DEFORM: a scene with such a
+                    // mesh; elsewhere nothing here deforms, and the read is as the dynamic triangles'.)
                     if (deforms) {
-                        let kq = (bitcast<u32>(r.n2.w) + ti - r.info.x) * 3u;
+                        var kq = kp;
+                        if (has(F_DEFORM)) { kq = (bitcast<u32>(r.n2.w) + ti - r.info.x) * 3u; }
                         lp = vec4<f32>(prev_verts[kq].xyz + prev_verts[kq + 1u].xyz * hit.u + prev_verts[kq + 2u].xyz * hit.v, 1.0);
                     }
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);

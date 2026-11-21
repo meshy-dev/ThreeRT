@@ -2281,6 +2281,7 @@ fn a_posed_rigid_model_is_hidden_shown_and_removed_in_place() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
+    assert!(live.sc.up.kernel.features & gpu::F_DEFORM == 0, "no mesh deforms here: the kernel has none of that");
     let records = |c: &LiveCore, id: u32| c.sc.tables.retained.rigid(id).expect("a posed rigid model").records();
     let (a, b) = (records(&live, 32), records(&live, 33));
     let seen = |c: &LiveCore, of: &[u32]| of.iter().map(|&i| (c.sc.instances[i as usize].hidden, c.sc.instances[i as usize].masked)).collect::<Vec<_>>();
@@ -2553,6 +2554,7 @@ fn posed_skinned_models_are_meshes_of_their_own() {
     let of = |c: &LiveCore, id: u32| c.sc.tables.retained.skinned.iter().find(|s| s.object == id).expect("a posed skinned model").clone();
     let (a, b) = (of(&live, 30), of(&live, 31));
     assert_eq!((live.sc.tables.retained.skinned.len(), a.mesh != b.mesh, a.source == b.source, live.sc.meshes[a.mesh as usize].sect_count), (2, true, true, 2), "two meshes of two sections, skinned from the model's one copy of its corners");
+    assert!(live.sc.up.kernel.features & gpu::F_DEFORM != 0, "the kernel finds a deforming mesh's previous vertices by its instance");
     let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
         let mut fresh = open(w).unwrap();
         forget(live);

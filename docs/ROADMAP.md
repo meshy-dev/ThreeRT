@@ -2784,7 +2784,9 @@ next poses (the pass's table grows), skinned from the model's one copy of its co
 and its job's slot, and the next one placed takes them.
 A mesh that deforms has its previous frame's vertices where its instance says (`scene::Instance::prev`, in its
 record): the kernel found them by the triangle's place among the dynamic triangles, which a mesh in the room does
-not have. Their buffer grows as the triangles' does.
+not have. Their buffer grows as the triangles' does. The kernel's read is a feature of its own (`F_DEFORM`: a scene
+with a mesh that deforms): in every kernel, a scene without one paid 0.6 % of its GPU frame for it (a flight over a
+city, five pairs of five).
 A fault found on the way: what a batch changed of an object (a pose, a move, its visibility) stayed when the same
 batch removed it, and the renderer rebuilt for an object it could not find. It goes with the object now.
 Still a rebuild: a skinned model the scene has not (its materials and textures load with one), one whose pose
@@ -2802,7 +2804,7 @@ whose triangles are neighbours and whose previous vertices are not, one posed tw
 and the next added in what it had; a built one removed (shown, hidden, posed in the same batch); the three that
 rebuild. The pictures are compared with the build's frames counted from the live view's (a frame's samples go by
 its number: at another count a picture of many thin models is two thirds of a step from itself).
-34 mutations of the new logic: 31 fail a test natively, two under software traversal, and one is equivalent (the
+36 mutations of the new logic: 33 fail a test natively, two under software traversal, and one is equivalent (the
 CPU's copy of an added model's triangles: a fallback no path reads while the model loads). Eight did not at first:
 the scenes had no moving triangles before the meshes, motion vectors were compared with a build's alone (wrong
 alike in both), other rooms grew in every commit that grew the pass's, and no frame was skipped between two edits.

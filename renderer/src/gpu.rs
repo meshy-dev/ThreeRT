@@ -1774,6 +1774,10 @@ pub const F_IFUNC: u32 = 1 << 28;
 /// software traversal skips such a triangle of a unit). Compiled out where no instance mixes the two: one that is all
 /// glass is out of a shadow ray's way by its mask (`scene::rows_cast`).
 pub const F_IGLASS: u32 = 1 << 29;
+/// A mesh that deforms among the instances (a posed skinned model's): the first hit's motion takes its previous
+/// frame's vertices from where its instance's record says. Compiled out where no mesh deforms: with the read in every
+/// kernel a scene without one paid for it (a flight over a city: frame GPU +0.6 %, five pairs of five).
+pub const F_DEFORM: u32 = 1 << 30;
 /// Whether a scene with more such lights has the light tiles (`F_LISTS`): `THREERT_LIGHT_TILES=1|0`, else everywhere
 /// but Android. On Adreno 740 they took OpenStrikeRT's Foundry from 31 to 48 ms a frame (249 x 140, one bounce):
 /// there the lights are resampled as in a scene of fewer, unguided (docs/RUNTIME.md "Android").
@@ -1838,7 +1842,7 @@ pub fn environment_features(fog: Option<&crate::desc::Fog>, background: bool, ae
 /// Kernel features of the scene's structure, which parameter edits do not change: F_INST and F_MASKED for the
 /// instanced meshes (cutout triangles among them), F_MEDIA for participating media (F_HMEDIA for homogeneous ones),
 /// F_PEMIT for opaque particles, F_PROC for procedural geometry, F_TINT for instance colours, F_IFUNC for a material
-/// function on an instanced mesh, F_IGLASS for glass on one.
+/// function on an instanced mesh, F_IGLASS for glass on one, F_DEFORM for a mesh that deforms.
 pub fn instance_features(scene: &Scene) -> u32 {
     // (F_GRID also for a volume function that calls `vgrid` on a node without a grid: it reads zeros.)
     let grid = !scene.grids.is_empty() || (!scene.media.is_empty() && scene.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid(")));
@@ -1855,7 +1859,8 @@ pub fn instance_features(scene: &Scene) -> u32 {
     let ifunc = if scene.rows.iter().any(|r| function(crate::scene::row_material(r))) { F_IFUNC } else { 0 };
     let iglass = if mixed_glass { F_IGLASS } else { 0 };
     let masked = any_row(crate::scene::ROW_CUTOUT);
-    media | particles | ifunc | iglass | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    let deform = if scene.meshes.iter().any(|m| m.deforms) { F_DEFORM } else { 0 };
+    media | particles | ifunc | iglass | deform | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -3838,6 +3843,7 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
+            ("F_DEFORM", F_DEFORM),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {
