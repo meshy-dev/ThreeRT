@@ -2576,7 +2576,8 @@ fn posed_skinned_models_are_meshes_of_their_own() {
 }
 
 /// A posed skinned model is hidden and shown in place: hidden, no ray sees its instance and a new pose skins
-/// nothing; shown, it is skinned as it is posed then, where it stands. The picture is a build's each time.
+/// nothing; shown, it is skinned as it is posed then, where it stands. The picture is a build's each time. (Under
+/// software traversal, by a rebuild.)
 #[test]
 fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
     let presets = crate::default_presets_dir();
@@ -2592,9 +2593,6 @@ fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    if !live.g.hwrt {
-        return eprintln!("skipped: no hardware ray tracing");
-    }
     let of = |c: &LiveCore, id: u32| c.sc.tables.retained.skinned.iter().find(|s| s.object == id).expect("a posed skinned model").clone();
     let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
         let mut fresh = open(w).unwrap();
@@ -2604,6 +2602,18 @@ fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
         a
     };
     let loaded = against_a_build("as loaded", &mut live, &w);
+    // Software traversal has a skinned model's triangles in its still tree, and no instance to mask: a rebuild's.
+    if !live.g.hwrt {
+        w.set_visible(31, false).unwrap();
+        assert!(live.commit(&mut w).unwrap(), "hidden under software traversal: a rebuild");
+        let hidden = against_a_build("hidden under software traversal", &mut live, &w);
+        assert!(apart(&loaded, &hidden) > 0.5, "it is out of the picture ({:.2} steps)", apart(&loaded, &hidden));
+        w.set_visible(31, true).unwrap();
+        assert!(live.commit(&mut w).unwrap(), "shown under software traversal: a rebuild");
+        let shown = against_a_build("shown under software traversal", &mut live, &w);
+        assert!(apart(&hidden, &shown) > 0.5, "it is in the picture again ({:.2} steps)", apart(&hidden, &shown));
+        return;
+    }
     let record = of(&live, 31).instance;
     w.set_visible(31, false).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "hidden: in place ({:?})", live.fallback);
