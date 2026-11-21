@@ -634,6 +634,9 @@ export class Vector2 {
   multiplyScalar(s: number): this {
     return this.set(this.x * s, this.y * s);
   }
+  roundToZero(): this {
+    return this.set(Math.trunc(this.x), Math.trunc(this.y));
+  }
   dot(v: Vector2): number {
     return this.x * v.x + this.y * v.y;
   }
