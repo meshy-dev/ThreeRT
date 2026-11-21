@@ -735,6 +735,11 @@ export class Object3D {
     this.quaternion.setFromEuler(e);
     return this;
   }
+  /** Sets the rotation from the upper 3x3 of `m`, which is assumed unscaled; translation is ignored (three.js). */
+  setRotationFromMatrix(m: Matrix4): this {
+    this.quaternion.setFromRotationMatrix(m);
+    return this;
+  }
   /** Applies `m` to the object's transform (three.js). */
   applyMatrix4(m: Matrix4): this {
     if (this.matrixAutoUpdate) this.updateMatrix();
