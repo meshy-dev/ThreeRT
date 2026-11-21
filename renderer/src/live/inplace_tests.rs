@@ -2506,6 +2506,107 @@ fn models_in_a_shared_pose_posed_again_keep_their_sections() {
     assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
 }
 
+/// The skinning pass writes what the CPU skin writes (tests/render/data/skin-blend.glb: vertices two joints hold,
+/// weights that do not sum to one, a primitive with tangents and one without normals, a mesh on a node beside the
+/// skin): after each new pose the GPU's triangles, shading attributes and BLAS input of the shared mesh are the
+/// model's triangles for the pose, the previous frame's vertices are the pose before, and the CPU has the mesh as
+/// it is now when asked.
+#[test]
+fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let uri = "tests/render/data/skin-blend.glb";
+    let bend = |time| crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() };
+    let mut w = world();
+    for (id, x) in [(30, -0.7), (31, 0.7)] {
+        w.set_object(id, format!("strip{id}"), None, Kind::Model { uri: uri.into(), nodes: None, animation: Some(bend(0.0)), functions: vec![] }, true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -0.6, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(1.2)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    if !live.g.hwrt {
+        return eprintln!("skipped: no hardware ray tracing");
+    }
+    assert_eq!(live.sc.tables.retained.pose_groups.len(), 1, "the two share a pose's mesh");
+    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> {
+        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = c.g.device.create_command_encoder(&Default::default());
+        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
+        c.g.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
+        words
+    };
+    // What the CPU skin gives the mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
+    let model = scene::model_gltf(uri, Path::new("..")).unwrap();
+    let cpu = |c: &LiveCore, a: &crate::desc::Animation| {
+        let pg = &c.sc.tables.retained.pose_groups[0];
+        let tris = model.triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
+        let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
+        for &(k, section, rank) in &pg.order {
+            let q = &tris[k as usize];
+            let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
+            v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);
+            at.extend(bytemuck::cast_slice::<_, f32>(&[scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank)]));
+            b.extend(q.p.iter().flat_map(|p| p.to_array()));
+        }
+        (v, at, b)
+    };
+    // (Numbers within a rounding of each other; the words that are no numbers, a flag, a section, a rank, the same.)
+    let same = |what: &str, got: &[f32], want: &[f32], words: &[usize], stride: usize| {
+        assert_eq!(got.len(), want.len(), "{what}: its length");
+        for (i, (g, x)) in got.iter().zip(want).enumerate() {
+            let ok = if words.contains(&(i % stride)) { g.to_bits() == x.to_bits() } else { (g - x).abs() <= 2e-5 * x.abs().max(1.0) };
+            assert!(ok, "{what}: word {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
+        }
+    };
+    let gpu = |c: &LiveCore| {
+        let pg = &c.sc.tables.retained.pose_groups[0];
+        let (k, n) = (c.sc.gpu_instances[pg.members[0].1 as usize].info[0] as u64, pg.order.len() as u64);
+        let up = &c.sc.up;
+        (read(c, &up.verts, k * 48, n * 48), read(c, &up.attrs, k * 96, n * 96), read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), read(c, &up.prev_verts, (k - c.sc.dynamic.0 as u64) * 48, n * 48))
+    };
+    let check = |what: &str, c: &LiveCore, now: &crate::desc::Animation, before: &crate::desc::Animation| {
+        let ((v, at, b, prev), (cv, cat, cb)) = (gpu(c), cpu(c, now));
+        same(&format!("{what}: the vertices"), &v, &cv, &[3], 12);
+        // (An attribute's words: the section in `uv.w` (15), the rank in `x.w` (23), the object and a spare beside.)
+        same(&format!("{what}: the attributes"), &at, &cat, &[15, 21, 22, 23], 24);
+        same(&format!("{what}: the BLAS input"), &b, &cb, &[], 9);
+        same(&format!("{what}: the previous frame's vertices"), &prev, &cpu(c, before).0, &[3], 12);
+        // The CPU's own: the build's pose in the pool, the pose as it is now when asked.
+        let inst = &c.sc.instances[c.sc.tables.retained.instance(30).unwrap().instance as usize];
+        let asked: Vec<f32> = c.node_tris("strip30").iter().flatten().flat_map(|p| p.to_array()).collect();
+        let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
+        same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+    };
+    let (first, second, third) = (bend(0.0), bend(0.75), bend(0.4));
+    let (loaded, _, _) = cpu(&live, &first);
+    for (what, now, before) in [("a new pose", &second, &first), ("the next", &third, &second)] {
+        for id in [30, 31] {
+            w.set_animation(id, Some(now.clone())).unwrap();
+        }
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        check(what, &live, now, before);
+    }
+    assert!(cpu(&live, &third).0.iter().zip(&loaded).any(|(a, b)| (a - b).abs() > 0.05), "the pose moves the mesh");
+    // A click finds the strip where its pose has it now, and a build pictures the same.
+    let mut fresh = open(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+    // Posed in the same frame as moved: in place, the mesh skinned, the instance moved.
+    w.set_transform(30, Vec3::new(-0.9, -0.5, 0.9), glam::Quat::from_rotation_y(-0.2), Vec3::splat(1.2)).unwrap();
+    for id in [30, 31] {
+        w.set_animation(id, Some(bend(0.9))).unwrap();
+    }
+    assert!(!live.commit(&mut w).unwrap(), "posed and moved at once: in place ({:?})", live.fallback);
+    check("posed and moved at once", &live, &bend(0.9), &third);
+}
+
 /// Models the game poses node by node (tests/render/data/arm.glb's joint `tip`, no clip): each is a pose of its own, even
 /// in the same pose as another, so posing them apart is in place; the picture is a build's.
 #[test]

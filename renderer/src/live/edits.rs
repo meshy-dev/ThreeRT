@@ -1814,14 +1814,14 @@ impl LiveCore {
         Ok(true)
     }
 
-    /// Models in a shared pose (`scene::PoseGroup`): each group whose pose changed is skinned once, in model space (the
-    /// groups in parallel), into its mesh's pool triangles; the commit builds their BLASes and the TLAS over their
-    /// new bounds. False when a group's members no longer share one pose, or one is hidden or changed:
-    /// the caller rebuilds, which groups them again. (Deforming meshes get no motion vectors of their own yet: an
-    /// instance's are its transform's.)
+    /// Models in a shared pose (`scene::PoseGroup`): each group whose pose changed is skinned once, in model space, by
+    /// the skinning pass (gpu.rs `skin`: the CPU sends its pose's matrices); the commit builds their BLASes and the
+    /// TLAS over their new bounds. False when a group's members no longer share one pose, one is hidden or changed,
+    /// or its new pose mirrors other primitives than the one its mesh was made for: the caller rebuilds, which groups
+    /// them again. (The CPU keeps no triangles of such a mesh's pose: `LiveCore::mesh_tris` skins it when asked.)
     pub(super) fn repose_groups(&mut self, world: &World, members: &[u32], build: &mut gpu::TopBuild) -> Result<bool> {
         use rayon::prelude::*;
-        if self.sc.up.accel.is_none() {
+        if self.sc.up.accel.is_none() || self.sc.up.skin.is_none() {
             return Ok(false);
         }
         let r = &self.sc.tables.retained;
@@ -1851,35 +1851,29 @@ impl LiveCore {
         if jobs.is_empty() {
             return Ok(true);
         }
+        // The poses' matrices (the groups in parallel).
         let t_skin = Instant::now();
         let assets = &self.assets;
-        type Skinned = (Vec<[f32; 4]>, Vec<scene::GpuTriAttr>, Vec<[f32; 3]>, Vec<[glam::Vec3A; 3]>);
-        let skinned: Vec<Result<Option<Skinned>>> = jobs
+        let palettes: Vec<Result<Option<Vec<crate::skin::PaletteRows>>>> = jobs
             .par_iter()
             .map(|(g, a)| {
                 let pg = &r.pose_groups[*g as usize];
-                let tris = scene::model_gltf(&pg.uri, assets)?.triangles(glam::Mat4::IDENTITY, pg.nodes.as_deref(), Some(a))?;
-                if tris.len() != pg.order.len() {
+                let model = scene::model_gltf(&pg.uri, assets)?;
+                if model.mirrored(Some(a))? != pg.mirrors {
                     return Ok(None);
                 }
-                let n = pg.order.len();
-                let (mut v, mut at, mut b, mut t) = (Vec::with_capacity(n * 3), Vec::with_capacity(n), Vec::with_capacity(n * 3), Vec::with_capacity(n));
-                for &(k, section, rank) in &pg.order {
-                    let q = &tris[k as usize];
-                    let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
-                    // The flag word keeps TRI_DYNAMIC: the kernel takes a deforming mesh's motion from `prev_verts`.
-                    v.extend_from_slice(&[[q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC)], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
-                    at.push(scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank));
-                    b.extend(scene::blas_tri(q.p.map(|p| p.to_array())));
-                    t.push(q.p.map(glam::Vec3A::from));
-                }
-                Ok(Some((v, at, b, t)))
+                Ok(Some(model.palette(Some(a))?))
             })
             .collect();
+        let mut work = Vec::with_capacity(jobs.len());
+        for ((g, _), rows) in jobs.iter().zip(palettes) {
+            let Some(rows) = rows? else { return Ok(false) };
+            work.push((*g, rows));
+        }
         self.cpu_skin_ms += t_skin.elapsed().as_secs_f32() * 1000.0;
         let t_up = Instant::now();
         // Motion vectors: the GPU still holds the previous pose of these meshes (and of the last re-skin's, if others):
-        // keep it in `prev_verts` before uploading the new one.
+        // keep it in `prev_verts` before the pass writes the new one.
         let df = self.sc.dynamic.0;
         let (mut lo, mut hi) = (usize::MAX, 0usize);
         for (g, _) in &jobs {
@@ -1888,25 +1882,16 @@ impl LiveCore {
             (lo, hi) = (lo.min(k), hi.max(k + pg.order.len()));
         }
         self.keep_prev(self.pose_span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        if !self.g.skin(&self.sc.up, &work) {
+            return Ok(false);
+        }
         self.pose_span = Some((lo, hi));
         self.pose_reposed = true;
-        let (q, up) = (&self.g.queue, &self.sc.up);
-        let accel = up.accel.as_ref().unwrap();
-        let mut meshes = Vec::with_capacity(jobs.len());
-        for ((g, a), res) in jobs.into_iter().zip(skinned) {
-            let Some((v, at, b, t)) = res? else { return Ok(false) };
+        for (g, a) in jobs {
             let pg = &mut self.sc.tables.retained.pose_groups[g as usize];
-            // The mesh's first triangle in the GPU order: any member's record has it.
-            let k = self.sc.gpu_instances[pg.members[0].1 as usize].info[0] as u64;
-            q.write_buffer(&up.verts, k * 48, bytemuck::cast_slice(&v));
-            q.write_buffer(&up.attrs, k * 96, bytemuck::cast_slice(&at));
-            q.write_buffer(&accel.verts, k * 36, bytemuck::cast_slice(&b));
-            let m = self.sc.meshes[pg.mesh as usize];
-            self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize].copy_from_slice(&t);
             pg.animation = a;
-            meshes.push(pg.mesh);
+            build.meshes.push(pg.mesh);
         }
-        build.meshes.extend(meshes);
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
     }

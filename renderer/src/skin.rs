@@ -338,16 +338,30 @@ impl Model {
         Ok(out)
     }
 
-    /// The model's triangles as the skinning pass reads them, three corners each, in `triangles`' order (restricted
-    /// to the mesh nodes named in `only`, as there): skinned by `palette`'s matrices they are `triangles` in the
-    /// model's own space.
-    pub fn skin_source(&self, only: Option<&[String]>) -> Result<Vec<[SkinCorner; 3]>> {
+    /// The palette's length.
+    pub fn palette_len(&self) -> usize {
+        self.palette_layout().2
+    }
+
+    /// Per primitive: whether `pose` places it mirrored (a node's transform; a skinned one never is). `triangles`
+    /// keeps such a primitive's winding front-facing, so the corners of `skin_source` are in a pose's order: they
+    /// serve the poses that mirror the same primitives.
+    pub fn mirrored(&self, pose: Option<&desc::Animation>) -> Result<Vec<bool>> {
+        let globals = self.globals(pose)?;
+        let nodes: Vec<gltf::Node> = self.gltf.0.nodes().collect();
+        Ok(self.prims.iter().map(|p| !(p.skin.is_some() && nodes[p.node].skin().is_some()) && globals[p.node].determinant() < 0.0).collect())
+    }
+
+    /// The model's triangles as the skinning pass reads them, three corners each, in `triangles`' order for `pose`
+    /// (restricted to the mesh nodes named in `only`, as there): skinned by `palette`'s matrices they are `triangles`
+    /// in the model's own space, for every pose that mirrors the primitives `pose` does (`mirrored`).
+    pub fn skin_source(&self, only: Option<&[String]>, pose: Option<&desc::Animation>) -> Result<Vec<[SkinCorner; 3]>> {
         let (doc, _, _) = &self.gltf;
-        let rest = self.globals(None)?;
+        let mirrors = self.mirrored(pose)?;
         let nodes: Vec<gltf::Node> = doc.nodes().collect();
         let (skins, of_node, _) = self.palette_layout();
         let mut out = vec![];
-        for p in &self.prims {
+        for (p, &mirrored) in self.prims.iter().zip(&mirrors) {
             let node = &nodes[p.node];
             if only.is_some_and(|names| !node.name().is_some_and(|nm| names.iter().any(|x| x == nm))) {
                 continue;
@@ -380,8 +394,7 @@ impl Model {
                     w: weights,
                 }
             };
-            // (A node that mirrors: the winding stays front-facing, as `triangles` has it, by the file's transforms.)
-            let mirrored = skin.is_none() && rest[p.node].determinant() < 0.0;
+            // (A node that mirrors: the winding stays front-facing, as `triangles` has it.)
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if mirrored { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
                 // (A triangle's tangent is its first corner's.)
@@ -607,11 +620,16 @@ mod tests {
     #[test]
     fn corners_placed_by_the_palette_are_the_models_triangles() {
         let arm = Model::new(gltf::import("../tests/render/data/arm.glb").unwrap()).unwrap();
+        // (Vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without
+        // normals, a mesh on a node beside the skin.)
+        let blend = Model::new(gltf::import("../tests/render/data/skin-blend.glb").unwrap()).unwrap();
         let rigid = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
         let pose = |clip: &str, time| desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
         let mut seen = 0;
-        for (m, poses) in [(&arm, vec![None, Some(pose("bend", 0.3)), Some(pose("bend", 0.8))]), (&rigid, vec![None, Some(pose("move", 0.5))])] {
-            let source = m.skin_source(None).unwrap();
+        let bends = || vec![None, Some(pose("bend", 0.3)), Some(pose("bend", 0.8))];
+        for (m, poses) in [(&arm, bends()), (&blend, bends()), (&rigid, vec![None, Some(pose("move", 0.5))])] {
+            let source = m.skin_source(None, None).unwrap();
+            assert!(poses.iter().all(|a| m.mirrored(a.as_ref()).unwrap() == m.mirrored(None).unwrap()), "no pose here mirrors a primitive");
             for a in &poses {
                 let (tris, palette) = (m.triangles(Mat4::IDENTITY, None, a.as_ref()).unwrap(), m.palette(a.as_ref()).unwrap());
                 assert_eq!(source.len(), tris.len());
@@ -630,9 +648,11 @@ mod tests {
                 }
             }
         }
-        assert!(seen > 30, "corners compared: {seen}");
+        assert_eq!(seen, 138, "corners compared");
+        assert_eq!((blend.palette_len(), blend.skin_source(None, None).unwrap().len()), (4, 10), "the identity, two joints and the badge's node; ten triangles");
         // A pose bends the strip: its corners are not where the file has them.
-        let (source, bent) = (arm.skin_source(None).unwrap(), arm.palette(Some(&pose("bend", 0.8))).unwrap());
+        let (source, bent) = (arm.skin_source(None, None).unwrap(), arm.palette(Some(&pose("bend", 0.8))).unwrap());
+        assert_eq!(bent.len(), arm.palette_len());
         assert!(source.iter().flatten().any(|c| (skin_corner(c, &bent).0 - Vec3::new(c.p[0], c.p[1], c.p[2])).length() > 0.05), "the pose moves corners");
     }
 

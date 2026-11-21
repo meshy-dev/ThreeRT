@@ -672,6 +672,9 @@ pub struct Scene {
     pub pool_attrs: Vec<GpuTriAttr>,
     pub meshes: Vec<InstMesh>,
     pub instances: Vec<Instance>,
+    /// What the skinning pass reads of the models whose meshes deform (`PoseGroup::source`): a model's triangles as
+    /// its file has them, in its mesh's order. One a model, whatever its poses.
+    pub skin_sources: Vec<Vec<[skin::SkinCorner; 3]>>,
     /// The meshes' sections (`InstMesh::sect_first`) and the instances' rows (`Instance::rows`): as the kernel reads
     /// the rows once `prepare` has set where each section's triangles and emitters are.
     pub sections: Vec<Section>,
@@ -974,6 +977,12 @@ pub struct PoseGroup {
     pub order: Vec<(u32, u32, u32)>,
     /// (object, instance) of each member.
     pub members: Vec<(u32, u32)>,
+    /// What the skinning pass skins it from (`Scene::skin_sources`), how many matrices its pose is
+    /// (`skin::Model::palette`), and the primitives the pose its mesh was made for mirrors (`skin::Model::mirrored`:
+    /// a pose that mirrors others has its triangles in another order, a build's to make).
+    pub source: u32,
+    pub palette_len: u32,
+    pub mirrors: Vec<bool>,
 }
 
 /// What groups posed models into a `PoseGroup`: model, nodes, clip, time (bits), loop; for a model whose pose names
@@ -1555,6 +1564,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         pose_key_of.retain(|_, k| count[k] >= 2 || k.5.is_some());
     }
     let mut pose_group_of: HashMap<PoseKey, Option<u32>> = HashMap::new();
+    // What the skinning pass reads, by (model, nodes, the primitives mirrored): shared by the model's pose groups.
+    let mut skin_sources: Vec<Vec<[skin::SkinCorner; 3]>> = vec![];
+    let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), u32> = HashMap::new();
     // Flattened instances' triangle ranges.
     let mut tri_instances: Vec<(u32, u32, u32)> = vec![];
     // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT.
@@ -1883,10 +1895,19 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 classed[if emits { FLAT } else { class as usize }].push((k, mat));
                             }
                             // Triangles flattened per placement (emissive): each model skinned alone.
-                            let g = (classed[FLAT].is_empty() && !local.is_empty()).then(|| {
+                            let shared = classed[FLAT].is_empty() && !local.is_empty();
+                            let (order, sects, mine) = model_sections(&kept(&classed));
+                            // (The model's corners in the mesh's order: the same for every pose group of the model.)
+                            let mirrors = if shared { glb.mirrored(Some(a))? } else { vec![] };
+                            let skey = (key.0.clone(), nodes.clone(), mirrors.clone());
+                            if shared && !skin_source_of.contains_key(&skey) {
+                                let corners = glb.skin_source(nodes.as_deref(), Some(a))?;
+                                skin_sources.push(order.iter().map(|&(k, _, _)| corners[k]).collect());
+                                skin_source_of.insert(skey.clone(), skin_sources.len() as u32 - 1);
+                            }
+                            let g = shared.then(|| {
                                 let first = pool_tris.len() as u32;
                                 let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-                                let (order, sects, mine) = model_sections(&kept(&classed));
                                 for &(k, section, rank) in &order {
                                     let t = &local[k];
                                     for v in t.p {
@@ -1903,7 +1924,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 meshes.push(InstMesh { lo: lo - pad, hi: hi + pad, deforms: true, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
                                 sections.extend(sects);
                                 retained.mesh_rows.insert(meshes.len() as u32 - 1, mine);
-                                retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![] });
+                                retained.pose_groups.push(PoseGroup { mesh: meshes.len() as u32 - 1, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, members: vec![], source: skin_source_of[&skey], palette_len: glb.palette_len() as u32, mirrors });
                                 retained.pose_groups.len() as u32 - 1
                             });
                             pose_group_of.insert(key.clone(), g);
@@ -2286,6 +2307,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         pool_attrs,
         meshes,
         instances,
+        skin_sources,
         sections,
         rows,
         gpu_instances: vec![],

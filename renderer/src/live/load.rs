@@ -12,6 +12,7 @@ pub(super) struct LoadedScene {
     pub(super) tri_nodes: Vec<(String, u32, u32)>,
     /// Flattened instances of instanced objects: (first, end, instance index), for picking.
     pub(super) tri_instances: Vec<(u32, u32, u32)>,
+    /// (A mesh the GPU skins has its build's pose here: `LiveCore::mesh_tris` has it as it is now.)
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
     /// Software traversal: each pool triangle's section and its index in it (a unit's tree orders its mesh's
     /// triangles; live/edits.rs `mesh_places`). Empty under hardware traversal, where they lie by section.

@@ -919,6 +919,25 @@ impl LiveCore {
 
     /// Closest surface under (u, v): (node id, world-space hit point). CPU ray cast over the scene triangles, and over
     /// each instance's model-space mesh with the ray in its space (same ray parameter t).
+    /// A mesh's triangles in its own space, as they are now. One that deforms is skinned by the GPU, and the CPU keeps
+    /// none of its pose: it is skinned here when asked for (a click, a query), once a call (`posed`, by mesh).
+    fn mesh_tris<'a>(&'a self, mesh: u32, posed: &'a mut std::collections::HashMap<u32, Vec<[glam::Vec3A; 3]>>) -> &'a [[glam::Vec3A; 3]] {
+        let m = self.sc.meshes[mesh as usize];
+        let pool = &self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize];
+        if !m.deforms || self.sc.up.skin.is_none() {
+            return pool;
+        }
+        let Some(pg) = self.sc.tables.retained.pose_groups.iter().find(|g| g.mesh == mesh) else { return pool };
+        if !posed.contains_key(&mesh) {
+            let tris = scene::model_gltf(&pg.uri, &self.assets).and_then(|model| model.triangles(glam::Mat4::IDENTITY, pg.nodes.as_deref(), Some(&pg.animation)));
+            match tris {
+                Ok(t) if t.len() == pg.order.len() => posed.insert(mesh, pg.order.iter().map(|&(k, _, _)| t[k as usize].p.map(glam::Vec3A::from)).collect()),
+                _ => return pool,
+            };
+        }
+        &posed[&mesh]
+    }
+
     /// The object under view point (u, v): its name, the hit point, and for an instanced object the instance's index.
     pub fn pick(&self, u: f32, v: f32) -> Option<(String, Vec3, Option<u32>)> {
         let (o, d) = self.ray(u, v);
@@ -954,6 +973,7 @@ impl LiveCore {
         let (mut t, i) = closest(&self.sc.tris, o, d);
         let mut node = self.sc.tri_nodes.iter().find(|(_, a, b)| (*a as usize..*b as usize).contains(&i)).map(|n| n.0.as_str());
         let mut sub = self.sc.tri_instances.iter().find(|(a, b, _)| (*a as usize..*b as usize).contains(&i)).map(|r| r.2);
+        let mut posed = Default::default();
         for inst in self.sc.instances.iter().filter(|i| !i.hidden) {
             let m = self.sc.meshes[inst.mesh as usize];
             let inv = inst.world.inverse();
@@ -964,7 +984,7 @@ impl LiveCore {
             if far < near.max(0.0) || near > t {
                 continue;
             }
-            let (ti, _) = closest(&self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize], lo, ld);
+            let (ti, _) = closest(&self.mesh_tris(inst.mesh, &mut posed), lo, ld);
             if ti < t {
                 t = ti;
                 node = Some(inst.name.as_str());
@@ -1001,9 +1021,9 @@ impl LiveCore {
         // A model's first instance; every drawn instance of an instanced object.
         let mut of_node = self.sc.instances.iter().filter(|i| i.name == id && !i.hidden);
         let first = of_node.next();
+        let mut posed = Default::default();
         for inst in first.into_iter().chain(of_node.filter(|i| i.sub.is_some())) {
-            let m = self.sc.meshes[inst.mesh as usize];
-            out.extend(self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize].iter().map(|t| inst.tri(t)));
+            out.extend(self.mesh_tris(inst.mesh, &mut posed).iter().map(|t| inst.tri(t)));
         }
         out
     }
