@@ -2776,6 +2776,31 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A posed skinned model is added and removed in place (2026-11-21).** A character that comes or goes while the game
+runs rebuilt the scene. Now one of a model the scene has is added as the build makes one: a mesh of its own in the
+room for edits, its triangles skinned on the CPU once for the pose it comes in, a job of the skinning pass for its
+next poses (the pass's table grows), skinned from the model's one copy of its corners. Removed, its instance is out
+(the build's or an edit's); one an edit placed gives back its triangles, its record and rows, its previous vertices
+and its job's slot, and the next one placed takes them.
+A mesh that deforms has its previous frame's vertices where its instance says (`scene::Instance::prev`, in its
+record): the kernel found them by the triangle's place among the dynamic triangles, which a mesh in the room does
+not have. Their buffer grows as the triangles' does.
+A fault found on the way: what a batch changed of an object (a pose, a move, its visibility) stayed when the same
+batch removed it, and the renderer rebuilt for an object it could not find. It goes with the object now.
+Still a rebuild: a skinned model the scene has not (its materials and textures load with one), one whose pose
+mirrors other primitives than the scene's, one added hidden and shown later, and any under software traversal.
+Measured, hardware traversal, a game that spawns a character every half second and takes the oldest away (twelve
+at most): each spawn and each despawn rebuilt the scene, 31 times in 16 s, 46 ms each (the longest frame 79 ms);
+now none does, a frame that spawns or despawns commits in 3.5 ms (4.9 at most) and the longest frame is 21 ms. The
+frame between is the same: eight spawned and then none, at 1280 x 720, the GPU's frame is 10.6 ms either way (the
+trace 3.5, the BLAS builds 0.58).
+Tests: one added against the CPU skin (triangles, attributes, BLAS input, previous vertices) and a build's picture;
+its motion vectors at a new pose against a built one's; moved, hidden, shown; 40 added at once (every room grows),
+posed on, half of them hidden and shown; one removed and the next added in what it had; a built one removed (shown,
+hidden, posed in the same batch); the three that rebuild. The pictures are compared with the build's frames counted
+from the live view's (a frame's samples go by its number: at another count a picture of many thin models is two
+thirds of a step from itself).
+
 **A posed skinned model is a mesh of its own (2026-11-21).** Models in the same pose (the same clip and time) shared
 one mesh, found by the build; one of them taking another pose had to leave it, and that rebuilt the scene (and a
 rebuild grouped whichever models then happened to be in one pose). A model alone in its pose was no mesh at all:
