@@ -977,10 +977,13 @@ export const FrontSide = 0;
 export const BackSide = 1;
 export const DoubleSide = 2;
 
+type MaterialEvent = { type: string; target?: MeshStandardMaterial | null };
+
 export class MeshStandardMaterial {
   readonly isMaterial = true;
   readonly isMeshStandardMaterial = true;
   readonly uuid = `mat${++uid}`;
+  private _listeners?: Map<string, Array<(event: MaterialEvent) => void>>;
   type: "standard" | "physical" = "standard";
   /** Colours, emission, roughness, metalness, opacity, maps and the material function binding are picked up by the
    *  engine binding automatically; set this after changing anything else (`side`, a map's `repeat`, ...). */
@@ -1038,12 +1041,39 @@ export class MeshStandardMaterial {
     return this.side === "double" || this.side === DoubleSide || this.side === BackSide;
   }
 
-  /** three.js API; the engine keeps what the scene uses. */
-  dispose(): void {}
+  /** three.js's material events are per instance, including dispose notifications. */
+  addEventListener(type: string, listener: (event: MaterialEvent) => void): void {
+    const all = (this._listeners ??= new Map());
+    const listeners = all.get(type);
+    if (!listeners) all.set(type, [listener]);
+    else if (!listeners.includes(listener)) listeners.push(listener);
+  }
+
+  hasEventListener(type: string, listener: (event: MaterialEvent) => void): boolean {
+    return this._listeners?.get(type)?.includes(listener) ?? false;
+  }
+
+  removeEventListener(type: string, listener: (event: MaterialEvent) => void): void {
+    const listeners = this._listeners?.get(type);
+    if (listeners?.includes(listener)) listeners.splice(listeners.indexOf(listener), 1);
+  }
+
+  dispatchEvent(event: MaterialEvent): void {
+    const listeners = this._listeners?.get(event.type);
+    if (!listeners?.length) return;
+    event.target = this;
+    for (const listener of [...listeners]) listener.call(this, event);
+    event.target = null;
+  }
+
+  /** Notify owners of this material; shared textures are not disposed. */
+  dispose(): void {
+    this.dispatchEvent({ type: "dispose" });
+  }
 
   copy(source: MeshStandardMaterial): this {
     for (const [k, v] of Object.entries(source)) {
-      if (k === "uuid") continue;
+      if (k === "uuid" || k === "_listeners") continue;
       (this as unknown as Record<string, unknown>)[k] = v instanceof Color ? v.clone() : Array.isArray(v) ? [...v] : v;
     }
     this.needsUpdate = true;
