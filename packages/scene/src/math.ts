@@ -554,6 +554,14 @@ export class Color {
   lerp(c: Color, t: number): this {
     return this.setRGB(this.r + (c.r - this.r) * t, this.g + (c.g - this.g) * t, this.b + (c.b - this.b) * t);
   }
+  /** Interpolates two source colors in linear RGB, regardless of this color's previous value. */
+  lerpColors(color1: Color, color2: Color, alpha: number): this {
+    return this.setRGB(
+      color1.r + (color2.r - color1.r) * alpha,
+      color1.g + (color2.g - color1.g) * alpha,
+      color1.b + (color2.b - color1.b) * alpha,
+    );
+  }
   add(c: Color): this {
     return this.setRGB(this.r + c.r, this.g + c.g, this.b + c.b);
   }
