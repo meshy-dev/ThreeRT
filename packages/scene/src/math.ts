@@ -98,6 +98,15 @@ export class Vector3 {
   setFromMatrixPosition(m: Matrix4): this {
     return this.set(m.elements[12], m.elements[13], m.elements[14]);
   }
+  /** The magnitudes of a transformation matrix's three basis columns (three.js r187). */
+  setFromMatrixScale(m: Matrix4): this {
+    const e = m.elements;
+    return this.set(
+      Math.hypot(e[0], e[1], e[2]),
+      Math.hypot(e[4], e[5], e[6]),
+      Math.hypot(e[8], e[9], e[10]),
+    );
+  }
   toArray(): [number, number, number] {
     return [this.x, this.y, this.z];
   }
