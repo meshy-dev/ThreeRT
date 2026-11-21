@@ -101,6 +101,15 @@ export class BufferAttribute {
     this.array.set(values, offset);
     return this;
   }
+  /** Copies one item's stored components from another attribute, without normalization. */
+  copyAt(index1: number, attribute: BufferAttribute, index2: number): this {
+    const dst = index1 * this.itemSize;
+    const src = index2 * attribute.itemSize;
+    for (let i = 0; i < this.itemSize; i++) {
+      this.array[dst + i] = attribute.array[src + i];
+    }
+    return this;
+  }
   copyArray(values: ArrayLike<number>): this {
     return this.set(values);
   }
