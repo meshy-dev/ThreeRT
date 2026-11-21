@@ -228,7 +228,8 @@ pub struct TopBuild {
     pub instances: bool,
     /// The dynamic groups' BLASes: their triangles were re-transformed.
     pub dynamic: bool,
-    /// Instanced meshes' BLASes: new meshes, a skinned model's new pose.
+    /// Instanced meshes' BLASes: new meshes, a skinned model's new pose. (Software traversal: their trees are written
+    /// by then; the top tree is made over their bounds.)
     pub meshes: Vec<u32>,
     /// Procedural BLASes an edit made.
     pub procs: Vec<PendingProc>,

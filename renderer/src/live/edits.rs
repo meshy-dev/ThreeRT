@@ -1972,7 +1972,6 @@ impl LiveCore {
                 units.set_bounds(mesh, lo, hi);
             }
         }
-        build.instances = true;
         self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
         Ok(true)
     }
