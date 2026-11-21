@@ -1902,6 +1902,13 @@ export abstract class Light extends Object3D {
 abstract class TargetedLight extends Light {
   /** World-space point the light aims at. `null` keeps the node's own orientation (-Z). */
   target: Object3D | null = new Object3D();
+
+  /** three.js gives copied directional and spot lights their own target object. */
+  override copy(source: Object3D, recursive = true): this {
+    super.copy(source, recursive);
+    if (source instanceof TargetedLight) this.target = source.target?.clone() ?? null;
+    return this;
+  }
 }
 
 export class DirectionalLight extends TargetedLight {
