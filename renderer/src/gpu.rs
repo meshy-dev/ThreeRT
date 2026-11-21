@@ -768,6 +768,12 @@ pub struct SkinGpu {
 }
 
 impl SkinGpu {
+    /// (Tests: the bytes of the jobs' table, the palettes' and the blocks' buffers.)
+    #[cfg(test)]
+    pub fn rooms(&self) -> [u64; 3] {
+        [self.table.size(), self.palette.size(), self.blocks.size()]
+    }
+
     /// The job of a mesh an edit placed, at `slot` (a new one, or one whose mesh is gone): its triangles from `first`
     /// in the scene's, skinned from `source`'s corners by a palette of `palette_len` matrices. The pass's buffers
     /// grow with it (the table written again whole; the palette's and the blocks' contents are a dispatch's, and

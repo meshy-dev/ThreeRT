@@ -2795,11 +2795,17 @@ now none does, a frame that spawns or despawns commits in 3.5 ms (4.9 at most) a
 frame between is the same: eight spawned and then none, at 1280 x 720, the GPU's frame is 10.6 ms either way (the
 trace 3.5, the BLAS builds 0.58).
 Tests: one added against the CPU skin (triangles, attributes, BLAS input, previous vertices) and a build's picture;
-its motion vectors at a new pose against a built one's; moved, hidden, shown; 40 added at once (every room grows),
-posed on, half of them hidden and shown; one removed and the next added in what it had; a built one removed (shown,
-hidden, posed in the same batch); the three that rebuild. The pictures are compared with the build's frames counted
-from the live view's (a frame's samples go by its number: at another count a picture of many thin models is two
-thirds of a step from itself).
+its motion vectors at a new pose against a built one's, none longer than the furthest a corner went; moved, hidden,
+shown; 40 added at once (every room grows), posed on, half of them hidden and shown; 24 more in a commit that
+grows the pass's buffers alone; previous vertices kept mesh by mesh (a model removed before a frame is drawn, two
+whose triangles are neighbours and whose previous vertices are not, one posed twice between frames); one removed
+and the next added in what it had; a built one removed (shown, hidden, posed in the same batch); the three that
+rebuild. The pictures are compared with the build's frames counted from the live view's (a frame's samples go by
+its number: at another count a picture of many thin models is two thirds of a step from itself).
+34 mutations of the new logic: 31 fail a test natively, two under software traversal, and one is equivalent (the
+CPU's copy of an added model's triangles: a fallback no path reads while the model loads). Eight did not at first:
+the scenes had no moving triangles before the meshes, motion vectors were compared with a build's alone (wrong
+alike in both), other rooms grew in every commit that grew the pass's, and no frame was skipped between two edits.
 
 **A posed skinned model is a mesh of its own (2026-11-21).** Models in the same pose (the same clip and time) shared
 one mesh, found by the build; one of them taking another pose had to leave it, and that rebuilt the scene (and a
