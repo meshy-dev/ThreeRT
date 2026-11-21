@@ -637,6 +637,9 @@ export class Vector2 {
   dot(v: Vector2): number {
     return this.x * v.x + this.y * v.y;
   }
+  cross(v: Vector2): number {
+    return this.x * v.y - this.y * v.x;
+  }
   length(): number {
     return Math.hypot(this.x, this.y);
   }
