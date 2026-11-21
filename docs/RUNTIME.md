@@ -1175,10 +1175,16 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk, a call at the end of the still walk, and the still
   walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
   kernel never does.
-- Still flattened, as before: meshes that deform (a posed skinned model's), every instance of a scene with more
-  of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
-  goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
-  step (the A/B).
+- **A mesh that deforms** (a posed skinned model's) is a unit too. Its tree has the shape of a tree built once over
+  its model's bind pose, one shape for every placement of the model (the skinning pass's corners and each such
+  mesh's triangles are in that tree's order), and the boxes of its pose. A new pose places the model's corners on
+  the CPU, takes the boxes again (`units::refit`: a leaf's from its triangles, an interior node's from its
+  children), and writes the nodes where they lie; the pass writes the triangles. Made again for a pose, a tree
+  costs sixty times as much (a character of 13,744 triangles, one core: 3.0 ms against 0.05) and walks 4 to 11 %
+  shorter by its nodes' areas.
+- Still flattened, as before: every instance of a scene with more of them than a top tree holds (2^18), and every
+  instance of an offline render (`prepare`; a live session's scene goes through `prepare_live`), unless
+  `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this step (the A/B).
 
 **Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
 its BLASes, or the units), so the engine's path is the same under both traversals (`live/edits.rs` `move_instances`,
@@ -1191,11 +1197,12 @@ its BLASes, or the units), so the engine's path is the same under both traversal
 | a mesh of its own is added (a new chunk, a new box) | its triangles and attributes into the edit room in its tree's order, its tree into the mesh range, a record, the top tree |
 | a mesh of its own changes (a voxel edit: the chunks it touched) | those meshes' trees made again (the old tree's nodes given back and filled), their records; no other unit is read |
 | a mesh is removed | its record cleared, its tree given back and filled, the top tree |
+| a skinned model takes a new pose | its mesh's tree's boxes written where they lie (the shape kept), its triangles by the skinning pass, the top tree |
+| a skinned model is hidden, shown or removed | its record, the top tree (shown: skinned as it is posed then) |
 
 The scene is rebuilt, as before this step, by: the first instanced mesh of a scene that has none (its kernel has no
 unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a skinned
-model's pose (its triangles are in the still tree; a rigid group's parts are units, posed in place); an instance of
-a mesh that deforms; **room that is
+model added (hardware traversal adds it in place); **room that is
 full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
 triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
 edit replaces stays behind until the next rebuild, under both; a scene with units and no geometry of its own to

@@ -1848,6 +1848,62 @@ mod tests {
         assert!(top[0].bmin[1] <= 12.0 && top[0].bmin[1] > 11.0 && top[0].bmax[1] >= 13.0, "{:?}", top[0]);
     }
 
+    /// A mesh that deforms keeps its tree's shape and takes its boxes again (`refit`): the links are as built, a leaf's
+    /// box is its triangles' as they are now, an interior node's its two children's, and the tree passes the mesh
+    /// trees' check as before. The bounds returned are the triangles', and the unit's box in the top tree is theirs
+    /// once they are set. A corner that is not finite is in no box; a leaf with none that is finite is a point.
+    #[test]
+    fn a_deforming_meshs_tree_takes_its_boxes_again() {
+        let mut rng = Rng(11);
+        let rest = rng.tris(300, 4.0, 0.3);
+        let t = mesh_tree(&rest).unwrap();
+        assert!(t.nodes.iter().filter(|n| n.count > 1).count() > 8, "leaves of several triangles");
+        // The mesh's triangles in the tree's order, bent: each corner moved by where it is.
+        let bend = |v: Vec3A| Vec3A::new(v.x + 0.5 * (v.y * 1.3).sin(), v.y * 1.2 + 0.3 * v.z, v.z - 0.4 * v.x * v.x + 7.0);
+        let posed: Vec<[Vec3A; 3]> = t.order.iter().map(|&i| rest[i as usize].map(bend)).collect();
+        let exact = |tris: &[[Vec3A; 3]]| tris.iter().flatten().filter(|v| v.is_finite()).fold((Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NEG_INFINITY)), |(a, b), v| (a.min(*v), b.max(*v)));
+        let holds = |what: &str, nodes: &[GpuNode], tris: &[[Vec3A; 3]]| {
+            for (k, (n, was)) in nodes.iter().zip(&t.nodes).enumerate() {
+                assert_eq!((n.left_or_first, n.count), (was.left_or_first, was.count), "{what}: node {k}'s links are as built");
+                let want = if n.count > 0 {
+                    let (a, b) = exact(&tris[n.left_or_first as usize..(n.left_or_first + n.count) as usize]);
+                    if a.x > b.x { (Vec3A::ZERO, Vec3A::ZERO) } else { (a, b) }
+                } else {
+                    let (a, b) = (nodes[n.left_or_first as usize], nodes[n.left_or_first as usize + 1]);
+                    (Vec3A::from(a.bmin).min(b.bmin.into()), Vec3A::from(a.bmax).max(b.bmax.into()))
+                };
+                assert_eq!((Vec3A::from(n.bmin), Vec3A::from(n.bmax)), want, "{what}: node {k}'s box ({} triangles)", n.count);
+            }
+            assert_eq!(check_mesh(nodes, tris.len()), Ok(t.depth), "{what}: the tree is a mesh's still");
+        };
+        let mut nodes = t.nodes.clone();
+        let (lo, hi) = refit(&mut nodes, |i| posed[i]);
+        holds("bent", &nodes, &posed);
+        assert_eq!((lo, hi), exact(&posed), "the bounds are the triangles'");
+        assert!(lo.z > t.hi.z, "the bent mesh is out of its first bounds");
+        // Its unit in the top tree: by the bounds it has, once they are set.
+        let mut u = Units { layout: Layout::new(1, t.nodes.len() + 8, 2), trees: vec![], slots: vec![], count: 0, records: 2, kept: Default::default() };
+        u.add_tree(0, &t).unwrap();
+        u.set(0, u.unit(0, Mat4::IDENTITY, false));
+        let top = u.top().unwrap();
+        assert!(top[0].bmax[2] < lo.z, "{:?}", top[0]);
+        u.set_bounds(0, lo, hi);
+        let top = u.top().unwrap();
+        assert!((0..3).all(|k| top[0].bmin[k] <= lo[k] && top[0].bmax[k] >= hi[k] && top[0].bmax[k] - top[0].bmin[k] < (hi[k] - lo[k]) * 1.01 + 1e-3), "{:?} holds {lo} .. {hi}", top[0]);
+        // Corners that are not finite: one of a triangle, and every corner of a leaf's triangles.
+        let leaf = *t.nodes.iter().filter(|n| n.count > 1).nth(3).unwrap();
+        let other = (0..posed.len()).find(|i| !(leaf.left_or_first as usize..(leaf.left_or_first + leaf.count) as usize).contains(i)).unwrap();
+        let mut broken = posed.clone();
+        broken[other][1] = Vec3A::new(f32::NAN, 0.0, 1.0);
+        for i in leaf.left_or_first..leaf.left_or_first + leaf.count {
+            broken[i as usize] = [Vec3A::splat(f32::INFINITY), Vec3A::splat(f32::NAN), Vec3A::new(0.0, f32::NEG_INFINITY, 0.0)];
+        }
+        let mut nodes = t.nodes.clone();
+        let (lo, hi) = refit(&mut nodes, |i| broken[i]);
+        holds("with corners that are not finite", &nodes, &broken);
+        assert!(lo.is_finite() && hi.is_finite() && nodes.iter().all(|n| n.bmin.iter().chain(&n.bmax).all(|v| v.is_finite())), "every box is finite");
+    }
+
     /// Units that only move keep their top tree, its boxes theirs again (each leaf's its unit's box, each node's what
     /// holds its children's), while it costs a ray no more than `REFIT_SLACK` of what it did when built; a unit that
     /// goes far, comes, goes, is hidden or shown has it built again. A kept tree is one a build could have made: the
