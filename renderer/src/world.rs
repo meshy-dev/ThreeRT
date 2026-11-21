@@ -972,6 +972,12 @@ impl World {
                 if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
                     self.changes.removed.insert(*d);
                 }
+                // What else this batch changed of it goes with it (a pose, a move, its visibility: there is nothing
+                // left to pose, and the renderer would rebuild for an object it cannot find).
+                let c = &mut self.changes;
+                for set in [&mut c.poses, &mut c.moved, &mut c.started, &mut c.shown, &mut c.powers, &mut c.customs, &mut c.instanced] {
+                    set.remove(d);
+                }
             }
             return doomed;
         }
@@ -1256,6 +1262,30 @@ mod tests {
         w.set_transform(4, Vec3::new(f32::INFINITY, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE).unwrap();
         assert!(w.world_matrix(4).is_finite());
         assert_eq!(w.objects[&4].position.x, f32::INFINITY, "the transform kept as set");
+    }
+
+    /// What a batch changed of an object goes with the object when the same batch removes it in place: its pose, its
+    /// move, its visibility, its power. (The renderer finds nothing to pose, and would rebuild.)
+    #[test]
+    fn an_object_removed_takes_its_other_changes_with_it() {
+        let mut w = World::default();
+        let pose = |time| Some(desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
+        for id in [1, 2] {
+            w.set_object(id, format!("m{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: pose(0.0), functions: vec![] }, true, true).unwrap();
+        }
+        w.take_changes();
+        for id in [1, 2] {
+            w.set_animation(id, pose(0.5)).unwrap();
+            w.set_transform(id, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+            w.set_visible(id, false).unwrap();
+        }
+        w.remove(1);
+        let c = w.take_changes();
+        assert!(!c.structural && c.removed.contains(&1), "removed in place");
+        for (what, set) in [("poses", &c.poses), ("moved", &c.moved), ("shown", &c.shown), ("started", &c.started), ("powers", &c.powers), ("customs", &c.customs), ("instanced", &c.instanced)] {
+            assert!(!set.contains(&1), "{what}: nothing of the object removed");
+        }
+        assert!(c.poses.contains(&2) && c.moved.contains(&2) && c.shown.contains(&2), "the other's changes are kept");
     }
 
     /// Density grids: sizes and data are checked; a new grid, another size or another program rebuilds the scene, new

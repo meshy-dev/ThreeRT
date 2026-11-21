@@ -2643,6 +2643,68 @@ fn a_posed_skinned_model_is_hidden_and_shown_in_place() {
     assert!(apart(&shown, &again) < 0.5, "as before it was hidden ({:.2} steps)", apart(&shown, &again));
 }
 
+/// A posed skinned model is removed in place: its instance is no object's and no ray sees it, the others are posed
+/// on as ever, and the picture is a build's. One that is hidden is removed in place too. (Under software traversal,
+/// where it has no instance, by a rebuild.)
+#[test]
+fn a_posed_skinned_model_is_removed_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
+    let mut w = world();
+    for (id, x) in [(30, -0.9), (31, 0.0), (32, 0.9)] {
+        w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: bend(0.0), functions: vec![] }, true, false).unwrap();
+        w.set_transform(id, Vec3::new(x, -1.0, 0.8), glam::Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+    }
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let against_a_build = |what: &str, live: &mut LiveCore, w: &World| {
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 64), picture(&mut fresh, 64));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        a
+    };
+    let loaded = against_a_build("as loaded", &mut live, &w);
+    if !live.g.hwrt {
+        w.remove(31);
+        assert!(live.commit(&mut w).unwrap(), "removed under software traversal: a rebuild");
+        let removed = against_a_build("removed under software traversal", &mut live, &w);
+        assert!(apart(&loaded, &removed) > 0.5, "it is out of the picture ({:.2} steps)", apart(&loaded, &removed));
+        return;
+    }
+    let record = |c: &LiveCore, id: u32| c.sc.tables.retained.instance(id).expect("a posed skinned model").instance;
+    let (r30, r31, r32) = (record(&live, 30), record(&live, 31), record(&live, 32));
+    w.remove(31);
+    assert!(!live.commit(&mut w).unwrap(), "removed: in place ({:?})", live.fallback);
+    assert!(!seen_by_rays(&live, r31) && seen_by_rays(&live, r30) && seen_by_rays(&live, r32), "no ray sees the one removed; the others are seen");
+    assert!(live.sc.tables.retained.instance(31).is_none() && live.pick(0.5, 0.5).is_none_or(|p| p.0 != "arm31"), "it is no object's, and a click does not find it");
+    let removed = against_a_build("removed", &mut live, &w);
+    assert!(apart(&loaded, &removed) > 0.5, "it is out of the picture ({:.2} steps)", apart(&loaded, &removed));
+    // The others posed and moved on, in place.
+    w.set_animation(30, bend(0.7)).unwrap();
+    w.set_transform(32, Vec3::new(0.3, -0.9, 0.9), glam::Quat::from_rotation_y(0.4), Vec3::splat(2.0)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the others posed and moved: in place ({:?})", live.fallback);
+    let on = against_a_build("the others posed and moved", &mut live, &w);
+    assert!(apart(&removed, &on) > 0.5, "that is in the picture ({:.2} steps)", apart(&removed, &on));
+    // One hidden, then removed: in place both.
+    w.set_visible(32, false).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "hidden: in place ({:?})", live.fallback);
+    w.remove(32);
+    assert!(!live.commit(&mut w).unwrap(), "a hidden one removed: in place ({:?})", live.fallback);
+    assert!(!seen_by_rays(&live, r32) && live.sc.tables.retained.instance(32).is_none(), "no ray sees it, it is no object's");
+    against_a_build("a hidden one removed", &mut live, &w);
+    // The last, posed in the commit that removes it: in place, nothing left of it.
+    w.set_animation(30, bend(0.2)).unwrap();
+    w.remove(30);
+    assert!(!live.commit(&mut w).unwrap(), "posed and removed at once: in place ({:?})", live.fallback);
+    assert!(!seen_by_rays(&live, r30), "no ray sees it");
+    against_a_build("all removed", &mut live, &w);
+}
+
 /// The skinning pass writes what the CPU skin writes. Two models (tests/render/data/skin-blend.glb: 72 triangles,
 /// vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without normals, a
 /// mesh on a node beside the skin that mirrors it, a joint turned about an axis that is neither the normals' nor the

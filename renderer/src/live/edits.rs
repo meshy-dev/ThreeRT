@@ -2222,8 +2222,11 @@ impl LiveCore {
                 continue;
             }
             emitters_changed |= release(*id, tables, instances);
-            // (A still model the build placed, whose instance is all of it, is taken out by it too.)
-            let at = slot_of(*id, edit, tables).or_else(|| tables.retained.instance(*id).filter(|i| whole(i, instances, meshes)).map(|i| (inst_base + i.instance as usize, i.instance as usize)));
+            // (A still model the build placed, whose instance is all of it, is taken out by it too; and a posed skinned
+            // model, an instance of its own mesh, where there is such an instance: software traversal has its triangles
+            // in the still tree. Its mesh's triangles and its skinning job stay until the next rebuild, as the build's do.)
+            let its_own = |i: &scene::InstanceRef| whole(i, instances, meshes) || (matches!(i.mesh, scene::MeshKind::Skinned(_)) && instances.get(i.instance as usize).is_some_and(|x| top.has_mesh(x.mesh)));
+            let at = slot_of(*id, edit, tables).or_else(|| tables.retained.instance(*id).filter(|i| its_own(i)).map(|i| (inst_base + i.instance as usize, i.instance as usize)));
             // Drawn, and not at a record an edit can clear (a model with triangles flattened beside its instance,
             // anything the build flattened): a rebuild takes it out.
             if at.is_none() && tables.retained.proxies.contains_key(id) {
