@@ -718,6 +718,11 @@ export class Box3 {
   containsPoint(p: Vector3): boolean {
     return p.x >= this.min.x && p.x <= this.max.x && p.y >= this.min.y && p.y <= this.max.y && p.z >= this.min.z && p.z <= this.max.z;
   }
+  containsBox(b: Box3): boolean {
+    return this.min.x <= b.min.x && b.max.x <= this.max.x &&
+      this.min.y <= b.min.y && b.max.y <= this.max.y &&
+      this.min.z <= b.min.z && b.max.z <= this.max.z;
+  }
   intersectsBox(b: Box3): boolean {
     return b.max.x >= this.min.x && b.min.x <= this.max.x && b.max.y >= this.min.y && b.min.y <= this.max.y && b.max.z >= this.min.z && b.min.z <= this.max.z;
   }

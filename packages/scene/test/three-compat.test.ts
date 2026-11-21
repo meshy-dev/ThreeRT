@@ -75,6 +75,20 @@ test("BufferGeometry: attributes, setIndex, groups, transforms and bounds as thr
   }
 });
 
+test("Box3.containsBox: touching faces are contained but overlap alone is not, as three.js does", () => {
+  const outer = new THREE.Box3(new THREE.Vector3(-2, -3, -4), new THREE.Vector3(4, 5, 6));
+  const inside = new THREE.Box3(new THREE.Vector3(-2, -1, 0), new THREE.Vector3(3, 5, 6));
+  const overlapping = new THREE.Box3(new THREE.Vector3(3, 0, 0), new THREE.Vector3(7, 2, 3));
+  const separate = new THREE.Box3(new THREE.Vector3(7, 0, 0), new THREE.Vector3(8, 2, 3));
+
+  assert.equal(outer.containsBox(inside), true, "inclusive on the min x and max y/z faces");
+  assert.equal(outer.containsBox(overlapping), false, "one overlapping box extends past max x");
+  assert.equal(outer.intersectsBox(overlapping), true, "overlap is not full containment");
+  assert.equal(outer.containsBox(separate), false, "separated boxes are not contained");
+  assert.equal(inside.containsBox(outer), false, "containment is directional");
+  assert.equal(outer.containsBox(outer.clone()), true, "equal bounds contain one another");
+});
+
 test("vertex colours: the geometry's `color` attribute (RGB, RGBA, normalized bytes) to the engine, `vertexColors` on the material", () => {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera();
