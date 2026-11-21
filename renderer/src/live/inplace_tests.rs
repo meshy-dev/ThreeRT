@@ -3331,6 +3331,7 @@ fn a_hidden_volumes_passes_are_made_at_load() {
     assert!(!live.commit(&mut w).unwrap(), "shown in place ({:?})", live.fallback);
     picture(&mut live, 2);
     assert_eq!(made(&live), ["media_composite", "media_train"], "the frame that shows it makes none");
+}
 
 /// A bright HDR panel catches clipping before reconstruction, stale bindings after resize, and
 /// carrying temporal history through a cut. MetalFX modes run only where the SDK supports them.
@@ -3381,7 +3382,8 @@ fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
         }
         core.set_camera(Camera::look_at(scene_cam.pos, scene_cam.pos + Vec3::Z, scene_cam.tan_half_fov));
         core.render(1, |_, _| {});
-        assert!(center(&core).iter().all(|v| *v < 1.0), "{}: bright history after cut", mode.name());
+        // (The view after the turn sees surfaces the panel lights a little, ~4 here; history carried over reads ~1800.)
+        assert!(center(&core).iter().all(|v| *v < 100.0), "{}: bright history after cut", mode.name());
         core.resize(257, 161).unwrap();
         core.set_camera(scene_cam);
         core.render(1, |_, _| {});
