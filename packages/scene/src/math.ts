@@ -256,14 +256,16 @@ export class Euler {
   private _x: number;
   private _y: number;
   private _z: number;
-  order: EulerOrder;
+  private _order: EulerOrder;
   _onChange: () => void = () => {};
   constructor(x = 0, y = 0, z = 0, order: EulerOrder = "XYZ") {
     this._x = x;
     this._y = y;
     this._z = z;
-    this.order = order;
+    this._order = order;
   }
+  get order() { return this._order; }
+  set order(value: EulerOrder) { this._order = value; this._onChange(); }
   get x() { return this._x; }
   set x(v) { this._x = v; this._onChange(); }
   get y() { return this._y; }
@@ -274,7 +276,7 @@ export class Euler {
     this._x = x;
     this._y = y;
     this._z = z;
-    this.order = order;
+    this._order = order;
     this._onChange();
     return this;
   }
@@ -294,7 +296,7 @@ export class Euler {
       this._x = Math.atan2(m32, m22);
       this._z = 0;
     }
-    this.order = "XYZ";
+    this._order = "XYZ";
     if (notify) this._onChange();
     return this;
   }
