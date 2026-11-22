@@ -71,7 +71,9 @@
     var pg = GOut(-1.0, vec3<f32>(0.0, 1.0, 0.0), 0u, vec2<f32>(0.0));
     var pprim = 0u;
     if (!has(F_PROC)) {
-        rayQueryProceed(&rq);
+        // Stepped until the traversal is over: one step is not always all of it (on Metal a SIMD group's queries come
+        // back unfinished now and then, with no candidate to judge), and the committed hit is the traversal's only then.
+        while (rayQueryProceed(&rq)) {}
     } else {
         // Procedural boxes come up as candidates although the query forces opacity (that applies to triangles; checked
         // on Metal: one AABB candidate loop is deterministic run to run, unlike cutout-triangle candidates). Each one's

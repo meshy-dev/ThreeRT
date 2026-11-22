@@ -4267,6 +4267,17 @@ mod tests {
         wesl_wgsl(include_str!("../shaders/skin.wgsl"), &[], &[]);
     }
 
+    /// A ray query's committed hit is read once its traversal is over: every step of a query in the kernel's files is
+    /// a loop's condition. (A step taken once and its answer dropped read an unfinished traversal on Metal: whole SIMD
+    /// groups without their hits, in one build of the kernel and not in another.)
+    #[test]
+    fn a_ray_query_is_stepped_until_its_traversal_is_over() {
+        for (file, src) in [("trace_hw.wgsl", include_str!("../shaders/trace_hw.wgsl")), ("translucent.wgsl", include_str!("../shaders/translucent.wgsl"))] {
+            let (steps, looped) = (src.matches("rayQueryProceed(").count(), src.matches("while (rayQueryProceed(").count());
+            assert!(steps > 0 && steps == looped, "{file}: {steps} steps of a ray query, {looped} of them a loop's condition");
+        }
+    }
+
     /// The skinning pass is valid WGSL, and its block size and dispatch row are the ones the CPU lays its work out by.
     #[test]
     fn the_skinning_pass_is_valid_and_its_sizes_are_the_cpus() {

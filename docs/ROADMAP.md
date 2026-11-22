@@ -2776,6 +2776,14 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A ray query is stepped until its traversal is over (2026-11-23).** The hardware trace stepped a query once
+and read its committed hit. One step is not always the whole traversal: on Metal a SIMD group's queries come back
+unfinished now and then, with no candidate to judge (an interior's camera rays: about 1 % of the pixels, in 8 x 4
+blocks). The hit read then was the finished traversal's in one build of the kernel and none in another: a kernel
+with another layout of the triangles lost whole blocks' hits, other blocks each frame, while the same kernel with
+the loop guard did not. Every query now loops until its step says it is over, as the translucency pass's and the
+procedural boxes' did. A source test holds every step of a query to a loop's condition.
+
 **A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
 choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
 its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it
