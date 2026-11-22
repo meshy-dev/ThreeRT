@@ -319,18 +319,26 @@ fn material_of(a: TriAttr, inst: u32) -> u32 {
 // The material a triangle itself holds: one that no instance places.
 fn triangle_material(a: TriAttr) -> u32 { return bitcast<u32>(a.uv.w); }
 
-// A triangle (indexed.rs): its three vertices, counted from its mesh's first (a world-space triangle's from 0), and
-// its row: its material (a mesh's triangle: its section), its object, its flags (TRI_*), its emitter entry + 1 (a
-// mesh's triangle: its index in its section).
+// A triangle's record (indexed.rs `TriRecord`), eight words, what a hit reads of it in one read: its three vertices,
+// counted from its mesh's first (a world-space triangle's from 0), a spare word, and its row: its material (a mesh's
+// triangle: its section), its object, its flags (TRI_*), its emitter entry + 1 (a mesh's triangle: its index in its
+// section).
+const TRI_WORDS: u32 = 8u;
 fn tri_indices(ti: u32) -> vec3<u32> {
-    let k = P.word_first[1].x + ti * 3u;
+    let k = P.word_first[1].y + ti * TRI_WORDS;
     return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
 }
 fn tri_row(ti: u32) -> vec4<u32> {
-    let k = P.word_first[1].y + ti * 4u;
+    let k = P.word_first[1].y + ti * TRI_WORDS + 4u;
     return vec4<u32>(words[k], words[k + 1u], words[k + 2u], words[k + 3u]);
 }
-fn tri_flags(ti: u32) -> u32 { return words[P.word_first[1].y + ti * 4u + 2u]; }
+fn tri_flags(ti: u32) -> u32 { return words[P.word_first[1].y + ti * TRI_WORDS + 6u]; }
+// The triangles' indices alone, three words a triangle: what the acceleration structures are built from, and what a
+// candidate's test reads (a walk tests many triangles for one it hits).
+fn leaf_indices(ti: u32) -> vec3<u32> {
+    let k = P.word_first[1].x + ti * 3u;
+    return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
+}
 // The first vertex of the mesh an instance places (none: a world-space triangle, whose indices are the vertices').
 fn tri_base(inst: u32) -> u32 {
     if (has(F_INST) && inst != NO_INST) { return instance_at(inst).info.z; }
@@ -744,7 +752,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 }
 
 @if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {
-    let ix = tri_indices(i) + vec3<u32>(base);
+    let ix = leaf_indices(i) + vec3<u32>(base);
     let v0 = positions[ix.x].xyz;
     let e1 = positions[ix.y].xyz - v0;
     let e2 = positions[ix.z].xyz - v0;

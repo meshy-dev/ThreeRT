@@ -19,6 +19,26 @@ pub type VertexAttr = [[f32; 4]; 2];
 /// emitter entry + 1 (a mesh's triangle: its index in its section).
 pub type TriRow = [u32; 4];
 
+/// A triangle's record, what the kernel reads of it at a hit, in one read: its three vertices, a spare word, its
+/// row. (The indices are an array of their own besides, three words a triangle: an acceleration structure is built
+/// from that, which has no room between a triangle's indices and the next's, and a candidate's test reads it.)
+pub type TriRecord = [u32; 8];
+pub const RECORD_BYTES: usize = std::mem::size_of::<TriRecord>();
+/// A record's row: its first word, and its byte in the record.
+pub const RECORD_ROW: usize = 4;
+pub const RECORD_ROW_BYTE: usize = RECORD_ROW * 4;
+
+/// A triangle's record.
+pub fn record(indices: [u32; 3], row: TriRow) -> TriRecord {
+    [indices[0], indices[1], indices[2], 0, row[0], row[1], row[2], row[3]]
+}
+
+/// Triangles' records, one after another.
+pub fn records(indices: &[[u32; 3]], rows: &[TriRow]) -> Vec<TriRecord> {
+    assert_eq!(indices.len(), rows.len(), "a row a triangle");
+    indices.iter().zip(rows).map(|(i, r)| record(*i, *r)).collect()
+}
+
 /// A scope's triangles as vertices and indices that count from the scope's first vertex.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {

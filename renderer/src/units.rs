@@ -959,8 +959,8 @@ pub(crate) mod cpu {
             self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 1);
             self.positions.get(i as usize).map(|v| Vec3A::new(v[0], v[1], v[2])).ok_or(format!("reads vertex {i} of {}", self.positions.len()))
         }
-        /// pathtrace.wgsl `tri_indices`, `tri_flags`.
-        pub(crate) fn tri_indices(&self, ti: u32) -> Walk<[u32; 3]> {
+        /// pathtrace.wgsl `leaf_indices`, `tri_flags`.
+        pub(crate) fn leaf_indices(&self, ti: u32) -> Walk<[u32; 3]> {
             self.indices.get(ti as usize).copied().ok_or(format!("reads triangle {ti} of {}", self.indices.len()))
         }
         pub(crate) fn tri_flags(&self, ti: u32) -> Walk<u32> {
@@ -995,7 +995,7 @@ pub(crate) mod cpu {
 
         /// pathtrace.wgsl `intersect_tri`: (t, u, v), t = INF for a miss.
         pub(crate) fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, base: u32, tmax: f32) -> Walk<f32> {
-            let ix = self.tri_indices(i)?;
+            let ix = self.leaf_indices(i)?;
             let v0 = self.vert(base + ix[0])?;
             let (e1, e2) = (self.vert(base + ix[1])? - v0, self.vert(base + ix[2])? - v0);
             let pv = d.cross(e2);
@@ -1290,7 +1290,7 @@ pub(crate) mod tests {
                 "fn proc_dir(r: Instance, d: vec3<f32>) -> vec3<f32> { return r.n0.xyz * d.x + r.n1.xyz * d.y + r.n2.xyz * d.z; }",
                 "fn proc_point(r: Instance, p: vec3<f32>) -> vec3<f32> { return proc_dir(r, p - vec3<f32>(r.m0.w, r.m1.w, r.m2.w)); }",
                 "fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {",
-                "let ix = tri_indices(i) + vec3<u32>(base);",
+                "let ix = leaf_indices(i) + vec3<u32>(base);",
                 "let v0 = positions[ix.x].xyz;",
                 "let e1 = positions[ix.y].xyz - v0;",
                 "let e2 = positions[ix.z].xyz - v0;",

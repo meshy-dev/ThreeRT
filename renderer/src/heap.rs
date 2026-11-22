@@ -75,9 +75,10 @@ pub enum Stream {
     /// The instances' rows (scene.rs `Row`): four words a section of an instance's mesh.
     Rows,
     /// The triangles' vertices (indexed.rs): three words a triangle, in the triangles' GPU order. What the BLASes are
-    /// built from, too.
+    /// built from, and what a candidate's test reads.
     Indices,
-    /// The triangles' rows (`indexed::TriRow`): four words a triangle.
+    /// The triangles' records (`indexed::TriRecord`): eight words a triangle, its vertices again and its row. What a
+    /// hit reads.
     Triangles,
 }
 

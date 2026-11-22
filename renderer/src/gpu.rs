@@ -2377,9 +2377,9 @@ impl Gpu {
         // (With units, edits write trees into it: units.rs.)
         // (COPY_SRC: read back by the test that holds a refit tree to its triangles.)
         let b_nodes = buf("nodes", nodes, if scene.units.is_some() { st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC } else { st });
-        // What the triangles hold on the GPU besides their BLASes: vertices (48 B each), indices and rows (28 B a
+        // What the triangles hold on the GPU besides their BLASes: vertices (48 B each), indices and records (44 B a
         // triangle), the software BVH's nodes (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
-        timings.push(("tri_data_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * 28 + nodes.len()) as f64 / (1 << 20) as f64));
+        timings.push(("tri_data_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * (12 + crate::indexed::RECORD_BYTES) + nodes.len()) as f64 / (1 << 20) as f64));
         let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, room.records, timings)?;
         let room = EditRoom { proc_words: proc_room, ..room };
         // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
@@ -2850,9 +2850,17 @@ impl Gpu {
         let color_bytes = if colors.is_empty() { 0 } else { colors.len() + room_tris * 12 };
         let rows: &[u8] = bytemuck::cast_slice(&scene.rows);
         let row_bytes = if rows.is_empty() && room_rows == 0 { 0 } else { rows.len() + room_rows * 16 };
-        // (The triangles' indices and rows: one at least, the triangle a tree over nothing names, of vertex 0.)
+        // (The triangles' indices and records: one at least, the triangle a tree over nothing names, of vertex 0.)
         let ix = &scene.indexed;
-        let (index_bytes, tri_bytes) = ((ix.indices.len() + room_tris).max(1) * 12, (ix.rows.len() + room_tris).max(1) * 16);
+        let (index_bytes, tri_bytes) = ((ix.indices.len() + room_tris).max(1) * 12, (ix.rows.len() + room_tris).max(1) * crate::indexed::RECORD_BYTES);
+        // (The records a run at a time: no second copy of them all.)
+        let records = |put: &mut dyn FnMut(u64, &[u8])| {
+            const RUN: usize = 1 << 18;
+            for at in (0..ix.rows.len()).step_by(RUN) {
+                let to = (at + RUN).min(ix.rows.len());
+                put((at * crate::indexed::RECORD_BYTES) as u64, bytemuck::cast_slice(&crate::indexed::records(&ix.indices[at..to], &ix.rows[at..to])));
+            }
+        };
         let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64, row_bytes as u64, index_bytes as u64, tri_bytes as u64];
         let (used, limit) = (Heap::<Stream>::size_for(&sizes(0)), self.device.limits().max_storage_buffer_binding_size as u64);
         if used > limit {
@@ -2878,7 +2886,7 @@ impl Gpu {
                 heap.write(&self.queue, Stream::VertexColors, 0, colors);
                 heap.write(&self.queue, Stream::Rows, 0, rows);
                 heap.write(&self.queue, Stream::Indices, 0, bytemuck::cast_slice(&ix.indices));
-                heap.write(&self.queue, Stream::Triangles, 0, bytemuck::cast_slice(&ix.rows));
+                records(&mut |at, bytes| heap.write(&self.queue, Stream::Triangles, at, bytes));
                 let mut e = self.device.create_command_encoder(&Default::default());
                 e.copy_buffer_to_buffer(&c.buf, c.offset, &heap.buffer, heap.at(Stream::Procs) + blob_at, c.bytes);
                 self.queue.submit([e.finish()]);
@@ -2889,7 +2897,7 @@ impl Gpu {
                 put(Stream::VertexColors, 0, colors);
                 put(Stream::Rows, 0, rows);
                 put(Stream::Indices, 0, bytemuck::cast_slice(&ix.indices));
-                put(Stream::Triangles, 0, bytemuck::cast_slice(&ix.rows));
+                records(&mut |at, bytes| put(Stream::Triangles, at, bytes));
                 let Some(l) = l else { return };
                 put(Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 for (blob, off) in &l.blobs {

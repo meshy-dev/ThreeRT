@@ -393,14 +393,14 @@ impl Grow<'_> {
         sizes.iter().all(|&s| self.g.buffer_fits(s))
     }
 
-    /// Triangles: their indices, their rows, and in a scene with them (`colors`) vertex colours: sections of the
+    /// Triangles: their indices, their records, and in a scene with them (`colors`) vertex colours: sections of the
     /// words' heap, grown together.
     pub(super) fn tris(&self, h: &mut Holes, extra: usize, words: &mut Heap<Stream>, colors: bool) -> bool {
         if !self.ok {
             return false;
         }
         let cap = Self::cap(h, extra);
-        let mut sections = vec![(Stream::Indices, (cap * 12) as u64), (Stream::Triangles, (cap * 16) as u64)];
+        let mut sections = vec![(Stream::Indices, (cap * 12) as u64), (Stream::Triangles, (cap * crate::indexed::RECORD_BYTES) as u64)];
         if colors {
             sections.push((Stream::VertexColors, (cap * 12) as u64));
         }
@@ -1417,7 +1417,7 @@ impl LiveCore {
             w_tris.put((*i as usize * size) as u64, bytemuck::bytes_of(t));
             // (A triangle in world space names its emitter; a mesh's is numbered among its mesh's.)
             if t.inst == crate::NO_INST {
-                w_rows.put((t.tri as usize * 16 + 12) as u64, bytemuck::bytes_of(&(i + 1)));
+                w_rows.put((t.tri as usize * crate::indexed::RECORD_BYTES + crate::indexed::RECORD_ROW_BYTE + 12) as u64, bytemuck::bytes_of(&(i + 1)));
             }
         }
         w_rows.flush_section(&g.queue, &up.words, Stream::Triangles);
@@ -2383,7 +2383,7 @@ impl LiveCore {
         let mut new_meshes = vec![];
         let mut pending_procs = vec![];
         let mut split = EditSplit::default();
-        // (Positions and attributes of vertices; indices and rows of triangles.)
+        // (Positions and attributes of vertices; indices and records of triangles.)
         let (mut w_cdf, mut w_pos, mut w_vattr, mut w_index, mut w_tri, mut w_records, mut w_objects) = (Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default());
         // Vertex colours (F_VCOLOR).
         let mut w_colors = Gather::default();
@@ -2621,7 +2621,7 @@ impl LiveCore {
                         w_pos.put((vfirst * 16) as u64, bytemuck::cast_slice(&positions));
                         w_vattr.put((vfirst * 32) as u64, bytemuck::cast_slice(&vattrs));
                         w_index.put((first * 12) as u64, bytemuck::cast_slice(&index[..]));
-                        w_tri.put((first * 16) as u64, bytemuck::cast_slice(&tri_rows));
+                        w_tri.put((first * crate::indexed::RECORD_BYTES) as u64, bytemuck::cast_slice(&crate::indexed::records(index, &tri_rows)));
                         if vcolors {
                             w_colors.put((first * 12) as u64, bytemuck::cast_slice(&vec![scene::WHITE; n]));
                         }
@@ -2872,7 +2872,7 @@ impl LiveCore {
                             w_pos.put((im.vfirst as usize * 16) as u64, bytemuck::cast_slice(&scope.positions));
                             w_vattr.put((im.vfirst as usize * 32) as u64, bytemuck::cast_slice(&scope.attrs));
                             w_index.put((first * 12) as u64, bytemuck::cast_slice(&scope.indices));
-                            w_tri.put((first * 16) as u64, bytemuck::cast_slice(&tri_rows));
+                            w_tri.put((first * crate::indexed::RECORD_BYTES) as u64, bytemuck::cast_slice(&crate::indexed::records(&scope.indices, &tri_rows)));
                             if vcolors {
                                 // White where it has none: the room's slots may hold an earlier mesh's.
                                 let c = c.filter(|_| im.colored).unwrap_or_else(|| vec![scene::WHITE; t.len()]);

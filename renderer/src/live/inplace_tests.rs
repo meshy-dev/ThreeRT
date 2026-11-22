@@ -151,13 +151,17 @@ struct Triangles {
     prev: Vec<f32>,
 }
 
-/// `n` triangles from `first` as the GPU has them, their vertices counted from `base`; their previous positions from
-/// `prev` on (None: not read).
+/// `n` triangles from `first` as the GPU has them (their records: their vertices, which the indices' own array has
+/// too, and their rows), their vertices counted from `base`; their previous positions from `prev` on (None: not
+/// read).
 fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u32>) -> Triangles {
     use crate::heap::Stream;
-    let up = &c.sc.up;
-    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
-    let rows: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * 16, n * 16);
+    let (up, size) = (&c.sc.up, crate::indexed::RECORD_BYTES as u64);
+    let records: Vec<crate::indexed::TriRecord> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * size, n * size);
+    let index: Vec<u32> = records.iter().flat_map(|r| [r[0], r[1], r[2]]).collect();
+    let alone: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
+    assert_eq!(index, alone, "triangles {first}..{}: a record's vertices are the indices' array's", first + n);
+    let rows: Vec<u32> = records.iter().flat_map(|r| r[crate::indexed::RECORD_ROW..].to_vec()).collect();
     let (positions, vattrs): (Vec<[f32; 4]>, Vec<[[f32; 4]; 2]>) = (read_back(c, &up.positions, 0, up.positions.size()), read_back(c, &up.vattrs, 0, up.vattrs.size()));
     let before: Vec<[f32; 4]> = prev.map_or(vec![], |_| read_back(c, &up.prev_pos, 0, up.prev_pos.size()));
     let mut out = Triangles { rows, ..Default::default() };
@@ -748,10 +752,9 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let (tables, up) = (&c.sc.tables, &c.sc.up);
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
-    // (The triangles as the kernel reads them: three indices and a row each, the vertices' positions.)
+    // (The triangles as the kernel reads them: a record each, its three vertices and its row; the vertices' positions.)
     let positions: Vec<[f32; 4]> = read_back(c, &up.positions, 0, up.positions.size());
-    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices), up.words.cap(Stream::Indices));
-    let tri_rows: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles));
+    let tri_records: Vec<crate::indexed::TriRecord> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / crate::indexed::RECORD_BYTES as u64 * crate::indexed::RECORD_BYTES as u64);
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
@@ -772,9 +775,10 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         }
         // (A mesh's indices count from its instance's first vertex; a world-space triangle's from the first of all.)
         let base = if e.inst == crate::NO_INST { 0 } else { c.sc.instances[e.inst as usize].verts };
-        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&positions[(base + index[e.tri as usize * 3 + k]) as usize][..3]));
+        let record = &tri_records[e.tri as usize];
+        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&positions[(base + record[k]) as usize][..3]));
         // (Its row: its material or its section, its object, its flags, its emitter + 1 or its index among its section's.)
-        let tri_row = &tri_rows[e.tri as usize * 4..][..4];
+        let tri_row = &record[crate::indexed::RECORD_ROW..];
         if e.inst == crate::NO_INST {
             assert_eq!(r, crate::GpuEmitterTri::of(e, p, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
             assert_eq!(tri_row[3], i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
