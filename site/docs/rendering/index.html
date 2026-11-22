@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreeRT Docs — rendering settings: resolution, denoisers, upscalers, latency</title>
+<meta name="description" content="How ThreeRT turns a few rays a pixel into a clean picture: the quality, reconstruction, frame generation and latency settings; ThreeRT's denoiser, MetalFX, DLSS and FSR; the Graphics settings of every client; the TypeScript API and custom providers.">
+<link rel="icon" href="../../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../css/threert.css">
+<style>
+  .doc { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 64px; align-items: start; padding-bottom: 112px; }
+  .toc { position: sticky; top: 96px; display: grid; gap: 2px; font-size: 14px; }
+  .toc a { text-decoration: none; color: var(--mute); padding: 6px 0 6px 14px; border-left: 1.5px solid var(--line); }
+  .toc a:hover { color: var(--bone); border-left-color: var(--bone-2); }
+  .toc .ext { margin-top: 14px; padding-left: 0; border-left: 0; color: var(--bone-2); }
+  .prose { max-width: 820px; min-width: 0; }
+  .prose section { padding: 0 0 64px; scroll-margin-top: 88px; }
+  .prose section + section { padding-top: 56px; border-top: 1px solid var(--line); }
+  .prose .num { display: block; font: 500 12.5px/1 var(--font-mono); color: var(--tungsten); margin-bottom: 14px; }
+  .prose h2 { font: 620 clamp(28px, 3vw, 38px)/1.08 var(--font-sans); letter-spacing: -0.04em; }
+  .prose h3 { font: 600 18px/1.3 var(--font-sans); letter-spacing: -0.015em; margin-top: 30px; }
+  .prose p { margin-top: 16px; color: var(--bone-2); font-size: 16px; line-height: 1.62; max-width: 70ch; }
+  .prose p a, .prose li a, .prose td a { color: var(--bone); }
+  .prose ul { margin: 16px 0 0; padding-left: 20px; color: var(--bone-2); display: grid; gap: 8px; max-width: 70ch; }
+  .prose .code { margin-top: 20px; font-size: 12.5px; line-height: 1.7; max-height: 460px; }
+  .prose .code.sh { color: var(--bone); }
+  .prose .code.sh .c { font-style: normal; }
+  .prose .acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+  .tbl { width: 100%; margin-top: 20px; border-collapse: collapse; font-size: 14.5px; }
+  .tbl th { text-align: left; font: 500 12px/1 var(--font-mono); color: var(--mute); padding: 0 16px 10px 0; border-bottom: 1px solid var(--line-2); }
+  .tbl td { padding: 11px 16px 11px 0; border-bottom: 1px solid var(--line); color: var(--bone-2); vertical-align: top; line-height: 1.5; }
+  .tbl td:first-child { white-space: nowrap; color: var(--bone); }
+  .tbl-wrap { overflow-x: auto; }
+  .callout { margin-top: 22px; padding: 16px 18px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--ink-1); font-size: 14.5px; line-height: 1.55; color: var(--bone-2); max-width: 70ch; }
+  .refs { margin-top: 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .refs a { display: block; text-decoration: none; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--ink-1); transition: border-color 0.2s; }
+  .refs a:hover { border-color: var(--line-2); }
+  .refs b { display: block; font: 600 15px/1.3 var(--font-sans); color: var(--bone); }
+  .refs span { display: block; margin-top: 5px; font-size: 13.5px; line-height: 1.5; color: var(--mute); }
+  /* A phone: each table row is a block, the command above what it does. */
+  @media (max-width: 700px) {
+    .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; }
+    .tbl thead { display: none; }
+    .tbl tr { padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .tbl td { padding: 0; border: 0; }
+    .tbl td:first-child { white-space: normal; line-height: 1.9; }
+    .tbl td + td { margin-top: 6px; }
+  }
+  @media (max-width: 960px) { .doc { grid-template-columns: 1fr; gap: 28px; } .toc { position: static; display: flex; flex-wrap: wrap; gap: 6px 18px; } .toc a { padding: 2px 0; border-left: 0; } .toc .ext { margin-top: 0; } .refs { grid-template-columns: 1fr; } }
+
+  .fig { margin-top: 24px; }
+  .fig video, .fig img { display: block; width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); background: #000; }
+  .fig figcaption { margin-top: 10px; font-size: 13.5px; line-height: 1.5; color: var(--mute); max-width: 80ch; }
+  .fig .labels { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 8px; font: 500 12.5px/1.3 var(--font-mono); color: var(--bone-2); }
+  .fig .labels span { padding-right: 8px; }
+  .pipe { margin-top: 22px; display: grid; gap: 10px; }
+  .pipe .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font: 500 13px/1.2 var(--font-mono); }
+  .pipe .row > b { min-width: 150px; font: 600 13.5px/1.3 var(--font-sans); color: var(--bone); }
+  .pipe .st { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--ink-1); color: var(--bone-2); }
+  .pipe .st.v { border-color: var(--tungsten); color: var(--tungsten); }
+  .pipe .st.wide { flex: 0 0 auto; }
+  .pipe .ar { color: var(--mute); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+  @media (max-width: 700px) { .two { grid-template-columns: 1fr; } .pipe .row > b { min-width: 0; width: 100%; } }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="logo" href="../../" aria-label="ThreeRT home"><img src="../../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+    <div class="links"><a href="https://threert.app/" rel="noopener">Apps</a><a href="../../download/">Download</a><a href="../../docs/" aria-current="page">Docs</a><a class="star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub" title="Star ThreeRT on GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star</span><b data-stars hidden></b></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
+  </div>
+</nav>
+
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Docs · Rendering settings</span>
+    <h1 class="h-1">A few rays a pixel.<br><span class="mute">A clean picture.</span></h1>
+    <p class="lede">A path tracer can afford one or two rays a pixel in a real-time frame, at less than the screen’s resolution. Four settings decide how that becomes what you see: how much is traced, who removes the noise and fills in the pixels, whether frames are added, and how far the GPU may run behind. Each is a request the device answers, and the answer is always readable.</p>
+  </div>
+</header>
+
+<div class="wrap doc">
+  <nav class="toc" aria-label="On this page">
+    <a href="#settings">1 · Four settings</a>
+    <a href="#reconstruction">2 · Denoise, then upscale</a>
+    <a href="#methods">3 · Methods and devices</a>
+    <a href="#clients">4 · In the clients</a>
+    <a href="#code">5 · In code</a>
+    <a href="#status">6 · What ran, and why</a>
+    <a href="#providers">7 · Your own provider</a>
+    <a href="#numbers">8 · What it costs</a>
+    <a href="#next">9 · Not yet</a>
+    <a href="../">← Getting started</a>
+    <a class="ext" href="https://github.com/meshy-dev/ThreeRT/blob/main/docs/RUNTIME.md#live-rendering-settings" rel="noopener">RUNTIME.md ↗</a>
+  </nav>
+
+  <main class="prose">
+    <figure class="fig" style="margin-top:0">
+      <video src="../../media/rendering/kaleido-3up.mp4" poster="../../media/rendering/kaleido-3up.webp" autoplay muted loop playsinline preload="metadata" aria-label="Kaleido: the traced input, ThreeRT's denoiser and MetalFX's, side by side"></video>
+      <div class="labels"><span>The trace, not denoised</span><span>ThreeRT’s denoiser</span><span>MetalFX’s denoiser</span></div>
+      <figcaption>Kaleido, a hall of mirrors and glass lit only by hundreds of glowing orbs: the same frames, 1:1 crops of a 1920 × 1080 picture traced at 960 × 540 with one ray a pixel, at half speed. Recorded on an M3 Max with <code>tools/denoise-demo</code>.</figcaption>
+    </figure>
+
+    <section id="settings" style="margin-top:56px">
+      <span class="num">01</span>
+      <h2>Four settings</h2>
+      <p>Between what a frame can afford and what is shown there are four gaps. Each setting closes one, and only one, so they can be chosen apart.</p>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Setting</th><th>The gap</th><th>ThreeRT’s own</th><th>Vendor technology</th></tr></thead>
+        <tbody>
+          <tr><td><code>quality</code></td><td>How many rays: the resolution every later stage works from</td><td>Dynamic resolution (<code>auto</code>), or a fixed share</td><td>A budget, not a technique</td></tr>
+          <tr><td><code>reconstruction</code></td><td>Noise, then missing pixels</td><td>A denoiser and a temporal upscaler</td><td>MetalFX, DLSS (Super Resolution, Ray Reconstruction), FSR</td></tr>
+          <tr><td><code>frameGeneration</code></td><td>Frames shown per frame rendered</td><td>None</td><td>None integrated yet (<a href="#next">below</a>)</td></tr>
+          <tr><td><code>latency</code></td><td>Input to photon</td><td>One frame queued instead of two</td><td>Not yet: Reflex, Anti-Lag, XeLL</td></tr>
+        </tbody>
+      </table></div>
+      <p>“Neural rendering” is not a fifth setting: it says how something is done, not which gap it closes. A neural denoiser or upscaler is a reconstruction method; a neural radiance cache would be a lighting option, neural texture compression an asset format.</p>
+      <p><code>quality</code> takes <code>auto</code>, <code>native</code> (100 %), <code>quality</code> (2/3), <code>balanced</code> (0.58), <code>performance</code> (1/2), <code>ultra-performance</code> (1/3) or a number. The presets are the vendors’ ratios exactly: a third of 1920 is 640, the smallest input DLSS takes at 1080p, where a typed 0.333 would give 639.</p>
+    </section>
+
+    <section id="reconstruction">
+      <span class="num">02</span>
+      <h2>Denoise, then upscale</h2>
+      <p>Reconstruction is two jobs in a fixed order. First the noise: a pixel’s one ray is an estimate, and neighbouring pixels and earlier frames make it a good one. Then the pixels: the image is traced smaller than the screen and brought to its size from the history of earlier frames, which is also what anti-aliases it.</p>
+      <p>Vendor technology takes over the second job, or both, and that is the only distinction the engine makes:</p>
+      <div class="pipe" aria-label="The reconstruction stage, three ways">
+        <div class="row"><b>ThreeRT’s own</b><span class="st">trace</span><span class="ar">→</span><span class="st">ThreeRT denoiser</span><span class="ar">→</span><span class="st">ThreeRT upscaler</span><span class="ar">→</span><span class="st">exposure, bloom, tone</span></div>
+        <div class="row"><b>An upscaler</b><span class="st">trace</span><span class="ar">→</span><span class="st">ThreeRT denoiser</span><span class="ar">→</span><span class="st v">MetalFX · DLSS · FSR</span><span class="ar">→</span><span class="st">exposure, bloom, tone</span></div>
+        <div class="row"><b>A joint denoiser</b><span class="st">trace + guides</span><span class="ar">→</span><span class="st v wide">MetalFX denoiser · DLSS-RR</span><span class="ar">→</span><span class="st">exposure, bloom, tone</span></div>
+      </div>
+      <p>An <b>upscaler</b> reads ThreeRT’s denoised image, depth, motion and a reactive mask. A <b>joint denoiser</b> reads the noisy trace itself, with the guides it needs to tell lighting from texture: diffuse and specular albedo, the normal, roughness, how far the reflected ray went, and an overlay of what has no noise to remove (lights and sky seen directly, or in a mirror). One network that sees the raw signal keeps detail a separate denoiser would have averaged away first, and keeps one history instead of two.</p>
+      <p>Because the two read different signals, they are two contracts, not two flavours of one. The engine packs the signals for both, and takes the result back into its own exposure, bloom, depth of field and tone mapping, so a vendor’s code is an adapter of a few calls.</p>
+    </section>
+
+    <section id="methods">
+      <span class="num">03</span>
+      <h2>Methods and devices</h2>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th><code>reconstruction</code></th><th>Denoise</th><th>Upscale</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><td><code>builtin</code></td><td>ThreeRT</td><td>ThreeRT, temporal</td><td>Everywhere (the default)</td></tr>
+          <tr><td><code>metalfx</code></td><td>ThreeRT</td><td>MetalFX temporal scaler</td><td>macOS 13+, iOS 16+</td></tr>
+          <tr><td><code>metalfx-denoised</code></td><td colspan="2">MetalFX temporal denoised scaler, both</td><td>macOS 26+ on Apple silicon, iOS 26+</td></tr>
+          <tr><td><code>dlss</code></td><td>ThreeRT</td><td>DLSS Super Resolution; DLAA at 100 %</td><td>NVIDIA RTX, Windows or Linux, Vulkan, an engine built with DLSS</td></tr>
+          <tr><td><code>dlss-rr</code></td><td colspan="2">DLSS Ray Reconstruction, both</td><td>As <code>dlss</code></td></tr>
+          <tr><td><code>fsr</code></td><td>ThreeRT</td><td>FSR 1 (spatial, no history)</td><td>Everywhere, browsers too</td></tr>
+          <tr><td><code>off</code></td><td>None</td><td>None, no history</td><td>Everywhere: the trace as it is, to compare</td></tr>
+          <tr><td><code>auto</code></td><td colspan="3">The best this device runs: on a Mac or an iPhone the MetalFX denoiser, then its upscaler; with DLSS, Ray Reconstruction, then Super Resolution; else ThreeRT’s own</td></tr>
+        </tbody>
+      </table></div>
+      <p>A list is an order of preference: <code>["dlss-rr", "metalfx-denoised", "builtin"]</code> runs the first one this device has, and ThreeRT’s own ends every list. The ThreeRT clients run every method of their platform except DLSS, whose SDK they do not ship; DLSS is for engines you build yourself (<a href="https://github.com/meshy-dev/ThreeRT/blob/main/docs/RUNTIME.md#nvidia-dlss-setup" rel="noopener">setup</a>).</p>
+      <figure class="fig">
+        <img src="../../media/rendering/iphone-metalfx.webp" alt="Neon reflections on an iPhone 17 Pro Max with MetalFX's denoiser" loading="lazy" width="1056" height="608">
+        <figcaption>MetalFX’s denoiser on an iPhone 17 Pro Max (A19 Pro): the client’s own picture, traced at 594 × 334 for the phone’s 959 × 540 view, about 50 frames a second.</figcaption>
+      </figure>
+    </section>
+
+    <section id="clients">
+      <span class="num">04</span>
+      <h2>In the clients</h2>
+      <p>Every ThreeRT client has a <b>Graphics</b> section in its settings, with the same three choices worded the same way, and only the methods the device has:</p>
+      <ul>
+        <li><b>Resolution</b>: Automatic (the client’s dynamic resolution, which holds the frame rate), or a fixed share of the picture.</li>
+        <li><b>Denoiser</b>: ThreeRT, Best on this device, or a method by name: MetalFX denoiser and MetalFX upscaler on a Mac and an iPhone, FSR 1, Off.</li>
+        <li><b>Latency</b>: Automatic, Off, or Low latency.</li>
+      </ul>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Client</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr><td>macOS</td><td>Settings › Graphics, with the method running in the open game and its share of the view; Game › Denoiser in the menu bar</td></tr>
+          <tr><td>iPhone</td><td>The gear on Home, with what the last game ran</td></tr>
+          <tr><td>Steam Deck, Linux</td><td>Settings: A steps to the next choice, Left and Right move through them</td></tr>
+          <tr><td>Android</td><td>Settings › Picture</td></tr>
+          <tr><td>Windows</td><td>Settings › Graphics</td></tr>
+        </tbody>
+      </table></div>
+      <p>In a game, the pause menu’s <b>Denoiser</b> line shows the method that runs and switches between ThreeRT’s own and the best the device has, on every client: the quickest way to compare them on your own scene.</p>
+      <figure class="fig">
+        <img src="../../media/rendering/macos-settings.webp" alt="ThreeRT for macOS, Settings, Graphics: Resolution, Denoiser, Latency, and what is running" loading="lazy" width="1080" height="600" style="max-width:540px">
+        <figcaption>ThreeRT for macOS: the denoiser asked for is “Best on this device”, and the open game runs MetalFX’s at 34 % of the view.</figcaption>
+      </figure>
+    </section>
+
+    <section id="code">
+      <span class="num">05</span>
+      <h2>In code</h2>
+      <p>A game can ask for settings itself, for instance a cinematic scene that wants the best denoiser. These are the device’s view settings, not scene state: they are not sent to other players, and the player’s own choice in the client can change them again.</p>
+      <pre class="code" id="tsCode" aria-label="TypeScript">import { rendering } from "@threert/scene";
+
+rendering.set({
+  quality: "performance",
+  reconstruction: ["metalfx-denoised", "dlss-rr", "builtin"],
+  latency: "auto",
+});
+
+const s = rendering.status();
+// s.reconstruction: { requested, active, denoise, upscale,
+//                     fallback, skipped: [{ method, reason, detail }] }
+// s.quality: { requested, scale, dynamic }
+// s.latency: { requested, active, framesInFlight }</pre>
+      <p><code>set</code> changes the settings it is given from the next frame, returns <code>true</code> when a renderer took the request (not a support check), and throws a <code>TypeError</code> for a name it does not know. Outside the client, the engine’s own commands take the same settings:</p>
+      <pre class="code sh" aria-label="Terminal"><span class="c">$</span> threert-render play game.js --quality performance \
+    --reconstruction metalfx-denoised,builtin --latency on
+<span class="c"># a running session, one JSON line on stdin:</span>
+{"cmd":"rendering","reconstruction":["dlss-rr","dlss"],"quality":"balanced"}</pre>
+      <p>In the engine’s viewer, <kbd>M</kbd> switches between ThreeRT’s own and <code>auto</code>, and <kbd>N</kbd> steps through every method; the title bar says which ran.</p>
+    </section>
+
+    <section id="status">
+      <span class="num">06</span>
+      <h2>What ran, and why</h2>
+      <p>Nothing falls back silently. The status of every frame says which method ran, who denoised and who upscaled, and for each method tried before it, why not:</p>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Reason</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>unavailable</code></td><td>Not in this build or on this platform (DLSS on a Mac), or no provider by that name</td></tr>
+          <tr><td><code>unsupported</code></td><td>The device, the OS or the size is outside what it takes, with the provider’s own sentence: “the MetalFX temporal denoised scaler takes outputs 1.00x to 3.00x its input; 637x358 to 2546x1432 is 4.00x”</td></tr>
+          <tr><td><code>provider-error</code></td><td>It failed; ThreeRT’s own takes over from that frame</td></tr>
+          <tr><td><code>diagnostic-view</code></td><td>A view mode (base colour, normals) is on: those are ThreeRT’s own buffers</td></tr>
+        </tbody>
+      </table></div>
+      <p>Each provider also says which render scales it takes. Under <code>auto</code> quality, dynamic resolution stays within the range of the method you asked for: a big window the governor would hold at a quarter of its pixels goes up to a third, where MetalFX runs, instead of quietly keeping ThreeRT’s own.</p>
+    </section>
+
+    <section id="providers">
+      <span class="num">07</span>
+      <h2>Your own provider</h2>
+      <p>A host that embeds the engine in Rust can add a method of either kind and select it as <code>custom:&lt;id&gt;</code>, from Rust or from game code:</p>
+      <pre class="code" id="rsCode" aria-label="Rust">impl UpscaleProvider for MyScaler {
+    fn prepare(&amp;mut self, gpu: &amp;Gpu, size: ReconstructionSize) -&gt; Result&lt;Prepared&gt; {
+        Ok(Prepared::ready(size)) // or Prepared::Unsupported("why".into())
+    }
+    fn encode(&amp;mut self, f: ReconstructionFrame, e: &amp;mut CommandEncoder)
+        -&gt; Result&lt;Option&lt;CommandBuffer&gt;&gt; {
+        // read f.color, f.depth, f.motion, f.reactive;
+        // write f.output (HDR, in f.radiance_unit nits)
+        Ok(None)
+    }
+}
+live.register_upscaler("custom:my-scaler", MyScaler::new())?;   // or register_joint_denoiser</pre>
+      <p>The engine owns the contract: it packs every texture (formats, units and conventions are documented on <code>ReconstructionFrame</code> and <code>JointGuides</code> in <code>renderer/src/live/reconstruction.rs</code>), runs a native command buffer the provider returns in order, and keeps post-processing and presentation. MetalFX and DLSS are written exactly this way.</p>
+    </section>
+
+    <section id="numbers">
+      <span class="num">08</span>
+      <h2>What it costs</h2>
+      <p>Measured on an M3 Max at a 1920 × 1080 picture traced at half its size, Kaleido running in real time:</p>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Denoiser</th><th>Frame rate</th><th>GPU a frame</th></tr></thead>
+        <tbody>
+          <tr><td>ThreeRT’s own</td><td>77 fps</td><td>12.6 ms</td></tr>
+          <tr><td>MetalFX denoiser</td><td>68 fps</td><td>13.1 ms</td></tr>
+        </tbody>
+      </table></div>
+      <p>So MetalFX buys the picture, not frames: in Kaleido it is far cleaner (walls without sparkle, readable reflections in the chrome, no smeared orbs). It is not better everywhere: in Bistro at night ThreeRT’s own stays closer to the offline reference, which MetalFX renders a little darker and greyer. On an RTX 5070 Laptop, DLSS at half resolution ran at the cost of ThreeRT’s own upscaler at the same scale and matched the image quality of ThreeRT’s at two thirds, 1.6 times faster. Try your scene: the pause menu switches it.</p>
+      <figure class="fig">
+        <img src="../../media/rendering/kaleido-split.webp" alt="Kaleido: the left half with ThreeRT's denoiser, the right half with MetalFX's, the same frame" loading="lazy" width="1440" height="810">
+        <figcaption>The same frame of Kaleido: ThreeRT’s denoiser on the left half, MetalFX’s on the right.</figcaption>
+      </figure>
+    </section>
+
+    <section id="next">
+      <span class="num">09</span>
+      <h2>Not yet</h2>
+      <ul>
+        <li><b>Frame generation</b> is a setting with no method behind it: asking for <code>2x</code> reports <code>unavailable</code>. Generating frames needs the engine to own presentation and to draw the HUD apart from the picture.</li>
+        <li><b>Latency</b> is the engine’s own queue depth; no vendor’s low-latency mode is connected.</li>
+        <li><b>More vendors</b>: XeSS, FSR 2 and later, Arm’s and Qualcomm’s upscalers, DirectSR. Each is an adapter on one of the two contracts.</li>
+      </ul>
+    </section>
+  </main>
+</div>
+
+<footer class="foot">
+  <div class="wrap cols">
+    <div>
+      <a class="logo" href="../../" aria-label="ThreeRT home"><img src="../../brand/mark.svg" alt=""><span>Three<span class="rt">RT</span></span></a>
+      <p style="margin-top:14px">Hardware-accelerated ray tracing behind a three.js-style API.</p>
+      <div class="site"><a href="https://threert.app/" rel="noopener">Apps</a><a href="../../download/">Download</a><a href="../../docs/">Docs</a><a class="star" href="https://github.com/meshy-dev/ThreeRT" rel="noopener" aria-label="Star ThreeRT on GitHub" title="Star ThreeRT on GitHub"><svg class="si" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.77-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 .2Z"/></svg><span>Star</span><b data-stars hidden></b></a><a class="ic" href="https://discord.gg/n7vsVmAKCK" rel="noopener" aria-label="ThreeRT on Discord" title="Discord"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a><a class="ic" href="https://x.com/ThreeRT3D" rel="noopener" aria-label="ThreeRT on X" title="X"><svg class="si" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z"/></svg></a></div>
+      <p class="legal">A research project from <a href="https://meshy.ai/" rel="noopener">MeshyAI</a> · © 2026 MeshyAI · <a href="../../privacy/">Privacy</a></p>
+    </div>
+    <div class="note">
+      <p>The engine, <code>@threert/scene</code> and <code>@threert/gameplay</code> are open source: <a href="https://github.com/meshy-dev/ThreeRT" rel="noopener">meshy-dev/ThreeRT</a>. The clients are free to use.</p>
+      <p>three.js is an independent open-source project; ThreeRT is not affiliated with it.</p>
+    </div>
+  </div>
+</footer>
+
+<script type="module">
+  import { $, highlight } from "../../js/threert.js";
+  import { guard } from "../../js/site.js";
+  guard("code", () => { for (const id of ["#tsCode", "#rsCode"]) { const el = $(id); el.innerHTML = highlight(el.textContent); } });
+</script>
+
+</body>
+</html>
