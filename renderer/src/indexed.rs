@@ -127,6 +127,21 @@ pub fn shared_skinned(source: &[[crate::skin::SkinCorner; 3]], tris: &[[Vec3A; 3
     )
 }
 
+/// The model's vertices a skinned mesh's are skinned from: for each vertex `scope` found (`shared_skinned`), the
+/// corner of the model that was it first.
+pub fn source_vertices(source: &[[crate::skin::SkinCorner; 3]], scope: &Scope) -> Vec<crate::skin::SkinCorner> {
+    let mut out = vec![crate::skin::SkinCorner::default(); scope.positions.len()];
+    let mut seen = vec![false; out.len()];
+    for (tri, from) in scope.indices.iter().zip(source) {
+        for (c, &v) in tri.iter().enumerate() {
+            if !std::mem::replace(&mut seen[v as usize], true) {
+                out[v as usize] = from[c];
+            }
+        }
+    }
+    out
+}
+
 /// A scope's triangles with three vertices each: what is written whole, a triangle at a time.
 pub fn apart(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
     let mut s = Scope::default();
@@ -155,6 +170,9 @@ pub struct Indexed {
     pub meshes: Vec<(u32, u32)>,
     /// The world-space triangles' vertices: the first so many (the still ones', then those that move).
     pub flat: u32,
+    /// By skin source (`Scene::skin_sources`): the model's vertices a mesh of it is skinned from (`source_vertices`)
+    /// and its triangles' indices, which every mesh of the source has. Empty: no mesh is skinned from it.
+    pub skins: Vec<(Vec<crate::skin::SkinCorner>, Vec<[u32; 3]>)>,
     /// The vertices that move (the dynamic world-space triangles', then the deforming meshes'): the first and how
     /// many. Their previous frame's positions are kept in this order.
     pub dynamic: (u32, u32),

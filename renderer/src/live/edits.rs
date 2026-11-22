@@ -1926,15 +1926,17 @@ impl LiveCore {
         // models in parallel). Nothing is written unless every one is a unit with such a tree.
         let mut trees: Vec<(u32, u32, Vec<crate::bvh::GpuNode>, (glam::Vec3A, glam::Vec3A))> = vec![];
         if let Some(units) = &self.sc.up.units {
-            let (sources, shapes) = (&self.sc.skin_sources, &self.sc.skin_trees);
+            let (skins, shapes) = (&self.sc.skins, &self.sc.skin_trees);
             let made: Vec<Option<(u32, u32, Vec<crate::bvh::GpuNode>, (glam::Vec3A, glam::Vec3A))>> = work
                 .par_iter()
                 .map(|(g, rows)| {
                     let sk = &r.skinned[*g as usize];
-                    let (corners, shape) = (sources.get(sk.source as usize)?, shapes.get(sk.source as usize)?);
-                    let tree = units.trees.get(sk.mesh as usize).copied().flatten().filter(|t| t.len as usize == shape.len() && !shape.is_empty() && corners.len() == sk.order.len())?;
+                    let ((vertices, index), shape) = (skins.get(sk.source as usize)?, shapes.get(sk.source as usize)?);
+                    let tree = units.trees.get(sk.mesh as usize).copied().flatten().filter(|t| t.len as usize == shape.len() && !shape.is_empty() && index.len() == sk.order.len())?;
                     let mut nodes = shape.clone();
-                    let bounds = crate::units::refit(&mut nodes, |i| corners[i].map(|c| glam::Vec3A::from(crate::skin::skin_corner(&c, rows).0)));
+                    // (The model's vertices placed once each; a triangle's corners through its indices.)
+                    let placed: Vec<glam::Vec3A> = vertices.iter().map(|c| glam::Vec3A::from(crate::skin::skin_corner(c, rows).0)).collect();
+                    let bounds = crate::units::refit(&mut nodes, |i| index[i].map(|v| placed[v as usize]));
                     Some((sk.mesh, tree.root, nodes, bounds))
                 })
                 .collect();
@@ -1951,7 +1953,8 @@ impl LiveCore {
             .iter()
             .map(|(g, _)| {
                 let sk = &self.sc.tables.retained.skinned[*g as usize];
-                (self.sc.gpu_instances[sk.instance as usize].info[0] as usize, self.sc.instances[sk.instance as usize].prev as usize, sk.order.len())
+                let i = &self.sc.instances[sk.instance as usize];
+                (i.verts as usize, i.prev as usize, self.sc.mesh_verts[sk.mesh as usize].1 as usize)
             })
             .collect();
         self.keep_prev_spans(&posed.iter().chain(&self.pose_spans).copied().collect::<Vec<_>>());
@@ -2063,18 +2066,19 @@ impl LiveCore {
         heap.write(q, Table::LightTree, t.moving_nodes as u64 * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
     }
 
-    /// Copies the GPU's current vertices of a dynamic-tail span into `prev_verts` (submitted before any write queued
-    /// after it, so it reads what the last frame traced).
+    /// Copies the GPU's current positions of a span of the dynamic tail's triangles (three vertices each, the first
+    /// of the vertices that move) into the previous positions (submitted before any write queued after it, so it
+    /// reads what the last frame traced).
     pub(super) fn keep_prev(&self, (lo, hi): (usize, usize)) {
         let up = &self.sc.up;
-        let first = self.sc.dynamic.0;
+        let first = self.sc.dynamic_verts.0 as usize;
         let mut e = self.g.device.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(&up.verts, ((first + lo) * 48) as u64, &up.prev_verts, (lo * 48) as u64, ((hi - lo) * 48) as u64);
+        e.copy_buffer_to_buffer(&up.positions, ((first + lo * 3) * 16) as u64, &up.prev_pos, (lo * 48) as u64, ((hi - lo) * 48) as u64);
         self.g.queue.submit([e.finish()]);
     }
 
-    /// Likewise for deforming meshes, each where it lies: (its first triangle in the scene's, the first of its
-    /// previous vertices, how many).
+    /// Likewise for deforming meshes, each where it lies: (its first vertex in the scene's, the first of its
+    /// previous positions, how many vertices).
     pub(super) fn keep_prev_spans(&self, spans: &[(usize, usize, usize)]) {
         if spans.is_empty() {
             return;
@@ -2082,7 +2086,7 @@ impl LiveCore {
         let up = &self.sc.up;
         let mut e = self.g.device.create_command_encoder(&Default::default());
         for (verts, prev, n) in merge_spans(spans.to_vec()) {
-            e.copy_buffer_to_buffer(&up.verts, (verts * 48) as u64, &up.prev_verts, (prev * 48) as u64, (n * 48) as u64);
+            e.copy_buffer_to_buffer(&up.positions, (verts * 16) as u64, &up.prev_pos, (prev * 16) as u64, (n * 16) as u64);
         }
         self.g.queue.submit([e.finish()]);
     }

@@ -774,8 +774,6 @@ pub struct SkinGpu {
     /// Each source's first triangle among the corners (`Scene::skin_sources`), and the palette's matrices in use.
     source_first: Vec<u32>,
     palette_end: u32,
-    /// Software traversal: what stands at the BLAS input's binding (the pass writes none there).
-    no_blas: Option<wgpu::Buffer>,
 }
 
 impl SkinGpu {
@@ -827,9 +825,9 @@ impl SkinGpu {
     }
 }
 
-fn skin_bind_group(d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, own: [&wgpu::Buffer; 5], verts: &wgpu::Buffer, attrs: &wgpu::Buffer, blas_verts: &wgpu::Buffer) -> wgpu::BindGroup {
+fn skin_bind_group(d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, own: [&wgpu::Buffer; 5], positions: &wgpu::Buffer, vattrs: &wgpu::Buffer) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = own.iter().enumerate().map(|(k, b)| buffer_entry(k as u32, b)).collect();
-    entries.extend([buffer_entry(5, verts), buffer_entry(6, attrs), buffer_entry(7, blas_verts)]);
+    entries.extend([buffer_entry(5, positions), buffer_entry(6, vattrs)]);
     d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("skin"), layout: &pipeline.get_bind_group_layout(0), entries: &entries })
 }
 
@@ -2795,12 +2793,7 @@ impl Gpu {
         };
         // The skinning pass, a job each mesh that deforms: under hardware traversal (it writes the BLASes' input too),
         // and under software traversal where such a mesh is a unit.
-        let skin = match (&accel, &scene.units) {
-            _ if scene.retained.skinned.is_empty() => None,
-            (Some(a), _) => Some(self.skin_pass(scene, a.pool_first, &b_verts, &b_attrs, Some(&a.verts))),
-            (None, Some(_)) => Some(self.skin_pass(scene, groups.iter().sum(), &b_verts, &b_attrs, None)),
-            _ => None,
-        };
+        let skin = (!scene.retained.skinned.is_empty() && (accel.is_some() || scene.units.is_some())).then(|| self.skin_pass(scene, &b_pos, &b_vattr));
         self.queue.submit([]);
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         timings.push(("upload_ms".into(), t0.elapsed().as_secs_f64() * 1000.0));
@@ -3490,10 +3483,7 @@ impl Gpu {
             f.bg = self.emitter_fill_bind_group(&f.runs, &up.verts, &up.heap);
         }
         if let Some(k) = &mut up.skin {
-            // (The BLASes' input, or what stands there under software traversal.)
-            if let Some(blas) = up.accel.as_ref().map(|a| &a.verts).or(k.no_blas.as_ref()) {
-                k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, blas);
-            }
+            k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.positions, &up.vattrs);
         }
         if let Some(a) = &mut up.accel {
             (a.positions, a.indices, a.index_first) = (up.positions.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
@@ -3511,26 +3501,25 @@ impl Gpu {
 
     /// The skinning pass of `scene`: its pipeline, the models' corners, a job each skinned model, and room for a frame's
     /// work and every job's palette.
-    fn skin_pass(&self, scene: &Scene, pool_first: usize, verts: &wgpu::Buffer, attrs: &wgpu::Buffer, blas_verts: Option<&wgpu::Buffer>) -> SkinGpu {
+    fn skin_pass(&self, scene: &Scene, positions: &wgpu::Buffer, vattrs: &wgpu::Buffer) -> SkinGpu {
         let d = &self.device;
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("skin"), source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/skin.wgsl").into()) });
-        let blas = [("BLAS", if blas_verts.is_some() { 1.0 } else { 0.0 })];
-        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("skin"), layout: None, module: &module, entry_point: Some("main"), compilation_options: wgpu::PipelineCompilationOptions { constants: &blas, ..Default::default() }, cache: self.cache() });
-        let no_blas = blas_verts.is_none().then(|| d.create_buffer(&wgpu::BufferDescriptor { label: Some("skin no blas"), size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }));
-        let blas_verts = blas_verts.or(no_blas.as_ref()).unwrap();
+        let pipeline = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("skin"), layout: None, module: &module, entry_point: Some("main"), compilation_options: Default::default(), cache: self.cache() });
+        // The models' vertices one model after another (`indexed::Indexed::skins`).
+        let ix = &scene.indexed;
         let mut source_first = vec![];
         let mut at = 0u32;
-        for source in &scene.skin_sources {
+        for (vertices, _) in &ix.skins {
             source_first.push(at);
-            at += source.len() as u32;
+            at += vertices.len() as u32;
         }
-        let corners: Vec<crate::skin::SkinCorner> = scene.skin_sources.iter().flatten().flatten().copied().collect();
+        let corners: Vec<crate::skin::SkinCorner> = ix.skins.iter().flat_map(|s| s.0.iter().copied()).collect();
         let (mut jobs, mut matrices, mut blocks) = (vec![], 0u32, 0u32);
         for g in &scene.retained.skinned {
-            let m = &scene.meshes[g.mesh as usize];
-            jobs.push((SkinJob { first: pool_first as u32 + m.first, count: m.count, source: source_first[g.source as usize], palette: matrices }, g.palette_len));
+            let (first, count) = ix.meshes[g.mesh as usize];
+            jobs.push((SkinJob { first, count, source: source_first[g.source as usize], palette: matrices }, g.palette_len));
             matrices += g.palette_len;
-            blocks += m.count.div_ceil(SKIN_BLOCK);
+            blocks += count.div_ceil(SKIN_BLOCK);
         }
         let table: Vec<SkinJob> = jobs.iter().map(|j| j.0).collect();
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -3539,8 +3528,8 @@ impl Gpu {
         let (b_corners, b_table) = (init("skin corners", bytemuck::cast_slice(&corners)), init("skin jobs", bytemuck::cast_slice(&table)));
         let params = room("skin params", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let (b_blocks, palette) = (room("skin blocks", blocks as u64 * 8, storage), room("skin palette", matrices as u64 * 48, storage));
-        let bg = skin_bind_group(d, &pipeline, [&params, &b_blocks, &b_table, &b_corners, &palette], verts, attrs, blas_verts);
-        SkinGpu { pipeline, bg, params, blocks: b_blocks, table: b_table, corners: b_corners, palette, jobs, source_first, palette_end: matrices, no_blas }
+        let bg = skin_bind_group(d, &pipeline, [&params, &b_blocks, &b_table, &b_corners, &palette], positions, vattrs);
+        SkinGpu { pipeline, bg, params, blocks: b_blocks, table: b_table, corners: b_corners, palette, jobs, source_first, palette_end: matrices }
     }
 
     /// Skins the meshes of `work` (a job and its pose's palette each) on the GPU: their triangles, shading attributes

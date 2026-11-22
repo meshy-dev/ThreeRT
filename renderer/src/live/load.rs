@@ -14,10 +14,14 @@ pub(super) struct LoadedScene {
     pub(super) tri_instances: Vec<(u32, u32, u32)>,
     /// (A mesh the GPU skins has its build's pose here: `LiveCore::mesh_tris` has it as it is now.)
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
-    /// Software traversal with units: what the skinning pass skins each model from (`scene::Scene::skin_sources`) and
-    /// the shape of its meshes' trees (`skin_trees`), kept on the CPU: a new pose takes a tree's boxes again from
-    /// them (live/edits.rs `repose_skinned`). Empty under hardware traversal, whose BLASes the GPU builds.
-    pub(super) skin_sources: Vec<Vec<[crate::skin::SkinCorner; 3]>>,
+    /// By mesh: its first vertex and how many it has (`indexed::Indexed::meshes`); the vertices that move, the first
+    /// and how many (`Indexed::dynamic`); by skin source, the model's vertices its meshes are skinned from and their
+    /// triangles' indices (`Indexed::skins`).
+    pub(super) mesh_verts: Vec<(u32, u32)>,
+    pub(super) dynamic_verts: (u32, u32),
+    pub(super) skins: Vec<(Vec<crate::skin::SkinCorner>, Vec<[u32; 3]>)>,
+    /// Software traversal with units: the shape of each skin source's meshes' trees (`scene::Scene::skin_trees`): a
+    /// new pose takes a tree's boxes again from its vertices as posed (live/edits.rs `repose_skinned`).
     pub(super) skin_trees: Vec<Vec<crate::bvh::GpuNode>>,
     /// Software traversal: each pool triangle's section and its index in it (a unit's tree orders its mesh's
     /// triangles; live/edits.rs `mesh_places`). Empty under hardware traversal, where they lie by section.
@@ -267,7 +271,10 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let instance_features = gpu::instance_features(&sc);
     let pool_place: Vec<[u32; 2]> = if up.units.is_some() { sc.pool_attrs.iter().map(|a| [a.uv[3].to_bits(), a.x[3].to_bits()]).collect() } else { vec![] };
     let (pool_tris, meshes, instances) = (std::mem::take(&mut sc.pool_tris), std::mem::take(&mut sc.meshes), std::mem::take(&mut sc.instances));
-    let (skin_sources, skin_trees) = if up.units.is_some() { (std::mem::take(&mut sc.skin_sources), std::mem::take(&mut sc.skin_trees)) } else { (vec![], vec![]) };
+    let skin_trees = if up.units.is_some() { std::mem::take(&mut sc.skin_trees) } else { vec![] };
+    // (The vertices and the indices themselves are the GPU's now.)
+    let ix = std::mem::take(&mut sc.indexed);
+    let (mesh_verts, dynamic_verts, skins) = (ix.meshes, ix.dynamic, ix.skins);
     let (sections, rows) = (std::mem::take(&mut sc.sections), std::mem::take(&mut sc.rows));
     let mut gpu_instances = std::mem::take(&mut sc.gpu_instances);
     let proc_first = gpu_instances.len();
@@ -319,5 +326,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         },
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, skin_sources, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, mesh_verts, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

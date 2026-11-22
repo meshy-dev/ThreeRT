@@ -604,11 +604,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     // (A deforming mesh's previous vertices lie as its triangles do, counted from the first dynamic triangle: what
     // gpu.rs `prev_verts` holds at the build. Its instance's record says where.)
-    let first_dynamic: usize = groups[..4].iter().sum();
-    for i in &mut sc.instances {
-        let m = &sc.meshes[i.mesh as usize];
-        i.prev = if m.deforms { (pool_first - first_dynamic) as u32 + m.first } else { 0 };
-    }
     sc.gpu_instances = sc.instances.iter().map(|i| i.gpu(pool_first as u32 + sc.meshes[i.mesh as usize].first)).collect();
     // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
     // primitive counts from there).
@@ -896,9 +891,12 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     timings.push(("vertices".into(), sc.indexed.positions.len() as f64));
     // An instance's triangles count their vertices from its mesh's first; the previous positions from the first
     // vertex that moves.
+    // (A deforming mesh's previous positions: where its vertices are among those that move.)
     for (r, i) in sc.instances.iter_mut().enumerate() {
         i.verts = sc.indexed.meshes[i.mesh as usize].0;
+        i.prev = if sc.meshes[i.mesh as usize].deforms { i.verts - sc.indexed.dynamic.0 } else { 0 };
         sc.gpu_instances[r].info[2] = i.verts;
+        sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
     params.word_first[1][2] = sc.indexed.dynamic.0;
     Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
@@ -914,7 +912,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     use rayon::prelude::*;
     let still: usize = groups[..4].iter().sum();
     let flat: Vec<[Vec3A; 3]> = order.iter().map(|&i| sc.tris[i as usize]).collect();
-    let mut out = indexed::Indexed { meshes: vec![(0, 0); sc.meshes.len()], ..Default::default() };
+    let mut out = indexed::Indexed { meshes: vec![(0, 0); sc.meshes.len()], skins: vec![Default::default(); sc.skin_sources.len()], ..Default::default() };
     out.push(indexed::shared(&flat[..still], &sc.attrs[..still]), 0);
     let moving = out.positions.len() as u32;
     out.push(indexed::apart(&flat[still..], &sc.attrs[still..pool_first]), moving);
@@ -923,20 +921,24 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
     meshes.sort_by_key(|&m| sc.meshes[m].first);
-    let scopes: Vec<indexed::Scope> = meshes
+    // (A skinned mesh with its source: the model's vertices are found with its first mesh.)
+    let scopes: Vec<(indexed::Scope, Option<u32>)> = meshes
         .par_iter()
         .map(|&m| {
             let im = sc.meshes[m];
             let r = im.first as usize..(im.first + im.count) as usize;
             let (tris, attrs) = (&sc.pool_tris[r.clone()], &sc.attrs[pool_first + r.start..pool_first + r.end]);
-            match source_of.get(&(m as u32)).map(|&s| &sc.skin_sources[s as usize]).filter(|c| im.deforms && c.len() == tris.len()) {
-                Some(corners) => indexed::shared_skinned(corners, tris, attrs),
-                None => indexed::shared(tris, attrs),
+            match source_of.get(&(m as u32)).copied().filter(|&s| im.deforms && sc.skin_sources[s as usize].len() == tris.len()) {
+                Some(s) => (indexed::shared_skinned(&sc.skin_sources[s as usize], tris, attrs), Some(s)),
+                None => (indexed::shared(tris, attrs), None),
             }
         })
         .collect();
     let mut deforming = 0;
-    for (&m, s) in meshes.iter().zip(scopes) {
+    for (&m, (s, source)) in meshes.iter().zip(scopes) {
+        if let Some(k) = source.filter(|&k| out.skins[k as usize].1.is_empty()) {
+            out.skins[k as usize] = (indexed::source_vertices(&sc.skin_sources[k as usize], &s), s.indices.clone());
+        }
         // (A mesh's triangles follow the mesh's before it: the pool has no triangle that is no mesh's.)
         assert_eq!(out.indices.len(), pool_first + sc.meshes[m].first as usize, "the pool's triangles are its meshes', one after another");
         let n = s.positions.len() as u32;

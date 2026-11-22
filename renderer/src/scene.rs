@@ -203,7 +203,7 @@ pub struct Instance {
     /// (`rows_bits`).
     pub rows: u32,
     pub bits: u32,
-    /// An instance of a mesh that deforms: the first triangle of its previous frame's vertices (the kernel's
+    /// An instance of a mesh that deforms: where its vertices' positions of the previous frame begin (the kernel's
     /// `prev_verts`: its motion is its pose's and its transform's). 0 otherwise.
     pub prev: u32,
     /// Its mesh's first vertex (`indexed::Indexed::meshes`): its triangles' indices count from it.
