@@ -64,6 +64,8 @@ struct State<C> {
 struct Feature<C> {
     name: &'static str,
     state: Option<State<C>>,
+    /// The render scales (input / output width) its modes take at the output last prepared.
+    scales: Option<[f32; 2]>,
 }
 
 impl<C: NgxFeature> Feature<C> {
@@ -94,6 +96,7 @@ impl<C: NgxFeature> Feature<C> {
             &scaled[..]
         };
         let mut ranges = vec![];
+        let mut scales: Option<[f32; 2]> = None;
         for &(mode, _) in modes {
             let context = match C::create(gpu, sdk, size.output, mode) {
                 Ok(c) => c,
@@ -101,6 +104,9 @@ impl<C: NgxFeature> Feature<C> {
                 Err(e) => return Err(e).with_context(|| format!("create {} {mode:?} for {:?}", self.name, size.output)),
             };
             let r = context.range();
+            let (lo, hi) = (r.start()[0] as f32 / size.output[0] as f32, r.end()[0] as f32 / size.output[0] as f32);
+            scales = Some(scales.map_or([lo, hi], |[a, b]| [a.min(lo), b.max(hi)]));
+            self.scales = scales;
             if contains(&r, size.input) {
                 self.state = Some(State { context, mode, input: size.input, reset: true });
                 return Ok(Prepared::ready(size));
@@ -139,11 +145,12 @@ fn check_frame(f: &ReconstructionFrame<'_>) -> Result<()> {
 pub(super) struct Dlss(Feature<DlssSuperResolution>);
 
 impl Default for Dlss {
-    fn default() -> Self { Self(Feature { name: "DLSS Super Resolution", state: None }) }
+    fn default() -> Self { Self(Feature { name: "DLSS Super Resolution", state: None, scales: None }) }
 }
 
 impl UpscaleProvider for Dlss {
     fn prepare(&mut self, gpu: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared> { self.0.prepare(gpu, true, size) }
+    fn scale_range(&self) -> Option<[f32; 2]> { self.0.scales }
 
     fn encode(&mut self, frame: ReconstructionFrame<'_>, encoder: &mut CommandEncoder) -> Result<Option<CommandBuffer>> {
         check_frame(&frame)?;
@@ -167,11 +174,12 @@ impl UpscaleProvider for Dlss {
 pub(super) struct DlssRr(Feature<DlssRayReconstruction>);
 
 impl Default for DlssRr {
-    fn default() -> Self { Self(Feature { name: "DLSS Ray Reconstruction", state: None }) }
+    fn default() -> Self { Self(Feature { name: "DLSS Ray Reconstruction", state: None, scales: None }) }
 }
 
 impl JointProvider for DlssRr {
     fn prepare(&mut self, gpu: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared> { self.0.prepare(gpu, gpu.dlss_rr, size) }
+    fn scale_range(&self) -> Option<[f32; 2]> { self.0.scales }
 
     fn encode(&mut self, frame: ReconstructionFrame<'_>, g: JointGuides<'_>, encoder: &mut CommandEncoder) -> Result<Option<CommandBuffer>> {
         check_frame(&frame)?;

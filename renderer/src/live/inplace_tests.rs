@@ -3528,3 +3528,32 @@ fn a_joint_denoiser_gets_the_noisy_signal_and_the_guides() {
     let hdr = live.read_hdr().unwrap();
     assert!((hdr[p] / (4.0 * unit) - 1.0).abs() < 0.01 && (hdr[p + 2] / (12.0 * unit) - 1.0).abs() < 0.01, "{:?} at {unit}", &hdr[p..p + 3]);
 }
+
+/// Dynamic resolution below a provider's range does not lose it: the governor goes up to the lowest scale the method
+/// asked for takes (MetalFX: a third), and from there the method runs.
+#[cfg(metalfx)]
+#[test]
+fn dynamic_resolution_rises_to_the_range_of_the_method_asked_for() {
+    let Ok(g) = gpu::Gpu::new() else { return };
+    let mut live = LiveCore::new(g, &world(), Path::new("."), &crate::default_presets_dir(), 640, 360).unwrap();
+    live.view_mode = 0;
+    live.set_scale(0.0);
+    live.min_scale = 0.2;
+    live.render_scale = 0.25;
+    live.set_reconstruction(Method::MetalFxDenoised);
+    live.render(1, |_, _| {});
+    let st = live.reconstruction_status();
+    if st.skipped.first().is_some_and(|s| !s.2.contains("takes outputs")) {
+        eprintln!("MetalFX denoised unsupported here: {:?}", st.skipped);
+        return;
+    }
+    assert_eq!(live.reconstruction(), Method::Builtin, "4x is outside MetalFX's range: {:?}", st.skipped);
+    let floor = live.reconstructor.scale_floor().expect("a floor from MetalFX's range");
+    assert!((floor - 1.0 / 3.0).abs() < 0.01, "{floor}");
+    // A frame far over its time: the governor would go down, and goes to the floor instead.
+    (live.gpu_ms, live.gpu_frame, live.frame) = (200.0, 1000, 1021);
+    live.govern_resolution(60);
+    assert!(live.render_scale >= floor, "{} under {floor}", live.render_scale);
+    live.render(1, |_, _| {});
+    assert_eq!(live.reconstruction(), Method::MetalFxDenoised, "{:?}", live.reconstruction_status().skipped);
+}

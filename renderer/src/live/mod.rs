@@ -875,7 +875,10 @@ impl LiveCore {
         // Not in the first 2 s: those frames run while caches fill (Kabukichō's first frames at 0.7 take ~47 ms), and
         // the regular check settles the start as before.
         let warm = self.frame >= 120 || (clock && self.born.elapsed().as_secs_f32() >= 2.0);
-        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
+        // (The floor: the budget's, or higher where the reconstruction asked for takes no lower scale: MetalFX scales
+        // outputs up to 3x its input, so a third.)
+        let floor = self.min_scale.max(self.reconstructor.scale_floor().unwrap_or(0.0)).min(1.0);
+        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > floor { self.over_budget.0 + 1 } else { 0 };
         let urgent = self.over_budget.0 >= 2;
         // (By the clock only when 30 frames take longer than 0.75 s: at 40 frames a second and above the frame count
         // comes first, as it always did.)
@@ -887,10 +890,10 @@ impl LiveCore {
         self.over_budget.0 = 0;
         let before = self.render_scale;
         let budget = 1000.0 / fps as f32 * 0.9;
-        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(self.min_scale, 1.0);
+        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(floor, 1.0);
         // The hysteresis (0.03) does not hold the scale just short of either end: 0.525 with the floor as the target
         // kept the district's return drive at 21-22 ms.
-        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > self.min_scale);
+        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == floor && self.render_scale > floor) || self.render_scale < floor;
         // (The hysteresis, the steps and the grid of scales are a view in points'; on a display of k pixels a point the
         // same share of the rays is 1 / k of the scale. Left absolute, a Retina view held 0.325 at 17.3 ms: its target,
         // 0.30, was inside the hysteresis.)
@@ -899,6 +902,8 @@ impl LiveCore {
             // Down fast when far over budget (a heavy scene just opened), up slowly; straight to the target when urgent.
             let step = if urgent { target - self.render_scale } else { (target - self.render_scale).clamp(if self.gpu_ms > budget * 1.5 { -0.3 } else { -0.15 } / k, 0.1 / k) };
             self.render_scale = ((self.render_scale + step) * 40.0 * k).round() / (40.0 * k);
+            // (On the grid, not below the floor: a step rounded down under a provider's range would lose it again.)
+            if self.render_scale < floor { self.render_scale = floor; }
         }
         if self.render_scale != before {
             // `frame` is already the next frame's index (render advanced it): the first one at the new scale.

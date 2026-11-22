@@ -37,11 +37,13 @@ pub(super) struct MetalFx {
     range: Option<[f32; 2]>,
     /// A new scaler: no history yet.
     fresh: bool,
+    /// The render scales it takes (input / output), as the system reported them at the last prepare.
+    scales: Option<[f32; 2]>,
 }
 
 impl MetalFx {
-    pub(super) fn upscaler() -> Self { Self { denoise: false, scaler: None, key: None, range: None, fresh: true } }
-    pub(super) fn denoiser() -> Self { Self { denoise: true, scaler: None, key: None, range: None, fresh: true } }
+    pub(super) fn upscaler() -> Self { Self { denoise: false, scaler: None, key: None, range: None, fresh: true, scales: None } }
+    pub(super) fn denoiser() -> Self { Self { denoise: true, scaler: None, key: None, range: None, fresh: true, scales: None } }
 
     fn name(&self) -> &'static str {
         if self.denoise { "the MetalFX temporal denoised scaler" } else { "the MetalFX temporal scaler" }
@@ -70,6 +72,8 @@ impl MetalFx {
                 let ptr = std::ptr::from_ref(&**dev.raw_device()).cast();
                 NonNull::new(unsafe { threert_fx_create(ptr, self.denoise, dynamic_inputs, input[0], input[1], output[0], output[1], scales.as_mut_ptr(), &mut why) })
             });
+            // (MetalFX reports output / input; a render scale is its inverse.)
+            self.scales = (why == 0 || why == 2).then(|| [1.0 / scales[1].max(1e-3), 1.0 / scales[0].max(1e-3)]);
             let Some(raw) = raw else {
                 return Prepared::Unsupported(match why {
                     1 => format!("this device has no {} (macOS {} or iOS {} or later, Apple silicon)", self.name(), if self.denoise { 26 } else { 13 }, if self.denoise { 26 } else { 16 }),
@@ -125,6 +129,7 @@ impl UpscaleProvider for MetalFx {
         MetalFx::encode(self, &frame, None)
     }
     fn untimed_gpu_ms(&self) -> f32 { if self.scaler.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 } }
+    fn scale_range(&self) -> Option<[f32; 2]> { self.scales }
     fn invalidate(&mut self) { self.scaler = None; self.key = None; }
 }
 
@@ -134,5 +139,6 @@ impl JointProvider for MetalFx {
         MetalFx::encode(self, &frame, Some(&guides))
     }
     fn untimed_gpu_ms(&self) -> f32 { if self.scaler.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 } }
+    fn scale_range(&self) -> Option<[f32; 2]> { self.scales }
     fn invalidate(&mut self) { self.scaler = None; self.key = None; }
 }
