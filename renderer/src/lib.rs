@@ -15,6 +15,7 @@ pub mod gpu;
 pub mod heap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
+pub mod indexed;
 pub mod live;
 pub mod ltree;
 pub mod merged;
@@ -89,6 +90,8 @@ pub struct Prepared {
     pub moving_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
     pub tri_order: Vec<u32>,
+    /// The triangles as shared vertices and indices (indexed.rs), in `tri_verts`' order.
+    pub indexed: indexed::Indexed,
     /// The brightest sky texel (luminance) from which the environment is light-sampled (`Params::counts2[1]`): 0 when
     /// there are no emitters. A dynamic sky re-decides with each bake (live/load.rs `DynamicSky`).
     pub env_nee_floor: f32,
@@ -889,7 +892,69 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         first += u32::try_from(count).expect("more than 2^32 triangles");
     }
     let energy = energy_lut();
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
+    let t = Instant::now();
+    let indexed = index_geometry(sc, &tri_order, &tri_verts, &groups, pool_first, no_still);
+    timings.push(("index_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
+    timings.push(("vertices".into(), indexed.positions.len() as f64));
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order, indexed }
+}
+
+/// The scene's triangles, in the GPU's order (`tri_verts`, `sc.attrs`), as vertices and indices (indexed.rs). The
+/// still world-space triangles share their vertices among themselves, the dynamic ones have three each (the CPU
+/// writes them whole), each mesh of the pool shares within itself (the meshes in parallel; a skinned one by its
+/// model's corners), the translucent particles' have three each. World-space triangles count their vertices from
+/// 0, a mesh's from the mesh's first. The vertices lie in that order, so those that move are one run: the dynamic
+/// world-space triangles', then the deforming meshes' (which are the pool's first).
+fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], groups: &[usize; GROUPS], pool_first: usize, no_still: bool) -> indexed::Indexed {
+    use rayon::prelude::*;
+    let still: usize = groups[..4].iter().sum();
+    let flat: Vec<[Vec3A; 3]> = order.iter().map(|&i| sc.tris[i as usize]).collect();
+    let mut out = indexed::Indexed { meshes: vec![(0, 0); sc.meshes.len()], ..Default::default() };
+    out.push(indexed::shared(&flat[..still], &sc.attrs[..still]), 0);
+    let moving = out.positions.len() as u32;
+    out.push(indexed::apart(&flat[still..], &sc.attrs[still..pool_first]), moving);
+    // The pool, mesh by mesh as their triangles lie.
+    let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
+    let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
+    meshes.sort_by_key(|&m| sc.meshes[m].first);
+    let scopes: Vec<indexed::Scope> = meshes
+        .par_iter()
+        .map(|&m| {
+            let im = sc.meshes[m];
+            let r = im.first as usize..(im.first + im.count) as usize;
+            let (tris, attrs) = (&sc.pool_tris[r.clone()], &sc.attrs[pool_first + r.start..pool_first + r.end]);
+            match source_of.get(&(m as u32)).map(|&s| &sc.skin_sources[s as usize]).filter(|c| im.deforms && c.len() == tris.len()) {
+                Some(corners) => indexed::shared_skinned(corners, tris, attrs),
+                None => indexed::shared(tris, attrs),
+            }
+        })
+        .collect();
+    let mut deforming = 0;
+    for (&m, s) in meshes.iter().zip(scopes) {
+        // (A mesh's triangles follow the mesh's before it: the pool has no triangle that is no mesh's.)
+        assert_eq!(out.indices.len(), pool_first + sc.meshes[m].first as usize, "the pool's triangles are its meshes', one after another");
+        let n = s.positions.len() as u32;
+        out.meshes[m] = (out.push(s, 0), n);
+        if sc.meshes[m].deforms {
+            assert_eq!(out.meshes[m].0, moving + (pool_first - still) as u32 * 3 + deforming, "the deforming meshes are the pool's first");
+            deforming += n;
+        }
+    }
+    out.dynamic = (moving, (pool_first - still) as u32 * 3 + deforming);
+    assert_eq!(out.indices.len(), pool_first + sc.pool_tris.len());
+    // The triangle of a still tree over nothing: without area.
+    if no_still {
+        out.indices.push([0; 3]);
+    }
+    // The translucent particles' (what `tri_verts` has after the pool: under hardware traversal).
+    if out.indices.len() < sc.attrs.len() {
+        let first = out.indices.len();
+        let by = out.positions.len() as u32;
+        out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), by);
+    }
+    assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
+    out.rows = sc.attrs.iter().enumerate().map(|(k, a)| [a.uv[3].to_bits(), a.x[1].to_bits(), tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()]).collect();
+    out
 }
 
 /// Instances as world-space triangles (software traversal), appended to the flattened ones with their objects.
@@ -1649,6 +1714,59 @@ mod units_tests {
     #[test]
     fn a_scene_with_units_is_the_flattened_scene_to_every_ray() {
         agree(&world(true), (3000, 400, 2000));
+    }
+
+    /// `prepare`'s vertices and indices (indexed.rs) are its triangles: every triangle read through its indices (a
+    /// mesh's from the mesh's first vertex, a world-space one's from 0) has the corners, the edges, the normals and
+    /// the UVs the kernel's arrays have for it, bit for bit, the tangent of one that has its own, and its row's four
+    /// words. Flattened, with units, and as hardware traversal has the scene; with two posed skinned models. A mesh's
+    /// vertices are fewer than its triangles' corners (the ring: 82 for 80 triangles), and the vertices that move are
+    /// one run. No GPU.
+    #[test]
+    fn the_indexed_geometry_is_the_scenes_triangles() {
+        let mut w = world(true);
+        for (id, x) in [(30, -0.7), (31, 0.7)] {
+            let pose = crate::desc::Animation { clip: "bend".into(), time: 0.25 * (id - 29) as f32, r#loop: true, nodes: Default::default() };
+            w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/skin-blend.glb".into(), nodes: None, animation: Some(pose), functions: vec![] }, true, false).unwrap();
+            w.set_transform(id, Vec3::new(x, -1.0, 0.8), Quat::IDENTITY, Vec3::splat(2.0)).unwrap();
+        }
+        for (what, hwrt, units) in [("flattened", false, false), ("units", false, true), ("hardware traversal", true, false)] {
+            let mut sc = scene::build(&w, std::path::Path::new(".."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(hwrt, units, &mut sc, &mut vec![]);
+            let x = &p.indexed;
+            assert_eq!((x.indices.len(), x.rows.len(), x.positions.len()), (sc.attrs.len(), sc.attrs.len(), x.attrs.len()), "{what}");
+            // (A pool triangle's mesh: its vertices count from the mesh's first.)
+            let pool_first = sc.attrs.len() - sc.pool_tris.len() - sc.trans_tris.len() * usize::from(hwrt) - usize::from(sc.units.is_some() && sc.tris.is_empty());
+            let base = |k: usize| sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count > 0 && (pool_first + m.first as usize..pool_first + (m.first + m.count) as usize).contains(&k)).map_or(0, |(_, v)| v.0);
+            let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+            for (k, a) in sc.attrs.iter().enumerate() {
+                let (q, n, uv, tangent) = x.triangle(k, base(k));
+                let v = |r: usize| [p.tri_verts[k * 3 + r][0], p.tri_verts[k * 3 + r][1], p.tri_verts[k * 3 + r][2]];
+                let edge = |c: usize| [q[c][0] - q[0][0], q[c][1] - q[0][1], q[c][2] - q[0][2]];
+                assert_eq!((bits(&q[0]), bits(&edge(1)), bits(&edge(2))), (bits(&v(0)), bits(&v(1)), bits(&v(2))), "{what}: triangle {k}'s first corner and its edges");
+                let skinned_without_normals = n.iter().flatten().all(|c| *c == 0.0);
+                if !skinned_without_normals {
+                    assert_eq!([bits(&n[0]), bits(&n[1]), bits(&n[2])], [bits(&a.n0[..3]), bits(&a.n1[..3]), bits(&a.n2[..3])], "{what}: triangle {k}'s normals");
+                }
+                assert_eq!(bits(&uv.concat()), bits(&[a.n0[3], a.n1[3], a.n2[3], a.uv[0], a.uv[1], a.uv[2]]), "{what}: triangle {k}'s UVs");
+                let own = a.x[0].to_bits() & indexed::OWN_TANGENT != 0;
+                assert_eq!(bits(&tangent), bits(&if own { a.t } else { [0.0; 4] }), "{what}: triangle {k}'s own tangent on its first vertex, or none");
+                assert_eq!(x.rows[k], [a.uv[3].to_bits(), a.x[1].to_bits(), p.tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()], "{what}: triangle {k}'s row");
+            }
+            if sc.meshes.is_empty() {
+                continue;
+            }
+            // The ring's mesh: 80 triangles of 82 vertices. Each skinned model's mesh: its own vertices, as many as
+            // the other's (one model), fewer than its corners; and they are the vertices that move.
+            assert!(sc.attrs.iter().any(|a| a.x[0].to_bits() & indexed::OWN_TANGENT != 0) && sc.attrs.iter().any(|a| a.x[0].to_bits() & indexed::OWN_TANGENT == 0), "{what}: triangles with a tangent of their own and without");
+            let ring = sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count == 80).expect("the ring's mesh");
+            assert_eq!(ring.1 .1, 82, "{what}: the ring's vertices");
+            let skinned: Vec<(u32, u32)> = sc.meshes.iter().zip(&x.meshes).filter(|(m, _)| m.deforms).map(|(_, v)| *v).collect();
+            assert_eq!(skinned.len(), 2, "{what}: two skinned meshes");
+            let corners = sc.meshes.iter().find(|m| m.deforms).unwrap().count * 3;
+            assert!(skinned[0].1 == skinned[1].1 && skinned[0].1 < corners && skinned[0].1 >= corners / 6, "{what}: {} vertices for {corners} corners", skinned[0].1);
+            assert_eq!((x.dynamic.0, x.dynamic.1), (skinned[0].0.min(skinned[1].0), skinned[0].1 * 2), "{what}: the vertices that move are the skinned meshes'");
+        }
     }
 
     /// The same with no still triangle at all: the still tree is then the leaf of one triangle (bvh.rs `EMPTY`), and

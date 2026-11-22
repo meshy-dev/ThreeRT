@@ -519,7 +519,7 @@ pub struct GpuTriAttr {
     pub n2: [f32; 4], // normal2, w = uv1.x
     pub uv: [f32; 4], // uv1.y, uv2.x, uv2.y, material (bits)
     pub t: [f32; 4],  // tangent (dP/du), w = bitangent sign
-    pub x: [f32; 4],  // a spare word, object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
+    pub x: [f32; 4],  // `indexed::OWN_TANGENT` (bits), object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
 }
 
 #[repr(C)]
@@ -2707,6 +2707,8 @@ fn push_tri(
 
 /// Shading attributes of a triangle (normals, UVs, tangent frame, texel density, material).
 pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3, f32)>, mat: u32) -> GpuTriAttr {
+    // (Whether the tangent is the first corner's own: `indexed::OWN_TANGENT`.)
+    let own = if tangent.is_some() { crate::indexed::OWN_TANGENT } else { 0 };
     // Per-triangle tangent frame from UVs (glTF convention: v grows downward in the image).
     let (t, sign) = tangent.unwrap_or_else(|| {
         let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
@@ -2730,7 +2732,7 @@ pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3
         n2: [n[2].x, n[2].y, n[2].z, uv[1].x],
         uv: [uv[1].y, uv[2].x, uv[2].y, f32::from_bits(mat)],
         t: [t.x, t.y, t.z, sign],
-        x: [0.0, 0.0, 0.0, 0.0],
+        x: [f32::from_bits(own), 0.0, 0.0, 0.0],
     }
 }
 
