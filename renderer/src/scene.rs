@@ -2723,7 +2723,7 @@ pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3
         let w = if n[0].cross(t).dot(b) < 0.0 { 1.0 } else { -1.0 };
         (t, w)
     });
-    // (Its texel density, for the mip choice, is the hit's to compute: pathtrace.wgsl `mesh_lod`.)
+    // (Its texel density, for the mip choice, is the hit's to compute: pathtrace.wgsl `mesh_density`.)
     GpuTriAttr {
         n0: [n[0].x, n[0].y, n[0].z, uv[0].x],
         n1: [n[1].x, n[1].y, n[1].z, uv[0].y],

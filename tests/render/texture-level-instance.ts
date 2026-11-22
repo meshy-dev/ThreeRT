@@ -1,5 +1,5 @@
 // A texture on an instance is as sharp as its triangles are large in the world, whatever the instance's scale: the
-// texel density is taken from the triangle as it stands (pathtrace.wgsl `mesh_lod`). A quad of 6.25 cm scaled 32
+// texel density is taken from the triangle as it stands (pathtrace.wgsl `mesh_density`). A quad of 6.25 cm scaled 32
 // times (2 m), a checker of 8 x 8 squares (64 x 64 texels) on a Lambert surface under a uniform sky of 1 nit, seen
 // straight on: a square is 14 pixels wide, the texture magnified. A black square reads 0 and a white one 1; from the
 // quad's own size the level would be five too high and both would read 0.5.

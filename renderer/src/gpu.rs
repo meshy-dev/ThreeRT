@@ -3892,9 +3892,10 @@ mod tests {
         }
     }
 
-    /// The kernel's texel density of a triangle (`mesh_lod`, its own text, run on the GPU): half the log of its UV area
-    /// over its area, from its two edges and its UVs, with the material's repeat; 0 for the first term where the
-    /// triangle or its UVs have no area. Triangles of every size and UV scale against the same in 64-bit floats.
+    /// The level the kernel reads a texture at, less the texture's own size (`mesh_density` and `mesh_lod`, their own
+    /// text, run on the GPU): half the log of a triangle's UV area times the material's repeat over its area, times a
+    /// footprint's square, over what else divides; the repeat alone for the triangle where it or its UVs have no
+    /// area. Triangles of every size and UV scale against the same in 64-bit floats.
     #[test]
     fn the_kernels_texel_density_is_the_triangles() {
         use wgpu::util::DeviceExt;
@@ -3907,11 +3908,15 @@ mod tests {
             &src[at..at + src[at..].find(to).expect("its end") + to.len()]
         };
         let attr = part(include_str!("../shaders/records.wgsl"), "struct TriAttr {", "};");
-        let density = part(include_str!("../shaders/pathtrace.wgsl"), "fn mesh_lod(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> f32 {", "\n}\n");
+        let kernel = include_str!("../shaders/pathtrace.wgsl");
+        let density = part(kernel, "fn mesh_density(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> vec2<f32> {", "\n}\n");
+        let level = part(kernel, "fn mesh_lod(density: vec2<f32>, footprint2: f32, over: f32) -> f32 {", "}\n");
+        // (A row: the two edges, with the footprint's square and the divisor in their fourth words; the attributes; the
+        // material's `uv`.)
         let src = format!(
             "{attr}\nstruct Material {{ uv: vec4<f32> }};\nstruct In {{ e1: vec4<f32>, e2: vec4<f32>, a: TriAttr, m: vec4<f32> }};\n\
-             @group(0) @binding(0) var<storage, read> input: array<In>;\n@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n{density}\n\
-             @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n    if (id.x >= arrayLength(&input)) {{ return; }}\n    let i = input[id.x];\n    out[id.x] = mesh_lod(i.e1.xyz, i.e2.xyz, i.a, Material(i.m));\n}}\n"
+             @group(0) @binding(0) var<storage, read> input: array<In>;\n@group(0) @binding(1) var<storage, read_write> out: array<f32>;\n{density}\n{level}\n\
+             @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n    if (id.x >= arrayLength(&input)) {{ return; }}\n    let i = input[id.x];\n    out[id.x] = mesh_lod(mesh_density(i.e1.xyz, i.e2.xyz, i.a, Material(i.m)), i.e1.w, i.e2.w);\n}}\n"
         );
         // A deterministic stream in [0, 1).
         let mut seed = 0x9e3779b97f4a7c15u64;
@@ -3921,8 +3926,10 @@ mod tests {
         };
         let (mut rows, mut want): (Vec<[f32; 36]>, Vec<f64>) = (vec![], vec![]);
         for k in 0..512 {
-            // Sizes from a millimetre to a hundred metres, UVs from a hundredth of the texture to a hundred repeats.
+            // Sizes from a millimetre to a hundred metres, UVs from a hundredth of the texture to a hundred repeats,
+            // footprints from a tenth of a millimetre to ten metres, a divisor from a thousandth to one.
             let (size, uvs) = (10f32.powf(f() * 5.0 - 3.0), 10f32.powf(f() * 4.0 - 2.0));
+            let (fp2, over) = (10f32.powf(f() * 10.0 - 8.0), 10f32.powf(-f() * 3.0));
             let mut v = |s: f32| [(f() - 0.5) * s, (f() - 0.5) * s, (f() - 0.5) * s];
             let (mut e1, mut e2) = (v(size), v(size));
             let (uv0, mut uv1, mut uv2) = ([f() * uvs, f() * uvs], [f() * uvs, f() * uvs], [f() * uvs, f() * uvs]);
@@ -3938,6 +3945,7 @@ mod tests {
             let mut row = [0f32; 36];
             row[..3].copy_from_slice(&e1);
             row[4..7].copy_from_slice(&e2);
+            (row[3], row[7]) = (fp2, over);
             // (The attributes' UV words: n0.w, n1.w = uv0; n2.w, uv.x = uv1; uv.y, uv.z = uv2.)
             (row[8 + 3], row[8 + 7], row[8 + 11], row[8 + 12], row[8 + 13], row[8 + 14]) = (uv0[0], uv0[1], uv1[0], uv1[1], uv2[0], uv2[1]);
             (row[32], row[33]) = (rep[0], rep[1]);
@@ -3948,8 +3956,8 @@ mod tests {
             let area = 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
             let (d1, d2) = ([(uv1[0] - uv0[0]) as f64, (uv1[1] - uv0[1]) as f64], [(uv2[0] - uv0[0]) as f64, (uv2[1] - uv0[1]) as f64]);
             let uv_area = 0.5 * (d1[0] * d2[1] - d2[0] * d1[1]).abs();
-            let k0 = if area > 1e-12 && uv_area > 1e-14 { 0.5 * (uv_area / area).log2() } else { 0.0 };
-            want.push(k0 + 0.5 * ((rep[0] * rep[1]).abs() as f64).max(1e-12).log2());
+            let ratio = if area > 1e-12 && uv_area > 1e-14 { uv_area / area } else { 1.0 };
+            want.push(0.5 * (ratio * ((rep[0] * rep[1]).abs() as f64).max(1e-12) * fp2 as f64 / over as f64).max(1e-30).log2());
         }
         let d = &g.device;
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("texel density"), source: wgpu::ShaderSource::Wgsl(src.into()) });
@@ -3979,7 +3987,7 @@ mod tests {
             flat += (k % 16 == 6 || k % 16 == 7) as usize;
             spread = (spread.0.min(*w), spread.1.max(*w));
         }
-        assert!(flat > 40 && spread.0 < -8.0 && spread.1 > 8.0, "the triangles span the densities ({spread:?}) and {flat} have no area");
+        assert!(flat > 40 && spread.0 < -8.0 && spread.1 > 8.0, "the triangles span the levels ({spread:?}) and {flat} have no area");
     }
 
     fn naga_valid(src: &str) {

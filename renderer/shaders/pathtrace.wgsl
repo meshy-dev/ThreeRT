@@ -910,7 +910,8 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     if (has(F_VCOLOR) && m.uv.w > 0.0) { g.tint *= vcolor(h.tri, h.u, h.v); }
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
-        let lod = mesh_lod(e1, e2, a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
+        let fp = max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7);
+        let lod = mesh_lod(mesh_density(e1, e2, a, m), fp * fp, 1.0) - LOD_BIAS;
         if (m.tex0.x >= 0) { g.tint *= srgb_to_linear(tex(m.tex0.x, uv, lod).rgb); }
         if (m.uv.z > 0.5) { tr *= tex(i32(m.uv.z) - 1, uv, lod).r; }
     }
@@ -1081,19 +1082,23 @@ fn mesh_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
     return (vec2<f32>(a.n0.w, a.n1.w) * w + vec2<f32>(a.n2.w, a.uv.x) * u + a.uv.yz * v) * m.uv.xy + m.uv2.xy;
 }
 
-// log2(texture-UV units per metre) of a triangle's mesh UVs (incl. material repeat), from the triangle where it is
-// hit: its edges e1, e2 as it stands in the world, its UVs: 0.5 log2(uv area / area), 0 where one of the two has no
-// size.
-fn mesh_lod(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> f32 {
+// The square of a triangle's texel density (texture-UV units per metre, incl. material repeat) as the two it is the
+// ratio of, from the triangle where it is hit: (its UV area x the repeat, its area), its edges e1, e2 as it stands in
+// the world; (the repeat, 1) where one of the two has no size.
+fn mesh_density(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> vec2<f32> {
     let uv0 = vec2<f32>(a.n0.w, a.n1.w);
     let d1 = vec2<f32>(a.n2.w, a.uv.x) - uv0;
     let d2 = a.uv.yz - uv0;
-    let uv_area = 0.5 * abs(d1.x * d2.y - d2.x * d1.y);
-    let area = 0.5 * length(cross(e1, e2));
-    var k = 0.0;
-    if (area > 1e-12 && uv_area > 1e-14) { k = 0.5 * log2(uv_area / area); }
-    return k + 0.5 * log2(max(abs(m.uv.x * m.uv.y), 1e-12));
+    // (Twice each area: the halves cancel.)
+    let uv_area = abs(d1.x * d2.y - d2.x * d1.y);
+    let area = length(cross(e1, e2));
+    let rep = max(abs(m.uv.x * m.uv.y), 1e-12);
+    let sized = area > 2e-12 && uv_area > 2e-14;
+    return vec2<f32>(select(rep, uv_area * rep, sized), select(1.0, area, sized));
 }
+// The level a texture is read at, less its own size's: half the log of the density times a footprint's square (m^2)
+// over `over` (1: nothing more).
+fn mesh_lod(density: vec2<f32>, footprint2: f32, over: f32) -> f32 { return 0.5 * log2(max(density.x * footprint2 / (density.y * over), 1e-30)); }
 
 // ------------------------------------------------------------------------------------------------
 // Material functions: scene-supplied WGSL (like a UE Custom-HLSL material), docs/MATERIAL_FUNCTIONS.md.
@@ -1197,7 +1202,7 @@ fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> M
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
     let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
-    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(e1, e2, a, m), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
+    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(mesh_density(e1, e2, a, m), 1.0, 1.0), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
                  P.time.x, P.time.y, P.time.z, lod, cur_depth, object_at(oi * OBJECT_STRIDE).w, cur_depth == 0u || mirror_path,
                  object_at(oi * OBJECT_STRIDE + 2u));
 }
@@ -1245,7 +1250,8 @@ fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
             e1 = inst_vec(r, e1);
             e2 = inst_vec(r, e2);
         }
-        let lod = mesh_lod(e1, e2, a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
+        let fp = max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7);
+        let lod = mesh_lod(mesh_density(e1, e2, a, m), fp * fp, 1.0) - LOD_BIAS;
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
@@ -1291,8 +1297,9 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let p = o + d * h.t;
 
     let uv = mesh_uv(a, m, h.u, h.v);
-    let mesh_k = mesh_lod(e1, e2, a, m);
-    let lod = mesh_k + log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
+    let density = mesh_density(e1, e2, a, m);
+    let fp = max(width, 1e-7);
+    let lod = mesh_lod(density, fp * fp, max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
 
     var s: Surface;
     s.p = p;
@@ -1335,7 +1342,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
         let oi = object_of(a);
         var t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
         let nv = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v) * select(-1.0, 1.0, front || dot(a.n0.xyz, ng) > 0.0);
-        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_k, -d,
+        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_lod(density, 1.0, 1.0), -d,
                       object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz, P.time.x, P.time.y, P.time.z,
                       log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth, object_at(oi * OBJECT_STRIDE).w, near,
                       object_at(oi * OBJECT_STRIDE + 2u));
@@ -2160,7 +2167,7 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     let m = material_at(material_of(a, em.inst));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
-    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(em.e1, em.e2, a, m) + log2(0.05)) * pw;
+    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(mesh_density(em.e1, em.e2, a, m), 0.0025, 1.0)) * pw;
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
