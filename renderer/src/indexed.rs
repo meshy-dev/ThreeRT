@@ -296,6 +296,24 @@ mod tests {
         }
     }
 
+    /// Two triangles along an edge share its two corners; with another UV on one's side (a texture's seam) or another
+    /// normal (a crease) each keeps its own.
+    #[test]
+    fn a_seam_or_a_crease_keeps_its_vertices() {
+        let p = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::new(1.0, 1.0, 0.0)];
+        let tris = vec![[p[0], p[1], p[2]].map(Vec3A::from), [p[2], p[1], p[3]].map(Vec3A::from)];
+        let uv = |v: Vec3| Vec2::new(v.x, v.y);
+        for (what, shift, normal, vertices) in [("one sheet", Vec2::ZERO, Vec3::Z, 4), ("a seam", Vec2::new(0.5, 0.0), Vec3::Z, 6), ("a crease", Vec2::ZERO, Vec3::new(0.6, 0.0, 0.8), 6)] {
+            let attrs = vec![
+                crate::scene::tri_attr([p[0], p[1], p[2]], [Vec3::Z; 3], [p[0], p[1], p[2]].map(uv), None, 3),
+                crate::scene::tri_attr([p[2], p[1], p[3]], [normal; 3], [p[2], p[1], p[3]].map(|v| uv(v) + shift), None, 3),
+            ];
+            let s = shared(&tris, &attrs);
+            same(what, &s, &tris, &attrs);
+            assert_eq!(s.positions.len(), vertices, "{what}: its vertices");
+        }
+    }
+
     /// A triangle with a corner that is not finite is three times one vertex at the origin (no ray meets it; a BLAS is
     /// built from these positions), shared or apart; the others are as they were.
     #[test]
