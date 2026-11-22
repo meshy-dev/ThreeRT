@@ -153,6 +153,8 @@ pub struct Indexed {
     pub rows: Vec<TriRow>,
     /// By mesh (`Scene::meshes`): its first vertex and how many it has.
     pub meshes: Vec<(u32, u32)>,
+    /// The world-space triangles' vertices: the first so many (the still ones', then those that move).
+    pub flat: u32,
     /// The vertices that move (the dynamic world-space triangles', then the deforming meshes'): the first and how
     /// many. Their previous frame's positions are kept in this order.
     pub dynamic: (u32, u32),

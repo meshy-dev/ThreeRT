@@ -918,6 +918,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     out.push(indexed::shared(&flat[..still], &sc.attrs[..still]), 0);
     let moving = out.positions.len() as u32;
     out.push(indexed::apart(&flat[still..], &sc.attrs[still..pool_first]), moving);
+    out.flat = out.positions.len() as u32;
     // The pool, mesh by mesh as their triangles lie.
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();

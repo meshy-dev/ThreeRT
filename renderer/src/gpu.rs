@@ -256,11 +256,11 @@ fn mesh_entries<'a>(accel: &'a Accel, meshes: &[u32]) -> Vec<wgpu::BlasBuildEntr
                         .zip(parts)
                         .map(|(size, &(first, _))| wgpu::BlasTriangleGeometry {
                             size,
-                            vertex_buffer: &accel.verts,
-                            first_vertex: ((accel.pool_first + first as usize) * 3) as u32,
-                            vertex_stride: 12,
-                            index_buffer: None,
-                            first_index: None,
+                            vertex_buffer: &accel.positions,
+                            first_vertex: accel.mesh_verts[m as usize].0,
+                            vertex_stride: 16,
+                            index_buffer: Some(&accel.indices),
+                            first_index: Some(accel.index_first + ((accel.pool_first + first as usize) * 3) as u32),
                             transform_buffer: None,
                             transform_buffer_offset: None,
                         })
@@ -281,11 +281,11 @@ fn dynamic_entries(accel: &Accel) -> Vec<wgpu::BlasBuildEntry<'_>> {
             blas,
             geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
                 size,
-                vertex_buffer: &accel.verts,
-                first_vertex: (*first * 3) as u32,
-                vertex_stride: 12,
-                index_buffer: None,
-                first_index: None,
+                vertex_buffer: &accel.positions,
+                first_vertex: 0,
+                vertex_stride: 16,
+                index_buffer: Some(&accel.indices),
+                first_index: Some(accel.index_first + (*first * 3) as u32),
                 transform_buffer: None,
                 transform_buffer_offset: None,
             }]),
@@ -916,8 +916,18 @@ fn particle_source(scene: &Scene) -> String {
 /// Hardware acceleration structures: one BLAS per non-empty traversal group, one TLAS over them.
 pub struct Accel {
     pub tlas: wgpu::Tlas,
-    /// Triangle vertices the BLASes are built from (12 B per vertex, 3 per triangle).
+    /// Triangle vertices the BLASes were built from (12 B per vertex, 3 per triangle): what the passes that have not
+    /// yet moved to the vertices still write.
     pub verts: wgpu::Buffer,
+    /// What the BLASes are built from: the vertices' positions (`Uploaded::positions`, 16 B each) and the triangles'
+    /// indices (the words' heap, from word `index_first` on). Handles of the scene's buffers as they are now
+    /// (`Gpu::rebind_scene` takes them again when one grew).
+    pub positions: wgpu::Buffer,
+    pub indices: wgpu::Buffer,
+    pub index_first: u32,
+    /// By mesh: its first vertex and how many (`indexed::Indexed::meshes`); and the world-space triangles' vertices.
+    pub mesh_verts: Vec<(u32, u32)>,
+    pub flat_verts: u32,
     /// (BLAS, group, first triangle, size).
     blases: Vec<(wgpu::Blas, usize, usize, wgpu::BlasTriangleGeometrySizeDescriptor)>,
     /// One per instanced mesh (model space), referenced by the TLAS's model instances.
@@ -2373,7 +2383,7 @@ impl Gpu {
         // The vertices: positions and attributes, with room for three a triangle of the edit room; the previous
         // positions of those that move.
         let ix = &scene.indexed;
-        let b_pos = buf_room("positions", bytemuck::cast_slice(&ix.positions), room.tris * 48, edit);
+        let b_pos = buf_room("positions", bytemuck::cast_slice(&ix.positions), room.tris * 48, edit | if self.hwrt { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() });
         let b_vattr = buf_room("vertex attrs", bytemuck::cast_slice(&ix.attrs), room.tris * 96, edit);
         let b_prev_pos = buf("prev positions", bytemuck::cast_slice(&ix.positions[ix.dynamic.0 as usize..(ix.dynamic.0 + ix.dynamic.1) as usize]), edit);
         timings.push(("vertex_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * 28) as f64 / (1 << 20) as f64));
@@ -2491,6 +2501,8 @@ impl Gpu {
                 .collect();
             let vbuf = buf_room("blas_verts", bytemuck::cast_slice(&verts), room.tris * 36, wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE);
             let huge_scene = huge(groups, !scene.gpu_instances.is_empty());
+            // (The indices' first word in the words' heap.)
+            let index_first = (words.at(Stream::Indices) / 4) as u32;
             let mut first = 0usize;
             let groups: Vec<(usize, usize, u8)> = groups
                 .iter()
@@ -2507,9 +2519,10 @@ impl Gpu {
                 .iter()
                 .map(|&(_, count, _)| wgpu::BlasTriangleGeometrySizeDescriptor {
                     vertex_format: wgpu::VertexFormat::Float32x3,
-                    vertex_count: (count * 3) as u32,
-                    index_format: None,
-                    index_count: None,
+                    // (A world-space triangle's indices count from vertex 0: any of the world-space vertices.)
+                    vertex_count: ix.flat.max(1),
+                    index_format: Some(wgpu::IndexFormat::Uint32),
+                    index_count: Some((count * 3) as u32),
                     // (Every geometry is flagged opaque, a cutout's too: every query forces opacity, trace_hw.wgsl.)
                     flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
                 })
@@ -2537,14 +2550,15 @@ impl Gpu {
             let mesh_parts: Vec<Vec<(u32, u32)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count)| (m.first + at, count)).collect()).collect();
             let mesh_sizes: Vec<Vec<wgpu::BlasTriangleGeometrySizeDescriptor>> = mesh_parts
                 .iter()
-                .map(|parts| {
+                .zip(&ix.meshes)
+                .map(|(parts, &(_, vertices))| {
                     parts
                         .iter()
                         .map(|&(_, count)| wgpu::BlasTriangleGeometrySizeDescriptor {
                             vertex_format: wgpu::VertexFormat::Float32x3,
-                            vertex_count: count * 3,
-                            index_format: None,
-                            index_count: None,
+                            vertex_count: vertices.max(1),
+                            index_format: Some(wgpu::IndexFormat::Uint32),
+                            index_count: Some(count * 3),
                             flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
                         })
                         .collect()
@@ -2619,16 +2633,16 @@ impl Gpu {
                     blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
                         size,
-                        vertex_buffer: &vbuf,
-                        first_vertex: (*first * 3) as u32,
-                        vertex_stride: 12,
-                        index_buffer: None,
-                        first_index: None,
+                        vertex_buffer: &b_pos,
+                        first_vertex: 0,
+                        vertex_stride: 16,
+                        index_buffer: Some(&words.buffer),
+                        first_index: Some(index_first + (*first * 3) as u32),
                         transform_buffer: None,
                         transform_buffer_offset: None,
                     }]),
                 })
-                .chain(meshes.iter().zip(&mesh_sizes).zip(&mesh_parts).map(|((blas, sizes), parts)| wgpu::BlasBuildEntry {
+                .chain(meshes.iter().zip(&mesh_sizes).zip(&mesh_parts).zip(&ix.meshes).map(|(((blas, sizes), parts), &(first_vertex, _))| wgpu::BlasBuildEntry {
                     blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(
                         sizes
@@ -2636,11 +2650,11 @@ impl Gpu {
                             .zip(parts)
                             .map(|(size, &(first, _))| wgpu::BlasTriangleGeometry {
                                 size,
-                                vertex_buffer: &vbuf,
-                                first_vertex: ((pool_first + first as usize) * 3) as u32,
-                                vertex_stride: 12,
-                                index_buffer: None,
-                                first_index: None,
+                                vertex_buffer: &b_pos,
+                                first_vertex,
+                                vertex_stride: 16,
+                                index_buffer: Some(&words.buffer),
+                                first_index: Some(index_first + ((pool_first + first as usize) * 3) as u32),
                                 transform_buffer: None,
                                 transform_buffer_offset: None,
                             })
@@ -2658,7 +2672,7 @@ impl Gpu {
             self.device.poll(wgpu::PollType::wait_indefinitely())?;
             drop(entries);
             let mesh_geo = mesh_parts.into_iter().zip(mesh_sizes).collect();
-            accel = Some(Accel { tlas: t, verts: vbuf, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
+            accel = Some(Accel { tlas: t, verts: vbuf, positions: b_pos.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), flat_verts: ix.flat, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
             timings.push(("accel_build_ms".into(), tb.elapsed().as_secs_f64() * 1000.0));
         }
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -2879,13 +2893,15 @@ impl Gpu {
         let blob_at = (head * 4) as u64;
         let blob_bytes = (blob_words * 4) as u64;
         let key = l.map(|l| l.key());
+        // (The BLASes are built from the indices' section.)
+        let usage = crate::heap::USAGE | if self.hwrt { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let mut cache = self.proc_cache.lock().unwrap();
         let reuse = cache.as_ref().filter(|c| blob_bytes > 0 && Some(&c.key) == key.as_ref() && c.bytes == blob_bytes);
         // Reused blobs: the small parts written through the queue, the blobs copied on the GPU (a mapped buffer of the
         // whole size would be zero-filled on the CPU first: 17 ms for 256 MB). New ones: written into the mapping.
         let heap = match (reuse, l) {
             (Some(c), Some(l)) => {
-                let heap = Heap::new(&self.device, &sizes);
+                let heap = Heap::new_with(&self.device, &sizes, usage);
                 heap.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
                 heap.write(&self.queue, Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 heap.write(&self.queue, Stream::VertexColors, 0, colors);
@@ -2897,7 +2913,7 @@ impl Gpu {
                 self.queue.submit([e.finish()]);
                 heap
             }
-            _ => Heap::filled(&self.device, &sizes, |put| {
+            _ => Heap::filled_with(&self.device, &sizes, usage, |put| {
                 put(Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
                 put(Stream::VertexColors, 0, colors);
                 put(Stream::Rows, 0, rows);
@@ -3478,6 +3494,9 @@ impl Gpu {
             if let Some(blas) = up.accel.as_ref().map(|a| &a.verts).or(k.no_blas.as_ref()) {
                 k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, blas);
             }
+        }
+        if let Some(a) = &mut up.accel {
+            (a.positions, a.indices, a.index_first) = (up.positions.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
         }
         up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.positions, attrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         let Some(a) = &up.accel else { return };

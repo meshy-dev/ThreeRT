@@ -132,7 +132,7 @@ fn place(bytes: &[u64]) -> (Vec<u64>, Vec<u64>, u64) {
     (at, cap, size)
 }
 
-const USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST).union(wgpu::BufferUsages::COPY_SRC);
+pub const USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST).union(wgpu::BufferUsages::COPY_SRC);
 
 impl<S: Section> Heap<S> {
     /// The bytes of a heap whose sections hold `bytes` each.
@@ -148,18 +148,28 @@ impl<S: Section> Heap<S> {
 
     /// A heap of zeros with sections of at least `bytes` each (`S::COUNT` of them), to be written through the queue.
     pub fn new(device: &wgpu::Device, bytes: &[u64]) -> Self {
+        Self::new_with(device, bytes, USAGE)
+    }
+
+    /// `new` with a buffer of another usage (the words' heap is the BLASes' index buffer too), which it keeps as it
+    /// grows.
+    pub fn new_with(device: &wgpu::Device, bytes: &[u64], usage: wgpu::BufferUsages) -> Self {
         assert_eq!(bytes.len(), S::COUNT);
         let (at, cap, size) = place(bytes);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage: USAGE, mapped_at_creation: false });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage, mapped_at_creation: false });
         Heap { buffer, at, cap, _s: PhantomData }
     }
 
     /// The same, filled while it is made: `fill` is given `put(section, byte, data)`, which writes into the buffer's
     /// mapping (no copy through the queue).
     pub fn filled(device: &wgpu::Device, bytes: &[u64], fill: impl FnOnce(&mut dyn FnMut(S, u64, &[u8]))) -> Self {
+        Self::filled_with(device, bytes, USAGE, fill)
+    }
+
+    pub fn filled_with(device: &wgpu::Device, bytes: &[u64], usage: wgpu::BufferUsages, fill: impl FnOnce(&mut dyn FnMut(S, u64, &[u8]))) -> Self {
         assert_eq!(bytes.len(), S::COUNT);
         let (at, cap, size) = place(bytes);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage: USAGE, mapped_at_creation: true });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage, mapped_at_creation: true });
         {
             let mut m = buffer.slice(..).get_mapped_range_mut().expect("mapped at creation");
             fill(&mut |s: S, byte: u64, data: &[u8]| {
@@ -215,7 +225,7 @@ impl<S: Section> Heap<S> {
         let mut want = self.cap.clone();
         want[s.index()] = bytes;
         let (at, cap, size) = place(&want);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage: USAGE, mapped_at_creation: false });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage: self.buffer.usage(), mapped_at_creation: false });
         let mut e = device.create_command_encoder(&Default::default());
         for k in 0..S::COUNT {
             e.copy_buffer_to_buffer(&self.buffer, self.at[k], &buffer, at[k], self.cap[k].min(cap[k]));
