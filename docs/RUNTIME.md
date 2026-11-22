@@ -1641,18 +1641,24 @@ provider, which read different signals:
 |---|---|---|
 | `builtin` (default) | ThreeRT | ThreeRT (temporal) |
 | `fsr` | ThreeRT | AMD FidelityFX Super Resolution **1** (spatial EASU + RCAS; also on WebGPU) |
-| `metalfx` | ThreeRT | Apple's temporal scaler (macOS 13+) |
+| `metalfx` | ThreeRT | Apple's temporal scaler (macOS 13+, iOS 16+) |
 | `dlss` | ThreeRT | NVIDIA DLSS Super Resolution; DLAA at scale 1 (x86-64 Windows/Linux, RTX on Vulkan, feature `dlss`) |
-| `metalfx-denoised` | Apple's temporal denoised scaler: both (macOS 26+, Apple silicon) | |
+| `metalfx-denoised` | Apple's temporal denoised scaler: both (macOS 26+ on Apple silicon, iOS 26+) | |
 | `dlss-rr` | NVIDIA DLSS Ray Reconstruction: both (as `dlss`) | |
 | `off` | none | none: each frame's samples as traced, without history (the joint denoisers' input; for comparison) |
 | `custom:<id>` | a provider an embedding host registered, of either kind | |
-| `auto` | the best this device runs: `metalfx-denoised`, `metalfx` on a Mac; `dlss-rr`, `dlss` with DLSS; else `builtin` | |
+| `auto` | the best this device runs: `metalfx-denoised`, `metalfx` on a Mac or an iPhone; `dlss-rr`, `dlss` with DLSS; else `builtin` | |
 
 A list (`dlss-rr,dlss,fsr`) is an order of preference; `builtin` ends every list. `quality` presets are the vendors'
 ratios exactly (`ultra-performance` is a third: 640 pixels across 1080p, the smallest input DLSS takes, where a typed
 `--scale 0.333` gives 639 and DLSS reports itself unsupported). Diagnostic views use `builtin`. A provider that
 fails while encoding a frame falls back to `builtin` from that frame on.
+
+A provider says which render scales it takes (`scale_range`: MetalFX scales its output up to 3x the input, so a third
+and up; DLSS from its modes' input ranges). Under dynamic resolution (`quality: auto`) the governor does not go below
+the range of the method that runs, nor below that of the first method asked for that did not run for the scale alone:
+it goes up to it, and from there the method runs. (A 2560 x 1440 view that dynamic resolution held at a quarter never
+ran MetalFX before.)
 
 ### TypeScript
 
@@ -1690,8 +1696,9 @@ The engine does not bundle NVIDIA's SDK or runtime.
 
 ### Apple MetalFX
 
-The temporal scaler requires a supporting Metal device and macOS 13 or later. Build with the macOS 26 SDK
-or newer to include the denoised scaler, which also requires macOS 26 or newer at runtime. A plain temporal scaler
+The temporal scaler requires a supporting Metal device and macOS 13 or iOS 16 or later. Build with the macOS / iOS 26
+SDK or newer to include the denoised scaler, which also requires macOS 26 or iOS 26 at runtime (an iPhone 17 Pro Max
+runs both). The framework is loaded at run time, so one binary runs on systems without it. A plain temporal scaler
 can keep its history across dynamic resolution changes inside its supported range (its inputs are textures of the
 output's size); the denoised scaler starts a new history when input dimensions change.
 
