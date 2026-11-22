@@ -104,8 +104,11 @@ pub const KINDS: [(&str, u32); 5] = [
     ("voxel lumps on voxel ground, carved", 300),
 ];
 
-/// The hash of all the cases (`cases()`) with `enhanced-determinism`, natively and in wasm32 alike.
-pub const EXPECTED_CASES: u64 = 0xcf74_cd21_1f5c_152f;
+/// The hash of all the cases (`cases()`) with `enhanced-determinism`, natively and in wasm32 alike. (Re-recorded for
+/// the voxel sweep's walk, third_party/parry3d/PATCH.md "Sweeps": four voxel cases, 72, 129, 186 and 200, change, in
+/// each a ball's fast step that the old walk never brought to a cell the ball reaches, which casting every cell finds
+/// and the patched sweep finds too, at the same time to the bit.)
+pub const EXPECTED_CASES: u64 = 0x8231_d2f3_c463_1676;
 
 /// A generator of integers only: a float made from one is exact arithmetic, the same bits on every platform.
 struct Rng(u64);

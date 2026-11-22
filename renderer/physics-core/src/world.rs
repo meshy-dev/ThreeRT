@@ -88,7 +88,9 @@ pub struct BodyDesc {
     pub angular_damping: f32,
     pub gravity_scale: f32,
     pub can_sleep: bool,
-    /// Continuous collision detection (fast, small bodies).
+    /// Continuous collision detection's bullet mode. Rapier 0.36 sweeps every fast dynamic body (one moving more than
+    /// half its thinnest collider's thickness in a tick; voxel, mesh, heightfield and polyline colliders do not count)
+    /// against fixed colliders whatever this says; `ccd` sweeps it against dynamic and kinematic bodies as well.
     pub ccd: bool,
 }
 
@@ -2205,6 +2207,167 @@ mod tests {
         let shape = rapier3d::parry::shape::Voxels::new(Vector::splat(0.1), &slab.iter().map(|c| IVector::new(c[0], c[1], c[2])).collect::<Vec<_>>());
         let ray = Ray::new(Vector::new(1.5, 5.0, -0.3), Vector::new(0.0, -1.0, 0.0));
         assert!((shape.cast_ray(&still, &ray, 10.0, true).unwrap() - 4.7).abs() < 1e-5);
+    }
+
+    /// The bound the voxel sweep (third_party/parry3d/PATCH.md, "Sweeps") takes a turning shape by: under a motion
+    /// that turns at a constant rate about a centre moving in a straight line (Rapier's), a point `r` from that centre
+    /// strays at most `r θ²/8 (1 + θ/2)` from the straight line between where it is at the start and at the end, at
+    /// the same fraction of the way (`θ` the turn: random motions up to a whole turn, random points).
+    #[test]
+    fn a_turning_centre_keeps_to_its_chord() {
+        use rapier3d::parry::math::{Pose, Rotation, Vector};
+        use rapier3d::parry::query::NonlinearRigidMotion;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 16_777_216.0
+        };
+        let mut v = |s: f32| Vector::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0) * s;
+        let mut worst = 0.0f32;
+        for _ in 0..2000 {
+            let (start, centre, linvel, axis, point) = (v(5.0), v(2.0), v(30.0), v(1.0), v(2.0));
+            let q = v(1.0);
+            let rotation = Rotation::from_xyzw(q.x, q.y, q.z, 0.5).normalize();
+            let turn = (q.x + 1.0) * std::f32::consts::PI;
+            let motion = NonlinearRigidMotion::new(Pose::from_parts(start, rotation), centre, linvel, axis.normalize() * turn);
+            let at = |t: f32| motion.position_at_time(t) * point;
+            let r = (point - centre).length();
+            let bound = r * turn * turn / 8.0 * (1.0 + turn / 2.0);
+            for k in 0..=100 {
+                let t = k as f32 / 100.0;
+                let stray = (at(t) - at(0.0).lerp(at(1.0), t)).length();
+                assert!(stray <= bound + 1e-4 * (1.0 + r + linvel.length()), "turn {turn}, r {r}: {stray} at {t}, bound {bound}");
+                worst = worst.max(stray / (bound + 1e-6));
+            }
+        }
+        assert!(worst > 0.5, "the bound is tight enough to mean something: {worst}");
+    }
+
+    /// Parry's sweep of a shape at a voxel shape (its walk patched in third_party/parry3d: PATCH.md, "Sweeps"), the
+    /// cast Rapier's continuous collision detection makes for a fast body against voxels, against casting every solid
+    /// cell's box on its own and keeping the earliest hit: random grids (scattered cells, a staircase slab; cells of 5,
+    /// 10 and 25 cm), random shapes (balls, boxes, capsules, hulls, and cylinders, which have no point-cloud proxy),
+    /// random motions (up to 30 m/s, turning up to 30 rad/s and some at 250 rad/s, about centres up to 1 m off the
+    /// shape), shapes overlapping cells at the start, both ways of treating a start in penetration
+    /// (`stop_at_penetration`), and the voxel shape moving too. The answer is the brute force's to the bit (time,
+    /// normal, witness; of equal times, one of the cells hit then), or else later than it only where the brute force's
+    /// hit is one parry's cast of that cell reports early, the shapes not touching then (the cell's true contact, which
+    /// the patch's bound respects, is later), and then no cell is met before the answer on the true motion (sampled).
+    #[test]
+    fn voxel_sweeps_against_every_cell() {
+        use rapier3d::parry::math::{IVector, Pose, Real, Rotation, Vector};
+        use rapier3d::parry::query::{self, DefaultQueryDispatcher, NonlinearRigidMotion, QueryDispatcher};
+        use rapier3d::parry::shape::{Ball, Capsule, ConvexPolyhedron, Cuboid, Cylinder, Shape, Voxels};
+        struct Rng(u64);
+        impl Rng {
+            fn f(&mut self) -> f32 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                (self.0 >> 40) as f32 / 16_777_216.0
+            }
+            fn v(&mut self, s: f32) -> Vector {
+                Vector::new(self.f() * 2.0 - 1.0, self.f() * 2.0 - 1.0, self.f() * 2.0 - 1.0) * s
+            }
+            fn q(&mut self) -> Rotation {
+                Rotation::from_xyzw(self.f() - 0.5, self.f() - 0.5, self.f() - 0.5, self.f() - 0.5).normalize()
+            }
+        }
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        let dispatcher = DefaultQueryDispatcher;
+        let (mut same, mut later, mut overlapping) = (0, 0, 0);
+        for trial in 0..3000 {
+            let size = [0.05, 0.1, 0.25][(r.f() * 3.0) as usize % 3];
+            let cells: Vec<IVector> = if trial % 2 == 0 {
+                let fill = 0.2 + 0.7 * r.f();
+                (0..10).flat_map(|x| (0..5).flat_map(move |y| (0..10).map(move |z| IVector::new(x, y, z)))).collect::<Vec<_>>().into_iter().filter(|_| r.f() < fill).collect()
+            } else {
+                (-6..6).flat_map(|x| (-2..14).flat_map(move |z| (z.max(0) / 4 - 3..z.max(0) / 4).map(move |y| IVector::new(x, y, z)))).collect()
+            };
+            if cells.is_empty() {
+                continue;
+            }
+            let voxels = Voxels::new(Vector::splat(size), &cells);
+            let aabb = voxels.local_aabb();
+            let shape: Box<dyn Shape> = match trial % 5 {
+                0 => Box::new(Ball::new(0.03 + 0.4 * r.f())),
+                1 => Box::new(Cuboid::new(Vector::new(0.03 + 0.5 * r.f(), 0.03 + 0.3 * r.f(), 0.03 + 0.6 * r.f()))),
+                2 => Box::new(Capsule::new_y(0.05 + 0.4 * r.f(), 0.03 + 0.2 * r.f())),
+                3 => Box::new(ConvexPolyhedron::from_convex_hull(&(0..14).map(|_| r.v(0.4)).collect::<Vec<_>>()).unwrap()),
+                _ => Box::new(Cylinder::new(0.05 + 0.3 * r.f(), 0.05 + 0.3 * r.f())),
+            };
+            let at = aabb.center() + aabb.half_extents() * Vector::new(r.f() * 2.6 - 1.3, r.f() * 2.6 - 1.3, r.f() * 2.6 - 1.3);
+            let spin = [0.0, 3.0, 30.0, 250.0][if r.f() < 0.05 { 3 } else { (r.f() * 3.0) as usize % 3 }];
+            let speed = 30.0 * r.f();
+            let lever = if r.f() < 0.5 { Vector::ZERO } else { r.v(1.0) };
+            let m2 = NonlinearRigidMotion::new(Pose::from_parts(at, r.q()), lever, r.v(speed), r.v(spin));
+            let m1 = if r.f() < 0.25 {
+                NonlinearRigidMotion::new(Pose::from_parts(r.v(0.5), r.q()), Vector::ZERO, r.v(5.0), r.v(3.0))
+            } else {
+                NonlinearRigidMotion::constant_position(Pose::IDENTITY)
+            };
+            let stop = r.f() < 0.5;
+            let (t0, t1) = if r.f() < 0.8 { (0.0, 1.0 / 60.0) } else { (0.004, 0.004 + 0.012 * r.f()) };
+            let answer = dispatcher.cast_shapes_nonlinear(&m1, &voxels, &m2, &*shape, t0, t1, stop).unwrap();
+            // The brute force: the cast's own frame (the voxel shape held where it is at the start, the shape's
+            // velocity taken relative to it), every solid cell's box cast, the earliest hits.
+            let (mut b1, mut b2) = (m1, m2);
+            b2.linvel -= b1.linvel;
+            b1.freeze(t0);
+            let cuboid = Cuboid::new(Vector::splat(size / 2.0));
+            let mut hits = vec![];
+            for vox in voxels.voxels() {
+                if vox.state.is_empty() {
+                    continue;
+                }
+                if let Some(h) = dispatcher.cast_shapes_nonlinear(&b1.prepend_translation(vox.center), &cuboid, &b2, &*shape, t0, t1, stop).unwrap() {
+                    if h.time_of_impact < t1 {
+                        hits.push((h, vox.center));
+                    }
+                }
+            }
+            let first = hits.iter().map(|h| h.0.time_of_impact).fold(Real::MAX, Real::min);
+            let key = |h: &query::ShapeCastHit| (h.time_of_impact.to_bits(), h.normal1.to_array().map(f32::to_bits), h.witness1.to_array().map(f32::to_bits), h.status as u8);
+            let brute: Vec<_> = hits.iter().filter(|h| h.0.time_of_impact == first).map(|h| key(&h.0)).collect();
+            let case = format!("trial {trial}: size {size}, {:?}, stop {stop}, times {t0}..{t1}, motion {m2:?}, voxels moving {m1:?}", shape.shape_type());
+            // (Where is the shape at a time, in the voxel shape's frame; is any cell met then.)
+            let pose = |t: Real| b1.position_at_time(t).inv_mul(&b2.position_at_time(t));
+            let met = |t: Real, except_overlapping_at: Option<Real>| {
+                hits.iter().map(|h| h.1).chain(voxels.voxels().filter(|x| !x.state.is_empty()).map(|x| x.center)).any(|c| {
+                    let touching = |t: Real| query::distance(&Pose::from_translation(c), &cuboid, &pose(t), &*shape).unwrap().distance <= 0.0;
+                    touching(t) && !except_overlapping_at.is_some_and(touching)
+                })
+            };
+            if met(t0, None) {
+                overlapping += 1;
+            }
+            match &answer {
+                Some(a) if a.time_of_impact == first => {
+                    assert!(brute.contains(&key(a)), "{case}: the answer {a:?} is none of the brute force's hits at that time {brute:?}");
+                    same += 1;
+                }
+                None if hits.is_empty() => same += 1,
+                _ => {
+                    let at = answer.map_or(t1, |a| a.time_of_impact);
+                    assert!(at > first, "{case}: the answer {answer:?} is before the brute force's {first}");
+                    // The brute force's earliest hits are early: their cells are clear of the shape then.
+                    for (h, c) in hits.iter().filter(|h| h.0.time_of_impact == first) {
+                        let gap = query::distance(&Pose::from_translation(*c), &cuboid, &pose(first), &*shape).unwrap().distance;
+                        assert!(gap > 1e-4, "{case}: the brute force's hit {h:?} (cell at {c:?}) is a contact (gap {gap}), and the answer {answer:?} is later");
+                    }
+                    // And no cell is met on the way to the answer (but those overlapping from the start).
+                    for k in 0..200 {
+                        let t = t0 + (at - t0) * k as Real / 200.0;
+                        assert!(!met(t, Some(t0)), "{case}: a cell is met at {t}, before the answer {answer:?}");
+                    }
+                    later += 1;
+                }
+            }
+        }
+        assert!(same > 2900 && overlapping > 500, "{same} the same, {later} later, {overlapping} overlapping at the start");
+        eprintln!("voxel sweeps: {same} the same as the brute force, {later} later (its hit early), {overlapping} overlapping cells at the start");
     }
 
     /// Colliders that share one voxel shape: its memory is counted once; an edit of one gives that one cells of its
