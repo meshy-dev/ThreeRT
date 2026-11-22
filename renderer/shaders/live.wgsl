@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live/mod.rs `live_lighting`), -
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), display whites a unit of a reconstruction provider's input is (reconstruction.wgsl `rc_radiance_unit`), the scene's lighting is changing (live/mod.rs `live_lighting`), -
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
@@ -1003,7 +1003,19 @@ fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let q = gid.y * iw + gid.x;
     let px = sample_px[q];
     let t = px.color.w;
-    let c = (fa[q].rgb * max(px.albedo.rgb, vec3<f32>(0.02)) + spec_load(1u, q).rgb) * medium_tr(q) + sample_emission(q) + direct_in[q].rgb;
+    var lighting: vec3<f32>;
+    if (L.mode.w == 1u) {
+        // The trace kept the whole specular path, including deferred-cache lighting. No irradiance
+        // demodulation or temporal/spatial filter here. Keep the pre-reconstruction signals for snapshots.
+        var spec = finite_or_zero(px.spec.rgb / L.misc2.w);
+        let ceiling = sample_clamp();
+        spec *= min(1.0, ceiling / max(lum(spec), 1e-8));
+        spec_store(1u, q, vec4<f32>(spec, 1.0));
+        lighting = sample_diffuse(q) + spec;
+    } else {
+        lighting = fa[q].rgb * max(px.albedo.rgb, vec3<f32>(0.02)) + spec_load(1u, q).rgb;
+    }
+    let c = lighting * medium_tr(q) + sample_emission(q) + direct_in[q].rgb;
     let sp = sample_pos(i32(gid.x), i32(gid.y));
     let dir = ray_dir(L.cur, sp.x, sp.y);
     var p = L.cur.pos.xyz + dir * 1.0e6;

@@ -18,11 +18,19 @@ struct Pages {
     streams: Vec<(String, crate::texpack::Place)>,
 }
 
+#[cfg(dlss)]
+pub(crate) type DlssSdk = std::sync::Arc<std::sync::Mutex<dlss_wgpu::DlssSdk>>;
+
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     /// GPU timestamp queries are available (used for adaptive samples per frame in the viewer).
     pub timestamps: bool,
+    #[cfg(dlss)]
+    pub(crate) dlss_sdk: Option<DlssSdk>,
+    /// NGX reported DLSS Ray Reconstruction on this device (with `dlss_sdk`).
+    #[cfg(dlss)]
+    pub(crate) dlss_rr: bool,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
@@ -1979,6 +1987,26 @@ fn stamp() {
 }
 ";
 
+/// Reopen the selected Vulkan adapter with NGX's instance and device extensions. Keep the original adapter
+/// available for fallback, and never replace a non-Vulkan adapter (e.g. when WGPU_BACKEND requests DX12).
+#[cfg(dlss)]
+async fn open_dlss(
+    info: &wgpu::AdapterInfo, desc: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue, DlssSdk, bool)> {
+    const PROJECT: uuid::Uuid = uuid::uuid!("7e2053f1-3c7a-4d3c-9a60-d28593bcfdb7");
+    let mut support = dlss_wgpu::FeatureSupport::default();
+    let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    let instance = dlss_wgpu::create_instance(PROJECT, &instance_desc, &mut support)?;
+    anyhow::ensure!(support.super_resolution_supported, "missing NGX Vulkan instance extensions");
+    let adapter = instance.enumerate_adapters(wgpu::Backends::VULKAN).await.into_iter()
+        .find(|adapter| adapter.get_info() == *info)
+        .ok_or_else(|| anyhow!("the selected Vulkan adapter is unavailable in the NGX instance"))?;
+    let (device, queue) = dlss_wgpu::request_device(PROJECT, &adapter, desc, &mut support, Some(desc.required_limits.clone()))?;
+    anyhow::ensure!(support.super_resolution_supported, "missing NGX Vulkan device extensions");
+    let sdk = dlss_wgpu::DlssSdk::new(PROJECT, device.clone())?;
+    Ok((instance, adapter, device, queue, sdk, support.ray_reconstruction_supported))
+}
+
 impl Gpu {
     /// The GPU, waited for (the native shell; a browser has `new_async`: nothing may block there).
     #[cfg(not(target_arch = "wasm32"))]
@@ -2037,14 +2065,39 @@ impl Gpu {
         // Compiled pipelines kept between runs, where a host gave a directory and the backend has a cache.
         let cache_feature = options.pipeline_cache.as_ref().and_then(|_| crate::pipeline_cache::PipelineCache::feature(&adapter, &adapter_info));
         features |= cache_feature.unwrap_or(wgpu::Features::empty());
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+        let device_desc = wgpu::DeviceDescriptor {
             label: Some("threert"),
             required_features: features,
             required_limits: limits,
             // Ray queries are still flagged experimental in wgpu 30.
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
-        }).await?;
+        };
+        #[cfg(dlss)]
+        let (instance, adapter, device, queue, dlss_sdk, dlss_rr) = {
+            let dlss = if adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == 0x10de
+                && std::env::var("THREERT_DLSS").is_ok_and(|v| v == "1")
+            {
+                match open_dlss(&adapter_info, &device_desc).await {
+                    Ok(opened) => Some(opened),
+                    Err(err) => {
+                        eprintln!("DLSS unavailable: {err:#}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            match dlss {
+                Some((instance, adapter, device, queue, sdk, rr)) => (instance, adapter, device, queue, Some(sdk), rr),
+                None => {
+                    let (device, queue) = adapter.request_device(&device_desc).await?;
+                    (instance, adapter, device, queue, None, false)
+                }
+            }
+        };
+        #[cfg(not(dlss))]
+        let (device, queue) = adapter.request_device(&device_desc).await?;
         let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
         let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
         let whole_tables = !merged && !options.table_views_on(merged, cfg!(target_os = "android"));
@@ -2096,7 +2149,21 @@ impl Gpu {
         } else {
             (None, None, None, None)
         };
-        Ok(Gpu { instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default() })
+        Ok(Gpu {
+            #[cfg(dlss)]
+            dlss_sdk,
+            #[cfg(dlss)]
+            dlss_rr,
+            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
+        })
+    }
+
+    /// Whether this device successfully initialized NGX with DLSS Super Resolution support.
+    pub fn dlss_supported(&self) -> bool {
+        #[cfg(dlss)]
+        { self.dlss_sdk.is_some() }
+        #[cfg(not(dlss))]
+        { false }
     }
 
     /// Whether this device's kernel buffers have the loop guard's count (`guard_room`; always in the merged layout).

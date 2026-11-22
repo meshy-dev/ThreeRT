@@ -7,6 +7,8 @@ import type { Engine } from "@threert/scene";
 
 /** The module's exports this file calls (wasm-bindgen's JavaScript for renderer/web: `threert_web.js`). */
 export interface EngineExports {
+  setRendering(json: string): void;
+  renderingStatus(): string;
   physics(op: string, args: string): string;
   physicsPoses(): Float32Array;
   voxelLevel(d: string): void;
@@ -71,6 +73,8 @@ const json = (d: unknown) => JSON.stringify(d ?? null);
 /** `__engine` for the page: every call goes to the export of its name. */
 export function webEngine(w: EngineExports): WebEngine {
   return {
+    setRendering: (json) => w.setRendering(json),
+    renderingStatus: () => w.renderingStatus(),
     physics: (op, args) => w.physics(op, json(args)),
     physicsPoses: () => w.physicsPoses(),
     voxelLevel: (d) => w.voxelLevel(json(d)),

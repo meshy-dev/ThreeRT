@@ -41,6 +41,9 @@ struct Job {
     hdr: Option<PathBuf>,
     /// A live job's approximations (`gpu::A_*` bits; None: the device's).
     approx: Option<u32>,
+    reconstruction: Option<live::Reconstruction>,
+    /// Fixed internal resolution for a live job, as a fraction of its output size.
+    scale: Option<f32>,
     /// `--signals PREFIX`: PREFIX-diffuse.raw / -specular.raw / -emission.raw, the image's linear signals apart as the
     /// live denoiser splits them (RGB f32, output size; live snapshots to `*.signals` write the same).
     signals: Option<PathBuf>,
@@ -179,6 +182,8 @@ fn main() -> Result<()> {
                 size: (flag("--width").map(|s| s.parse()).transpose()?, flag("--height").map(|s| s.parse()).transpose()?),
                 hdr: flag("--hdr").map(PathBuf::from),
                 approx: None,
+                reconstruction: None,
+                scale: None,
                 signals: flag("--signals").map(PathBuf::from),
             };
             let stats = render(&g, &job, &presets, init_ms, &mut Hosts::default())?;
@@ -309,7 +314,7 @@ fn main() -> Result<()> {
         "serve" => {
             // One job per stdin line: {id, game: bundle path (or game module + runtime: runtime module), assets, room,
             // seed, state?, seq?, out, spp?, denoise?, overrides?, camera?, preset?, width?, height?, time?, hdr? (raw f32
-            // RGB linear radiance, nits), live? (frames of the real-time renderer instead, `render_live`), approx? (a
+            // RGB linear radiance, nits), live? (frames of the real-time renderer, with optional scale and reconstruction), approx? (a
             // live job's approximations, `gpu::A_*` bits; the device's without)}; one result line
             // each: {id, ok, stats} or
             // {id, ok: false, error, missing?: [files to put under the asset root before retrying]}.
@@ -340,6 +345,8 @@ fn main() -> Result<()> {
                         time: v["time"].as_f64().map(|t| t as f32),
                         size: (v["width"].as_u64().map(|x| x as u32), v["height"].as_u64().map(|x| x as u32)),
                         hdr: v["hdr"].as_str().map(PathBuf::from),
+                        reconstruction: v.get("reconstruction").filter(|r| !r.is_null()).map(live::Reconstruction::from_json).transpose()?,
+                        scale: v["scale"].as_f64().map(|s| s as f32),
                         approx: v["approx"].as_u64().map(|x| x as u32),
                         signals: v["signals"].as_str().map(PathBuf::from),
                     };
@@ -368,7 +375,7 @@ fn main() -> Result<()> {
 
 
 /// A `serve` job with `live: frames`: the real-time renderer (radiance cache, temporal and denoising passes) runs that
-/// many frames at 100 % scale on the scene's camera, the game's frame script (if any) before each at 60 fps; `hdr` gets
+/// many frames at the job's scale on the scene's camera, the game's frame script (if any) before each at 60 fps; `hdr` gets
 /// its linear radiance, `out` the displayed image.
 fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u32, hosts: &mut Hosts) -> Result<serde_json::Value> {
     let t0 = Instant::now();
@@ -395,7 +402,9 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     };
     g.set_approx(job.approx);
     let mut core = live::LiveCore::new(g, &w, &job.game.assets, presets, width, height)?;
-    core.set_scale(1.0);
+    host.attach_rendering(&mut core);
+    if let Some(mode) = &job.reconstruction { core.set_reconstruction(mode.clone()); }
+    core.set_scale(job.scale.unwrap_or(1.0));
     drop(w);
     // A frame script runs at 60 fps: the renderer's frame time is the same (motion blur, exposure adaptation).
     if host.has_frame() {
@@ -423,8 +432,13 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     }
     let ev100 = core.read_ev100()?;
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let info = serde_json::json!({
+        "width": width, "height": height, "frames": frames, "scale": core.render_scale,
+        "reconstruction": core.reconstruction().name(), "requested_reconstruction": core.requested_reconstruction().name(),
+        "ev100": ev100, "timings_ms": { "total_ms": ms }
+    });
     *slot = Some(core.g);
-    Ok(serde_json::json!({ "width": width, "height": height, "frames": frames, "ev100": ev100, "timings_ms": { "total_ms": ms } }))
+    Ok(info)
 }
 
 /// PREFIX-diffuse.raw, -specular.raw, -emission.raw (RGB f32 each).

@@ -2678,6 +2678,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytemuck",
+ "cc",
  "glam 0.30.10",
  "gltf",
  "half",

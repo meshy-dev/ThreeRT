@@ -49,8 +49,15 @@ use web_time::Instant;
 
 mod edits;
 mod frame;
+#[cfg(dlss)]
+mod dlss;
+mod fsr;
 mod layout;
+#[cfg(metalfx)]
+mod metalfx;
 mod load;
+mod reconstruction;
+mod rendering;
 #[cfg(not(target_arch = "wasm32"))]
 mod session;
 mod state;
@@ -60,6 +67,9 @@ pub(crate) use targets::live_source;
 pub(crate) use targets::Targets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::{parse_cmd, parse_launch, parse_opts, run, save_bgra};
+pub use reconstruction::{JointGuides, JointProvider, Method, Prepared, Reconstruction, ReconstructionFrame, ReconstructionSize, ReconstructionStatus, Skip, UpscaleProvider};
+pub use rendering::{next_method, FrameGeneration, Latency, Quality, RenderingControl, RenderingRequest, RenderingStatus};
+use reconstruction::Reconstructor;
 use edits::*;
 use frame::*;
 use load::*;
@@ -67,6 +77,8 @@ use state::*;
 use targets::*;
 
 pub struct LiveOpts {
+    /// `--quality`, `--reconstruction`, `--frame-generation`, `--latency` (live/rendering.rs); `--quality` over `scale`.
+    pub rendering: RenderingRequest,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -215,6 +227,8 @@ pub enum Cmd {
     Status(String),
     /// Render scale (0 = dynamic resolution).
     Scale(f32),
+    /// Rendering settings (live/rendering.rs): the fields given change.
+    Rendering(RenderingRequest),
     /// The view at another size, pixels (`LiveCore::resize`; the window host: its window's).
     Resize(u32, u32),
     Quit,
@@ -223,6 +237,12 @@ pub enum Cmd {
 /// The real-time renderer: scene + screen targets + camera/history state. Records one frame at a time; the output
 /// (sRGB BGRA8 per pixel) lands in `targets.out`. Used by the headless runner, the native window viewer and the native clients.
 pub struct LiveCore {
+    reconstructor: Reconstructor,
+    /// The requested render resolution (`render_scale` and `dynamic_res` are what it resolves to).
+    quality: Quality,
+    frame_generation: FrameGeneration,
+    latency: Latency,
+    rendering_control: Option<RenderingControl>,
     /// The game's particle spawns since the last frame (`World::particle_spawns`), for the GPU particle pass.
     particle_spawns: std::collections::BTreeMap<u32, Vec<f32>>,
     /// The sources the game gave its density grids since the last frame (`World::grid_sources`), for the grid pass.
@@ -540,10 +560,76 @@ impl LiveCore {
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let reconstructor = Reconstructor::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let reconstructor = {
+            let mut reconstructor = reconstructor;
+            if let Ok(mode) = std::env::var("THREERT_RECONSTRUCTION") {
+                reconstructor.set(Reconstruction::parse(&mode)?);
+            }
+            reconstructor
+        };
+        let mut core = LiveCore {
+            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();
         Ok(core)
+    }
+
+    /// Change the rendering settings given (live/rendering.rs); from the next frame.
+    pub fn set_rendering(&mut self, r: RenderingRequest) {
+        if let Some(q) = r.quality {
+            self.set_scale(q.scale().unwrap_or(0.0));
+            self.quality = q;
+        }
+        if let Some(m) = r.reconstruction { self.set_reconstruction(m); }
+        if let Some(f) = r.frame_generation { self.frame_generation = f; }
+        if let Some(l) = r.latency { self.latency = l; }
+    }
+
+    /// A reconstruction request: a method, a preference list, or `Reconstruction::Auto`.
+    pub fn set_reconstruction(&mut self, r: impl Into<Reconstruction>) {
+        if self.reconstructor.set(r.into()) {
+            self.reset_history();
+        }
+    }
+
+    /// The method the last frame ran.
+    pub fn reconstruction(&self) -> Method { self.reconstructor.method() }
+
+    pub fn requested_reconstruction(&self) -> &Reconstruction { &self.reconstructor.requested }
+
+    pub fn reconstruction_status(&self) -> ReconstructionStatus { self.reconstructor.status() }
+
+    pub fn rendering_status(&self) -> RenderingStatus {
+        RenderingStatus {
+            quality: self.quality, scale: self.render_scale, dynamic: self.dynamic_res,
+            reconstruction: self.reconstruction_status(), frame_generation: self.frame_generation, latency: self.latency,
+            frames_in_flight: self.frames_in_flight() as u32,
+        }
+    }
+
+    /// Frames the CPU may record ahead of the GPU: one with low latency on (or frames generated, which need it).
+    pub(crate) fn frames_in_flight(&self) -> usize {
+        match self.latency { Latency::On => 1, Latency::Off | Latency::Auto => 2 }
+    }
+
+    /// Install an upscaler (live/reconstruction.rs), selected as `custom:<id>` like a built-in method.
+    pub fn register_upscaler(&mut self, id: &str, provider: impl UpscaleProvider + 'static) -> Result<()> {
+        self.reconstructor.register_upscaler(id, Box::new(provider))
+    }
+
+    /// Install a joint denoiser (live/reconstruction.rs), selected as `custom:<id>` like a built-in method.
+    pub fn register_joint_denoiser(&mut self, id: &str, provider: impl JointProvider + 'static) -> Result<()> {
+        self.reconstructor.register_joint(id, Box::new(provider))
+    }
+
+    /// Share the settings with a game runtime or a page: its requests apply from the next frame, and it reads each
+    /// frame's status.
+    pub fn attach_rendering_control(&mut self, control: RenderingControl) {
+        if let Some(r) = control.take() { self.set_rendering(r); }
+        control.publish(self.rendering_status());
+        self.rendering_control = Some(control);
     }
 
     pub fn scene_camera(&self) -> Camera {
@@ -678,6 +764,7 @@ impl LiveCore {
 
     /// Fixed render scale (`s` in SCALE_FLOOR ..= 1), or dynamic resolution (`s` = 0).
     pub fn set_scale(&mut self, s: f32) {
+        self.quality = if s <= 0.0 { Quality::Auto } else { Quality::Scale(s) };
         self.dynamic_res = s <= 0.0;
         if s > 0.0 {
             self.render_scale = s.clamp(SCALE_FLOOR, 1.0);
@@ -739,6 +826,7 @@ impl LiveCore {
             anyhow::bail!("a view of {w} x {h}: more samples than this device holds in one buffer");
         }
         (self.w, self.h, self.aspect) = (w, h, w as f32 / h as f32);
+        self.reconstructor.invalidate();
         self.targets.resize(&self.g, &self.passes, w, h);
         if self.raster.is_some() {
             self.raster = Some(Raster::new(&self.g, w, h));
@@ -787,7 +875,10 @@ impl LiveCore {
         // Not in the first 2 s: those frames run while caches fill (Kabukichō's first frames at 0.7 take ~47 ms), and
         // the regular check settles the start as before.
         let warm = self.frame >= 120 || (clock && self.born.elapsed().as_secs_f32() >= 2.0);
-        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
+        // (The floor: the budget's, or higher where the reconstruction asked for takes no lower scale: MetalFX scales
+        // outputs up to 3x its input, so a third.)
+        let floor = self.min_scale.max(self.reconstructor.scale_floor().unwrap_or(0.0)).min(1.0);
+        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > floor { self.over_budget.0 + 1 } else { 0 };
         let urgent = self.over_budget.0 >= 2;
         // (By the clock only when 30 frames take longer than 0.75 s: at 40 frames a second and above the frame count
         // comes first, as it always did.)
@@ -799,10 +890,10 @@ impl LiveCore {
         self.over_budget.0 = 0;
         let before = self.render_scale;
         let budget = 1000.0 / fps as f32 * 0.9;
-        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(self.min_scale, 1.0);
+        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(floor, 1.0);
         // The hysteresis (0.03) does not hold the scale just short of either end: 0.525 with the floor as the target
         // kept the district's return drive at 21-22 ms.
-        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > self.min_scale);
+        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == floor && self.render_scale > floor) || self.render_scale < floor;
         // (The hysteresis, the steps and the grid of scales are a view in points'; on a display of k pixels a point the
         // same share of the rays is 1 / k of the scale. Left absolute, a Retina view held 0.325 at 17.3 ms: its target,
         // 0.30, was inside the hysteresis.)
@@ -811,6 +902,8 @@ impl LiveCore {
             // Down fast when far over budget (a heavy scene just opened), up slowly; straight to the target when urgent.
             let step = if urgent { target - self.render_scale } else { (target - self.render_scale).clamp(if self.gpu_ms > budget * 1.5 { -0.3 } else { -0.15 } / k, 0.1 / k) };
             self.render_scale = ((self.render_scale + step) * 40.0 * k).round() / (40.0 * k);
+            // (On the grid, not below the floor: a step rounded down under a provider's range would lose it again.)
+            if self.render_scale < floor { self.render_scale = floor; }
         }
         if self.render_scale != before {
             // `frame` is already the next frame's index (render advanced it): the first one at the new scale.
@@ -1033,6 +1126,8 @@ impl LiveCore {
         let c = &self.cam;
         serde_json::json!({
             "seq": self.seq, "frame": self.frame, "history": self.history_len, "gpu_ms": self.gpu_ms,
+            "reconstruction": self.reconstruction().name(), "requested_reconstruction": self.requested_reconstruction().name(),
+            "reconstruction_fallback": self.reconstructor.status().fallback.map(Skip::name), "rendering": self.rendering_status().json(),
             "scene": self.scene_name, "triangles": self.triangles, "bounces": self.bounces, "mode": self.view_mode, "width": self.w, "height": self.h, "scale": self.render_scale,
             "cam": { "pos": c.pos.to_array(), "fwd": c.fwd.to_array(), "up": c.up.to_array(), "right": c.right.to_array(), "tan": c.tan_half_fov, "aspect": self.aspect },
         })

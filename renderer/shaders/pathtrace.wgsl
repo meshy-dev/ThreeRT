@@ -1588,6 +1588,9 @@ struct Lobes {
 // Not here: the radiance scaling by the indices' ratio squared (as Cycles and glTF's formula: it cancels over a
 // closed solid, and a single-sheet pane, which refracts as a solid here, would be scaled once); thin walls;
 // absorption by distance.
+// Smoother than this a reflection or refraction is sharp enough that an emitter seen through it needs no denoising
+// (`delta_path`; a polished floor's 0.035 still spreads it over pixels).
+const DELTA_ROUGHNESS: f32 = 0.025;
 const GLASS_DELTA: f32 = 0.05; // roughness (RTXPT 0.04, Falcor 0.08)
 
 // Unpolarised Fresnel reflectance: `c` the cosine on the incident side, `eta` = n(far) / n(incident); 1 at total
@@ -3203,6 +3206,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     };
     @group(1) @binding(1) var<storage, read_write> ML: MergedLive;
     fn refl_len() -> u32 { return P.live_len.x; }
+    fn refl_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].y + i]; }
     fn refl_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].y + i] = v; }
     fn motion_len() -> u32 { return P.live_len.y; }
     fn motion_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].z + i] = v; }
@@ -3230,6 +3234,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     @group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;
     @group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;
     fn refl_len() -> u32 { return arrayLength(&refl); }
+    fn refl_load(i: u32) -> vec4<f32> { return refl[i]; }
     fn refl_store(i: u32, v: vec4<f32>) { refl[i] = v; }
     fn motion_len() -> u32 { return arrayLength(&motion_out); }
     fn motion_store(i: u32, v: vec4<f32>) { motion_out[i] = v; }
@@ -3269,7 +3274,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 
 fn resolve_bound() -> bool { return LIVE && refl_len() >= 2u * P.size.x * P.size.y; }
 // THREERT_CACHE_FLAGS bit 16 turns the resolve off (rays then stay in their pixel's specular, the resolve reads zeros).
-fn resolve_on() -> bool { return resolve_bound() && (u32(P.cache.w) & 16u) == 0u; }
+fn resolve_on() -> bool { return resolve_bound() && P.motion.y == 0.0 && (u32(P.cache.w) & 16u) == 0u; }
 
 // Density of l under the base specular lobe alone (VNDF sampling).
 fn pdf_spec(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -3630,6 +3635,88 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     accum[pix] = px;
 }
 
+// Deterministic reconstruction guides at smooth reflectors. Using the random BSDF sample makes
+// glass alternate between two different materials and leaves a hole wherever a diffuse lobe was drawn.
+struct GuideHit { albedo: vec3<f32>, normal: vec3<f32>, rough: f32, distance: f32 };
+fn guide_color(radiance: vec3<f32>) -> vec3<f32> {
+    // Keep a dark background dark and preserve the hue of bright emitters in the albedo guide.
+    return radiance / max(1.0, max(radiance.r, max(radiance.g, radiance.b)));
+}
+fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: bool) -> GuideHit {
+    var o = offset_origin(origin, dir);
+    var d = dir;
+    var first = 0.0;
+    for (var i = 0u; i < 2u; i++) {
+        let h = trace(o, d, INF, TRACE_CLOSEST);
+        if (h.tri == 0xffffffffu) {
+            var sky = env_radiance(d);
+            if (through_glass) { sky = sky_mis(d, 0.0); }
+            return GuideHit(guide_color(sky), -d, 1.0, select(first, 1e4, i == 0u));
+        }
+        if (i == 0u) { first = h.t; }
+        let s = surface(o, d, h, footprint + h.t * 2.0 * P.cam_pos.w / lod_height());
+        // Continue through the back face of a clear solid to the material visible behind it.
+        if (i == 0u && through_glass && !s.front && s.transmission > 0.0 && s.roughness < GLASS_DELTA) {
+            let exit_d = refract(d, s.n, s.ior);
+            d = select(reflect(d, s.n), exit_d, dot(exit_d, exit_d) > 0.0);
+            o = offset_origin(s.p, d);
+            continue;
+        }
+        let m = lobes(s, max(dot(s.n, -d), 1e-4));
+        let emission = guide_color(s.emissive);
+        return GuideHit(clamp(max(cache_reflectance(m), emission), vec3<f32>(0.0), vec3<f32>(1.0)), s.n, s.roughness, first);
+    }
+    return GuideHit(vec3<f32>(1.0), -d, 1.0, first);
+}
+
+@compute @workgroup_size(8, 8) fn surface_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (any(gid.xy >= P.size.xy)) { return; }
+    let q = gid.y * P.size.x + gid.x;
+    let px = accum[q];
+    let diffuse = refl_load(2u*q);
+    let specular = refl_load(2u*q+1u);
+    var alb = diffuse.rgb;
+    var normal = px.normal.xyz;
+    var rough = px.emit.w;
+    // Rough surfaces have no single reflected point. A stochastic second-bounce hit would move
+    // their guide even when both the object and camera stand still.
+    accum[q].spec.w = 0.0;
+    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.raster.w == 0.0 &&
+        (any(specular.rgb > vec3<f32>(0.005)) || diffuse.w > 0.0)) {
+        cur_depth = 1u;
+        mirror_path = true;
+        let ndc = ((vec2<f32>(gid.xy) + P.raster.yz) / vec2<f32>(P.size.xy) * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+        let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * ndc.x * P.cam_pos.w * P.cam_fwd.w + P.cam_up.xyz * ndc.y * P.cam_pos.w);
+        let x = P.cam_pos.xyz + d * px.color.w;
+        let width = px.color.w * 2.0 * P.cam_pos.w / lod_height();
+        let reflected = guide_hit(x, reflect(d, normal), width, false);
+        accum[q].spec.w = reflected.distance;
+        // At a mirror or clear pane the visible material is the secondary surface. Preserve primary
+        // depth and motion for silhouettes, disocclusions and post; only the denoiser gets virtual guides.
+        let sharp = 1.0 - smoothstep(GLASS_DELTA, 0.18, rough);
+        let reflection = clamp(max(specular.r, max(specular.g, specular.b)), 0.0, 1.0);
+        var virtual_n = reflect(reflected.normal, normal);
+        var virtual_r = reflected.rough;
+        var share = reflection;
+        alb += sharp * specular.rgb * reflected.albedo;
+        if (diffuse.w > 0.0 && specular.w > 0.0) {
+            let refracted = refract(d, normal, specular.w);
+            if (dot(refracted, refracted) > 0.0) {
+                let transmitted = guide_hit(x, refracted, width, true);
+                let weight = diffuse.w * (1.0 - reflection);
+                alb += sharp * weight * px.albedo.rgb * transmitted.albedo;
+                if (weight > reflection) { virtual_n = transmitted.normal; virtual_r = transmitted.rough; }
+                share += weight;
+            }
+        }
+        if (dot(virtual_n, normal) < 0.0) { virtual_n = -virtual_n; }
+        normal = normalize(mix(normal, virtual_n, sharp * min(share, 1.0)));
+        rough = mix(rough, virtual_r, sharp * min(share, 1.0));
+    }
+    refl_store(2u*q, vec4<f32>(alb, bitcast<f32>(oct_enc(select(vec3<f32>(0.0, 0.0, 1.0), normal, dot(normal, normal) > 0.0)))));
+    refl_store(2u*q+1u, vec4<f32>(specular.rgb, rough));
+}
+
 // Live, after the trace: MEDIA_TRAIN_POINTS fresh estimates (point_radiance) into the volume voxels, each at a random
 // point where a camera ray toward a random traced pixel crosses the media before its first hit.
 @compute @workgroup_size(64, 1, 1)
@@ -3807,6 +3894,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var refl_pdf = 0.0;
     var refl_w = vec3<f32>(0.0);
     var refl_e = vec3<f32>(0.0);
+    var guide_diffuse = vec3<f32>(0.0);
+    var guide_glass = vec2<f32>(0.0); // transmitted share and incident/transmitted index ratio
     var through0 = false;
     // The camera hit is transmissive (glass, water): its reflections stay in the specular signal too (the resolve's
     // neighbours there mostly went through, so it had no rays to rebuild them from: live glass lost its reflection).
@@ -3815,6 +3904,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dl_det = vec3<f32>(0.0);
     dl_det_spec = vec3<f32>(0.0);
     var specular_bounce = true;
+    // Every bounce so far a delta sample off a smooth mirror or clear glass: an emitter the path then hits is seen
+    // sharply (MetalFX denoised takes it as emission: upscaled, not denoised).
+    var delta_path = true;
     // Glass passed since the last scattering vertex: any (behind_glass), and whether an odd number of surfaces (bent).
     // The vertex's shadow rays toward emitters stopped at the glass and those toward the sky at bending glass, so
     // what the path finds there counts in full; behind glass that does not bend (a pane) the sky and the directional
@@ -3919,6 +4011,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 bent = false;
                 straight = false;
                 mirror_path = false;
+                delta_path = false;
                 cone_w += cone_a * tk.t;
                 cone_a += 2.0;
                 if (depth >= P.counts.w) {
@@ -4013,7 +4106,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let lum = luminance(c);
                 if (lum > clamp_v) { c *= clamp_v / lum; }
             }
-            if (depth == 0u) { e0 += c; }
+            if (depth == 0u || (LIVE && P.motion.y > 0.5 && delta_path)) { e0 += c; }
             radiance += c;
         }
         if (s.card) { break; }
@@ -4112,6 +4205,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             through0 = through;
             glass0 = has(F_GLASS) && s.transmission > 0.0;
             refl_e = lb.e_spec;
+            if (LIVE && P.motion.y > 0.5) {
+                // MetalFX takes the directional reflectances of the layered BSDF, including glass and coat.
+                guide_diffuse = lb.diffuse * lb.kd * (1.0 - lb.e_coat);
+                refl_e = cache_reflectance(lb) - guide_diffuse;
+                if (has(F_GLASS)) { guide_glass = vec2<f32>(s.transmission * (1.0 - s.metallic), lb.eta); }
+            }
             if (sampled_spec && !through && lb.coat <= 0.0) {
                 refl_l = l;
                 refl_pdf = pdf_spec(s, lb, v, l);
@@ -4139,6 +4238,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cone_w = width;
         cone_a += 2.0 * s.roughness * s.roughness;
         mirror_path = (depth == 0u || mirror_path) && s.roughness < MIRROR_ROUGHNESS && (sampled_spec || sampled_trans);
+        delta_path = delta_path && s.roughness < DELTA_ROUGHNESS && (sampled_spec || sampled_trans);
         if (depth >= P.counts.w) {
             let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
             if (rng1(rng_dim(D_RR)) > q) { break; }
@@ -4170,7 +4270,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (P.misc.w < 0.5 && motion_len() >= w * h) {
             motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz)));
         }
-        if (resolve_bound() && P.misc.w < 0.5) {
+        if (P.motion.y > 0.5 && P.misc.w < 0.5 && resolve_bound()) {
+            // The reconstruction consumes the noisy path itself. Its material guides reuse the idle ray slots.
+            refl_store(pix * 2u, vec4<f32>(guide_diffuse, guide_glass.x));
+            refl_store(pix * 2u + 1u, vec4<f32>(refl_e, guide_glass.y));
+        } else if (resolve_bound() && P.misc.w < 0.5) {
             // Radiance along the specular ray: what the path gathered after it, over the ray's weight.
             var li = vec3<f32>(0.0);
             if (resolve && refl_pdf > 0.0) {
