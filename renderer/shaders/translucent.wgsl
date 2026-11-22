@@ -57,7 +57,9 @@
 // Material of a translucent particle at triangle ti (barycentrics b): colour, opacity and emission after maps and its
 // material function.
 @if(hwrt) fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
-    let td = tri_data(ti, 0u);
+    // (Its row: the translucent triangles' rows follow the other rows, from `P.word_first[1].w` on.)
+    let row = P.word_first[1].w + ti - TPS.size.z;
+    let td = tri_data(ti, NO_INST, row);
     let a = td.a;
     // (A particle's triangle is in the world: no instance.)
     let m = material_at(material_of(a, NO_INST));
@@ -71,7 +73,7 @@
     }
     r.emissive = emission(m, uv, tl) * obj_power(a);
     if (has(F_FUNC) && m.tex1.w > 0) {
-        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, NO_INST, b.x, b.y, view, lod), m, r);
+        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, NO_INST, row, b.x, b.y, view, lod), m, r);
     }
     return r;
 }

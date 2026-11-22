@@ -151,17 +151,14 @@ struct Triangles {
     prev: Vec<f32>,
 }
 
-/// `n` triangles from `first` as the GPU has them (their records: their vertices, which the indices' own array has
-/// too, and their rows), their vertices counted from `base`; their previous positions from `prev` on (None: not
-/// read).
+/// `n` triangles from `first` as the GPU has them, their vertices counted from `base`; their previous positions from
+/// `prev` on (None: not read). Their rows where each has one: under software traversal (a unit's tree's own; a
+/// world-space triangle's), not a mesh's under hardware traversal, which has none.
 fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u32>) -> Triangles {
     use crate::heap::Stream;
-    let (up, size) = (&c.sc.up, crate::indexed::RECORD_BYTES as u64);
-    let records: Vec<crate::indexed::TriRecord> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * size, n * size);
-    let index: Vec<u32> = records.iter().flat_map(|r| [r[0], r[1], r[2]]).collect();
-    let alone: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
-    assert_eq!(index, alone, "triangles {first}..{}: a record's vertices are the indices' array's", first + n);
-    let rows: Vec<u32> = records.iter().flat_map(|r| r[crate::indexed::RECORD_ROW..].to_vec()).collect();
+    let up = &c.sc.up;
+    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
+    let rows: Vec<u32> = if c.g.hwrt { vec![] } else { read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * 16, n * 16) };
     let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
     let before: Vec<crate::indexed::Vertex> = prev.map_or(vec![], |_| read_back(c, &up.prev_vertices, 0, up.prev_vertices.size()));
     let mut out = Triangles { rows, ..Default::default() };
@@ -200,7 +197,7 @@ fn skinned_on_cpu(c: &LiveCore, sk: &scene::Skinned, a: &crate::desc::Animation)
             Some((t, hand)) => [t.x, t.y, t.z, hand],
             None => [0.0; 4],
         });
-        out.rows.extend([section, 0, scene::TRI_DYNAMIC, rank]);
+        out.rows.extend([section, 0, 0, rank]);
     }
     out
 }
@@ -213,9 +210,11 @@ fn same_numbers(what: &str, got: &[f32], want: &[f32], stride: usize) {
     }
 }
 
-/// A posed skinned model's mesh on the GPU against the CPU skin of `now` (corners, normals, UVs, tangents; its rows
-/// word for word), its vertices' previous positions against that of `before`, and the mesh as the CPU has it when
-/// asked (`name`: its node). Its record has where its vertices and their previous positions are. The CPU's corners.
+/// A posed skinned model's mesh on the GPU against the CPU skin of `now` (corners, normals, UVs, tangents), its
+/// vertices' previous positions against that of `before`, and the mesh as the CPU has it when asked (`name`: its
+/// node). Its record has where its vertices and their previous positions are, and that its mesh deforms. Which
+/// section a triangle is in and its index there: under software traversal the tree's rows, word for word; under
+/// hardware traversal the triangle is its section's first (its instance's row's) and its index on. The CPU's corners.
 fn skinned_is_the_cpus(what: &str, c: &LiveCore, sk: &scene::Skinned, name: &str, now: &crate::desc::Animation, before: &crate::desc::Animation) -> Vec<f32> {
     let (inst, record, mesh) = (&c.sc.instances[sk.instance as usize], &c.sc.gpu_instances[sk.instance as usize], &c.sc.meshes[sk.mesh as usize]);
     assert_eq!((record.n[2][3].to_bits(), record.info[2], inst.verts), (inst.prev, mesh.vfirst, mesh.vfirst), "{what}: the record has where the mesh's vertices and their previous positions are");
@@ -225,7 +224,14 @@ fn skinned_is_the_cpus(what: &str, c: &LiveCore, sk: &scene::Skinned, name: &str
     same_numbers(&format!("{what}: the normals"), &got.n, &want.n, 9);
     same_numbers(&format!("{what}: the UVs"), &got.uv, &want.uv, 6);
     same_numbers(&format!("{what}: the tangents"), &got.t, &want.t, 4);
-    assert_eq!(got.rows, want.rows, "{what}: the triangles' rows (section, -, the deforming flag, index in the section)");
+    assert!(record.n[1][3].to_bits() & scene::INST_DEFORMS != 0 && inst.bits & scene::INST_DEFORMS != 0, "{what}: the record says its mesh deforms");
+    if c.g.hwrt {
+        for (j, &(_, section, rank)) in sk.order.iter().enumerate() {
+            assert_eq!(c.sc.rows[(inst.rows + section) as usize][1] + rank, record.info[0] + j as u32, "{what}: triangle {j} is its section's first and its index on (section {section}, index {rank})");
+        }
+    } else {
+        assert_eq!(got.rows, want.rows, "{what}: the tree's rows (a triangle's section, -, -, its index in the section)");
+    }
     same_numbers(&format!("{what}: the previous frame's positions"), &got.prev, &skinned_on_cpu(c, sk, before).p, 9);
     let asked: Vec<f32> = c.node_tris(name).iter().flatten().flat_map(|p| p.to_array()).collect();
     let placed: Vec<f32> = want.p.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
@@ -256,6 +262,209 @@ fn moving_triangles_are_the_cpus(what: &str, c: &LiveCore) {
 fn apart(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as f64).sum::<f64>() / a.len() as f64
+}
+
+/// The mean of a picture's colour bytes (BGRA8, 96 pixels a row) over the pixels x0..x1 of the rows y0..y1.
+fn region_mean(p: &[u8], [x0, y0, x1, y1]: [usize; 4]) -> f64 {
+    assert_eq!(p.len(), 96 * 54 * 4);
+    let sum: f64 = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y * 96 + x) * 4)).map(|k| p[k] as f64 + p[k + 1] as f64 + p[k + 2] as f64).sum();
+    sum / (3 * (x1 - x0) * (y1 - y0)) as f64
+}
+
+/// A world of a white wall (2 m, at z = 0), a black sky and a camera before the wall at `z`, with three materials:
+/// 1 white, 2 black, 3 as given.
+fn wall_world(z: f32, third: serde_json::Value) -> World {
+    let json = |v: serde_json::Value| serde_json::from_value::<crate::desc::Material>(v).unwrap();
+    let plain = |c: f32| serde_json::json!({ "name": "m", "color": [c, c, c], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+    let mut w = World::default();
+    w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [0.0, 0.0, 0.0], "intensity": 0, "skyLightIntensity": 0 })), ..w.environment.clone() });
+    w.set_material(1, json(plain(0.8)));
+    w.set_material(2, json(plain(0.0)));
+    w.set_material(3, json(third));
+    w.set_geometry(1, Geometry { positions: vec![-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] }).unwrap();
+    w.set_object(10, "wall".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(0.0))), true, false).unwrap();
+    w.set_transform(4, Vec3::new(0.0, 0.0, z), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_settings(Settings { camera: Some(4), ..Default::default() });
+    w
+}
+
+/// Triangles as a geometry of corners of their own, with one normal.
+fn soup(t: &[[[f32; 3]; 3]], normal: [f32; 3], groups: Vec<[u32; 3]>) -> Geometry {
+    Geometry { positions: t.iter().flatten().flatten().copied().collect(), normals: normal.repeat(3 * t.len()), uvs: vec![0.0; 6 * t.len()], indices: (0..3 * t.len() as u32).collect(), groups, colors: vec![] }
+}
+
+/// A wall with a dark triangle, a large emitting one at its side, edge-on to it, and a small emitting one 0.12 m
+/// before it and parallel to it: one mesh of two sections (the emitters its second), or with `apart` a mesh each.
+/// (The two emitters turned apart: light sampling picks between them by power, so a ray's weight for one read as
+/// the other's differs by their cosines alone.)
+fn emitters_world(apart: bool) -> World {
+    let (dark, large, small) = ([[-0.95, -0.95, 0.05], [-0.8, -0.95, 0.05], [-0.8, -0.8, 0.05]], [[0.9, -0.6, 0.6], [0.9, -0.6, 1.4], [0.9, 0.4, 1.0]], [[-0.35, -0.06, 0.12], [-0.2, -0.06, 0.12], [-0.275, 0.07, 0.12]]);
+    let mut w = wall_world(2.6, serde_json::json!({ "name": "glow", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 1.5, "doubleSided": true }));
+    if apart {
+        for (k, (t, material)) in [(dark, 2), (large, 3), (small, 3)].into_iter().enumerate() {
+            w.set_geometry(20 + k as u32, soup(&[t], [0.0, 0.0, 1.0], vec![])).unwrap();
+            w.set_object(20 + k as u32, format!("part{k}"), None, Kind::Mesh { geometry: 20 + k as u32, material, own_blas: false, materials: vec![] }, true, false).unwrap();
+        }
+    } else {
+        w.set_geometry(20, soup(&[dark, large, small], [0.0, 0.0, 1.0], vec![[0, 3, 0], [3, 6, 1]])).unwrap();
+        w.set_object(20, "lamps".into(), None, Kind::Mesh { geometry: 20, material: 2, own_blas: false, materials: vec![2, 3] }, true, false).unwrap();
+    }
+    w
+}
+
+/// Emitters in a section that is not its mesh's first, a large triangle at a wall's side and a small one close to it:
+/// the wall beside the small one is lit as by the same triangles a mesh each (the same rays: the two pictures are
+/// one). A light sample is told its emitter's section, whose row has the material that emits; a surface's own ray
+/// that meets one finds it in that section.
+#[test]
+fn emitters_in_a_meshs_second_section_light_as_meshes_of_their_own() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let (mut one, mut each) = match (open(&emitters_world(false)), open(&emitters_world(true))) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+    };
+    let e = &one.sc.tables.emitter_tris;
+    assert!(e.len() == 2 && e.iter().all(|e| e.inst != crate::NO_INST && e.part == 1), "the mesh's two emitters, of its second section");
+    // (The wall around the small triangle.)
+    let region = [35, 20, 49, 34];
+    let (a, b) = (region_mean(&picture(&mut one, 96), region), region_mean(&picture(&mut each, 96), region));
+    assert!(b > 30.0 && (a / b - 1.0).abs() < 0.03, "the wall beside the small emitter: {a:.1} of 255 as one mesh's second section, {b:.1} as meshes of their own");
+}
+
+/// Offline, a surface's own ray that meets an emitter weighs it against the light sample that could have picked it,
+/// by that triangle's entry of the light list: its section's first and its index on (under software traversal's
+/// units its tree's row has the index). The same wall, lit alike by the emitters as one section and as a mesh each
+/// (a mesh of one triangle: index 0).
+#[test]
+fn a_ray_that_meets_an_emitter_weighs_it_by_that_triangles_entry() {
+    let g = match gpu::Gpu::new() {
+        Ok(g) => g,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    let lit = |apart: bool| {
+        let mut sc = scene::build(&emitters_world(apart), Path::new(".."), &crate::default_presets_dir(), None).unwrap();
+        (sc.width, sc.height) = (96, 54);
+        // (Under software traversal with units, as a live view has the scene.)
+        let prep = crate::prepare_as(g.hwrt, true, &mut sc, &mut vec![]);
+        let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 64, &mut vec![]).unwrap();
+        // (The wall around the small triangle, as the live test's region.)
+        (20..34).flat_map(|y| (35..49).map(move |x| y * 96 + x)).map(|k| frame.color[k].iter().sum::<f32>() as f64).sum::<f64>() / (3.0 * 14.0 * 14.0)
+    };
+    let (a, b) = (lit(false), lit(true));
+    assert!(b > 0.01 && (a / b - 1.0).abs() < 0.01, "the wall beside the small emitter: {a:.4} as one mesh's second section, {b:.4} as meshes of their own");
+}
+
+/// The light a surface's own ray brings back from what it meets is that surface's from a view's first frames on,
+/// while the cache is cold and such a pixel is left to the kernel's second pass: a wall lit by nothing but a patch
+/// under a spot light is lit alike with the patch a mesh of its own, the second section of a mesh whose first is
+/// black, and (hardware traversal, which draws particles) a particle that follows a black one. (The record a pixel
+/// is left by says which section its ray met; a triangle no instance places is its own row.)
+#[test]
+fn a_first_frames_bounce_is_off_the_section_the_ray_met() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let quad = |x: f32, z: f32, h: f32| [[[x - h, -0.7, z + h], [x + h, -0.7, z + h], [x + h, -0.7, z - h]], [[x - h, -0.7, z + h], [x + h, -0.7, z - h], [x - h, -0.7, z - h]]];
+    let (far, patch) = (quad(-3.0, 3.0, 0.05), quad(0.0, 0.75, 0.5));
+    // (`how` 0: the patch a mesh of its own; 1: a mesh's second section; 2: a particle.)
+    let scene = |how: u32| {
+        let mut w = wall_world(3.0, serde_json::json!({ "name": "patch", "color": [0.8, 0.8, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true }));
+        let spot = serde_json::from_value(serde_json::json!({ "type": "spot", "color": [1, 1, 1], "castShadow": true, "intensity": 60, "radius": 0, "range": 0, "angle": 0.25, "penumbra": 0.2 })).unwrap();
+        w.set_object(21, "spot".into(), None, Kind::Light(spot), true, false).unwrap();
+        w.set_transform(21, Vec3::new(0.0, 1.4, 0.75), glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), Vec3::ONE).unwrap();
+        match how {
+            0 => {
+                for (k, (t, material)) in [(far, 2), (patch, 3)].into_iter().enumerate() {
+                    w.set_geometry(30 + k as u32, soup(&t, [0.0, 1.0, 0.0], vec![])).unwrap();
+                    w.set_object(30 + k as u32, format!("part{k}"), None, Kind::Mesh { geometry: 30 + k as u32, material, own_blas: false, materials: vec![] }, true, false).unwrap();
+                }
+            }
+            1 => {
+                w.set_geometry(30, soup(&[far, patch].concat(), [0.0, 1.0, 0.0], vec![[0, 6, 0], [6, 6, 1]])).unwrap();
+                w.set_object(30, "floor".into(), None, Kind::Mesh { geometry: 30, material: 2, own_blas: false, materials: vec![2, 3] }, true, false).unwrap();
+            }
+            _ => {
+                for (id, name, material, at) in [(30, "far", 2, "vec3<f32>(-3.0, -0.7, 3.0), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.0, -0.05)"), (31, "patch", 3, "vec3<f32>(0.0, -0.7, 0.75), vec3<f32>(0.5, 0.0, 0.0), vec3<f32>(0.0, 0.0, -0.5)")] {
+                    w.set_particle_fn(name, format!("fn pf_{name}(i: PIn, p: array<vec4<f32>, 8>) -> POut {{ return POut({at}, true, vec4<f32>(0.0)); }}"), String::new());
+                    w.set_object(id, name.into(), None, Kind::Particles { count: 1, emitter: name.into(), params: vec![], material, emitter_area: 0.0 }, true, false).unwrap();
+                }
+            }
+        }
+        w
+    };
+    // (The wall above the patch: lit by nothing but what the patch sends back.)
+    let region = [39, 22, 57, 38];
+    let mut lit = vec![];
+    for how in 0..3 {
+        let mut live = match open(&scene(how)) {
+            Ok(c) if how == 2 && !c.g.hwrt => break,
+            Ok(c) => c,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        lit.push(region_mean(&picture(&mut live, 2), region));
+    }
+    assert!(lit[0] > 20.0 && lit[1..].iter().all(|x| (x / lit[0] - 1.0).abs() < 0.1), "the wall above the patch after two frames, of 255: {lit:.1?} (the patch a mesh, a mesh's second section, a particle)");
+}
+
+/// A particle of a cutout's material is tested by its own material (its triangle's row has it): one whose opacity is
+/// under its material's alpha test is not there, before a wall the sun lights, after a particle of another material.
+#[test]
+fn a_cutout_particle_is_tested_by_its_own_material() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let scene = |cut: bool| {
+        let mut w = wall_world(3.0, serde_json::json!({ "name": "cut", "color": [0, 0, 0], "opacity": 0.3, "alphaTest": 0.5, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true }));
+        let sun = serde_json::from_value(serde_json::json!({ "type": "directional", "color": [1.0, 1.0, 1.0], "castShadow": true, "intensity": 1.0, "angularDiameter": 0.5 })).unwrap();
+        w.set_object(20, "sun".into(), None, Kind::Light(sun), true, false).unwrap();
+        for (id, name, material, at) in [(30, "solid", 1, "vec3<f32>(-0.8, -0.8, 0.3), vec3<f32>(0.05, 0.0, 0.0), vec3<f32>(0.0, 0.05, 0.0)"), (31, "cut", 3, "vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(0.5, 0.0, 0.0), vec3<f32>(0.0, 0.5, 0.0)")] {
+            if cut || id == 30 {
+                w.set_particle_fn(name, format!("fn pf_{name}(i: PIn, p: array<vec4<f32>, 8>) -> POut {{ return POut({at}, true, vec4<f32>(0.0)); }}"), String::new());
+                w.set_object(id, name.into(), None, Kind::Particles { count: 1, emitter: name.into(), params: vec![], material, emitter_area: 0.0 }, true, false).unwrap();
+            }
+        }
+        w
+    };
+    let (mut with, mut without) = match (open(&scene(true)), open(&scene(false))) {
+        (Ok(a), Ok(b)) if a.g.hwrt => (a, b),
+        (Ok(_), Ok(_)) => return eprintln!("skipped: no hardware RT"),
+        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+    };
+    // (The wall's middle, behind the particle.)
+    let region = [40, 19, 56, 35];
+    let (a, b) = (region_mean(&picture(&mut with, 16), region), region_mean(&picture(&mut without, 16), region));
+    assert!(b > 30.0 && (a / b - 1.0).abs() < 0.05, "the wall behind the particle: {a:.1} of 255 with it, {b:.1} without");
+}
+
+/// An emitting particle lights both its sides (a rect light's card alone lights one, and whether an emitter is one
+/// its own row's material says): a wall behind it is lit alike with the particle's face or its back to it, in a
+/// scene whose first triangles are a light's card.
+#[test]
+fn an_emitting_particle_lights_both_its_sides_beside_a_lights_card() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let scene = |turned: bool| {
+        let mut w = wall_world(3.0, serde_json::json!({ "name": "glow", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 3, "doubleSided": true }));
+        // (A card far behind the camera, turned away.)
+        let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 0.05, "width": 0.2, "height": 0.2, "range": 0 })).unwrap();
+        w.set_object(21, "card".into(), None, Kind::Light(card), true, false).unwrap();
+        w.set_transform(21, Vec3::new(0.0, 0.0, 9.0), glam::Quat::from_rotation_y(std::f32::consts::PI), Vec3::ONE).unwrap();
+        let v = if turned { -0.15 } else { 0.15 };
+        w.set_particle_fn("glow", format!("fn pf_glow(i: PIn, p: array<vec4<f32>, 8>) -> POut {{ return POut(vec3<f32>(0.0, 0.0, 0.3), vec3<f32>(0.15, 0.0, 0.0), vec3<f32>(0.0, {v}, 0.0), true, vec4<f32>(0.0)); }}"), String::new());
+        w.set_object(31, "glow".into(), None, Kind::Particles { count: 1, emitter: "glow".into(), params: vec![], material: 3, emitter_area: 0.09 }, true, false).unwrap();
+        w
+    };
+    let (mut face, mut back) = match (open(&scene(false)), open(&scene(true))) {
+        (Ok(a), Ok(b)) if a.g.hwrt => (a, b),
+        (Ok(_), Ok(_)) => return eprintln!("skipped: no hardware RT"),
+        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+    };
+    let e = &face.sc.tables.emitter_tris;
+    assert!(e.first().is_some_and(|e| !e.nominal) && e.iter().any(|e| e.nominal), "the light list: a card's triangles first, then the particle's");
+    // (The wall beside the particle, as the camera sees it.)
+    let region = [35, 20, 43, 34];
+    let (a, b) = (region_mean(&picture(&mut face, 64), region), region_mean(&picture(&mut back, 64), region));
+    assert!(b > 20.0 && (a / b - 1.0).abs() < 0.05, "the wall beside the particle: {a:.1} of 255 with its back to the wall, {b:.1} with its face");
 }
 
 /// Primary visibility by rasterization (`Raster`): a path starts at the triangle the pass drew at its pixel, which is
@@ -415,6 +624,45 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
     assert!(built.1.len() == 6 && built.1.iter().any(|uv| uv[0] != 0.0) && built.1.iter().any(|uv| uv[1] != 0.0), "the particle's six vertices, with the build's UVs ({:?})", built.1);
     live.fixed_dt = Some(1.0 / 60.0);
     for _ in 0..4 {
+        live.advance_time(1.0 / 60.0);
+        live.render(1, |_, _| {});
+    }
+    let now = vertices(&live);
+    assert!(now.0 != built.0 && now.1 == built.1, "the pass moved the vertices and left their UVs ({:?} -> {:?})", built.1, now.1);
+    let (m, step) = (&live.targets.kernel.motion, Vec3::new(-0.6 / 60.0, 0.0, 0.0));
+    let vectors: Vec<Vec3> = read_back::<f32>(&live, &m.buffer, m.offset, m.size).chunks_exact(4).filter(|p| p[3] > 0.5).map(|p| Vec3::new(p[0], p[1], p[2])).filter(|v| v.length() > 1e-4).collect();
+    assert!(vectors.len() > 20 && vectors.iter().all(|v| (*v - step).length() < 2e-4), "{} pixels moved, each by the particle's step back {step} (the first: {:?})", vectors.len(), vectors.first());
+}
+
+/// A stateful GPU particle that drifts, as the one above: its pass keeps its vertices' last positions too, a vertex
+/// each, and leaves their UVs.
+#[test]
+fn a_gpu_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = world();
+    let emit = "fn pe_drift(i: EIn, p: array<vec4<f32>, 8>) -> PState { var s: PState; s.pos = i.at; s.life = 1000.0; s.color = i.color; s.size = 0.3; s.vel = vec3<f32>(0.6, 0.0, 0.0); return s; }";
+    w.set_particle_program("drift", emit.into(), "fn pu_drift(s: PState, i: UIn, p: array<vec4<f32>, 8>) -> PState { return s; }".into(), String::new());
+    w.set_object(18, "drift".into(), None, Kind::GpuParticles { capacity: 1, program: "drift".into(), params: vec![], material: 1, emitter_area: 0.01, rate: 0.0, collide: Default::default() }, true, false).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    // (The game spawns one: the next commit takes it.)
+    w.spawn_particles(18, &[-0.6, 0.5, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "a spawn: in place ({:?})", live.fallback);
+    let vertices = |c: &LiveCore| -> (Vec<[f32; 3]>, Vec<[f32; 2]>) {
+        let (first, n) = (c.sc.dynamic_verts.0 as u64, c.sc.dynamic_verts.1 as u64);
+        let size = crate::indexed::VERTEX_BYTES as u64;
+        let v: Vec<crate::indexed::Vertex> = read_back(c, &c.sc.up.vertices, first * size, n * size);
+        (v.iter().map(|v| [v[0][0], v[0][1], v[0][2]]).collect(), v.iter().map(|v| [v[0][3], v[1][3]]).collect())
+    };
+    let built = vertices(&live);
+    assert!(built.1.len() == 6 && built.1.iter().any(|uv| uv[0] != 0.0) && built.1.iter().any(|uv| uv[1] != 0.0), "the particle's six vertices, with the build's UVs ({:?})", built.1);
+    live.fixed_dt = Some(1.0 / 60.0);
+    for _ in 0..6 {
         live.advance_time(1.0 / 60.0);
         live.render(1, |_, _| {});
     }
@@ -753,9 +1001,10 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let (tables, up) = (&c.sc.tables, &c.sc.up);
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
-    // (The triangles as the kernel reads them: a record each, its three vertices and its row; the vertices.)
+    // (The triangles as the kernel reads them: three indices each; the vertices; the rows of those that have one.)
     let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
-    let tri_records: Vec<crate::indexed::TriRecord> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / crate::indexed::RECORD_BYTES as u64 * crate::indexed::RECORD_BYTES as u64);
+    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices), up.words.cap(Stream::Indices));
+    let tri_rows: Vec<[u32; 4]> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / 16 * 16);
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
@@ -776,30 +1025,36 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         }
         // (A mesh's indices count from its instance's first vertex; a world-space triangle's from the first of all.)
         let base = if e.inst == crate::NO_INST { 0 } else { c.sc.instances[e.inst as usize].verts };
-        let record = &tri_records[e.tri as usize];
-        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&vertices[(base + record[k]) as usize][0][..3]));
-        // (Its row: its material or its section, its object, its flags, its emitter + 1 or its index among its section's.)
-        let tri_row = &record[crate::indexed::RECORD_ROW..];
+        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&vertices[(base + index[e.tri as usize * 3 + k]) as usize][0][..3]));
         if e.inst == crate::NO_INST {
+            // (A triangle no instance places has a row: its material, its object, its flags, its emitter + 1. The
+            // list's record names the row: the triangle's own.)
             assert_eq!(r, crate::GpuEmitterTri::of(e, p, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
-            assert_eq!(tri_row[3], i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
+            assert_eq!((r.part, tri_rows[e.tri as usize][3]), (e.tri, i as u32 + 1), "{what}: emitter {i}'s record names its triangle's row, and the row the emitter");
         } else {
             // (The record as the GPU has it.)
             let (inst, record) = (&c.sc.instances[e.inst as usize], bytemuck::pod_read_unaligned::<scene::GpuInstance>(&records[e.inst as usize * record_size..][..record_size]));
             let placed = [inst.world.transform_point3(p[0].into()), inst.world.transform_vector3((p[1] - p[0]).into()), inst.world.transform_vector3((p[2] - p[0]).into())];
             assert_eq!(record.info[2], inst.verts, "{what}: instance {}'s record has its mesh's first vertex", e.inst);
-            assert_eq!((r.tri, r.inst, r.code), (e.tri, e.inst, code), "{what}: emitter {i}'s words");
+            assert_eq!((r.tri, r.inst, r.code, r.part), (e.tri, e.inst, code, e.part), "{what}: emitter {i}'s words (its triangle, its instance, its code, its section)");
             for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
                 assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
             }
             // Its section's row as the GPU has it says the material and where the section's emitters start, the
-            // triangle its index among them.
-            let at = (record.info[3] + tri_row[0]) as usize;
+            // triangle its index among them: its place after the section's first triangle (hardware traversal), or
+            // what its tree's row says (software traversal: a tree has a mesh's triangles in its own order).
+            let at = (record.info[3] + e.part) as usize;
             let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
             assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
             assert_eq!(record.info[3], inst.rows, "{what}: instance {}'s record has its rows", e.inst);
             assert!(inst.first_emitter <= i as u32, "{what}: emitter {i} is of instance {}'s run, from {}", e.inst, inst.first_emitter);
-            assert_eq!((row[2].wrapping_add(tri_row[3]), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
+            let rank = if c.g.hwrt {
+                e.tri.wrapping_sub(row[1])
+            } else {
+                assert_eq!(tri_rows[e.tri as usize][0], e.part, "{what}: triangle {}'s row has its section", e.tri);
+                tri_rows[e.tri as usize][3]
+            };
+            assert_eq!((row[2].wrapping_add(rank), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         }
         alive += 1;
     }
@@ -1239,9 +1494,10 @@ fn the_light_list_holds_its_triangles() {
         let spark = live.sc.tables.emitter_tris.iter().position(|e| e.nominal).expect("the particles are emitters");
         let side = |c: &LiveCore| {
             let at = c.sc.up.heap.at(Table::EmitterTris) + (spark * std::mem::size_of::<crate::GpuEmitterTri>()) as u64;
-            let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 48, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let size = std::mem::size_of::<crate::GpuEmitterTri>() as u64;
+            let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             let mut e = c.g.device.create_command_encoder(&Default::default());
-            e.copy_buffer_to_buffer(&c.sc.up.heap.buffer, at, &to, 0, 48);
+            e.copy_buffer_to_buffer(&c.sc.up.heap.buffer, at, &to, 0, size);
             c.g.queue.submit([e.finish()]);
             to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
             c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -3099,13 +3355,13 @@ fn a_posed_skinned_model_is_added_in_place() {
 
     // Many at once, of both models (more triangles than the room has): every room grows again, and each is skinned as
     // the build skins it.
-    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Indices));
     let (size, ids) = (rooms_size(&live), (100..140).collect::<Vec<u32>>());
     for (k, &id) in ids.iter().enumerate() {
         add(&mut w, id, if k % 2 == 0 { "skin-blend" } else { "arm" }, bend(0.1 + 0.02 * k as f32), Vec3::new(-1.5 + 0.075 * k as f32, 0.3, 0.6));
     }
     assert!(!live.commit(&mut w).unwrap(), "40 added at once: in place ({:?})", live.fallback);
-    assert!(rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1, "the vertices' buffer and the triangles' rows were made again, larger ({size:?} -> {:?})", rooms_size(&live));
+    assert!(rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1, "the vertices' buffer and the triangles' indices were made again, larger ({size:?} -> {:?})", rooms_size(&live));
     for (k, &id) in ids.iter().enumerate() {
         let a = bend(0.1 + 0.02 * k as f32);
         check(&format!("one of 40 added ({id})"), &live, id, &a, &a);
@@ -3470,7 +3726,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     pictured("posed and moved at once", &mut live, &w);
     // The scene's buffers made again, larger (a mesh of more triangles and more vertices than the room for edits has,
     // added in place, far below the view): the pass writes the new ones.
-    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Indices));
     let size = rooms_size(&live);
     let n = (((live.sc.edit.verts.cap - live.sc.edit.verts.end) as f64).sqrt() as u32 + 1).max(200);
     let positions: Vec<f32> = (0..=n).flat_map(|y| (0..=n).flat_map(move |x| [x as f32, y as f32, 0.0])).collect();
@@ -3481,7 +3737,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     w.set_transform(40, Vec3::new(0.0, -80.0, 0.0), glam::Quat::IDENTITY, Vec3::splat(0.001)).unwrap();
     // (Software traversal's room does not grow: a rebuild's there.)
     assert_eq!(live.commit(&mut w).unwrap(), !hw, "a large mesh added: in place under hardware traversal ({:?})", live.fallback);
-    assert!(!hw || (rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1), "the vertices' buffer and the triangles' rows were made again, larger ({size:?} -> {:?})", rooms_size(&live));
+    assert!(!hw || (rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1), "the vertices' buffer and the triangles' indices were made again, larger ({size:?} -> {:?})", rooms_size(&live));
     if !hw {
         picture(&mut live, 2);
     }

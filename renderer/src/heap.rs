@@ -74,11 +74,10 @@ pub enum Stream {
     VertexColors,
     /// The instances' rows (scene.rs `Row`): four words a section of an instance's mesh.
     Rows,
-    /// The triangles' vertices (indexed.rs): three words a triangle, in the triangles' GPU order. What the BLASes are
-    /// built from, and what a candidate's test reads.
+    /// The triangles' vertices (indexed.rs): three words a triangle, in the triangles' GPU order. What a hit and a
+    /// candidate's test read, and what the BLASes are built from.
     Indices,
-    /// The triangles' records (`indexed::TriRecord`): eight words a triangle, its vertices again and its row. What a
-    /// hit reads.
+    /// The rows of the triangles that have one (`indexed::TriRow`, `Indexed::gpu_rows`): four words each.
     Triangles,
 }
 

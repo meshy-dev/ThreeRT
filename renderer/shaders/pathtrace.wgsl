@@ -195,16 +195,17 @@ fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i)
 // An emitter's triangle (lib.rs `GpuEmitterTri`): in world space, the light list's own copy, so a light sample reads
 // no placement (what moves it is copied again: emitter_fill.wgsl); `tri`: its triangle in the triangles' table
 // (attributes: `emitter_attrs`), `inst`: the instance that places it (NO_INST: none), `code`: the light tree's path
-// code (0: not one of the tree's), EMITTER_MOVES if it moves.
-struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32 };
-const EMITTER_TRI_VEC4: u32 = 3u;
+// code (0: not one of the tree's), EMITTER_MOVES if it moves; `part`: as a hit's (`Hit.part`): its section of its
+// instance's mesh, or its own row. Four vec4s, a cache line.
+struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32, part: u32 };
+const EMITTER_TRI_VEC4: u32 = 4u;
 const EMITTER_MOVES: u32 = 0x80000000u;
 fn emitter_tri_at(i: u32) -> EmitterTri {
     let b = P.table_first[2].w + i * EMITTER_TRI_VEC4;
     let r0 = tables[b];
     let r1 = tables[b + 1u];
     let r2 = tables[b + 2u];
-    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w);
+    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w, tables[b + 3u].x);
 }
 // The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
 // `object_at`, `instance_at` and `medium_at` in every layout.
@@ -298,11 +299,12 @@ fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(x.x, bitcast<f32>(info.y), x.z, x.w);
 }
 // An instance's rows (scene.rs `Row`): four words a section of its mesh, from the record's info.w on. The material
-// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). A triangle of
-// a mesh holds its section in its attributes' uv.w and its index in the section in x.w; a record's n1.w says whether
-// a row of it is a cutout's or glass.
+// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). Which section
+// a triangle of a mesh is in, its hit says (`Hit.part`); a record's n1.w says whether a row of it is a cutout's or
+// glass, and whether its mesh deforms.
 const INST_CUTOUT: u32 = 16u;
 const INST_GLASS: u32 = 32u;
+const INST_DEFORMS: u32 = 64u;
 const ROW_MATERIAL: u32 = 0xffffffu;
 const ROW_CUTOUT: u32 = 0x1000000u;
 const ROW_GLASS: u32 = 0x2000000u;
@@ -320,42 +322,37 @@ fn material_of(a: TriAttr, inst: u32) -> u32 {
 // The material a triangle itself holds: one that no instance places.
 fn triangle_material(a: TriAttr) -> u32 { return bitcast<u32>(a.uv.w); }
 
-// A triangle's record (indexed.rs `TriRecord`), eight words, what a hit reads of it in one read: its three vertices,
-// counted from its mesh's first (a world-space triangle's from 0), a spare word, and its row: its material (a mesh's
-// triangle: its section), its object, its flags (TRI_*), its emitter entry + 1 (a mesh's triangle: its index in its
-// section).
-const TRI_WORDS: u32 = 8u;
+// A triangle's three vertices (indexed.rs), counted from its mesh's first (a world-space triangle's from 0): what a
+// hit and a candidate's test read, and what the acceleration structures are built from.
 fn tri_indices(ti: u32) -> vec3<u32> {
-    let k = P.word_first[1].y + ti * TRI_WORDS;
-    return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
-}
-fn tri_row(ti: u32) -> vec4<u32> {
-    let k = P.word_first[1].y + ti * TRI_WORDS + 4u;
-    return vec4<u32>(words[k], words[k + 1u], words[k + 2u], words[k + 3u]);
-}
-fn tri_flags(ti: u32) -> u32 { return words[P.word_first[1].y + ti * TRI_WORDS + 6u]; }
-// The triangles' indices alone, three words a triangle: what the acceleration structures are built from, and what a
-// candidate's test reads (a walk tests many triangles for one it hits).
-fn leaf_indices(ti: u32) -> vec3<u32> {
     let k = P.word_first[1].x + ti * 3u;
     return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
 }
-// The first vertex of the mesh an instance places (none: a world-space triangle, whose indices are the vertices').
-fn tri_base(inst: u32) -> u32 {
-    if (has(F_INST) && inst != NO_INST) { return instance_at(inst).info.z; }
-    return 0u;
+// The row of a triangle no instance places (a light's card, a particle's, a scene's that is flattened), four words:
+// its material, its object, its flags (TRI_*), its emitter entry + 1. A mesh's triangle has none: which section of
+// its mesh it is in is its hit's to say (`Hit.part`), and the rest is its instance's. (Software traversal's units
+// keep one for each triangle of a mesh's tree, the tree's own: its section, -, -, its index in the section.)
+fn tri_row(row: u32) -> vec4<u32> {
+    let k = P.word_first[1].y + row * 4u;
+    return vec4<u32>(words[k], words[k + 1u], words[k + 2u], words[k + 3u]);
 }
-// The material of triangle ti, placed by `inst` or by none (`material_of`, for a triangle that is not read whole).
-fn tri_material(ti: u32, inst: u32) -> u32 {
-    let m = tri_row(ti).x;
-    if (has(F_INST) && inst != NO_INST) { return row_word(instance_at(inst).info.w, m, 0u) & ROW_MATERIAL; }
-    return m;
+fn tri_flags(row: u32) -> u32 { return words[P.word_first[1].y + row * 4u + 2u]; }
+// Whether an emitter is a rect light's card, which lights one side. (A card is in world space: its row has its
+// material. No mesh is drawn with a card's.)
+fn emitter_is_card(em: EmitterTri) -> bool {
+    if (has(F_INST) && em.inst != NO_INST) { return false; }
+    return material_at(tri_row(em.part).x).tex1.z == MAT_EMITTER_CARD;
 }
-// A triangle read whole, its vertices counted from `base`: its first corner and its edges, and its attributes as a
-// hit has them: normals and UVs a corner; its material or section; `t`: its first vertex's tangent, zeros where
-// that has none (`hit_tangent`); `x`: -, its object, -, its emitter entry + 1 or its index in its section.
+// A triangle read whole: its first corner and its edges, and its attributes as a hit has them: normals and UVs a
+// corner; `uv.w`: its section (an instance's: `part`) or its material; `t`: its first vertex's tangent, zeros where
+// that has none (`hit_tangent`); `x`: -, its object (an instance's: where its attributes are placed, `inst_x`), -,
+// its emitter entry + 1. `inst`, `part`: as a hit has them (`Hit`): with an instance its vertices count from the
+// mesh's first and `part` is its section; without, `part` is its row.
 struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32> }
-fn tri_data(ti: u32, base: u32) -> TriData {
+fn tri_data(ti: u32, inst: u32, part: u32) -> TriData {
+    var base = 0u;
+    var row = vec4<u32>(part, 0u, 0u, 0u);
+    if (has(F_INST) && inst != NO_INST) { base = instance_at(inst).info.z; } else { row = tri_row(part); }
     let i = (tri_indices(ti) + vec3<u32>(base)) * VERTEX_VEC4;
     let p0 = vertices[i.x];
     let p1 = vertices[i.y];
@@ -375,7 +372,6 @@ fn tri_data(ti: u32, base: u32) -> TriData {
         n1 = vec4<f32>(flat, n1.w);
         n2 = vec4<f32>(flat, n2.w);
     }
-    let row = tri_row(ti);
     return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(row.x)), vertices[i.x + 2u],
                             vec4<f32>(0.0, bitcast<f32>(row.y), 0.0, bitcast<f32>(row.w))), p0.xyz, e1, e2);
 }
@@ -620,7 +616,10 @@ fn emitter_pmf(ei: u32, em: EmitterTri, x: vec3<f32>, n: vec3<f32>) -> f32 {
 // Intersection
 
 // `inst`: the model instance whose model-space triangle `tri` is (F_INST), NO_INST for world-space triangles.
-struct Hit { t: f32, tri: u32, u: f32, v: f32, inst: u32 };
+// `part`: with an instance, the section of its mesh the triangle is in (the acceleration structure's geometry; a
+// unit's tree's own data): its instance's row for it has its material. Without one, the triangle's row (`tri_row`):
+// `tri` itself.
+struct Hit { t: f32, tri: u32, u: f32, v: f32, inst: u32, part: u32 };
 const NO_INST: u32 = 0xffffffffu;
 
 // ------------------------------------------------------------------------------------------------
@@ -705,7 +704,7 @@ fn proc_hit(t: f32, g: GOut, prim: u32, rec: u32) -> Hit {
     // Each half rounded to its upper 15 bits (a carry into the exponent is the right rounding; 0x7fff stays put).
     let ha = min(((a & 0xffffu) + 1u) >> 1u, 0x7fffu);
     let hb = min(((a >> 16u) + 1u) >> 1u, 0x7fffu);
-    return Hit(t, PROC_BIT | (min(g.material, 255u) << 23u) | prim, proc_word(q.x | (q.y << 15u)), proc_word(ha | (hb << 15u)), rec);
+    return Hit(t, PROC_BIT | (min(g.material, 255u) << 23u) | prim, proc_word(q.x | (q.y << 15u)), proc_word(ha | (hb << 15u)), rec, 0u);
 }
 
 // A procedural hit's attribute (GOut.attr): its material function's `i.uv`.
@@ -737,7 +736,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
     let s = o - a;
     let u = dot(s, p) * inv;
     let q = cross(s, e1);
-    return Hit(dot(e2, q) * inv, ti, clamp(u, 0.0, 1.0), clamp(dot(d, q) * inv, 0.0, 1.0), NO_INST);
+    return Hit(dot(e2, q) * inv, ti, clamp(u, 0.0, 1.0), clamp(dot(d, q) * inv, 0.0, 1.0), NO_INST, ti);
 }
 
 // The software BVH walk (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
@@ -753,7 +752,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 }
 
 @if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {
-    let ix = (leaf_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;
+    let ix = (tri_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;
     let v0 = vertices[ix.x].xyz;
     let e1 = vertices[ix.y].xyz - v0;
     let e2 = vertices[ix.z].xyz - v0;
@@ -774,7 +773,7 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 
 // mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface).
 @if(!hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
-    var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+    var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
     if (rays_off) { return hit; }
     let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
     @if(!units) var stack: array<u32, 48>;
@@ -789,8 +788,8 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
                 if (r.x < hit.t) {
                     let flags = tri_flags(ti);
                     if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
-                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, r.y, r.z, r.x)) { shadow_hole = true; continue; }
-                    hit = Hit(r.x, ti, r.y, r.z, NO_INST);
+                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, ti, r.y, r.z, r.x)) { shadow_hole = true; continue; }
+                    hit = Hit(r.x, ti, r.y, r.z, NO_INST, ti);
                     if (mode != TRACE_CLOSEST) { return hit; }
                 }
             }
@@ -988,7 +987,7 @@ fn glass_hit(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
 }
 
 fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
-    let td = tri_data(h.tri, tri_base(h.inst));
+    let td = tri_data(h.tri, h.inst, h.part);
     var a = td.a;
     var e1 = td.e1;
     var e2 = td.e2;
@@ -1278,10 +1277,10 @@ fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rg
 fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
-// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST. (By F_IFUNC, not by
-// F_INST: where no instanced mesh has a function the placement is not compiled in.)
-fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
-    let td = tri_data(ti, tri_base(inst));
+// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST; `part`: as a hit's. (By
+// F_IFUNC, not by F_INST: where no instanced mesh has a function the placement is not compiled in.)
+fn mat_in_at(ti: u32, inst: u32, part: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
+    let td = tri_data(ti, inst, part);
     var a = td.a;
     var v0 = td.v0;
     var e1 = td.e1;
@@ -1341,9 +1340,10 @@ var<private> nee_alone: bool = false;
 var<private> lights_only: bool = false;
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
-// the model instance a pool triangle belongs to (it places the triangle's edges: its texel density), or NO_INST.
-fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
-    let td = tri_data(ti, tri_base(inst));
+// the model instance a pool triangle belongs to (it places the triangle's edges: its texel density), or NO_INST;
+// `part`: as a hit's.
+fn alpha_pass(ti: u32, inst: u32, part: u32, u: f32, v: f32, t: f32) -> bool {
+    let td = tri_data(ti, inst, part);
     let a = td.a;
     let m = material_at(material_of(a, inst));
     var alpha = m.base_color.a;
@@ -1360,7 +1360,7 @@ fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
-        let i = mat_in_at(ti, inst, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
+        let i = mat_in_at(ti, inst, part, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
         var b = mat_base(m);
         b.opacity = alpha;
         alpha = alpha_material_function(m.tex1.w - 1, i, m, b).opacity;
@@ -1380,7 +1380,7 @@ fn emission(m: Material, uv: vec2<f32>, lod: f32) -> vec3<f32> {
 fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     if (is_proc(h)) { return surface_proc(o, d, h, width); }
     let i = h.tri;
-    let td = tri_data(i, tri_base(h.inst));
+    let td = tri_data(i, h.inst, h.part);
     var e1 = td.e1;
     var e2 = td.e2;
     var a = td.a;
@@ -2002,10 +2002,16 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
 // its triangle's, with its instance's object if it has one. (Not the normals and the tangent, which stay the mesh's:
 // a light sample reads none, and placing them is work a sample. Its texel density is from the list's own edges.)
 fn emitter_attrs(em: EmitterTri) -> TriAttr {
-    var a = tri_data(em.tri, tri_base(em.inst)).a;
+    var a = tri_data(em.tri, em.inst, em.part).a;
     if (has(F_INST) && em.inst != NO_INST) { a.x = inst_x(instance_at(em.inst).info, a.x); }
     return a;
 }
+
+// A mesh's triangle's index in its section. Hardware traversal: from the section's first triangle (the instance's
+// row for it, the word a hit's triangle is found by: trace_hw.wgsl `hit_tri`). Software traversal's units: the tree's
+// own data (a tree puts a mesh's triangles in its own order).
+@if(hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return h.tri - row_word(rows, h.part, 1u); }
+@if(!hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return tri_row(h.tri).w; }
 
 // The MIS weight of a BSDF ray's (pdf `pdf`) hit on an emitter against light sampling in `direct_light`: by the
 // density light sampling has for the point, the probability it picks the emitter (`emitter_pmf`, at the vertex the
@@ -2013,14 +2019,16 @@ fn emitter_attrs(em: EmitterTri) -> TriAttr {
 // surface) is the BSDF ray's alone.
 fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
     if (is_proc(hit) || P.counts.y == 0u) { return 1.0; }
-    // The hit triangle's emitter: its attributes' x.w is the entry + 1 (0: it is not light-sampled). A triangle an
-    // instance places: x.w is its index in its section, counted from the section's first entry (its row's).
-    let row = tri_row(hit.tri);
-    var entry = row.w;
+    // The hit triangle's emitter. One no instance places: its row has the entry + 1 (0: it is not light-sampled). A
+    // mesh's: its index in its section, counted from the section's first entry (its instance's row's).
+    var entry = 0u;
     if (has(F_INST) && hit.inst != NO_INST) {
-        let first = row_word(instance_at(hit.inst).info.w, row.x, 2u);
+        let rows = instance_at(hit.inst).info.w;
+        let first = row_word(rows, hit.part, 2u);
         if (first == NO_EMITTER) { return 1.0; }
-        entry += first + 1u;
+        entry = first + hit_rank(hit, rows) + 1u;
+    } else {
+        entry = tri_row(hit.part).w;
     }
     if (entry == 0u) { return 1.0; }
     let em = emitter_tri_at(entry - 1u);
@@ -2279,7 +2287,7 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, em.inst, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, em.inst, em.part, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
@@ -2351,7 +2359,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    let m_card = material_at(tri_material(em.tri, em.inst)).tex1.z == MAT_EMITTER_CARD;
+    let m_card = emitter_is_card(em);
     if (!m_card) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0) { return r; }
     r.le = emitter_radiance(em, pick_b.x, pick_b.y, l);
@@ -2386,7 +2394,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    if (material_at(tri_material(em.tri, em.inst)).tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
+    if (!emitter_is_card(em)) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0 || (has(F_PEMIT) && !(cos_l > 0.0))) { return r; } // also a particle not shown (no area: NaN)
     r.le = emitter_radiance(em, b1, b2, l);
     r.l = l;
@@ -3558,9 +3566,10 @@ fn cache_end(s: Surface, d: vec3<f32>, cone: vec2<f32>, thr: vec3<f32>, depth: u
     return c;
 }
 
-// A pixel `main` left for `finish`, DEFERRED_VECS vec4<u32>s (floats as their bits): (pixel, DF_ flags | depth << 8,
-// light list + its length, hit triangle) (hit instance, u, v, k_spec.x) (hit point, cone width) (ray direction, cone
-// spread) (path weight, k_spec.y) (the specular ray's weight, k_spec.z).
+// A pixel `main` left for `finish`, DEFERRED_VECS vec4<u32>s (floats as their bits): (pixel, DF_ flags | depth << 8
+// (255 at most) | an instance's hit's section << 16 (scene.rs `MESH_SECTIONS`), light list + its length, hit triangle)
+// (hit instance, u, v, k_spec.x) (hit point, cone width) (ray direction, cone spread) (path weight, k_spec.y) (the
+// specular ray's weight, k_spec.z).
 const DEFERRED_VECS: u32 = 6u;
 const DEFERRED_ROW: u32 = 16384u; // `finish` invocations a dispatch row (gpu.rs DEFERRED_ROW)
 const DF_TRAIN: u32 = 1u;     // of a training tile
@@ -3590,7 +3599,8 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = r0.x;
     let fl = r0.y;
     rng_start(vec2<u32>(pix % P.size.x, pix / P.size.x), P.size.z, P.size.w, 0u);
-    cur_depth = fl >> 8u;
+    let depth = (fl >> 8u) & 0xffu;
+    cur_depth = depth;
     mirror_path = (fl & DF_MIRROR) != 0u;
     rays_off = LIVE && P.raster.w > 0.5;
     if (has(F_LISTS)) {
@@ -3599,8 +3609,9 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
         lt_fb = LT_NONE;
     }
     // (The hit point as the ray's origin, at distance 0.)
-    let s = surface(r2.xyz, r3.xyz, Hit(0.0, r0.w, bitcast<f32>(r1.y), bitcast<f32>(r1.z), r1.x), r2.w);
-    let c = cache_end(s, r3.xyz, vec2<f32>(r2.w, r3.w), r4.xyz, fl >> 8u, (fl & DF_TRAIN) != 0u, (fl & DF_HIT_LIGHT) != 0u, (fl & DF_STRAIGHT) != 0u);
+    // (A hit without an instance: its row is its triangle.)
+    let s = surface(r2.xyz, r3.xyz, Hit(0.0, r0.w, bitcast<f32>(r1.y), bitcast<f32>(r1.z), r1.x, select(fl >> 16u, r0.w, r1.x == NO_INST)), r2.w);
+    let c = cache_end(s, r3.xyz, vec2<f32>(r2.w, r3.w), r4.xyz, depth, (fl & DF_TRAIN) != 0u, (fl & DF_HIT_LIGHT) != 0u, (fl & DF_STRAIGHT) != 0u);
     if ((fl & DF_OUT) == 0u || non_finite(c)) { return; }
     let cs = c * vec3<f32>(bitcast<f32>(r1.w), r4.w, r5.w);
     var px = accum[pix];
@@ -3821,11 +3832,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (raster && depth == 0u) {
             let id = textureLoad(vis_tex, vec2<i32>(gid.xy), 0).x;
             if (id == 0u) {
-                hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST);
+                hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
             } else {
                 hit = tri_hit(id - 1u, o, d);
                 // The raster pass draws cutout triangles whole: the alpha test decides here, else trace past them.
-                if (has(F_MASKED) && (tri_flags(hit.tri) & TRI_MASKED) != 0u && !alpha_pass(hit.tri, NO_INST, hit.u, hit.v, hit.t)) {
+                if (has(F_MASKED) && (tri_flags(hit.part) & TRI_MASKED) != 0u && !alpha_pass(hit.tri, NO_INST, hit.part, hit.u, hit.v, hit.t)) {
                     hit = trace(o, d, INF, TRACE_CLOSEST);
                 }
             }
@@ -3936,7 +3947,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // denormal below 2^23, which a driver may flush to zero).
             // Dynamic triangles keep their previous vertices, as they lie from the first dynamic one (`kp`); a deforming
             // instanced mesh keeps its own in model space, where its instance's record says.
-            let deforms = LIVE && P.motion.x > 0.5 && !is_proc(hit) && ti >= P.group_first[1].x && (tri_flags(ti) & TRI_DYNAMIC) != 0u;
+            var deforms = false;
+            if (LIVE && P.motion.x > 0.5 && !is_proc(hit)) {
+                if (has(F_INST) && hit.inst != NO_INST) {
+                    deforms = has(F_DEFORM) && (bitcast<u32>(instance_at(hit.inst).n1.w) & INST_DEFORMS) != 0u;
+                } else {
+                    deforms = ti >= P.group_first[1].x && (tri_flags(hit.part) & TRI_DYNAMIC) != 0u;
+                }
+            }
             if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
                 // Procedural geometry: its object-space hit point through the previous frame's rows.
                 let r = instance_at(hit.inst);
@@ -4028,7 +4046,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (later || train) {
                     let at = atomicAdd(&deferred.n, 1u) * DEFERRED_VECS;
                     if (at + DEFERRED_VECS <= arrayLength(&deferred.recs)) {
-                        let fl = (depth << 8u) | select(0u, DF_TRAIN, train) | select(0u, DF_OUT, later) | select(0u, DF_HIT_LIGHT, hit_light) | select(0u, DF_STRAIGHT, straight)
+                        let fl = (min(depth, 255u) << 8u) | select(0u, hit.part << 16u, hit.inst != NO_INST) | select(0u, DF_TRAIN, train) | select(0u, DF_OUT, later) | select(0u, DF_HIT_LIGHT, hit_light) | select(0u, DF_STRAIGHT, straight)
                             | select(0u, DF_MIRROR, mirror_path) | select(0u, DF_RESOLVE, resolve_on() && !through0 && !glass0) | select(0u, DF_REFL_RAY, refl_pdf > 0.0);
                         var lt = 0u;
                         if (has(F_LISTS) && lt_list_n > 0u) { lt = lt_list + lt_list_n; }

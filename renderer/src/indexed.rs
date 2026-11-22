@@ -17,29 +17,12 @@ pub const OWN_TANGENT: u32 = 1;
 pub type Vertex = [[f32; 4]; 3];
 pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
 
-/// A triangle's row: its material (a mesh's triangle: its section), its object, its flags (`scene::TRI_*`), its
-/// emitter entry + 1 (a mesh's triangle: its index in its section).
+/// The row of a triangle no instance places (a light's card, a particle's, a flattened scene's): its material, its
+/// object, its flags (`scene::TRI_*`), its emitter entry + 1. A mesh's triangle needs none on the GPU: a ray's hit
+/// says which section of its mesh it is in, and the rest is its instance's. Software traversal's units keep one for
+/// each triangle of a mesh's tree, what a walk returns of a leaf's triangle: its section, -, -, its index in the
+/// section. (The build has one for every triangle: `Indexed::rows`.)
 pub type TriRow = [u32; 4];
-
-/// A triangle's record, what the kernel reads of it at a hit, in one read: its three vertices, a spare word, its
-/// row. (The indices are an array of their own besides, three words a triangle: an acceleration structure is built
-/// from that, which has no room between a triangle's indices and the next's, and a candidate's test reads it.)
-pub type TriRecord = [u32; 8];
-pub const RECORD_BYTES: usize = std::mem::size_of::<TriRecord>();
-/// A record's row: its first word, and its byte in the record.
-pub const RECORD_ROW: usize = 4;
-pub const RECORD_ROW_BYTE: usize = RECORD_ROW * 4;
-
-/// A triangle's record.
-pub fn record(indices: [u32; 3], row: TriRow) -> TriRecord {
-    [indices[0], indices[1], indices[2], 0, row[0], row[1], row[2], row[3]]
-}
-
-/// Triangles' records, one after another.
-pub fn records(indices: &[[u32; 3]], rows: &[TriRow]) -> Vec<TriRecord> {
-    assert_eq!(indices.len(), rows.len(), "a row a triangle");
-    indices.iter().zip(rows).map(|(i, r)| record(*i, *r)).collect()
-}
 
 /// A scope's triangles as vertices and indices that count from the scope's first vertex.
 #[derive(Clone, Debug, Default)]
@@ -213,6 +196,10 @@ pub struct Indexed {
     /// A triangle's three vertices: a mesh's count from the mesh's first vertex, a world-space triangle's from 0.
     pub indices: Vec<[u32; 3]>,
     pub rows: Vec<TriRow>,
+    /// The meshes' first triangle: those before it are in world space. And the translucent particles' first (they
+    /// lie after the meshes') and how many.
+    pub pool_first: u32,
+    pub translucent_tris: (u32, u32),
     /// By mesh (`Scene::meshes`): its first vertex and how many it has.
     pub meshes: Vec<(u32, u32)>,
     /// The world-space triangles' vertices: the first so many (the still ones', then those that move).
@@ -228,6 +215,17 @@ pub struct Indexed {
 }
 
 impl Indexed {
+    /// The rows the GPU holds. Hardware traversal: the world-space triangles', then the translucent particles'
+    /// (found from `pool_first` on: the meshes' triangles lie between and have none). Software traversal: every
+    /// triangle's.
+    pub fn gpu_rows(&self, hwrt: bool) -> std::borrow::Cow<'_, [TriRow]> {
+        if !hwrt {
+            return (&self.rows[..]).into();
+        }
+        let (first, n) = (self.translucent_tris.0 as usize, self.translucent_tris.1 as usize);
+        self.rows[..(self.pool_first as usize).min(self.rows.len())].iter().chain(self.rows.get(first..first + n).unwrap_or(&[])).copied().collect()
+    }
+
     /// A scope's vertices after those there are, its triangles after those there are, their indices raised by `by`
     /// (0: they count from the scope's first vertex). The scope's first vertex.
     pub fn push(&mut self, s: Scope, by: u32) -> u32 {

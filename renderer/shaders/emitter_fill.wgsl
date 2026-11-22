@@ -8,7 +8,8 @@ struct Run { first: u32, count: u32 };
 // counted from the first vertex of the mesh an instance places; a world-space triangle's from 0).
 @group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> indices: array<u32>;
-// Three vec4s an emitter: (v0, its triangle), (e1, its instance), (e2, its path code). The words stay.
+// Four vec4s an emitter: (v0, its triangle), (e1, its instance), (e2, its path code), (its section, -). The words
+// stay.
 @group(0) @binding(2) var<storage, read_write> list: array<vec4<u32>>;
 // The instances' records (scene.rs `GpuInstance`: the first three vec4s are the rows of the instance's matrix). Read
 // only: they are a section of the buffer the list is one of, and a buffer is not bound to read and to write at once.
@@ -20,7 +21,7 @@ const NO_INST: u32 = 0xffffffffu;
 fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
     let run = runs[id.y];
     if (id.x >= run.count) { return; }
-    let r = (run.first + id.x) * 3u;
+    let r = (run.first + id.x) * 4u;
     let t = list[r].w * 3u;
     // An instance's emitter: its mesh's triangle (v0, e1, e2 in model space) placed by the instance. (The record's
     // seventh vec4: its mesh's first triangle, its object, its mesh's first vertex, its rows.)

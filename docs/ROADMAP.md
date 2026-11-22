@@ -2778,14 +2778,18 @@ section that is not its first, the model a unit under software traversal).
 
 **Triangles are vertices and indices (2026-11-22).** Every triangle carried its own three vertices (48 bytes), its
 shading attributes (96) and, under hardware traversal, its positions again as the BLAS's input (36). Now the scene
-has vertices (position and u, 16 bytes; normal, v and tangent, 32) and a triangle is three indices and a row of
-four words (`renderer/src/indexed.rs`; docs/RUNTIME.md "The scene's triangles"): one layout for both traversals,
-and the BLASes are built from the same positions through the indices. A mesh's vertices are a run of their own:
-the skinning pass skins a vertex once (it skinned every corner), the particle passes and the light list's fill
-write and read vertices, previous positions are kept a vertex, and an edit in place takes a run of vertices with
-its triangles.
-On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 4.3, Zero Day 1.6 GB -> 1.0, a small scene
-15 MB -> 8. The BLASes themselves are as large as they were.
+has vertices, a record of 48 bytes each (position and u; normal and v; tangent), and a triangle is three indices
+(`renderer/src/indexed.rs`; docs/RUNTIME.md "The scene's triangles"): one layout for both traversals, and the
+BLASes are built from the same vertices through the indices. A mesh's vertices are a run of their own: the
+skinning pass skins a vertex once (it skinned every corner), the particle passes and the light list's fill write
+and read vertices, the previous frame's are kept a vertex, and an edit in place takes a run of vertices with its
+triangles. The kernel binds one buffer fewer.
+A mesh's triangle has no data of its own besides. Its hit says which section of its mesh it is in (the BLAS's
+geometry; under software traversal its tree's row for it); the section's row of its instance has the material,
+the instance's record the object and whether the mesh deforms; the light list's record (64 bytes, was 48) has an
+emitter's section. A triangle no instance places keeps a row of four words.
+On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 3.9, Zero Day 1.6 GB -> 0.95, a small scene
+15 MB -> 7.5. The BLASes themselves are as large as they were.
 What changes in a picture. A triangle's tangent frame, where its file gives none, is made where it is hit, not at
 the build: rounding (offline, software traversal, against the build before: two scenes the same bytes, one with
 411 of 921,600 pixels off by 2 steps at most). Under hardware traversal the driver's tree over indexed geometry is
@@ -2793,20 +2797,25 @@ another tree, and a few rays at shared edges meet the other triangle: five scene
 2,408 pixels, by 3 steps at most but for single samples (8 steps; in one scene one sample, 22 steps over the 11 x 11
 pixels the denoiser spreads it to).
 A skinned vertex whose position is not finite is at its mesh's origin now; its triangles were left out before.
-What it costs: software traversal's trace 3.7 % (a candidate's three indices are read before its positions);
-the build finds the sharing again, 1.2 s on Tokyo (a file's indices are flattened before: historical, a later step).
+The build finds the sharing again, 1.2 s on Tokyo (a file's indices are flattened before: historical, a later step).
 Tests: indexed.rs's own (sharing; a seam or a crease; a first corner's tangent; a triangle that is not finite); the
 build's triangles through their indices against the scene's; the in-place tests read every triangle they check
-back through its indices (the light list's emitters, a skinned mesh's corners, normals, UVs, tangents, rows and
-previous positions against the CPU skin); a mesh changed in place to more vertices; a moved card beside another and
-a drifting particle, by their motion vectors; a skinned primitive without normals, by the normal the camera sees;
+back through its indices (the light list's emitters with their sections; a skinned mesh's corners, normals, UVs,
+tangents and previous positions against the CPU skin, its record's deforming bit, each triangle's section and its
+index there); a mesh changed in place to more vertices; a moved card beside another, a drifting particle and a
+drifting GPU particle, by their motion vectors; a skinned primitive without normals, by the normal the camera sees;
+emitters in a mesh's second section against the same triangles a mesh each (live, and offline for the weight of a
+ray that meets one); a first frames' bounce off a mesh's second section and off a particle, which the kernel's
+second pass shades; a cutout particle; an emitting particle's two sides beside a light's card;
 `material/function-file-tangent` (a file's tangent is the one a function is given); the rasterized first hit
 (`THREERT_RASTER`, which had no test and is off in any scene with a mesh since meshes are instances) against the
 traced picture.
-28 mutations: 20 failed a test there was (15 a unit test, 4 a render test, 1 a render test under software
-traversal); 8 failed none (vertices shared across a seam, a changed mesh in a run too short, a moved span written a
-triangle off, a moving triangle's previous positions from the wrong vertex, a particle's previous positions and
-its v, a model without normals left without, a file's tangent not read) and each has its test above now.
+Fixed on the way: a still mesh that emits, moved for the first time, had the pass that places moved emitters run
+over the emitters the move had just made, which the light list did not hold yet (its write landed on the list's
+last record); they are made where the mesh stands and the pass leaves them alone.
+Mutations: 28 of the first form (20 failed a test there was, 8 none and have their tests above) and 27 of this
+one (17 and 8; one changes nothing, no deforming instance has its materials' classes remade in place; one is
+reached only by a live view without units, `THREERT_UNITS=0`, and has no test).
 Next: tangents a vertex, interpolated (generated where a file has none); vertices packed to 32 bytes; a file's
 indices carried through the build.
 

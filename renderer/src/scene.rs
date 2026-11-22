@@ -88,6 +88,10 @@ pub struct Section {
     pub slot: u32,
 }
 
+/// The most sections a mesh may have: a hit's section is 16 bits of the record a pixel is left to the kernel's second
+/// pass by (pathtrace.wgsl `finish`).
+pub const MESH_SECTIONS: usize = 1 << 16;
+
 /// An instance's row for a section of its mesh, as the kernel reads it (the words' heap, heap.rs `Stream::Rows`):
 /// the material with the class bits `ROW_*`, the section's first triangle in the triangles' table, its first emitter in
 /// the light list (`NO_EMITTER`: it does not emit), and a word to spare.
@@ -128,12 +132,12 @@ pub fn rows_emitters(sections: &[Section], rows: &[Row], materials: &[GpuMateria
     sections.iter().zip(rows).filter(|(_, r)| materials.get(row_material(r) as usize).is_some_and(emissive)).map(|(s, _)| s.count).sum()
 }
 
-/// A triangle's place among its instance's emitters and its material, from its attributes (its section and its
-/// index in it), the instance's rows and where each section's emitters start (`section_emitters`). None: its
-/// section's material does not emit.
-pub fn section_slot(a: &GpuTriAttr, rows: &[Row], starts: &[Option<u32>]) -> Option<(usize, u32)> {
+/// A triangle's place among its instance's emitters, its material and its section, from its attributes (its
+/// section and its index in it), the instance's rows and where each section's emitters start (`section_emitters`).
+/// None: its section's material does not emit.
+pub fn section_slot(a: &GpuTriAttr, rows: &[Row], starts: &[Option<u32>]) -> Option<(usize, u32, u32)> {
     let s = a.uv[3].to_bits() as usize;
-    Some(((starts.get(s).copied()?? + a.x[3].to_bits()) as usize, row_material(rows.get(s)?)))
+    Some(((starts.get(s).copied()?? + a.x[3].to_bits()) as usize, row_material(rows.get(s)?), s as u32))
 }
 
 /// Where each section's emitters start among its instance's (None: its material does not emit).
@@ -279,8 +283,10 @@ pub const INST_MIRRORED: u32 = 4;
 /// triangle's row).
 pub const INST_CUTOUT: u32 = 16;
 pub const INST_GLASS: u32 = 32;
+/// Its mesh deforms (a posed skinned model's): its motion is its vertices' too (`Instance::prev`).
+pub const INST_DEFORMS: u32 = 64;
 /// Every bit of n1.w that is the instance's own, not a unit's.
-pub const INST_BITS: u32 = INST_MIRRORED | INST_CUTOUT | INST_GLASS;
+pub const INST_BITS: u32 = INST_MIRRORED | INST_CUTOUT | INST_GLASS | INST_DEFORMS;
 
 /// Whether a placement mirrors what it places (a negative determinant).
 pub fn mirrors(w: Mat4) -> bool {
@@ -3007,7 +3013,7 @@ mod instance_tests {
         assert_eq!((rows_cast(&rows, true), rows_cast(&rows, false), rows_bits(&rows)), (true, false, INST_CUTOUT | INST_GLASS));
         let starts = section_emitters(&d.sections, &rows, &materials);
         assert_eq!((rows_emitters(&d.sections, &rows, &materials), &starts[..]), (2, &[None, None, Some(0), None, None][..]));
-        assert_eq!((section_slot(&d.attrs[4], &rows, &starts), section_slot(&d.attrs[5], &rows, &starts)), (Some((1, 2)), None), "an emitter's place: its section's start and its index");
+        assert_eq!((section_slot(&d.attrs[4], &rows, &starts), section_slot(&d.attrs[5], &rows, &starts)), (Some((1, 2, 2)), None), "an emitter's place (its section's start and its index), its material and its section");
         // Two materials for four slots: a slot past the last is the last. Emitters in two sections, one after another.
         let two = section_rows(&d.sections, &[2, 0], &materials);
         assert_eq!(two.iter().map(row_material).collect::<Vec<_>>(), [2, 0, 0, 0, 0]);

@@ -113,7 +113,7 @@ pub fn emitter_tri(k: usize, tri_verts: &[[f32; 4]], a: &scene::GpuTriAttr, mate
     }
     let c = v(0) + (e1 + e2) / 3.0;
     let moves = tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0;
-    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal, in_tree: false, inst: NO_INST })
+    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal, in_tree: false, inst: NO_INST, part: 0 })
 }
 
 /// An emissive triangle of the emitter CDF: triangle (traversal order), material, object, area.
@@ -135,6 +135,9 @@ pub struct EmitterTri {
     /// The instance that places its triangle (its record; the triangle is the mesh's, in model space), or `NO_INST`:
     /// a triangle in world space.
     pub inst: u32,
+    /// Its section of that instance's mesh (0 without one): a mesh's triangle does not say which section it is of,
+    /// so a light sample is told here, as a ray is by its hit.
+    pub part: u32,
 }
 
 /// No instance (pathtrace.wgsl `NO_INST`).
@@ -147,7 +150,8 @@ const _: () = assert!((ltree::PATH_BITS + 2) << ltree::PATH_BITS <= EMITTER_MOVE
 /// An emitter's triangle as the kernel's light sampling reads it (pathtrace.wgsl `EmitterTri`; `Table::EmitterTris`,
 /// entry i for `emitter_tris[i]`): in world space, the light list's own copy, so a sample reads no placement. v0, e1,
 /// e2 in world space; its triangle in the triangles' table (attributes); the instance that places it (`NO_INST`: the
-/// triangle is in world space there too); where its weight is (`emitter_codes`) with `EMITTER_MOVES`.
+/// triangle is in world space there too); where its weight is (`emitter_codes`) with `EMITTER_MOVES`; its section of
+/// that instance's mesh. 64 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuEmitterTri {
@@ -157,13 +161,17 @@ pub struct GpuEmitterTri {
     pub inst: u32,
     pub e2: [f32; 3],
     pub code: u32,
+    pub part: u32,
+    pub spare: [u32; 3],
 }
 
 impl GpuEmitterTri {
     /// `e`'s, from its triangle's rows (v0, e1, e2: `Prepared::tri_verts`), with path code `code`.
     pub fn new(e: &EmitterTri, rows: &[[f32; 4]], code: u32) -> GpuEmitterTri {
         let v = |r: usize| [rows[r][0], rows[r][1], rows[r][2]];
-        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 } }
+        // (As a hit has it: with an instance its section, without one its row, which is its triangle's.)
+        let part = if e.inst == NO_INST { e.tri } else { e.part };
+        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 }, part, spare: [0; 3] }
     }
 
     /// As `new`, from its vertices.
@@ -182,17 +190,17 @@ impl GpuEmitterTri {
 /// The emitters of an instance that has some (`count` of them: `scene::rows_emitters`, or a model's mesh's
 /// `InstMesh::emitters`): one a numbered
 /// triangle, in the numbers' order, each with its triangle as the instance places it. `tris`: the mesh's, in model
-/// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number and material, if
-/// it emits; `record`: the instance's. A triangle of no area: no weight (area 0). A hidden instance's (an instanced
+/// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number, material and
+/// section, if it emits; `record`: the instance's. A triangle of no area: no weight (area 0). A hidden instance's (an instanced
 /// object's copy not shown) keep their mesh's own area: its object has no power, so they weigh nothing, and the light
 /// tree has them (`switchable_power`) for when the copy is shown.
-pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
-    let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record };
+pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
+    let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record, part: 0 };
     let mut out = vec![(dead, [glam::Vec3A::ZERO; 3]); count];
     for (k, t) in tris.iter().enumerate() {
-        let Some((slot, mat)) = numbered(k) else { continue };
+        let Some((slot, mat, part)) = numbered(k) else { continue };
         let (area, c, w) = placed_emitter(inst, t, mat, materials);
-        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c, ..dead }, w);
+        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c, part, ..dead }, w);
     }
     out
 }
@@ -897,11 +905,17 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     }
     for (r, i) in sc.instances.iter_mut().enumerate() {
         i.verts = sc.indexed.meshes[i.mesh as usize].0;
-        i.prev = if sc.meshes[i.mesh as usize].deforms { i.verts - sc.indexed.dynamic.0 } else { 0 };
+        let deforms = sc.meshes[i.mesh as usize].deforms;
+        i.prev = if deforms { i.verts - sc.indexed.dynamic.0 } else { 0 };
+        i.bits = i.bits & !scene::INST_DEFORMS | if deforms { scene::INST_DEFORMS } else { 0 };
+        let bits = sc.gpu_instances[r].n[1][3].to_bits();
+        sc.gpu_instances[r].n[1][3] = f32::from_bits(bits & !scene::INST_DEFORMS | if deforms { scene::INST_DEFORMS } else { 0 });
         sc.gpu_instances[r].info[2] = i.verts;
         sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
     params.word_first[1][2] = sc.indexed.dynamic.0;
+    // (Hardware traversal: the translucent particles' rows follow the world-space triangles'.)
+    params.word_first[1][3] = sc.indexed.pool_first;
     Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
 }
 
@@ -961,10 +975,15 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     if out.indices.len() < sc.attrs.len() {
         let first = out.indices.len();
         out.translucent = out.vertices.len() as u32;
+        out.translucent_tris = (first as u32, sc.trans_tris.len() as u32);
         out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), out.translucent);
     }
     assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
-    out.rows = sc.attrs.iter().enumerate().map(|(k, a)| [a.uv[3].to_bits(), a.x[1].to_bits(), tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()]).collect();
+    // A row a triangle. One no instance places: its material, its object, its flags, its emitter + 1. A mesh's: its
+    // section and its index in it (whether it deforms is its instance's to say: `scene::INST_DEFORMS`).
+    let pool = pool_first..pool_first + sc.pool_tris.len();
+    out.rows = sc.attrs.iter().enumerate().map(|(k, a)| if pool.contains(&k) { [a.uv[3].to_bits(), 0, 0, a.x[3].to_bits()] } else { [a.uv[3].to_bits(), a.x[1].to_bits(), tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()] }).collect();
+    out.pool_first = pool_first as u32;
     out
 }
 
@@ -1509,7 +1528,7 @@ mod light_lod_tests {
         // the one a load with all of them on builds: the plain build's, its powers summed bottom-up.
         let mats = [scene::GpuMaterial { emissive: [1.0, 1.0, 1.0, 0.0], ..Default::default() }];
         let tris: Vec<EmitterTri> = (0..600u32)
-            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: NO_INST })
+            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
             .collect();
         let verts: Vec<[f32; 4]> = (0..600).flat_map(|i| [[2.0 * i as f32, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]).collect();
         let (off, on) = ([[0.0, 0.0, 0.0, 1.0], [0.0; 4]], [[0.0, 0.0, 0.0, 1.0]; 2]);
@@ -1542,7 +1561,7 @@ mod light_lod_tests {
         let mut unit = || (rnd() >> 8) as f32 / (1 << 24) as f32;
         let mats: Vec<scene::GpuMaterial> = (0..4).map(|k| scene::GpuMaterial { emissive: [k as f32 * 3.0, k as f32, 0.5 * k as f32, 0.0], ..Default::default() }).collect();
         let tris: Vec<EmitterTri> = (0..3000)
-            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false, inst: NO_INST })
+            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
             .collect();
         let (t, total, _) = emitter_cdf(&tris, &emitter_order(&tris, None), &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
         let n = tris.len() as u32;
@@ -1762,7 +1781,11 @@ mod units_tests {
                 assert_eq!(bits(&uv.concat()), bits(&[a.n0[3], a.n1[3], a.n2[3], a.uv[0], a.uv[1], a.uv[2]]), "{what}: triangle {k}'s UVs");
                 let own = a.x[0].to_bits() & indexed::OWN_TANGENT != 0;
                 assert_eq!(bits(&tangent), bits(&if own { a.t } else { [0.0; 4] }), "{what}: triangle {k}'s own tangent on its first vertex, or none");
-                assert_eq!(x.rows[k], [a.uv[3].to_bits(), a.x[1].to_bits(), p.tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()], "{what}: triangle {k}'s row");
+                // (A mesh's triangle: its section and its index in it, nothing else. One no instance places: its
+                // material, its object, its flags, its emitter + 1.)
+                let pool = (pool_first..pool_first + sc.pool_tris.len()).contains(&k);
+                let row = if pool { [a.uv[3].to_bits(), 0, 0, a.x[3].to_bits()] } else { [a.uv[3].to_bits(), a.x[1].to_bits(), p.tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()] };
+                assert_eq!(x.rows[k], row, "{what}: triangle {k}'s row");
             }
             if sc.meshes.is_empty() {
                 continue;

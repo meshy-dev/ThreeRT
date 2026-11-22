@@ -7,7 +7,7 @@
 
 @if(hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     // Ray tracing off (pathtrace.wgsl `rays_off`): past the camera ray, every ray misses.
-    if (rays_off) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
+    if (rays_off) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u); }
     let mask = select(0xffu, 1u, mode == TRACE_SHADOW);
     let any = mode != TRACE_CLOSEST;
     // (A scene without cutouts: one query. A feature bit: the kernel has this or what follows, not both. Glass among an
@@ -45,26 +45,26 @@
         if (h.tri == 0xffffffffu) {
             // (A shadow ray comes here in order only past a cutout that let it through, `shadow_hole`, or past glass.)
             if (any && !first && hole) { shadow_hole = true; }
-            return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+            return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
         }
         let t = t0 + h.t;
         // A shadow ray passes the glass among an instance's sections (its row says so; an instance that is all glass is
         // out of its way by its mask).
         let passes = has(F_IGLASS) && mask == 1u && hit_row != NO_ROW && (hit_row & ROW_GLASS) != 0u;
         if (!passes) {
-            if (!has(F_MASKED) || solid || is_proc(h) || !cutout_hit(h) || alpha_pass(h.tri, h.inst, h.u, h.v, t)) { return Hit(t, h.tri, h.u, h.v, h.inst); }
+            if (!has(F_MASKED) || solid || is_proc(h) || !cutout_hit(h) || alpha_pass(h.tri, h.inst, h.part, h.u, h.v, t)) { return Hit(t, h.tri, h.u, h.v, h.inst, h.part); }
             hole = true;
         }
         if (first) { first = false; } else { t0 = t + 1e-4 * max(1.0, t); }
     }
-    if (any) { return Hit(t0, 0u, 0.0, 0.0, NO_INST); }
-    return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+    if (any) { return Hit(t0, 0u, 0.0, 0.0, NO_INST, 0u); }
+    return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
 }
 
 // The closest (or with `any`, the first found) hit, every triangle opaque.
 @if(hwrt) fn trace_opaque(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mask: u32, any: bool) -> Hit {
     hit_row = NO_ROW;
-    @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST); }
+    @if(strict) if (ray_bad(o, d, tmax_in)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u); }
     var rq: ray_query;
     let flags = select(RAY_FLAG_FORCE_OPAQUE, RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, any);
     rayQueryInitialize(&rq, acc, RayDesc(flags, mask, 0.0, tmax_in, o, d));
@@ -94,12 +94,14 @@
     }
     let it = rayQueryGetCommittedIntersection(&rq);
     if (it.kind == RAY_QUERY_INTERSECTION_NONE) {
-        return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+        return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
     }
     if (has(F_PROC) && it.kind == RAY_QUERY_INTERSECTION_GENERATED) { return proc_hit(it.t, pg, pprim, it.instance_custom_data); }
     let ti = hit_tri(it.instance_custom_data, it.geometry_index, it.primitive_index);
-    // Model instance (F_INST, custom data bit 23 | record): ti is its model-space pool triangle.
-    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, hit_inst(it.instance_custom_data));
+    // Model instance (F_INST, custom data bit 23 | record): ti is its model-space pool triangle, and the geometry it
+    // was hit in its section. A traversal group's triangle is in the world: its row is its own.
+    let inst = hit_inst(it.instance_custom_data);
+    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, inst, select(it.geometry_index, ti, inst == NO_INST));
 }
 
 // The first word of the row of the hit `trace_opaque` last found (its material and class bits), NO_ROW where its
@@ -110,7 +112,7 @@
 // material has an alpha test, as the build flags TRI_MASKED.
 @if(hwrt) fn cutout_hit(h: Hit) -> bool {
     if (has(F_INST) && hit_row != NO_ROW) { return (hit_row & ROW_CUTOUT) != 0u; }
-    return material_at(tri_row(h.tri).x).uv2.w > 0.0;
+    return material_at(tri_row(h.part).x).uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.

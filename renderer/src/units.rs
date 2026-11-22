@@ -959,8 +959,8 @@ pub(crate) mod cpu {
             self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 1);
             self.vertices.get(i as usize).map(|v| Vec3A::new(v[0][0], v[0][1], v[0][2])).ok_or(format!("reads vertex {i} of {}", self.vertices.len()))
         }
-        /// pathtrace.wgsl `leaf_indices`, `tri_flags`.
-        pub(crate) fn leaf_indices(&self, ti: u32) -> Walk<[u32; 3]> {
+        /// pathtrace.wgsl `tri_indices`, `tri_flags`.
+        pub(crate) fn tri_indices(&self, ti: u32) -> Walk<[u32; 3]> {
             self.indices.get(ti as usize).copied().ok_or(format!("reads triangle {ti} of {}", self.indices.len()))
         }
         pub(crate) fn tri_flags(&self, ti: u32) -> Walk<u32> {
@@ -995,7 +995,7 @@ pub(crate) mod cpu {
 
         /// pathtrace.wgsl `intersect_tri`: (t, u, v), t = INF for a miss.
         pub(crate) fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, base: u32, tmax: f32) -> Walk<f32> {
-            let ix = self.leaf_indices(i)?;
+            let ix = self.tri_indices(i)?;
             let v0 = self.vert(base + ix[0])?;
             let (e1, e2) = (self.vert(base + ix[1])? - v0, self.vert(base + ix[2])? - v0);
             let pv = d.cross(e2);
@@ -1096,9 +1096,13 @@ pub(crate) mod cpu {
             self.trace_units(o, d, inv_d, hit, mode, &mut stack)
         }
 
+        /// A unit's triangle's section: the tree's own data, a row a triangle (shaders/trace_units.wgsl `tri_row(ti).x`).
+        fn tri_part(&self, ti: u32) -> Walk<u32> {
+            Ok(self.tri_rows.get(ti as usize).ok_or(format!("reads the row of triangle {ti} of {}", self.tri_rows.len()))?[0])
+        }
+
         /// shaders/trace_units.wgsl `row_flags`.
-        fn row_flags(&self, first: u32, ti: u32) -> Walk<u32> {
-            let section = self.tri_rows.get(ti as usize).ok_or(format!("reads the row of triangle {ti}"))?[0];
+        fn row_flags(&self, first: u32, section: u32) -> Walk<u32> {
             let x = self.rows.get((first + section) as usize).ok_or(format!("reads row {first} + {section}"))?[0];
             Ok(if x & crate::scene::ROW_CUTOUT != 0 { crate::scene::TRI_MASKED } else { 0 } | if x & crate::scene::ROW_GLASS != 0 { crate::scene::TRI_NO_SHADOW } else { 0 })
         }
@@ -1167,9 +1171,10 @@ pub(crate) mod cpu {
                         let x = self.intersect_tri(ro, rd, ti, uverts, hit.t)?;
                         if x < hit.t {
                             // (A unit's glass: shadow rays pass it.)
-                            let mut flags = self.tri_flags(ti)?;
+                            let part = self.tri_part(ti)?;
+                            let mut flags = 0;
                             if ubits & (crate::scene::INST_CUTOUT | crate::scene::INST_GLASS) != 0 {
-                                flags |= self.row_flags(urows, ti)?;
+                                flags = self.row_flags(urows, part)?;
                             }
                             if mode == TRACE_SHADOW && flags & crate::scene::TRI_NO_SHADOW != 0 {
                                 continue;
@@ -1268,7 +1273,10 @@ pub(crate) mod tests {
                 "let ti = first + n.left_or_first + k;",
                 "let x = intersect_tri(ro, rd, ti, uverts, hit.t);",
                 "if (x.x < hit.t) {",
-                "hit = Hit(x.x, ti, x.y, x.z, rec);",
+                "let part = tri_row(ti).x;",
+                "var flags = 0u;",
+                "if ((ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags = row_flags(urows, part); }",
+                "hit = Hit(x.x, ti, x.y, x.z, rec, part);",
                 "if (mode != TRACE_CLOSEST) { return hit; }",
                 "if (rec != NO_INST && sp == base) {",
                 "rec = NO_INST;",
@@ -1290,7 +1298,7 @@ pub(crate) mod tests {
                 "fn proc_dir(r: Instance, d: vec3<f32>) -> vec3<f32> { return r.n0.xyz * d.x + r.n1.xyz * d.y + r.n2.xyz * d.z; }",
                 "fn proc_point(r: Instance, p: vec3<f32>) -> vec3<f32> { return proc_dir(r, p - vec3<f32>(r.m0.w, r.m1.w, r.m2.w)); }",
                 "fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {",
-                "let ix = (leaf_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;",
+                "let ix = (tri_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;",
                 "let v0 = vertices[ix.x].xyz;",
                 "let e1 = vertices[ix.y].xyz - v0;",
                 "let e2 = vertices[ix.z].xyz - v0;",
@@ -1309,7 +1317,7 @@ pub(crate) mod tests {
                 "let r = intersect_tri(o, d, ti, 0u, hit.t);",
                 "let flags = tri_flags(ti);",
                 "if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }",
-                "hit = Hit(r.x, ti, r.y, r.z, NO_INST);",
+                "hit = Hit(r.x, ti, r.y, r.z, NO_INST, ti);",
                 "if (mode != TRACE_CLOSEST) { return hit; }",
                 "if (tr != INF && sp < 48u) {",
                 "if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }",
