@@ -59,12 +59,12 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, d: vec4<f32>, e: vec4<
 
 @group(0) @binding(0) var<uniform> PPS: PP;
 @group(0) @binding(1) var<storage, read> systems: array<System>;
-@group(0) @binding(2) var<storage, read_write> verts: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> prev_verts: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> blas: array<f32>;
+// The scene's vertices (pathtrace.wgsl `positions`, `vattrs`) and the previous positions of those that move.
+@group(0) @binding(2) var<storage, read_write> positions: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> prev_pos: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> objects: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read_write> attrs: array<TriAttr>;
-// This pass's last positions of its triangles (prev_verts' indexing; a repose re-uploads the dynamic tail).
+@group(0) @binding(6) var<storage, read_write> vattrs: array<vec4<f32>>;
+// This pass's last positions of its vertices (the previous positions' indexing; a repose re-uploads the dynamic tail).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
 // Per particle: (pos, age), (vel, life), color, (size, alive, -, -); from each system's first state.
 @group(0) @binding(8) var<storage, read_write> state: array<vec4<f32>>;
@@ -139,32 +139,19 @@ fn collide(s_in: PState, dt: f32, flags: f32, d: vec4<f32>) -> PState {
     return s;
 }
 
-// One triangle of a quad (particles.wgsl `put_tri`, opaque particles only).
-fn put_tri(t: u32, dyn_first: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>) {
-    let flags = verts[t * 3u].w;
-    let now = array<vec4<f32>, 3>(vec4<f32>(a, flags), vec4<f32>(b - a, 0.0), vec4<f32>(c - a, 0.0));
+// One triangle of a quad, from its first vertex `v` on (particles.wgsl `put_tri`, opaque particles only).
+fn put_tri(v: u32, dyn_first: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>) {
+    let corners = array<vec3<f32>, 3>(a, b, c);
     let first = PPS.env.x > 0.5;
     for (var k = 0u; k < 3u; k++) {
-        verts[t * 3u + k] = now[k];
-        let j = (t - dyn_first) * 3u + k;
-        prev_verts[j] = select(last[j], now[k], first);
-        last[j] = now[k];
-    }
-    attrs[t].n0.x = n.x;
-    attrs[t].n0.y = n.y;
-    attrs[t].n0.z = n.z;
-    attrs[t].n1.x = n.x;
-    attrs[t].n1.y = n.y;
-    attrs[t].n1.z = n.z;
-    attrs[t].n2.x = n.x;
-    attrs[t].n2.y = n.y;
-    attrs[t].n2.z = n.z;
-    attrs[t].t = vec4<f32>(tg, 1.0);
-    let corners = array<vec3<f32>, 3>(a, b, c);
-    for (var k = 0u; k < 3u; k++) {
-        for (var j = 0u; j < 3u; j++) {
-            blas[t * 9u + k * 3u + j] = corners[k][j];
-        }
+        let i = v + k;
+        positions[i] = vec4<f32>(corners[k], positions[i].w);
+        vattrs[i * 2u] = vec4<f32>(n, vattrs[i * 2u].w);
+        vattrs[i * 2u + 1u] = vec4<f32>(tg, 1.0);
+        let j = i - dyn_first;
+        let now = vec4<f32>(corners[k], 0.0);
+        prev_pos[j] = select(last[j], now, first);
+        last[j] = now;
     }
 }
 
@@ -237,9 +224,9 @@ fn gpu_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let area = length(uxv);
     let n = select(to_cam, uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(u), dot(u, u) > 1e-24);
-    let t = sys.a.x + 2u * k;
+    let t = sys.a.x + 6u * k;
     put_tri(t, sys.b.y, c00, c10, c11, n, tg);
-    put_tri(t + 1u, sys.b.y, c00, c11, c01, n, tg);
+    put_tri(t + 3u, sys.b.y, c00, c11, c01, n, tg);
     let oi = (sys.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(s.pos, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(vec3<f32>(4.0 * half), objects[oi + 1u].w);

@@ -4,7 +4,10 @@
 // the instances that moved).
 struct Run { first: u32, count: u32 };
 @group(0) @binding(0) var<storage, read> runs: array<Run>;
-@group(0) @binding(1) var<storage, read> verts: array<vec4<f32>>;
+// The scene's vertices' positions, and its triangles' indices (three a triangle, counted from the first vertex of the
+// mesh an instance places; a world-space triangle's from 0).
+@group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> indices: array<u32>;
 // Three vec4s an emitter: (v0, its triangle), (e1, its instance), (e2, its path code). The words stay.
 @group(0) @binding(2) var<storage, read_write> list: array<vec4<u32>>;
 // The instances' records (scene.rs `GpuInstance`: the first three vec4s are the rows of the instance's matrix). Read
@@ -19,9 +22,13 @@ fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= run.count) { return; }
     let r = (run.first + id.x) * 3u;
     let t = list[r].w * 3u;
-    var rows = array<vec3<f32>, 3>(verts[t].xyz, verts[t + 1u].xyz, verts[t + 2u].xyz);
-    // An instance's emitter: its mesh's triangle (v0, e1, e2 in model space) placed by the instance.
+    // An instance's emitter: its mesh's triangle (v0, e1, e2 in model space) placed by the instance. (The record's
+    // seventh vec4: its mesh's first triangle, its object, its mesh's first vertex, its rows.)
     let inst = list[r + 1u].w;
+    var base = 0u;
+    if (inst != NO_INST) { base = bitcast<u32>(instances[inst * INSTANCE_VEC4 + 6u].z); }
+    let v0 = positions[base + indices[t]].xyz;
+    var rows = array<vec3<f32>, 3>(v0, positions[base + indices[t + 1u]].xyz - v0, positions[base + indices[t + 2u]].xyz - v0);
     if (inst != NO_INST) {
         let m0 = instances[inst * INSTANCE_VEC4];
         let m1 = instances[inst * INSTANCE_VEC4 + 1u];

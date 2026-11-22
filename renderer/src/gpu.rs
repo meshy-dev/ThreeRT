@@ -423,11 +423,10 @@ struct SceneBuffers<'a> {
 /// section of the tables as a buffer of its own). The pass's bind group holds them: one replaced, the group is made
 /// again (`Gpu::rebind_scene`).
 struct ParticleTargets<'a> {
-    verts: &'a wgpu::Buffer,
-    prev_verts: &'a wgpu::Buffer,
-    blas_verts: &'a wgpu::Buffer,
+    positions: &'a wgpu::Buffer,
+    prev_pos: &'a wgpu::Buffer,
     heap: &'a Heap<Table>,
-    attrs: &'a wgpu::Buffer,
+    vattrs: &'a wgpu::Buffer,
 }
 
 fn buffer_entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -437,7 +436,7 @@ fn buffer_entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 /// A particle pass's bind group: its `own` buffers at their bindings, and the scene's it writes.
 fn particle_bind_group(d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, label: &str, own: &[(u32, &wgpu::Buffer)], t: &ParticleTargets) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = own.iter().map(|(binding, b)| buffer_entry(*binding, b)).collect();
-    entries.extend([buffer_entry(2, t.verts), buffer_entry(3, t.prev_verts), buffer_entry(4, t.blas_verts), wgpu::BindGroupEntry { binding: 5, resource: t.heap.binding(Table::Objects) }, buffer_entry(6, t.attrs)]);
+    entries.extend([buffer_entry(2, t.positions), buffer_entry(3, t.prev_pos), wgpu::BindGroupEntry { binding: 5, resource: t.heap.binding(Table::Objects) }, buffer_entry(6, t.vattrs)]);
     d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout: &pipeline.get_bind_group_layout(0), entries: &entries })
 }
 
@@ -2374,6 +2373,10 @@ impl Gpu {
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let b_verts = buf_room("verts", bytemuck::cast_slice(tri_verts), room.tris * 48, edit | wgpu::BufferUsages::COPY_SRC);
         let dynamic_first: usize = groups[..4].iter().sum();
+        // A particle's triangle's first vertex: three vertices a triangle, from the first vertex that moves (a dynamic
+        // world-space triangle) or the first translucent one.
+        let (moving, translucent, trans_first) = (scene.indexed.dynamic.0, scene.indexed.translucent, scene.trans_first);
+        let vertex_of = move |tri: u32, trans: bool| if trans { translucent + (tri - trans_first) * 3 } else { moving + (tri - dynamic_first as u32) * 3 };
         // The dynamic tail (groups 4..8; the instanced pool follows it, its deforming meshes first: theirs too).
         let dynamic_end: usize = groups.iter().sum::<usize>() + crate::scene::deforming_pool(&scene.meshes);
         let prev = &tri_verts[(dynamic_first * 3).min(tri_verts.len())..(dynamic_end * 3).min(tri_verts.len())];
@@ -2733,15 +2736,15 @@ impl Gpu {
                         let mut p = [0.0f32; 32];
                         p.copy_from_slice(&ps.params);
                         // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
-                        ParticleSystemGpu { a: [ps.final_first, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, dynamic_first as u32, ps.translucent as u32, scene.trans_first], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        ParticleSystemGpu { a: [vertex_of(ps.final_first, ps.translucent), if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, ps.translucent as u32, ix.translucent], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
                 let b_sys = buf("particle systems", bytemuck::cast_slice(&systems), edit);
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particle params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles last"), size: b_prev.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+                let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles last"), size: b_prev_pos.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let no_trans = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-                let written = ParticleTargets { verts: &b_verts, prev_verts: &b_prev, blas_verts: &a.verts, heap: &heap, attrs: &b_attrs };
+                let written = ParticleTargets { positions: &b_pos, prev_pos: &b_prev_pos, heap: &heap, vattrs: &b_vattr };
                 let pbg = particle_bind_group(d, &pipeline, "particles", &[(0, &params), (1, &b_sys), (7, &last), (8, translucent.as_ref().map_or(&no_trans, |t| &t.verts))], &written);
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
                 let opaque = scene.particles.iter().any(|p| !p.translucent);
@@ -2764,7 +2767,7 @@ impl Gpu {
                     .map(|ps| {
                         let c = &ps.collide;
                         let flags = u32::from(c.plane.is_some()) | if c.voxels { 2 } else { 0 };
-                        GpuParticleSystemGpu { a: [ps.final_first, ps.capacity, ps.object, ps.program], b: [ps.seed, dynamic_first as u32, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, 0.0], e: [0; 4], p: ps.params }
+                        GpuParticleSystemGpu { a: [vertex_of(ps.final_first, false), ps.capacity, ps.object, ps.program], b: [ps.seed, ix.dynamic.0, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, 0.0], e: [0; 4], p: ps.params }
                     })
                     .collect();
                 let table = buf("gpu particle systems", bytemuck::cast_slice(&systems), edit);
@@ -2772,7 +2775,7 @@ impl Gpu {
                 let state = d.create_buffer(&wgpu::BufferDescriptor { label: Some("gpu particle states"), size: states, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let spawns = d.create_buffer(&wgpu::BufferDescriptor { label: Some("gpu particle spawns"), size: (MAX_SPAWNS * 32) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("gpu particle params"), size: 80, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("gpu particles last"), size: b_prev.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+                let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("gpu particles last"), size: b_prev_pos.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let occ = scene.voxel_occupancy.as_ref().filter(|_| scene.gpu_particles.iter().any(|p| p.collide.voxels)).map(|o| o.read().unwrap().clone());
                 let (grid, grid_o, grid_n) = match &occ {
                     Some(o) => (buf("voxel occupancy", bytemuck::cast_slice(&o.words), edit), [o.origin[0], o.origin[1], o.origin[2], o.cell], [o.dims[0], o.dims[1], o.dims[2], o.row_words() as u32]),
@@ -2781,12 +2784,12 @@ impl Gpu {
                 if let Some(o) = &scene.voxel_occupancy {
                     o.write().unwrap().dirty.clear();
                 }
-                let written = ParticleTargets { verts: &b_verts, prev_verts: &b_prev, blas_verts: &a.verts, heap: &heap, attrs: &b_attrs };
+                let written = ParticleTargets { positions: &b_pos, prev_pos: &b_prev_pos, heap: &heap, vattrs: &b_vattr };
                 let bg = particle_bind_group(d, &pipeline, "gpu particles", &[(0, &params), (1, &table), (7, &last), (8, &state), (9, &spawns), (10, &grid)], &written);
                 let host = scene.gpu_particles.iter().map(|ps| (0u32, 0.0f32, ps.rate)).collect();
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
                 let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
-                let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &a.verts), wgpu::BindGroupEntry { binding: 1, resource: a.tlas.as_binding() }] });
+                let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &b_pos), wgpu::BindGroupEntry { binding: 1, resource: a.tlas.as_binding() }] });
                 Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, last, state, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n })
             }
             _ => None,
@@ -2801,7 +2804,7 @@ impl Gpu {
         self.save_pipeline_cache();
         // (What moves emitters after the load needs hardware ray tracing: triangles reposed in place, the particle passes.)
         let fills = match &accel {
-            Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_verts, &heap), particles: self.emitter_fill(&emitter_runs.particles, &b_verts, &heap) },
+            Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_pos, &heap, &words), particles: self.emitter_fill(&emitter_runs.particles, &b_pos, &heap, &words) },
             None => EmitterFills::default(),
         };
         Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, positions: b_pos, vattrs: b_vattr, prev_pos: b_prev_pos, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
@@ -3000,8 +3003,8 @@ impl Gpu {
         }
     }
 
-    fn emitter_fill_bind_group(&self, runs: &wgpu::Buffer, verts: &wgpu::Buffer, heap: &Heap<Table>) -> wgpu::BindGroup {
-        let entries = [buffer_entry(0, runs), buffer_entry(1, verts), wgpu::BindGroupEntry { binding: 2, resource: heap.binding(Table::EmitterTris) }, wgpu::BindGroupEntry { binding: 3, resource: heap.binding(Table::Instances) }];
+    fn emitter_fill_bind_group(&self, runs: &wgpu::Buffer, positions: &wgpu::Buffer, heap: &Heap<Table>, words: &Heap<Stream>) -> wgpu::BindGroup {
+        let entries = [buffer_entry(0, runs), buffer_entry(1, positions), wgpu::BindGroupEntry { binding: 2, resource: heap.binding(Table::EmitterTris) }, wgpu::BindGroupEntry { binding: 3, resource: heap.binding(Table::Instances) }, wgpu::BindGroupEntry { binding: 4, resource: words.binding(Stream::Indices) }];
         self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("emitter fill"), layout: &self.emitter_fill_pipeline().get_bind_group_layout(0), entries: &entries })
     }
 
@@ -3013,16 +3016,16 @@ impl Gpu {
     }
 
     /// The fill of `runs` of the light list (none: no fill).
-    fn emitter_fill(&self, runs: &[[u32; 2]], verts: &wgpu::Buffer, heap: &Heap<Table>) -> Option<EmitterFill> {
+    fn emitter_fill(&self, runs: &[[u32; 2]], positions: &wgpu::Buffer, heap: &Heap<Table>, words: &Heap<Stream>) -> Option<EmitterFill> {
         let longest = runs.iter().map(|r| r[1]).max()?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("emitter runs"), size: (runs.len() * 8) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(runs));
-        Some(EmitterFill { bg: self.emitter_fill_bind_group(&buffer, verts, heap), runs: buffer, count: runs.len() as u32, longest })
+        Some(EmitterFill { bg: self.emitter_fill_bind_group(&buffer, positions, heap, words), runs: buffer, count: runs.len() as u32, longest })
     }
 
     /// `runs` of the light list taken again now (the instances an edit just moved: their records are queued).
     pub fn fill_emitter_runs(&self, up: &Uploaded, runs: &[[u32; 2]]) {
-        let Some(f) = self.emitter_fill(runs, &up.verts, &up.heap) else { return };
+        let Some(f) = self.emitter_fill(runs, &up.positions, &up.heap, &up.words) else { return };
         let mut e = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitter fill") });
         self.fill_emitters(&f, &mut e);
         self.queue.submit([e.finish()]);
@@ -3480,7 +3483,7 @@ impl Gpu {
     /// live/edits.rs): the kernel's, the light list's fills', the skinning pass's and the particle passes'.
     pub fn rebind_scene(&self, up: &mut Uploaded) {
         for f in [&mut up.fills.moved, &mut up.fills.particles].into_iter().flatten() {
-            f.bg = self.emitter_fill_bind_group(&f.runs, &up.verts, &up.heap);
+            f.bg = self.emitter_fill_bind_group(&f.runs, &up.positions, &up.heap, &up.words);
         }
         if let Some(k) = &mut up.skin {
             k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.positions, &up.vattrs);
@@ -3489,8 +3492,10 @@ impl Gpu {
             (a.positions, a.indices, a.index_first) = (up.positions.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
         }
         up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.positions, attrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
-        let Some(a) = &up.accel else { return };
-        let written = ParticleTargets { verts: &up.verts, prev_verts: &up.prev_verts, blas_verts: &a.verts, heap: &up.heap, attrs: &up.attrs };
+        if up.accel.is_none() {
+            return;
+        }
+        let written = ParticleTargets { positions: &up.positions, prev_pos: &up.prev_pos, heap: &up.heap, vattrs: &up.vattrs };
         if let Some(p) = &mut up.particles {
             p.bg = particle_bind_group(&self.device, &p.pipeline, "particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, up.translucent.as_ref().map_or(&p.no_trans, |t| &t.verts))], &written);
         }

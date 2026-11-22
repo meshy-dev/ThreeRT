@@ -957,8 +957,8 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     // The translucent particles' (what `tri_verts` has after the pool: under hardware traversal).
     if out.indices.len() < sc.attrs.len() {
         let first = out.indices.len();
-        let by = out.positions.len() as u32;
-        out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), by);
+        out.translucent = out.positions.len() as u32;
+        out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), out.translucent);
     }
     assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
     out.rows = sc.attrs.iter().enumerate().map(|(k, a)| [a.uv[3].to_bits(), a.x[1].to_bits(), tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()]).collect();

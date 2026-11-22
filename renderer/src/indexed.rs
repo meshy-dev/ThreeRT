@@ -170,6 +170,8 @@ pub struct Indexed {
     pub meshes: Vec<(u32, u32)>,
     /// The world-space triangles' vertices: the first so many (the still ones', then those that move).
     pub flat: u32,
+    /// The translucent particles' first vertex (three a triangle, after every mesh's).
+    pub translucent: u32,
     /// By skin source (`Scene::skin_sources`): the model's vertices a mesh of it is skinned from (`source_vertices`)
     /// and its triangles' indices, which every mesh of the source has. Empty: no mesh is skinned from it.
     pub skins: Vec<(Vec<crate::skin::SkinCorner>, Vec<[u32; 3]>)>,
