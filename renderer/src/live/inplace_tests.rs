@@ -343,6 +343,7 @@ fn a_mesh_changed_in_place_to_more_vertices_takes_another_run() {
 /// Two movable rect lights' cards (world-space triangles that move, one card after the other; a still card's
 /// vertices lie before theirs): each moved alone is written where it lies, the other's vertices as they were; the
 /// motion vectors at its pixels are its step back (its previous positions are its own); the picture is a build's.
+/// (Hardware traversal: under software traversal a world-space triangle that moves is a rebuild's.)
 #[test]
 fn a_moved_card_beside_another_is_written_where_it_lies() {
     let presets = crate::default_presets_dir();
@@ -356,7 +357,8 @@ fn a_moved_card_beside_another_is_written_where_it_lies() {
         w.set_transform(id + 100, at[k], turn, Vec3::ONE).unwrap();
     }
     let mut live = match open(&w) {
-        Ok(c) => c,
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
@@ -420,6 +422,7 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
 
 /// A skinned model's primitive whose file has no normals is shaded by its triangles' own, which the kernel makes where
 /// a triangle is hit: offline, a camera before the largest such triangle of a posed model sees that triangle's normal.
+/// (Under either traversal: the model's mesh an instance's, or a unit's.)
 #[test]
 fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     let g = match gpu::Gpu::new() {
@@ -433,7 +436,9 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     let built = |w: &World| {
         let mut sc = scene::build(w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         (sc.width, sc.height) = (96, 54);
-        let prep = crate::prepare(&g, &mut sc, &mut vec![]);
+        // (Under software traversal with units, as a live view has the scene: without them the model is flattened
+        // into world-space triangles with the CPU's normals.)
+        let prep = crate::prepare_as(g.hwrt, true, &mut sc, &mut vec![]);
         (sc, prep)
     };
     // The mesh's triangles whose three vertices have no normal, as the instance places them: the largest.
