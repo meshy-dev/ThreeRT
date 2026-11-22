@@ -3381,15 +3381,17 @@ impl Gpu {
     }
 
     /// The BLAS vertex buffer grown to `bytes` (`grown`).
-    pub fn grow_blas_verts(&self, accel: &mut Accel, bytes: u64) {
-        accel.verts = self.grown(&accel.verts, bytes, "blas_verts");
-    }
-
     /// Mesh `k` (one an edit no longer draws) made again over `count` triangles from `first`: a new BLAS in its slot.
     pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) {
         let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
         accel.meshes[k as usize] = blas;
         accel.mesh_geo[k as usize] = geo;
+        accel.mesh_verts[k as usize] = (mesh.vfirst, mesh.vcount);
+    }
+
+    /// Mesh `k`'s vertices are another run now (its BLAS keeps its sizes: as many vertices).
+    pub fn move_mesh_verts(&self, accel: &mut Accel, k: u32, mesh: &crate::scene::InstMesh) {
+        accel.mesh_verts[k as usize] = (mesh.vfirst, mesh.vcount);
     }
 
     fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
@@ -3399,9 +3401,9 @@ impl Gpu {
             .iter()
             .map(|&(_, c)| wgpu::BlasTriangleGeometrySizeDescriptor {
                 vertex_format: wgpu::VertexFormat::Float32x3,
-                vertex_count: c * 3,
-                index_format: None,
-                index_count: None,
+                vertex_count: mesh.vcount.max(1),
+                index_format: Some(wgpu::IndexFormat::Uint32),
+                index_count: Some(c * 3),
                 flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
             })
             .collect();
@@ -3418,6 +3420,7 @@ impl Gpu {
         let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
         accel.meshes.push(blas);
         accel.mesh_geo.push(geo);
+        accel.mesh_verts.push((mesh.vfirst, mesh.vcount));
         accel.meshes.len() as u32 - 1
     }
 

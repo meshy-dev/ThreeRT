@@ -126,6 +126,109 @@ fn seen_by_rays(c: &LiveCore, record: u32) -> bool {
     }
 }
 
+/// Part of a GPU buffer, read back.
+fn read_back<T: bytemuck::Pod>(c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64) -> Vec<T> {
+    let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut e = c.g.device.create_command_encoder(&Default::default());
+    e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
+    c.g.queue.submit([e.finish()]);
+    to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
+    words
+}
+
+/// Triangles as the kernel reads them (through their indices): a triangle's corners (9 numbers), their normals (9),
+/// their UVs (6), its first vertex's tangent (4; zeros: none), its row (4 words), and its corners' positions of the
+/// previous frame (9; a mesh that deforms).
+#[derive(Default)]
+struct Triangles {
+    p: Vec<f32>,
+    n: Vec<f32>,
+    uv: Vec<f32>,
+    t: Vec<f32>,
+    rows: Vec<u32>,
+    prev: Vec<f32>,
+}
+
+/// `n` triangles from `first` as the GPU has them, their vertices counted from `base`; their previous positions from
+/// `prev` on (None: not read).
+fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u32>) -> Triangles {
+    use crate::heap::Stream;
+    let up = &c.sc.up;
+    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
+    let rows: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * 16, n * 16);
+    let (positions, vattrs): (Vec<[f32; 4]>, Vec<[[f32; 4]; 2]>) = (read_back(c, &up.positions, 0, up.positions.size()), read_back(c, &up.vattrs, 0, up.vattrs.size()));
+    let before: Vec<[f32; 4]> = prev.map_or(vec![], |_| read_back(c, &up.prev_pos, 0, up.prev_pos.size()));
+    let mut out = Triangles { rows, ..Default::default() };
+    for tri in index.chunks_exact(3) {
+        for (k, &i) in tri.iter().enumerate() {
+            let v = (base + i) as usize;
+            out.p.extend(&positions[v][..3]);
+            out.n.extend(&vattrs[v][0][..3]);
+            out.uv.extend([positions[v][3], vattrs[v][0][3]]);
+            if k == 0 {
+                out.t.extend(vattrs[v][1]);
+            }
+            if let Some(p) = prev {
+                out.prev.extend(&before[(p + i) as usize][..3]);
+            }
+        }
+    }
+    out
+}
+
+/// A skinned model's mesh as the CPU skin gives it for a pose, in the same form: a normal where the model has one
+/// (else zeros: the triangle's own is made where it is hit), a tangent where the model has its own.
+fn skinned_on_cpu(c: &LiveCore, sk: &scene::Skinned, a: &crate::desc::Animation) -> Triangles {
+    let tris = scene::model_gltf(&sk.uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
+    let (model, index) = &c.sc.skins[sk.source as usize];
+    let has = |j: usize, k: usize, bit: u32| model[index[j][k] as usize].t[3].to_bits() & bit != 0;
+    let mut out = Triangles::default();
+    for (j, &(k, section, rank)) in sk.order.iter().enumerate() {
+        let q = &tris[k as usize];
+        for corner in 0..3 {
+            out.p.extend(q.p[corner].to_array());
+            out.n.extend(if has(j, corner, crate::skin::CORNER_NORMAL) { q.n[corner].to_array() } else { [0.0; 3] });
+            out.uv.extend(q.uv[corner].to_array());
+        }
+        out.t.extend(match q.tangent.filter(|_| has(j, 0, crate::skin::CORNER_TANGENT)) {
+            Some((t, hand)) => [t.x, t.y, t.z, hand],
+            None => [0.0; 4],
+        });
+        out.rows.extend([section, 0, scene::TRI_DYNAMIC, rank]);
+    }
+    out
+}
+
+/// Numbers within a rounding of each other.
+fn same_numbers(what: &str, got: &[f32], want: &[f32], stride: usize) {
+    assert_eq!(got.len(), want.len(), "{what}: its length");
+    for (i, (g, x)) in got.iter().zip(want).enumerate() {
+        assert!((g - x).abs() <= 2e-5 * x.abs().max(1.0), "{what}: number {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
+    }
+}
+
+/// A posed skinned model's mesh on the GPU against the CPU skin of `now` (corners, normals, UVs, tangents; its rows
+/// word for word), its vertices' previous positions against that of `before`, and the mesh as the CPU has it when
+/// asked (`name`: its node). Its record has where its vertices and their previous positions are. The CPU's corners.
+fn skinned_is_the_cpus(what: &str, c: &LiveCore, sk: &scene::Skinned, name: &str, now: &crate::desc::Animation, before: &crate::desc::Animation) -> Vec<f32> {
+    let (inst, record, mesh) = (&c.sc.instances[sk.instance as usize], &c.sc.gpu_instances[sk.instance as usize], &c.sc.meshes[sk.mesh as usize]);
+    assert_eq!((record.n[2][3].to_bits(), record.info[2], inst.verts), (inst.prev, mesh.vfirst, mesh.vfirst), "{what}: the record has where the mesh's vertices and their previous positions are");
+    let got = triangles_on_gpu(c, record.info[0] as u64, sk.order.len() as u64, inst.verts, Some(inst.prev));
+    let want = skinned_on_cpu(c, sk, now);
+    same_numbers(&format!("{what}: the corners"), &got.p, &want.p, 9);
+    same_numbers(&format!("{what}: the normals"), &got.n, &want.n, 9);
+    same_numbers(&format!("{what}: the UVs"), &got.uv, &want.uv, 6);
+    same_numbers(&format!("{what}: the tangents"), &got.t, &want.t, 4);
+    assert_eq!(got.rows, want.rows, "{what}: the triangles' rows (section, -, the deforming flag, index in the section)");
+    same_numbers(&format!("{what}: the previous frame's positions"), &got.prev, &skinned_on_cpu(c, sk, before).p, 9);
+    let asked: Vec<f32> = c.node_tris(name).iter().flatten().flat_map(|p| p.to_array()).collect();
+    let placed: Vec<f32> = want.p.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
+    same_numbers(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, 9);
+    want.p
+}
+
 /// Mean absolute difference of two pictures, in 8-bit steps.
 fn apart(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
@@ -235,7 +338,7 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     };
     w.take_changes();
     picture(&mut live, 8);
-    let (verts, cache, out) = (live.sc.up.verts.clone(), live.targets.kernel.cache.val.buffer.clone(), live.targets.out.clone());
+    let (verts, cache, out) = (live.sc.up.positions.clone(), live.targets.kernel.cache.val.buffer.clone(), live.targets.out.clone());
     live.resize(96, 54).unwrap();
     assert!(live.targets.out == out && !live.reset, "the same size: the view as it was");
     let against = |what: &str, live: &mut LiveCore, w: &World| {
@@ -252,7 +355,7 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     for size in [(160, 90), (54, 96), (97, 55), (5, 3), (1, 1), (96, 54)] {
         live.resize(size.0, size.1).unwrap();
         assert!(live.reset && (live.w, live.h) == size, "{size:?}: the histories start again");
-        assert!(live.sc.up.verts == verts, "{size:?}: the scene's data is as it was");
+        assert!(live.sc.up.positions == verts, "{size:?}: the scene's data is as it was");
         assert!(live.g.merged || live.targets.kernel.cache.val.buffer == cache, "{size:?}: the radiance cache is as it was");
         against(&format!("{size:?}"), &mut live, &w);
     }
@@ -416,20 +519,15 @@ fn an_instanced_object_added_in_place_keeps_its_copies_data() {
 /// triangle placed by the instance, to rounding), its instance and moving flag, and a ray that hits its triangle
 /// finds it (the attributes' number, from the instance's first).
 fn list_is_its_triangles(what: &str, c: &LiveCore) {
-    let read = |b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
-        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let mut e = c.g.device.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
-        c.g.queue.submit([e.finish()]);
-        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
-        bytes
-    };
+    use crate::heap::Stream;
+    let read = |b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> { read_back(c, b, at, bytes) };
     let (tables, up) = (&c.sc.tables, &c.sc.up);
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
-    let (verts, attrs) = (read(&up.verts, 0, up.verts.size()), read(&up.attrs, 0, up.attrs.size()));
+    // (The triangles as the kernel reads them: three indices and a row each, the vertices' positions.)
+    let positions: Vec<[f32; 4]> = read_back(c, &up.positions, 0, up.positions.size());
+    let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices), up.words.cap(Stream::Indices));
+    let tri_rows: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles));
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
@@ -448,28 +546,31 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         if e.area <= 0.0 {
             continue;
         }
-        let rows: Vec<[f32; 4]> = (0..3).map(|k| bytemuck::pod_read_unaligned(&verts[(e.tri as usize * 3 + k) * 16..][..16])).collect();
-        let a: scene::GpuTriAttr = bytemuck::pod_read_unaligned(&attrs[e.tri as usize * 96..][..96]);
+        // (A mesh's indices count from its instance's first vertex; a world-space triangle's from the first of all.)
+        let base = if e.inst == crate::NO_INST { 0 } else { c.sc.instances[e.inst as usize].verts };
+        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&positions[(base + index[e.tri as usize * 3 + k]) as usize][..3]));
+        // (Its row: its material or its section, its object, its flags, its emitter + 1 or its index among its section's.)
+        let tri_row = &tri_rows[e.tri as usize * 4..][..4];
         if e.inst == crate::NO_INST {
-            assert_eq!(r, crate::GpuEmitterTri::new(e, &rows, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
-            assert_eq!(a.x[3].to_bits(), i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
+            assert_eq!(r, crate::GpuEmitterTri::of(e, p, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
+            assert_eq!(tri_row[3], i as u32 + 1, "{what}: triangle {} names its emitter", e.tri);
         } else {
             // (The record as the GPU has it.)
             let (inst, record) = (&c.sc.instances[e.inst as usize], bytemuck::pod_read_unaligned::<scene::GpuInstance>(&records[e.inst as usize * record_size..][..record_size]));
-            let at = |k: usize| glam::Vec3::new(rows[k][0], rows[k][1], rows[k][2]);
-            let placed = [inst.world.transform_point3(at(0)), inst.world.transform_vector3(at(1)), inst.world.transform_vector3(at(2))];
+            let placed = [inst.world.transform_point3(p[0].into()), inst.world.transform_vector3((p[1] - p[0]).into()), inst.world.transform_vector3((p[2] - p[0]).into())];
+            assert_eq!(record.info[2], inst.verts, "{what}: instance {}'s record has its mesh's first vertex", e.inst);
             assert_eq!((r.tri, r.inst, r.code), (e.tri, e.inst, code), "{what}: emitter {i}'s words");
             for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
                 assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
             }
             // Its section's row as the GPU has it says the material and where the section's emitters start, the
             // triangle its index among them.
-            let at = (record.info[3] + a.uv[3].to_bits()) as usize;
+            let at = (record.info[3] + tri_row[0]) as usize;
             let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
             assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
             assert_eq!(record.info[3], inst.rows, "{what}: instance {}'s record has its rows", e.inst);
             assert!(inst.first_emitter <= i as u32, "{what}: emitter {i} is of instance {}'s run, from {}", e.inst, inst.first_emitter);
-            assert_eq!((row[2].wrapping_add(a.x[3].to_bits()), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
+            assert_eq!((row[2].wrapping_add(tri_row[3]), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         }
         alive += 1;
     }
@@ -2686,58 +2787,18 @@ fn a_posed_skinned_model_is_added_in_place() {
         assert!(apart(&loaded, &added) > 0.5, "it is in the picture ({:.2} steps)", apart(&loaded, &added));
         return;
     }
-    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> {
-        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let mut e = c.g.device.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
-        c.g.queue.submit([e.finish()]);
-        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
-        words
-    };
+    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> { read_back(c, b, at, bytes) };
     let of = |c: &LiveCore, id: u32| c.sc.tables.retained.skinned.iter().position(|s| s.object == id && s.mesh != u32::MAX).expect("a posed skinned model");
-    // What the CPU skin gives a model's mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
-    let cpu = |c: &LiveCore, id: u32, a: &crate::desc::Animation| {
-        let sk = &c.sc.tables.retained.skinned[of(c, id)];
-        let tris = scene::model_gltf(&sk.uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
-        let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
-        for &(k, section, rank) in sk.order.iter() {
-            let q = &tris[k as usize];
-            let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
-            v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);
-            at.extend(bytemuck::cast_slice::<_, f32>(&[scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank)]));
-            b.extend(q.p.iter().flat_map(|p| p.to_array()));
-        }
-        (v, at, b)
-    };
-    let same = |what: &str, got: &[f32], want: &[f32], words: &[usize], stride: usize| {
-        assert_eq!(got.len(), want.len(), "{what}: its length");
-        for (i, (g, x)) in got.iter().zip(want).enumerate() {
-            let ok = if words.contains(&(i % stride)) { g.to_bits() == x.to_bits() } else { (g - x).abs() <= 2e-5 * x.abs().max(1.0) };
-            assert!(ok, "{what}: word {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
-        }
-    };
-    // A model's mesh on the GPU against the CPU skin of `now`; its previous vertices against that of `before`.
+    let cpu = |c: &LiveCore, id: u32, a: &crate::desc::Animation| skinned_on_cpu(c, &c.sc.tables.retained.skinned[of(c, id)], a).p;
+    // A model's mesh on the GPU against the CPU skin of `now`; its previous positions against that of `before`.
     let check = |what: &str, c: &LiveCore, id: u32, now: &crate::desc::Animation, before: &crate::desc::Animation| {
-        let sk = &c.sc.tables.retained.skinned[of(c, id)];
-        let inst = &c.sc.instances[sk.instance as usize];
-        let (k, n, prev) = (c.sc.gpu_instances[sk.instance as usize].info[0] as u64, sk.order.len() as u64, inst.prev as u64);
-        assert_eq!(c.sc.gpu_instances[sk.instance as usize].n[2][3].to_bits() as u64, prev, "{what}: the record has where the mesh's previous vertices are");
-        let (up, (cv, cat, cb)) = (&c.sc.up, cpu(c, id, now));
-        same(&format!("{what}: the vertices"), &read(c, &up.verts, k * 48, n * 48), &cv, &[3], 12);
-        same(&format!("{what}: the attributes"), &read(c, &up.attrs, k * 96, n * 96), &cat, &[15, 21, 22, 23], 24);
-        same(&format!("{what}: the BLAS input"), &read(c, &up.accel.as_ref().unwrap().verts, k * 36, n * 36), &cb, &[], 9);
-        same(&format!("{what}: the previous frame's vertices"), &read(c, &up.prev_verts, prev * 48, n * 48), &cpu(c, id, before).0, &[3], 12);
-        let asked: Vec<f32> = c.node_tris(&format!("m{id}")).iter().flatten().flat_map(|p| p.to_array()).collect();
-        let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
-        same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+        skinned_is_the_cpus(what, c, &c.sc.tables.retained.skinned[of(c, id)], &format!("m{id}"), now, before);
     };
     let built = live.sc.tables.retained.skinned.len();
-    let prev_size = live.sc.up.prev_verts.size();
+    let prev_size = live.sc.up.prev_pos.size();
     {
         let i = &live.sc.instances[live.sc.tables.retained.skinned[of(&live, 31)].instance as usize];
-        assert!(live.sc.dynamic.1.len() == 6 && i.prev == live.sc.meshes[i.mesh as usize].first + 2, "a mesh's previous vertices lie after the card's two triangles'");
+        assert!(live.sc.dynamic.1.len() == 6 && i.prev == i.verts - live.sc.dynamic_verts.0 && i.prev >= 6, "a mesh's previous positions lie after the card's six vertices'");
     }
 
     // One of a model the scene has, in a pose of its own.
@@ -2747,7 +2808,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     let (sk, its) = (live.sc.tables.retained.skinned[g].clone(), live.sc.tables.retained.skinned[t].clone());
     assert_eq!((g, sk.source, sk.mesh != its.mesh, live.sc.meshes[sk.mesh as usize].deforms), (built, its.source, true, true), "a mesh of its own that deforms, skinned from the model's one copy of its corners, the next of the skinned");
     assert!(live.sc.edit.in_room(sk.instance as usize) && live.sc.instances[sk.instance as usize].prev as usize >= live.sc.edit.prev.base && seen_by_rays(&live, sk.instance), "its record and its previous vertices are the room's, and the rays see it");
-    assert!(live.sc.up.prev_verts.size() > prev_size, "the previous vertices' buffer was made again, larger");
+    assert!(live.sc.up.prev_pos.size() > prev_size, "the previous positions' buffer was made again, larger");
     check("added", &live, 32, &bend(0.3), &bend(0.3));
     check("the built one beside it", &live, 30, &bend(0.0), &bend(0.0));
     let added = against_a_build("added", &mut live, &w);
@@ -2766,7 +2827,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     check("the built one posed on", &live, 30, &bend(0.8), &bend(0.0));
     check("the other built one posed on", &live, 31, &bend(0.8), &bend(0.0));
     // (The card did not move: its previous vertices are its own, whatever the meshes' did.)
-    assert_eq!(read(&live, &live.sc.up.prev_verts, 0, 96), read(&live, &live.sc.up.verts, live.sc.dynamic.0 as u64 * 48, 96), "the card's previous vertices are its vertices");
+    assert_eq!(read(&live, &live.sc.up.prev_pos, 0, 96), read(&live, &live.sc.up.positions, live.sc.dynamic_verts.0 as u64 * 16, 96), "the card's previous positions are its positions");
     let motion = |c: &mut LiveCore| -> Vec<f32> {
         (c.fixed_dt, c.frame, c.reset) = (Some(1.0 / 60.0), 16, true);
         c.render(1, |_, _| {});
@@ -2782,10 +2843,8 @@ fn a_posed_skinned_model_is_added_in_place() {
     // vertices gives vectors as long as the mesh; another mesh's, anything), and some are nearly as long.
     let reach = |c: &LiveCore, id: u32, before: &crate::desc::Animation| -> f32 {
         let world = c.sc.instances[c.sc.tables.retained.skinned[of(c, id)].instance as usize].world;
-        let corners = |v: &[f32]| -> Vec<Vec3> {
-            v.chunks_exact(12).flat_map(|t| { let (p, e1, e2) = (Vec3::new(t[0], t[1], t[2]), Vec3::new(t[4], t[5], t[6]), Vec3::new(t[8], t[9], t[10])); [p, p + e1, p + e2] }).collect()
-        };
-        corners(&cpu(c, id, &bend(0.8)).0).iter().zip(corners(&cpu(c, id, before).0)).map(|(x, y)| world.transform_vector3(*x - y).length()).fold(0.0, f32::max)
+        let corners = |v: &[f32]| -> Vec<Vec3> { v.chunks_exact(3).map(Vec3::from_slice).collect() };
+        corners(&cpu(c, id, &bend(0.8))).iter().zip(corners(&cpu(c, id, before))).map(|(x, y)| world.transform_vector3(*x - y).length()).fold(0.0, f32::max)
     };
     let far = [(30, bend(0.0)), (31, bend(0.0)), (32, bend(0.3))].iter().map(|(id, before)| reach(&live, *id, before)).fold(0.0f32, f32::max);
     let longest = a.chunks_exact(4).filter(|p| p[3] > 0.5).map(|p| Vec3::new(p[0], p[1], p[2]).length()).fold(0.0f32, f32::max);
@@ -2810,12 +2869,13 @@ fn a_posed_skinned_model_is_added_in_place() {
 
     // Many at once, of both models (more triangles than the room has): every room grows again, and each is skinned as
     // the build skins it.
-    let (tris_size, ids) = (live.sc.up.verts.size(), (100..140).collect::<Vec<u32>>());
+    let rooms_size = |c: &LiveCore| (c.sc.up.positions.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let (size, ids) = (rooms_size(&live), (100..140).collect::<Vec<u32>>());
     for (k, &id) in ids.iter().enumerate() {
         add(&mut w, id, if k % 2 == 0 { "skin-blend" } else { "arm" }, bend(0.1 + 0.02 * k as f32), Vec3::new(-1.5 + 0.075 * k as f32, 0.3, 0.6));
     }
     assert!(!live.commit(&mut w).unwrap(), "40 added at once: in place ({:?})", live.fallback);
-    assert!(live.sc.up.verts.size() > tris_size, "the triangles' buffer was made again, larger");
+    assert!(rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1, "the vertices' buffer and the triangles' rows were made again, larger ({size:?} -> {:?})", rooms_size(&live));
     for (k, &id) in ids.iter().enumerate() {
         let a = bend(0.1 + 0.02 * k as f32);
         check(&format!("one of 40 added ({id})"), &live, id, &a, &a);
@@ -2850,11 +2910,11 @@ fn a_posed_skinned_model_is_added_in_place() {
 
     // Removed: its slot among the skinned, its record, its triangles and its previous vertices are the room's again,
     // and the next one added takes them.
-    let (mesh, prev, tri) = (sk.mesh, live.sc.instances[sk.instance as usize].prev, live.sc.gpu_instances[sk.instance as usize].info[0]);
+    let (mesh, prev, tri, vertices) = (sk.mesh, live.sc.instances[sk.instance as usize].prev, live.sc.gpu_instances[sk.instance as usize].info[0], live.sc.meshes[sk.mesh as usize].vcount);
     w.remove(32);
     assert!(!live.commit(&mut w).unwrap(), "the one added removed: in place ({:?})", live.fallback);
     assert!(live.sc.tables.retained.skinned[g].mesh == u32::MAX && live.sc.edit.free_skinned == vec![g as u32] && live.sc.edit.dead_meshes.contains(&mesh) && !seen_by_rays(&live, sk.instance), "its slot and its mesh are free, no ray sees it");
-    assert!(live.sc.edit.prev.free.iter().any(|(&at, &n)| at <= prev as usize && prev as usize + 4 <= at + n), "its previous vertices are the room's again");
+    assert!(live.sc.edit.prev.free.iter().any(|(&at, &n)| at <= prev as usize && prev as usize + vertices as usize <= at + n), "its previous vertices are the room's again");
     against_a_build("the one added removed", &mut live, &w);
     add(&mut w, 34, "arm", bend(0.6), Vec3::new(0.0, -0.8, 0.9));
     assert!(!live.commit(&mut w).unwrap(), "the next added: in place ({:?})", live.fallback);
@@ -2900,11 +2960,14 @@ fn a_posed_skinned_model_is_added_in_place() {
         let i = c.sc.tables.retained.instance(id).unwrap().instance as usize;
         (c.sc.gpu_instances[i].info[0], c.sc.instances[i].prev)
     };
+    // (A model's vertices: fewer than three a triangle.)
+    let nv = live.sc.meshes[live.sc.tables.retained.skinned[of(&live, 35)].mesh as usize].vcount;
+    assert!(nv > 0 && nv < 12, "the model's four triangles share vertices ({nv})");
     add(&mut w, 50, "arm", bend(0.1), Vec3::new(-2.6, -0.2, 0.7));
     add(&mut w, 51, "arm", bend(0.1), Vec3::new(-2.1, -0.2, 0.7));
     assert!(!live.commit(&mut w).unwrap(), "two more: in place ({:?})", live.fallback);
     let ((ta, pa), (tb, pb)) = (place(&live, 50), place(&live, 51));
-    assert_eq!((tb, pb), (ta + 4, pa + 4), "the two lie one after the other");
+    assert_eq!((tb, pb), (ta + 4, pa + nv), "the two lie one after the other");
     picture(&mut live, 2);
     w.set_animation(50, Some(bend(0.5))).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the first posed: in place ({:?})", live.fallback);
@@ -3080,47 +3143,9 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     // (A mesh, its instance and its object, for each deforming mesh of the scene.)
     let deforming = |c: &LiveCore| c.sc.tables.retained.skinned.iter().map(|g| (g.uri.clone(), g.order.clone(), g.instance, g.object)).collect::<Vec<_>>();
     assert_eq!(deforming(&live).len(), 4, "four models, each a mesh of its own");
-    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> {
-        let to = c.g.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let mut e = c.g.device.create_command_encoder(&Default::default());
-        e.copy_buffer_to_buffer(b, at, &to, 0, bytes);
-        c.g.queue.submit([e.finish()]);
-        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        c.g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let words = bytemuck::pod_collect_to_vec(&to.slice(..).get_mapped_range().unwrap());
-        words
-    };
-    // What the CPU skin gives a mesh for a pose: vertices (48 B a triangle), attributes (96 B), BLAS input (36 B).
-    let cpu = |c: &LiveCore, g: usize, a: &crate::desc::Animation| {
-        let (uri, order, _, _) = &deforming(c)[g];
-        let tris = scene::model_gltf(uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
-        let (mut v, mut at, mut b): (Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
-        for &(k, section, rank) in order.iter() {
-            let q = &tris[k as usize];
-            let (e1, e2) = (q.p[1] - q.p[0], q.p[2] - q.p[0]);
-            v.extend([q.p[0].x, q.p[0].y, q.p[0].z, f32::from_bits(scene::TRI_DYNAMIC), e1.x, e1.y, e1.z, 0.0, e2.x, e2.y, e2.z, 0.0]);
-            at.extend(bytemuck::cast_slice::<_, f32>(&[scene::section_attr(q.p, q.n, q.uv, q.tangent, section, rank)]));
-            b.extend(q.p.iter().flat_map(|p| p.to_array()));
-        }
-        (v, at, b)
-    };
-    // (Numbers within a rounding of each other; the words that are no numbers, a flag, a section, a rank, the same.)
-    let same = |what: &str, got: &[f32], want: &[f32], words: &[usize], stride: usize| {
-        assert_eq!(got.len(), want.len(), "{what}: its length");
-        for (i, (g, x)) in got.iter().zip(want).enumerate() {
-            let ok = if words.contains(&(i % stride)) { g.to_bits() == x.to_bits() } else { (g - x).abs() <= 2e-5 * x.abs().max(1.0) };
-            assert!(ok, "{what}: word {} of triangle {}: {g} ({:#x}), the CPU's {x} ({:#x})", i % stride, i / stride, g.to_bits(), x.to_bits());
-        }
-    };
-    let gpu = |c: &LiveCore, g: usize| {
-        let (_, order, instance, _) = &deforming(c)[g];
-        let (k, n) = (c.sc.gpu_instances[*instance as usize].info[0] as u64, order.len() as u64);
-        let up = &c.sc.up;
-        // (Its previous vertices: where its instance's record says, on the CPU and on the GPU.)
-        let prev = c.sc.instances[*instance as usize].prev;
-        assert_eq!(c.sc.gpu_instances[*instance as usize].n[2][3].to_bits(), prev, "the record has where the mesh's previous vertices are");
-        (read(c, &up.verts, k * 48, n * 48), read(c, &up.attrs, k * 96, n * 96), up.accel.as_ref().map(|a| read(c, &a.verts, k * 36, n * 36)), read(c, &up.prev_verts, prev as u64 * 48, n * 48))
-    };
+    let read = |c: &LiveCore, b: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<f32> { read_back(c, b, at, bytes) };
+    // What the CPU skin gives a mesh for a pose: its triangles' corners, nine numbers a triangle.
+    let cpu = |c: &LiveCore, g: usize, a: &crate::desc::Animation| skinned_on_cpu(c, &c.sc.tables.retained.skinned[g], a).p;
     // Software traversal: a mesh's tree on the GPU has its model's tree's shape (the links, word for word) and the
     // pose's boxes: a leaf's its triangles' (`corners`: the CPU skin's, nine numbers a triangle), an interior node's
     // its two children's. The mesh's bounds are the root's, and the top tree's leaf of its unit is those, placed.
@@ -3154,22 +3179,10 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         assert_eq!((leaf.bmin, leaf.bmax), (unit.lo.into(), unit.hi.into()), "{what}: the top tree has the unit by its mesh's bounds, placed");
     };
     let check_one = |what: &str, c: &LiveCore, g: usize, now: &crate::desc::Animation, before: &crate::desc::Animation| {
-        let what = format!("{what}, {} (object {})", deforming(c)[g].0, deforming(c)[g].3);
-        let ((v, at, b, prev), (cv, cat, cb)) = (gpu(c, g), cpu(c, g, now));
-        same(&format!("{what}: the vertices"), &v, &cv, &[3], 12);
-        // (An attribute's words: the section in `uv.w` (15), the rank in `x.w` (23), the object and a spare beside.)
-        same(&format!("{what}: the attributes"), &at, &cat, &[15, 21, 22, 23], 24);
-        if let Some(b) = b {
-            same(&format!("{what}: the BLAS input"), &b, &cb, &[], 9);
-        }
-        tree(&what, c, g, &cb);
-        same(&format!("{what}: the previous frame's vertices"), &prev, &cpu(c, g, before).0, &[3], 12);
-        // The CPU's own: the build's pose in the pool, the pose as it is now when asked.
-        let (instance, id) = (deforming(c)[g].2, deforming(c)[g].3);
-        let inst = &c.sc.instances[instance as usize];
-        let asked: Vec<f32> = c.node_tris(&format!("m{id}")).iter().flatten().flat_map(|p| p.to_array()).collect();
-        let placed: Vec<f32> = cb.chunks_exact(3).flat_map(|p| inst.world.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()).collect();
-        same(&format!("{what}: the mesh as the CPU has it when asked"), &asked, &placed, &[], 9);
+        let sk = &c.sc.tables.retained.skinned[g];
+        let what = format!("{what}, {} (object {})", sk.uri, sk.object);
+        let corners = skinned_is_the_cpus(&what, c, sk, &format!("m{}", sk.object), now, before);
+        tree(&what, c, g, &corners);
     };
     let check = |what: &str, c: &LiveCore, now: &crate::desc::Animation, before: &crate::desc::Animation| {
         for g in 0..deforming(c).len() {
@@ -3182,13 +3195,13 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         }
     };
     let (first, second, third) = (bend(0.0), bend(0.75), bend(0.4));
-    let loaded: Vec<Vec<f32>> = (0..4).map(|g| cpu(&live, g, &first).0).collect();
+    let loaded: Vec<Vec<f32>> = (0..4).map(|g| cpu(&live, g, &first)).collect();
     for (what, now, before) in [("a new pose", &second, &first), ("the next", &third, &second)] {
         all(&mut w, now);
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
         check(what, &live, now, before);
     }
-    assert!((0..4).all(|g| cpu(&live, g, &third).0.iter().zip(&loaded[g]).any(|(a, b)| (a - b).abs() > 0.05)), "the pose moves every mesh");
+    assert!((0..4).all(|g| cpu(&live, g, &third).iter().zip(&loaded[g]).any(|(a, b)| (a - b).abs() > 0.05)), "the pose moves every mesh");
     // One posed alone: its mesh, and the others' as they were (their previous frame's vertices their own pose now).
     let alone = bend(0.15);
     w.set_animation(31, Some(alone.clone())).unwrap();
@@ -3223,10 +3236,11 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     check("posed and moved at once", &live, &bend(0.9), &third);
     assert_eq!(stands(&live, 30), w.world_matrix(30), "its instance stands where the model was moved to");
     pictured("posed and moved at once", &mut live, &w);
-    // The scene's buffers made again, larger (a mesh of more triangles than the room for edits has, added in place,
-    // far below the view): the pass writes the new ones.
-    let size = live.sc.up.verts.size();
-    let n = 200u32;
+    // The scene's buffers made again, larger (a mesh of more triangles and more vertices than the room for edits has,
+    // added in place, far below the view): the pass writes the new ones.
+    let rooms_size = |c: &LiveCore| (c.sc.up.positions.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let size = rooms_size(&live);
+    let n = (((live.sc.edit.verts.cap - live.sc.edit.verts.end) as f64).sqrt() as u32 + 1).max(200);
     let positions: Vec<f32> = (0..=n).flat_map(|y| (0..=n).flat_map(move |x| [x as f32, y as f32, 0.0])).collect();
     let indices: Vec<u32> = (0..n).flat_map(|y| (0..n).flat_map(move |x| { let k = y * (n + 1) + x; [k, k + 1, k + n + 2, k, k + n + 2, k + n + 1] })).collect();
     let corners = ((n + 1) * (n + 1)) as usize;
@@ -3235,7 +3249,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     w.set_transform(40, Vec3::new(0.0, -80.0, 0.0), glam::Quat::IDENTITY, Vec3::splat(0.001)).unwrap();
     // (Software traversal's room does not grow: a rebuild's there.)
     assert_eq!(live.commit(&mut w).unwrap(), !hw, "a large mesh added: in place under hardware traversal ({:?})", live.fallback);
-    assert!(live.sc.up.verts.size() > size, "the triangles' buffer was made again, larger ({} -> {})", size, live.sc.up.verts.size());
+    assert!(!hw || (rooms_size(&live).0 > size.0 && rooms_size(&live).1 > size.1), "the vertices' buffer and the triangles' rows were made again, larger ({size:?} -> {:?})", rooms_size(&live));
     if !hw {
         picture(&mut live, 2);
     }
@@ -3251,12 +3265,10 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         live.render(1, |_, _| {});
         let m = &live.targets.kernel.motion;
         let moved = read(&live, &m.buffer, m.offset, m.size);
-        let corners = |v: &[f32]| -> Vec<Vec3> {
-            v.chunks_exact(12).flat_map(|t| { let (p, e1, e2) = (Vec3::new(t[0], t[1], t[2]), Vec3::new(t[4], t[5], t[6]), Vec3::new(t[8], t[9], t[10])); [p, p + e1, p + e2] }).collect()
-        };
+        let corners = |v: &[f32]| -> Vec<Vec3> { v.chunks_exact(3).map(Vec3::from_slice).collect() };
         let far = (0..4).map(|g| {
             let world = live.sc.instances[deforming(&live)[g].2 as usize].world;
-            corners(&cpu(&live, g, &bend(0.25)).0).iter().zip(corners(&cpu(&live, g, &bend(0.9)).0)).map(|(x, y)| world.transform_vector3(*x - y).length()).fold(0.0f32, f32::max)
+            corners(&cpu(&live, g, &bend(0.25))).iter().zip(corners(&cpu(&live, g, &bend(0.9)))).map(|(x, y)| world.transform_vector3(*x - y).length()).fold(0.0f32, f32::max)
         }).fold(0.0f32, f32::max);
         let vectors: Vec<f32> = moved.chunks_exact(4).filter(|p| p[3] > 0.5).map(|p| Vec3::new(p[0], p[1], p[2]).length()).collect();
         let longest = vectors.iter().copied().fold(0.0f32, f32::max);

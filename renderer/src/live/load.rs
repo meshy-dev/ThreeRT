@@ -14,10 +14,8 @@ pub(super) struct LoadedScene {
     pub(super) tri_instances: Vec<(u32, u32, u32)>,
     /// (A mesh the GPU skins has its build's pose here: `LiveCore::mesh_tris` has it as it is now.)
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
-    /// By mesh: its first vertex and how many it has (`indexed::Indexed::meshes`); the vertices that move, the first
-    /// and how many (`Indexed::dynamic`); by skin source, the model's vertices its meshes are skinned from and their
-    /// triangles' indices (`Indexed::skins`).
-    pub(super) mesh_verts: Vec<(u32, u32)>,
+    /// The vertices that move, the first and how many (`indexed::Indexed::dynamic`); by skin source, the model's
+    /// vertices its meshes are skinned from and their triangles' indices (`Indexed::skins`).
     pub(super) dynamic_verts: (u32, u32),
     pub(super) skins: Vec<(Vec<crate::skin::SkinCorner>, Vec<[u32; 3]>)>,
     /// Software traversal with units: the shape of each skin source's meshes' trees (`scene::Scene::skin_trees`): a
@@ -274,7 +272,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let skin_trees = if up.units.is_some() { std::mem::take(&mut sc.skin_trees) } else { vec![] };
     // (The vertices and the indices themselves are the GPU's now.)
     let ix = std::mem::take(&mut sc.indexed);
-    let (mesh_verts, dynamic_verts, skins) = (ix.meshes, ix.dynamic, ix.skins);
+    let (vertices, dynamic_verts, skins) = (ix.positions.len(), ix.dynamic, ix.skins);
     let (sections, rows) = (std::mem::take(&mut sc.sections), std::mem::take(&mut sc.rows));
     let mut gpu_instances = std::mem::take(&mut sc.gpu_instances);
     let proc_first = gpu_instances.len();
@@ -318,13 +316,12 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         row_runs: Default::default(),
         pool_first: prep.groups.iter().sum(),
         blobs,
-        // (What `prev_verts` holds at the build: the dynamic triangles and the deforming meshes after them. No room:
-        // it grows with the first deforming mesh an edit places.)
-        prev: {
-            let n = prep.groups.iter().sum::<usize>() + scene::deforming_pool(&meshes) - up.dynamic_first;
-            Holes::new(n, n)
-        },
+        // (The previous positions at the build: the vertices that move. No room: it grows with the first deforming
+        // mesh an edit places.)
+        prev: Holes::new(dynamic_verts.1 as usize, dynamic_verts.1 as usize),
+        // (Three vertices a triangle of the room: `Gpu::upload`.)
+        verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, mesh_verts, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

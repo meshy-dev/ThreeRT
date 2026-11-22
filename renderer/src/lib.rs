@@ -892,6 +892,9 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // An instance's triangles count their vertices from its mesh's first; the previous positions from the first
     // vertex that moves.
     // (A deforming mesh's previous positions: where its vertices are among those that move.)
+    for (m, &(first, count)) in sc.meshes.iter_mut().zip(&sc.indexed.meshes) {
+        (m.vfirst, m.vcount) = (first, count);
+    }
     for (r, i) in sc.instances.iter_mut().enumerate() {
         i.verts = sc.indexed.meshes[i.mesh as usize].0;
         i.prev = if sc.meshes[i.mesh as usize].deforms { i.verts - sc.indexed.dynamic.0 } else { 0 };

@@ -71,6 +71,10 @@ pub struct InstMesh {
     pub sect_count: u32,
     /// Its triangles carry its geometry's vertex colours (a material says whether it reads them).
     pub colored: bool,
+    /// Its vertices (indexed.rs): the first and how many the run holds. Its triangles' indices count from the first;
+    /// `prepare` sets them, or the edit that places the mesh.
+    pub vfirst: u32,
+    pub vcount: u32,
 }
 
 /// A run of a mesh's triangles that an object draws with one of its materials: a geometry group, or the whole of a
@@ -2641,7 +2645,7 @@ pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32) -> InstMesh {
         }
     }
     let count = tris.len() as u32;
-    InstMesh { first, count, rest_first: 0, rest_count: 0, lo, hi, deforms: false, sect_first: 0, sect_count: 0, colored: false }
+    InstMesh { first, count, rest_first: 0, rest_count: 0, lo, hi, deforms: false, sect_first: 0, sect_count: 0, colored: false, vfirst: 0, vcount: 0 }
 }
 
 /// The GPU material of each triangle of a mesh with several (`Kind::Mesh::materials`, here GPU indices) by its

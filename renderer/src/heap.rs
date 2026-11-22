@@ -213,8 +213,15 @@ impl<S: Section> Heap<S> {
 
     /// The bytes of this heap with section `s` holding `bytes`.
     pub fn size_with(&self, s: S, bytes: u64) -> u64 {
+        self.size_with_all(&[(s, bytes)])
+    }
+
+    /// The heap's size with each of `sections` holding its bytes.
+    pub fn size_with_all(&self, sections: &[(S, u64)]) -> u64 {
         let mut want = self.cap.clone();
-        want[s.index()] = bytes;
+        for &(s, bytes) in sections {
+            want[s.index()] = bytes;
+        }
         place(&want).2
     }
 
@@ -222,8 +229,15 @@ impl<S: Section> Heap<S> {
     /// so writes queued after this land on the copy. The sections after it move: whoever holds the buffer or an
     /// offset (the scene's bind group, `Params`) reads them again.
     pub fn grow(&mut self, device: &wgpu::Device, q: &wgpu::Queue, s: S, bytes: u64) {
+        self.grow_all(device, q, &[(s, bytes)]);
+    }
+
+    /// `grow` for several sections at once: one new buffer.
+    pub fn grow_all(&mut self, device: &wgpu::Device, q: &wgpu::Queue, sections: &[(S, u64)]) {
         let mut want = self.cap.clone();
-        want[s.index()] = bytes;
+        for &(s, bytes) in sections {
+            want[s.index()] = bytes;
+        }
         let (at, cap, size) = place(&want);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(S::LABEL), size, usage: self.buffer.usage(), mapped_at_creation: false });
         let mut e = device.create_command_encoder(&Default::default());

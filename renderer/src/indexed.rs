@@ -60,7 +60,20 @@ fn share<K: Hash + Eq>(n: usize, vertex: impl Fn(usize, usize) -> (K, [f32; 4], 
     let mut slots: Vec<Slot> = vec![];
     // (A key's vertices: one, but where triangles disagree on the tangent of a first corner.)
     let mut seen: HashMap<K, Vec<u32>> = HashMap::with_capacity(n);
+    // (A triangle with a corner that is not finite: three times one vertex at the origin, a triangle without size,
+    // which no ray meets. The BLASes are built from these positions.)
+    let mut nowhere = None;
     for k in 0..n {
+        if (0..3).any(|c| vertex(k, c).1[..3].iter().any(|x| !x.is_finite())) {
+            let v = *nowhere.get_or_insert_with(|| {
+                s.positions.push([0.0; 4]);
+                s.attrs.push([[0.0; 4]; 2]);
+                slots.push(Slot::Without);
+                slots.len() as u32 - 1
+            });
+            s.indices.push([v; 3]);
+            continue;
+        }
         let mut row = [0u32; 3];
         for (c, at) in row.iter_mut().enumerate() {
             let (key, p, nv) = vertex(k, c);
@@ -147,14 +160,34 @@ pub fn apart(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
     let mut s = Scope::default();
     for (k, (t, a)) in tris.iter().zip(attrs).enumerate() {
         let tangent = own_tangent(a).unwrap_or([0.0; 4]);
+        // (One with a corner that is not finite: its three vertices at the origin, as `share` has it.)
+        let finite = t.iter().all(|p| p.is_finite());
         for (c, p) in t.iter().enumerate() {
             let (n, uv) = corner(a, c);
+            let p = if finite { *p } else { Vec3A::ZERO };
             s.positions.push([p.x, p.y, p.z, uv[0]]);
             s.attrs.push([[n[0], n[1], n[2], uv[1]], tangent]);
         }
         s.indices.push([k as u32 * 3, k as u32 * 3 + 1, k as u32 * 3 + 2]);
     }
     s
+}
+
+/// Triangles written whole as their vertices alone (their indices do not change): `corners`, three a triangle, and
+/// their attributes; the vertices' (position, u) and attributes, as `apart` has them.
+pub fn apart_vertices(corners: &[[f32; 3]], attrs: &[GpuTriAttr]) -> (Vec<[f32; 4]>, Vec<VertexAttr>) {
+    let (mut positions, mut out) = (Vec::with_capacity(corners.len()), Vec::with_capacity(corners.len()));
+    for (t, a) in corners.chunks_exact(3).zip(attrs) {
+        let tangent = own_tangent(a).unwrap_or([0.0; 4]);
+        let finite = t.iter().flatten().all(|x| x.is_finite());
+        for (c, p) in t.iter().enumerate() {
+            let (n, uv) = corner(a, c);
+            let p = if finite { *p } else { [0.0; 3] };
+            positions.push([p[0], p[1], p[2], uv[0]]);
+            out.push([[n[0], n[1], n[2], uv[1]], tangent]);
+        }
+    }
+    (positions, out)
 }
 
 /// The scene's geometry: every scope's vertices one after another, the triangles in the GPU's order.
@@ -261,6 +294,28 @@ mod tests {
             same(&format!("apart, own tangents {own}"), &a, &tris, &attrs);
             assert_eq!(a.positions.len(), tris.len() * 3);
         }
+    }
+
+    /// A triangle with a corner that is not finite is three times one vertex at the origin (no ray meets it; a BLAS is
+    /// built from these positions), shared or apart; the others are as they were.
+    #[test]
+    fn a_triangle_that_is_not_finite_has_no_size() {
+        let (mut tris, attrs) = sheet(4, false);
+        tris[5][1] = Vec3A::new(f32::NAN, 0.0, 0.0);
+        tris[9][2] = Vec3A::new(0.0, f32::INFINITY, 0.0);
+        for s in [shared(&tris, &attrs), apart(&tris, &attrs)] {
+            assert!(s.positions.iter().flatten().all(|x| x.is_finite()), "every position is finite");
+            for k in [5, 9] {
+                let p = s.indices[k].map(|v| s.positions[v as usize]);
+                assert!(p[0][..3] == [0.0; 3] && p[0][..3] == p[1][..3] && p[1][..3] == p[2][..3], "triangle {k}: {p:?}");
+            }
+            let all = Indexed { positions: s.positions.clone(), attrs: s.attrs.clone(), indices: s.indices.clone(), ..Default::default() };
+            for (k, t) in tris.iter().enumerate().filter(|(k, _)| ![5, 9].contains(k)) {
+                assert_eq!(all.triangle(k, 0).0, t.map(|p| p.to_array()), "triangle {k}'s corners");
+            }
+        }
+        let corners: Vec<[f32; 3]> = tris.iter().flatten().map(|p| p.to_array()).collect();
+        assert!(apart_vertices(&corners, &attrs).0.iter().flatten().all(|x| x.is_finite()));
     }
 
     /// Where triangles disagree about a first corner's tangent the corner is a vertex for each: a sheet whose
