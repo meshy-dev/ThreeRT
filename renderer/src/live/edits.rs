@@ -2380,8 +2380,8 @@ impl LiveCore {
         let mut new_meshes = vec![];
         let mut pending_procs = vec![];
         let mut split = EditSplit::default();
-        // (Vertices; triangles' indices; under software traversal a row a triangle of a unit's tree.)
-        let (mut w_cdf, mut w_vert, mut w_index, mut w_tri, mut w_records, mut w_objects) = (Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default());
+        // (Vertices; triangles' indices; under software traversal a unit's tree's leaves.)
+        let (mut w_cdf, mut w_vert, mut w_index, mut w_leaf, mut w_records, mut w_objects) = (Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default(), Gather::default());
         // Vertex colours (F_VCOLOR).
         let mut w_colors = Gather::default();
         let vcolors = up.vcolors;
@@ -2759,11 +2759,11 @@ impl LiveCore {
                                 }
                             };
                             // As `prepare` lays the pool out: the mesh's vertices, each once (indexed.rs), its triangles'
-                            // indices from its first vertex, and their rows: their section and their index in it (no
-                            // flag: a unit's cutouts and glass are its instances' rows').
+                            // indices from its first vertex, and for a tree its leaves: each triangle with its section
+                            // and its index in it.
                             let scope = crate::indexed::shared(&t, &a);
                             let nv = scope.vertices.len();
-                            let tri_rows: Vec<crate::indexed::TriRow> = a.iter().map(|x| [x.uv[3].to_bits(), 0, 0, x.x[3].to_bits()]).collect();
+                            let leaves: Vec<crate::indexed::Leaf> = if tree.is_some() { t.iter().zip(&a).map(|(t, x)| crate::indexed::leaf(*t, [x.uv[3].to_bits(), x.x[3].to_bits()])).collect() } else { vec![] };
                             split.tris += t0.elapsed().as_secs_f64() * 1e3;
                             // The same sections as the mesh it replaces (as many triangles in each: a BLAS's geometries keep
                             // their sizes): rewritten where it is, its BLAS rebuilt (no room used; a geometry that moves
@@ -2866,9 +2866,9 @@ impl LiveCore {
                             let t2 = Instant::now();
                             w_vert.put((im.vfirst as usize * crate::indexed::VERTEX_BYTES) as u64, bytemuck::cast_slice(&scope.vertices));
                             w_index.put((first * 12) as u64, bytemuck::cast_slice(&scope.indices));
-                            // (A unit's tree's triangles each have a row; a BLAS's geometries say as much.)
+                            // (A unit's tree's leaves; a BLAS is built from the vertices.)
                             if top.sw() {
-                                w_tri.put((first * 16) as u64, bytemuck::cast_slice(&tri_rows));
+                                w_leaf.put((first * crate::indexed::LEAF_BYTES) as u64, bytemuck::cast_slice(&leaves));
                             }
                             if vcolors {
                                 // White where it has none: the room's slots may hold an earlier mesh's.
@@ -3086,7 +3086,7 @@ impl LiveCore {
         w_cdf.flush_section(q, &up.words, Stream::Procs);
         w_vert.flush(q, &up.vertices);
         w_index.flush_section(q, &up.words, Stream::Indices);
-        w_tri.flush_section(q, &up.words, Stream::Triangles);
+        w_leaf.flush(q, &up.bg_parts.leaves);
         w_colors.flush_section(q, &up.words, Stream::VertexColors);
         w_rows.flush_section(q, &up.words, Stream::Rows);
         w_records.flush_section(q, &up.heap, Table::Instances);

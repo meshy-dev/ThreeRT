@@ -895,6 +895,20 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let energy = energy_lut();
     let t = Instant::now();
     sc.indexed = index_geometry(sc, &tri_order, &tri_verts, &groups, pool_first, no_still);
+    // Software traversal: the trees' leaves, every triangle as it was laid out for its tree above (v0, e1, e2), a
+    // mesh's with its section and its index there, a world-space one's with its flags.
+    if !hwrt {
+        let pool = pool_first..pool_first + sc.pool_tris.len();
+        let rows = &sc.indexed.rows;
+        sc.indexed.leaves = tri_verts
+            .chunks_exact(3)
+            .enumerate()
+            .map(|(k, t)| {
+                let ids = if pool.contains(&k) { [rows[k][0], rows[k][3]] } else { [t[0][3].to_bits(), 0] };
+                [[t[0][0], t[0][1], t[0][2], f32::from_bits(ids[0])], [t[1][0], t[1][1], t[1][2], f32::from_bits(ids[1])], [t[2][0], t[2][1], t[2][2], 0.0]]
+            })
+            .collect();
+    }
     timings.push(("index_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
     timings.push(("vertices".into(), sc.indexed.vertices.len() as f64));
     // An instance's triangles count their vertices from its mesh's first; the previous positions from the first
@@ -1786,7 +1800,15 @@ mod units_tests {
                 let pool = (pool_first..pool_first + sc.pool_tris.len()).contains(&k);
                 let row = if pool { [a.uv[3].to_bits(), 0, 0, a.x[3].to_bits()] } else { [a.uv[3].to_bits(), a.x[1].to_bits(), p.tri_verts[k * 3][3].to_bits(), a.x[3].to_bits()] };
                 assert_eq!(x.rows[k], row, "{what}: triangle {k}'s row");
+                // Software traversal: the triangle as its tree's leaf has it, with its ids (a mesh's: its section and
+                // its index there; a world-space one's: its flags).
+                if !hwrt {
+                    let ids = if pool { [row[0], row[3]] } else { [row[2], 0] };
+                    let corners = q.map(|c| Vec3A::new(c[0], c[1], c[2]));
+                    assert_eq!(x.leaves[k].map(|r| bits(&r)), indexed::leaf(corners, ids).map(|r| bits(&r)), "{what}: triangle {k}'s leaf");
+                }
             }
+            assert_eq!(x.leaves.len(), if hwrt { 0 } else { x.indices.len() }, "{what}: a leaf a triangle under software traversal, none under hardware traversal");
             if sc.meshes.is_empty() {
                 continue;
             }
@@ -1867,13 +1889,13 @@ mod units_tests {
         assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
         let kernel = |p: &Prepared, sc: &scene::Scene| {
             let (top, units) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
-            (p.nodes.clone(), (sc.indexed.vertices.clone(), sc.indexed.indices.clone()), sc.gpu_instances.clone(), top, units, sc.indexed.rows.clone(), sc.rows.clone())
+            (p.nodes.clone(), sc.indexed.leaves.clone(), sc.gpu_instances.clone(), top, units, sc.rows.clone())
         };
         let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
         #[allow(clippy::type_complexity)]
-        let walk = |k: &(Vec<bvh::GpuNode>, (Vec<indexed::Vertex>, Vec<[u32; 3]>), Vec<scene::GpuInstance>, u32, u32, Vec<indexed::TriRow>, Vec<scene::Row>), o: Vec3A, d: Vec3A, mode: u32| {
+        let walk = |k: &(Vec<bvh::GpuNode>, Vec<indexed::Leaf>, Vec<scene::GpuInstance>, u32, u32, Vec<scene::Row>), o: Vec3A, d: Vec3A, mode: u32| {
             let instances = if k.2.is_empty() { vec![scene::GpuInstance::default()] } else { k.2.clone() };
-            let kernel = Kernel { nodes: &k.0, vertices: &k.1 .0, indices: &k.1 .1, tri_rows: &k.5, instances: &instances, rows: &k.6, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
+            let kernel = Kernel { nodes: &k.0, leaves: &k.1, instances: &instances, rows: &k.5, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
             kernel.trace(o, d, INF, mode).unwrap_or_else(|e| panic!("ray {o} {d}, mode {mode}: the kernel {e}"))
         };
         let mut s = 12345u64;

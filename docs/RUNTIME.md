@@ -940,7 +940,7 @@ tree (ROADMAP § 6).
   the node host as `GameSession` does, and sends the canvas' clicks down the same path. `node tools/build-web.ts
   [game.ts] --serve` builds and serves it (needs the wasm-bindgen CLI of the crate's version).
 - **The merged binding layout** (`renderer/src/merged.rs`). WebGPU gives a stage 8 storage buffers by default; the
-  kernel binds 20. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
+  kernel binds 21. (The live passes need none of it: each has a layout of its own, of the bindings its entry point
   uses, `renderer/src/live/layout.rs` from live.wgsl as build.rs reads it, and none binds more than eight, a unit
   test's check; a page binds them as natively.) There is one source: pathtrace.wgsl declares the views of its
   tables and its group-1 buffers in an `@if(merged) { .. } @else { .. }` block each (WESL's conditional
@@ -1531,19 +1531,22 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
 Vertices and indices, one layout for hardware and software traversal (`renderer/src/indexed.rs`):
 - **Vertices.** `vertices` (binding 1): a record of 48 bytes a vertex, (position, u), (normal, v), (tangent, hand;
   zeros: none). The BLASes are built from this buffer too (stride 48).
-- **Triangles.** Three indices each, a section of `words` (`Stream::Indices`): what a hit and software traversal's
-  candidate test read, and the BLASes' index buffer. A mesh's indices count from the mesh's first vertex, which
-  its instances' records carry (`info.z`); a world-space triangle's count from 0.
+- **Triangles.** Three indices each, a section of `words` (`Stream::Indices`): what a hit reads, and the BLASes'
+  index buffer. A mesh's indices count from the mesh's first vertex, which its instances' records carry
+  (`info.z`); a world-space triangle's count from 0.
 - **A mesh's triangle has nothing else of its own.** Which section of its mesh it is in, its hit says (`Hit.part`):
-  the geometry of the BLAS it was hit in, or under software traversal its tree's row for it. Its instance's row for
+  the geometry of the BLAS it was hit in, or under software traversal its tree's leaf. Its instance's row for
   the section has the material and where the section's triangles and emitters start; its instance's record has
   its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
   light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
 - **Rows** (`Stream::Triangles`, four words). A triangle no instance places (a light's card, a particle's, a
-  flattened scene's) has one: its material, its object, its flags, its emitter + 1. Under hardware traversal these
-  are all the GPU holds: the world-space triangles', then the translucent particles'. Software traversal's units
-  keep one for every triangle of a mesh's tree besides: its section and its index in it (a tree has a mesh's
-  triangles in its own order).
+  flattened scene's) has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the
+  world-space triangles', then the translucent particles'.
+- **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an
+  acceleration structure does: 48 bytes each, in the triangles' order, (v0, id), (v1 - v0, id), (v2 - v0, -). A
+  candidate's test reads nothing else. The ids: a world-space triangle's flags; a mesh's section, and its index in
+  the section (a tree has a mesh's triangles in its own order). Written at the build and where an edit places a
+  mesh; after the skinning pass a pass takes a posed mesh's again from its vertices (`leaf_gather.wgsl`).
 - **A hit reads** its triangle's indices and its three vertices' records (`tri_data(triangle, instance, part)`).
 - **What shares.** Corners equal bit for bit in position, normal and UV are one vertex: the still world-space
   triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles the CPU or
@@ -1563,9 +1566,9 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   3.9, Zero Day 1.6 -> 0.95.
 - The build still flattens a file's indexed geometry and finds the sharing again (1.2 s on Tokyo's 23 M
   triangles): carrying a file's indices through is a later step.
-- The kernel binds one buffer fewer than it did (a triangle's attributes were a second one), in every layout: the
-  translucency pass's pipeline, which was at Metal's 29 buffers a stage, is at 28, and a browser's merged layout
-  uses seven of its eight storage buffers.
+- Under hardware traversal the kernel binds one buffer fewer than it did (a triangle's attributes were a second
+  one): the translucency pass's pipeline, which was at Metal's 29 buffers a stage, is at 28. Under software
+  traversal the leaves take that place: a browser's merged layout uses all eight of its storage buffers, as it did.
 
 ## Random numbers
 
@@ -1802,7 +1805,7 @@ on the device", and differs where it says so.
   |---|---|---|
   | `tables` (4) and, with the views, `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers of their own (bindings 4 to 6, before #89) and reads them right from `tables` whole; not as the views (above) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
-  | `vertices` (1), `nodes` (3), `prev_verts` (6) | per vertex, per node | storage (megabytes) |
+  | `vertices` (1), `leaves` (2), `nodes` (3), `prev_verts` (6) | per vertex, per triangle, per node | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, `finish`'s records, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
   | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |

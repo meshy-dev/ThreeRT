@@ -2785,9 +2785,13 @@ skinning pass skins a vertex once (it skinned every corner), the particle passes
 and read vertices, the previous frame's are kept a vertex, and an edit in place takes a run of vertices with its
 triangles. The kernel binds one buffer fewer.
 A mesh's triangle has no data of its own besides. Its hit says which section of its mesh it is in (the BLAS's
-geometry; under software traversal its tree's row for it); the section's row of its instance has the material,
-the instance's record the object and whether the mesh deforms; the light list's record (64 bytes, was 48) has an
+geometry; under software traversal its tree's leaf); the section's row of its instance has the material, the
+instance's record the object and whether the mesh deforms; the light list's record (64 bytes, was 48) has an
 emitter's section. A triangle no instance places keeps a row of four words.
+Software traversal's trees keep their triangles in their leaves, their own copy as an acceleration structure has
+one (48 bytes a triangle: v0, the edges, its section and its index there): a candidate's test read through the
+indices and the 48-byte vertices cost its trace 6 % (a crowd standing still, 85 -> 90 ms); from the leaves it is
+81 ms. A pass takes a posed mesh's leaves again from its vertices.
 On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 3.9, Zero Day 1.6 GB -> 0.95, a small scene
 15 MB -> 7.5. The BLASes themselves are as large as they were.
 What changes in a picture. A triangle's tangent frame, where its file gives none, is made where it is hit, not at
@@ -2813,9 +2817,10 @@ traced picture.
 Fixed on the way: a still mesh that emits, moved for the first time, had the pass that places moved emitters run
 over the emitters the move had just made, which the light list did not hold yet (its write landed on the list's
 last record); they are made where the mesh stands and the pass leaves them alone.
-Mutations: 28 of the first form (20 failed a test there was, 8 none and have their tests above) and 27 of this
+Mutations: 28 of the first form (20 failed a test there was, 8 none and have their tests above), 27 of this
 one (17 and 8; one changes nothing, no deforming instance has its materials' classes remade in place; one is
-reached only by a live view without units, `THREERT_UNITS=0`, and has no test).
+reached only by a live view without units, `THREERT_UNITS=0`, and has no test) and 17 of the trees' leaves (15
+failed a test, one the walk's transcription alone, one none until the emitters' test had three at right angles).
 Next: tangents a vertex, interpolated (generated where a file has none); vertices packed to 32 bytes; a file's
 indices carried through the build.
 

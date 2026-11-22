@@ -58,8 +58,6 @@ const UNIT_SHIFTED: u32 = 2u;
     var rinv = inv_d;
     var off = top;
     var first = 0u;
-    // The unit's mesh's first vertex.
-    var uverts = 0u;
     var base = 0u;
     // The unit's bits and its rows' first (a unit with rows has its cutouts and its glass by them: `row_flags`).
     var ubits = 0u;
@@ -102,7 +100,6 @@ const UNIT_SHIFTED: u32 = 2u;
                 }
                 off = bitcast<u32>(u.n0.w);
                 first = u.info.x;
-                uverts = u.info.z;
                 ubits = bitcast<u32>(u.n1.w);
                 urows = u.info.w;
                 base = sp;
@@ -112,10 +109,10 @@ const UNIT_SHIFTED: u32 = 2u;
         } else {
             for (var k = 0u; k < n.count; k++) {
                 let ti = first + n.left_or_first + k;
-                let x = intersect_tri(ro, rd, ti, uverts, hit.t);
+                let x = intersect_tri(ro, rd, ti, hit.t);
                 if (x.x < hit.t) {
-                    // (Its section: the tree's own data, a row a triangle of the tree.)
-                    let part = tri_row(ti).x;
+                    // (Its section: its leaf's id.)
+                    let part = leaf_id(ti, 0u);
                     var flags = 0u;
                     if ((ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags = row_flags(urows, part); }
                     if (has(F_IGLASS) && mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }

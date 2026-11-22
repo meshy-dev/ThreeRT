@@ -19,10 +19,22 @@ pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
 
 /// The row of a triangle no instance places (a light's card, a particle's, a flattened scene's): its material, its
 /// object, its flags (`scene::TRI_*`), its emitter entry + 1. A mesh's triangle needs none on the GPU: a ray's hit
-/// says which section of its mesh it is in, and the rest is its instance's. Software traversal's units keep one for
-/// each triangle of a mesh's tree, what a walk returns of a leaf's triangle: its section, -, -, its index in the
-/// section. (The build has one for every triangle: `Indexed::rows`.)
+/// says which section of its mesh it is in, and the rest is its instance's. (The build has one for every triangle,
+/// a mesh's with its section and its index there: `Indexed::rows`.)
 pub type TriRow = [u32; 4];
+
+/// A triangle as a software tree keeps it in its leaves, the tree's own copy (hardware traversal's acceleration
+/// structures keep theirs): (v0, id), (v1 - v0, id), (v2 - v0, -), so a candidate's test reads one place. The ids:
+/// a world-space triangle's flags (`scene::TRI_*`), -; a mesh's section, and its index in the section. Three vec4s a
+/// triangle, in the triangles' order (a tree's leaves name runs of it).
+pub type Leaf = [[f32; 4]; 3];
+pub const LEAF_BYTES: usize = std::mem::size_of::<Leaf>();
+
+/// A triangle's leaf, of its corners.
+pub fn leaf(p: [glam::Vec3A; 3], ids: [u32; 2]) -> Leaf {
+    let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+    [[p[0].x, p[0].y, p[0].z, f32::from_bits(ids[0])], [e1.x, e1.y, e1.z, f32::from_bits(ids[1])], [e2.x, e2.y, e2.z, 0.0]]
+}
 
 /// A scope's triangles as vertices and indices that count from the scope's first vertex.
 #[derive(Clone, Debug, Default)]
@@ -196,6 +208,8 @@ pub struct Indexed {
     /// A triangle's three vertices: a mesh's count from the mesh's first vertex, a world-space triangle's from 0.
     pub indices: Vec<[u32; 3]>,
     pub rows: Vec<TriRow>,
+    /// Software traversal: every triangle as its tree's leaf has it. Empty under hardware traversal.
+    pub leaves: Vec<Leaf>,
     /// The meshes' first triangle: those before it are in world space. And the translucent particles' first (they
     /// lie after the meshes') and how many.
     pub pool_first: u32,
@@ -215,13 +229,9 @@ pub struct Indexed {
 }
 
 impl Indexed {
-    /// The rows the GPU holds. Hardware traversal: the world-space triangles', then the translucent particles'
-    /// (found from `pool_first` on: the meshes' triangles lie between and have none). Software traversal: every
-    /// triangle's.
-    pub fn gpu_rows(&self, hwrt: bool) -> std::borrow::Cow<'_, [TriRow]> {
-        if !hwrt {
-            return (&self.rows[..]).into();
-        }
+    /// The rows the GPU holds: the world-space triangles', then the translucent particles' (found from `pool_first`
+    /// on: the meshes' triangles lie between and have none).
+    pub fn gpu_rows(&self) -> Vec<TriRow> {
         let (first, n) = (self.translucent_tris.0 as usize, self.translucent_tris.1 as usize);
         self.rows[..(self.pool_first as usize).min(self.rows.len())].iter().chain(self.rows.get(first..first + n).unwrap_or(&[])).copied().collect()
     }

@@ -152,14 +152,25 @@ struct Triangles {
 }
 
 /// `n` triangles from `first` as the GPU has them, their vertices counted from `base`; their previous positions from
-/// `prev` on (None: not read). Their rows where each has one: under software traversal (a unit's tree's own; a
-/// world-space triangle's), not a mesh's under hardware traversal, which has none.
+/// `prev` on (None: not read). Software traversal: each one's leaf is held to the triangle its indices name (v0, e1,
+/// e2, bit for bit), and `rows` has the leaves' ids as a row (a mesh's: its section, -, -, its index there).
 fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u32>) -> Triangles {
     use crate::heap::Stream;
     let up = &c.sc.up;
     let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
-    let rows: Vec<u32> = if c.g.hwrt { vec![] } else { read_back(c, &up.words.buffer, up.words.at(Stream::Triangles) + first * 16, n * 16) };
     let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
+    let mut rows = vec![];
+    if !c.g.hwrt {
+        let size = crate::indexed::LEAF_BYTES as u64;
+        let leaves: Vec<crate::indexed::Leaf> = read_back(c, &up.bg_parts.leaves, first * size, n * size);
+        let bits = |l: &crate::indexed::Leaf| l.map(|r| r.map(f32::to_bits));
+        for (j, (l, tri)) in leaves.iter().zip(index.chunks_exact(3)).enumerate() {
+            let p = |k: usize| glam::Vec3A::from_slice(&vertices[(base + tri[k]) as usize][0][..3]);
+            let ids = [l[0][3].to_bits(), l[1][3].to_bits()];
+            assert_eq!(bits(l), bits(&crate::indexed::leaf([p(0), p(1), p(2)], ids)), "triangle {}: its leaf is the triangle its indices name", first + j as u64);
+            rows.extend([ids[0], 0, 0, ids[1]]);
+        }
+    }
     let before: Vec<crate::indexed::Vertex> = prev.map_or(vec![], |_| read_back(c, &up.prev_vertices, 0, up.prev_vertices.size()));
     let mut out = Triangles { rows, ..Default::default() };
     for tri in index.chunks_exact(3) {
@@ -294,28 +305,32 @@ fn soup(t: &[[[f32; 3]; 3]], normal: [f32; 3], groups: Vec<[u32; 3]>) -> Geometr
     Geometry { positions: t.iter().flatten().flatten().copied().collect(), normals: normal.repeat(3 * t.len()), uvs: vec![0.0; 6 * t.len()], indices: (0..3 * t.len() as u32).collect(), groups, colors: vec![] }
 }
 
-/// A wall with a dark triangle, a large emitting one at its side, edge-on to it, and a small emitting one 0.12 m
-/// before it and parallel to it: one mesh of two sections (the emitters its second), or with `apart` a mesh each.
-/// (The two emitters turned apart: light sampling picks between them by power, so a ray's weight for one read as
-/// the other's differs by their cosines alone.)
+/// A wall with a dark triangle and three emitting ones close before it, at right angles to each other (one parallel
+/// to the wall, one upright, one level): one mesh of two sections (the emitters its second), or with `apart` a mesh
+/// each. (At right angles: light sampling picks between emitters of one material by power, so a ray's weight for
+/// one read as another's differs by their cosines alone. Three: whichever entry a wrong index names, one of the
+/// first two is not it.)
 fn emitters_world(apart: bool) -> World {
-    let (dark, large, small) = ([[-0.95, -0.95, 0.05], [-0.8, -0.95, 0.05], [-0.8, -0.8, 0.05]], [[0.9, -0.6, 0.6], [0.9, -0.6, 1.4], [0.9, 0.4, 1.0]], [[-0.35, -0.06, 0.12], [-0.2, -0.06, 0.12], [-0.275, 0.07, 0.12]]);
+    let dark = [[-0.95, -0.95, 0.05], [-0.8, -0.95, 0.05], [-0.8, -0.8, 0.05]];
+    let lit = [[[-0.4, -0.1, 0.12], [-0.1, -0.1, 0.12], [-0.25, 0.16, 0.12]], [[0.3, -0.65, 0.02], [0.3, -0.35, 0.02], [0.3, -0.5, 0.3]], [[0.4, 0.6, 0.02], [0.8, 0.6, 0.02], [0.6, 0.6, 0.3]]];
     let mut w = wall_world(2.6, serde_json::json!({ "name": "glow", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 1.5, "doubleSided": true }));
     if apart {
-        for (k, (t, material)) in [(dark, 2), (large, 3), (small, 3)].into_iter().enumerate() {
+        for (k, (t, material)) in [(dark, 2), (lit[0], 3), (lit[1], 3), (lit[2], 3)].into_iter().enumerate() {
             w.set_geometry(20 + k as u32, soup(&[t], [0.0, 0.0, 1.0], vec![])).unwrap();
             w.set_object(20 + k as u32, format!("part{k}"), None, Kind::Mesh { geometry: 20 + k as u32, material, own_blas: false, materials: vec![] }, true, false).unwrap();
         }
     } else {
-        w.set_geometry(20, soup(&[dark, large, small], [0.0, 0.0, 1.0], vec![[0, 3, 0], [3, 6, 1]])).unwrap();
+        w.set_geometry(20, soup(&[dark, lit[0], lit[1], lit[2]], [0.0, 0.0, 1.0], vec![[0, 3, 0], [3, 9, 1]])).unwrap();
         w.set_object(20, "lamps".into(), None, Kind::Mesh { geometry: 20, material: 2, own_blas: false, materials: vec![2, 3] }, true, false).unwrap();
     }
     w
 }
 
-/// Emitters in a section that is not its mesh's first, a large triangle at a wall's side and a small one close to it:
-/// the wall beside the small one is lit as by the same triangles a mesh each (the same rays: the two pictures are
-/// one). A light sample is told its emitter's section, whose row has the material that emits; a surface's own ray
+/// The wall beside `emitters_world`'s first two emitters, in a picture of 96 x 54: x0, y0, x1, y1.
+const BESIDE_EMITTERS: [[usize; 4]; 2] = [[34, 19, 50, 35], [49, 33, 61, 44]];
+
+/// Emitters in a section that is not its mesh's first, close before a wall: the wall beside two of them is lit as
+/// by the same triangles a mesh each (the same rays: the two pictures are one). A light sample is told its emitter's section, whose row has the material that emits; a surface's own ray
 /// that meets one finds it in that section.
 #[test]
 fn emitters_in_a_meshs_second_section_light_as_meshes_of_their_own() {
@@ -326,16 +341,17 @@ fn emitters_in_a_meshs_second_section_light_as_meshes_of_their_own() {
         (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
     };
     let e = &one.sc.tables.emitter_tris;
-    assert!(e.len() == 2 && e.iter().all(|e| e.inst != crate::NO_INST && e.part == 1), "the mesh's two emitters, of its second section");
-    // (The wall around the small triangle.)
-    let region = [35, 20, 49, 34];
-    let (a, b) = (region_mean(&picture(&mut one, 96), region), region_mean(&picture(&mut each, 96), region));
-    assert!(b > 30.0 && (a / b - 1.0).abs() < 0.03, "the wall beside the small emitter: {a:.1} of 255 as one mesh's second section, {b:.1} as meshes of their own");
+    assert!(e.len() == 3 && e.iter().all(|e| e.inst != crate::NO_INST && e.part == 1), "the mesh's three emitters, of its second section");
+    let (pa, pb) = (picture(&mut one, 96), picture(&mut each, 96));
+    for region in BESIDE_EMITTERS {
+        let (a, b) = (region_mean(&pa, region), region_mean(&pb, region));
+        assert!(b > 30.0 && (a / b - 1.0).abs() < 0.01, "the wall beside an emitter ({region:?}): {a:.1} of 255 as one mesh's second section, {b:.1} as meshes of their own");
+    }
 }
 
 /// Offline, a surface's own ray that meets an emitter weighs it against the light sample that could have picked it,
 /// by that triangle's entry of the light list: its section's first and its index on (under software traversal's
-/// units its tree's row has the index). The same wall, lit alike by the emitters as one section and as a mesh each
+/// units its tree's leaf has the index). The same wall, lit alike by the emitters as one section and as a mesh each
 /// (a mesh of one triangle: index 0).
 #[test]
 fn a_ray_that_meets_an_emitter_weighs_it_by_that_triangles_entry() {
@@ -349,11 +365,12 @@ fn a_ray_that_meets_an_emitter_weighs_it_by_that_triangles_entry() {
         // (Under software traversal with units, as a live view has the scene.)
         let prep = crate::prepare_as(g.hwrt, true, &mut sc, &mut vec![]);
         let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 64, &mut vec![]).unwrap();
-        // (The wall around the small triangle, as the live test's region.)
-        (20..34).flat_map(|y| (35..49).map(move |x| y * 96 + x)).map(|k| frame.color[k].iter().sum::<f32>() as f64).sum::<f64>() / (3.0 * 14.0 * 14.0)
+        BESIDE_EMITTERS.map(|[x0, y0, x1, y1]| (y0..y1).flat_map(|y| (x0..x1).map(move |x| y * 96 + x)).map(|k| frame.color[k].iter().sum::<f32>() as f64).sum::<f64>() / (3 * (x1 - x0) * (y1 - y0)) as f64)
     };
-    let (a, b) = (lit(false), lit(true));
-    assert!(b > 0.01 && (a / b - 1.0).abs() < 0.01, "the wall beside the small emitter: {a:.4} as one mesh's second section, {b:.4} as meshes of their own");
+    let (one, each) = (lit(false), lit(true));
+    for ((a, b), region) in one.into_iter().zip(each).zip(BESIDE_EMITTERS) {
+        assert!(b > 0.01 && (a / b - 1.0).abs() < 0.003, "the wall beside an emitter ({region:?}): {a:.4} as one mesh's second section, {b:.4} as meshes of their own");
+    }
 }
 
 /// The light a surface's own ray brings back from what it meets is that surface's from a view's first frames on,
@@ -1005,6 +1022,8 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
     let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices), up.words.cap(Stream::Indices));
     let tri_rows: Vec<[u32; 4]> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / 16 * 16);
+    // (Software traversal: the trees' leaves, whose ids say a mesh's triangle's section and its index there.)
+    let leaves: Vec<crate::indexed::Leaf> = if c.g.hwrt { vec![] } else { read_back(c, &up.bg_parts.leaves, 0, up.bg_parts.leaves.size() / crate::indexed::LEAF_BYTES as u64 * crate::indexed::LEAF_BYTES as u64) };
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
     let cdf = read(&up.heap.buffer, up.heap.at(Table::Emitters), (tables.emitter_tris.len() * 16) as u64);
@@ -1042,7 +1061,7 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             }
             // Its section's row as the GPU has it says the material and where the section's emitters start, the
             // triangle its index among them: its place after the section's first triangle (hardware traversal), or
-            // what its tree's row says (software traversal: a tree has a mesh's triangles in its own order).
+            // what its tree's leaf says (software traversal: a tree has a mesh's triangles in its own order).
             let at = (record.info[3] + e.part) as usize;
             let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
             assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
@@ -1051,8 +1070,9 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
             let rank = if c.g.hwrt {
                 e.tri.wrapping_sub(row[1])
             } else {
-                assert_eq!(tri_rows[e.tri as usize][0], e.part, "{what}: triangle {}'s row has its section", e.tri);
-                tri_rows[e.tri as usize][3]
+                let l = &leaves[e.tri as usize];
+                assert_eq!(l[0][3].to_bits(), e.part, "{what}: triangle {}'s leaf has its section", e.tri);
+                l[1][3].to_bits()
             };
             assert_eq!((row[2].wrapping_add(rank), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         }

@@ -904,10 +904,8 @@ pub(crate) mod cpu {
     /// their buffer; every loop iteration counted against `budget` (the loop guard's role: the walk must end).
     pub(crate) struct Kernel<'a> {
         pub(crate) nodes: &'a [GpuNode],
-        /// The vertices' positions, and the triangles' indices and rows (indexed.rs), as the kernel has them.
-        pub(crate) vertices: &'a [crate::indexed::Vertex],
-        pub(crate) indices: &'a [[u32; 3]],
-        pub(crate) tri_rows: &'a [crate::indexed::TriRow],
+        /// The trees' leaf triangles (`indexed::Leaf`), as the kernel has them.
+        pub(crate) leaves: &'a [crate::indexed::Leaf],
         pub(crate) instances: &'a [GpuInstance],
         /// The instances' rows: what a unit with rows has its glass by, through its triangles' sections
         /// (`row_flags`). Empty where no unit has rows.
@@ -955,16 +953,14 @@ pub(crate) mod cpu {
             self.count(|r| *(if !r.in_units { &mut r.still_nodes } else if i >= self.top { &mut r.top_nodes } else { &mut r.mesh_nodes }) += 1);
             self.nodes.get(i as usize).copied().ok_or(format!("reads node {i} of {}", self.nodes.len()))
         }
-        pub(crate) fn vert(&self, i: u32) -> Walk<Vec3A> {
-            self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 1);
-            self.vertices.get(i as usize).map(|v| Vec3A::new(v[0][0], v[0][1], v[0][2])).ok_or(format!("reads vertex {i} of {}", self.vertices.len()))
+        /// A leaf's triangle: v0, e1, e2. (Counted as a triangle's three vertices.)
+        pub(crate) fn leaf(&self, i: u32) -> Walk<[Vec3A; 3]> {
+            self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 3);
+            self.leaves.get(i as usize).map(|l| l.map(|v| Vec3A::new(v[0], v[1], v[2]))).ok_or(format!("reads leaf triangle {i} of {}", self.leaves.len()))
         }
-        /// pathtrace.wgsl `tri_indices`, `tri_flags`.
-        pub(crate) fn tri_indices(&self, ti: u32) -> Walk<[u32; 3]> {
-            self.indices.get(ti as usize).copied().ok_or(format!("reads triangle {ti} of {}", self.indices.len()))
-        }
-        pub(crate) fn tri_flags(&self, ti: u32) -> Walk<u32> {
-            Ok(self.tri_rows.get(ti as usize).ok_or(format!("reads the row of triangle {ti} of {}", self.tri_rows.len()))?[2])
+        /// pathtrace.wgsl `leaf_id`.
+        pub(crate) fn leaf_id(&self, ti: u32, k: usize) -> Walk<u32> {
+            Ok(self.leaves.get(ti as usize).ok_or(format!("reads leaf triangle {ti} of {}", self.leaves.len()))?[k][3].to_bits())
         }
         pub(crate) fn record(&self, i: u32) -> Walk<GpuInstance> {
             self.count(|r| r.records += 1);
@@ -994,10 +990,8 @@ pub(crate) mod cpu {
         }
 
         /// pathtrace.wgsl `intersect_tri`: (t, u, v), t = INF for a miss.
-        pub(crate) fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, base: u32, tmax: f32) -> Walk<f32> {
-            let ix = self.tri_indices(i)?;
-            let v0 = self.vert(base + ix[0])?;
-            let (e1, e2) = (self.vert(base + ix[1])? - v0, self.vert(base + ix[2])? - v0);
+        pub(crate) fn intersect_tri(&self, o: Vec3A, d: Vec3A, i: u32, tmax: f32) -> Walk<f32> {
+            let [v0, e1, e2] = self.leaf(i)?;
             let pv = d.cross(e2);
             let det = e1.dot(pv);
             if det.abs() < 1e-12 {
@@ -1049,9 +1043,9 @@ pub(crate) mod cpu {
                     for k in 0..n.count {
                         self.step()?;
                         let ti = n.left_or_first + k;
-                        let t = self.intersect_tri(o, d, ti, 0, hit.t)?;
+                        let t = self.intersect_tri(o, d, ti, hit.t)?;
                         if t < hit.t {
-                            let flags = self.tri_flags(ti)?;
+                            let flags = self.leaf_id(ti, 0)?;
                             if mode == TRACE_SHADOW && flags & crate::scene::TRI_NO_SHADOW != 0 {
                                 continue;
                             }
@@ -1096,11 +1090,6 @@ pub(crate) mod cpu {
             self.trace_units(o, d, inv_d, hit, mode, &mut stack)
         }
 
-        /// A unit's triangle's section: the tree's own data, a row a triangle (shaders/trace_units.wgsl `tri_row(ti).x`).
-        fn tri_part(&self, ti: u32) -> Walk<u32> {
-            Ok(self.tri_rows.get(ti as usize).ok_or(format!("reads the row of triangle {ti} of {}", self.tri_rows.len()))?[0])
-        }
-
         /// shaders/trace_units.wgsl `row_flags`.
         fn row_flags(&self, first: u32, section: u32) -> Walk<u32> {
             let x = self.rows.get((first + section) as usize).ok_or(format!("reads row {first} + {section}"))?[0];
@@ -1122,7 +1111,7 @@ pub(crate) mod cpu {
             let mut rec = NO_INST;
             let (mut ubits, mut urows) = (0u32, 0u32);
             let (mut ro, mut rd, mut rinv) = (o, d, inv_d);
-            let (mut off, mut first, mut uverts, mut base) = (top, 0u32, 0u32, 0usize);
+            let (mut off, mut first, mut base) = (top, 0u32, 0usize);
             loop {
                 self.step()?;
                 let n = self.node(node)?;
@@ -1158,7 +1147,6 @@ pub(crate) mod cpu {
                         }
                         off = u.n[0][3].to_bits();
                         first = u.info[0];
-                        uverts = u.info[2];
                         (ubits, urows) = (u.n[1][3].to_bits(), u.info[3]);
                         base = sp;
                         node = off;
@@ -1168,10 +1156,10 @@ pub(crate) mod cpu {
                     for k in 0..n.count {
                         self.step()?;
                         let ti = first + n.left_or_first + k;
-                        let x = self.intersect_tri(ro, rd, ti, uverts, hit.t)?;
+                        let x = self.intersect_tri(ro, rd, ti, hit.t)?;
                         if x < hit.t {
                             // (A unit's glass: shadow rays pass it.)
-                            let part = self.tri_part(ti)?;
+                            let part = self.leaf_id(ti, 0)?;
                             let mut flags = 0;
                             if ubits & (crate::scene::INST_CUTOUT | crate::scene::INST_GLASS) != 0 {
                                 flags = self.row_flags(urows, part)?;
@@ -1239,7 +1227,6 @@ pub(crate) mod tests {
                 "var rinv = inv_d;",
                 "var off = top;",
                 "var first = 0u;",
-                "var uverts = 0u;",
                 "var base = 0u;",
                 "let n = nodes[node];",
                 "if (n.count == 0u) {",
@@ -1264,16 +1251,15 @@ pub(crate) mod tests {
                 "rinv = 1.0 / select(rd, vec3<f32>(1e-20), abs(rd) < vec3<f32>(1e-20));",
                 "off = bitcast<u32>(u.n0.w);",
                 "first = u.info.x;",
-                "uverts = u.info.z;",
                 "base = sp;",
                 "node = off;",
                 "continue;",
                 "} else {",
                 "for (var k = 0u; k < n.count; k++) {",
                 "let ti = first + n.left_or_first + k;",
-                "let x = intersect_tri(ro, rd, ti, uverts, hit.t);",
+                "let x = intersect_tri(ro, rd, ti, hit.t);",
                 "if (x.x < hit.t) {",
-                "let part = tri_row(ti).x;",
+                "let part = leaf_id(ti, 0u);",
                 "var flags = 0u;",
                 "if ((ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags = row_flags(urows, part); }",
                 "hit = Hit(x.x, ti, x.y, x.z, rec, part);",
@@ -1295,13 +1281,14 @@ pub(crate) mod tests {
             kernel,
             "pathtrace.wgsl",
             &[
+                "fn leaf_id(ti: u32, k: u32) -> u32 { return bitcast<u32>(leaves[ti * 3u + k].w); }",
                 "fn proc_dir(r: Instance, d: vec3<f32>) -> vec3<f32> { return r.n0.xyz * d.x + r.n1.xyz * d.y + r.n2.xyz * d.z; }",
                 "fn proc_point(r: Instance, p: vec3<f32>) -> vec3<f32> { return proc_dir(r, p - vec3<f32>(r.m0.w, r.m1.w, r.m2.w)); }",
-                "fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {",
-                "let ix = (tri_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;",
-                "let v0 = vertices[ix.x].xyz;",
-                "let e1 = vertices[ix.y].xyz - v0;",
-                "let e2 = vertices[ix.z].xyz - v0;",
+                "fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {",
+                "let k = i * 3u;",
+                "let v0 = leaves[k].xyz;",
+                "let e1 = leaves[k + 1u].xyz;",
+                "let e2 = leaves[k + 2u].xyz;",
                 "let pv = cross(d, e2);",
                 "let det = dot(e1, pv);",
                 "if (abs(det) < 1e-12) { return vec3<f32>(INF, 0.0, 0.0); }",
@@ -1314,8 +1301,8 @@ pub(crate) mod tests {
                 "if (t <= 0.0 || t >= tmax) { return vec3<f32>(INF, 0.0, 0.0); }",
                 "fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {",
                 "var stack: array<u32, 48>;",
-                "let r = intersect_tri(o, d, ti, 0u, hit.t);",
-                "let flags = tri_flags(ti);",
+                "let r = intersect_tri(o, d, ti, hit.t);",
+                "let flags = leaf_id(ti, 0u);",
                 "if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }",
                 "hit = Hit(r.x, ti, r.y, r.z, NO_INST, ti);",
                 "if (mode != TRACE_CLOSEST) { return hit; }",
@@ -1370,25 +1357,17 @@ pub(crate) mod tests {
         kept: Kept,
     }
 
-    /// Triangles as the kernel reads them (indexed.rs), plainly: three vertices each, their indices counted from 0,
-    /// rows without flags.
+    /// Triangles as the trees' leaves have them (`indexed::Leaf`), without flags or sections.
     #[derive(Default)]
     pub(crate) struct Soup {
-        pub(crate) vertices: Vec<crate::indexed::Vertex>,
-        pub(crate) indices: Vec<[u32; 3]>,
-        pub(crate) rows: Vec<crate::indexed::TriRow>,
+        pub(crate) leaves: Vec<crate::indexed::Leaf>,
     }
 
     impl Soup {
         /// The triangles after those there are; the first's index.
         pub(crate) fn push(&mut self, tris: &[[Vec3A; 3]]) -> u32 {
-            let first = self.indices.len() as u32;
-            for t in tris {
-                let v = self.vertices.len() as u32;
-                self.vertices.extend(t.map(|p| [[p.x, p.y, p.z, 0.0], [0.0; 4], [0.0; 4]]));
-                self.indices.push([v, v + 1, v + 2]);
-                self.rows.push([0; 4]);
-            }
+            let first = self.leaves.len() as u32;
+            self.leaves.extend(tris.iter().map(|t| crate::indexed::leaf(*t, [0, 0])));
             first
         }
     }
@@ -1466,8 +1445,8 @@ pub(crate) mod tests {
         }
 
         fn kernel(&self) -> Kernel<'_> {
-            let budget = 64 * (self.nodes.len() as u64 + self.soup.vertices.len() as u64) + 1024;
-            Kernel { nodes: &self.nodes, vertices: &self.soup.vertices, indices: &self.soup.indices, tri_rows: &self.soup.rows, instances: &self.instances, rows: &[], top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
+            let budget = 64 * (self.nodes.len() as u64 + self.soup.leaves.len() as u64 * 3) + 1024;
+            Kernel { nodes: &self.nodes, leaves: &self.soup.leaves, instances: &self.instances, rows: &[], top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
         }
 
         /// Every triangle a ray could meet, tested one by one with the kernel's own triangle test (the still scene's in
@@ -1476,7 +1455,7 @@ pub(crate) mod tests {
             let k = self.kernel();
             let mut best = Hit { t: INF, tri: 0xffff_ffff, inst: NO_INST };
             for ti in 0..self.still_tris as u32 {
-                let t = k.intersect_tri(o, d, ti, 0, best.t).unwrap();
+                let t = k.intersect_tri(o, d, ti, best.t).unwrap();
                 if t < best.t {
                     best = Hit { t, tri: ti, inst: NO_INST };
                 }
@@ -1490,7 +1469,7 @@ pub(crate) mod tests {
                 let (lo, ld) = (Kernel::proc_point(r, o), Kernel::proc_dir(r, d));
                 let (first, count, ..) = self.meshes[*mesh].unwrap();
                 for ti in first..first + count {
-                    let t = k.intersect_tri(lo, ld, ti, r.info[2], best.t).unwrap();
+                    let t = k.intersect_tri(lo, ld, ti, best.t).unwrap();
                     if t < best.t {
                         best = Hit { t, tri: ti, inst: rec as u32 };
                     }
@@ -1518,7 +1497,7 @@ pub(crate) mod tests {
                         if got.tri != want.tri || got.inst != want.inst {
                             // Two triangles at one distance: both are closest.
                             let again = Kernel { budget: u64::MAX, ..self.kernel() };
-                            let t = if got.inst == NO_INST { again.intersect_tri(o, d, got.tri, 0, INF).unwrap() } else { let r = &self.instances[got.inst as usize]; again.intersect_tri(Kernel::proc_point(r, o), Kernel::proc_dir(r, d), got.tri, r.info[2], INF).unwrap() };
+                            let t = if got.inst == NO_INST { again.intersect_tri(o, d, got.tri, INF).unwrap() } else { let r = &self.instances[got.inst as usize]; again.intersect_tri(Kernel::proc_point(r, o), Kernel::proc_dir(r, d), got.tri, INF).unwrap() };
                             assert_eq!(t.to_bits(), want.t.to_bits(), "{what}: ray {o} {d}: {got:?} is not at brute force's distance {want:?}");
                         }
                         on_units += (got.inst != NO_INST) as usize;

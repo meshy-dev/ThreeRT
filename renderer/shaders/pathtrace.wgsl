@@ -146,8 +146,13 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 // (tangent, hand; zeros: it has none). A triangle is three of them, by its indices in `words` (`tri_data`).
 @group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
 const VERTEX_VEC4: u32 = 3u;
-// (Software traversal's trees: hardware traversal has no binding for them.)
+// Software traversal's trees (hardware traversal has no binding for them): their nodes, and their leaves'
+// triangles (indexed.rs `Leaf`), the trees' own copy, three vec4s a triangle in the triangles' order: (v0, id),
+// (e1, id), (e2, -). A candidate's test reads nothing else. The ids: a world-space triangle's flags (TRI_*); a
+// mesh's section, and its index in the section.
+@if(!hwrt) @group(0) @binding(2) var<storage, read> leaves: array<vec4<f32>>;
 @if(!hwrt) @group(0) @binding(3) var<storage, read> nodes: array<Node>;
+@if(!hwrt) fn leaf_id(ti: u32, k: u32) -> u32 { return bitcast<u32>(leaves[ti * 3u + k].w); }
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
@@ -330,8 +335,7 @@ fn tri_indices(ti: u32) -> vec3<u32> {
 }
 // The row of a triangle no instance places (a light's card, a particle's, a scene's that is flattened), four words:
 // its material, its object, its flags (TRI_*), its emitter entry + 1. A mesh's triangle has none: which section of
-// its mesh it is in is its hit's to say (`Hit.part`), and the rest is its instance's. (Software traversal's units
-// keep one for each triangle of a mesh's tree, the tree's own: its section, -, -, its index in the section.)
+// its mesh it is in is its hit's to say (`Hit.part`), and the rest is its instance's.
 fn tri_row(row: u32) -> vec4<u32> {
     let k = P.word_first[1].y + row * 4u;
     return vec4<u32>(words[k], words[k + 1u], words[k + 2u], words[k + 3u]);
@@ -617,8 +621,8 @@ fn emitter_pmf(ei: u32, em: EmitterTri, x: vec3<f32>, n: vec3<f32>) -> f32 {
 
 // `inst`: the model instance whose model-space triangle `tri` is (F_INST), NO_INST for world-space triangles.
 // `part`: with an instance, the section of its mesh the triangle is in (the acceleration structure's geometry; a
-// unit's tree's own data): its instance's row for it has its material. Without one, the triangle's row (`tri_row`):
-// `tri` itself.
+// unit's tree's leaf's id): its instance's row for it has its material. Without one, the triangle's row
+// (`tri_row`): `tri` itself.
 struct Hit { t: f32, tri: u32, u: f32, v: f32, inst: u32, part: u32 };
 const NO_INST: u32 = 0xffffffffu;
 
@@ -751,11 +755,11 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
     return select(INF, tn, tn <= tf);
 }
 
-@if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {
-    let ix = (tri_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;
-    let v0 = vertices[ix.x].xyz;
-    let e1 = vertices[ix.y].xyz - v0;
-    let e2 = vertices[ix.z].xyz - v0;
+@if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
+    let k = i * 3u;
+    let v0 = leaves[k].xyz;
+    let e1 = leaves[k + 1u].xyz;
+    let e2 = leaves[k + 2u].xyz;
     let pv = cross(d, e2);
     let det = dot(e1, pv);
     if (abs(det) < 1e-12) { return vec3<f32>(INF, 0.0, 0.0); }
@@ -784,9 +788,9 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
         if (n.count > 0u) {
             for (var k = 0u; k < n.count; k++) {
                 let ti = n.left_or_first + k;
-                let r = intersect_tri(o, d, ti, 0u, hit.t);
+                let r = intersect_tri(o, d, ti, hit.t);
                 if (r.x < hit.t) {
-                    let flags = tri_flags(ti);
+                    let flags = leaf_id(ti, 0u);
                     if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
                     if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, ti, r.y, r.z, r.x)) { shadow_hole = true; continue; }
                     hit = Hit(r.x, ti, r.y, r.z, NO_INST, ti);
@@ -2008,10 +2012,10 @@ fn emitter_attrs(em: EmitterTri) -> TriAttr {
 }
 
 // A mesh's triangle's index in its section. Hardware traversal: from the section's first triangle (the instance's
-// row for it, the word a hit's triangle is found by: trace_hw.wgsl `hit_tri`). Software traversal's units: the tree's
-// own data (a tree puts a mesh's triangles in its own order).
+// row for it, the word a hit's triangle is found by: trace_hw.wgsl `hit_tri`). Software traversal's units: its
+// leaf's id (a tree has a mesh's triangles in its own order).
 @if(hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return h.tri - row_word(rows, h.part, 1u); }
-@if(!hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return tri_row(h.tri).w; }
+@if(!hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return leaf_id(h.tri, 1u); }
 
 // The MIS weight of a BSDF ray's (pdf `pdf`) hit on an emitter against light sampling in `direct_light`: by the
 // density light sampling has for the point, the probability it picks the emitter (`emitter_pmf`, at the vertex the
