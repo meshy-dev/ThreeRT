@@ -663,6 +663,9 @@ impl LiveCore {
     /// rays a view in points starts with) down to `MIN_SCALE` of it, and starts there again; a fixed scale stays.
     pub fn set_display_scale(&mut self, k: f32) {
         let k = k.max(1.0);
+        if (k - self.display_scale).abs() < 1e-4 {
+            return;
+        }
         self.display_scale = k;
         self.min_scale = (MIN_SCALE / k).max(SCALE_FLOOR);
         if self.dynamic_res {

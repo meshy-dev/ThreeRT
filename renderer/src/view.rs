@@ -109,6 +109,8 @@ struct State {
     tan: f32,
     cursor: PhysicalPosition<f64>,
     press: Option<(MouseButton, PhysicalPosition<f64>, bool)>,
+    focused: bool,
+    focused_at: Option<Instant>,
     mods: ModifiersState,
     keys: std::collections::HashSet<String>,
     spp: u32,
@@ -275,6 +277,8 @@ impl App {
             tan: cam.tan_half_fov,
             cursor: PhysicalPosition::new(0.0, 0.0),
             press: None,
+            focused: true,
+            focused_at: None,
             mods: ModifiersState::empty(),
             keys: Default::default(),
             spp: 1,
@@ -316,11 +320,19 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::ModifiersChanged(m) => s.mods = m.state(),
-            WindowEvent::Focused(false) => {
-                // (The keys' ups go to whoever has the keyboard now.)
-                s.capture(false);
-                if let Some(i) = s.input.as_mut() {
-                    i.release_all();
+            WindowEvent::Focused(focused) => {
+                s.focused = focused;
+                s.press = None;
+                s.keys.clear();
+                if focused {
+                    s.focused_at = Some(Instant::now());
+                } else {
+                    // (The keys' ups go to whoever has the keyboard now.)
+                    s.mods = ModifiersState::empty();
+                    s.capture(false);
+                    if let Some(i) = s.input.as_mut() {
+                        i.release_all();
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -374,9 +386,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 ElementState::Pressed => {
-                    s.press = Some((button, s.cursor, false));
-                    if let (Some(i), Some(n)) = (s.input.as_mut(), button_number(button)) {
-                        i.button(n, true);
+                    // Ignore the click that merely activates/focuses the window so stale cursor coords or
+                    // focus-click jitter never nudge the orbit camera and wipe temporal accumulation.
+                    let activating = !s.focused || s.focused_at.is_some_and(|t| t.elapsed() < Duration::from_millis(80));
+                    if !activating {
+                        s.press = Some((button, s.cursor, false));
+                        if let (Some(i), Some(n)) = (s.input.as_mut(), button_number(button)) {
+                            i.button(n, true);
+                        }
                     }
                 }
                 ElementState::Released => {
@@ -400,6 +417,9 @@ impl ApplicationHandler for App {
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {
+                if !s.focused {
+                    return;
+                }
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 40.0,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -423,6 +443,11 @@ impl ApplicationHandler for App {
                     _ => return,
                 };
                 if event.state == ElementState::Pressed {
+                    // Do not let OS shortcuts (Cmd+Shift+4 screenshot, Cmd+W/S/H/M/R, Ctrl/Alt combos)
+                    // trigger game handlers, camera resets, or WASD fly.
+                    if s.input.is_none() && (s.mods.super_key() || s.mods.control_key() || s.mods.alt_key()) {
+                        return;
+                    }
                     let handler = s.game.host.handler_for_key(&name);
                     if let (Some(h), false) = (&handler, event.repeat) {
                         let cam = s.core.scene_camera();
@@ -452,7 +477,9 @@ impl ApplicationHandler for App {
                         }
                         emit(serde_json::json!({ "type": "key", "key": name }));
                     }
-                    s.keys.insert(name);
+                    if handler.is_none() {
+                        s.keys.insert(name);
+                    }
                 } else {
                     s.keys.remove(&name);
                 }
