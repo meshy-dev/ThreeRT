@@ -3334,7 +3334,7 @@ fn a_hidden_volumes_passes_are_made_at_load() {
 }
 
 /// A bright HDR panel catches clipping before reconstruction, stale bindings after resize, and
-/// carrying temporal history through a cut. MetalFX modes run only where the SDK supports them.
+/// carrying temporal history through a cut. MetalFX methods run only where the SDK supports them.
 #[test]
 fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
     let Ok(gpu) = gpu::Gpu::new() else { return };
@@ -3353,101 +3353,178 @@ fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
         let p = ((c.h / 2 * c.w + c.w / 2) * 3) as usize;
         [hdr[p], hdr[p + 1], hdr[p + 2]]
     };
-    let modes = [
-        Reconstruction::Fsr,
+    let methods = [
+        Method::Fsr,
+        Method::Off,
         #[cfg(target_os = "macos")]
-        Reconstruction::Temporal,
+        Method::MetalFx,
         #[cfg(target_os = "macos")]
-        Reconstruction::Denoised,
+        Method::MetalFxDenoised,
     ];
-    for mode in modes {
+    for method in methods {
         core.set_scale(0.5);
-        core.set_reconstruction(mode.clone());
+        core.set_reconstruction(method.clone());
         core.set_camera(scene_cam);
         for _ in 0..16 { core.render(1, |_, _| {}); }
-        if *core.reconstruction() == Reconstruction::Builtin {
-            assert_ne!(mode, Reconstruction::Fsr);
-            eprintln!("{} unavailable on this device", mode.name());
+        if core.reconstruction() == Method::Builtin {
+            assert!(!matches!(method, Method::Fsr | Method::Off));
+            eprintln!("{} unsupported on this device: {:?}", method.name(), core.reconstruction_status().skipped);
             continue;
         }
         for (v, reference) in center(&core).into_iter().zip([1800.0, 450.0, 900.0]) {
-            assert!((v / reference - 1.0).abs() < 0.2, "{}: {v} of {reference}", mode.name());
+            assert!((v / reference - 1.0).abs() < 0.2, "{}: {v} of {reference}", method.name());
         }
         core.set_scale(0.0);
         for scale in [0.5, 0.75, 0.625] {
             core.render_scale = scale;
             core.render(1, |_, _| {});
-            assert_eq!(core.reconstruction(), &mode);
-            assert!(center(&core)[0] > 1000.0, "{}: missing dynamic input at {scale}", mode.name());
+            assert_eq!(core.reconstruction(), method);
+            assert!(center(&core)[0] > 1000.0, "{}: missing dynamic input at {scale}", method.name());
         }
         core.set_camera(Camera::look_at(scene_cam.pos, scene_cam.pos + Vec3::Z, scene_cam.tan_half_fov));
         core.render(1, |_, _| {});
         // (The view after the turn sees surfaces the panel lights a little, ~4 here; history carried over reads ~1800.)
-        assert!(center(&core).iter().all(|v| *v < 100.0), "{}: bright history after cut", mode.name());
+        assert!(center(&core).iter().all(|v| *v < 100.0), "{}: bright history after cut", method.name());
         core.resize(257, 161).unwrap();
         core.set_camera(scene_cam);
         core.render(1, |_, _| {});
-        assert!(center(&core)[0] > 1000.0, "{}: missing output after resize", mode.name());
+        assert!(center(&core)[0] > 1000.0, "{}: missing output after resize", method.name());
         core.resize(320, 180).unwrap();
     }
 }
 
+/// A request is a preference list: the first method this device runs is used, and the status says why each one
+/// before it did not. A typed quality preset is the vendors' exact ratio.
 #[test]
-fn reconstruction_falls_back_in_the_frame_a_custom_provider_fails() {
-    struct FailAfterOne(Option<wgpu::ComputePipeline>);
-    impl ReconstructionProvider for FailAfterOne {
-        fn prepare(&mut self, g: &gpu::Gpu, _: ReconstructionSize) -> Result<bool> {
-            let d = &g.device;
-            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(r#"
-                    @group(0) @binding(0) var image: texture_storage_2d<rgba16float, write>;
-                    @compute @workgroup_size(8,8) fn put_color(@builtin(global_invocation_id) id: vec3<u32>) {
-                        if (all(id.xy < textureDimensions(image))) {
-                            textureStore(image, id.xy, vec4<f32>(4.0, 8.0, 12.0, 1.0));
-                        }
-                    }
-                "#.into()),
-            });
-            self.0 = Some(d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: None, layout: None, module: &module, entry_point: Some("put_color"),
-                compilation_options: Default::default(), cache: None,
-            }));
-            Ok(true)
-        }
-
-        fn encode(&mut self, f: ReconstructionFrame<'_>, e: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
-            let Some(pipe) = self.0.take() else { anyhow::bail!("test provider rejected the frame") };
-            let bg = f.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &pipe.get_bind_group_layout(0),
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(f.output) }],
-            });
-            let mut pass = e.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&pipe);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(f.size.output[0].div_ceil(8), f.size.output[1].div_ceil(8), 1);
-            Ok(None)
-        }
-    }
+fn reconstruction_takes_the_first_method_that_runs_and_says_why() {
+    assert_eq!(Reconstruction::parse("metalfx-denoised, builtin").unwrap(), Reconstruction::Prefer(vec![Method::MetalFxDenoised, Method::Builtin]));
+    assert_eq!(Reconstruction::from_json(&serde_json::json!(["dlss-rr", "fsr"])).unwrap().name(), "dlss-rr,fsr");
+    assert_eq!(Reconstruction::parse("auto").unwrap(), Reconstruction::Auto);
+    assert!(Reconstruction::parse("dlss-fg").is_err());
+    let r = RenderingRequest::from_json(&serde_json::json!({ "quality": "ultra-performance", "latency": "on", "frameGeneration": "2x" })).unwrap();
+    assert_eq!(((1920.0 * r.quality.unwrap().scale().unwrap()) as f32).round(), 640.0, "a third of 1080p's width is DLSS's 640");
+    assert!(RenderingRequest::from_json(&serde_json::json!({ "upscaler": "dlss" })).is_err(), "unknown settings are errors");
 
     let Ok(g) = gpu::Gpu::new() else { return };
     let mut live = LiveCore::new(g, &world(), Path::new("."), &crate::default_presets_dir(), 97, 55).unwrap();
     live.view_mode = 0;
+    let control = RenderingControl::default();
+    live.attach_rendering_control(control.clone());
+    control.request(RenderingRequest { reconstruction: Some(Reconstruction::parse("custom:none,fsr").unwrap()), ..r });
+    live.render(1, |_, _| {});
+    assert_eq!(live.reconstruction(), Method::Fsr);
+    let st = control.status();
+    assert_eq!(st["reconstruction"]["active"], "fsr");
+    assert_eq!(st["reconstruction"]["denoise"], "builtin");
+    assert_eq!(st["reconstruction"]["fallback"], "unavailable");
+    assert_eq!(st["reconstruction"]["skipped"][0]["method"], "custom:none");
+    assert_eq!(st["quality"]["scale"], 1.0 / 3.0f32);
+    assert_eq!(st["latency"]["active"], "on");
+    assert_eq!(live.frames_in_flight(), 1);
+    assert_eq!(st["frameGeneration"]["fallback"], "unavailable", "no frame generation yet, and it says so");
+}
+
+/// A test provider: on prepare, a pipeline that writes (4, 8, 12) into the output; the frame after, it fails.
+struct ConstantOnce(Option<wgpu::ComputePipeline>);
+
+impl ConstantOnce {
+    fn prepare(&mut self, g: &gpu::Gpu) {
+        let d = &g.device;
+        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(r#"
+                @group(0) @binding(0) var image: texture_storage_2d<rgba16float, write>;
+                @compute @workgroup_size(8,8) fn put_color(@builtin(global_invocation_id) id: vec3<u32>) {
+                    if (all(id.xy < textureDimensions(image))) {
+                        textureStore(image, id.xy, vec4<f32>(4.0, 8.0, 12.0, 1.0));
+                    }
+                }
+            "#.into()),
+        });
+        self.0 = Some(d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None, layout: None, module: &module, entry_point: Some("put_color"),
+            compilation_options: Default::default(), cache: None,
+        }));
+    }
+
+    fn encode(&mut self, f: &ReconstructionFrame<'_>, e: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
+        let Some(pipe) = self.0.take() else { anyhow::bail!("test provider rejected the frame") };
+        let bg = f.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipe.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(f.output) }],
+        });
+        let mut pass = e.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipe);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(f.size.output[0].div_ceil(8), f.size.output[1].div_ceil(8), 1);
+        Ok(None)
+    }
+}
+
+impl UpscaleProvider for ConstantOnce {
+    fn prepare(&mut self, g: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared> { ConstantOnce::prepare(self, g); Ok(Prepared::ready(size)) }
+    fn encode(&mut self, f: ReconstructionFrame<'_>, e: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> { ConstantOnce::encode(self, &f, e) }
+}
+
+#[test]
+fn reconstruction_falls_back_in_the_frame_a_custom_provider_fails() {
+    let Ok(g) = gpu::Gpu::new() else { return };
+    let mut live = LiveCore::new(g, &world(), Path::new("."), &crate::default_presets_dir(), 97, 55).unwrap();
+    live.view_mode = 0;
     live.set_scale(0.5);
-    let control = ReconstructionControl::default();
-    live.attach_reconstruction_control(control.clone());
-    live.register_reconstruction("custom:test", FailAfterOne(None)).unwrap();
-    control.request(Reconstruction::parse("custom:test").unwrap());
+    let control = RenderingControl::default();
+    live.attach_rendering_control(control.clone());
+    live.register_upscaler("custom:test", ConstantOnce(None)).unwrap();
+    control.request(RenderingRequest { reconstruction: Some(Reconstruction::parse("custom:test").unwrap()), ..Default::default() });
     live.render(1, |_, _| {});
     let p = ((live.h / 2 * live.w + live.w / 2) * 3) as usize;
     assert_eq!(&live.read_hdr().unwrap()[p..p+3], &[128.0, 256.0, 384.0]);
-    assert_eq!(control.status()["active"], "custom:test");
+    assert_eq!(control.status()["reconstruction"]["active"], "custom:test");
+    assert_eq!(control.status()["reconstruction"]["upscale"], "custom:test");
 
     live.render(1, |_, _| {});
     let hdr = live.read_hdr().unwrap();
     assert!(hdr[p] > 0.01 && hdr[p] < 32.0, "expected scene radiance after failure, got {}", hdr[p]);
-    assert_eq!(control.status(), serde_json::json!({
-        "requested": "custom:test", "active": "builtin", "fallback": "provider-error"
+    assert_eq!(control.status()["reconstruction"], serde_json::json!({
+        "requested": "custom:test", "active": "builtin", "denoise": "builtin", "upscale": "builtin", "fallback": "provider-error",
+        "skipped": [{ "method": "custom:test", "reason": "provider-error", "detail": "test provider rejected the frame" }],
     }));
+}
+
+/// A joint denoiser gets the noisy signal and every guide, at the input's size in the contract's formats, and the
+/// built-in denoiser does not run.
+#[test]
+fn a_joint_denoiser_gets_the_noisy_signal_and_the_guides() {
+    struct Joint(ConstantOnce, std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl JointProvider for Joint {
+        fn prepare(&mut self, g: &gpu::Gpu, size: ReconstructionSize) -> Result<Prepared> { self.0.prepare(g); Ok(Prepared::ready(size)) }
+        fn encode(&mut self, f: ReconstructionFrame<'_>, j: JointGuides<'_>, e: &mut wgpu::CommandEncoder) -> Result<Option<wgpu::CommandBuffer>> {
+            let seen = [f.color, f.depth, f.motion, f.reactive, j.overlay, j.bypass, j.diffuse_albedo, j.specular_albedo, j.normal, j.roughness, j.specular_hit_distance]
+                .map(|v| { let t = v.texture(); format!("{:?} {}x{}", t.format(), t.width(), t.height()) });
+            *self.1.lock().unwrap() = seen.into_iter().chain([f.radiance_unit.to_string()]).collect();
+            if self.0.0.is_none() { self.0.prepare(f.gpu); }
+            self.0.encode(&f, e)
+        }
+    }
+    let Ok(g) = gpu::Gpu::new() else { return };
+    let mut w = world();
+    w.set_camera_desc(4, camera(50.0, None, manual(6.0))).unwrap();
+    let mut live = LiveCore::new(g, &w, Path::new("."), &crate::default_presets_dir(), 96, 54).unwrap();
+    live.view_mode = 0;
+    live.set_scale(0.5);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    live.register_joint_denoiser("custom:joint", Joint(ConstantOnce(None), seen.clone())).unwrap();
+    live.set_reconstruction(Method::parse("custom:joint").unwrap());
+    live.render(1, |_, _| {});
+    let st = live.reconstruction_status();
+    assert_eq!((st.denoise.as_str(), st.upscale.as_str()), ("custom:joint", "custom:joint"));
+    let seen = seen.lock().unwrap().clone();
+    let unit: f32 = seen[11].parse().unwrap();
+    assert_eq!(seen[..11], ["Rgba16Float 48x27", "R32Float 48x27", "Rg16Float 48x27", "R8Unorm 48x27", "Rgba16Float 48x27",
+        "R8Unorm 48x27", "Rgba8Unorm 48x27", "Rgba8Unorm 48x27", "Rgba16Float 48x27", "R16Float 48x27", "R16Float 48x27"]);
+    let p = ((live.h / 2 * live.w + live.w / 2) * 3) as usize;
+    // The output's (4, 8, 12), in the frame's unit, back in nits.
+    let hdr = live.read_hdr().unwrap();
+    assert!((hdr[p] / (4.0 * unit) - 1.0).abs() < 0.01 && (hdr[p + 2] / (12.0 * unit) - 1.0).abs() < 0.01, "{:?} at {unit}", &hdr[p..p + 3]);
 }

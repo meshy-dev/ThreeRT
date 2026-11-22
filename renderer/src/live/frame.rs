@@ -254,6 +254,8 @@ impl LiveCore {
         // A dynamic sky's bake that finished since the last frame (time of day).
         self.take_sky();
         self.take_emitters();
+        // Settings a game or page requested since the last frame.
+        if let Some(r) = self.rendering_control.as_ref().and_then(|c| c.take()) { self.set_rendering(r); }
         let (w, h) = (self.w, self.h);
         let (iw, ih) = self.internal_size();
         let size = ReconstructionSize { input: [iw, ih], output: [w, h], dynamic: self.dynamic_res };
@@ -287,7 +289,7 @@ impl LiveCore {
         // At most two frames in flight: beyond that the CPU waits, so latency stays bounded when GPU-bound.
         // Wait for the oldest frame only (waiting for all work would leave the GPU idle while this frame records).
         let t_wait = Instant::now();
-        while self.inflight.len() >= 2 {
+        while self.inflight.len() >= self.frames_in_flight() {
             let oldest = self.inflight.pop_front().unwrap();
             let _ = g.device.poll(wgpu::PollType::Wait { submission_index: Some(oldest), timeout: None });
         }
@@ -351,7 +353,7 @@ impl LiveCore {
         let g = &self.g;
         let t_submit = Instant::now();
         let pipeline = g.pipeline(&self.sc.up.kernel, true);
-        let guides = reconstruction.denoises().then(|| g.kernel_pass(&self.sc.up.kernel, "metalfx_surface_guides"));
+        let guides = reconstruction.guides().then(|| g.kernel_pass(&self.sc.up.kernel, "surface_guides"));
         // (No media pass while every medium is hidden: a pool of idle fireballs costs the frame nothing.)
         let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
         let media_train = (media && self.cache.is_some()).then(|| g.kernel_pass(&self.sc.up.kernel, "media_train"));
@@ -361,7 +363,7 @@ impl LiveCore {
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
-        let jitter = if reconstruction == Active::Fsr {
+        let jitter = if reconstruction.unjittered() {
             (0.5, 0.5)
         } else {
             let phases = ((8.0 * (w as f32 / iw as f32) * (h as f32 / ih as f32)).round() as u32).clamp(8, 512);
@@ -380,7 +382,7 @@ impl LiveCore {
         let moving = !self.sc.dynamic.1.is_empty() || self.sc.moving_instances;
         for k in 0..spp.max(1) {
             let mut p = self.sc.base;
-            p.motion[1] = reconstruction.denoises() as u32 as f32;
+            p.motion[1] = reconstruction.raw_signal() as u32 as f32;
             if let Some((row, at, size, cam)) = self.light_tiles {
                 (p.ltile[0], p.ltile[1], p.ltile[2]) = (1, row, at);
                 p.ltile2 = [size.0, size.1, 0, 0];
@@ -533,13 +535,13 @@ impl LiveCore {
         let lp = LiveParams {
             cur: cam.uniform(self.aspect),
             prev: self.prev_cam.uniform(self.aspect),
-            size: [w, h, self.frame, self.reset as u32],
+            size: [w, h, self.frame, (self.reset || reconstruction.history_free()) as u32],
             misc: [self.view.exposure, cap, self.vignette, (self.bloom.1.iter().sum::<f32>() > 0.0) as u32 as f32],
             // misc2.z: motion blur, this frame's motion (pixels) -> blur length. UE (PostProcessMotionBlur.cpp,
             // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
             // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
             misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
-            mode: [self.view_mode, 0, self.live_lighting() as u32, reconstruction.denoises() as u32],
+            mode: [self.view_mode, 0, self.live_lighting() as u32, reconstruction.raw_signal() as u32],
             post: self.post,
             ae: self.view.exposure_settings.ae,
             ae2: self.view.exposure_settings.ae2,
@@ -603,15 +605,15 @@ impl LiveCore {
             pass.dispatch_workgroups((gpu::CACHE_SIZE / 256) as u32, 1, 1);
         }
         let mut before_post: Option<[wgpu::CommandBuffer; 2]> = None;
-        let use_provider = reconstruction != Active::Builtin;
+        let use_provider = reconstruction.external();
         let mut provider_failed = false;
         let mut reconstruct = |e: &mut wgpu::CommandEncoder| {
             match self.reconstructor.encode(g, e, size, cam, self.aspect, jitter, self.view.exposure, self.reset || cut) {
                 Ok(buffers) => buffers,
                 Err(_) => {
                     provider_failed = true;
-                    // Only the normal denoised-input providers can fail here. Start fresh rather than read
-                    // a built-in history from before the switch. With reset, lock_carry does no work.
+                    // Start fresh rather than read a built-in history from before the switch. With reset, lock_carry
+                    // does no work. (A joint denoiser's frame has no denoising: this one frame shows its raw signal.)
                     let at = (std::mem::offset_of!(LiveParams, size) + 3 * std::mem::size_of::<u32>()) as u64;
                     g.queue.write_buffer(&self.targets.params, at, bytemuck::bytes_of(&1u32));
                     let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("builtin reconstruction fallback"), ..Default::default() });
@@ -691,7 +693,7 @@ impl LiveCore {
         extra(&mut e, &self.targets.out);
         let done = g.queue.submit(before_post.into_iter().flatten().chain([e.finish()]));
         if provider_failed { self.history_len = 1.0; }
-        self.reconstructor.publish();
+        if let Some(c) = &self.rendering_control { c.publish(self.rendering_status()); }
         self.inflight.push_back(done);
         self.cpu_wait_ms = waited;
         if let (Some((read, state)), true) = (&self.guard_read, guard_free) {

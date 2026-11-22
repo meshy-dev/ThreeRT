@@ -18,16 +18,19 @@ struct Pages {
     streams: Vec<(String, crate::texpack::Place)>,
 }
 
-#[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
-type DlssSdk = std::sync::Arc<std::sync::Mutex<dlss_wgpu::DlssSdk>>;
+#[cfg(dlss)]
+pub(crate) type DlssSdk = std::sync::Arc<std::sync::Mutex<dlss_wgpu::DlssSdk>>;
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     /// GPU timestamp queries are available (used for adaptive samples per frame in the viewer).
     pub timestamps: bool,
-    #[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(dlss)]
     pub(crate) dlss_sdk: Option<DlssSdk>,
+    /// NGX reported DLSS Ray Reconstruction on this device (with `dlss_sdk`).
+    #[cfg(dlss)]
+    pub(crate) dlss_rr: bool,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
@@ -1948,10 +1951,10 @@ fn stamp() {
 
 /// Reopen the selected Vulkan adapter with NGX's instance and device extensions. Keep the original adapter
 /// available for fallback, and never replace a non-Vulkan adapter (e.g. when WGPU_BACKEND requests DX12).
-#[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+#[cfg(dlss)]
 async fn open_dlss(
     info: &wgpu::AdapterInfo, desc: &wgpu::DeviceDescriptor<'_>,
-) -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue, DlssSdk)> {
+) -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue, DlssSdk, bool)> {
     const PROJECT: uuid::Uuid = uuid::uuid!("7e2053f1-3c7a-4d3c-9a60-d28593bcfdb7");
     let mut support = dlss_wgpu::FeatureSupport::default();
     let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -1963,7 +1966,7 @@ async fn open_dlss(
     let (device, queue) = dlss_wgpu::request_device(PROJECT, &adapter, desc, &mut support, Some(desc.required_limits.clone()))?;
     anyhow::ensure!(support.super_resolution_supported, "missing NGX Vulkan device extensions");
     let sdk = dlss_wgpu::DlssSdk::new(PROJECT, device.clone())?;
-    Ok((instance, adapter, device, queue, sdk))
+    Ok((instance, adapter, device, queue, sdk, support.ray_reconstruction_supported))
 }
 
 impl Gpu {
@@ -2032,8 +2035,8 @@ impl Gpu {
             experimental_features: if hwrt { unsafe { wgpu::ExperimentalFeatures::enabled() } } else { wgpu::ExperimentalFeatures::disabled() },
             ..Default::default()
         };
-        #[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
-        let (instance, adapter, device, queue, dlss_sdk) = {
+        #[cfg(dlss)]
+        let (instance, adapter, device, queue, dlss_sdk, dlss_rr) = {
             let dlss = if adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == 0x10de
                 && std::env::var("THREERT_DLSS").is_ok_and(|v| v == "1")
             {
@@ -2048,14 +2051,14 @@ impl Gpu {
                 None
             };
             match dlss {
-                Some((instance, adapter, device, queue, sdk)) => (instance, adapter, device, queue, Some(sdk)),
+                Some((instance, adapter, device, queue, sdk, rr)) => (instance, adapter, device, queue, Some(sdk), rr),
                 None => {
                     let (device, queue) = adapter.request_device(&device_desc).await?;
-                    (instance, adapter, device, queue, None)
+                    (instance, adapter, device, queue, None, false)
                 }
             }
         };
-        #[cfg(not(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows"))))]
+        #[cfg(not(dlss))]
         let (device, queue) = adapter.request_device(&device_desc).await?;
         let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
         let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
@@ -2109,17 +2112,19 @@ impl Gpu {
             (None, None, None, None)
         };
         Ok(Gpu {
-            #[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+            #[cfg(dlss)]
             dlss_sdk,
+            #[cfg(dlss)]
+            dlss_rr,
             instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
         })
     }
 
     /// Whether this device successfully initialized NGX with DLSS Super Resolution support.
     pub fn dlss_supported(&self) -> bool {
-        #[cfg(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+        #[cfg(dlss)]
         { self.dlss_sdk.is_some() }
-        #[cfg(not(all(feature = "dlss", target_arch = "x86_64", any(target_os = "linux", target_os = "windows"))))]
+        #[cfg(not(dlss))]
         { false }
     }
 

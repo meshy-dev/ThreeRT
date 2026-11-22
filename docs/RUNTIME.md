@@ -1603,46 +1603,74 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
-## Live reconstruction
+## Live rendering settings
 
-The native `play` and `live` commands, `serve` live jobs, and the browser share one HDR reconstruction stage.
-It runs before output-resolution effects, exposure, and tonemapping. Offline rendering is unchanged.
+The native `play` and `live` commands, `serve` live jobs and the browser take four settings, one for each gap
+between what a frame affords and what is shown (renderer/src/live/rendering.rs):
+
+| setting | the gap | ThreeRT's own | vendor technology it maps |
+|---|---|---|---|
+| `quality` | rays: the render resolution every later stage works from | dynamic resolution | (a budget, not a technique) |
+| `reconstruction` | noise, then pixels | denoiser + temporal upscaler | DLSS SR / RR, MetalFX, FSR, XeSS |
+| `frameGeneration` | frames shown per frame rendered | none | DLSS FG, FSR FG, XeSS FG, MetalFX frame interpolation (none integrated yet) |
+| `latency` | input to photon | one frame queued instead of two | Reflex, Anti-Lag 2, XeLL |
+
+Each is a request: the renderer runs what the device supports, and the status says what ran and why not the rest
+(nothing falls back silently). Neural techniques are not a setting of their own: a neural denoiser or upscaler is a
+reconstruction method, a neural radiance cache would be a lighting option, neural texture compression an asset format.
 
 ```sh
 node tools/bundle-game.ts scenes/neon-reflections.ts
-cargo run --release --manifest-path renderer/Cargo.toml --bin threert-render -- \
-  play out/bundles/neon-reflections.js --scale 0.5 --reconstruction fsr
+renderer/target/release/threert-render play out/bundles/neon-reflections.js \
+  --quality performance --reconstruction metalfx-denoised,metalfx,builtin --latency on
 ```
 
-| `--reconstruction` | Live HDR pipeline |
-|---|---|
-| `builtin` (default) | ThreeRT's diffuse and specular denoisers, reflection resolve and temporal upscaler |
-| `fsr` | AMD FidelityFX Super Resolution **1** (spatial EASU + RCAS) after ThreeRT denoising. Works on native wgpu and WebGPU without a vendor SDK. |
-| `dlss` | NVIDIA DLSS Super Resolution after ThreeRT denoising (DLAA at native resolution). Opt-in x86-64 Linux/Windows, RTX over Vulkan. |
-| `metalfx` | ThreeRT's denoisers and reflection resolve, followed by Apple's temporal upscaler |
-| `metalfx-denoised` | Apple's joint denoising and upscaling of noisy path-traced radiance |
-| `auto` | Tries MetalFX denoised, MetalFX temporal, DLSS, then the built-in path. FSR and custom providers are explicit selections. |
-| `custom:<id>` | A GPU reconstruction provider installed by an embedding host. |
+### Reconstruction: two contracts
 
-Reconstruction selection does not change `--scale` or the dynamic resolution governor. FSR 1 is spatial, not a
-temporal FSR 2+ implementation; for best results start at a scale of 0.5 or higher. DLSS checks the SDK's supported
-input range at the selected output size. Diagnostic views and unsupported requests use `builtin`. A provider that
-fails while encoding a frame also falls back to `builtin` for that frame.
+A path tracer's frame needs two jobs before post: remove the samples' noise, then bring the image to the output size
+from the history of earlier frames. Vendor technology takes over the second job or both, so there are two kinds of
+provider, which read different signals:
+
+- an **upscaler** (`UpscaleProvider`) reads ThreeRT's *denoised* HDR image, depth, motion, a reactive mask and the
+  jitter, and replaces the upscaling;
+- a **joint denoiser** (`JointProvider`) reads the *noisy* traced lighting and the surface guides it needs to tell
+  lighting from texture (diffuse and specular albedo, normal, roughness, specular hit distance, an overlay of what has
+  no noise to remove), and replaces both. ThreeRT's denoiser does not run.
+
+| `--reconstruction` | denoise | upscale |
+|---|---|---|
+| `builtin` (default) | ThreeRT | ThreeRT (temporal) |
+| `fsr` | ThreeRT | AMD FidelityFX Super Resolution **1** (spatial EASU + RCAS; also on WebGPU) |
+| `metalfx` | ThreeRT | Apple's temporal scaler (macOS 13+) |
+| `dlss` | ThreeRT | NVIDIA DLSS Super Resolution; DLAA at scale 1 (x86-64 Windows/Linux, RTX on Vulkan, feature `dlss`) |
+| `metalfx-denoised` | Apple's temporal denoised scaler: both (macOS 26+, Apple silicon) | |
+| `dlss-rr` | NVIDIA DLSS Ray Reconstruction: both (as `dlss`) | |
+| `off` | none | none: each frame's samples as traced, without history (the joint denoisers' input; for comparison) |
+| `custom:<id>` | a provider an embedding host registered, of either kind | |
+| `auto` | the best this device runs: `metalfx-denoised`, `metalfx` on a Mac; `dlss-rr`, `dlss` with DLSS; else `builtin` | |
+
+A list (`dlss-rr,dlss,fsr`) is an order of preference; `builtin` ends every list. `quality` presets are the vendors'
+ratios exactly (`ultra-performance` is a third: 640 pixels across 1080p, the smallest input DLSS takes, where a typed
+`--scale 0.333` gives 639 and DLSS reports itself unsupported). Diagnostic views use `builtin`. A provider that
+fails while encoding a frame falls back to `builtin` from that frame on.
 
 ### TypeScript
 
 ```ts
-import { reconstruction, type ReconstructionStatus } from "@threert/scene";
+import { rendering, type RenderingStatus } from "@threert/scene";
 
-reconstruction.set("auto");  // queues a local choice, not a change to replicated game state
-const status: ReconstructionStatus | undefined = reconstruction.status();
+rendering.set({ quality: "performance", reconstruction: ["metalfx-denoised", "dlss-rr", "builtin"], latency: "auto" });
+const status: RenderingStatus | undefined = rendering.status();
+// status.reconstruction: { requested, active, denoise, upscale, fallback, skipped: [{ method, reason, detail }] }
 ```
 
-`set` returning `true` means a renderer binding accepted the request, not that the device supports it.
-`status()` returns the current `requested` mode and the `active` provider from the last submitted view frame
-(`null` before the first frame). `fallback` describes that frame: `unavailable`, `diagnostic-view`,
-`provider-error`, or `null`. The normal `auto` choice of `builtin` is not an error. A runtime without the live
-renderer binding returns `false` from `set` and `undefined` from `status`.
+`set` changes the settings it is given, from the next frame; it returns `true` when a renderer binding took the
+request (not a support check) and throws a `TypeError` for an unknown setting or value. `status()` is the last frame's:
+for each setting what was requested and what ran; for reconstruction also who denoised and who upscaled, and each
+method tried before the one that ran with its reason (`unavailable`: not in this build or platform; `unsupported`: the
+device, OS or size; `provider-error`; `diagnostic-view`) and a sentence of detail. `fallback` is the first method's
+reason (`null` when it ran, or for `auto`). These are device-local view settings, not scene state, and are not
+replicated. A runtime without the live renderer binding returns `false` from `set` and `undefined` from `status`.
 
 ### NVIDIA DLSS setup
 
@@ -1652,10 +1680,11 @@ Install [NVIDIA DLSS SDK 310.9.1](https://github.com/NVIDIA/DLSS/tree/v310.9.1),
 ```sh
 cargo build --release --locked --manifest-path renderer/Cargo.toml --features dlss
 WGPU_BACKEND=vulkan THREERT_DLSS=1 renderer/target/release/threert-render \
-  play out/bundles/neon-reflections.js --scale 0.5 --reconstruction dlss
+  play out/bundles/neon-reflections.js --quality performance --reconstruction dlss-rr,dlss
 ```
 
-NVIDIA's matching runtime library must be discoverable. For distribution, follow the
+NVIDIA's matching runtime libraries (`nvngx_dlss`, and `nvngx_dlssd` for Ray Reconstruction) must be discoverable.
+For distribution, follow the
 [DLSS wrapper's deployment instructions](https://github.com/bevyengine/dlss_wgpu/tree/b35069de8640bfae383e65a46b7d16058b2994d2#distributing-your-app).
 The engine does not bundle NVIDIA's SDK or runtime.
 
@@ -1663,33 +1692,36 @@ The engine does not bundle NVIDIA's SDK or runtime.
 
 The temporal scaler requires a supporting Metal device and macOS 13 or later. Build with the macOS 26 SDK
 or newer to include the denoised scaler, which also requires macOS 26 or newer at runtime. A plain temporal scaler
-can keep its history across dynamic resolution changes inside its supported range. The denoised scaler starts a new
-history when input dimensions change.
+can keep its history across dynamic resolution changes inside its supported range (its inputs are textures of the
+output's size); the denoised scaler starts a new history when input dimensions change.
 
-In the Mac scene viewer, press `M` to cycle through the three implementations. The title bar shows the
-active mode. Games that handle keyboard input keep their key bindings.
+In the scene viewer, press `M` to switch between `builtin` and `auto` (on a Mac, MetalFX's joint denoiser) and `N`
+to step through every method this platform has. The title bar shows the method that ran and the render scale. Games
+that handle keyboard input keep their key bindings. `tools/denoise-demo/live.sh` opens Kaleido (a mirror hall lit
+only by hundreds of glowing orbs) for this comparison; `tools/denoise-demo/record.ts` and `video.ts` record it.
 
-Both scalers receive scene-linear HDR, reverse-Z depth, camera and object motion, subpixel jitter and a reactive
-mask on systems that support it. The denoised scaler also receives world-space shading normals, diffuse and
-specular reflectance, roughness, a denoising mask and specular hit distance. For smooth mirrors and glass,
-secondary ray queries add the reflected and transmitted surfaces to the material guides. Directly visible
-sky and emission-dominated pixels use the native overlay. The denoise mask is 1 on those pixels and
-0 on surfaces with noisy lighting. Exposure, bloom,
-depth of field and motion blur process the reconstructed HDR image on the GPU.
+For smooth mirrors and glass, secondary ray queries put the reflected and transmitted surfaces in the joint
+denoiser's guides (pathtrace.wgsl `surface_guides`). Directly visible sky and emission-dominated pixels are the
+overlay, with the bypass mask 1 on them. Exposure, bloom, depth of field and motion blur process the reconstructed
+HDR image on the GPU.
 
 ### Native controls and custom providers
 
-Set `THREERT_RECONSTRUCTION` for a native process that embeds `LiveCore`, call `LiveCore::set_reconstruction`,
-or send `{"cmd":"reconstruction","mode":"fsr"}` to a running `live` or `play` session. An explicit launch flag
-overrides the initial selection. Viewer `stats` report `requested_reconstruction`, the active `reconstruction`,
-and `reconstruction_fallback`. The `live --frame-log` also records the active implementation. Live `serve` jobs
-accept the same mode in `reconstruction` and a numeric `scale`.
+Set `THREERT_RECONSTRUCTION` for a native process that embeds `LiveCore`, call `LiveCore::set_rendering` (or
+`set_reconstruction`), or send `{"cmd":"rendering","reconstruction":["metalfx-denoised","builtin"],"quality":"balanced"}`
+to a running `live` or `play` session (`{"cmd":"reconstruction","mode":"fsr"}` is the same with one setting). Launch
+flags (`--quality`, `--reconstruction`, `--frame-generation`, `--latency`) set the initial values. Viewer `stats` have
+the whole status under `rendering`, and `reconstruction`, `requested_reconstruction` and `reconstruction_fallback`;
+the `live --frame-log` records the method each frame ran and its fallback. Live `serve` jobs accept `reconstruction`
+(a method, a list or `auto`) and a numeric `scale`.
 
-An embedding host can implement `ReconstructionProvider` and call
-`LiveCore::register_reconstruction("custom:my-scaler", provider)` before selecting it from Rust or TypeScript.
-IDs after `custom:` are 1–48 lowercase ASCII letters, digits, or hyphens. The provider receives denoised linear HDR,
-reversed-Z depth, current-to-previous motion in input pixels, a reactive mask, jitter and a history reset flag.
-It writes full-output HDR on the live GPU; the engine still owns post-processing and presentation.
+An embedding host implements `UpscaleProvider` or `JointProvider` (renderer/src/live/reconstruction.rs documents
+every texture: format, units, conventions) and calls `LiveCore::register_upscaler("custom:my-scaler", provider)` or
+`register_joint_denoiser`, then selects it from Rust or TypeScript. IDs after `custom:` are 1–48 lowercase ASCII
+letters, digits, or hyphens. `prepare` answers `Prepared::Ready` (with the input textures' size, which may exceed the
+input for a provider that takes a varying input) or `Prepared::Unsupported(reason)`, which goes to the status. The
+provider writes full-output HDR on the live GPU, on the encoder or in a native command buffer it returns; the engine
+still owns packing the signals, post-processing and presentation.
 
 Run `node tools/bench-metalfx.ts` after building the release binary to compare the three MetalFX/built-in paths
 against 256-spp offline references for a still camera and a lateral move. It saves the frames, frame timings and

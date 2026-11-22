@@ -18,8 +18,10 @@ float threert_fx_gpu_ms(void) {
 #import <MetalFX/MetalFX.h>
 #endif
 
-void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, float *scales) {
+// NULL with *why: 1 = no such scaler on this OS or device, 2 = the input's scale is outside scales[0..2], 3 = it failed.
+void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, float *scales, int32_t *why) {
     @autoreleasepool {
+        *why = 1;
 #if __has_include(<MetalFX/MetalFX.h>)
         if (@available(macOS 13, *)) {
             // Resolve the framework at runtime so the same binary runs on older systems.
@@ -40,7 +42,7 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
                 scales[0] = minScale;
                 scales[1] = maxScale;
                 if (iw < floorf(ow / maxScale) || ih < floorf(oh / maxScale) ||
-                    iw > ceilf(ow / minScale) || ih > ceilf(oh / minScale)) return NULL;
+                    iw > ceilf(ow / minScale) || ih > ceilf(oh / minScale)) { *why = 2; return NULL; }
             }
 #endif
             id desc = [cls new];
@@ -73,7 +75,9 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
                     d.denoiseStrengthMaskTextureFormat = MTLPixelFormatR8Unorm;
                     d.transparencyOverlayTextureEnabled = YES;
                     d.transparencyOverlayTextureFormat = MTLPixelFormatRGBA16Float;
-                    return (__bridge_retained void *)[d newTemporalDenoisedScalerWithDevice:gpu];
+                    id made = [d newTemporalDenoisedScalerWithDevice:gpu];
+                    *why = made ? 0 : 3;
+                    return (__bridge_retained void *)made;
                 }
 #endif
                 return NULL;
@@ -84,7 +88,9 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
                 t.inputContentMinScale = scales[0];
                 t.inputContentMaxScale = scales[1];
             }
-            return (__bridge_retained void *)[t newTemporalScalerWithDevice:gpu];
+            id made = [t newTemporalScalerWithDevice:gpu];
+            *why = made ? 0 : 3;
+            return (__bridge_retained void *)made;
         }
 #endif
         return NULL;
@@ -93,7 +99,7 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
 
 void threert_fx_release(void *scaler) { CFRelease(scaler); }
 
-// The order is shared with metalfx.rs's input format lists.
+// The order is metalfx.rs's: the frame's colour, depth, motion, reactive; then the joint guides (live/reconstruction.rs).
 void threert_fx_bind(void *scaler, bool denoise, void *const *inputs, void *output) {
 #if __has_include(<MetalFX/MetalFX.h>)
     id s = (__bridge id)scaler;

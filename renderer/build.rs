@@ -9,7 +9,13 @@ use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, 
 use std::fmt::Write;
 
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+    // `cfg(dlss)`: the `dlss` feature on a target NGX supports (x86-64 Windows or Linux); elsewhere it builds nothing.
+    println!("cargo:rustc-check-cfg=cfg(dlss)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if std::env::var_os("CARGO_FEATURE_DLSS").is_some() && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") && (os == "windows" || os == "linux") {
+        println!("cargo:rustc-cfg=dlss");
+    }
+    if os == "macos" {
         println!("cargo:rerun-if-changed=src/live/metalfx.m");
         cc::Build::new().file("src/live/metalfx.m").flag("-fobjc-arc").compile("threert_metalfx");
         println!("cargo:rustc-link-lib=framework=Foundation");

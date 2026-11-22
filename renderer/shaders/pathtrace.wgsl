@@ -3546,7 +3546,7 @@ fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: b
     return GuideHit(vec3<f32>(1.0), -d, 1.0, first);
 }
 
-@compute @workgroup_size(8, 8) fn metalfx_surface_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
+@compute @workgroup_size(8, 8) fn surface_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (any(gid.xy >= P.size.xy)) { return; }
     let q = gid.y * P.size.x + gid.x;
     let px = accum[q];

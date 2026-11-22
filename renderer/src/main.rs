@@ -345,7 +345,7 @@ fn main() -> Result<()> {
                         time: v["time"].as_f64().map(|t| t as f32),
                         size: (v["width"].as_u64().map(|x| x as u32), v["height"].as_u64().map(|x| x as u32)),
                         hdr: v["hdr"].as_str().map(PathBuf::from),
-                        reconstruction: v["reconstruction"].as_str().map(live::Reconstruction::parse).transpose()?,
+                        reconstruction: v.get("reconstruction").filter(|r| !r.is_null()).map(live::Reconstruction::from_json).transpose()?,
                         scale: v["scale"].as_f64().map(|s| s as f32),
                         approx: v["approx"].as_u64().map(|x| x as u32),
                         signals: v["signals"].as_str().map(PathBuf::from),
@@ -402,7 +402,7 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     };
     g.set_approx(job.approx);
     let mut core = live::LiveCore::new(g, &w, &job.game.assets, presets, width, height)?;
-    host.attach_reconstruction(&mut core);
+    host.attach_rendering(&mut core);
     if let Some(mode) = &job.reconstruction { core.set_reconstruction(mode.clone()); }
     core.set_scale(job.scale.unwrap_or(1.0));
     drop(w);
