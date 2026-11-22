@@ -2776,6 +2776,40 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**Triangles are vertices and indices (2026-11-22).** Every triangle carried its own three vertices (48 bytes), its
+shading attributes (96) and, under hardware traversal, its positions again as the BLAS's input (36). Now the scene
+has vertices (position and u, 16 bytes; normal, v and tangent, 32) and a triangle is three indices and a row of
+four words (`renderer/src/indexed.rs`; docs/RUNTIME.md "The scene's triangles"): one layout for both traversals,
+and the BLASes are built from the same positions through the indices. A mesh's vertices are a run of their own:
+the skinning pass skins a vertex once (it skinned every corner), the particle passes and the light list's fill
+write and read vertices, previous positions are kept a vertex, and an edit in place takes a run of vertices with
+its triangles.
+On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 4.3, Zero Day 1.6 GB -> 1.0, a small scene
+15 MB -> 8. The BLASes themselves are as large as they were.
+What changes in a picture. A triangle's tangent frame, where its file gives none, is made where it is hit, not at
+the build: rounding (offline, software traversal, against the build before: two scenes the same bytes, one with
+411 of 921,600 pixels off by 2 steps at most). Under hardware traversal the driver's tree over indexed geometry is
+another tree, and a few rays at shared edges meet the other triangle: five scenes at 8 samples differ in 3 to
+2,408 pixels, by 3 steps at most but for single samples (8 steps; in one scene one sample, 22 steps over the 11 x 11
+pixels the denoiser spreads it to).
+A skinned vertex whose position is not finite is at its mesh's origin now; its triangles were left out before.
+What it costs: software traversal's trace 3.7 % (a candidate's three indices are read before its positions);
+the build finds the sharing again, 1.2 s on Tokyo (a file's indices are flattened before: historical, a later step).
+Tests: indexed.rs's own (sharing; a seam or a crease; a first corner's tangent; a triangle that is not finite); the
+build's triangles through their indices against the scene's; the in-place tests read every triangle they check
+back through its indices (the light list's emitters, a skinned mesh's corners, normals, UVs, tangents, rows and
+previous positions against the CPU skin); a mesh changed in place to more vertices; a moved card beside another and
+a drifting particle, by their motion vectors; a skinned primitive without normals, by the normal the camera sees;
+`material/function-file-tangent` (a file's tangent is the one a function is given); the rasterized first hit
+(`THREERT_RASTER`, which had no test and is off in any scene with a mesh since meshes are instances) against the
+traced picture.
+28 mutations: 20 failed a test there was (15 a unit test, 4 a render test, 1 a render test under software
+traversal); 8 failed none (vertices shared across a seam, a changed mesh in a run too short, a moved span written a
+triangle off, a moving triangle's previous positions from the wrong vertex, a particle's previous positions and
+its v, a model without normals left without, a file's tangent not read) and each has its test above now.
+Next: tangents a vertex, interpolated (generated where a file has none); vertices packed to 32 bytes; a file's
+indices carried through the build.
+
 **A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
 choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
 its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it

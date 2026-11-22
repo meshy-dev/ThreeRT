@@ -1459,8 +1459,8 @@ too is an override, from F_TINT).
   `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
   nothing else of the kernel knows which it is in.
 - The loop guard's count goes into every loop by a pass over the variant's syntax tree (gpu.rs `guard_loops`).
-- What more than one shader reads or writes is declared once, in `records.wgsl`: a triangle's attributes
-  (`TriAttr`), a sample of the trace (`Pixel`), the light tiles' constants. The file is part of the kernel, of the
+- What more than one shader reads or writes is declared once, in `records.wgsl`: a triangle's attributes as a hit
+  has them (`TriAttr`), a sample of the trace (`Pixel`), the light tiles' constants. The file is part of the kernel, of the
   particle passes and of the live passes (build.rs reads it with live.wgsl). The particle passes take the object
   table's stride as a pipeline constant, as the kernel does (until 2026-11-15 gpu.rs rewrote a line of their text).
 - The kernel's bind group layouts are written in one place (gpu.rs `kernel_layout_entries`), and a test holds them
@@ -1492,7 +1492,8 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   copies, so a light sample reads no placement; what moves an emitter after the load is copied again on the GPU,
   `emitter_fill.wgsl`).
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
-  colours (`env_cdf_at`, `pword`, `vcolor_word`). Integers are read as integers, not through a float's bits.
+  colours, the instances' rows, and the triangles' indices and rows ("The scene's triangles" below) (`env_cdf_at`,
+  `pword`, `vcolor_word`, `tri_indices`, `tri_row`). Integers are read as integers, not through a float's bits.
 
 `Params::table_first` and `word_first` name each section's first element and are written with the parameters
 (`Uploaded::place`). What a scene has more of is another section, not another binding.
@@ -1524,6 +1525,34 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   without, and stays at 29.)
   (Hardware traversal no longer binds software traversal's trees, a placeholder there; the light tiles' lists took
   the binding.)
+
+## The scene's triangles
+
+Vertices and indices, one layout for hardware and software traversal (`renderer/src/indexed.rs`):
+- **Vertices.** `positions` (binding 1): (position, u), 16 bytes a vertex; the BLASes are built from this buffer
+  too (stride 16). `vattrs` (binding 2): (normal, v) and (tangent, hand), 32 bytes a vertex; a zero tangent: none.
+- **Triangles**, two sections of `words`: three indices each (`Stream::Indices`), and a row of four words
+  (`Stream::Triangles`): its material (a mesh's triangle: its section), its object, its flags, its emitter + 1 (a
+  mesh's triangle: its index in its section).
+- A mesh's indices count from the mesh's first vertex, which its instances' records carry (`info.z`); a
+  world-space triangle's count from 0. The kernel reads a triangle through `tri_data(triangle, base)`; software
+  traversal's candidate test reads its three positions the same way.
+- **What shares.** Corners equal bit for bit in position, normal and UV are one vertex: the still world-space
+  triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles the CPU or
+  a pass writes whole (those that move in world space, particles) keep three vertices each.
+- **Tangents.** A triangle's frame is its first vertex's tangent where its file has one (a first corner never
+  shares a vertex with a triangle of another tangent), else made where it is hit, from its edges, its UVs and its
+  first normal (`hit_tangent`), and placed by its instance there.
+- **Motion.** `prev_verts` (binding 6): the previous position of every vertex that moves, 16 bytes: the moving
+  world-space triangles' first, then the deforming meshes', each where its record says (`n2.w`).
+- **Edits.** A mesh an edit places takes a run of triangles and a run of vertices (`EditState::tris`, `verts`);
+  both rooms grow by a copy on the GPU. A mesh changed in place keeps its run where the new vertices fit.
+- **Bytes.** A triangle was 144 bytes for the kernel (48 its vertices, 96 its attributes) and 36 more as the BLAS's
+  input; it is 28 and its share of the vertices' 48 each. Vertices a triangle as measured: Tokyo 1.17 (half the
+  bytes under hardware traversal), Zero Day 1.03, a crowd of skinned walkers 0.98, small scenes of smooth models
+  0.5 to 0.7, a voxel level's meshes 1.88 (a face's four corners are no other face's).
+- The build still flattens a file's indexed geometry and finds the sharing again (1.2 s on Tokyo's 23 M
+  triangles): carrying a file's indices through is a later step.
 
 ## Random numbers
 
@@ -1760,7 +1789,7 @@ on the device", and differs where it says so.
   |---|---|---|
   | `tables` (4) and, with the views, `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers of their own (bindings 4 to 6, before #89) and reads them right from `tables` whole; not as the views (above) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
-  | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
+  | `positions` (1), `vattrs` (2), `nodes` (3), `prev_verts` (6) | per vertex, per node | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, `finish`'s records, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
   | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |
