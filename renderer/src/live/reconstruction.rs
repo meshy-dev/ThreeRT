@@ -256,6 +256,9 @@ pub trait JointProvider: Send {
     /// As [`UpscaleProvider::scale_range`].
     fn scale_range(&self) -> Option<[f32; 2]> { None }
     fn invalidate(&mut self) {}
+    /// Display whites a unit of `color` and of the overlay is (`radiance_unit` = this / exposure, in nits per unit):
+    /// 1 = lighting near display white, the scale a denoiser is commonly trained on. Upscalers take 32.
+    fn white_units(&self) -> f32 { 1.0 }
 }
 
 enum Provider {
@@ -270,6 +273,9 @@ impl Provider {
     }
     fn untimed_gpu_ms(&self) -> f32 {
         match self { Self::Upscale(p) => p.untimed_gpu_ms(), Self::Joint(p) => p.untimed_gpu_ms() }
+    }
+    fn white_units(&self) -> f32 {
+        match self { Self::Upscale(_) => 32.0, Self::Joint(p) => p.white_units() }
     }
     fn invalidate(&mut self) {
         match self { Self::Upscale(p) => p.invalidate(), Self::Joint(p) => p.invalidate() }
@@ -547,6 +553,15 @@ impl Reconstructor {
         }
     }
 
+    /// Display whites a unit of the active provider's input is (its `radiance_unit` = this / exposure); the shader's
+    /// `rc_radiance_unit` takes the same (`L.mode.y`).
+    pub(super) fn white_units(&self) -> f32 {
+        match self.active {
+            Active::Upscaler(i) | Active::Joint(i) => self.providers[i].1.white_units(),
+            _ => 32.0,
+        }
+    }
+
     /// GPU time (ms) the active provider spends outside the frame timer's passes.
     pub(super) fn untimed_gpu_ms(&self) -> f32 {
         match self.active {
@@ -576,7 +591,7 @@ impl Reconstructor {
         let textures = self.textures.as_mut().expect("prepared reconstruction textures");
         let pipes = self.pipes.as_ref().unwrap();
         textures.pack(e, pipes, size.input);
-        let unit = if textures.key.0 { 1.0 } else { 32.0 } / exposure.clamp(0.00001, 64.0);
+        let unit = self.providers[i].1.white_units() / exposure.clamp(0.00001, 64.0);
         let world_to_view = glam::Mat4::look_to_rh(cam.pos, cam.fwd, cam.up).to_cols_array();
         let view_to_clip = glam::Mat4::perspective_infinite_reverse_rh(2.0 * cam.tan_half_fov.atan(), aspect, 0.01).to_cols_array();
         let [color, depth, motion, reactive, ..] = &textures.inputs[..] else { unreachable!() };

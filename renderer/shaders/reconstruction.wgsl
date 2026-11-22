@@ -12,11 +12,11 @@ struct RcInputs {
     @location(2) motion: vec2<f32>,
     @location(3) reactive: f32,
 };
-// A fixed radiometric unit between exposure changes. The post chain receives scene radiance again.
+// A fixed radiometric unit between exposure changes: the display whites a unit is, as the active provider takes it
+// (`L.mode.y`: live/reconstruction.rs `white_units`, which `encode` passes as `radiance_unit`), over the exposure.
+// The post chain receives scene radiance again.
 fn rc_radiance_unit() -> f32 {
-    // A joint denoiser takes lighting near display white (its overlay keeps much brighter emitters); an upscaler
-    // the whole lit frame in a wider linear range. (live/reconstruction.rs `encode` passes the same unit.)
-    return select(32.0, 1.0, L.mode.w == 1u) / clamp(L.misc.x, 0.00001, 64.0);
+    return f32(max(L.mode.y, 1u)) / clamp(L.misc.x, 0.00001, 64.0);
 }
 fn pack_rc_inputs(p: vec4<f32>) -> RcInputs {
     let q = u32(p.y) * L.isz.x + u32(p.x);

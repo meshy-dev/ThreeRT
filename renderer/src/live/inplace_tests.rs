@@ -3393,6 +3393,50 @@ fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
     }
 }
 
+/// A bright emitter keeps its level and hue through MetalFX, as through the built-in path, from 1800 to 120 000 nits
+/// (at EV 6: 28 to 1900 times display white). The denoised scaler given lighting near display white kept them only to
+/// ~30x: Zero Day's orange LEDs (~125x) came out yellow and its frame at 0.68 of the offline reference's luminance; at
+/// 20 000 nits this read 0.82 of the level and green / red 0.29, at 120 000, 0.22 and 0.71 (metalfx.rs `white_units`).
+#[test]
+fn metalfx_keeps_bright_emitters_level_and_hue() {
+    #[cfg(metalfx)]
+    let methods = [Method::MetalFx, Method::MetalFxDenoised];
+    #[cfg(not(metalfx))]
+    let methods: [Method; 0] = [];
+    for nits in [1800.0f32, 20000.0, 120000.0] {
+        let Ok(gpu) = gpu::Gpu::new() else { return };
+        let mut w = world();
+        w.set_material(5, serde_json::from_value(serde_json::json!({
+            "name": "HDR panel", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1,
+            "emissive": [1, 0.25, 0.5], "emissiveIntensity": nits, "doubleSided": true,
+        })).unwrap());
+        w.set_transform(12, Vec3::new(0.0, 0.0, 1.0), glam::Quat::IDENTITY, Vec3::new(5.0, 0.5, 1.0)).unwrap();
+        w.set_camera_desc(4, camera(50.0, None, manual(6.0))).unwrap();
+        let mut core = LiveCore::new(gpu, &w, Path::new("."), &crate::default_presets_dir(), 320, 180).unwrap();
+        for method in methods.clone() {
+            core.set_scale(0.5);
+            core.set_reconstruction(method.clone());
+            for _ in 0..48 { core.render(1, |_, _| {}); }
+            if core.reconstruction() == Method::Builtin {
+                eprintln!("{} unsupported on this device: {:?}", method.name(), core.reconstruction_status().skipped);
+                continue;
+            }
+            // The panel's middle (a block: one pixel's upscaling does not decide it).
+            let hdr = core.read_hdr().unwrap();
+            let mut c = [0.0f32; 3];
+            for y in core.h / 2 - 5..core.h / 2 + 5 {
+                for x in core.w / 2 - 10..core.w / 2 + 10 {
+                    let p = ((y * core.w + x) * 3) as usize;
+                    for k in 0..3 { c[k] += hdr[p + k] / 200.0; }
+                }
+            }
+            let what = format!("{} at {nits} nits: {c:?}", method.name());
+            assert!((c[0] / nits - 1.0).abs() < 0.05, "{what}: level");
+            assert!((c[1] / c[0] / 0.25 - 1.0).abs() < 0.03 && (c[2] / c[0] / 0.5 - 1.0).abs() < 0.03, "{what}: hue");
+        }
+    }
+}
+
 /// A request is a preference list: the first method this device runs is used, and the status says why each one
 /// before it did not. A typed quality preset is the vendors' exact ratio.
 #[test]

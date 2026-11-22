@@ -18,7 +18,7 @@ struct LiveParams {
     size: vec4<u32>,   // width, height, frame, reset history (1)
     misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
     misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
-    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), -, the scene's lighting is changing (live/mod.rs `live_lighting`), -
+    mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), display whites a unit of a reconstruction provider's input is (reconstruction.wgsl `rc_radiance_unit`), the scene's lighting is changing (live/mod.rs `live_lighting`), -
     post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
     ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)

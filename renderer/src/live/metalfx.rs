@@ -141,4 +141,10 @@ impl JointProvider for MetalFx {
     fn untimed_gpu_ms(&self) -> f32 { if self.scaler.is_some() { unsafe { threert_fx_gpu_ms() } } else { 0.0 } }
     fn scale_range(&self) -> Option<[f32; 2]> { self.scales }
     fn invalidate(&mut self) { self.scaler = None; self.key = None; }
+    /// The denoised scaler is not linear in its input's level. Given lighting near display white it averaged the
+    /// highlights down and bent bright emitters (M3 Max, macOS 26.6: Zero Day at 0.68 of the offline reference's
+    /// luminance, its orange LEDs yellow and dull; an emitter at 300x white lost a fifth of its red, the hue drifting
+    /// to yellow, and at 1900x came out clipped flat). Given it at 1/32 of white, as the upscaler: 0.999, the LEDs
+    /// orange, the emitter's level and hue within 1 % to 1900x.
+    fn white_units(&self) -> f32 { 32.0 }
 }

@@ -541,7 +541,7 @@ impl LiveCore {
             // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
             // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
             misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
-            mode: [self.view_mode, 0, self.live_lighting() as u32, reconstruction.raw_signal() as u32],
+            mode: [self.view_mode, self.reconstructor.white_units() as u32, self.live_lighting() as u32, reconstruction.raw_signal() as u32],
             post: self.post,
             ae: self.view.exposure_settings.ae,
             ae2: self.view.exposure_settings.ae2,
