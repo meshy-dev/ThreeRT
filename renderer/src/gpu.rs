@@ -3464,6 +3464,9 @@ impl Gpu {
         if let Some(a) = &mut up.accel {
             (a.positions, a.indices, a.index_first) = (up.positions.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
         }
+        if let Some(t) = &mut up.translucent {
+            t.positions = up.positions.clone();
+        }
         up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, positions: &up.positions, vattrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_pos: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         if up.accel.is_none() {
             return;

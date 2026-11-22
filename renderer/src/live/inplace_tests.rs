@@ -2942,6 +2942,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     // Removed: its slot among the skinned, its record, its triangles and its previous vertices are the room's again,
     // and the next one added takes them.
     let (mesh, prev, tri, vertices) = (sk.mesh, live.sc.instances[sk.instance as usize].prev, live.sc.gpu_instances[sk.instance as usize].info[0], live.sc.meshes[sk.mesh as usize].vcount);
+    let first_vertex = live.sc.instances[sk.instance as usize].verts;
     w.remove(32);
     assert!(!live.commit(&mut w).unwrap(), "the one added removed: in place ({:?})", live.fallback);
     assert!(live.sc.tables.retained.skinned[g].mesh == u32::MAX && live.sc.edit.free_skinned == vec![g as u32] && live.sc.edit.dead_meshes.contains(&mesh) && !seen_by_rays(&live, sk.instance), "its slot and its mesh are free, no ray sees it");
@@ -2951,6 +2952,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     assert!(!live.commit(&mut w).unwrap(), "the next added: in place ({:?})", live.fallback);
     let next = live.sc.tables.retained.skinned[of(&live, 34)].clone();
     assert_eq!((of(&live, 34), next.mesh, next.instance, live.sc.instances[next.instance as usize].prev, live.sc.gpu_instances[next.instance as usize].info[0]), (g, mesh, sk.instance, prev, tri), "it has the slot, the mesh, the record, the previous vertices and the triangles of the one removed");
+    assert_eq!(live.sc.instances[next.instance as usize].verts, first_vertex, "and its vertices");
     check("the next added", &live, 34, &bend(0.6), &bend(0.6));
     w.set_animation(34, Some(bend(0.2))).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the next added posed on: in place ({:?})", live.fallback);
