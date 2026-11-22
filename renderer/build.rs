@@ -15,7 +15,11 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_DLSS").is_some() && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") && (os == "windows" || os == "linux") {
         println!("cargo:rustc-cfg=dlss");
     }
-    if os == "macos" {
+    // `cfg(metalfx)`: Apple's platforms, where MetalFX's scalers exist (macOS 13 / iOS 16; the denoised one 26). The
+    // framework is loaded at run time (metalfx.m), so the same binary runs on systems without it.
+    println!("cargo:rustc-check-cfg=cfg(metalfx)");
+    if os == "macos" || os == "ios" {
+        println!("cargo:rustc-cfg=metalfx");
         println!("cargo:rerun-if-changed=src/live/metalfx.m");
         cc::Build::new().file("src/live/metalfx.m").flag("-fobjc-arc").compile("threert_metalfx");
         println!("cargo:rustc-link-lib=framework=Foundation");

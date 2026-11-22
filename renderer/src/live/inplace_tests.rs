@@ -3356,9 +3356,9 @@ fn reconstruction_keeps_hdr_emitters_and_resets_on_a_cut() {
     let methods = [
         Method::Fsr,
         Method::Off,
-        #[cfg(target_os = "macos")]
+        #[cfg(metalfx)]
         Method::MetalFx,
-        #[cfg(target_os = "macos")]
+        #[cfg(metalfx)]
         Method::MetalFxDenoised,
     ];
     for method in methods {

@@ -72,7 +72,7 @@ impl MetalFx {
             });
             let Some(raw) = raw else {
                 return Prepared::Unsupported(match why {
-                    1 => format!("this Mac has no {} (macOS {} or later on Apple silicon)", self.name(), if self.denoise { 26 } else { 13 }),
+                    1 => format!("this device has no {} (macOS {} or iOS {} or later, Apple silicon)", self.name(), if self.denoise { 26 } else { 13 }, if self.denoise { 26 } else { 16 }),
                     2 => format!("{} takes outputs {:.2}x to {:.2}x its input; {}x{} to {}x{} is {:.2}x", self.name(), scales[0], scales[1],
                         input[0], input[1], output[0], output[1], output[0] as f32 / input[0] as f32),
                     _ => format!("{} could not be made for {}x{} to {}x{}", self.name(), input[0], input[1], output[0], output[1]),

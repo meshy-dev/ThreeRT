@@ -17,13 +17,25 @@ float threert_fx_gpu_ms(void) {
 #if __has_include(<MetalFX/MetalFX.h>)
 #import <MetalFX/MetalFX.h>
 #endif
+// What the SDK declares, on either platform: input content scale queries (macOS 14, iOS 17) and the reactive mask
+// (macOS 14.4, iOS 17.4). Each use also asks the object at run time.
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED)
+#define FX_SDK_SCALE_QUERY (__MAC_OS_X_VERSION_MAX_ALLOWED >= 140000)
+#define FX_SDK_REACTIVE (__MAC_OS_X_VERSION_MAX_ALLOWED >= 140400)
+#elif defined(__IPHONE_OS_VERSION_MAX_ALLOWED)
+#define FX_SDK_SCALE_QUERY (__IPHONE_OS_VERSION_MAX_ALLOWED >= 170000)
+#define FX_SDK_REACTIVE (__IPHONE_OS_VERSION_MAX_ALLOWED >= 170400)
+#else
+#define FX_SDK_SCALE_QUERY 0
+#define FX_SDK_REACTIVE 0
+#endif
 
 // NULL with *why: 1 = no such scaler on this OS or device, 2 = the input's scale is outside scales[0..2], 3 = it failed.
 void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, float *scales, int32_t *why) {
     @autoreleasepool {
         *why = 1;
 #if __has_include(<MetalFX/MetalFX.h>)
-        if (@available(macOS 13, *)) {
+        if (@available(macOS 13, iOS 16, *)) {
             // Resolve the framework at runtime so the same binary runs on older systems.
             NSBundle *framework = [NSBundle bundleWithPath:@"/System/Library/Frameworks/MetalFX.framework"];
             if (![framework load]) return NULL;
@@ -34,7 +46,7 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
             // Earlier SDKs have no capability query. Limit reuse to this configuration there.
             scales[0] = fminf((float)ow / iw, (float)oh / ih);
             scales[1] = fmaxf((float)ow / iw, (float)oh / ih);
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+#if FX_SDK_SCALE_QUERY
             if ([cls respondsToSelector:@selector(supportedInputContentMaxScaleForDevice:)]) {
                 float maxScale = [cls supportedInputContentMaxScaleForDevice:gpu];
                 float minScale = [cls supportedInputContentMinScaleForDevice:gpu];
@@ -55,7 +67,7 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
             [desc setMotionTextureFormat:MTLPixelFormatRG16Float];
             [desc setOutputTextureFormat:MTLPixelFormatRGBA16Float];
             [desc setAutoExposureEnabled:NO];
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140400
+#if FX_SDK_REACTIVE
             if ([desc respondsToSelector:@selector(setReactiveMaskTextureEnabled:)]) {
                 [desc setReactiveMaskTextureEnabled:YES];
                 [desc setReactiveMaskTextureFormat:MTLPixelFormatR8Unorm];
@@ -63,7 +75,7 @@ void *threert_fx_create(void *device, bool denoise, bool dynamic, uint32_t iw, u
 #endif
             if (denoise) {
 #if __has_include(<MetalFX/MTLFXTemporalDenoisedScaler.h>)
-                if (@available(macOS 26, *)) {
+                if (@available(macOS 26, iOS 26, *)) {
                     MTLFXTemporalDenoisedScalerDescriptor *d = desc;
                     d.diffuseAlbedoTextureFormat = MTLPixelFormatRGBA8Unorm;
                     d.specularAlbedoTextureFormat = MTLPixelFormatRGBA8Unorm;
@@ -106,7 +118,7 @@ void threert_fx_bind(void *scaler, bool denoise, void *const *inputs, void *outp
     [s setColorTexture:(__bridge id)inputs[0]];
     [s setDepthTexture:(__bridge id)inputs[1]];
     [s setMotionTexture:(__bridge id)inputs[2]];
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140400
+#if FX_SDK_REACTIVE
     if ([s respondsToSelector:@selector(setReactiveMaskTexture:)]) [s setReactiveMaskTexture:(__bridge id)inputs[3]];
 #endif
     [s setOutputTexture:(__bridge id)output];

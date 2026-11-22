@@ -35,9 +35,9 @@ pub enum Method {
     Off,
     /// ThreeRT's denoiser, then FidelityFX Super Resolution 1 (spatial: no history).
     Fsr,
-    /// ThreeRT's denoiser, then the MetalFX temporal scaler (macOS 13+).
+    /// ThreeRT's denoiser, then the MetalFX temporal scaler (macOS 13+, iOS 16+).
     MetalFx,
-    /// The MetalFX temporal denoised scaler: both jobs (macOS 26+, Apple silicon).
+    /// The MetalFX temporal denoised scaler: both jobs (macOS 26+ on Apple silicon, iOS 26+).
     MetalFxDenoised,
     /// ThreeRT's denoiser, then DLSS Super Resolution (DLAA at scale 1; NVIDIA RTX, feature `dlss`).
     Dlss,
@@ -80,7 +80,7 @@ impl Method {
     /// The methods this build could run on its platform, in the order the viewer's key cycles them.
     pub fn platform() -> Vec<Method> {
         let mut m = vec![Self::Builtin];
-        #[cfg(target_os = "macos")]
+        #[cfg(metalfx)]
         m.extend([Self::MetalFxDenoised, Self::MetalFx]);
         #[cfg(dlss)]
         m.extend([Self::DlssRr, Self::Dlss]);
@@ -140,7 +140,7 @@ impl Reconstruction {
             Self::Auto => {
                 #[allow(unused_mut)]
                 let mut m = vec![];
-                #[cfg(target_os = "macos")]
+                #[cfg(metalfx)]
                 m.extend([Method::MetalFxDenoised, Method::MetalFx]);
                 #[cfg(dlss)]
                 m.extend([Method::DlssRr, Method::Dlss]);
@@ -381,7 +381,7 @@ impl Default for Reconstructor {
     fn default() -> Self {
         #[allow(unused_mut)]
         let mut providers: Vec<(Method, Provider)> = vec![];
-        #[cfg(target_os = "macos")]
+        #[cfg(metalfx)]
         providers.extend([
             (Method::MetalFx, Provider::Upscale(Box::new(super::metalfx::MetalFx::upscaler()))),
             (Method::MetalFxDenoised, Provider::Joint(Box::new(super::metalfx::MetalFx::denoiser()))),
@@ -496,7 +496,7 @@ impl Reconstructor {
         }
         let Some(i) = self.providers.iter().position(|(k, _)| k == m) else {
             return Err((Skip::Unavailable, match m {
-                Method::MetalFx | Method::MetalFxDenoised => "MetalFX runs on macOS only".into(),
+                Method::MetalFx | Method::MetalFxDenoised => "MetalFX runs on macOS and iOS only".into(),
                 Method::Dlss | Method::DlssRr => "this build has no DLSS (feature `dlss`, x86-64 Windows or Linux)".into(),
                 _ => format!("no provider is registered as {}", m.name()),
             }));

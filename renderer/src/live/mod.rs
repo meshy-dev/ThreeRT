@@ -53,7 +53,7 @@ mod frame;
 mod dlss;
 mod fsr;
 mod layout;
-#[cfg(target_os = "macos")]
+#[cfg(metalfx)]
 mod metalfx;
 mod load;
 mod reconstruction;
