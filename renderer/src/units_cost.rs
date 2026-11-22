@@ -17,7 +17,7 @@ use std::time::Instant;
 /// A scene as the kernel is given it.
 struct Laid {
     nodes: Vec<bvh::GpuNode>,
-    tri_verts: Vec<[f32; 4]>,
+    soup: units::tests::Soup,
     instances: Vec<scene::GpuInstance>,
     top: u32,
     units: u32,
@@ -49,10 +49,12 @@ fn lay(world: &crate::world::World, assets: &std::path::Path, with_units: bool) 
     let s = t.elapsed().as_secs_f64();
     let (top, count) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
     let stored = p.tri_verts.len() / 3;
+    // (The triangles as the kernel has them: `prepare`'s vertices, indices and rows.)
+    let soup = units::tests::Soup { positions: sc.indexed.positions.clone(), indices: sc.indexed.indices.clone(), rows: sc.indexed.rows.clone() };
     let what = format!("{} triangles stored ({:.1} MiB of vertices + attributes), {} nodes ({:.1} MiB), {} units; flattened {} triangles; prepare {s:.2} s", stored, (stored * 144) as f64 / 1048576.0, p.nodes.len(), (p.nodes.len() * 32) as f64 / 1048576.0, sc.units.as_ref().map_or(0, |u| u.count), flat + placed);
     let instances = if sc.gpu_instances.is_empty() { vec![scene::GpuInstance::default()] } else { sc.gpu_instances.clone() };
     let unit_tris = sc.units.as_ref().map_or(vec![], |u| sc.instances.iter().enumerate().filter(|(r, i)| !i.hidden && u.slots.get(*r).is_some_and(|s| s.is_some())).map(|(r, i)| (r as u32, sc.gpu_instances[r].info[0], sc.meshes[i.mesh as usize].count)).collect());
-    (Laid { nodes: p.nodes, tri_verts: p.tri_verts, instances, top, units: if sc.units.is_some() { count } else { 0 }, what, still: sc.tris.len() as u32, unit_tris }, sc)
+    (Laid { nodes: p.nodes, soup, instances, top, units: if sc.units.is_some() { count } else { 0 }, what, still: sc.tris.len() as u32, unit_tris }, sc)
 }
 
 impl Laid {
@@ -62,20 +64,20 @@ impl Laid {
         let k = Kernel { budget: u64::MAX, ..self.kernel() };
         let mut best = tmax;
         for ti in 0..self.still {
-            best = best.min(k.intersect_tri(o, d, ti, best).unwrap());
+            best = best.min(k.intersect_tri(o, d, ti, 0, best).unwrap());
         }
         for &(rec, first, count) in &self.unit_tris {
             let r = &self.instances[rec as usize];
             let (lo, ld) = (Kernel::proc_point(r, o), Kernel::proc_dir(r, d));
             for ti in first..first + count {
-                best = best.min(k.intersect_tri(lo, ld, ti, best).unwrap());
+                best = best.min(k.intersect_tri(lo, ld, ti, r.info[2], best).unwrap());
             }
         }
         best
     }
 
     fn kernel(&self) -> Kernel<'_> {
-        Kernel { nodes: &self.nodes, tri_verts: &self.tri_verts, instances: &self.instances, sections: &[], rows: &[], top: self.top, units: self.units, steps: Default::default(), budget: 1 << 26, deepest: Default::default(), reads: Default::default() }
+        Kernel { nodes: &self.nodes, positions: &self.soup.positions, indices: &self.soup.indices, tri_rows: &self.soup.rows, instances: &self.instances, rows: &[], top: self.top, units: self.units, steps: Default::default(), budget: 1 << 26, deepest: Default::default(), reads: Default::default() }
     }
 }
 
@@ -101,8 +103,9 @@ fn rays(l: &Laid, cam: &scene::CameraData, w: usize, h: usize) -> Vec<Ray> {
         out.push(Ray { o: o.into(), tmax, d: d.into(), mode, t, kind });
         (t < INF).then(|| {
             // The hit's point, a little off the triangle on the ray's side.
-            let v = |k: u32| { let v = l.tri_verts[(hit.tri * 3 + k) as usize]; Vec3A::new(v[0], v[1], v[2]) };
-            let n = v(1).cross(v(2)).normalize_or_zero();
+            let base = if hit.inst == units::cpu::NO_INST { 0 } else { l.instances[hit.inst as usize].info[2] };
+            let v = |k: usize| { let v = l.soup.positions[(base + l.soup.indices[hit.tri as usize][k]) as usize]; Vec3A::new(v[0], v[1], v[2]) };
+            let n = (v(1) - v(0)).cross(v(2) - v(0)).normalize_or_zero();
             // (A unit's triangle is in the unit's space: its normal by the record's normal rows.)
             let n = if hit.inst == NO_INST { n } else { let r = &l.instances[hit.inst as usize]; Vec3A::new(Vec3A::from_slice(&r.n[0]).dot(n), Vec3A::from_slice(&r.n[1]).dot(n), Vec3A::from_slice(&r.n[2]).dot(n)).normalize_or_zero() };
             let n = if n.dot(d) > 0.0 { -n } else { n };
@@ -342,11 +345,8 @@ fn units_pile() {
         // The piece's mesh: its triangles after the scene's, its tree in the mesh range.
         let tris = lump();
         let tree = units::mesh_tree(&tris).unwrap();
-        let first_tri = (l.tri_verts.len() / 3) as u32;
-        for &i in &tree.order {
-            let [a, b, c] = tris[i as usize];
-            l.tri_verts.extend([[a.x, a.y, a.z, 0.0], [(b - a).x, (b - a).y, (b - a).z, 0.0], [(c - a).x, (c - a).y, (c - a).z, 0.0]]);
-        }
+        // (Its vertices three a triangle and counted from 0: the records placing it have no first vertex.)
+        let first_tri = l.soup.push(&tree.order.iter().map(|&i| tris[i as usize]).collect::<Vec<_>>());
         let mesh = u.trees.len() as u32;
         let root = u.add_tree(mesh, &tree).expect("room for one small tree") as usize;
         l.nodes[root..root + tree.nodes.len()].copy_from_slice(&tree.nodes);
@@ -409,7 +409,7 @@ fn units_pile() {
         let made = (u.kept.builds - was.0, u.kept.changes - was.1, u.kept.refits - was.2);
         // At rest: the kernel's buffers as a session would have written them.
         for (j, p) in pieces.iter().enumerate() {
-            let inst = scene::Instance { mesh, world: pose(p, 1.0), object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0 };
+            let inst = scene::Instance { mesh, world: pose(p, 1.0), object: 0, cast_shadow: true, name: String::new(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
             l.instances[first_rec + j] = units::unit_record(inst.gpu(first_tri), root as u32, true);
         }
         let at = u.layout.top_first as usize;

@@ -74,10 +74,15 @@ pub enum Stream {
     VertexColors,
     /// The instances' rows (scene.rs `Row`): four words a section of an instance's mesh.
     Rows,
+    /// The triangles' vertices (indexed.rs): three words a triangle, in the triangles' GPU order. What the BLASes are
+    /// built from, too.
+    Indices,
+    /// The triangles' rows (`indexed::TriRow`): four words a triangle.
+    Triangles,
 }
 
 impl Section for Stream {
-    const COUNT: usize = 4;
+    const COUNT: usize = 6;
     const UNIT: u64 = 4;
     const LABEL: &'static str = "words";
     fn index(self) -> usize {

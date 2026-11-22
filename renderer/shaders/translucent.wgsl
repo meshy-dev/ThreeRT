@@ -57,11 +57,12 @@
 // Material of a translucent particle at triangle ti (barycentrics b): colour, opacity and emission after maps and its
 // material function.
 @if(hwrt) fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
-    let a = attrs[ti];
+    let td = tri_data(ti, 0u);
+    let a = td.a;
     // (A particle's triangle is in the world: no instance.)
     let m = material_at(material_of(a, NO_INST));
     let uv = mesh_uv(a, m, b.x, b.y);
-    let tl = mesh_lod(mesh_density(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz, a, m), 1.0, 1.0) + lod - LOD_BIAS;
+    let tl = mesh_lod(mesh_density(td.e1, td.e2, a, m), 1.0, 1.0) + lod - LOD_BIAS;
     var r = mat_base(m);
     if (has(F_TEX) && m.tex0.x >= 0) {
         let c = tex(m.tex0.x, uv, tl);

@@ -110,7 +110,7 @@
 // material has an alpha test, as the build flags TRI_MASKED.
 @if(hwrt) fn cutout_hit(h: Hit) -> bool {
     if (has(F_INST) && hit_row != NO_ROW) { return (hit_row & ROW_CUTOUT) != 0u; }
-    return material_at(triangle_material(attrs[h.tri])).uv2.w > 0.0;
+    return material_at(tri_row(h.tri).x).uv2.w > 0.0;
 }
 
 // The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.

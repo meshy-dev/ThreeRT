@@ -153,8 +153,9 @@ pub struct Params {
     /// Each table's first vec4 in the tables' heap (`heap::Table`'s order; `Uploaded::place`).
     pub table_first: [[u32; 4]; 3],
     /// Each stream's first word in the words' heap (`heap::Stream`'s order): the environment's CDF, the procedural
-    /// data, the vertex colours, -.
-    pub word_first: [u32; 4],
+    /// data, the vertex colours, the instances' rows; the triangles' indices, their rows. Then the first vertex that
+    /// moves (the previous positions count from it), -.
+    pub word_first: [[u32; 4]; 2],
     /// The merged layout (`KernelBufs::place`): each of group 1's vec4 sections' first vec4 in the tail of its one
     /// buffer (the cache's values, the specular rays, the motion vectors, the direct light; the light lists), and
     /// the last four's lengths. As written: zeros (the kernel asks the buffers).
@@ -462,6 +463,11 @@ pub struct Uploaded {
     /// The dynamic triangles' (posed models, movable objects: the tail from `dynamic_first`) vertices of the previous
     /// frame, kernel layout: live motion vectors.
     pub prev_verts: wgpu::Buffer,
+    /// The vertices (indexed.rs): (position, u) each; their attributes, (normal, v) and (tangent, hand) each; and the
+    /// previous frame's positions of those that move. What the kernel reads (bindings 1, 2 and 6).
+    pub positions: wgpu::Buffer,
+    pub vattrs: wgpu::Buffer,
+    pub prev_pos: wgpu::Buffer,
     pub dynamic_first: usize,
     pub accel: Option<Accel>,
     /// Software traversal's units (units.rs), when the scene has any: what `accel` is to hardware traversal. Their
@@ -581,7 +587,9 @@ impl Uploaded {
         let first = self.heap.firsts();
         p.table_first = std::array::from_fn(|k| std::array::from_fn(|j| first.get(k * 4 + j).copied().unwrap_or(0)));
         let first = self.words.firsts();
-        p.word_first = std::array::from_fn(|k| first.get(k).copied().unwrap_or(0));
+        for (k, at) in first.iter().enumerate().take(6) {
+            p.word_first[k / 4][k % 4] = *at;
+        }
     }
 }
 
@@ -2362,6 +2370,13 @@ impl Gpu {
         let dynamic_end: usize = groups.iter().sum::<usize>() + crate::scene::deforming_pool(&scene.meshes);
         let prev = &tri_verts[(dynamic_first * 3).min(tri_verts.len())..(dynamic_end * 3).min(tri_verts.len())];
         let b_prev = buf("prev verts", bytemuck::cast_slice(prev), edit);
+        // The vertices: positions and attributes, with room for three a triangle of the edit room; the previous
+        // positions of those that move.
+        let ix = &scene.indexed;
+        let b_pos = buf_room("positions", bytemuck::cast_slice(&ix.positions), room.tris * 48, edit);
+        let b_vattr = buf_room("vertex attrs", bytemuck::cast_slice(&ix.attrs), room.tris * 96, edit);
+        let b_prev_pos = buf("prev positions", bytemuck::cast_slice(&ix.positions[ix.dynamic.0 as usize..(ix.dynamic.0 + ix.dynamic.1) as usize]), edit);
+        timings.push(("vertex_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * 28) as f64 / (1 << 20) as f64));
         // The vertex colours' bytes on the GPU (the edit room's included).
         timings.push(("vcolor_mb".into(), if scene.gpu_vcolors.is_empty() { 0.0 } else { (scene.gpu_vcolors.len() * 4 + room.tris * 12) as f64 / (1 << 20) as f64 }));
         let b_attrs = buf_room("attrs", bytemuck::cast_slice(&scene.attrs), room.tris * std::mem::size_of::<crate::scene::GpuTriAttr>(), edit);
@@ -2659,7 +2674,7 @@ impl Gpu {
             self.uniform_copies(&heap)
         });
         let bg_parts = BindParts { nodes: b_nodes, tex_view, env_view, sampler, grid_view };
-        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_verts, attrs: &b_attrs, heap: &heap, words: &words, prev_verts: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
+        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_pos, attrs: &b_vattr, heap: &heap, words: &words, prev_verts: &b_prev_pos, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
         let kernel = Kernel { approx: self.approx, ..Kernel::new(scene, groups) };
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
         let translucent = match &accel {
@@ -2782,7 +2797,7 @@ impl Gpu {
             Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_verts, &heap), particles: self.emitter_fill(&emitter_runs.particles, &b_verts, &heap) },
             None => EmitterFills::default(),
         };
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, positions: b_pos, vattrs: b_vattr, prev_pos: b_prev_pos, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2850,7 +2865,10 @@ impl Gpu {
         let color_bytes = if colors.is_empty() { 0 } else { colors.len() + room_tris * 12 };
         let rows: &[u8] = bytemuck::cast_slice(&scene.rows);
         let row_bytes = if rows.is_empty() && room_rows == 0 { 0 } else { rows.len() + room_rows * 16 };
-        let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64, row_bytes as u64];
+        // (The triangles' indices and rows: one at least, the triangle a tree over nothing names, of vertex 0.)
+        let ix = &scene.indexed;
+        let (index_bytes, tri_bytes) = ((ix.indices.len() + room_tris).max(1) * 12, (ix.rows.len() + room_tris).max(1) * 16);
+        let sizes = |room: usize| [(env_cdf.len() * 4) as u64, ((head + blob_words + room) * 4) as u64, color_bytes as u64, row_bytes as u64, index_bytes as u64, tri_bytes as u64];
         let (used, limit) = (Heap::<Stream>::size_for(&sizes(0)), self.device.limits().max_storage_buffer_binding_size as u64);
         if used > limit {
             return Err(anyhow!("procedural geometry: {} MB of data, more than this device binds in one buffer ({} MB)", used >> 20, limit >> 20));
@@ -2872,6 +2890,8 @@ impl Gpu {
                 heap.write(&self.queue, Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 heap.write(&self.queue, Stream::VertexColors, 0, colors);
                 heap.write(&self.queue, Stream::Rows, 0, rows);
+                heap.write(&self.queue, Stream::Indices, 0, bytemuck::cast_slice(&ix.indices));
+                heap.write(&self.queue, Stream::Triangles, 0, bytemuck::cast_slice(&ix.rows));
                 let mut e = self.device.create_command_encoder(&Default::default());
                 e.copy_buffer_to_buffer(&c.buf, c.offset, &heap.buffer, heap.at(Stream::Procs) + blob_at, c.bytes);
                 self.queue.submit([e.finish()]);
@@ -2881,6 +2901,8 @@ impl Gpu {
                 put(Stream::EnvCdf, 0, bytemuck::cast_slice(env_cdf));
                 put(Stream::VertexColors, 0, colors);
                 put(Stream::Rows, 0, rows);
+                put(Stream::Indices, 0, bytemuck::cast_slice(&ix.indices));
+                put(Stream::Triangles, 0, bytemuck::cast_slice(&ix.rows));
                 let Some(l) = l else { return };
                 put(Stream::Procs, 0, bytemuck::cast_slice(&l.head));
                 for (blob, off) in &l.blobs {
@@ -3457,7 +3479,7 @@ impl Gpu {
                 k.bg = skin_bind_group(&self.device, &k.pipeline, [&k.params, &k.blocks, &k.table, &k.corners, &k.palette], &up.verts, &up.attrs, blas);
             }
         }
-        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.verts, attrs: &up.attrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_verts, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
+        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.positions, attrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         let Some(a) = &up.accel else { return };
         let written = ParticleTargets { verts: &up.verts, prev_verts: &up.prev_verts, blas_verts: &a.verts, heap: &up.heap, attrs: &up.attrs };
         if let Some(p) = &mut up.particles {

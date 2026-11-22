@@ -40,7 +40,7 @@ const UNIT_SHIFTED: u32 = 2u;
 // The flags of a triangle of a unit with rows (from `first` on), which its vertices do not carry: its section's row
 // says whether it is a cutout's (TRI_MASKED) or glass (TRI_NO_SHADOW). Asked of the units that have such a section.
 @if(units) fn row_flags(first: u32, ti: u32) -> u32 {
-    let x = row_word(first, bitcast<u32>(attrs[ti].uv.w), 0u);
+    let x = row_word(first, tri_row(ti).x, 0u);
     return select(0u, TRI_MASKED, (x & ROW_CUTOUT) != 0u) | select(0u, TRI_NO_SHADOW, (x & ROW_GLASS) != 0u);
 }
 
@@ -58,6 +58,8 @@ const UNIT_SHIFTED: u32 = 2u;
     var rinv = inv_d;
     var off = top;
     var first = 0u;
+    // The unit's mesh's first vertex.
+    var uverts = 0u;
     var base = 0u;
     // The unit's bits and its rows' first (a unit with rows has its cutouts and its glass by them: `row_flags`).
     var ubits = 0u;
@@ -100,6 +102,7 @@ const UNIT_SHIFTED: u32 = 2u;
                 }
                 off = bitcast<u32>(u.n0.w);
                 first = u.info.x;
+                uverts = u.info.z;
                 ubits = bitcast<u32>(u.n1.w);
                 urows = u.info.w;
                 base = sp;
@@ -109,9 +112,9 @@ const UNIT_SHIFTED: u32 = 2u;
         } else {
             for (var k = 0u; k < n.count; k++) {
                 let ti = first + n.left_or_first + k;
-                let x = intersect_tri(ro, rd, ti, hit.t);
+                let x = intersect_tri(ro, rd, ti, uverts, hit.t);
                 if (x.x < hit.t) {
-                    var flags = bitcast<u32>(tri_verts[ti * 3u].w);
+                    var flags = tri_flags(ti);
                     if ((ubits & (INST_CUTOUT | INST_GLASS)) != 0u) { flags |= row_flags(urows, ti); }
                     if (has(F_IGLASS) && mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
                     if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, rec, x.y, x.z, x.x)) { shadow_hole = true; continue; }

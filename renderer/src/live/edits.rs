@@ -2582,7 +2582,7 @@ impl LiveCore {
                         }
                         let pass = up.skin.as_mut().ok_or("a scene without a skinning pass")?;
                         edit.rebind |= pass.set_job(&g.device, q, slot as usize, first as u32, n as u32, source, palette_len);
-                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: prev as u32 };
+                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: prev as u32, verts: 0 };
                         let (lo, hi) = im.placed_bounds(m);
                         let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                         (None, Placed::Skinned(inst, mine, slot), entry)
@@ -2603,7 +2603,7 @@ impl LiveCore {
                             let (w_n, _) = scene::placed_world(scene::RigidModel::part_world(m, node, &globals), m.w_axis.truncate());
                             let (plo, phi) = meshes[mesh as usize].placed_bounds(w_n);
                             (lo, hi) = (lo.min(plo), hi.max(phi));
-                            let inst = scene::Instance { mesh, world: w_n, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0 };
+                            let inst = scene::Instance { mesh, world: w_n, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0, verts: 0 };
                             placed.push((node, inst, mine));
                         }
                         for &(_, mesh) in &parts {
@@ -2626,7 +2626,7 @@ impl LiveCore {
                         if let Some(k) = was {
                             drop_mesh_user(k, edit, tables, meshes);
                         }
-                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0 };
+                        let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0, verts: 0 };
                         let (lo, hi) = im.placed_bounds(m);
                         let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, hi - lo, o.custom, [1.0; 3]);
                         (at.map(|(_, r)| r), Placed::Mesh(inst, mine), entry)
@@ -2864,7 +2864,7 @@ impl LiveCore {
                         };
                         let (st, size) = (tables.stride, std::mem::size_of::<scene::GpuInstance>());
                         if instances.len() < r0 + cap {
-                            let filler = scene::Instance { mesh, world: glam::Mat4::IDENTITY, object: 0, cast_shadow: false, name: String::new(), sub: None, hidden: true, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0 };
+                            let filler = scene::Instance { mesh, world: glam::Mat4::IDENTITY, object: 0, cast_shadow: false, name: String::new(), sub: None, hidden: true, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
                             instances.resize(r0 + cap, filler);
                         }
                         if gpu_instances.len() < r0 + cap {
@@ -2879,7 +2879,7 @@ impl LiveCore {
                             let row_at = run + i;
                             let mut row = scene::row_of(mat, &tables.materials);
                             row[1] = edit.pool_first as u32 + im.first;
-                            let mut inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: scene::rows_cast(&[row], o.cast_shadow), name: o.name.clone(), sub: Some(i as u32), hidden, masked: false, first_emitter: 0, rows: row_at as u32, bits: scene::rows_bits(&[row]), prev: 0 };
+                            let mut inst = scene::Instance { mesh, world: wm, object: (o0 + i) as u32, cast_shadow: scene::rows_cast(&[row], o.cast_shadow), name: o.name.clone(), sub: Some(i as u32), hidden, masked: false, first_emitter: 0, rows: row_at as u32, bits: scene::rows_bits(&[row]), prev: 0, verts: 0 };
                             // A copy whose material emits: its emitters, a run at the light list's end; moving ones
                             // (`update_instanced` changes the copies in place), a hidden copy's at no weight.
                             if emits {
@@ -2919,7 +2919,7 @@ impl LiveCore {
                     if scene::rows_bits(&mine) & scene::INST_GLASS != 0 && scene::rows_cast(&mine, o.cast_shadow) && features & gpu::F_IGLASS == 0 {
                         return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
                     }
-                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0 };
+                    let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0, verts: 0 };
                     let (lo, hi) = im.placed_bounds(m);
                     let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), if unseen { 0.0 } else { o.power }, hi - lo, o.custom, [1.0; 3]);
                     (at.map(|(_, r)| r), Placed::Mesh(inst, mine), entry)
