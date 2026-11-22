@@ -408,11 +408,11 @@ pub struct BindParts {
 /// What the scene's bind group is made of (`Gpu::scene_bind_group`).
 struct SceneBuffers<'a> {
     params: &'a wgpu::Buffer,
-    verts: &'a wgpu::Buffer,
-    attrs: &'a wgpu::Buffer,
+    positions: &'a wgpu::Buffer,
+    vattrs: &'a wgpu::Buffer,
     heap: &'a Heap<Table>,
     words: &'a Heap<Stream>,
-    prev_verts: &'a wgpu::Buffer,
+    prev_pos: &'a wgpu::Buffer,
     accum: &'a wgpu::Buffer,
     parts: &'a BindParts,
     accel: Option<&'a Accel>,
@@ -456,18 +456,11 @@ pub struct Uploaded {
     pub params: wgpu::Buffer,
     /// Kernel specialisation for this scene (`Gpu::pipeline`).
     pub kernel: Kernel,
-    /// Triangle vertices / shading attributes (posed models rewrite their ranges).
-    pub verts: wgpu::Buffer,
-    pub attrs: wgpu::Buffer,
-    /// The dynamic triangles' (posed models, movable objects: the tail from `dynamic_first`) vertices of the previous
-    /// frame, kernel layout: live motion vectors.
-    pub prev_verts: wgpu::Buffer,
     /// The vertices (indexed.rs): (position, u) each; their attributes, (normal, v) and (tangent, hand) each; and the
     /// previous frame's positions of those that move. What the kernel reads (bindings 1, 2 and 6).
     pub positions: wgpu::Buffer,
     pub vattrs: wgpu::Buffer,
     pub prev_pos: wgpu::Buffer,
-    pub dynamic_first: usize,
     pub accel: Option<Accel>,
     /// Software traversal's units (units.rs), when the scene has any: what `accel` is to hardware traversal. Their
     /// trees are in the node buffer (`bg_parts.nodes`).
@@ -526,9 +519,8 @@ pub struct ParticleGpu {
     params: wgpu::Buffer,
     /// The system table (`ParticleSystemGpu`) and each system's node (pivot updates when it moves).
     table: wgpu::Buffer,
-    /// The pass's own buffers besides: the last frame's vertices, the translucent BLAS input's stand-in.
+    /// The pass's own buffer besides: the last frame's vertices.
     last: wgpu::Buffer,
-    no_trans: wgpu::Buffer,
     nodes: Vec<u32>,
     systems: u32,
     max_count: u32,
@@ -559,14 +551,15 @@ enum Hidden {
 /// Volume training points per frame at most (translucent.wgsl `volume_train`).
 pub const VOLUME_TRAIN_CAP: u32 = 8192;
 
-/// Translucent particles (`transparent` materials; hardware RT): their own BLAS + TLAS over the BLAS input the
-/// particle pass writes (`verts`), from triangle `first` in the kernel's tables; the translucency pass's parameters and
-/// volume training points (translucent.wgsl).
+/// Translucent particles (`transparent` materials; hardware RT): their own BLAS + TLAS over their vertices, which the
+/// particle pass writes (`positions` from `first_vertex`, three a triangle), from triangle `first` in the kernel's
+/// tables; the translucency pass's parameters and volume training points (translucent.wgsl).
 pub struct Translucent {
     blas: wgpu::Blas,
     pub tlas: wgpu::Tlas,
     size: wgpu::BlasTriangleGeometrySizeDescriptor,
-    verts: wgpu::Buffer,
+    positions: wgpu::Buffer,
+    first_vertex: u32,
     pub first: u32,
     pub params: wgpu::Buffer,
     pub points: wgpu::Buffer,
@@ -597,7 +590,7 @@ impl Translucent {
     fn build(&self, e: &mut wgpu::CommandEncoder) {
         let entry = wgpu::BlasBuildEntry {
             blas: &self.blas,
-            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry { size: &self.size, vertex_buffer: &self.verts, first_vertex: 0, vertex_stride: 12, index_buffer: None, first_index: None, transform_buffer: None, transform_buffer_offset: None }]),
+            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry { size: &self.size, vertex_buffer: &self.positions, first_vertex: self.first_vertex, vertex_stride: 16, index_buffer: None, first_index: None, transform_buffer: None, transform_buffer_offset: None }]),
         };
         e.build_acceleration_structures([entry].iter(), [&self.tlas]);
     }
@@ -913,9 +906,6 @@ fn particle_source(scene: &Scene) -> String {
 /// Hardware acceleration structures: one BLAS per non-empty traversal group, one TLAS over them.
 pub struct Accel {
     pub tlas: wgpu::Tlas,
-    /// Triangle vertices the BLASes were built from (12 B per vertex, 3 per triangle): what the passes that have not
-    /// yet moved to the vertices still write.
-    pub verts: wgpu::Buffer,
     /// What the BLASes are built from: the vertices' positions (`Uploaded::positions`, 16 B each) and the triangles'
     /// indices (the words' heap, from word `index_first` on). Handles of the scene's buffers as they are now
     /// (`Gpu::rebind_scene` takes them again when one grew).
@@ -2343,7 +2333,7 @@ impl Gpu {
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
     /// bind group used by both the offline and the live kernels. `accum` holds one 80-byte Pixel per output pixel.
     #[allow(clippy::too_many_arguments)]
-    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
+    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
         // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
@@ -2367,36 +2357,29 @@ impl Gpu {
         let records: Vec<crate::scene::GpuInstance> = scene.gpu_instances.iter().chain(&scene.proc_records).copied().collect();
         // (Software traversal's units have room as hardware traversal's instances do: `prepare` sized their trees'
         // by the same figures.)
-        let room = EditRoom::for_scene(scene, tri_verts.len() / 3, records.len(), self.hwrt, scene.units.is_some());
+        let room = EditRoom::for_scene(scene, scene.indexed.rows.len(), records.len(), self.hwrt, scene.units.is_some());
         let st = wgpu::BufferUsages::STORAGE;
         // (COPY_SRC: the live view's in-place edits grow these past their room by a copy, live/edits.rs `edit_geometry`.)
         let edit = st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
-        let b_verts = buf_room("verts", bytemuck::cast_slice(tri_verts), room.tris * 48, edit | wgpu::BufferUsages::COPY_SRC);
         let dynamic_first: usize = groups[..4].iter().sum();
         // A particle's triangle's first vertex: three vertices a triangle, from the first vertex that moves (a dynamic
         // world-space triangle) or the first translucent one.
         let (moving, translucent, trans_first) = (scene.indexed.dynamic.0, scene.indexed.translucent, scene.trans_first);
         let vertex_of = move |tri: u32, trans: bool| if trans { translucent + (tri - trans_first) * 3 } else { moving + (tri - dynamic_first as u32) * 3 };
-        // The dynamic tail (groups 4..8; the instanced pool follows it, its deforming meshes first: theirs too).
-        let dynamic_end: usize = groups.iter().sum::<usize>() + crate::scene::deforming_pool(&scene.meshes);
-        let prev = &tri_verts[(dynamic_first * 3).min(tri_verts.len())..(dynamic_end * 3).min(tri_verts.len())];
-        let b_prev = buf("prev verts", bytemuck::cast_slice(prev), edit);
         // The vertices: positions and attributes, with room for three a triangle of the edit room; the previous
         // positions of those that move.
         let ix = &scene.indexed;
         let b_pos = buf_room("positions", bytemuck::cast_slice(&ix.positions), room.tris * 48, edit | if self.hwrt { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() });
         let b_vattr = buf_room("vertex attrs", bytemuck::cast_slice(&ix.attrs), room.tris * 96, edit);
         let b_prev_pos = buf("prev positions", bytemuck::cast_slice(&ix.positions[ix.dynamic.0 as usize..(ix.dynamic.0 + ix.dynamic.1) as usize]), edit);
-        timings.push(("vertex_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * 28) as f64 / (1 << 20) as f64));
         // The vertex colours' bytes on the GPU (the edit room's included).
         timings.push(("vcolor_mb".into(), if scene.gpu_vcolors.is_empty() { 0.0 } else { (scene.gpu_vcolors.len() * 4 + room.tris * 12) as f64 / (1 << 20) as f64 }));
-        let b_attrs = buf_room("attrs", bytemuck::cast_slice(&scene.attrs), room.tris * std::mem::size_of::<crate::scene::GpuTriAttr>(), edit);
         // (With units, edits write trees into it: units.rs.)
         // (COPY_SRC: read back by the test that holds a refit tree to its triangles.)
         let b_nodes = buf("nodes", nodes, if scene.units.is_some() { st | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC } else { st });
-        // What the triangles hold on the GPU besides their BLASes: vertices (a, e1, e2), attributes, the software BVH's nodes
-        // (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
-        timings.push(("tri_data_mb".into(), (std::mem::size_of_val(tri_verts) + std::mem::size_of_val(&scene.attrs[..]) + nodes.len()) as f64 / (1 << 20) as f64));
+        // What the triangles hold on the GPU besides their BLASes: vertices (48 B each), indices and rows (28 B a
+        // triangle), the software BVH's nodes (ROADMAP § 6 step 2's table: a meshed representation against voxel data).
+        timings.push(("tri_data_mb".into(), (ix.positions.len() * 48 + ix.indices.len() * 28 + nodes.len()) as f64 / (1 << 20) as f64));
         let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, room.records, timings)?;
         let room = EditRoom { proc_words: proc_room, ..room };
         // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
@@ -2493,14 +2476,6 @@ impl Gpu {
         let mut accel = None;
         if self.hwrt {
             let tb = Instant::now();
-            let verts: Vec<[f32; 3]> = tri_verts
-                .chunks(3)
-                .flat_map(|t| {
-                    let v0 = [t[0][0], t[0][1], t[0][2]];
-                    crate::scene::blas_tri([v0, [v0[0] + t[1][0], v0[1] + t[1][1], v0[2] + t[1][2]], [v0[0] + t[2][0], v0[1] + t[2][1], v0[2] + t[2][2]]])
-                })
-                .collect();
-            let vbuf = buf_room("blas_verts", bytemuck::cast_slice(&verts), room.tris * 36, wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::STORAGE);
             let huge_scene = huge(groups, !scene.gpu_instances.is_empty());
             // (The indices' first word in the words' heap.)
             let index_first = (words.at(Stream::Indices) / 4) as u32;
@@ -2575,14 +2550,15 @@ impl Gpu {
                     d.create_blas(&wgpu::CreateBlasDescriptor { label: None, flags, update_mode: wgpu::AccelerationStructureUpdateMode::Build }, wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: s.clone() })
                 })
                 .collect();
-            // What the triangle BLASes hold (Metal's own sizes; each instanced mesh once) and their vertex buffer.
-            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![((first * 3) as u32, (count * 3) as u32)]);
-            let mesh_vertex_parts = mesh_parts.iter().map(|ps| ps.iter().map(|&(first, count)| ((pool_first as u32 + first) * 3, count * 3)).collect::<Vec<_>>());
+            // What the triangle BLASes hold (Metal's own sizes; each instanced mesh once). A geometry: its first vertex
+            // and how many, its first triangle and how many.
+            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![(0, ix.flat.max(1), first as u32, count as u32)]);
+            let mesh_vertex_parts = mesh_parts.iter().zip(&ix.meshes).map(|(ps, &(vfirst, vcount))| ps.iter().map(|&(first, count)| (vfirst, vcount.max(1), pool_first as u32 + first, count)).collect::<Vec<_>>());
             let mut blas_per_tri = 0.0;
-            let parts: Vec<Vec<(u32, u32)>> = group_parts.chain(mesh_vertex_parts).collect();
-            if let Some(bytes) = parts.iter().map(|ps| self.tri_blas_bytes(&vbuf, ps)).sum::<Option<u64>>() {
-                timings.push(("tri_blas_mb".into(), (bytes + vbuf.size()) as f64 / (1 << 20) as f64));
-                let tris: u64 = parts.iter().flatten().map(|p| p.1 as u64 / 3).sum();
+            let parts: Vec<Vec<(u32, u32, u32, u32)>> = group_parts.chain(mesh_vertex_parts).collect();
+            if let Some(bytes) = parts.iter().map(|ps| self.tri_blas_bytes(&b_pos, &words.buffer, index_first, ps)).sum::<Option<u64>>() {
+                timings.push(("tri_blas_mb".into(), bytes as f64 / (1 << 20) as f64));
+                let tris: u64 = parts.iter().flatten().map(|p| p.3 as u64).sum();
                 blas_per_tri = bytes as f64 / tris.max(1) as f64;
             }
             let base = blases.len();
@@ -2673,7 +2649,7 @@ impl Gpu {
             self.device.poll(wgpu::PollType::wait_indefinitely())?;
             drop(entries);
             let mesh_geo = mesh_parts.into_iter().zip(mesh_sizes).collect();
-            accel = Some(Accel { tlas: t, verts: vbuf, positions: b_pos.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), flat_verts: ix.flat, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
+            accel = Some(Accel { tlas: t, positions: b_pos.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), flat_verts: ix.flat, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
             timings.push(("accel_build_ms".into(), tb.elapsed().as_secs_f64() * 1000.0));
         }
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -2689,7 +2665,7 @@ impl Gpu {
             self.uniform_copies(&heap)
         });
         let bg_parts = BindParts { nodes: b_nodes, tex_view, env_view, sampler, grid_view };
-        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, verts: &b_pos, attrs: &b_vattr, heap: &heap, words: &words, prev_verts: &b_prev_pos, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
+        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, positions: &b_pos, vattrs: &b_vattr, heap: &heap, words: &words, prev_pos: &b_prev_pos, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
         let kernel = Kernel { approx: self.approx, ..Kernel::new(scene, groups) };
         // Translucent particles (hardware RT): their own BLAS + TLAS, rebuilt after the particle pass.
         let translucent = match &accel {
@@ -2702,11 +2678,10 @@ impl Gpu {
                 );
                 let mut tlas = d.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("translucent"), max_instances: 1, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
                 tlas[0] = Some(wgpu::TlasInstance::new(&blas, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 0, 0xff));
-                let verts = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent blas verts"), size: n as u64 * 36, usage: wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let points = d.create_buffer(&wgpu::BufferDescriptor { label: Some("volume points"), size: VOLUME_TRAIN_CAP as u64 * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let count = d.create_buffer(&wgpu::BufferDescriptor { label: Some("volume point count"), size: 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                let t = Translucent { blas, tlas, size, verts, first: scene.trans_first, params, points, count };
+                let t = Translucent { blas, tlas, size, positions: b_pos.clone(), first_vertex: ix.translucent, first: scene.trans_first, params, points, count };
                 // Built once now (collapsed quads): bind groups may use the TLAS before the first particle pass.
                 let mut enc = d.create_command_encoder(&Default::default());
                 t.build(&mut enc);
@@ -2725,8 +2700,8 @@ impl Gpu {
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
                 let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 // The stamps depend on what is rebuilt last: the translucent TLAS when there is one.
-                let (sv, stl) = translucent.as_ref().map_or((&a.verts, &a.tlas), |t| (&t.verts, &t.tlas));
-                let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, sv), wgpu::BindGroupEntry { binding: 1, resource: stl.as_binding() }] });
+                let stl = translucent.as_ref().map_or(&a.tlas, |t| &t.tlas);
+                let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &b_pos), wgpu::BindGroupEntry { binding: 1, resource: stl.as_binding() }] });
                 let stamp = (sp, sbg);
                 let systems: Vec<ParticleSystemGpu> = scene
                     .particles
@@ -2736,22 +2711,21 @@ impl Gpu {
                         let mut p = [0.0f32; 32];
                         p.copy_from_slice(&ps.params);
                         // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
-                        ParticleSystemGpu { a: [vertex_of(ps.final_first, ps.translucent), if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, ps.translucent as u32, ix.translucent], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        ParticleSystemGpu { a: [vertex_of(ps.final_first, ps.translucent), if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, ps.translucent as u32, 0], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
                 let b_sys = buf("particle systems", bytemuck::cast_slice(&systems), edit);
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particle params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let last = d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles last"), size: b_prev_pos.size(), usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-                let no_trans = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
                 let written = ParticleTargets { positions: &b_pos, prev_pos: &b_prev_pos, heap: &heap, vattrs: &b_vattr };
-                let pbg = particle_bind_group(d, &pipeline, "particles", &[(0, &params), (1, &b_sys), (7, &last), (8, translucent.as_ref().map_or(&no_trans, |t| &t.verts))], &written);
+                let pbg = particle_bind_group(d, &pipeline, "particles", &[(0, &params), (1, &b_sys), (7, &last)], &written);
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
                 let opaque = scene.particles.iter().any(|p| !p.translucent);
                 let counts = scene.particles.iter().map(|p| p.count).collect();
                 let translucent_sys = scene.particles.iter().map(|p| p.translucent).collect();
                 let hidden = std::cell::RefCell::new(scene.particles.iter().map(|p| if p.hidden { Hidden::Idle } else { Hidden::Shown }).collect());
-                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, last, no_trans, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
+                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, last, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
             }
             _ => None,
         };
@@ -2807,7 +2781,7 @@ impl Gpu {
             Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_pos, &heap, &words), particles: self.emitter_fill(&emitter_runs.particles, &b_pos, &heap, &words) },
             None => EmitterFills::default(),
         };
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, verts: b_verts, attrs: b_attrs, prev_verts: b_prev, positions: b_pos, vattrs: b_vattr, prev_pos: b_prev_pos, dynamic_first, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, positions: b_pos, vattrs: b_vattr, prev_pos: b_prev_pos, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -2829,24 +2803,25 @@ impl Gpu {
         }
     }
 
-    /// Bytes Metal allocates for a triangle BLAS over the (first vertex, vertex count) geometries of `verts`
-    /// (non-indexed Float32x3 flagged opaque, as every triangle BLAS here; None on other backends).
-    fn tri_blas_bytes(&self, verts: &wgpu::Buffer, parts: &[(u32, u32)]) -> Option<u64> {
+    /// Bytes Metal allocates for a triangle BLAS over geometries (first vertex, vertices, first triangle, triangles) of
+    /// the vertices' positions and the indices from word `index_first` of `words` (flagged opaque, as every triangle
+    /// BLAS here; None on other backends).
+    fn tri_blas_bytes(&self, positions: &wgpu::Buffer, words: &wgpu::Buffer, index_first: u32, parts: &[(u32, u32, u32, u32)]) -> Option<u64> {
         #[cfg(target_vendor = "apple")]
         {
             use wgpu::hal::{api::Metal, Device as _};
             let d = unsafe { self.device.as_hal::<Metal>() }?;
-            let b = unsafe { verts.as_hal::<Metal>() }?;
+            let (b, i) = unsafe { (positions.as_hal::<Metal>()?, words.as_hal::<Metal>()?) };
             let entries = wgpu::hal::AccelerationStructureEntries::Triangles(
                 parts
                     .iter()
-                    .map(|&(first_vertex, vertex_count)| wgpu::hal::AccelerationStructureTriangles {
+                    .map(|&(first_vertex, vertex_count, first, count)| wgpu::hal::AccelerationStructureTriangles {
                         vertex_buffer: Some(&*b),
                         vertex_format: wgpu::VertexFormat::Float32x3,
                         first_vertex,
                         vertex_count,
-                        vertex_stride: 12,
-                        indices: None,
+                        vertex_stride: 16,
+                        indices: Some(wgpu::hal::AccelerationStructureTriangleIndices { format: wgpu::IndexFormat::Uint32, buffer: Some(&*i), offset: (index_first + first * 3) * 4, count: count * 3 }),
                         transform: None,
                         flags: wgpu::hal::AccelerationStructureGeometryFlags::OPAQUE,
                     })
@@ -2857,7 +2832,7 @@ impl Gpu {
         }
         #[allow(unreachable_code)]
         {
-            let _ = (verts, parts);
+            let _ = (positions, words, index_first, parts);
             None
         }
     }
@@ -3389,11 +3364,6 @@ impl Gpu {
         accel.mesh_verts[k as usize] = (mesh.vfirst, mesh.vcount);
     }
 
-    /// Mesh `k`'s vertices are another run now (its BLAS keeps its sizes: as many vertices).
-    pub fn move_mesh_verts(&self, accel: &mut Accel, k: u32, mesh: &crate::scene::InstMesh) {
-        accel.mesh_verts[k as usize] = (mesh.vfirst, mesh.vcount);
-    }
-
     fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
         let rel = (first - accel.pool_first) as u32;
         let parts: Vec<(u32, u32)> = mesh.parts(sections).into_iter().map(|(at, count)| (rel + at, count)).collect();
@@ -3453,11 +3423,11 @@ impl Gpu {
         let p = b.parts;
         let mut entries = vec![
             buffer_entry(0, b.params),
-            buffer_entry(1, b.verts),
-            buffer_entry(2, b.attrs),
+            buffer_entry(1, b.positions),
+            buffer_entry(2, b.vattrs),
             buffer_entry(4, &b.heap.buffer),
             buffer_entry(5, &b.words.buffer),
-            buffer_entry(6, b.prev_verts),
+            buffer_entry(6, b.prev_pos),
             view(7, &p.tex_view),
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&p.sampler) },
             view(9, &p.env_view),
@@ -3494,13 +3464,13 @@ impl Gpu {
         if let Some(a) = &mut up.accel {
             (a.positions, a.indices, a.index_first) = (up.positions.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
         }
-        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, verts: &up.positions, attrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_verts: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
+        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, positions: &up.positions, vattrs: &up.vattrs, heap: &up.heap, words: &up.words, prev_pos: &up.prev_pos, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
         if up.accel.is_none() {
             return;
         }
         let written = ParticleTargets { positions: &up.positions, prev_pos: &up.prev_pos, heap: &up.heap, vattrs: &up.vattrs };
         if let Some(p) = &mut up.particles {
-            p.bg = particle_bind_group(&self.device, &p.pipeline, "particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, up.translucent.as_ref().map_or(&p.no_trans, |t| &t.verts))], &written);
+            p.bg = particle_bind_group(&self.device, &p.pipeline, "particles", &[(0, &p.params), (1, &p.table), (7, &p.last)], &written);
         }
         if let Some(p) = &mut up.gpu_particles {
             p.bg = particle_bind_group(&self.device, &p.pipeline, "gpu particles", &[(0, &p.params), (1, &p.table), (7, &p.last), (8, &p.state), (9, &p.spawns), (10, &p.grid)], &written);
@@ -3728,10 +3698,10 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     /// Render `spp` samples. `base` holds everything except the per-dispatch sample index.
     #[allow(clippy::too_many_arguments)]
-    pub fn render(&self, scene: &Scene, tri_verts: &[[f32; 4]], groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
+    pub fn render(&self, scene: &Scene, groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
         let d = &self.device;
         let (w, h) = (scene.width, scene.height);
-        let up = self.upload(scene, &self.accum_buffer(w, h), tri_verts, groups, nodes, emitters, emitter_tris, emitter_runs, light_tree, env, env_cdf, energy, timings)?;
+        let up = self.upload(scene, &self.accum_buffer(w, h), groups, nodes, emitters, emitter_tris, emitter_runs, light_tree, env, env_cdf, energy, timings)?;
         let pipeline = self.pipeline(&up.kernel, false);
         // Particles: placed once, at the scene time and camera.
         if up.particles.is_some() {

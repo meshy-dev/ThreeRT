@@ -51,8 +51,9 @@ pub(super) struct LoadedScene {
     pub(super) base: gpu::Params,
     /// GPU table copies that parameter edits rewrite in place (`commit`).
     pub(super) tables: tables::Tables,
-    /// CPU copy of the dynamic triangles (posed models: the tail of the GPU triangle order from `dynamic_first`):
-    /// vertices (kernel layout), shading attributes, BLAS vertices.
+    /// CPU copy of the dynamic triangles (posed models: the tail of the GPU triangle order, from its first): rows
+    /// (v0, e1, e2), shading attributes, corners (a triangle that is not finite: at the origin). Their vertices on
+    /// the GPU are made from these (`upload_dynamic`).
     pub(super) dynamic: (usize, Vec<[f32; 4]>, Vec<scene::GpuTriAttr>, Vec<[f32; 3]>),
     /// Kernel feature inputs edits cannot change: textures, material functions, traversal groups.
     pub(super) fixed_features: (bool, bool, [usize; crate::GROUPS]),
@@ -241,7 +242,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     // (The light tree is the tables' by now: its nodes from there.)
-    let up = g.upload(&sc, &targets.accum, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
+    let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");

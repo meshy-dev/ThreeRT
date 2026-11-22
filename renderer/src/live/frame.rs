@@ -91,15 +91,14 @@ pub(super) struct Raster {
 }
 
 pub(super) const RASTER_WGSL: &str = r#"
-struct R { pos: vec4<f32>, fwd: vec4<f32>, right: vec4<f32>, up: vec4<f32>, jit: vec4<f32> }; // pos.w = tan(fov/2), fwd.w = aspect, jit = ndc offset xy, near
+struct R { pos: vec4<f32>, fwd: vec4<f32>, right: vec4<f32>, up: vec4<f32>, jit: vec4<f32> }; // pos.w = tan(fov/2), fwd.w = aspect, right.w = the indices' first word, jit = ndc offset xy, near
 @group(0) @binding(0) var<uniform> r: R;
-@group(0) @binding(1) var<storage, read> tri_verts: array<vec4<f32>>; // per triangle: a, b - a, c - a (kernel layout)
+@group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>; // a vertex: (position, u) (kernel layout)
+@group(0) @binding(2) var<storage, read> words: array<u32>; // the triangles' indices, three a triangle
 struct V { @builtin(position) p: vec4<f32>, @location(0) @interpolate(flat) id: u32 };
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> V {
     let ti = vi / 3u;
-    let k = vi % 3u;
-    var p = tri_verts[ti * 3u].xyz;
-    if (k != 0u) { p += tri_verts[ti * 3u + k].xyz; }
+    let p = positions[words[bitcast<u32>(r.right.w) + vi]].xyz;
     let d = p - r.pos.xyz;
     let z = dot(d, r.fwd.xyz);
     // Reversed infinite depth: near / z.
@@ -117,6 +116,7 @@ impl Raster {
             entries: &[
                 wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
         let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -142,13 +142,14 @@ impl Raster {
         Raster { pipeline, layout, uniform, vis, depth }
     }
 
-    /// Records the visibility pass for `tris` triangles at internal size (iw, ih), sampling at jitter (jx, jy).
+    /// Records the visibility pass for the scene's first `tris` triangles (their vertices' positions; their indices in
+    /// the words' heap) at internal size (iw, ih), sampling at jitter (jx, jy).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn record(&self, g: &gpu::Gpu, e: &mut wgpu::CommandEncoder, verts: &wgpu::Buffer, tris: u32, cam: &Camera, aspect: f32, (iw, ih): (u32, u32), (jx, jy): (f32, f32), timestamps: Option<wgpu::RenderPassTimestampWrites>) {
+    pub(super) fn record(&self, g: &gpu::Gpu, e: &mut wgpu::CommandEncoder, positions: &wgpu::Buffer, words: &crate::heap::Heap<crate::heap::Stream>, tris: u32, cam: &Camera, aspect: f32, (iw, ih): (u32, u32), (jx, jy): (f32, f32), timestamps: Option<wgpu::RenderPassTimestampWrites>) {
         let u: [[f32; 4]; 5] = [
             [cam.pos.x, cam.pos.y, cam.pos.z, cam.tan_half_fov],
             [cam.fwd.x, cam.fwd.y, cam.fwd.z, aspect],
-            [cam.right.x, cam.right.y, cam.right.z, 0.0],
+            [cam.right.x, cam.right.y, cam.right.z, f32::from_bits((words.at(crate::heap::Stream::Indices) / 4) as u32)],
             [cam.up.x, cam.up.y, cam.up.z, 0.0],
             // Pixel centres sample at +0.5; shift the image so they sample at the jittered position instead.
             [2.0 * (0.5 - jx) / iw as f32, -2.0 * (0.5 - jy) / ih as f32, 0.01, 0.0],
@@ -157,7 +158,7 @@ impl Raster {
         let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: verts.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: positions.as_entire_binding() }, wgpu::BindGroupEntry { binding: 2, resource: words.buffer.as_entire_binding() }],
         });
         let mut pass = e.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("raster vis"),
@@ -453,7 +454,7 @@ impl LiveCore {
             }
             if let (Some(r), 0, false) = (&self.raster, k, self.sc.instanced) {
                 let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::RenderPassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 4), end_of_pass_write_index: Some(slot as u32 * 8 + 5) });
-                r.record(g, &mut e, &self.sc.up.verts, self.sc.tris.len() as u32, &cam, self.aspect, (iw, ih), jitter, tw);
+                r.record(g, &mut e, &self.sc.up.positions, &self.sc.up.words, self.sc.tris.len() as u32, &cam, self.aspect, (iw, ih), jitter, tw);
             }
             {
                 let tw = match (&self.profile, &self.timer, timed) {

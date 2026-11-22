@@ -42,8 +42,7 @@ struct PP {
 // (`TriAttr`: records.wgsl.)
 
 // a: (its first vertex (six a particle), count, first object, function); b: (seed, the first vertex that moves,
-// translucent (1: its triangles are the translucency pass's, `tblas` from the first translucent vertex), the first
-// translucent vertex); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
+// translucent (1: its triangles are the translucency pass's), -); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
 // was shown (no last frame: motion vectors 0) (gpu.rs `set_particles_hidden`); p: parameters; d: the node's customData.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>, d: vec4<f32> };
 
@@ -56,8 +55,6 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>
 @group(0) @binding(6) var<storage, read_write> vattrs: array<vec4<f32>>;
 // This pass's last positions of the dynamic tail's particle vertices (the previous positions' indexing).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
-// The translucent particles' BLAS input (gpu.rs `Translucent`).
-@group(0) @binding(8) var<storage, read_write> tblas: array<f32>;
 
 // vec4s an object in `objects` (scene.rs `object_stride`: 4 in a scene with instance colours), the pipeline's constant.
 override OBJECT_STRIDE: u32 = 3u;
@@ -76,9 +73,9 @@ fn particle_function(f: u32, i: PIn, p: array<vec4<f32>, 8>) -> POut { return PO
 
 // One triangle of a quad, from its first vertex `v` on (three vertices a triangle): positions, the last frame's as
 // the previous positions, shading normal and tangent (as scene.rs tri_attr). The dynamic groups' BLAS is built from
-// the positions. Translucent triangles (`trans` = the first translucent vertex) have no motion vectors (the pass draws
-// them over the image each frame) and a BLAS input of their own.
-fn put_tri(v: u32, dyn_first: u32, trans: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
+// the positions, the translucent triangles' own too. Translucent triangles (`trans`) have no motion vectors (the pass
+// draws them over the image each frame).
+fn put_tri(v: u32, dyn_first: u32, trans: bool, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
     let corners = array<vec3<f32>, 3>(a, b, c);
     for (var k = 0u; k < 3u; k++) {
         let i = v + k;
@@ -86,15 +83,11 @@ fn put_tri(v: u32, dyn_first: u32, trans: u32, a: vec3<f32>, b: vec3<f32>, c: ve
         positions[i] = vec4<f32>(corners[k], positions[i].w);
         vattrs[i * 2u] = vec4<f32>(n, vattrs[i * 2u].w);
         vattrs[i * 2u + 1u] = vec4<f32>(tg, 1.0);
-        if (trans == 0xffffffffu) {
+        if (!trans) {
             let j = i - dyn_first;
             let now = vec4<f32>(corners[k], 0.0);
             prev_pos[j] = select(last[j], now, first);
             last[j] = now;
-        } else {
-            for (var j = 0u; j < 3u; j++) {
-                tblas[(i - trans) * 3u + j] = corners[k][j];
-            }
         }
     }
 }
@@ -133,7 +126,7 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = select(vec3<f32>(0.0, 0.0, 1.0), uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(o.u), dot(o.u, o.u) > 1e-24);
     let t = s.a.x + 6u * k;
-    let trans = select(0xffffffffu, s.b.w, s.b.z == 1u);
+    let trans = s.b.z == 1u;
     let first = PPS.env.z > 0.5 || s.c.w > 1.5;
     put_tri(t, s.b.y, trans, c00, c10, c11, n, tg, first);
     put_tri(t + 3u, s.b.y, trans, c00, c11, c01, n, tg, first);

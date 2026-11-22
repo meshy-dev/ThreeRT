@@ -235,6 +235,37 @@ fn apart(a: &[u8], b: &[u8]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as f64).sum::<f64>() / a.len() as f64
 }
 
+/// Primary visibility by rasterization (`Raster`): a path starts at the triangle the pass drew at its pixel, which is
+/// the one its camera ray hits: the picture is the traced one's. The pass draws world-space triangles and is off in a
+/// scene with instances, which every mesh of a world is: a scene of rect lights' cards alone.
+#[test]
+fn a_rasterized_first_hit_is_the_traced_one() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mut w = World::default();
+    // (Turned to face the camera: a card lights the side of its node's -z.)
+    for (id, at, turn) in [(21, Vec3::new(-0.9, 0.2, 0.0), 3.6), (22, Vec3::new(0.8, -0.3, 1.0), 2.5)] {
+        let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 0.6, 0.3], "castShadow": true, "intensity": 3, "width": 1.2, "height": 0.8, "range": 0 })).unwrap();
+        w.set_object(id, format!("card{id}"), None, Kind::Light(card), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_y(turn), Vec3::ONE).unwrap();
+    }
+    w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(0.0))), true, false).unwrap();
+    w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    w.set_settings(Settings { camera: Some(4), ..Default::default() });
+    let (mut traced, mut drawn) = match (open(&w), open(&w)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+    };
+    assert!(!drawn.sc.instanced && drawn.sc.tris.len() == 4 && traced.raster.is_none(), "a scene of four world-space triangles, traced unless asked");
+    drawn.raster = Some(super::frame::Raster::new(&drawn.g, drawn.w, drawn.h));
+    (drawn.kernel_bg, drawn.tl_kernel_bg) = super::kernel_bind_groups(&drawn.g, drawn.raster.as_ref(), &drawn.targets);
+    let (a, b) = (picture(&mut traced, 64), picture(&mut drawn, 64));
+    let lit = a.chunks_exact(4).filter(|p| p[0] > 100).count();
+    assert!(lit > a.len() / 4 / 50, "the cards are in the picture ({lit} pixels)");
+    // (0 steps as measured; 4.9 with each index read one word on.)
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from the traced one", apart(&a, &b));
+}
+
 /// Each edit, on one view that takes them one after another, against a view built from the world as it is then.
 #[test]
 fn edits_in_place_leave_what_a_build_does() {

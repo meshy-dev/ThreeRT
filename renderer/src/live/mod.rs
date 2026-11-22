@@ -570,7 +570,7 @@ impl LiveCore {
             });
         }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
-        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.heap.buffer, &up.words.buffer, &a.verts].iter().map(|b| b.size()).sum::<u64>();
+        let buffers = [&up.positions, &up.vattrs, &up.prev_pos, &up.heap.buffer, &up.words.buffer].iter().map(|b| b.size()).sum::<u64>();
         let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
         let mb = |b: f64| (b / (1 << 20) as f64 * 10.0).round() / 10.0;
         serde_json::json!({
@@ -1289,7 +1289,7 @@ mod instanced_tests {
             let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
             (sc.width, sc.height) = (64, 36);
             let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
             frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
         };
         let (a, b) = (offline(&views), offline(&whole));
@@ -1338,7 +1338,7 @@ mod instanced_tests {
             let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
             (sc.width, sc.height) = (64, 36);
             let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
             frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
         };
         let (a, b) = (offline(&plain), offline(&uniform));
