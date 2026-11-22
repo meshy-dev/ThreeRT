@@ -2780,7 +2780,9 @@ section that is not its first, the model a unit under software traversal).
 choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
 its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it
 from the triangle where it is hit, from its two edges as it stands in the world and its UVs (`mesh_density`), and
-nothing stores or writes it: the attributes' first `x` word and the record's third `info` word are spare.
+nothing stores or writes it: the attributes' first `x` word and the record's third `info` word are spare. A level
+is one division and one logarithm (`mesh_lod`: the density, a footprint's square, what else divides); it was three
+logarithms. With a logarithm a term the frame cost up to 1.7 % more on the clips with textures or cutouts.
 What changes in a picture: nothing under a uniform scale but rounding (five scenes offline against the build
 before: four the same bytes, one with 21 of 921,600 pixels off by 6 steps at most). An instance scaled otherwise
 has its triangles' own density now; its offset was the cube root of its volume's scale.
@@ -2792,10 +2794,11 @@ UVs a hundredth of the texture to a hundred repeats, ones without area) against 
 instance scaled 32 times, a square's inside reading its colour (a level five too high reads grey); the checker in
 a cutout's alpha on one scaled 256 times; a shadow through a pane with a colour map, the pane scaled 1 / 32 and 32
 times (the first fails on the build before). Not held by a test: the density a light sample, a material function's input and a
-translucent particle read (a wrong level there changes noise, not a mean).
-10 mutations: six of the formula fail the unit test, four of the places that use it fail a render test. One did not at
-first: a cutout three levels too high still has each square's middle on its side of the test, so that test's
-instance is scaled 256 times.
+translucent particle read, and the ray's angle a surface's level is divided by (a wrong level there changes
+noise, or sharpens: no mean sees it).
+12 mutations: eight of the two functions fail the unit test, four of the places that use them fail a render test.
+One did not at first: a cutout three levels too high still has each square's middle on its side of the test, so
+that test's instance is scaled 256 times.
 
 **A posed skinned model is posed in place under software traversal (2026-11-22).** Under software traversal a mesh
 that deforms was written out into the still scene's tree, so every pose rebuilt the scene. Now it is a unit as any
