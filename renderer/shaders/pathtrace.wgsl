@@ -142,10 +142,10 @@ struct Material {
 struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>, x: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> P: Params;
-// The scene's vertices (indexed.rs), each kept once: its position and u; and its attributes, two rows: (normal, v),
+// The scene's vertices (indexed.rs `Vertex`), each kept once, a record of three rows: (position, u), (normal, v),
 // (tangent, hand; zeros: it has none). A triangle is three of them, by its indices in `words` (`tri_data`).
-@group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> vattrs: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
+const VERTEX_VEC4: u32 = 3u;
 // (Software traversal's trees: hardware traversal has no binding for them.)
 @if(!hwrt) @group(0) @binding(3) var<storage, read> nodes: array<Node>;
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
@@ -159,7 +159,8 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 // (The CDF is the buffer's first section: from word 0, no offset to read.)
 fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
-// The positions the vertices that move had the previous frame, from the first of them (`P.word_first[1].z`) on.
+// The vertices that move as they were the previous frame (their records: the positions are read), from the first of
+// them (`P.word_first[1].z`) on.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
 // Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, a spare word, its rows' first).
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
@@ -355,13 +356,13 @@ fn tri_material(ti: u32, inst: u32) -> u32 {
 // that has none (`hit_tangent`); `x`: -, its object, -, its emitter entry + 1 or its index in its section.
 struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32> }
 fn tri_data(ti: u32, base: u32) -> TriData {
-    let i = tri_indices(ti) + vec3<u32>(base);
-    let p0 = positions[i.x];
-    let p1 = positions[i.y];
-    let p2 = positions[i.z];
-    var n0 = vattrs[i.x * 2u];
-    var n1 = vattrs[i.y * 2u];
-    var n2 = vattrs[i.z * 2u];
+    let i = (tri_indices(ti) + vec3<u32>(base)) * VERTEX_VEC4;
+    let p0 = vertices[i.x];
+    let p1 = vertices[i.y];
+    let p2 = vertices[i.z];
+    var n0 = vertices[i.x + 1u];
+    var n1 = vertices[i.y + 1u];
+    var n2 = vertices[i.z + 1u];
     let e1 = p1.xyz - p0.xyz;
     let e2 = p2.xyz - p0.xyz;
     // A skinned mesh whose model has no normals has zeros: the triangle's own, as it is posed.
@@ -375,7 +376,7 @@ fn tri_data(ti: u32, base: u32) -> TriData {
         n2 = vec4<f32>(flat, n2.w);
     }
     let row = tri_row(ti);
-    return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(row.x)), vattrs[i.x * 2u + 1u],
+    return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(row.x)), vertices[i.x + 2u],
                             vec4<f32>(0.0, bitcast<f32>(row.y), 0.0, bitcast<f32>(row.w))), p0.xyz, e1, e2);
 }
 // A triangle's tangent frame in the world: (tangent, hand). Its first vertex's where that has one (a file's, a
@@ -726,10 +727,10 @@ fn proc_normal(h: Hit) -> vec3<f32> {
 
 // The camera ray's hit on a known triangle (two-sided, no t range): the raster pass already resolved visibility.
 fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
-    let ix = tri_indices(ti);
-    let a = positions[ix.x].xyz;
-    let e1 = positions[ix.y].xyz - a;
-    let e2 = positions[ix.z].xyz - a;
+    let ix = tri_indices(ti) * VERTEX_VEC4;
+    let a = vertices[ix.x].xyz;
+    let e1 = vertices[ix.y].xyz - a;
+    let e2 = vertices[ix.z].xyz - a;
     let p = cross(d, e2);
     let det = dot(e1, p);
     let inv = 1.0 / select(det, 1e-20, abs(det) < 1e-20);
@@ -752,10 +753,10 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 }
 
 @if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {
-    let ix = leaf_indices(i) + vec3<u32>(base);
-    let v0 = positions[ix.x].xyz;
-    let e1 = positions[ix.y].xyz - v0;
-    let e2 = positions[ix.z].xyz - v0;
+    let ix = (leaf_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;
+    let v0 = vertices[ix.x].xyz;
+    let e1 = vertices[ix.y].xyz - v0;
+    let e2 = vertices[ix.z].xyz - v0;
     let pv = cross(d, e2);
     let det = dot(e1, pv);
     if (abs(det) < 1e-12) { return vec3<f32>(INF, 0.0, 0.0); }
@@ -3949,23 +3950,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let r = instance_at(hit.inst);
                 if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
                     let ix = tri_indices(ti);
-                    var q0 = positions[r.info.z + ix.x].xyz;
-                    var q1 = positions[r.info.z + ix.y].xyz;
-                    var q2 = positions[r.info.z + ix.z].xyz;
+                    let now = (ix + vec3<u32>(r.info.z)) * VERTEX_VEC4;
+                    var q0 = vertices[now.x].xyz;
+                    var q1 = vertices[now.y].xyz;
+                    var q2 = vertices[now.z].xyz;
                     // (A deforming mesh's previous positions are where its record says, n2.w, its vertices as the
                     // mesh has them. F_DEFORM: a scene with such a mesh.)
                     if (has(F_DEFORM) && deforms) {
-                        let pv = bitcast<u32>(r.n2.w);
-                        q0 = prev_verts[pv + ix.x].xyz;
-                        q1 = prev_verts[pv + ix.y].xyz;
-                        q2 = prev_verts[pv + ix.z].xyz;
+                        let before = (ix + vec3<u32>(bitcast<u32>(r.n2.w))) * VERTEX_VEC4;
+                        q0 = prev_verts[before.x].xyz;
+                        q1 = prev_verts[before.y].xyz;
+                        q2 = prev_verts[before.z].xyz;
                     }
                     let lp = vec4<f32>(q0 + (q1 - q0) * hit.u + (q2 - q0) * hit.v, 1.0);
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
                 }
             } else if (deforms) {
                 // (A world-space triangle that moves: its vertices' previous positions, from the first that moves.)
-                let ix = tri_indices(ti) - vec3<u32>(P.word_first[1].z);
+                let ix = (tri_indices(ti) - vec3<u32>(P.word_first[1].z)) * VERTEX_VEC4;
                 let q0 = prev_verts[ix.x].xyz;
                 let pp = q0 + (prev_verts[ix.y].xyz - q0) * hit.u + (prev_verts[ix.z].xyz - q0) * hit.v;
                 mv = vec4<f32>(pp - s.p, 1.0);

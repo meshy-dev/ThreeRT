@@ -48,11 +48,11 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>
 
 @group(0) @binding(0) var<uniform> PPS: PP;
 @group(0) @binding(1) var<storage, read> systems: array<System>;
-// The scene's vertices (pathtrace.wgsl `positions`, `vattrs`) and the previous positions of those that move.
-@group(0) @binding(2) var<storage, read_write> positions: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> prev_pos: array<vec4<f32>>;
+// The scene's vertices (pathtrace.wgsl `vertices`: three rows each) and those that move as they were the previous
+// frame (their positions are read).
+@group(0) @binding(2) var<storage, read_write> vertices: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> prev_verts: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> objects: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read_write> vattrs: array<vec4<f32>>;
 // This pass's last positions of the dynamic tail's particle vertices (the previous positions' indexing).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
 
@@ -78,15 +78,15 @@ fn particle_function(f: u32, i: PIn, p: array<vec4<f32>, 8>) -> POut { return PO
 fn put_tri(v: u32, dyn_first: u32, trans: bool, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
     let corners = array<vec3<f32>, 3>(a, b, c);
     for (var k = 0u; k < 3u; k++) {
-        let i = v + k;
+        let i = (v + k) * 3u;
         // (The w's hold the uv, left as built.)
-        positions[i] = vec4<f32>(corners[k], positions[i].w);
-        vattrs[i * 2u] = vec4<f32>(n, vattrs[i * 2u].w);
-        vattrs[i * 2u + 1u] = vec4<f32>(tg, 1.0);
+        vertices[i] = vec4<f32>(corners[k], vertices[i].w);
+        vertices[i + 1u] = vec4<f32>(n, vertices[i + 1u].w);
+        vertices[i + 2u] = vec4<f32>(tg, 1.0);
         if (!trans) {
-            let j = i - dyn_first;
+            let j = v + k - dyn_first;
             let now = vec4<f32>(corners[k], 0.0);
-            prev_pos[j] = select(last[j], now, first);
+            prev_verts[j * 3u] = select(last[j], now, first);
             last[j] = now;
         }
     }

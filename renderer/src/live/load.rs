@@ -273,7 +273,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let skin_trees = if up.units.is_some() { std::mem::take(&mut sc.skin_trees) } else { vec![] };
     // (The vertices and the indices themselves are the GPU's now.)
     let ix = std::mem::take(&mut sc.indexed);
-    let (vertices, dynamic_verts, skins) = (ix.positions.len(), ix.dynamic, ix.skins);
+    let (vertices, dynamic_verts, skins) = (ix.vertices.len(), ix.dynamic, ix.skins);
     let (sections, rows) = (std::mem::take(&mut sc.sections), std::mem::take(&mut sc.rows));
     let mut gpu_instances = std::mem::take(&mut sc.gpu_instances);
     let proc_first = gpu_instances.len();

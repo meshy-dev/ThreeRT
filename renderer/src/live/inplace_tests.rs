@@ -162,20 +162,20 @@ fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u3
     let alone: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices) + first * 12, n * 12);
     assert_eq!(index, alone, "triangles {first}..{}: a record's vertices are the indices' array's", first + n);
     let rows: Vec<u32> = records.iter().flat_map(|r| r[crate::indexed::RECORD_ROW..].to_vec()).collect();
-    let (positions, vattrs): (Vec<[f32; 4]>, Vec<[[f32; 4]; 2]>) = (read_back(c, &up.positions, 0, up.positions.size()), read_back(c, &up.vattrs, 0, up.vattrs.size()));
-    let before: Vec<[f32; 4]> = prev.map_or(vec![], |_| read_back(c, &up.prev_pos, 0, up.prev_pos.size()));
+    let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
+    let before: Vec<crate::indexed::Vertex> = prev.map_or(vec![], |_| read_back(c, &up.prev_vertices, 0, up.prev_vertices.size()));
     let mut out = Triangles { rows, ..Default::default() };
     for tri in index.chunks_exact(3) {
         for (k, &i) in tri.iter().enumerate() {
-            let v = (base + i) as usize;
-            out.p.extend(&positions[v][..3]);
-            out.n.extend(&vattrs[v][0][..3]);
-            out.uv.extend([positions[v][3], vattrs[v][0][3]]);
+            let v = &vertices[(base + i) as usize];
+            out.p.extend(&v[0][..3]);
+            out.n.extend(&v[1][..3]);
+            out.uv.extend([v[0][3], v[1][3]]);
             if k == 0 {
-                out.t.extend(vattrs[v][1]);
+                out.t.extend(v[2]);
             }
             if let Some(p) = prev {
-                out.prev.extend(&before[(p + i) as usize][..3]);
+                out.prev.extend(&before[(p + i) as usize][0][..3]);
             }
         }
     }
@@ -407,8 +407,9 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
     // (The vertices that move: the particle's six.)
     let vertices = |c: &LiveCore| -> (Vec<[f32; 3]>, Vec<[f32; 2]>) {
         let (first, n) = (c.sc.dynamic_verts.0 as u64, c.sc.dynamic_verts.1 as u64);
-        let (p, a): (Vec<[f32; 4]>, Vec<[[f32; 4]; 2]>) = (read_back(c, &c.sc.up.positions, first * 16, n * 16), read_back(c, &c.sc.up.vattrs, first * 32, n * 32));
-        (p.iter().map(|p| [p[0], p[1], p[2]]).collect(), p.iter().zip(&a).map(|(p, a)| [p[3], a[0][3]]).collect())
+        let size = crate::indexed::VERTEX_BYTES as u64;
+        let v: Vec<crate::indexed::Vertex> = read_back(c, &c.sc.up.vertices, first * size, n * size);
+        (v.iter().map(|v| [v[0][0], v[0][1], v[0][2]]).collect(), v.iter().map(|v| [v[0][3], v[1][3]]).collect())
     };
     let built = vertices(&live);
     assert!(built.1.len() == 6 && built.1.iter().any(|uv| uv[0] != 0.0) && built.1.iter().any(|uv| uv[1] != 0.0), "the particle's six vertices, with the build's UVs ({:?})", built.1);
@@ -451,8 +452,8 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
         let m = sc.meshes.iter().position(|m| m.deforms).expect("a deforming mesh");
         let (im, world, x) = (sc.meshes[m], sc.instances.iter().find(|i| i.mesh as usize == m).unwrap().world, &sc.indexed);
         let first = prep.groups.iter().sum::<usize>() + im.first as usize;
-        let bare = x.indices[first..first + im.count as usize].iter().filter(|t| t.iter().all(|&v| x.attrs[(im.vfirst + v) as usize][0][..3] == [0.0; 3]));
-        let placed = bare.map(|t| t.map(|v| world.transform_point3(Vec3::from_slice(&x.positions[(im.vfirst + v) as usize][..3]))));
+        let bare = x.indices[first..first + im.count as usize].iter().filter(|t| t.iter().all(|&v| x.vertices[(im.vfirst + v) as usize][1][..3] == [0.0; 3]));
+        let placed = bare.map(|t| t.map(|v| world.transform_point3(Vec3::from_slice(&x.vertices[(im.vfirst + v) as usize][0][..3]))));
         let p = placed.max_by(|a, b| (a[1] - a[0]).cross(a[2] - a[0]).length().total_cmp(&(b[1] - b[0]).cross(b[2] - b[0]).length())).expect("triangles without normals");
         ((p[0] + p[1] + p[2]) / 3.0, (p[1] - p[0]).cross(p[2] - p[0]).normalize(), (p[1] - p[0]).length().max((p[2] - p[0]).length()))
     };
@@ -566,7 +567,7 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     };
     w.take_changes();
     picture(&mut live, 8);
-    let (verts, cache, out) = (live.sc.up.positions.clone(), live.targets.kernel.cache.val.buffer.clone(), live.targets.out.clone());
+    let (verts, cache, out) = (live.sc.up.vertices.clone(), live.targets.kernel.cache.val.buffer.clone(), live.targets.out.clone());
     live.resize(96, 54).unwrap();
     assert!(live.targets.out == out && !live.reset, "the same size: the view as it was");
     let against = |what: &str, live: &mut LiveCore, w: &World| {
@@ -583,7 +584,7 @@ fn a_resized_view_is_a_view_built_at_that_size() {
     for size in [(160, 90), (54, 96), (97, 55), (5, 3), (1, 1), (96, 54)] {
         live.resize(size.0, size.1).unwrap();
         assert!(live.reset && (live.w, live.h) == size, "{size:?}: the histories start again");
-        assert!(live.sc.up.positions == verts, "{size:?}: the scene's data is as it was");
+        assert!(live.sc.up.vertices == verts, "{size:?}: the scene's data is as it was");
         assert!(live.g.merged || live.targets.kernel.cache.val.buffer == cache, "{size:?}: the radiance cache is as it was");
         against(&format!("{size:?}"), &mut live, &w);
     }
@@ -752,8 +753,8 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let (tables, up) = (&c.sc.tables, &c.sc.up);
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
-    // (The triangles as the kernel reads them: a record each, its three vertices and its row; the vertices' positions.)
-    let positions: Vec<[f32; 4]> = read_back(c, &up.positions, 0, up.positions.size());
+    // (The triangles as the kernel reads them: a record each, its three vertices and its row; the vertices.)
+    let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
     let tri_records: Vec<crate::indexed::TriRecord> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / crate::indexed::RECORD_BYTES as u64 * crate::indexed::RECORD_BYTES as u64);
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
     // (The CDF as the kernel reads it: an emitter that is not the tree's is found by the entry its code names.)
@@ -776,7 +777,7 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         // (A mesh's indices count from its instance's first vertex; a world-space triangle's from the first of all.)
         let base = if e.inst == crate::NO_INST { 0 } else { c.sc.instances[e.inst as usize].verts };
         let record = &tri_records[e.tri as usize];
-        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&positions[(base + record[k]) as usize][..3]));
+        let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&vertices[(base + record[k]) as usize][0][..3]));
         // (Its row: its material or its section, its object, its flags, its emitter + 1 or its index among its section's.)
         let tri_row = &record[crate::indexed::RECORD_ROW..];
         if e.inst == crate::NO_INST {
@@ -3023,7 +3024,7 @@ fn a_posed_skinned_model_is_added_in_place() {
         skinned_is_the_cpus(what, c, &c.sc.tables.retained.skinned[of(c, id)], &format!("m{id}"), now, before);
     };
     let built = live.sc.tables.retained.skinned.len();
-    let prev_size = live.sc.up.prev_pos.size();
+    let prev_size = live.sc.up.prev_vertices.size();
     {
         let i = &live.sc.instances[live.sc.tables.retained.skinned[of(&live, 31)].instance as usize];
         assert!(live.sc.dynamic.1.len() == 6 && i.prev == i.verts - live.sc.dynamic_verts.0 && i.prev >= 6, "a mesh's previous positions lie after the card's six vertices'");
@@ -3036,7 +3037,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     let (sk, its) = (live.sc.tables.retained.skinned[g].clone(), live.sc.tables.retained.skinned[t].clone());
     assert_eq!((g, sk.source, sk.mesh != its.mesh, live.sc.meshes[sk.mesh as usize].deforms), (built, its.source, true, true), "a mesh of its own that deforms, skinned from the model's one copy of its corners, the next of the skinned");
     assert!(live.sc.edit.in_room(sk.instance as usize) && live.sc.instances[sk.instance as usize].prev as usize >= live.sc.edit.prev.base && seen_by_rays(&live, sk.instance), "its record and its previous vertices are the room's, and the rays see it");
-    assert!(live.sc.up.prev_pos.size() > prev_size, "the previous positions' buffer was made again, larger");
+    assert!(live.sc.up.prev_vertices.size() > prev_size, "the previous vertices' buffer was made again, larger");
     check("added", &live, 32, &bend(0.3), &bend(0.3));
     check("the built one beside it", &live, 30, &bend(0.0), &bend(0.0));
     let added = against_a_build("added", &mut live, &w);
@@ -3055,7 +3056,8 @@ fn a_posed_skinned_model_is_added_in_place() {
     check("the built one posed on", &live, 30, &bend(0.8), &bend(0.0));
     check("the other built one posed on", &live, 31, &bend(0.8), &bend(0.0));
     // (The card did not move: its previous vertices are its own, whatever the meshes' did.)
-    assert_eq!(read(&live, &live.sc.up.prev_pos, 0, 96), read(&live, &live.sc.up.positions, live.sc.dynamic_verts.0 as u64 * 16, 96), "the card's previous positions are its positions");
+    let card = 6 * crate::indexed::VERTEX_BYTES as u64;
+    assert_eq!(read(&live, &live.sc.up.prev_vertices, 0, card), read(&live, &live.sc.up.vertices, live.sc.dynamic_verts.0 as u64 * crate::indexed::VERTEX_BYTES as u64, card), "the card's previous vertices are its vertices");
     let motion = |c: &mut LiveCore| -> Vec<f32> {
         (c.fixed_dt, c.frame, c.reset) = (Some(1.0 / 60.0), 16, true);
         c.render(1, |_, _| {});
@@ -3097,7 +3099,7 @@ fn a_posed_skinned_model_is_added_in_place() {
 
     // Many at once, of both models (more triangles than the room has): every room grows again, and each is skinned as
     // the build skins it.
-    let rooms_size = |c: &LiveCore| (c.sc.up.positions.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
     let (size, ids) = (rooms_size(&live), (100..140).collect::<Vec<u32>>());
     for (k, &id) in ids.iter().enumerate() {
         add(&mut w, id, if k % 2 == 0 { "skin-blend" } else { "arm" }, bend(0.1 + 0.02 * k as f32), Vec3::new(-1.5 + 0.075 * k as f32, 0.3, 0.6));
@@ -3468,7 +3470,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     pictured("posed and moved at once", &mut live, &w);
     // The scene's buffers made again, larger (a mesh of more triangles and more vertices than the room for edits has,
     // added in place, far below the view): the pass writes the new ones.
-    let rooms_size = |c: &LiveCore| (c.sc.up.positions.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
+    let rooms_size = |c: &LiveCore| (c.sc.up.vertices.size(), c.sc.up.words.cap(crate::heap::Stream::Triangles));
     let size = rooms_size(&live);
     let n = (((live.sc.edit.verts.cap - live.sc.edit.verts.end) as f64).sqrt() as u32 + 1).max(200);
     let positions: Vec<f32> = (0..=n).flat_map(|y| (0..=n).flat_map(move |x| [x as f32, y as f32, 0.0])).collect();

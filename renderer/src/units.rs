@@ -905,7 +905,7 @@ pub(crate) mod cpu {
     pub(crate) struct Kernel<'a> {
         pub(crate) nodes: &'a [GpuNode],
         /// The vertices' positions, and the triangles' indices and rows (indexed.rs), as the kernel has them.
-        pub(crate) positions: &'a [[f32; 4]],
+        pub(crate) vertices: &'a [crate::indexed::Vertex],
         pub(crate) indices: &'a [[u32; 3]],
         pub(crate) tri_rows: &'a [crate::indexed::TriRow],
         pub(crate) instances: &'a [GpuInstance],
@@ -957,7 +957,7 @@ pub(crate) mod cpu {
         }
         pub(crate) fn vert(&self, i: u32) -> Walk<Vec3A> {
             self.count(|r| *(if r.in_units { &mut r.mesh_verts } else { &mut r.still_verts }) += 1);
-            self.positions.get(i as usize).map(|v| Vec3A::new(v[0], v[1], v[2])).ok_or(format!("reads vertex {i} of {}", self.positions.len()))
+            self.vertices.get(i as usize).map(|v| Vec3A::new(v[0][0], v[0][1], v[0][2])).ok_or(format!("reads vertex {i} of {}", self.vertices.len()))
         }
         /// pathtrace.wgsl `leaf_indices`, `tri_flags`.
         pub(crate) fn leaf_indices(&self, ti: u32) -> Walk<[u32; 3]> {
@@ -1290,10 +1290,10 @@ pub(crate) mod tests {
                 "fn proc_dir(r: Instance, d: vec3<f32>) -> vec3<f32> { return r.n0.xyz * d.x + r.n1.xyz * d.y + r.n2.xyz * d.z; }",
                 "fn proc_point(r: Instance, p: vec3<f32>) -> vec3<f32> { return proc_dir(r, p - vec3<f32>(r.m0.w, r.m1.w, r.m2.w)); }",
                 "fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, base: u32, tmax: f32) -> vec3<f32> {",
-                "let ix = leaf_indices(i) + vec3<u32>(base);",
-                "let v0 = positions[ix.x].xyz;",
-                "let e1 = positions[ix.y].xyz - v0;",
-                "let e2 = positions[ix.z].xyz - v0;",
+                "let ix = (leaf_indices(i) + vec3<u32>(base)) * VERTEX_VEC4;",
+                "let v0 = vertices[ix.x].xyz;",
+                "let e1 = vertices[ix.y].xyz - v0;",
+                "let e2 = vertices[ix.z].xyz - v0;",
                 "let pv = cross(d, e2);",
                 "let det = dot(e1, pv);",
                 "if (abs(det) < 1e-12) { return vec3<f32>(INF, 0.0, 0.0); }",
@@ -1366,7 +1366,7 @@ pub(crate) mod tests {
     /// rows without flags.
     #[derive(Default)]
     pub(crate) struct Soup {
-        pub(crate) positions: Vec<[f32; 4]>,
+        pub(crate) vertices: Vec<crate::indexed::Vertex>,
         pub(crate) indices: Vec<[u32; 3]>,
         pub(crate) rows: Vec<crate::indexed::TriRow>,
     }
@@ -1376,8 +1376,8 @@ pub(crate) mod tests {
         pub(crate) fn push(&mut self, tris: &[[Vec3A; 3]]) -> u32 {
             let first = self.indices.len() as u32;
             for t in tris {
-                let v = self.positions.len() as u32;
-                self.positions.extend(t.map(|p| [p.x, p.y, p.z, 0.0]));
+                let v = self.vertices.len() as u32;
+                self.vertices.extend(t.map(|p| [[p.x, p.y, p.z, 0.0], [0.0; 4], [0.0; 4]]));
                 self.indices.push([v, v + 1, v + 2]);
                 self.rows.push([0; 4]);
             }
@@ -1458,8 +1458,8 @@ pub(crate) mod tests {
         }
 
         fn kernel(&self) -> Kernel<'_> {
-            let budget = 64 * (self.nodes.len() as u64 + self.soup.positions.len() as u64) + 1024;
-            Kernel { nodes: &self.nodes, positions: &self.soup.positions, indices: &self.soup.indices, tri_rows: &self.soup.rows, instances: &self.instances, rows: &[], top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
+            let budget = 64 * (self.nodes.len() as u64 + self.soup.vertices.len() as u64) + 1024;
+            Kernel { nodes: &self.nodes, vertices: &self.soup.vertices, indices: &self.soup.indices, tri_rows: &self.soup.rows, instances: &self.instances, rows: &[], top: self.top, units: self.count, steps: Default::default(), budget, deepest: Default::default(), reads: Default::default() }
         }
 
         /// Every triangle a ray could meet, tested one by one with the kernel's own triangle test (the still scene's in

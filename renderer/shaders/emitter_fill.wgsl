@@ -4,9 +4,9 @@
 // the instances that moved).
 struct Run { first: u32, count: u32 };
 @group(0) @binding(0) var<storage, read> runs: array<Run>;
-// The scene's vertices' positions, and its triangles' indices (three a triangle, counted from the first vertex of the
-// mesh an instance places; a world-space triangle's from 0).
-@group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>;
+// The scene's vertices (three rows each: the first has the position), and its triangles' indices (three a triangle,
+// counted from the first vertex of the mesh an instance places; a world-space triangle's from 0).
+@group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> indices: array<u32>;
 // Three vec4s an emitter: (v0, its triangle), (e1, its instance), (e2, its path code). The words stay.
 @group(0) @binding(2) var<storage, read_write> list: array<vec4<u32>>;
@@ -27,8 +27,8 @@ fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
     let inst = list[r + 1u].w;
     var base = 0u;
     if (inst != NO_INST) { base = bitcast<u32>(instances[inst * INSTANCE_VEC4 + 6u].z); }
-    let v0 = positions[base + indices[t]].xyz;
-    var rows = array<vec3<f32>, 3>(v0, positions[base + indices[t + 1u]].xyz - v0, positions[base + indices[t + 2u]].xyz - v0);
+    let v0 = vertices[(base + indices[t]) * 3u].xyz;
+    var rows = array<vec3<f32>, 3>(v0, vertices[(base + indices[t + 1u]) * 3u].xyz - v0, vertices[(base + indices[t + 2u]) * 3u].xyz - v0);
     if (inst != NO_INST) {
         let m0 = instances[inst * INSTANCE_VEC4];
         let m1 = instances[inst * INSTANCE_VEC4 + 1u];

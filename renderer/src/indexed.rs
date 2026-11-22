@@ -12,8 +12,10 @@ use std::hash::Hash;
 /// from the triangle's UVs.
 pub const OWN_TANGENT: u32 = 1;
 
-/// A vertex's attributes: (normal, v), (tangent, hand). A tangent of zeros: the vertex has none.
-pub type VertexAttr = [[f32; 4]; 2];
+/// A vertex, one record: (position, u), (normal, v), (tangent, hand). A tangent of zeros: the vertex has none. What a
+/// hit reads of each of its triangle's three; an acceleration structure is built from the records' positions.
+pub type Vertex = [[f32; 4]; 3];
+pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
 
 /// A triangle's row: its material (a mesh's triangle: its section), its object, its flags (`scene::TRI_*`), its
 /// emitter entry + 1 (a mesh's triangle: its index in its section).
@@ -42,9 +44,7 @@ pub fn records(indices: &[[u32; 3]], rows: &[TriRow]) -> Vec<TriRecord> {
 /// A scope's triangles as vertices and indices that count from the scope's first vertex.
 #[derive(Clone, Debug, Default)]
 pub struct Scope {
-    /// (position, u) a vertex.
-    pub positions: Vec<[f32; 4]>,
-    pub attrs: Vec<VertexAttr>,
+    pub vertices: Vec<Vertex>,
     pub indices: Vec<[u32; 3]>,
 }
 
@@ -86,8 +86,7 @@ fn share<K: Hash + Eq>(n: usize, vertex: impl Fn(usize, usize) -> (K, [f32; 4], 
     for k in 0..n {
         if (0..3).any(|c| vertex(k, c).1[..3].iter().any(|x| !x.is_finite())) {
             let v = *nowhere.get_or_insert_with(|| {
-                s.positions.push([0.0; 4]);
-                s.attrs.push([[0.0; 4]; 2]);
+                s.vertices.push([[0.0; 4]; 3]);
                 slots.push(Slot::Without);
                 slots.len() as u32 - 1
             });
@@ -108,8 +107,7 @@ fn share<K: Hash + Eq>(n: usize, vertex: impl Fn(usize, usize) -> (K, [f32; 4], 
                 _ => list.iter().copied().find(|&v| slots[v as usize] == want).or_else(|| list.iter().copied().find(|&v| slots[v as usize] == Slot::Open)),
             };
             let v = found.unwrap_or_else(|| {
-                s.positions.push(p);
-                s.attrs.push([nv, [0.0; 4]]);
+                s.vertices.push([p, nv, [0.0; 4]]);
                 slots.push(Slot::Open);
                 list.push(slots.len() as u32 - 1);
                 slots.len() as u32 - 1
@@ -117,7 +115,7 @@ fn share<K: Hash + Eq>(n: usize, vertex: impl Fn(usize, usize) -> (K, [f32; 4], 
             if want != Slot::Open {
                 slots[v as usize] = want;
                 if let Slot::Own(t) = want {
-                    s.attrs[v as usize][1] = t.map(f32::from_bits);
+                    s.vertices[v as usize][2] = t.map(f32::from_bits);
                 }
             }
             *at = v;
@@ -163,7 +161,7 @@ pub fn shared_skinned(source: &[[crate::skin::SkinCorner; 3]], tris: &[[Vec3A; 3
 /// The model's vertices a skinned mesh's are skinned from: for each vertex `scope` found (`shared_skinned`), the
 /// corner of the model that was it first.
 pub fn source_vertices(source: &[[crate::skin::SkinCorner; 3]], scope: &Scope) -> Vec<crate::skin::SkinCorner> {
-    let mut out = vec![crate::skin::SkinCorner::default(); scope.positions.len()];
+    let mut out = vec![crate::skin::SkinCorner::default(); scope.vertices.len()];
     let mut seen = vec![false; out.len()];
     for (tri, from) in scope.indices.iter().zip(source) {
         for (c, &v) in tri.iter().enumerate() {
@@ -185,8 +183,7 @@ pub fn apart(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
         for (c, p) in t.iter().enumerate() {
             let (n, uv) = corner(a, c);
             let p = if finite { *p } else { Vec3A::ZERO };
-            s.positions.push([p.x, p.y, p.z, uv[0]]);
-            s.attrs.push([[n[0], n[1], n[2], uv[1]], tangent]);
+            s.vertices.push([[p.x, p.y, p.z, uv[0]], [n[0], n[1], n[2], uv[1]], tangent]);
         }
         s.indices.push([k as u32 * 3, k as u32 * 3 + 1, k as u32 * 3 + 2]);
     }
@@ -194,28 +191,25 @@ pub fn apart(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
 }
 
 /// Triangles written whole as their vertices alone (their indices do not change): `corners`, three a triangle, and
-/// their attributes; the vertices' (position, u) and attributes, as `apart` has them.
-pub fn apart_vertices(corners: &[[f32; 3]], attrs: &[GpuTriAttr]) -> (Vec<[f32; 4]>, Vec<VertexAttr>) {
-    let (mut positions, mut out) = (Vec::with_capacity(corners.len()), Vec::with_capacity(corners.len()));
+/// their attributes; the vertices, as `apart` has them.
+pub fn apart_vertices(corners: &[[f32; 3]], attrs: &[GpuTriAttr]) -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(corners.len());
     for (t, a) in corners.chunks_exact(3).zip(attrs) {
         let tangent = own_tangent(a).unwrap_or([0.0; 4]);
         let finite = t.iter().flatten().all(|x| x.is_finite());
         for (c, p) in t.iter().enumerate() {
             let (n, uv) = corner(a, c);
             let p = if finite { *p } else { [0.0; 3] };
-            positions.push([p[0], p[1], p[2], uv[0]]);
-            out.push([[n[0], n[1], n[2], uv[1]], tangent]);
+            out.push([[p[0], p[1], p[2], uv[0]], [n[0], n[1], n[2], uv[1]], tangent]);
         }
     }
-    (positions, out)
+    out
 }
 
 /// The scene's geometry: every scope's vertices one after another, the triangles in the GPU's order.
 #[derive(Clone, Debug, Default)]
 pub struct Indexed {
-    /// (position, u) a vertex.
-    pub positions: Vec<[f32; 4]>,
-    pub attrs: Vec<VertexAttr>,
+    pub vertices: Vec<Vertex>,
     /// A triangle's three vertices: a mesh's count from the mesh's first vertex, a world-space triangle's from 0.
     pub indices: Vec<[u32; 3]>,
     pub rows: Vec<TriRow>,
@@ -237,9 +231,8 @@ impl Indexed {
     /// A scope's vertices after those there are, its triangles after those there are, their indices raised by `by`
     /// (0: they count from the scope's first vertex). The scope's first vertex.
     pub fn push(&mut self, s: Scope, by: u32) -> u32 {
-        let first = self.positions.len() as u32;
-        self.positions.extend(s.positions);
-        self.attrs.extend(s.attrs);
+        let first = self.vertices.len() as u32;
+        self.vertices.extend(s.vertices);
         self.indices.extend(s.indices.iter().map(|i| i.map(|v| v + by)));
         first
     }
@@ -248,10 +241,9 @@ impl Indexed {
     /// UVs and tangent (its first vertex's: zeros where that has none).
     pub fn triangle(&self, k: usize, base: u32) -> ([[f32; 3]; 3], [[f32; 3]; 3], [[f32; 2]; 3], [f32; 4]) {
         let v = self.indices[k].map(|i| (base + i) as usize);
-        let p = v.map(|i| [self.positions[i][0], self.positions[i][1], self.positions[i][2]]);
-        let n = v.map(|i| [self.attrs[i][0][0], self.attrs[i][0][1], self.attrs[i][0][2]]);
-        let uv = v.map(|i| [self.positions[i][3], self.attrs[i][0][3]]);
-        (p, n, uv, self.attrs[v[0]][1])
+        let [p, n] = [0, 1].map(|r| v.map(|i| [self.vertices[i][r][0], self.vertices[i][r][1], self.vertices[i][r][2]]));
+        let uv = v.map(|i| [self.vertices[i][0][3], self.vertices[i][1][3]]);
+        (p, n, uv, self.vertices[v[0]][2])
     }
 }
 
@@ -287,7 +279,7 @@ mod tests {
     /// The scope's triangles are the build's, corner for corner and bit for bit: positions, normals, UVs, and the
     /// tangent of a triangle that has its own on its first vertex (zeros there for one that has none).
     fn same(what: &str, s: &Scope, tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) {
-        let all = Indexed { positions: s.positions.clone(), attrs: s.attrs.clone(), indices: s.indices.clone(), ..Default::default() };
+        let all = Indexed { vertices: s.vertices.clone(), indices: s.indices.clone(), ..Default::default() };
         assert_eq!(s.indices.len(), tris.len(), "{what}: a row of indices a triangle");
         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         for (k, (t, a)) in tris.iter().zip(attrs).enumerate() {
@@ -309,10 +301,10 @@ mod tests {
             let (tris, attrs) = sheet(12, own);
             let s = shared(&tris, &attrs);
             same(&format!("own tangents {own}"), &s, &tris, &attrs);
-            assert_eq!((s.positions.len(), s.attrs.len()), (13 * 13, 13 * 13), "own tangents {own}: the sheet's vertices, each once");
+            assert_eq!(s.vertices.len(), 13 * 13, "own tangents {own}: the sheet's vertices, each once");
             let a = apart(&tris, &attrs);
             same(&format!("apart, own tangents {own}"), &a, &tris, &attrs);
-            assert_eq!(a.positions.len(), tris.len() * 3);
+            assert_eq!(a.vertices.len(), tris.len() * 3);
         }
     }
 
@@ -330,7 +322,7 @@ mod tests {
             ];
             let s = shared(&tris, &attrs);
             same(what, &s, &tris, &attrs);
-            assert_eq!(s.positions.len(), vertices, "{what}: its vertices");
+            assert_eq!(s.vertices.len(), vertices, "{what}: its vertices");
         }
     }
 
@@ -342,18 +334,18 @@ mod tests {
         tris[5][1] = Vec3A::new(f32::NAN, 0.0, 0.0);
         tris[9][2] = Vec3A::new(0.0, f32::INFINITY, 0.0);
         for s in [shared(&tris, &attrs), apart(&tris, &attrs)] {
-            assert!(s.positions.iter().flatten().all(|x| x.is_finite()), "every position is finite");
+            assert!(s.vertices.iter().flat_map(|v| v[0]).all(|x| x.is_finite()), "every position is finite");
             for k in [5, 9] {
-                let p = s.indices[k].map(|v| s.positions[v as usize]);
+                let p = s.indices[k].map(|v| s.vertices[v as usize][0]);
                 assert!(p[0][..3] == [0.0; 3] && p[0][..3] == p[1][..3] && p[1][..3] == p[2][..3], "triangle {k}: {p:?}");
             }
-            let all = Indexed { positions: s.positions.clone(), attrs: s.attrs.clone(), indices: s.indices.clone(), ..Default::default() };
+            let all = Indexed { vertices: s.vertices.clone(), indices: s.indices.clone(), ..Default::default() };
             for (k, t) in tris.iter().enumerate().filter(|(k, _)| ![5, 9].contains(k)) {
                 assert_eq!(all.triangle(k, 0).0, t.map(|p| p.to_array()), "triangle {k}'s corners");
             }
         }
         let corners: Vec<[f32; 3]> = tris.iter().flatten().map(|p| p.to_array()).collect();
-        assert!(apart_vertices(&corners, &attrs).0.iter().flatten().all(|x| x.is_finite()));
+        assert!(apart_vertices(&corners, &attrs).iter().flat_map(|v| v[0]).all(|x| x.is_finite()));
     }
 
     /// Where triangles disagree about a first corner's tangent the corner is a vertex for each: a sheet whose
@@ -368,7 +360,7 @@ mod tests {
         let s = shared(&tris, &attrs);
         same("a tangent a triangle", &s, &tris, &attrs);
         // (Every vertex of the sheet but two corners is the first corner of one triangle or two.)
-        assert!(s.positions.len() > 7 * 7 && s.positions.len() <= 7 * 7 + 6 * 6, "{} vertices", s.positions.len());
+        assert!(s.vertices.len() > 7 * 7 && s.vertices.len() <= 7 * 7 + 6 * 6, "{} vertices", s.vertices.len());
         let (tris, mut attrs) = sheet(6, true);
         for (k, a) in attrs.iter_mut().enumerate() {
             if k % 2 == 1 {
@@ -385,6 +377,6 @@ mod tests {
         let (tris, attrs) = (vec![p, [p[1], p[2], p[0]]], vec![a(false), turned(a(true))]);
         let s = shared(&tris, &attrs);
         same("a corner met as a second corner first", &s, &tris, &attrs);
-        assert_eq!(s.positions.len(), 3, "three vertices: the shared corner took its tangent when a triangle began at it");
+        assert_eq!(s.vertices.len(), 3, "three vertices: the shared corner took its tangent when a triangle began at it");
     }
 }

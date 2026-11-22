@@ -40,9 +40,8 @@ const ROW: u32 = 32768u;
 @group(0) @binding(3) var<storage, read> corners: array<Corner>;
 // Three rows a matrix.
 @group(0) @binding(4) var<storage, read> palette: array<vec4<f32>>;
-// The scene's vertices (pathtrace.wgsl `positions`, `vattrs`): (position, u); (normal, v), (tangent, hand).
-@group(0) @binding(5) var<storage, read_write> positions: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read_write> vattrs: array<vec4<f32>>;
+// The scene's vertices (pathtrace.wgsl `vertices`), three rows each: (position, u), (normal, v), (tangent, hand).
+@group(0) @binding(5) var<storage, read_write> vertices: array<vec4<f32>>;
 
 struct Placed {
     p: vec3<f32>,
@@ -94,7 +93,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     if local >= job.count {
         return;
     }
-    let k = job.first + local;
+    let k = (job.first + local) * 3u;
     let c = corners[job.source + local];
     let flags = bitcast<u32>(c.t.w);
     let q = place(c, job.palette);
@@ -103,12 +102,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     if !(finite(p.x) && finite(p.y) && finite(p.z)) {
         p = vec3<f32>(0.0);
     }
-    positions[k] = vec4<f32>(p, positions[k].w);
+    vertices[k] = vec4<f32>(p, vertices[k].w);
     // A model without normals keeps zeros (the triangle's own is made where it is hit); one without tangents too.
     if (flags & CORNER_NORMAL) != 0u {
-        vattrs[k * 2u] = vec4<f32>(q.n, vattrs[k * 2u].w);
+        vertices[k + 1u] = vec4<f32>(q.n, vertices[k + 1u].w);
     }
     if (flags & CORNER_TANGENT) != 0u {
-        vattrs[k * 2u + 1u] = vec4<f32>(q.t, vattrs[k * 2u + 1u].w);
+        vertices[k + 2u] = vec4<f32>(q.t, vertices[k + 2u].w);
     }
 }

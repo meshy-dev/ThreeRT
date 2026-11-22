@@ -888,7 +888,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let t = Instant::now();
     sc.indexed = index_geometry(sc, &tri_order, &tri_verts, &groups, pool_first, no_still);
     timings.push(("index_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
-    timings.push(("vertices".into(), sc.indexed.positions.len() as f64));
+    timings.push(("vertices".into(), sc.indexed.vertices.len() as f64));
     // An instance's triangles count their vertices from its mesh's first; the previous positions from the first
     // vertex that moves.
     // (A deforming mesh's previous positions: where its vertices are among those that move.)
@@ -917,9 +917,9 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     let flat: Vec<[Vec3A; 3]> = order.iter().map(|&i| sc.tris[i as usize]).collect();
     let mut out = indexed::Indexed { meshes: vec![(0, 0); sc.meshes.len()], skins: vec![Default::default(); sc.skin_sources.len()], ..Default::default() };
     out.push(indexed::shared(&flat[..still], &sc.attrs[..still]), 0);
-    let moving = out.positions.len() as u32;
+    let moving = out.vertices.len() as u32;
     out.push(indexed::apart(&flat[still..], &sc.attrs[still..pool_first]), moving);
-    out.flat = out.positions.len() as u32;
+    out.flat = out.vertices.len() as u32;
     // The pool, mesh by mesh as their triangles lie.
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
@@ -944,7 +944,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
         }
         // (A mesh's triangles follow the mesh's before it: the pool has no triangle that is no mesh's.)
         assert_eq!(out.indices.len(), pool_first + sc.meshes[m].first as usize, "the pool's triangles are its meshes', one after another");
-        let n = s.positions.len() as u32;
+        let n = s.vertices.len() as u32;
         out.meshes[m] = (out.push(s, 0), n);
         if sc.meshes[m].deforms {
             assert_eq!(out.meshes[m].0, moving + (pool_first - still) as u32 * 3 + deforming, "the deforming meshes are the pool's first");
@@ -960,7 +960,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     // The translucent particles' (what `tri_verts` has after the pool: under hardware traversal).
     if out.indices.len() < sc.attrs.len() {
         let first = out.indices.len();
-        out.translucent = out.positions.len() as u32;
+        out.translucent = out.vertices.len() as u32;
         out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), out.translucent);
     }
     assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
@@ -1745,7 +1745,7 @@ mod units_tests {
             let mut sc = scene::build(&w, std::path::Path::new(".."), &default_presets_dir(), None).unwrap();
             let p = prepare_as(hwrt, units, &mut sc, &mut vec![]);
             let x = &sc.indexed;
-            assert_eq!((x.indices.len(), x.rows.len(), x.positions.len()), (sc.attrs.len(), sc.attrs.len(), x.attrs.len()), "{what}");
+            assert_eq!((x.indices.len(), x.rows.len()), (sc.attrs.len(), sc.attrs.len()), "{what}");
             // (A pool triangle's mesh: its vertices count from the mesh's first.)
             let pool_first = sc.attrs.len() - sc.pool_tris.len() - sc.trans_tris.len() * usize::from(hwrt) - usize::from(sc.units.is_some() && sc.tris.is_empty());
             let base = |k: usize| sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count > 0 && (pool_first + m.first as usize..pool_first + (m.first + m.count) as usize).contains(&k)).map_or(0, |(_, v)| v.0);
@@ -1844,13 +1844,13 @@ mod units_tests {
         assert_eq!(pu.nodes.len(), u.layout.top_first as usize + u.layout.top_cap as usize);
         let kernel = |p: &Prepared, sc: &scene::Scene| {
             let (top, units) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
-            (p.nodes.clone(), (sc.indexed.positions.clone(), sc.indexed.indices.clone()), sc.gpu_instances.clone(), top, units, sc.indexed.rows.clone(), sc.rows.clone())
+            (p.nodes.clone(), (sc.indexed.vertices.clone(), sc.indexed.indices.clone()), sc.gpu_instances.clone(), top, units, sc.indexed.rows.clone(), sc.rows.clone())
         };
         let (ku, kf) = (kernel(&pu, &su), kernel(&pf, &sf));
         #[allow(clippy::type_complexity)]
-        let walk = |k: &(Vec<bvh::GpuNode>, (Vec<[f32; 4]>, Vec<[u32; 3]>), Vec<scene::GpuInstance>, u32, u32, Vec<indexed::TriRow>, Vec<scene::Row>), o: Vec3A, d: Vec3A, mode: u32| {
+        let walk = |k: &(Vec<bvh::GpuNode>, (Vec<indexed::Vertex>, Vec<[u32; 3]>), Vec<scene::GpuInstance>, u32, u32, Vec<indexed::TriRow>, Vec<scene::Row>), o: Vec3A, d: Vec3A, mode: u32| {
             let instances = if k.2.is_empty() { vec![scene::GpuInstance::default()] } else { k.2.clone() };
-            let kernel = Kernel { nodes: &k.0, positions: &k.1 .0, indices: &k.1 .1, tri_rows: &k.5, instances: &instances, rows: &k.6, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
+            let kernel = Kernel { nodes: &k.0, vertices: &k.1 .0, indices: &k.1 .1, tri_rows: &k.5, instances: &instances, rows: &k.6, top: k.3, units: k.4, steps: Default::default(), budget: 1 << 20, deepest: Default::default(), reads: Default::default() };
             kernel.trace(o, d, INF, mode).unwrap_or_else(|e| panic!("ray {o} {d}, mode {mode}: the kernel {e}"))
         };
         let mut s = 12345u64;
