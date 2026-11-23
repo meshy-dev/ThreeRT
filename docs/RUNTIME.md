@@ -803,7 +803,43 @@ core.write_stream("screen", 640, 360, &rgba)?;                  // LiveCore, bef
   emission from a function keeps the live view's short history, so the screen shows this frame's picture and
   not a blend of the last sixteen.
 - The script side has no call for it: pictures come from the app (`write_stream`), not through the script
-  runtime. A script's own `DataTexture` with `needsUpdate` still rebuilds, as before.
+  runtime. A script's own `DataTexture` with `needsUpdate` is another texture under its number: written over the
+  old one where it is as large, else placed as a new one ("What comes in place", below).
+
+## What comes in place
+
+An edit rewrites what it touches and nothing else; the scene is built again from the world only for what is listed
+at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's log has its reason (`fallback`).
+
+- **Textures.** The pages keep where each texture lies and what they have free (`texpack::Atlas`). A texture a
+  material first names is decoded, placed among them (a shelf it fits, a new shelf, a new layer) and written there,
+  every level; its two rows go into the texture table (`Gpu::place_texture`, `LiveCore::place_textures`). Pages
+  without room become a texture with a layer more or a longer side, and what they held is copied there on the GPU.
+  New pixels of the same size go over the old ones, unless another texture has the same slot. A texture no
+  material names any more keeps its place until the scene is loaded again.
+- **Materials.** A new one, its maps and its function with it; a material given other maps, another function or
+  none. (Not one that is a particle's, `transparent`, or has vertex colours: those say where triangles are kept.)
+- **Material functions.** The scene keeps its functions by number, and one that comes takes the next
+  (`LiveCore::set_functions`). The kernel with them is another module.
+- **The kernel's variant.** A feature a scene first uses (fog, glass, a clear coat, a texture, a cutout or a
+  function on an instance), and other functions, are another variant of the kernel, which the driver compiles for
+  half a second to tens of seconds. The view runs the kernel it has while the scene's is made on another thread
+  (`Gpu::warm_kernel`, `LiveCore::choose_kernel`), and takes it at a frame's start once every pipeline a frame
+  asks of it is there. Until then what the new variant draws is missing: a material of a function the old kernel
+  has not is drawn as one without, fog comes a moment late. In lockstep (benchmarks, tests) and in a browser,
+  which has no thread to give, the frame makes its kernel itself and waits.
+- **Models.** A still model the scene has not got: its materials are made as the build makes them, its textures
+  placed in the pages, its mesh made in the edit's room (`LiveCore::place_models`, `make_mesh`).
+- **Lights.** A light that is an entry of the light table alone (not a rect light with a card, not the
+  atmosphere's sun) comes, goes and changes its kind or its shadow in place: the table is listed in a build's
+  order, sorted, grown where it is full, and the kernel's counts follow.
+- **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
+
+Still a rebuild: particle systems, volumes and density grids that come or go, and their functions and programs; a
+geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
+not grow); a material that becomes a particle's or gets vertex colours; a rect light's card; as many shadow-casting
+local lights as bring the light tiles or take them away; the scene's first instance, procedural object, instance
+colours or vertex colours (the kernel's data is laid out for them); the atmosphere's sun shown or hidden.
 
 ## Streaming: reading assets and adding them in place
 
@@ -2133,7 +2169,7 @@ geometry in JS), where the runtime could move to V8 (deno_core) behind the same 
    are structural today: fine for small scenes or occasional changes, not every frame on a big street.
 2. **Warm room sessions on nodes.** `serve` keeps runtimes per room already; a node could also keep the GPU scene of a
    room between jobs and apply state changes in place, as the live view does.
-3. **Kernel variant warm-up.** An edit that enables a kernel feature (e.g. a dry street getting wet) compiles that
-   variant on first use; pre-compile likely variants in the background.
+3. **Images decoded beside the frames.** A texture or a model that comes in place is decoded on the frame's
+   thread (five 2048 x 2048 images: 0.2 s); the object could wait for a worker instead, as it waits for its kernel.
 4. **UE references for the simple scenes** came from the removed IR adapter (cached in out/ue). New ones need either
    the scenes rebuilt in UE by hand or an engine-API binding on the UE side (the scene code driving UE actors).

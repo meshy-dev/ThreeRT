@@ -2776,6 +2776,33 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**Textures, models, functions and lights come in place; the kernel is made beside the frames (2026-11-24).**
+A game that brought a texture, a model, a material function or a light while it ran had the scene built again from
+the world, and a feature a scene first used had the next frame wait for the driver's compile. On Bistro (2.8 M
+triangles, 960 x 540, an M5 Pro), the frame the edit landed in:
+
+| | before | now |
+|---|---|---|
+| fog appears (a kernel variant not compiled before) | 0.8 to 2.4 s | no long frame (28 ms at most) |
+| a mesh with a new 256 x 256 texture | 4.5 to 4.6 s | 39 to 56 ms |
+| a mesh with a new material function | 2.3 to 4.2 s | no long frame (19 ms) |
+| a model the scene has not (15 k triangles, five 2048 x 2048 textures) | 4.8 to 5.2 s | 223 to 233 ms, then 85 to 138 ms |
+| a point light comes | 1.5 s | no long frame (19 to 26 ms) |
+| the light goes | 1.3 s | no long frame (17 to 22 ms) |
+
+The texture pages keep where each texture lies (`texpack::Atlas`) and take another without being packed again,
+growing by a copy on the GPU; a still model's materials, textures and mesh are made by the code the build and the
+scene meshes' edits use; functions are numbered in the order they come; a light's entry is added, dropped or
+sorted within the table as a build lists it. A new kernel variant is made on another thread while the view runs
+the one it has (docs/RUNTIME.md "What comes in place" has the rules and what still rebuilds). The model's frame
+is its images' decode, on the frame's thread still.
+Not freed: a texture or a material nothing uses any more keeps its place until the scene loads again (the
+allocator's step).
+Tests: each kind of edit against a build of the edited world, state and picture (`textures_come_and_change_in_place`,
+`a_model_the_scene_has_not_got_comes_in_place`, `material_functions_come_and_change_in_place`,
+`lights_come_and_go_in_place`); a variant made while the frames go on; the atlas's places; the world's rules.
+Mutations: 24. 23 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
+
 **A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
 had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a
 curved surface. Now each corner of a file's triangle carries its own through the build, corners that differ in

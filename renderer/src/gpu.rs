@@ -75,6 +75,7 @@ pub struct Gpu {
     /// does not use (they cost registers even when idle); `LIVE` = one fresh sample per dispatch for the viewport.
     pipelines: PipelineMap<(u32, u64, bool, u32)>,
     /// The kernels being made on another thread (`warm_kernel`): by (features, functions' hash, approximations).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     warming: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(u32, u64, u32)>>>,
     layout: wgpu::BindGroupLayout,
     /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
@@ -2397,9 +2398,9 @@ impl Gpu {
     /// Makes what `kernel_ready` asks of `k` on another thread, each pipeline on one of its own (a driver compiles a
     /// kernel variant for half a second to tens of seconds): the frame goes on with the kernel it has and takes this
     /// one when it is ready. Nothing if it is ready, or being made.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn warm_kernel(&self, k: &Kernel, passes: &[&'static str], translucent: bool) {
-        // (A browser has no thread to give: its frame makes its kernel itself, live/frame.rs `choose_kernel`.)
-        if cfg!(target_arch = "wasm32") || self.kernel_ready(k, passes, translucent) || !self.warming.lock().unwrap().insert((k.features, k.hash, k.approx)) {
+        if self.kernel_ready(k, passes, translucent) || !self.warming.lock().unwrap().insert((k.features, k.hash, k.approx)) {
             return;
         }
         let (maker, k, passes, warming) = (self.maker(), k.clone(), passes.to_vec(), self.warming.clone());
@@ -2419,6 +2420,11 @@ impl Gpu {
         };
         std::thread::spawn(work);
     }
+
+    /// (A browser has no thread to give, and its device is one thread's: its frame makes its kernel itself,
+    /// live/frame.rs `choose_kernel`.)
+    #[cfg(target_arch = "wasm32")]
+    pub fn warm_kernel(&self, _: &Kernel, _: &[&'static str], _: bool) {}
 
     /// The translucency pass's bind group (group 2) drawing into `target` (live: the composed image; offline: sums);
     /// `low`: (colour, transmittance) per traced pixel, where a live view draws below full resolution
