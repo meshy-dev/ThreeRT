@@ -494,6 +494,13 @@ mod tests {
         // The longest side and no layer more: no room.
         let mut c = Atlas { side: MAX_PAGE, places: vec![], shelves: vec![vec![]] };
         assert!((0..4).all(|_| c.place(2048, 2048, true, 1).is_some()) && c.place(16, 16, true, 1).is_none());
+        assert_eq!((c.side, c.layers(), c.places.len()), (MAX_PAGE, 1, 4), "what found no room left nothing");
+        // A shelf with room beside its last, but lower than the texture, is not its place.
+        let mut d = pack(&[flat(100, 60)]).atlas;
+        let tall = d.place(60, 150, true, 8).unwrap();
+        assert!((tall.layer, tall.y) != (0, 0), "not on the shelf that is too low: {tall:?}");
+        d.place(200, 60, true, 8).unwrap();
+        sound("a tall one beside a low shelf", &d);
         // Pages without a texture take their first.
         let mut e = pack(&[]).atlas;
         let first = e.place(100, 60, true, 8).unwrap();

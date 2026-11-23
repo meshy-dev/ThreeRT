@@ -1067,7 +1067,9 @@ impl LiveCore {
             let l = &self.sc.tables.lights;
             let need = [(Table::Lights, std::mem::size_of_val(&l[..]) as u64), (Table::LightGroups, crate::light_groups(l).len() as u64 * 16)];
             if need.iter().any(|&(t, n)| n > self.sc.up.heap.cap(t)) {
-                self.sc.up.heap.grow_all(&self.g.device, &self.g.queue, &need.map(|(t, n)| (t, n * 2)));
+                let cap = &self.sc.up.heap;
+                let want = need.map(|(t, n)| (t, if n > cap.cap(t) { n * 2 } else { cap.cap(t) }));
+                self.sc.up.heap.grow_all(&self.g.device, &self.g.queue, &want);
                 self.g.rebind_scene(&mut self.sc.up);
             }
             // The kernel's counts of them: all, the directional ones, where the shadowed ones start.

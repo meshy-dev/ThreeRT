@@ -2539,7 +2539,10 @@ impl Gpu {
             return Err(anyhow!("more textures than this device's texture table holds ({})", rows / 2));
         }
         let (side, layers) = (pages.atlas.side, pages.atlas.layers());
-        let place = pages.atlas.place(t.width, t.height, t.wrap, self.device.limits().max_texture_array_layers).ok_or_else(|| anyhow!("no room in the texture pages"))?;
+        // (On a copy: one that finds no room leaves the pages' record as it was.)
+        let mut atlas = pages.atlas.clone();
+        let place = atlas.place(t.width, t.height, t.wrap, self.device.limits().max_texture_array_layers).ok_or_else(|| anyhow!("no room in the texture pages"))?;
+        pages.atlas = atlas;
         let mut view = None;
         if (pages.atlas.side, pages.atlas.layers()) != (side, layers) {
             let tex = self.pages_texture(pages.atlas.side, pages.atlas.layers());

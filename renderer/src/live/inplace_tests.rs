@@ -4300,6 +4300,13 @@ fn a_model_the_scene_has_not_got_comes_in_place() {
     place(&mut w, 42, Vec3::new(0.2, 0.1, 0.8));
     check("the model again", &mut live, &mut w);
     assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.g.pages_state().0.len()), (materials + 2, meshes + 1, 1), "nothing made twice");
+    // Another model the scene has not got, one of whose materials only emits (tests/render/data/panel.glb): its
+    // emitters light the scene as a build's (the lamp away: the panel is what lights it).
+    w.set_visible(12, false).unwrap();
+    w.set_object(43, "panel43".into(), None, Kind::Model { uri: "tests/render/data/panel.glb".into(), nodes: None, animation: None, functions: vec![] }, true, false).unwrap();
+    w.set_transform(43, Vec3::new(-0.5, -0.4, 0.6), glam::Quat::from_rotation_y(0.4), Vec3::splat(0.05)).unwrap();
+    check("a model that emits", &mut live, &mut w);
+    list_is_its_triangles("a model that emits", &live);
 }
 
 /// A kernel variant the device has not is made on another thread while the frames go on: the frame after the edit
@@ -4423,8 +4430,8 @@ fn lights_come_and_go_in_place() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    let mut last = picture(&mut live, 24);
-    let mut check = |what: &str, live: &mut LiveCore, w: &mut World, lights: usize| {
+    let last = std::cell::RefCell::new(picture(&mut live, 24));
+    let check = |what: &str, live: &mut LiveCore, w: &mut World, lights: usize| {
         assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
         assert_eq!((live.sc.tables.lights.len(), live.sc.base.counts[0]), (lights, lights as u32), "{what}: the table's lights and the kernel's count of them");
         let mut fresh = open(w).unwrap();
@@ -4432,8 +4439,8 @@ fn lights_come_and_go_in_place() {
         let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
         same_state(what, live, &fresh);
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
-        assert!(apart(&last, &b) > 0.1, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
-        last = b;
+        assert!(apart(&last.borrow(), &b) > 0.1, "{what}: the picture is {:.2} steps from the one before", apart(&last.borrow(), &b));
+        *last.borrow_mut() = b;
     };
     w.set_object(40, "point".into(), None, Kind::Light(point(true)), true, false).unwrap();
     w.set_transform(40, Vec3::new(-0.5, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
@@ -4463,4 +4470,19 @@ fn lights_come_and_go_in_place() {
     w.set_object(43, "point".into(), None, Kind::Light(point(true)), true, false).unwrap();
     w.set_transform(43, Vec3::new(0.3, 0.3, 0.9), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
     check("a light in a scene without one", &mut live, &mut w, 1);
+    // As many shadow-casting local lights as the kernel resamples (the light tiles): they come with a rebuild; one
+    // more and one fewer among them are in place again.
+    for k in 0..gpu::RIS_EXACT as u32 {
+        w.set_object(60 + k, format!("p{k}"), None, Kind::Light(point(true)), true, false).unwrap();
+        w.set_transform(60 + k, Vec3::new(-0.8 + 0.2 * k as f32, -0.6, 0.7), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    }
+    if gpu::light_tiles_on() {
+        assert!(live.commit(&mut w).unwrap() && live.sc.up.kernel.features & gpu::F_LISTS != 0, "the light tiles come with a rebuild ({:?})", live.fallback);
+        *last.borrow_mut() = picture(&mut live, 24);
+        w.set_object(70, "more".into(), None, Kind::Light(point(true)), true, false).unwrap();
+        w.set_transform(70, Vec3::new(0.0, 0.7, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        check("a light among those resampled", &mut live, &mut w, gpu::RIS_EXACT + 2);
+        w.remove(62);
+        check("one of them removed", &mut live, &mut w, gpu::RIS_EXACT + 1);
+    }
 }
