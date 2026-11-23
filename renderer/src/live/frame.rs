@@ -202,6 +202,35 @@ pub(super) struct Profile {
 }
 
 impl LiveCore {
+    /// The kernel this frame runs. The scene's (`up.kernel`: an edit that brings a feature or a function changes it)
+    /// where what a frame asks of it is made; else the one the view has, while the scene's is made on another thread
+    /// (`Gpu::warm_kernel`): the frame does not wait for a compile, and what the new kernel draws (fog, a clear
+    /// coat, a function) comes when it is ready. A view's first kernel is its load's. In lockstep a frame is its
+    /// world's alone, and a browser has no other thread: there the frame makes its kernel itself.
+    fn choose_kernel(&mut self, guides: bool) {
+        let wanted = &self.sc.up.kernel;
+        let key = |k: &gpu::Kernel| (k.features, k.hash, k.approx);
+        if self.kernel.as_ref().is_some_and(|k| key(k) == key(wanted)) {
+            return;
+        }
+        // (What a frame asks: as the load makes them, and the guides and the translucency pass where it has them.)
+        let mut passes: Vec<&'static str> = vec![];
+        if !self.g.merged {
+            passes.push("finish");
+        }
+        if guides {
+            passes.push("surface_guides");
+        }
+        if wanted.features & gpu::F_MEDIA != 0 {
+            passes.extend(["media_train", "media_composite"]);
+        }
+        let translucent = self.sc.up.translucent.is_some();
+        if self.kernel.is_none() || self.fixed_dt.is_some() || cfg!(target_arch = "wasm32") || self.g.kernel_ready(wanted, &passes, translucent) {
+            self.kernel = Some(wanted.clone());
+        } else {
+            self.g.warm_kernel(wanted, &passes, translucent);
+        }
+    }
     /// Profile slots after the cache resolve that this scene writes: particle pass + BLAS rebuild (2; stateless or GPU
     /// particles), translucency + volume training (2 more).
     pub(super) fn profile_extra(&self) -> u32 {
@@ -351,16 +380,18 @@ impl LiveCore {
             }
         }
         self.inst_moved = false;
+        self.choose_kernel(reconstruction.guides());
         let g = &self.g;
+        let kernel = self.kernel.as_ref().unwrap_or(&self.sc.up.kernel);
         let t_submit = Instant::now();
-        let pipeline = g.pipeline(&self.sc.up.kernel, true);
-        let guides = reconstruction.guides().then(|| g.kernel_pass(&self.sc.up.kernel, "surface_guides"));
+        let pipeline = g.pipeline(kernel, true);
+        let guides = reconstruction.guides().then(|| g.kernel_pass(kernel, "surface_guides"));
         // (No media pass while every medium is hidden: a pool of idle fireballs costs the frame nothing.)
-        let media = self.sc.up.kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
-        let media_train = (media && self.cache.is_some()).then(|| g.kernel_pass(&self.sc.up.kernel, "media_train"));
-        let media_composite = media.then(|| g.kernel_pass(&self.sc.up.kernel, "media_composite"));
+        let media = kernel.features & gpu::F_MEDIA != 0 && self.sc.up.media_hidden.borrow().iter().any(|h| !h);
+        let media_train = (media && self.cache.is_some()).then(|| g.kernel_pass(kernel, "media_train"));
+        let media_composite = media.then(|| g.kernel_pass(kernel, "media_composite"));
         // The pixels a sample's trace leaves at the radiance cache (pathtrace.wgsl `finish`).
-        let finish = self.targets.kernel.deferred.as_ref().filter(|_| self.cache.is_some()).map(|d| (g.kernel_pass(&self.sc.up.kernel, "finish"), d));
+        let finish = self.targets.kernel.deferred.as_ref().filter(|_| self.cache.is_some()).map(|d| (g.kernel_pass(kernel, "finish"), d));
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
@@ -374,7 +405,7 @@ impl LiveCore {
         // The light tiles (pathtrace.wgsl "Light tiles"), in a scene whose local lights are resampled (gpu::F_LISTS):
         // the lists the last frame built, for this frame's paths (none after a reset: its reports were another
         // view's), and this frame's grid offset, a pixel of 8 x 8.
-        let tiles_on = self.sc.up.kernel.features & gpu::F_LISTS != 0;
+        let tiles_on = kernel.features & gpu::F_LISTS != 0;
         if self.reset || !tiles_on {
             self.light_tiles = None;
         }
@@ -564,7 +595,7 @@ impl LiveCore {
         // translucency after the upscaler the same way), then their volume voxels trained.
         // (Nothing to draw while every translucent particle system is hidden in place.)
         let tl = self.sc.up.translucent.as_ref().filter(|_| g.translucent_particles_live(&self.sc.up)).map(|t| {
-            let pipes = g.translucent_pipelines(&self.sc.up.kernel, true);
+            let pipes = g.translucent_pipelines(kernel, true);
             let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.buf("sb").buffer } else { &self.targets.buf("fa").buffer };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
             let low = (iw, ih) != (w, h);

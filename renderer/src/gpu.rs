@@ -62,18 +62,20 @@ pub struct Gpu {
     /// Compiled pipelines kept between runs (`GpuOptions::pipeline_cache`), where the backend has such a cache.
     pipeline_cache: Option<crate::pipeline_cache::PipelineCache>,
     /// Kernel source (hardware or software traversal spliced in); scenes with material functions get their own module.
-    source: String,
+    source: std::sync::Arc<String>,
     /// The kernel as written: a scene without features that change the source or functions of its own.
     module: wgpu::ShaderModule,
     /// The merged binding layout (merged.rs): a browser's, where a stage has eight storage buffers. Natively with
     /// THREERT_MERGED=1 (software traversal, the device held to eight too).
     pub merged: bool,
     /// By (material-function code hash, the features that change the source: `KernelVariant::flags`).
-    modules: std::sync::Mutex<std::collections::HashMap<(u64, u32), wgpu::ShaderModule>>,
+    modules: ModuleCache,
     pipeline_layout: wgpu::PipelineLayout,
     /// Kernel variants by (feature mask, material-function code hash, LIVE): `FEAT` compiles out the features a scene
     /// does not use (they cost registers even when idle); `LIVE` = one fresh sample per dispatch for the viewport.
-    pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool, u32), wgpu::ComputePipeline>>,
+    pipelines: PipelineMap<(u32, u64, bool, u32)>,
+    /// The kernels being made on another thread (`warm_kernel`): by (features, functions' hash, approximations).
+    warming: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(u32, u64, u32)>>>,
     layout: wgpu::BindGroupLayout,
     /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
     /// what the live passes read of a trace (`KernelBufs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`,
@@ -102,9 +104,9 @@ pub struct Gpu {
     /// are one buffer past Metal's 29 a stage), and `no_vis` made for it.
     pub tl_vis_layout: Option<wgpu::BindGroupLayout>,
     no_vis_tl: Option<wgpu::BindGroup>,
-    tl_pipelines: std::sync::Mutex<std::collections::HashMap<(u32, u64, bool, u32), TranslucentPipelines>>,
+    tl_pipelines: PipelineMap<(u32, u64, bool, u32), TranslucentPipelines>,
     /// The kernel's passes beside `main` (`kernel_pass`) by kernel variant and entry point.
-    kernel_passes: std::sync::Mutex<std::collections::HashMap<(u32, u64, &'static str, u32), wgpu::ComputePipeline>>,
+    kernel_passes: PipelineMap<(u32, u64, &'static str, u32)>,
     /// The procedural blobs of the last upload (`upload_procs`).
     proc_cache: std::sync::Mutex<Option<ProcCache>>,
     /// The last upload's procedural BLASes by geometry hash (read-only once built; another upload may share them), with
@@ -1471,6 +1473,109 @@ impl KernelSwitches {
     }
 }
 
+type ModuleCache = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(u64, u32), wgpu::ShaderModule>>>;
+type PipelineMap<K, V = wgpu::ComputePipeline> = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<K, V>>>;
+
+/// What a kernel variant's module and pipelines are made from and kept in: a device's, cloned to the thread that
+/// makes a variant the frame does not wait for (`Gpu::warm_kernel`). A variant is looked up, made without a lock
+/// held (a compile takes long, and the frame looks its own up meanwhile), then kept; made twice at once, the first
+/// kept stays.
+#[derive(Clone)]
+struct KernelMaker {
+    device: wgpu::Device,
+    source: std::sync::Arc<String>,
+    /// The kernel as written (`Gpu::module`).
+    module: wgpu::ShaderModule,
+    /// The device's part of a variant (its features 0, its guard a kernel's own).
+    variant: KernelVariant,
+    layout: wgpu::PipelineLayout,
+    tl_layout: Option<wgpu::PipelineLayout>,
+    modules: ModuleCache,
+    pipelines: PipelineMap<(u32, u64, bool, u32)>,
+    passes: PipelineMap<(u32, u64, &'static str, u32)>,
+    tl: PipelineMap<(u32, u64, bool, u32), TranslucentPipelines>,
+}
+
+impl KernelMaker {
+    /// The kernel module for a scene: the shared one, or with its material functions spliced in.
+    fn module(&self, k: &Kernel) -> wgpu::ShaderModule {
+        let patches = k.features & F_SOURCE;
+        if patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty() {
+            return self.module.clone();
+        }
+        if let Some(m) = self.modules.lock().unwrap().get(&(k.hash, patches)) {
+            return m.clone();
+        }
+        let splice = |src: &str, marker: &str, code: &str| -> String {
+            if code.is_empty() {
+                return src.to_string();
+            }
+            let (head, rest) = src.split_once(&format!("// @{marker}-begin")).unwrap();
+            let (_, tail) = rest.split_once(&format!("// @{marker}-end")).unwrap();
+            format!("{head}{code}{tail}")
+        };
+        let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
+        // The variant: this device's traversal, switches, layout and loop guard, this scene's features.
+        let v = KernelVariant { features: patches, guard: loop_guard_of(patches & F_UNITS != 0), ..self.variant };
+        // A scene's functions that do not compile (a game's own WGSL) cost the game its functions, not the
+        // app its renderer: the kernel is made without them, and the game's log says why. (A panic here took
+        // the engine down, and ThreeRT for Android then took the device for one without a renderer.)
+        let wgsl = try_kernel_wgsl(&src, &v).unwrap_or_else(|e| {
+            let msg = format!("this scene's material, volume or geometry functions do not compile, so it is drawn without them: {e}");
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::script::engine_log("error", &msg);
+            #[cfg(target_arch = "wasm32")]
+            eprintln!("{msg}");
+            kernel_wgsl(&self.source, &v)
+        });
+        let m = unsafe { self.device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks()) };
+        self.modules.lock().unwrap().entry((k.hash, patches)).or_insert(m).clone()
+    }
+
+    fn make(&self, k: &Kernel, live: bool, entry: &str, label: &str, layout: Option<&wgpu::PipelineLayout>, cache: Option<&wgpu::PipelineCache>) -> wgpu::ComputePipeline {
+        let (module, constants) = (self.module(k), k.constants(live));
+        self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            cache,
+        })
+    }
+
+    /// The kernel's `main` for `k` (`live`: the viewport's), and whether it was made now.
+    fn pipeline(&self, k: &Kernel, live: bool, cache: Option<&wgpu::PipelineCache>) -> (wgpu::ComputePipeline, bool) {
+        let key = (k.features, k.hash, live, k.approx_of(live));
+        if let Some(p) = self.pipelines.lock().unwrap().get(&key) {
+            return (p.clone(), false);
+        }
+        let p = self.make(k, live, "main", if live { "pathtrace-live" } else { "pathtrace" }, Some(&self.layout), cache);
+        (self.pipelines.lock().unwrap().entry(key).or_insert(p).clone(), true)
+    }
+
+    /// A live pass of `k` beside `main`, and whether it was made now.
+    fn pass(&self, k: &Kernel, entry: &'static str, cache: Option<&wgpu::PipelineCache>) -> (wgpu::ComputePipeline, bool) {
+        let key = (k.features, k.hash, entry, k.approx);
+        if let Some(p) = self.passes.lock().unwrap().get(&key) {
+            return (p.clone(), false);
+        }
+        let p = self.make(k, true, entry, entry, Some(&self.layout), cache);
+        (self.passes.lock().unwrap().entry(key).or_insert(p).clone(), true)
+    }
+
+    /// The translucency pass's pipelines for `k`, and whether they were made now.
+    fn translucent(&self, k: &Kernel, live: bool, cache: Option<&wgpu::PipelineCache>) -> (TranslucentPipelines, bool) {
+        let key = (k.features, k.hash, live, k.approx_of(live));
+        if let Some(p) = self.tl.lock().unwrap().get(&key) {
+            return (p.clone(), false);
+        }
+        let make = |entry: &str| self.make(k, live, entry, entry, self.tl_layout.as_ref(), cache);
+        let made = TranslucentPipelines { draw: make("translucent"), train: make("volume_train"), up: make("translucent_up") };
+        (self.tl.lock().unwrap().entry(key).or_insert(made).clone(), true)
+    }
+}
+
 /// The kernel's runtime checks: loop bounding alone, wgpu's default for it (every loop has a count its compiler can
 /// see the end of). The kernel's loops end on sound data, which does not promise a compiler that they end; without
 /// the bound, kernels Metal's compiler made lost the state of whole SIMD groups on a scene with cutouts, one build and
@@ -2174,7 +2279,7 @@ impl Gpu {
             dlss_sdk,
             #[cfg(dlss)]
             dlss_rr,
-            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: src, module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
+            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: std::sync::Arc::new(src), module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), warming: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
         })
     }
 
@@ -2212,60 +2317,11 @@ impl Gpu {
 
     /// The path-tracing kernel specialised for a scene (feature mask + material functions), compiled on first use.
     pub fn pipeline(&self, k: &Kernel, live: bool) -> wgpu::ComputePipeline {
-        let mut cache = self.pipelines.lock().unwrap();
-        cache
-            .entry((k.features, k.hash, live, k.approx_of(live)))
-            .or_insert_with(|| {
-                let module = self.kernel_module(k);
-                let constants = k.constants(live);
-                let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(if live { "pathtrace-live" } else { "pathtrace" }),
-                    layout: Some(&self.pipeline_layout),
-                    module: &module,
-                    entry_point: Some("main"),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                    cache: self.cache(),
-                });
-                self.save_pipeline_cache();
-                p
-            })
-            .clone()
-    }
-
-    /// The kernel module for a scene: the shared one, or with its material functions spliced in.
-    fn kernel_module(&self, k: &Kernel) -> wgpu::ShaderModule {
-        let patches = k.features & F_SOURCE;
-        if patches == 0 && k.functions.is_empty() && k.volume_functions.is_empty() && k.geometry_functions.is_empty() {
-            return self.module.clone();
+        let (p, made) = self.maker().pipeline(k, live, self.cache());
+        if made {
+            self.save_pipeline_cache();
         }
-        let mut mods = self.modules.lock().unwrap();
-        mods.entry((k.hash, patches))
-            .or_insert_with(|| {
-                let splice = |src: &str, marker: &str, code: &str| -> String {
-                    if code.is_empty() {
-                        return src.to_string();
-                    }
-                    let (head, rest) = src.split_once(&format!("// @{marker}-begin")).unwrap();
-                    let (_, tail) = rest.split_once(&format!("// @{marker}-end")).unwrap();
-                    format!("{head}{code}{tail}")
-                };
-                let src = splice(&splice(&splice(&self.source, "material-functions", &k.functions), "volume-functions", &k.volume_functions), "geometry-functions", &k.geometry_functions);
-                // The variant: this device's traversal, switches, layout and loop guard, this scene's features.
-                let v = KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, whole_tables: self.whole_tables, guard: loop_guard_of(patches & F_UNITS != 0), ..KernelVariant::new(self.hwrt, self.switches, patches) };
-                // A scene's functions that do not compile (a game's own WGSL) cost the game its functions, not the
-                // app its renderer: the kernel is made without them, and the game's log says why. (A panic here took
-                // the engine down, and ThreeRT for Android then took the device for one without a renderer.)
-                let wgsl = try_kernel_wgsl(&src, &v).unwrap_or_else(|e| {
-                    let msg = format!("this scene's material, volume or geometry functions do not compile, so it is drawn without them: {e}");
-                    #[cfg(not(target_arch = "wasm32"))]
-                    crate::script::engine_log("error", &msg);
-                    #[cfg(target_arch = "wasm32")]
-                    eprintln!("{msg}");
-                    kernel_wgsl(&self.source, &v)
-                });
-                unsafe { self.device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace+functions"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks()) }
-            })
-            .clone()
+        p
     }
 
     /// The entries of the live passes made so far (`kernel_pass`), for tests: which were made, and when.
@@ -2277,49 +2333,72 @@ impl Gpu {
     /// A live pass of a scene's kernel variant beside `main`: `finish` (the pixels a sample's trace left), `media_train`
     /// (the volume voxels) or `media_composite` (camera rays through media, after the trace).
     pub fn kernel_pass(&self, k: &Kernel, entry: &'static str) -> wgpu::ComputePipeline {
-        let mut cache = self.kernel_passes.lock().unwrap();
-        cache
-            .entry((k.features, k.hash, entry, k.approx))
-            .or_insert_with(|| {
-                let module = self.kernel_module(k);
-                let constants = k.constants(true);
-                let p = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&self.pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                    cache: self.cache(),
-                });
-                self.save_pipeline_cache();
-                p
-            })
-            .clone()
+        let (p, made) = self.maker().pass(k, entry, self.cache());
+        if made {
+            self.save_pipeline_cache();
+        }
+        p
     }
 
     /// The translucency pass's pipelines for a scene's kernel variant.
     pub fn translucent_pipelines(&self, k: &Kernel, live: bool) -> TranslucentPipelines {
-        let mut cache = self.tl_pipelines.lock().unwrap();
-        cache
-            .entry((k.features, k.hash, live, k.approx_of(live)))
-            .or_insert_with(|| {
-                let module = self.kernel_module(k);
-                let constants = k.constants(live);
-                let make = |entry: &str| {
-                    self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(entry),
-                        layout: self.tl_pipeline_layout.as_ref(),
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                        cache: self.cache(),
-                    })
-                };
-                let made = TranslucentPipelines { draw: make("translucent"), train: make("volume_train"), up: make("translucent_up") };
-                self.save_pipeline_cache();
-                made
-            })
-            .clone()
+        let (p, made) = self.maker().translucent(k, live, self.cache());
+        if made {
+            self.save_pipeline_cache();
+        }
+        p
+    }
+
+    /// What makes this device's kernel modules and pipelines, for whichever thread makes them.
+    fn maker(&self) -> KernelMaker {
+        KernelMaker {
+            device: self.device.clone(),
+            source: self.source.clone(),
+            module: self.module.clone(),
+            variant: KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, whole_tables: self.whole_tables, ..KernelVariant::new(self.hwrt, self.switches, 0) },
+            layout: self.pipeline_layout.clone(),
+            tl_layout: self.tl_pipeline_layout.clone(),
+            modules: self.modules.clone(),
+            pipelines: self.pipelines.clone(),
+            passes: self.kernel_passes.clone(),
+            tl: self.tl_pipelines.clone(),
+        }
+    }
+
+    /// Whether what a live frame asks of kernel `k` is made: its `main`, the passes named, and the translucency
+    /// pass's pipelines if `translucent`.
+    pub fn kernel_ready(&self, k: &Kernel, passes: &[&'static str], translucent: bool) -> bool {
+        self.pipelines.lock().unwrap().contains_key(&(k.features, k.hash, true, k.approx_of(true)))
+            && passes.iter().all(|e| self.kernel_passes.lock().unwrap().contains_key(&(k.features, k.hash, *e, k.approx)))
+            && (!translucent || self.tl_pipelines.lock().unwrap().contains_key(&(k.features, k.hash, true, k.approx_of(true))))
+    }
+
+    /// Makes what `kernel_ready` asks of `k` on another thread, each pipeline on one of its own (a driver compiles a
+    /// kernel variant for half a second to tens of seconds): the frame goes on with the kernel it has and takes this
+    /// one when it is ready. Nothing if it is ready, or being made. (A browser has no thread to give: made here.)
+    pub fn warm_kernel(&self, k: &Kernel, passes: &[&'static str], translucent: bool) {
+        if self.kernel_ready(k, passes, translucent) || !self.warming.lock().unwrap().insert((k.features, k.hash, k.approx)) {
+            return;
+        }
+        let (maker, k, passes, warming) = (self.maker(), k.clone(), passes.to_vec(), self.warming.clone());
+        let work = move || {
+            // (The module first: every pipeline is made of it.)
+            let _ = maker.module(&k);
+            std::thread::scope(|s| {
+                s.spawn(|| maker.pipeline(&k, true, None));
+                for entry in &passes {
+                    s.spawn(|| maker.pass(&k, entry, None));
+                }
+                if translucent {
+                    s.spawn(|| maker.translucent(&k, true, None));
+                }
+            });
+            warming.lock().unwrap().remove(&(k.features, k.hash, k.approx));
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(work);
+        #[cfg(target_arch = "wasm32")]
+        work();
     }
 
     /// The translucency pass's bind group (group 2) drawing into `target` (live: the composed image; offline: sums);

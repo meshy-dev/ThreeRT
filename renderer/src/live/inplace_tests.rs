@@ -4284,3 +4284,44 @@ fn a_model_the_scene_has_not_got_comes_in_place() {
     check("the model again", &mut live, &mut w);
     assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.g.pages_state().0.len()), (materials + 2, meshes + 1, 1), "nothing made twice");
 }
+
+/// A kernel variant the device has not is made on another thread while the frames go on: the frame after the edit
+/// that brings a feature (a material that is glass) runs the kernel the view had, and the view takes the scene's
+/// once it is made. In lockstep a frame is its world's alone: it makes its kernel itself.
+#[test]
+fn a_new_kernel_variant_is_made_while_the_frames_go_on() {
+    let presets = crate::default_presets_dir();
+    let mat = |extra: serde_json::Value| -> crate::desc::Material {
+        let mut m = serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 0.2, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true });
+        m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(m).unwrap()
+    };
+    let mut w = world();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    live.render(1, |_, _| {});
+    let key = |k: &gpu::Kernel| (k.features, k.hash);
+    let had = key(live.kernel.as_ref().expect("the view's kernel"));
+    assert_eq!((had, had.0 & (gpu::F_GLASS | gpu::F_COAT)), (key(&live.sc.up.kernel), 0), "the scene's kernel, without glass or a clear coat");
+    w.set_material(7, mat(serde_json::json!({ "transmission": 1 })));
+    assert!(!live.commit(&mut w).unwrap(), "a new material: in place ({:?})", live.fallback);
+    let wanted = key(&live.sc.up.kernel);
+    assert_ne!(wanted.0 & gpu::F_GLASS, 0, "the scene's kernel has glass now");
+    live.render(1, |_, _| {});
+    assert_eq!(key(live.kernel.as_ref().unwrap()), had, "the frame after the edit ran the kernel the view had");
+    let t = Instant::now();
+    while key(live.kernel.as_ref().unwrap()) != wanted {
+        assert!(t.elapsed().as_secs() < 120, "the scene's kernel was never taken");
+        live.render(1, |_, _| {});
+    }
+    // In lockstep the next frame runs the scene's kernel, whatever it has to make for it.
+    live.fixed_dt = Some(1.0 / 60.0);
+    w.set_material(8, mat(serde_json::json!({ "clearcoat": 1 })));
+    assert!(!live.commit(&mut w).unwrap(), "another new material: in place ({:?})", live.fallback);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_COAT, 0);
+    live.render(1, |_, _| {});
+    assert_eq!(key(live.kernel.as_ref().unwrap()), key(&live.sc.up.kernel), "in lockstep the frame ran the scene's kernel");
+}
