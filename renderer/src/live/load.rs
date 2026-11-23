@@ -63,6 +63,8 @@ pub(super) struct LoadedScene {
     pub(super) shaders: Vec<(String, String, String)>,
     /// The materials of translucent particles' triangles: their functions are the translucency pass's.
     pub(super) translucent_mats: Vec<u32>,
+    /// The functions of those materials the scene's kernel was made with (`LiveCore::remake_functions`).
+    pub(super) translucent_used: std::collections::BTreeSet<i32>,
     /// Where in-place geometry edits write next (`edit_geometry`); a rebuild starts it afresh.
     pub(super) edit: EditState,
     /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
@@ -251,6 +253,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let mut translucent_mats: Vec<u32> = sc.trans_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
     translucent_mats.sort_unstable();
     translucent_mats.dedup();
+    let translucent_used = translucent_mats.iter().filter_map(|&m| sc.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
     // (The light tree is the tables' by now: its nodes from there.)
     let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
@@ -334,5 +337,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

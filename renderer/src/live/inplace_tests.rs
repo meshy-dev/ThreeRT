@@ -4486,3 +4486,54 @@ fn lights_come_and_go_in_place() {
         check("one of them removed", &mut live, &mut w, gpu::RIS_EXACT + 1);
     }
 }
+
+/// A translucent particle's material given another function, in place: the translucency pass has the functions of
+/// its particles' materials alone, so the kernel is made again with the one the material has now. First a function
+/// the scene had (an opaque material's: no function's code changes), then one that comes with the edit. After
+/// each: no rebuild, and the picture is a build's of the edited world.
+#[test]
+fn a_translucent_particles_material_takes_another_function_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let glow = |function: &str| -> crate::desc::Material {
+        serde_json::from_value(serde_json::json!({ "name": "glow", "color": [0.5, 0.5, 0.5], "opacity": 0.9, "transparent": true, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true,
+            "shader": { "id": function, "params": [], "textures": [] } })).unwrap()
+    };
+    let function = |name: &str, rgb: &str| format!("fn mf_{name}(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n    o.base = vec3<f32>({rgb});\n    o.emissive = vec3<f32>({rgb}) * 40.0;\n    return o;\n}}\n");
+    let mut w = wall_world(3.0, serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "shader": { "id": "fb", "params": [], "textures": [] } }));
+    let sun = serde_json::from_value(serde_json::json!({ "type": "directional", "color": [1.0, 1.0, 1.0], "castShadow": true, "intensity": 1.0, "angularDiameter": 0.5 })).unwrap();
+    w.set_object(20, "sun".into(), None, Kind::Light(sun), true, false).unwrap();
+    w.set_shader("fa", function("fa", "0.9, 0.05, 0.05"), String::new());
+    w.set_shader("fb", function("fb", "0.05, 0.9, 0.05"), String::new());
+    // (A small mesh of the opaque material with `fb`, out of the particle's way: the scene has both functions.)
+    w.set_object(11, "tile".into(), None, Kind::Mesh { geometry: 1, material: 3, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(11, Vec3::new(-0.8, -0.8, 0.2), glam::Quat::IDENTITY, Vec3::splat(0.1)).unwrap();
+    w.set_material(5, glow("fa"));
+    w.set_particle_fn("card", "fn pf_card(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(0.5, 0.0, 0.0), vec3<f32>(0.0, 0.5, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
+    w.set_object(30, "card".into(), None, Kind::Particles { count: 1, emitter: "card".into(), params: vec![], material: 5, emitter_area: 0.0 }, true, false).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert!(live.sc.up.translucent.is_some(), "the particle is the translucency pass's");
+    let mut last = picture(&mut live, 24);
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &b) > 0.5, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        last = b;
+    };
+    let before = live.sc.up.kernel.hash;
+    w.set_material(5, glow("fb"));
+    assert!(!w.changes.functions && !w.changes.structural, "a material given a function the scene has: the material's change alone");
+    check("a function the scene had", &mut live, &mut w);
+    assert_ne!(live.sc.up.kernel.hash, before, "another kernel: the translucency pass's functions are others");
+    w.set_shader("fc", function("fc", "0.05, 0.05, 0.9"), String::new());
+    w.set_material(5, glow("fc"));
+    check("a function that comes with the edit", &mut live, &mut w);
+}

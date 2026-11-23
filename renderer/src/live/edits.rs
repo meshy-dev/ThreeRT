@@ -1055,6 +1055,9 @@ impl LiveCore {
         if d.materials {
             self.upload_materials();
         }
+        if d.materials || changes.functions {
+            self.remake_functions(changes.functions);
+        }
         if more != 0 {
             self.sc.instance_features |= more;
             self.sc.up.kernel.features = self.kernel_features();
@@ -1466,10 +1469,10 @@ impl LiveCore {
 
     /// The material table to the GPU: written in place; with more materials than its section holds (materials added
     /// while the game runs), the section is made twice the size first and the scene's bind groups made again.
-    /// The scene's kernel with the world's material functions as they are now (`World::set_shader`): each under the
-    /// number it has, one the scene had not under the next, so the kernel the view runs meanwhile draws every
-    /// material it knows as before, and a material of a function it has not as one without (its dispatch's default).
-    /// The kernel with them is another module: made as any variant is (`choose_kernel`).
+    /// The world's material functions as they are now (`World::set_shader`), each under the number it has, one the
+    /// scene had not under the next: so the kernel the view runs meanwhile draws every material it knows as before,
+    /// and a material of a function it has not as one without (its dispatch's default). Before the commit's
+    /// materials are made (they name functions by number); the kernel with them is made after (`remake_functions`).
     fn set_functions(&mut self, world: &World) {
         let sc = &mut self.sc;
         for (name, (code, helpers)) in &world.shaders {
@@ -1482,10 +1485,21 @@ impl LiveCore {
                 }
             }
         }
-        let used: std::collections::BTreeSet<i32> = sc.translucent_mats.iter().filter_map(|&m| sc.tables.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
-        sc.up.kernel = sc.up.kernel.with_material_functions(&sc.shaders, &used);
         sc.fixed_features.1 = !sc.shaders.is_empty();
         self.sc.up.kernel.features = self.kernel_features();
+    }
+
+    /// The scene's kernel with its material functions as they are now, after the commit's materials are made: where
+    /// a function came or changed (`changed`), or where the functions of translucent particles' materials are
+    /// others than the kernel was made with (the translucency pass's dispatch has those alone: a particle's material
+    /// given another function needs another kernel). Another module, made as any variant is (`choose_kernel`).
+    fn remake_functions(&mut self, changed: bool) {
+        let sc = &mut self.sc;
+        let used: std::collections::BTreeSet<i32> = sc.translucent_mats.iter().filter_map(|&m| sc.tables.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+        if changed || used != sc.translucent_used {
+            sc.up.kernel = sc.up.kernel.with_material_functions(&sc.shaders, &used);
+            sc.translucent_used = used;
+        }
     }
 
     /// Places in the texture pages what the commit's materials need of them (`Gpu::place_texture`), before the

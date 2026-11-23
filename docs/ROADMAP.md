@@ -2801,7 +2801,9 @@ allocator's step).
 Tests: each kind of edit against a build of the edited world, state and picture (`textures_come_and_change_in_place`,
 `a_model_the_scene_has_not_got_comes_in_place`, `material_functions_come_and_change_in_place`,
 `lights_come_and_go_in_place`); a variant made while the frames go on; the atlas's places; the world's rules.
-Mutations: 24. 23 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
+Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
+Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
+translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
 **A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
 had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a
