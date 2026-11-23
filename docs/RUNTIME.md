@@ -807,7 +807,7 @@ core.write_stream("screen", 640, 360, &rgba)?;                  // LiveCore, bef
 
 ## Streaming: reading assets and adding them in place
 
-A game that streams its world as the camera moves (a city of baked cells: [threert/tokyo-1980](https://github.com/threert/tokyo-1980))
+A game that streams its world as the camera moves (a city of baked cells: [threert/TokyoRT](https://github.com/threert/TokyoRT))
 reads files under the asset root as it goes and adds what they hold without rebuilding the scene.
 
 - **`readAsset(path, offset?, length?)`** (`@threert/scene`; `__engine.readAsset`): a file under the asset root as an
