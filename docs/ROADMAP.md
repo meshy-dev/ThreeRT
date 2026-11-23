@@ -2776,6 +2776,19 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**The kernel's loops are bounded (2026-11-23).** The kernel was the one shader compiled without wgpu's loop
+bounding (every loop given a count its compiler can see the end of); every other pass has it. Its loops end on
+sound data, which is no promise to a compiler that they end. Without the bound, the kernels Metal's compiler made
+lost the state of whole SIMD groups (8 × 4 pixels) on the home showcase, a scene with cutouts, one build and not the
+next. Nine builds of this kernel that differ by a statement that changes nothing (a counter, a
+branch never taken), under the loop guard: in six the guard stopped 14 to 43 invocations a run; with the bound, in
+none. Five builds of the next change's kernel (triangles as vertices and indices) drew 94,000 to 112,000 of the
+picture's 518,400 pixels wrong without the guard; with the bound each drew the right picture. Bounds checks and
+ray-query tracking, turned on alone, changed nothing and stay off. `THREERT_CHECKED=0` is the kernel as it was.
+What it costs: under hardware traversal a frame's GPU time in twelve scenes, alternated twice with the kernel before,
+is -1 % to +4 % (Zero Day +4.0, the neon street +3.8, the colour room +3.6, the crowd +2.9, the others under 2, Tokyo
+-1.0); under software traversal, whose tree walks are loops, the trace of a crowd of 3.3 M triangles is 85.3 -> 90.6 ms
+(+6 %). The pictures and the suites are the ones before.
 **Triangles are vertices and indices (2026-11-22).** Every triangle carried its own three vertices (48 bytes), its
 shading attributes (96) and, under hardware traversal, its positions again as the BLAS's input (36). Now the scene
 has vertices, a record of 48 bytes each (position and u; normal and v; tangent), and a triangle is three indices
