@@ -89,6 +89,12 @@ pub fn physics(op: &str, args: &str) -> Result<String, JsValue> {
     engine(|e| api::physics(&mut e.physics, &mut e.world, op, &a)).map_err(thrown)
 }
 
+/// `readAsset`: native only (a page has no asset root on disk; it fetches what it needs): throws.
+#[wasm_bindgen(js_name = readAsset)]
+pub fn read_asset(path: &str, _offset: Option<f64>, _length: Option<f64>) -> Result<Vec<u8>, JsValue> {
+    Err(JsValue::from_str(&format!("readAsset {path}: the native renderer reads assets; a page fetches them")))
+}
+
 #[wasm_bindgen(js_name = physicsPoses)]
 pub fn physics_poses() -> Vec<f32> {
     engine(|e| api::physics_poses(&e.physics).to_vec())
