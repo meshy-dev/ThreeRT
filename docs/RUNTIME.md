@@ -1530,7 +1530,7 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
 
 Vertices and indices, one layout for hardware and software traversal (`renderer/src/indexed.rs`):
 - **Vertices.** `vertices` (binding 1): a record of 48 bytes a vertex, (position, u), (normal, v), (tangent, hand;
-  zeros: none). The BLASes are built from this buffer too (stride 48).
+  a hand of 0: none). The BLASes are built from this buffer too (stride 48).
 - **Triangles.** Three indices each, a section of `words` (`Stream::Indices`): what a hit reads, and the BLASes'
   index buffer. A mesh's indices count from the mesh's first vertex, which its instances' records carry
   (`info.z`); a world-space triangle's count from 0.
@@ -1548,12 +1548,16 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   the section (a tree has a mesh's triangles in its own order). Written at the build and where an edit places a
   mesh; after the skinning pass a pass takes a posed mesh's again from its vertices (`leaf_gather.wgsl`).
 - **A hit reads** its triangle's indices and its three vertices' records (`tri_data(triangle, instance, part)`).
-- **What shares.** Corners equal bit for bit in position, normal and UV are one vertex: the still world-space
-  triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles the CPU or
-  a pass writes whole (those that move in world space, particles) keep three vertices each.
-- **Tangents.** A triangle's frame is its first vertex's tangent where its file has one (a first corner never
-  shares a vertex with a triangle of another tangent), else made where it is hit, from its edges, its UVs and its
-  first normal (`hit_tangent`), and placed by its instance there.
+- **What shares.** Corners equal bit for bit in position, normal, UV and tangent are one vertex: the still
+  world-space triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles
+  the CPU or a pass writes whole (those that move in world space, particles) keep three vertices each.
+- **Tangents.** A vertex's own: the tangent at a hit is its triangle's three vertices' there, the hand its first
+  vertex's, placed by its instance (`hit_tangent`; read only where a frame is asked, by a normal map or a
+  function). A model's file gives them; a primitive of a file that has UVs and no tangents has them made where it
+  is loaded, a corner each, by the algorithm normal maps are baked against (`tangents.rs`, MikkTSpace; a vertex
+  whose corners come out apart, at a mirrored texture's seam, is a vertex for each). Geometry that is no file's and
+  has no tangents (a scene's own geometries, a light's card) has its frame made where it is hit, from its
+  triangle's edges, its UVs and its first normal.
 - **Motion.** `prev_verts` (binding 6): the vertices that move as they were the previous frame, whole records (a
   copy on the GPU has no stride; the kernel reads their positions): the moving world-space triangles' first, then
   the deforming meshes', each where its record says (`n2.w`).

@@ -30,18 +30,17 @@ pub fn generate(n: usize, corner: impl Fn(usize, usize) -> ([f32; 3], [f32; 3], 
         fn set_tangent(&mut self, space: Option<bevy_mikktspace::TangentSpace>, face: usize, vert: usize) {
             // (The algorithm's hand is for a v that grows up the image: ours is the other.)
             let t = space.map(|s| s.tangent_encoded()).map(|t| [t[0], t[1], t[2], -t[3]]);
+            // (A corner without a frame, or with one that is not finite, keeps its hand of 0: see below.)
             let whole = t.filter(|t| t.iter().all(|x| x.is_finite()) && t[..3].iter().any(|x| *x != 0.0));
-            match (whole, &mut self.out[face]) {
-                (Some(t), Some(tri)) => tri[vert] = t,
-                (None, tri) => *tri = None,
-                _ => {}
+            if let (Some(t), Some(tri)) = (whole, &mut self.out[face]) {
+                tri[vert] = t;
             }
         }
     }
     let mut faces = Faces { corner, out: vec![Some([[0.0; 4]; 3]); n] };
     // (Its error type has no value: it cannot fail.)
     let _ = bevy_mikktspace::generate_tangents(&mut faces);
-    // (A corner the algorithm did not write is none.)
+    // (A triangle with a corner the algorithm gave nothing has none.)
     for t in &mut faces.out {
         if t.is_some_and(|t| t.iter().any(|c| c[3] == 0.0)) {
             *t = None;

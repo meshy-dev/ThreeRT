@@ -75,7 +75,7 @@ or only adjust a part.
 |---|---|
 | `wp` | world position (m) |
 | `n`, `ng` | vertex / geometric normal, facing the viewer |
-| `t`, `b` | tangent (+u), bitangent (image up) |
+| `t`, `b` | tangent (+u), bitangent (image up): the surface's own at the point (a model's vertices', a file's or made for it) or, for geometry without tangents, its triangle's |
 | `uv`, `uvd` | mesh UV0 (v down); `exp2(uvd)` = UV units per metre (pass it to `msample` for the mip) |
 | `view` | unit vector toward the ray origin |
 | `op`, `ob` | object pivot and world bounds size (UE `ObjectPositionWS` / `ObjectBounds`) |

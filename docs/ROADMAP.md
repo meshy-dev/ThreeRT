@@ -2776,6 +2776,29 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
+had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a
+curved surface. Now each corner of a file's triangle carries its own through the build, corners that differ in
+tangent are vertices apart, and the kernel takes a hit's tangent from its three vertices at the hit (the hand from
+the first). A primitive of a file with UVs and no tangents has them made where it is loaded, as the glTF
+specification says, by MikkTSpace (`tangents.rs`, on `bevy_mikktspace`, a crate without dependencies), a corner
+each. Made for every such primitive, not only where a material reads a frame: 1.4 to 2.9 M triangles a second on
+one thread, and 0 to 0.4 % more vertices on the files measured, so a material that starts reading a frame needs
+no rebuild. Against the tangents two sample files carry themselves, 897,150 corners: 3 more than a degree off, none
+of the other hand. A scene's own geometries, which have no tangent attribute, keep the frame made at the hit.
+Pictures: offline at 8 samples against the build before, three scenes without normal-mapped models are the same
+bytes; the home showcase (models without tangents under normal maps) differs in 5.4 % of its pixels, by 0.08 steps
+in the mean; the museum in 1.2 %.
+Tests: a quad whose file has a tangent of its own on each side, by the gradient a function draws of it
+(`material/function-vertex-tangents`: 1 with one tangent a triangle); two quads whose file gives one hand each, by
+the side their bitangent points to (`material/function-file-hand`); the tangents made for a quad, upright and
+mirrored, and for a primitive whose texture mirrors along an edge (the edge's vertices twice, their joints and
+weights with them); corners apart by tangent or by hand, a skinned mesh's too; a model's triangles, its skin's
+corners and a placed triangle each with a tangent a corner, under a mirroring placement too.
+Mutations: 18 (15 of the build, 3 of the kernel). 15 failed a test there was; one, a hand never read at a hit, none,
+and has the hand's test now; one, a corner without a tangent that says it has one, none, and is asserted now; one
+changed nothing: a branch of the generator that its last pass repeats, removed.
+
 **The kernel's loops are bounded (2026-11-23).** The kernel was the one shader compiled without wgpu's loop
 bounding (every loop given a count its compiler can see the end of); every other pass has it. Its loops end on
 sound data, which is no promise to a compiler that they end. Without the bound, the kernels Metal's compiler made

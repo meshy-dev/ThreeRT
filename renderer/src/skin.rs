@@ -742,6 +742,12 @@ mod tests {
             }
         }
         assert_eq!(seen, 36 + 648 + 12, "corners compared");
+        // A vertex whose tangent has no hand has none: its corners do not say they have one, the others do.
+        rigid.prims[0].tangents.as_mut().unwrap()[0] = [0.0; 4];
+        let says: Vec<bool> = rigid.skin_source(None, None).unwrap().iter().flatten().map(|c| c.t[3].to_bits() & CORNER_TANGENT != 0).collect();
+        let without = rigid.prims.iter().enumerate().map(|(k, p)| if k == 0 { p.indices.iter().filter(|&&v| v == 0).count() } else { 0 }).sum::<usize>();
+        assert_eq!((says.iter().filter(|s| !**s).count(), without > 0), (without, true), "the corners at the vertex without a tangent");
+        rigid.prims[0].tangents.as_mut().unwrap()[0] = [1.0, 0.0, 0.0, 1.0];
         // A model's triangles a node (`node_triangles`) are `triangles`', their tangents a corner each too.
         for a in [None, Some(pose("move", 0.5))] {
             let (by_node, whole) = (rigid.node_triangles(Mat4::IDENTITY, a.as_ref(), &|_| true, false).unwrap(), rigid.triangles(Mat4::IDENTITY, None, a.as_ref()).unwrap());
