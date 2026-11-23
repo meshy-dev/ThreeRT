@@ -313,6 +313,11 @@ pub struct LiveCore {
     /// The kernel the frames run (`choose_kernel`): the scene's (`up.kernel`), or the one before it while the scene's
     /// is being made on another thread. None: none chosen yet (a view's first frame, the first after a rebuild).
     pub(super) kernel: Option<gpu::Kernel>,
+    /// Kernel features an edit of this commit asks for that the scene's structure had not (`F_MASKED`: its first
+    /// cutout on an instance; `F_IGLASS`: its first shadow caster with glass among its sections; `F_IFUNC`: its
+    /// first material function on an instance). They switch code on, over data every scene has: the commit adds
+    /// them to the scene's (`instance_features`).
+    pub(super) more_features: std::cell::Cell<u32>,
     pub triangles: usize,
     pub scene_name: String,
     /// Scene time, s: what `advance_time` added up, the dt each frame script gets, so it is the game's clock (`f.time`)
@@ -574,6 +579,7 @@ impl LiveCore {
         };
         let mut core = LiveCore {
             kernel: None,
+            more_features: Default::default(),
             reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();

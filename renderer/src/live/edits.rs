@@ -1026,6 +1026,8 @@ impl LiveCore {
             }
             applied = None;
         }
+        // (Features the edits asked for: the scene's from now on. A rebuild finds them itself.)
+        let more = self.more_features.take();
         let Some(d) = applied else {
             let t = Instant::now();
             self.pending_emitters.clear();
@@ -1038,6 +1040,10 @@ impl LiveCore {
         };
         if d.materials {
             self.upload_materials();
+        }
+        if more != 0 {
+            self.sc.instance_features |= more;
+            self.sc.up.kernel.features = self.kernel_features();
         }
         let (q, up, e) = (&self.g.queue, &self.sc.up, &mut self.sc.tables);
         if d.lights && !e.lights.is_empty() {
@@ -1573,6 +1579,7 @@ impl LiveCore {
     /// class needs (the scene's first cutout, its first caster with glass among its sections, its first function
     /// on an instance); the caller rebuilds.
     fn remake_classes(&mut self, world: &World, build: &mut gpu::TopBuild) -> std::result::Result<(), String> {
+        let more = &self.more_features;
         let mats: std::collections::HashSet<u32> = self.sc.tables.reclassed.iter().copied().collect();
         let (features, q) = (self.sc.up.kernel.features, &self.g.queue);
         let LoadedScene { up, tables, meshes, instances, gpu_instances, rows, .. } = &mut self.sc;
@@ -1598,15 +1605,15 @@ impl LiveCore {
                 let mat = scene::row_material(row);
                 row[0] = scene::row_of(mat, &tables.materials)[0];
                 if tables.materials.get(mat as usize).is_some_and(|m| m.tex1[3] != 0) && features & gpu::F_IFUNC == 0 {
-                    return Err("the scene's first material function on an instance (kernel feature)".into());
+                    more.set(more.get() | gpu::F_IFUNC);
                 }
             }
             let (bits, cast) = (scene::rows_bits(mine), scene::rows_cast(mine, casts));
             if bits & scene::INST_CUTOUT != 0 && features & gpu::F_MASKED == 0 {
-                return Err("the scene's first cutout (kernel feature)".into());
+                more.set(more.get() | gpu::F_MASKED);
             }
             if bits & scene::INST_GLASS != 0 && cast && features & gpu::F_IGLASS == 0 {
-                return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                more.set(more.get() | gpu::F_IGLASS);
             }
             let Some(top) = top.as_mut() else { return Err("software traversal".into()) };
             // (Its rows' bits; whether its mesh deforms is its own.)
@@ -1934,6 +1941,7 @@ impl LiveCore {
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
             return Err("THREERT_EDIT_REBUILD=1".into());
         }
+        let more = &self.more_features;
         let size = std::mem::size_of::<scene::GpuInstance>();
         let now = shader_time(self.time);
         let empty = crate::world::InstanceTable::default();
@@ -1967,10 +1975,10 @@ impl LiveCore {
             if let Some(mat) = mat.filter(|&mat| sc.instances.get(first).is_some_and(|i| scene::row_material(&sc.rows[i.rows as usize]) != mat)) {
                 let (gm, features) = (sc.tables.materials[mat as usize], sc.up.kernel.features);
                 if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
-                    return Err("the scene's first material function on an instance (kernel feature)".into());
+                    more.set(more.get() | gpu::F_IFUNC);
                 }
                 if scene::mesh_class(&gm) == 1 && features & gpu::F_MASKED == 0 {
-                    return Err("the scene's first cutout (kernel feature)".into());
+                    more.set(more.get() | gpu::F_MASKED);
                 }
                 let emits = scene::emissive(&gm);
                 let mut w_rows = Gather::default();
@@ -2561,6 +2569,7 @@ impl LiveCore {
         if std::env::var("THREERT_EDIT_REBUILD").is_ok_and(|v| v == "1") {
             return Err("THREERT_EDIT_REBUILD=1".into());
         }
+        let more = &self.more_features;
         let LoadedScene { up, tables, edit, meshes, pool_tris, pool_place, instances, gpu_instances, sections, rows, procs, proc_first, moving_instances, skins, .. } = &mut self.sc;
         let (g, assets) = (&self.g, &self.assets);
         let features = up.kernel.features;
@@ -2848,7 +2857,7 @@ impl LiveCore {
                         }
                         let mine = tables.retained.mesh_rows.get(&its_mesh).ok_or("a model's mesh without its rows")?.clone();
                         if glass_caster(&mine) {
-                            return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                            more.set(more.get() | gpu::F_IGLASS);
                         }
                         let posed = glb.triangles(glam::Mat4::IDENTITY, nodes.as_deref(), Some(a)).map_err(|e| e.to_string())?;
                         let n = order.len();
@@ -2979,7 +2988,7 @@ impl LiveCore {
                             }
                             let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();
                             if glass_caster(&mine) {
-                                return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                                more.set(more.get() | gpu::F_IGLASS);
                             }
                             // (A part without size, a node its clip scales to nothing: at a point, as the build has it.)
                             let (w_n, _) = scene::placed_world(scene::RigidModel::part_world(m, node, &globals), m.w_axis.truncate());
@@ -3016,7 +3025,7 @@ impl LiveCore {
                                     return Err("a model with triangles the build flattens at each placement".into());
                                 }
                                 if !classed[1].is_empty() && features & gpu::F_MASKED == 0 {
-                                    return Err("the scene's first cutout (kernel feature)".into());
+                                    more.set(more.get() | gpu::F_MASKED);
                                 }
                                 let (order, sects, mine) = scene::model_sections(&scene::kept(&classed));
                                 if order.is_empty() {
@@ -3041,7 +3050,7 @@ impl LiveCore {
                         // (Its rows, the mesh's own, are placed with its record below.)
                         let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();
                         if glass_caster(&mine) {
-                            return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                            more.set(more.get() | gpu::F_IGLASS);
                         }
                         *edit.users.entry(mesh).or_default() += 1;
                         if let Some(k) = was {
@@ -3078,10 +3087,10 @@ impl LiveCore {
                     for &mat in &mats {
                         let gm = tables.materials[mat as usize];
                         if gm.tex1[3] != 0 && features & gpu::F_IFUNC == 0 {
-                            return Err("the scene's first material function on an instance (kernel feature)".into());
+                            more.set(more.get() | gpu::F_IFUNC);
                         }
                         if scene::mesh_class(&gm) == 1 && features & gpu::F_MASKED == 0 {
-                            return Err("the scene's first cutout (kernel feature)".into());
+                            more.set(more.get() | gpu::F_MASKED);
                         }
                     }
                     // An emitting material: a mesh as any other, each instance's emitters in the light list (given
@@ -3215,7 +3224,7 @@ impl LiveCore {
                     let mine = scene::section_rows(im.sections(sections), &mats, &tables.materials);
                     // (Shadow rays pass the glass among a caster's other sections under a kernel feature.)
                     if scene::rows_bits(&mine) & scene::INST_GLASS != 0 && scene::rows_cast(&mine, o.cast_shadow) && features & gpu::F_IGLASS == 0 {
-                        return Err("the scene's first shadow caster with glass among its sections (kernel feature)".into());
+                        more.set(more.get() | gpu::F_IGLASS);
                     }
                     let inst = scene::Instance { mesh, world: m, object: object as u32, cast_shadow: scene::rows_cast(&mine, o.cast_shadow), name: o.name.clone(), sub: None, hidden: unseen, masked: unseen, first_emitter: 0, rows: 0, bits: scene::rows_bits(&mine), prev: 0, verts: 0 };
                     let (lo, hi) = im.placed_bounds(m);

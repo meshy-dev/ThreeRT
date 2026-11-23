@@ -2290,9 +2290,10 @@ fn a_model_of_several_materials_placed_in_place_has_its_rows() {
 }
 
 /// A model with glass among its sections, in a scene where no instance of it casts a shadow: the kernel was built
-/// without what has a shadow ray pass such glass, so the first instance that casts is placed by a rebuild.
+/// without what has a shadow ray pass such glass. The first instance that casts is placed in place and asks for it
+/// (`F_IGLASS`): the picture is a build's.
 #[test]
-fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
+fn the_first_caster_with_glass_among_its_sections_comes_in_place() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
     let model = || Kind::Model { uri: "tests/render/data/frame-pane.glb".into(), nodes: None, animation: None, functions: vec![] };
@@ -2311,7 +2312,7 @@ fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
     // (Upright before the wall, its pane 1 m wide: the pane's shadow is the sun's light through it.)
     w.set_object(31, "caster".into(), None, model(), true, false).unwrap();
     w.set_transform(31, Vec3::new(0.5, 0.0, 0.5), glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), Vec3::splat(2.0)).unwrap();
-    live.commit(&mut w).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "in place ({:?})", live.fallback);
     let mut fresh = open(&w).unwrap();
     forget(&mut live);
     let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
@@ -2328,7 +2329,7 @@ fn the_first_caster_with_glass_among_its_sections_is_a_rebuilds() {
     w.set_geometry(30, Geometry { positions: vec![-1.0, -0.5, 0.0, 0.0, -0.5, 0.0, 1.0, -0.5, 0.0, -1.0, 0.5, 0.0, 0.0, 0.5, 0.0, 1.0, 0.5, 0.0], normals: [0.0, 0.0, 1.0].repeat(6), uvs: vec![0.0; 12], indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4], groups: vec![[0, 6, 0], [6, 6, 1]], colors: vec![] }).unwrap();
     w.set_object(31, "pane".into(), None, Kind::Mesh { geometry: 30, material: 1, own_blas: false, materials: vec![1, 65] }, true, false).unwrap();
     w.set_transform(31, Vec3::new(0.0, 0.0, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-    live.commit(&mut w).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "in place ({:?})", live.fallback);
     let mut fresh = open(&w).unwrap();
     forget(&mut live);
     let (a, b) = (picture(&mut live, 64), picture(&mut fresh, 64));
