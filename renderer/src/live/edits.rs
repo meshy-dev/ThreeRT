@@ -593,15 +593,24 @@ impl LiveCore {
                 }
             }
         }
-        // New materials without textures: entries after the scene's, before the edits that place objects drawn with
-        // them (and the GPU's table with them, grown if it is full).
+        // The textures the new and the changed materials name: those the pages have not got are placed in them now;
+        // a texture that was replaced has its materials made again.
+        if !changes.structural && (!changes.new_materials.is_empty() || !changes.materials.is_empty() || !changes.textures.is_empty()) {
+            if let Err(why) = self.place_textures(world, &mut changes) {
+                self.fallback = Some(format!("a texture that cannot be placed in the pages ({why:#})"));
+                self.fallbacks += 1;
+                changes.structural = true;
+            }
+        }
+        // New materials: entries after the scene's, before the edits that place objects drawn with them (and the GPU's
+        // table with them, grown if it is full).
         if !changes.new_materials.is_empty() && !changes.structural {
             if self.sc.tables.add_materials(world, &changes.new_materials) {
                 self.upload_materials();
                 // (A clear coat, an unlit material: the kernel variant with it, compiled once.)
                 self.sc.up.kernel.features = self.kernel_features();
             } else {
-                self.fallback = Some("a new material that cannot be added in place (it emits, is glass or a cutout)".into());
+                self.fallback = Some("a new material that cannot be added in place".into());
                 self.fallbacks += 1;
                 if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:582"); }
                 changes.structural = true;
@@ -1226,6 +1235,61 @@ impl LiveCore {
 
     /// The material table to the GPU: written in place; with more materials than its section holds (materials added
     /// while the game runs), the section is made twice the size first and the scene's bind groups made again.
+    /// Places in the texture pages what the commit's materials need of them (`Gpu::place_texture`), before the
+    /// materials are made:
+    /// - A texture a new or a changed material names and the pages have not got: decoded and placed, its rows in
+    ///   the texture table, its slot remembered (`Retained::textures`).
+    /// - A texture that was replaced: its new pixels over the old where they fit their place and the slot is no
+    ///   other texture's, else its slots are forgotten and it is placed as another; the materials that name it are
+    ///   made again either way (its repeat and offset are theirs).
+    fn place_textures(&mut self, world: &World, changes: &mut crate::world::Changes) -> Result<()> {
+        for tid in std::mem::take(&mut changes.textures) {
+            let Some(t) = world.textures.get(&tid) else { continue };
+            let slots: Vec<(bool, i32)> = self.sc.tables.retained.textures.iter().filter(|(k, _)| k.0 == tid).map(|(k, s)| (k.1, *s)).collect();
+            for (srgb_default, slot) in slots {
+                let shared = self.sc.tables.retained.textures.iter().any(|(k, s)| *s == slot && k.0 != tid);
+                if shared || !self.g.rewrite_texture(slot, &scene::Texture::of_world(t, srgb_default, &self.assets)?) {
+                    self.sc.tables.retained.textures.remove(&(tid, srgb_default));
+                }
+            }
+            let known = &self.sc.tables.retained.materials;
+            changes.materials.extend(world.materials.iter().filter(|(id, m)| known.contains_key(id) && crate::world::material_texture_ids(m).any(|x| x == tid)).map(|(id, _)| *id));
+        }
+        let (mut info, mut rebind) = (None, false);
+        let ids: Vec<u32> = changes.new_materials.iter().chain(&changes.materials).copied().collect();
+        for id in ids {
+            let Some(m) = world.materials.get(&id) else { continue };
+            for (tid, srgb_default) in scene::material_textures(id, m, &world.textures, &self.sc.tables.retained.shaders)? {
+                if self.sc.tables.retained.textures.contains_key(&(tid, srgb_default)) {
+                    continue;
+                }
+                let t = world.textures.get(&tid).ok_or_else(|| anyhow::anyhow!("material {id}: unknown texture {tid}"))?;
+                let e = self.g.place_texture(&scene::Texture::of_world(t, srgb_default, &self.assets)?)?;
+                self.sc.tables.retained.textures.insert((tid, srgb_default), e.slot);
+                if let Some(view) = e.view {
+                    self.sc.up.bg_parts.tex_view = view;
+                    rebind = true;
+                }
+                info = e.info.or(info);
+            }
+        }
+        if let Some(info) = info {
+            let bytes: &[u8] = bytemuck::cast_slice(&info[..]);
+            if bytes.len() as u64 > self.sc.up.heap.cap(Table::TexInfo) {
+                self.sc.up.heap.grow(&self.g.device, &self.g.queue, Table::TexInfo, bytes.len() as u64 * 2);
+                rebind = true;
+            }
+            self.sc.up.heap.write(&self.g.queue, Table::TexInfo, 0, bytes);
+            // (The scene's first texture: the kernel variant that samples them.)
+            self.sc.fixed_features.0 = true;
+            self.sc.up.kernel.features = self.kernel_features();
+        }
+        if rebind {
+            self.g.rebind_scene(&mut self.sc.up);
+        }
+        Ok(())
+    }
+
     pub(super) fn upload_materials(&mut self) {
         let bytes: &[u8] = bytemuck::cast_slice(&self.sc.tables.materials);
         if bytes.len() as u64 > self.sc.up.heap.cap(Table::Materials) {

@@ -100,7 +100,7 @@ pub enum ProcSource {
 /// AABBs a procedural geometry may have: the hit's primitive index has 23 bits (pathtrace.wgsl `PROC_BIT`).
 pub const PROC_MAX_BOXES: usize = (1 << 23) - 1;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TextureSource {
     /// Path relative to the asset root.
     File(String),
@@ -114,7 +114,7 @@ pub enum TextureSource {
     Stream { name: String, width: u32, height: u32, rgba: Arc<Vec<u8>> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Texture {
     pub source: TextureSource,
     pub srgb: bool,
@@ -285,6 +285,8 @@ pub struct Changes {
     /// and lights without a card (their table entry goes black). A rebuild where the build left the object out.
     pub shown: HashSet<u32>,
     pub materials: HashSet<u32>,
+    /// Textures that were replaced by another (`World::set_texture`): the materials that name one are made again.
+    pub textures: HashSet<u32>,
     /// Objects whose light parameters changed.
     pub lights: HashSet<u32>,
     pub powers: HashSet<u32>,
@@ -334,7 +336,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -419,10 +421,9 @@ impl Default for World {
     }
 }
 
-fn same_texture_refs(a: &desc::Material, b: &desc::Material) -> bool {
-    let maps = |m: &desc::Material| [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map];
-    let func = |m: &desc::Material| m.shader.as_ref().map(|s| (s.id.clone(), s.textures.clone()));
-    maps(a) == maps(b) && func(a) == func(b)
+/// The textures a material names: its maps and its function's.
+pub fn material_texture_ids(m: &desc::Material) -> impl Iterator<Item = u32> + '_ {
+    [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].into_iter().flatten().chain(m.shader.iter().flat_map(|s| s.textures.iter().flatten().copied()))
 }
 
 fn light_class(l: &desc::Light) -> (u8, bool, bool) {
@@ -505,12 +506,21 @@ impl World {
         Ok(())
     }
 
+    /// Creates or replaces a texture. A new one is placed in the texture pages when a material first names it; one
+    /// that changed (its pixels, its wrap, its repeat or offset) has its materials made again, in place
+    /// (`Changes::textures`). The same texture set again changes nothing.
     pub fn set_texture(&mut self, id: u32, t: Texture) -> Result<()> {
         if let TextureSource::File(uri) = &t.source {
             check_uri(uri)?;
         }
+        match self.textures.get(&id) {
+            Some(old) if *old == t => return Ok(()),
+            Some(_) => {
+                self.changes.textures.insert(id);
+            }
+            None => {}
+        }
         self.textures.insert(id, t);
-        mark_structural(&mut self.changes, line!());
         Ok(())
     }
 
@@ -523,19 +533,21 @@ impl World {
     }
 
     pub fn set_material(&mut self, id: u32, m: desc::Material) {
+        let function = |m: &desc::Material| m.shader.as_ref().map(|s| s.id.clone());
         match self.materials.get(&id) {
-            // `transparent` moves particles between the scene and the translucency pass, `vertexColors` decides which
-            // triangles carry colours: a rebuild.
-            Some(old) if same_texture_refs(old, &m) && old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
+            // Its parameters and its textures (a texture the scene has not is placed in the pages then), in place.
+            // Another function, or none where it had one: the kernel's code; `transparent` moves particles between
+            // the scene and the translucency pass, `vertexColors` decides which triangles carry colours: a rebuild.
+            Some(old) if function(old) == function(&m) && old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
                 self.changes.materials.insert(id);
             }
-            // A new one of plain parameters (no texture, no function, not a particle's): in place.
-            None if [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].iter().all(Option::is_none) && m.shader.is_none() && !m.transparent && !m.vertex_colors => {
+            // A new one without a function, not a particle's: in place, its textures with it.
+            None if m.shader.is_none() && !m.transparent && !m.vertex_colors => {
                 self.changes.new_materials.insert(id);
             }
             _ => {
                 if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
-                    eprintln!("world: structural: material {id} new with textures or a function, or changed beyond its parameters");
+                    eprintln!("world: structural: material {id} new with a function, or changed beyond its parameters and textures");
                 }
                 mark_structural(&mut self.changes, line!())
             }
@@ -1491,8 +1503,16 @@ mod tests {
         assert!(!c.structural && c.any() && c.new_materials.contains(&2), "a new material of plain parameters: in place");
         let mut textured = mat();
         textured.map = Some(9);
-        w.set_material(3, textured);
-        assert!(w.take_changes().structural, "one with a texture: a rebuild");
+        w.set_material(3, textured.clone());
+        let c = w.take_changes();
+        assert!(!c.structural && c.new_materials.contains(&3), "one with a texture: in place too (the texture is placed in the pages)");
+        // A new one that is a particle's (`transparent`), or has vertex colours: a rebuild.
+        for (k, what) in ["transparent", "vertex colours"].iter().enumerate() {
+            let mut m = mat();
+            (m.transparent, m.vertex_colors) = (k == 0, k == 1);
+            w.set_material(20 + k as u32, m);
+            assert!(w.take_changes().structural, "a new material with {what}: a rebuild");
+        }
         // (The engine's `object` call gives a mesh a body will drive its own BLAS.)
         w.set_object(2, "box".into(), None, mesh(2, true), true, false).unwrap();
         w.set_driven(2).unwrap();
@@ -1715,9 +1735,31 @@ mod tests {
             let c = w.take_changes();
             assert!(!c.structural && c.materials.contains(&1), "{what}: the material's change");
         }
-        m.map = Some(7);
+        // Its textures too: a map that comes, another, none again.
+        for (map, what) in [(Some(7), "a map"), (Some(8), "another map"), (None, "no map again")] {
+            m.map = map;
+            w.set_material(1, m.clone());
+            let c = w.take_changes();
+            assert!(!c.structural && c.materials.contains(&1), "{what}: the material's change");
+        }
+        // A texture: a new one is nothing until a material names it, the same again is nothing, another under its
+        // number is that texture's change.
+        let texture = |v: u8| Texture { source: TextureSource::Pixels { width: 1, height: 1, rgba: Arc::new(vec![v; 4]) }, srgb: true, wrap: true, repeat: [1.0, 1.0], offset: [0.0, 0.0] };
+        w.set_texture(7, texture(1)).unwrap();
+        w.set_texture(7, texture(1)).unwrap();
+        assert!(!w.take_changes().any(), "a new texture, and the same again: no change");
+        w.set_texture(7, texture(2)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.textures.contains(&7) && c.any(), "other pixels: the texture's change");
+        w.set_texture(7, Texture { repeat: [2.0, 1.0], ..texture(2) }).unwrap();
+        assert!(w.take_changes().textures.contains(&7), "another repeat: the texture's change");
+        // `transparent` moves particles between the scene and the translucency pass: a rebuild.
+        m.transparent = true;
+        w.set_material(1, m.clone());
+        assert!(w.take_changes().structural, "a material that turns transparent: a rebuild");
+        m.transparent = false;
         w.set_material(1, m);
-        assert!(w.take_changes().structural, "texture slots are structural");
+        w.take_changes();
         w.set_object(5, "placed".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         w.set_transform(5, Vec3::Y, Quat::IDENTITY, Vec3::ONE).unwrap();
         assert!(w.take_changes().promoted.is_empty(), "placing a new object is not a move");

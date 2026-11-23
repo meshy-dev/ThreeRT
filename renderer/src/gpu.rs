@@ -16,6 +16,20 @@ struct Pages {
     info: std::sync::Arc<Vec<[f32; 4]>>,
     /// Stream textures by name: where their pixels go (`Gpu::write_stream`).
     streams: Vec<(String, crate::texpack::Place)>,
+    /// Where each texture is and what the pages have free (`Gpu::place_texture`).
+    atlas: crate::texpack::Atlas,
+    /// By slot: the texture's key, its size and whether it wraps (what `texpack::set_key` is made of).
+    keys: Vec<(String, u32, u32, bool)>,
+}
+
+/// What `Gpu::place_texture` did to the pages.
+pub struct PagesEdit {
+    /// The texture's slot: its index among the scene's textures, its rows in `tex_info`.
+    pub slot: i32,
+    /// Every texture's rows as they are now, where a texture was placed.
+    pub info: Option<std::sync::Arc<Vec<[f32; 4]>>>,
+    /// The pages' view, where they are another texture now (they grew): bind groups hold the old one's.
+    pub view: Option<wgpu::TextureView>,
 }
 
 #[cfg(dlss)]
@@ -2369,19 +2383,8 @@ impl Gpu {
             }
         }
         let t = Instant::now();
-        let d = &self.device;
         let packed = crate::texpack::pack(&scene.textures);
-        let side = packed.side;
-        let tex = d.create_texture(&wgpu::TextureDescriptor {
-            label: Some("texture pages"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: packed.layers.len() as u32 },
-            mip_level_count: crate::texpack::MIPS,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let tex = self.pages_texture(packed.side, packed.layers.len() as u32);
         for (z, chain) in packed.layers.iter().enumerate() {
             for (lvl, img) in chain.iter().enumerate() {
                 self.queue.write_texture(
@@ -2402,8 +2405,91 @@ impl Gpu {
             }
         }
         timings.push(("texture_pages_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
-        *cache = Some(Pages { key, texture: tex, view: view.clone(), info: info.clone(), streams: packed.streams });
+        let keys = scene.textures.iter().map(|t| (t.key.clone(), t.width, t.height, t.wrap)).collect();
+        *cache = Some(Pages { key, texture: tex, view: view.clone(), info: info.clone(), streams: packed.streams, atlas: packed.atlas, keys });
         (view, info)
+    }
+
+    /// The pages' texture: `layers` square layers of `side`, `texpack::MIPS` levels. (A source of copies too: the
+    /// pages grow by a copy on the GPU, `place_texture`.)
+    fn pages_texture(&self, side: u32, layers: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texture pages"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
+            mip_level_count: crate::texpack::MIPS,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    /// The slot of texture `t` in the uploaded scene's pages; a texture they have not got is placed in them now
+    /// (`texpack::Atlas::place`) and its pixels written there, every level. Nothing is packed again: where the pages
+    /// have no room they become a texture with a layer more, or a longer side, and what they hold is copied there
+    /// on the GPU. (A texture the scene no longer uses keeps its place until the scene is loaded again.)
+    pub fn place_texture(&self, t: &crate::scene::Texture) -> Result<PagesEdit> {
+        use crate::texpack::{set_key_of, stream_name, MIPS};
+        let mut cache = self.pages.lock().unwrap();
+        let pages = cache.as_mut().ok_or_else(|| anyhow!("no scene's pages to place a texture in"))?;
+        if let Some(slot) = pages.keys.iter().position(|k| k.0 == t.key) {
+            return Ok(PagesEdit { slot: slot as i32, info: None, view: None });
+        }
+        let rows = crate::merged::UNIFORM_TABLES.iter().find(|u| u.table == crate::heap::Table::TexInfo).map_or(u32::MAX, |u| u.len);
+        if self.uniform_tables && (pages.keys.len() as u32 + 1) * 2 > rows {
+            return Err(anyhow!("more textures than this device's texture table holds ({})", rows / 2));
+        }
+        let (side, layers) = (pages.atlas.side, pages.atlas.layers());
+        let place = pages.atlas.place(t.width, t.height, t.wrap, self.device.limits().max_texture_array_layers).ok_or_else(|| anyhow!("no room in the texture pages"))?;
+        let mut view = None;
+        if (pages.atlas.side, pages.atlas.layers()) != (side, layers) {
+            let tex = self.pages_texture(pages.atlas.side, pages.atlas.layers());
+            let mut e = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("texture pages grow") });
+            for level in 0..MIPS {
+                let at = |texture| wgpu::TexelCopyTextureInfo { texture, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All };
+                let s = (side >> level).max(1);
+                e.copy_texture_to_texture(at(&pages.texture), at(&tex), wgpu::Extent3d { width: s, height: s, depth_or_array_layers: layers });
+            }
+            self.queue.submit([e.finish()]);
+            pages.view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+            pages.texture = tex;
+            view = Some(pages.view.clone());
+        }
+        // (A stream shows its last picture, as in pages packed whole.)
+        let last = stream_name(&t.key).and_then(|n| self.streams.lock().unwrap().get(n).cloned());
+        self.write_place(&pages.texture, &place, last.as_deref().unwrap_or(&t.rgba));
+        if let Some(n) = stream_name(&t.key) {
+            pages.streams.push((n.to_string(), place));
+        }
+        pages.keys.push((t.key.clone(), t.width, t.height, t.wrap));
+        pages.key = set_key_of(pages.keys.iter().map(|k| (k.0.as_str(), k.1, k.2, k.3)));
+        pages.info = std::sync::Arc::new(pages.atlas.info());
+        Ok(PagesEdit { slot: pages.keys.len() as i32 - 1, info: Some(pages.info.clone()), view })
+    }
+
+    /// New pixels for the texture in `slot`, written over the old ones in the pages: where their size in the pages
+    /// and their wrap are the same. False, and nothing written, where they are not (the texture is then placed as
+    /// another: `place_texture`).
+    pub fn rewrite_texture(&self, slot: i32, t: &crate::scene::Texture) -> bool {
+        let mut cache = self.pages.lock().unwrap();
+        let Some(pages) = cache.as_mut() else { return false };
+        let Some(place) = pages.atlas.places.get(slot as usize).copied() else { return false };
+        if crate::texpack::content_size(t.width, t.height) != place.size || t.wrap != place.wrap || crate::texpack::stream_name(&t.key).is_some() {
+            return false;
+        }
+        self.write_place(&pages.texture, &place, &t.rgba);
+        pages.keys[slot as usize] = (t.key.clone(), t.width, t.height, t.wrap);
+        pages.key = crate::texpack::set_key_of(pages.keys.iter().map(|k| (k.0.as_str(), k.1, k.2, k.3)));
+        true
+    }
+
+    /// The pages' textures as they are now, by slot: (key, width, height, wrap), their side and their layers.
+    #[cfg(test)]
+    pub fn pages_state(&self) -> (Vec<(String, u32, u32, bool)>, u32, u32, Vec<crate::texpack::Place>) {
+        let cache = self.pages.lock().unwrap();
+        let p = cache.as_ref().expect("pages");
+        (p.keys.clone(), p.atlas.side, p.atlas.layers(), p.atlas.places.clone())
     }
 
     fn write_place(&self, pages: &wgpu::Texture, place: &crate::texpack::Place, img: &image::RgbaImage) {

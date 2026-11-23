@@ -103,7 +103,8 @@ impl Tables {
 
     /// Applies parameter changes; Err / Ok(None) means the scene must be rebuilt instead.
     pub fn apply(&mut self, w: &World, c: &Changes, now: f32) -> Result<Option<Dirty>> {
-        if c.structural || !c.poses.is_empty() || !c.moved.is_empty() {
+        // (A texture that was replaced is the live view's to place again, before this: live/edits.rs `place_textures`.)
+        if c.structural || !c.poses.is_empty() || !c.moved.is_empty() || !c.textures.is_empty() {
             return Ok(None);
         }
         let mut d = Dirty::default();
@@ -239,9 +240,10 @@ impl Tables {
 
     /// Whether a material may emit without a rebuild: it already has emitter entries, or (`emit_in_place`) its
     /// triangles can get them in place, queued in `started_emitting` (ROADMAP § 6 step 3).
-    /// Materials created since the build (`Changes::new_materials`: no texture, no function), as entries after the
-    /// scene's, whatever their class: what an edit draws with one is an instance, whose rows say it. False, and
-    /// nothing added, if one of them cannot be made.
+    /// Materials created since the build (`Changes::new_materials`: no function), as entries after the scene's,
+    /// whatever their class: what an edit draws with one is an instance, whose rows say it. Their textures are the
+    /// pages' by now (the live view places them first: live/edits.rs `place_textures`). False, and nothing added, if
+    /// one of them cannot be made.
     pub fn add_materials(&mut self, w: &World, ids: &std::collections::BTreeSet<u32>) -> bool {
         let mut fresh = vec![];
         for id in ids {
@@ -249,7 +251,9 @@ impl Tables {
                 continue;
             }
             let Some(m) = w.materials.get(id) else { return false };
-            let Ok(gm) = scene::build_material(*id, m, &w.textures, &self.retained.shaders, &mut |_, _| Err(anyhow!("a texture"))) else { return false };
+            let slots = &self.retained.textures;
+            let mut tex = |tid: u32, srgb: bool| slots.get(&(tid, srgb)).copied().ok_or_else(|| anyhow!("texture {tid} is not in the pages"));
+            let Ok(gm) = scene::build_material(*id, m, &w.textures, &self.retained.shaders, &mut tex) else { return false };
             fresh.push((*id, gm));
         }
         for (id, gm) in fresh {

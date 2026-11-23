@@ -21,6 +21,104 @@ pub struct Packed {
     pub info: Vec<[f32; 4]>,
     /// Where each stream texture (`stream_key`) sits, by name: its pixels are replaced in place (`patch`).
     pub streams: Vec<(String, Place)>,
+    /// Where every texture sits and what the pages have free: a texture is placed among them later (`Atlas::place`).
+    pub atlas: Atlas,
+}
+
+/// The pages as what they hold and what they have free: every texture's place, and each layer's shelves. A texture
+/// added while the scene runs takes a place here (`place`) and has its pixels written there (`patch`); nothing is
+/// packed again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Atlas {
+    pub side: u32,
+    /// By texture.
+    pub places: Vec<Place>,
+    /// By layer, top to bottom: a shelf's y, its height, and the x its next rect starts at.
+    shelves: Vec<Vec<(u32, u32, u32)>>,
+}
+
+/// The size a texture of `width` x `height` has in the pages: at most `MAX_DIM` a side, and a power of two >= 512
+/// gives up 2 x GUTTER texels, so that its padded rect stays a power of two and four 2048s (or sixteen 1024s) fill a
+/// page exactly; anything else keeps its size and is padded.
+pub fn content_size(width: u32, height: u32) -> (u32, u32) {
+    let (w, h) = (width.min(MAX_DIM), height.min(MAX_DIM));
+    let k = (w as f32 / width as f32).min(h as f32 / height as f32);
+    let (mut w, mut h) = (((width as f32 * k) as u32).max(1), ((height as f32 * k) as u32).max(1));
+    if w >= 512 && w.is_power_of_two() {
+        w -= 2 * GUTTER;
+    }
+    if h >= 512 && h.is_power_of_two() {
+        h -= 2 * GUTTER;
+    }
+    (w, h)
+}
+
+fn padded_size(content: (u32, u32)) -> (u32, u32) {
+    (round_up(content.0 + 2 * GUTTER), round_up(content.1 + 2 * GUTTER))
+}
+
+impl Atlas {
+    pub fn layers(&self) -> u32 {
+        self.shelves.len() as u32
+    }
+
+    /// Two rows a texture, at the pages' side as it is now: (u0, v0, du, dv) of the content rect in page UV; (layer,
+    /// wrap, width, height). (No texture: two rows of zeros, so the table is never empty.)
+    pub fn info(&self) -> Vec<[f32; 4]> {
+        let s = self.side as f32;
+        let mut info = vec![[0.0f32; 4]; self.places.len().max(1) * 2];
+        for (i, p) in self.places.iter().enumerate() {
+            let (w, h) = p.size;
+            info[i * 2] = [(p.x + GUTTER) as f32 / s, (p.y + GUTTER) as f32 / s, w as f32 / s, h as f32 / s];
+            info[i * 2 + 1] = [p.layer as f32, p.wrap as u32 as f32, w as f32, h as f32];
+        }
+        info
+    }
+
+    /// A place for one more texture of `width` x `height` as its source has it: on a shelf it fits (the lowest such),
+    /// else on a new shelf of a layer with room below its last, else on a new layer. The pages get a longer side
+    /// where the texture is wider than they are, or where they have `max_layers` already; what they hold stays where
+    /// it is, and a longer side changes every texture's rows (`info`). None: no room at the longest side and
+    /// `max_layers`.
+    pub fn place(&mut self, width: u32, height: u32, wrap: bool, max_layers: u32) -> Option<Place> {
+        let size = content_size(width, height);
+        let (w, h) = padded_size(size);
+        if w.max(h) > self.side {
+            self.side = w.max(h).next_power_of_two().max(256);
+        }
+        if self.shelves.is_empty() {
+            self.shelves.push(vec![]);
+        }
+        loop {
+            let side = self.side;
+            // (The lowest shelf that takes it; the first of them.)
+            let on = self
+                .shelves
+                .iter()
+                .enumerate()
+                .flat_map(|(l, shelves)| shelves.iter().enumerate().map(move |(k, s)| (l, k, *s)))
+                .filter(|(_, _, s)| s.1 >= h && s.2 + w <= side)
+                .min_by_key(|(_, _, s)| s.1);
+            let (layer, x, y) = if let Some((l, k, s)) = on {
+                self.shelves[l][k].2 += w;
+                (l, s.2, s.0)
+            } else if let Some((l, y)) = self.shelves.iter().enumerate().map(|(l, shelves)| (l, shelves.last().map_or(0, |s| s.0 + s.1))).find(|(_, y)| y + h <= side) {
+                self.shelves[l].push((y, h, w));
+                (l, 0, y)
+            } else if self.layers() < max_layers {
+                self.shelves.push(vec![(0, h, w)]);
+                (self.shelves.len() - 1, 0, 0)
+            } else if side < MAX_PAGE {
+                self.side *= 2;
+                continue;
+            } else {
+                return None;
+            };
+            let place = Place { layer: layer as u32, x, y, padded: (w, h), size, wrap };
+            self.places.push(place);
+            return Some(place);
+        }
+    }
 }
 
 /// A texture's padded rect in the pages (aligned to `ALIGN`, so its mips are its own) and its content's size.
@@ -90,22 +188,13 @@ fn round_up(v: u32) -> u32 {
 pub fn pack(textures: &[Texture]) -> Packed {
     if textures.is_empty() {
         let img = image::RgbaImage::from_pixel(ALIGN, ALIGN, image::Rgba([255, 255, 255, 255]));
-        return Packed { side: ALIGN, layers: vec![mip_chain(img)], info: vec![[0.0; 4], [0.0; 4]], streams: vec![] };
+        let atlas = Atlas { side: ALIGN, places: vec![], shelves: vec![vec![]] };
+        return Packed { side: ALIGN, layers: vec![mip_chain(img)], info: atlas.info(), streams: vec![], atlas };
     }
-    // Power-of-two textures >= 512 give up 2 x GUTTER texels so the padded rect stays a power of two and four
-    // 2048s (or sixteen 1024s) fill a page exactly; anything else keeps its size and is padded.
     let src: Vec<std::borrow::Cow<image::RgbaImage>> = textures
         .par_iter()
         .map(|t| {
-            let (w, h) = (t.width.min(MAX_DIM), t.height.min(MAX_DIM));
-            let k = (w as f32 / t.width as f32).min(h as f32 / t.height as f32);
-            let (mut w, mut h) = (((t.width as f32 * k) as u32).max(1), ((t.height as f32 * k) as u32).max(1));
-            if w >= 512 && w.is_power_of_two() {
-                w -= 2 * GUTTER;
-            }
-            if h >= 512 && h.is_power_of_two() {
-                h -= 2 * GUTTER;
-            }
+            let (w, h) = content_size(t.width, t.height);
             if (w, h) == (t.width, t.height) {
                 std::borrow::Cow::Borrowed(&*t.rgba)
             } else {
@@ -113,7 +202,7 @@ pub fn pack(textures: &[Texture]) -> Packed {
             }
         })
         .collect();
-    let padded: Vec<(u32, u32)> = src.iter().map(|i| (round_up(i.width() + 2 * GUTTER), round_up(i.height() + 2 * GUTTER))).collect();
+    let padded: Vec<(u32, u32)> = src.iter().map(|i| padded_size(i.dimensions())).collect();
     let mut order: Vec<usize> = (0..src.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse((padded[i].1, padded[i].0)));
     let area: u64 = padded.iter().map(|&(w, h)| w as u64 * h as u64).sum();
@@ -125,6 +214,7 @@ pub fn pack(textures: &[Texture]) -> Packed {
     // Shelf packing; a size that does not fit restarts on a new layer.
     let mut place = vec![(0u32, 0u32, 0u32); src.len()];
     let (mut layer, mut x, mut y, mut shelf) = (0u32, 0u32, 0u32, 0u32);
+    let mut shelves: Vec<Vec<(u32, u32, u32)>> = vec![vec![]];
     for &i in &order {
         let (w, h) = padded[i];
         if x + w > side {
@@ -137,19 +227,20 @@ pub fn pack(textures: &[Texture]) -> Packed {
             x = 0;
             y = 0;
             shelf = 0;
+            shelves.push(vec![]);
         }
         place[i] = (layer, x, y);
         x += w;
         shelf = shelf.max(h);
+        // (Its shelf: the layer's last where that is at this y, else a new one.)
+        match shelves[layer as usize].last_mut() {
+            Some(s) if s.0 == y => (s.1, s.2) = (s.1.max(h), x),
+            _ => shelves[layer as usize].push((y, h, x)),
+        }
     }
-    let mut info = vec![[0.0f32; 4]; src.len() * 2];
-    for (i, img) in src.iter().enumerate() {
-        let (l, px, py) = place[i];
-        let (w, h) = (img.width(), img.height());
-        let s = side as f32;
-        info[i * 2] = [(px + GUTTER) as f32 / s, (py + GUTTER) as f32 / s, w as f32 / s, h as f32 / s];
-        info[i * 2 + 1] = [l as f32, textures[i].wrap as u32 as f32, w as f32, h as f32];
-    }
+    let places = (0..src.len()).map(|i| Place { layer: place[i].0, x: place[i].1, y: place[i].2, padded: padded[i], size: src[i].dimensions(), wrap: textures[i].wrap }).collect();
+    let atlas = Atlas { side, places, shelves };
+    let info = atlas.info();
     // Fill pages row-parallel: every page row gathers from the textures whose padded rect spans it.
     let pages: Vec<image::RgbaImage> = (0..=layer)
         .into_par_iter()
@@ -181,15 +272,8 @@ pub fn pack(textures: &[Texture]) -> Packed {
             image::RgbaImage::from_raw(side, side, bytemuck::cast_slice(&page).to_vec()).unwrap()
         })
         .collect();
-    let streams = textures
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| {
-            let (layer, x, y) = place[i];
-            Some((stream_name(&t.key)?.to_string(), Place { layer, x, y, padded: padded[i], size: src[i].dimensions(), wrap: t.wrap }))
-        })
-        .collect();
-    Packed { side, layers: pages.into_par_iter().map(mip_chain).collect(), info, streams }
+    let streams = textures.iter().enumerate().filter_map(|(i, t)| Some((stream_name(&t.key)?.to_string(), atlas.places[i]))).collect();
+    Packed { side, layers: pages.into_par_iter().map(mip_chain).collect(), info, streams, atlas }
 }
 
 /// 2x2 box-filtered chain (sRGB-encoded texels are averaged as stored, like most engines' default mip gen).
@@ -286,11 +370,16 @@ pub fn resize_triangle(img: &image::RgbaImage, nw: u32, nh: u32) -> image::RgbaI
 
 /// Identity of a texture set (pages are rebuilt only when it changes).
 pub fn set_key(textures: &[Texture]) -> u64 {
+    set_key_of(textures.iter().map(|t| (t.key.as_str(), t.width, t.height, t.wrap)))
+}
+
+/// `set_key` of textures given as (key, width, height, wrap).
+pub fn set_key_of<'a>(textures: impl Iterator<Item = (&'a str, u32, u32, bool)>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for t in textures {
-        t.key.hash(&mut h);
-        (t.width, t.height, t.wrap).hash(&mut h);
+    for (key, width, height, wrap) in textures {
+        key.hash(&mut h);
+        (width, height, wrap).hash(&mut h);
     }
     h.finish()
 }
@@ -347,6 +436,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// No two of the places overlap, each lies in its page on the 16-texel grid, and each texture's rows say its
+    /// place at the pages' side.
+    fn sound(what: &str, a: &Atlas) {
+        let info = a.info();
+        for (i, p) in a.places.iter().enumerate() {
+            assert!(p.x + p.padded.0 <= a.side && p.y + p.padded.1 <= a.side && p.layer < a.layers(), "{what}: texture {i} in its page: {p:?} of {}", a.side);
+            assert_eq!((p.x % ALIGN, p.y % ALIGN, p.padded.0 % ALIGN, p.padded.1 % ALIGN), (0, 0, 0, 0), "{what}: texture {i} on the grid");
+            assert!(p.size.0 + 2 * GUTTER <= p.padded.0 && p.size.1 + 2 * GUTTER <= p.padded.1, "{what}: texture {i} has its gutters");
+            let s = a.side as f32;
+            assert_eq!(info[i * 2], [(p.x + GUTTER) as f32 / s, (p.y + GUTTER) as f32 / s, p.size.0 as f32 / s, p.size.1 as f32 / s], "{what}: texture {i}'s rect");
+            assert_eq!(info[i * 2 + 1], [p.layer as f32, p.wrap as u32 as f32, p.size.0 as f32, p.size.1 as f32], "{what}: texture {i}'s layer and size");
+            for (j, q) in a.places.iter().enumerate().skip(i + 1) {
+                let apart = p.layer != q.layer || p.x + p.padded.0 <= q.x || q.x + q.padded.0 <= p.x || p.y + p.padded.1 <= q.y || q.y + q.padded.1 <= p.y;
+                assert!(apart, "{what}: textures {i} and {j} overlap: {p:?}, {q:?}");
+            }
+        }
+    }
+
+    /// Textures placed after the pack take the room it left: beside the last on a shelf, on a new shelf, on a new
+    /// layer; those there stay where they are. A texture wider than the pages gives them a longer side, and with as
+    /// many layers as there may be a full page does too; every texture's rows are then of the new side.
+    #[test]
+    fn a_texture_is_placed_among_the_packed_ones() {
+        let flat = |w: u32, h: u32| tex(w, h, true, |_, _| [9, 9, 9, 255]);
+        let packed = pack(&[flat(300, 200), flat(100, 60), flat(200, 200)]);
+        let mut a = packed.atlas.clone();
+        assert_eq!((a.side, a.layers(), a.places.len()), (512, 1, 3));
+        sound("packed", &a);
+        assert_eq!(a.info(), packed.info, "the pack's rows are the atlas's");
+        let before = a.places.clone();
+        // Beside the last on a shelf (both are as high: the first), then new shelves, then more than the page has.
+        let small = a.place(64, 40, false, 8).unwrap();
+        assert_eq!((small.layer, small.x, small.y, small.size, small.wrap), (0, before[0].x + before[0].padded.0, before[0].y, (64, 40), false));
+        let mut layers = 1;
+        for k in 0..12 {
+            let p = a.place(200, 120, true, 8).unwrap();
+            layers = layers.max(p.layer + 1);
+            sound(&format!("after {k} more"), &a);
+        }
+        assert!(layers > 1 && a.side == 512, "the page filled and a layer was added: {layers} layers of {}", a.side);
+        assert_eq!(a.places[..3], before[..], "those packed stay where they were");
+        // Wider than the pages: a longer side, the places as they were, the rows of the new side.
+        let big = a.place(2048, 1024, true, 8).unwrap();
+        assert_eq!((a.side, big.size, big.padded), (2048, (2016, 992), (2048, 1024)));
+        assert_eq!(a.places[..3], before[..]);
+        sound("a longer side", &a);
+        assert_eq!(a.info()[0][0], (before[0].x + GUTTER) as f32 / 2048.0);
+        // As many layers as there may be: a full page gets a longer side, not another layer.
+        let mut b = pack(&[flat(224, 224)]).atlas;
+        assert_eq!((b.side, b.layers()), (256, 1));
+        let p = b.place(224, 224, true, 1).unwrap();
+        assert_eq!((b.side, b.layers(), p.layer), (512, 1, 0));
+        sound("one layer", &b);
+        // The longest side and no layer more: no room.
+        let mut c = Atlas { side: MAX_PAGE, places: vec![], shelves: vec![vec![]] };
+        assert!((0..4).all(|_| c.place(2048, 2048, true, 1).is_some()) && c.place(16, 16, true, 1).is_none());
+        // Pages without a texture take their first.
+        let mut e = pack(&[]).atlas;
+        let first = e.place(100, 60, true, 8).unwrap();
+        assert_eq!((e.side, first.layer, first.x, first.y), (256, 0, 0, 0));
+        sound("the first", &e);
     }
 
     #[test]

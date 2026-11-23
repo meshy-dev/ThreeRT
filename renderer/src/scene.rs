@@ -1117,10 +1117,35 @@ impl TexCache {
         }
         let img = img()?;
         let id = self.textures.len() as i32;
-        self.textures.push(Texture { width: img.width(), height: img.height(), rgba: img, srgb: key.1, key: format!("{}|{}|{}", key.0, key.1, wrap), wrap });
+        self.textures.push(Texture::of(&key.0, key.1, wrap, img));
         self.by_key.insert(key, id);
         Ok(id)
     }
+}
+
+impl Texture {
+    /// A texture of the pages: an image (its source's identity `key`: `texture_image`), read as sRGB or not, wrapped
+    /// or clamped.
+    pub fn of(key: &str, srgb: bool, wrap: bool, img: Arc<image::RgbaImage>) -> Texture {
+        Texture { width: img.width(), height: img.height(), rgba: img, srgb, key: format!("{key}|{srgb}|{wrap}"), wrap }
+    }
+
+    /// A world's texture as a material's slot has it (`srgb_default`: whether the slot is a colour's), decoded. As
+    /// the build makes it, so the pages know one they have by its key.
+    pub fn of_world(t: &world::Texture, srgb_default: bool, assets: &Path) -> Result<Texture> {
+        let (key, img) = texture_image(t, assets)?;
+        Ok(Texture::of(&key, t.srgb && srgb_default, t.wrap, img))
+    }
+}
+
+/// The textures a material's GPU form names, as `build_material` asks for them: (texture, sRGB requested).
+pub fn material_textures(id: u32, m: &desc::Material, textures: &HashMap<u32, world::Texture>, shaders: &HashMap<String, i32>) -> Result<Vec<(u32, bool)>> {
+    let mut out = vec![];
+    build_material(id, m, textures, shaders, &mut |tid, srgb| {
+        out.push((tid, srgb));
+        Ok(0)
+    })?;
+    Ok(out)
 }
 
 /// Identity of a file version: (path, length, mtime). Assets and textures rarely change, so they are parsed /
