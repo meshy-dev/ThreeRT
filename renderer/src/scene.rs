@@ -260,20 +260,23 @@ impl Instance {
             return (w, b, c);
         }
         // (The UVs are packed along the normals: uv0 in n0.w n1.w, uv1 in n2.w uv.x, uv2 in uv.y uv.z.)
-        let swapped = GpuTriAttr { n1: [b.n2[0], b.n2[1], b.n2[2], b.n1[3]], n2: [b.n1[0], b.n1[1], b.n1[2], b.uv[1]], uv: [b.uv[2], b.n2[3], b.uv[0], b.uv[3]], ..b };
+        let swapped = GpuTriAttr { n1: [b.n2[0], b.n2[1], b.n2[2], b.n1[3]], n2: [b.n1[0], b.n1[1], b.n1[2], b.uv[1]], uv: [b.uv[2], b.n2[3], b.uv[0], b.uv[3]], t1: b.t2, t2: b.t1, ..b };
         ([w[0], w[2], w[1]], swapped, c.map(|c| [c[0], c[2], c[1]]))
     }
 }
 
-/// A triangle in a node's own space (vertices, normals, UVs, an authored tangent) placed by `w` as the build flattens
-/// it: under a mirroring `w` the second and third vertex change places, so that it faces as its mesh does, and an
-/// authored tangent's frame changes hand (`Instance::flat` does the same with a mesh's triangle; a tangent worked out
-/// from the placed triangle has the right hand by itself).
+/// A triangle's tangents, one a corner: the direction of u on the surface and the frame's hand (1 or -1). A file's,
+/// or generated (tangents.rs); a triangle without has none (`GpuTriAttr::t`'s hand is 0).
+pub type CornerTangents = [(Vec3, f32); 3];
+
+/// A triangle in a node's own space (vertices, normals, UVs, tangents) placed by `w` as the build flattens it: under
+/// a mirroring `w` the second and third vertex change places, so that it faces as its mesh does, and its tangents'
+/// frame changes hand (`Instance::flat` does the same with a mesh's triangle).
 #[allow(clippy::type_complexity)]
-pub fn placed_tri(w: Mat4, p: &[Vec3; 3], n: &[Vec3; 3], uv: &[Vec2; 3], tangent: Option<(Vec3, f32)>) -> ([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>) {
+pub fn placed_tri(w: Mat4, p: &[Vec3; 3], n: &[Vec3; 3], uv: &[Vec2; 3], tangent: Option<CornerTangents>) -> ([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<CornerTangents>) {
     let nm = Mat3::from_mat4(w).inverse().transpose();
     let (k, hand) = if mirrors(w) { ([0, 2, 1], -1.0) } else { ([0, 1, 2], 1.0) };
-    (k.map(|i| w.transform_point3(p[i])), k.map(|i| (nm * n[i]).normalize_or_zero()), k.map(|i| uv[i]), tangent.map(|(v, s)| (w.transform_vector3(v).normalize_or_zero(), s * hand)))
+    (k.map(|i| w.transform_point3(p[i])), k.map(|i| (nm * n[i]).normalize_or_zero()), k.map(|i| uv[i]), tangent.map(|t| k.map(|i| (w.transform_vector3(t[i].0).normalize_or_zero(), t[i].1 * hand))))
 }
 
 /// Bit of an instance record's n1.w, beside the units' flags there (units.rs `UNIT_*`): the instance mirrors its mesh
@@ -509,8 +512,8 @@ pub fn node_ranges<'a>(tri_nodes: &'a [(String, u32, u32)], id: &'a str) -> impl
     tri_nodes.iter().filter(move |(n, _, _)| n == id).map(|(_, a, b)| *a as usize..*b as usize)
 }
 
-/// Model-space shading attributes of a pool triangle placed by `w` (normals by the inverse transpose, tangent by the
-/// matrix, its frame's hand changed by a mirroring one), object `object`.
+/// Model-space shading attributes of a pool triangle placed by `w` (normals by the inverse transpose, tangents by
+/// the matrix, their frame's hand changed by a mirroring one), object `object`.
 pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
     let m3 = glam::Mat3::from_mat4(w);
     let nm = m3.inverse().transpose();
@@ -518,9 +521,12 @@ pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
         let r = (nm * Vec3::new(v[0], v[1], v[2])).normalize_or_zero();
         [r.x, r.y, r.z, v[3]]
     };
-    let t = (m3 * Vec3::new(a.t[0], a.t[1], a.t[2])).normalize_or_zero();
-    let hand = if mirrors(w) { -a.t[3] } else { a.t[3] };
-    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: [t.x, t.y, t.z, hand], x: [a.x[0], f32::from_bits(object), a.x[2], a.x[3]] }
+    let flip = if mirrors(w) { -1.0 } else { 1.0 };
+    let t = |v: [f32; 4]| {
+        let r = (m3 * Vec3::new(v[0], v[1], v[2])).normalize_or_zero();
+        [r.x, r.y, r.z, v[3] * flip]
+    };
+    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: t(a.t), x: [a.x[0], f32::from_bits(object), a.x[2], a.x[3]], t1: t(a.t1), t2: t(a.t2) }
 }
 
 #[repr(C)]
@@ -530,8 +536,10 @@ pub struct GpuTriAttr {
     pub n1: [f32; 4], // normal1, w = uv0.y
     pub n2: [f32; 4], // normal2, w = uv1.x
     pub uv: [f32; 4], // uv1.y, uv2.x, uv2.y, material (bits)
-    pub t: [f32; 4],  // tangent (dP/du), w = bitangent sign
-    pub x: [f32; 4],  // `indexed::OWN_TANGENT` (bits), object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
+    pub t: [f32; 4],  // its first corner's tangent (dP/du), w = the frame's hand (0: the triangle has no tangents)
+    pub x: [f32; 4],  // -, object index (bits), a particle's area, its emitter entry + 1 (bits; 0: not light-sampled)
+    pub t1: [f32; 4], // its second corner's tangent
+    pub t2: [f32; 4], // its third corner's
 }
 
 #[repr(C)]
@@ -943,7 +951,7 @@ pub struct RigidModel {
     pub rest: DynamicModel,
     /// Per `rest` triangle: its node (`STILL_NODES`: the model's own space) and its triangle there (positions,
     /// normals, uvs, tangent).
-    pub rest_local: Vec<(usize, [Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>)>,
+    pub rest_local: Vec<(usize, [Vec3; 3], [Vec3; 3], [Vec2; 3], Option<CornerTangents>)>,
     /// `rigid_pose_key` of the pose its parts were made for: a pose with another is other parts (a build's to make).
     pub pose: String,
 }
@@ -980,7 +988,7 @@ impl RigidModel {
 struct RigidPart {
     node: usize,
     mesh: Option<u32>,
-    rest: Vec<([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<(Vec3, f32)>, u32)>,
+    rest: Vec<([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<CornerTangents>, u32)>,
 }
 
 /// A posed skinned model's mesh: the model's triangles in its own space, a mesh a model. The skinning pass skins it at
@@ -1801,7 +1809,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 for &(k, section, rank) in &order {
                                     let t = &local[k];
                                     pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
+                                    pool_attrs.push(section_attr(t.n, t.uv, t.tangent, section, rank));
                                 }
                                 meshes.push(InstMesh { sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first_pool as usize..], first_pool) });
                                 sections.extend(sects);
@@ -1909,7 +1917,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 hi = hi.max(v.into());
                             }
                             pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                            pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
+                            pool_attrs.push(section_attr(t.n, t.uv, t.tangent, section, rank));
                         }
                         // Other poses reach further (a stride, a swing): object bounds a quarter wider each way; one
                         // the game poses may take any pose (lie down): as far as its size each way.
@@ -1965,13 +1973,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                 for &(k, section, rank) in &order {
                                     let t = &local[k];
                                     pool_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                    pool_attrs.push(section_attr(t.p, t.n, t.uv, t.tangent, section, rank));
+                                    pool_attrs.push(section_attr(t.n, t.uv, t.tangent, section, rank));
                                 }
                                 // (What leaves the mesh keeps its material on the triangle: each placement flattens it.)
                                 for &(k, mat) in &classed[FLAT] {
                                     let t = &local[k];
                                     rest_tris.push([t.p[0].into(), t.p[1].into(), t.p[2].into()]);
-                                    rest_attrs.push(tri_attr(t.p, t.n, t.uv, t.tangent, mat));
+                                    rest_attrs.push(tri_attr(t.n, t.uv, t.tangent, mat));
                                 }
                                 meshes.push(InstMesh { rest_first, rest_count: classed[FLAT].len() as u32, lo, hi, sect_first: sections.len() as u32, sect_count: sects.len() as u32, ..own_inst_mesh(&pool_tris[first as usize..], first) });
                                 sections.extend(sects);
@@ -2119,7 +2127,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let first = if translucent { trans_tris.len() as u32 } else { first };
                 for k in 0..*count {
                     for uv in corners {
-                        let mut a = tri_attr([pivot; 3], [Vec3::Z; 3], uv, Some((Vec3::X, 1.0)), mat);
+                        let mut a = tri_attr([Vec3::Z; 3], uv, Some([(Vec3::X, 1.0); 3]), mat);
                         a.x[1] = f32::from_bits(object + k);
                         // Light sampling by a nominal area (half a quad per triangle; lib.rs prepare, emit_mis); -1: a
                         // particle not light-sampled (its emission reaches surfaces by their BSDF rays alone).
@@ -2154,7 +2162,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
                 for k in 0..*capacity {
                     for uv in corners {
-                        let mut a = tri_attr([pivot; 3], [Vec3::Z; 3], uv, Some((Vec3::X, 1.0)), mat);
+                        let mut a = tri_attr([Vec3::Z; 3], uv, Some([(Vec3::X, 1.0); 3]), mat);
                         a.x[1] = f32::from_bits(object + k);
                         a.x[2] = if *emitter_area > 0.0 { emitter_area * 0.5 } else { -1.0 };
                         tris.push([p; 3]);
@@ -2418,10 +2426,10 @@ pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Resu
             if tris.len() != d.mats.len() {
                 return Ok(None);
             }
-            Some(tris.iter().zip(&d.mats).map(|(t, &mat)| (t.p, tri_attr(t.p, t.n, t.uv, t.tangent, mat))).collect())
+            Some(tris.iter().zip(&d.mats).map(|(t, &mat)| (t.p, tri_attr(t.n, t.uv, t.tangent, mat))).collect())
         }
         Kind::Light(Light::Rect { width, height, visible: true, .. }) => {
-            Some(card_tris(m, *width, *height).iter().zip(&d.mats).map(|((v, dir), &mat)| (*v, tri_attr(*v, [*dir; 3], [Vec2::ZERO; 3], None, mat))).collect())
+            Some(card_tris(m, *width, *height).iter().zip(&d.mats).map(|((v, dir), &mat)| (*v, tri_attr([*dir; 3], [Vec2::ZERO; 3], None, mat))).collect())
         }
         _ => None,
     })
@@ -2603,8 +2611,8 @@ pub fn model_sections(kept: &[(usize, u32, u32)]) -> (Vec<(usize, u32, u32)>, Ve
 }
 
 /// A model's triangle as its mesh holds it: its attributes with its section and its index in it.
-pub fn section_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3, f32)>, section: u32, rank: u32) -> GpuTriAttr {
-    let mut a = tri_attr(p, n, uv, tangent, section);
+pub fn section_attr(n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<CornerTangents>, section: u32, rank: u32) -> GpuTriAttr {
+    let mut a = tri_attr(n, uv, tangent, section);
     a.x[3] = f32::from_bits(rank);
     a
 }
@@ -2711,43 +2719,28 @@ fn push_tri(
     p: [Vec3; 3],
     n: [Vec3; 3],
     uv: [Vec2; 3],
-    tangent: Option<(Vec3, f32)>,
+    tangent: Option<CornerTangents>,
     mat: u32,
     flags: u32,
 ) {
     tris.push([p[0].into(), p[1].into(), p[2].into()]);
     tri_flags.push(flags);
-    attrs.push(tri_attr(p, n, uv, tangent, mat));
+    attrs.push(tri_attr(n, uv, tangent, mat));
 }
 
-/// Shading attributes of a triangle (normals, UVs, tangent frame, texel density, material).
-pub fn tri_attr(p: [Vec3; 3], n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<(Vec3, f32)>, mat: u32) -> GpuTriAttr {
-    // (Whether the tangent is the first corner's own: `indexed::OWN_TANGENT`.)
-    let own = if tangent.is_some() { crate::indexed::OWN_TANGENT } else { 0 };
-    // Per-triangle tangent frame from UVs (glTF convention: v grows downward in the image).
-    let (t, sign) = tangent.unwrap_or_else(|| {
-        let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
-        let (d1, d2) = (uv[1] - uv[0], uv[2] - uv[0]);
-        let det = d1.x * d2.y - d2.x * d1.y;
-        if det.abs() < 1e-12 {
-            let any = if n[0].x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-            return (n[0].cross(any).normalize(), 1.0);
-        }
-        let r = 1.0 / det;
-        let t = ((e1 * d2.y - e2 * d1.y) * r).normalize_or_zero();
-        let b = (e2 * d1.x - e1 * d2.x) * r;
-        // glTF/MikkTSpace: bitangent = cross(N, T) * w, pointing toward decreasing v (image "up").
-        let w = if n[0].cross(t).dot(b) < 0.0 { 1.0 } else { -1.0 };
-        (t, w)
-    });
+/// Shading attributes of a triangle: normals, UVs, its tangents if it has them, its material.
+pub fn tri_attr(n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<CornerTangents>, mat: u32) -> GpuTriAttr {
+    let t = |c: usize| tangent.map_or([0.0; 4], |t| [t[c].0.x, t[c].0.y, t[c].0.z, t[c].1]);
     // (Its texel density, for the mip choice, is the hit's to compute: pathtrace.wgsl `mesh_density`.)
     GpuTriAttr {
         n0: [n[0].x, n[0].y, n[0].z, uv[0].x],
         n1: [n[1].x, n[1].y, n[1].z, uv[0].y],
         n2: [n[2].x, n[2].y, n[2].z, uv[1].x],
         uv: [uv[1].y, uv[2].x, uv[2].y, f32::from_bits(mat)],
-        t: [t.x, t.y, t.z, sign],
-        x: [f32::from_bits(own), 0.0, 0.0, 0.0],
+        t: t(0),
+        x: [0.0; 4],
+        t1: t(1),
+        t2: t(2),
     }
 }
 
@@ -2825,7 +2818,8 @@ mod instance_tests {
     /// An instance's placed triangle and attributes equal flattening the same triangle at the instance transform: as
     /// the flattening path has them (`Instance::flat`) against the triangle built in world space as `append_arrays`
     /// builds it, under a transform that keeps the hand and under one that mirrors (the second and third vertex
-    /// change places, the tangent frame changes hand), with distinct normals, UVs and vertex colours a vertex.
+    /// change places, the tangent frame changes hand), with distinct normals, UVs, tangents and vertex colours a
+    /// vertex.
     #[test]
     fn instance_matches_flattening() {
         let p = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.5, 0.2)];
@@ -2833,7 +2827,8 @@ mod instance_tests {
         let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.25), Vec2::new(0.5, 1.0)];
         let colors = [1, 2, 3];
         let keeps = Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::from_rotation_y(0.7) * glam::Quat::from_rotation_x(-0.3), Vec3::new(5.0, 1.0, -3.0));
-        let local = tri_attr(p, n, uv, None, 7);
+        let tg = [(Vec3::new(1.0, 0.1, 0.0).normalize(), 1.0), (Vec3::new(0.9, 0.0, 0.3).normalize(), 1.0), (Vec3::new(0.8, -0.2, 0.1).normalize(), 1.0)];
+        let local = tri_attr(n, uv, Some(tg), 7);
         for (w, mirrored) in [(keeps, false), (keeps * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)), true)] {
             assert_eq!(mirrors(w), mirrored);
             let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
@@ -2843,12 +2838,13 @@ mod instance_tests {
             let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
             let nm = glam::Mat3::from_mat4(w).inverse().transpose();
             let wp = order.map(|k| w.transform_point3(p[k]));
-            let flat = tri_attr(wp, order.map(|k| (nm * n[k]).normalize()), order.map(|k| uv[k]), None, 7);
+            let hand = if mirrored { -1.0 } else { 1.0 };
+            let flat = tri_attr(order.map(|k| (nm * n[k]).normalize()), order.map(|k| uv[k]), Some(order.map(|k| (w.transform_vector3(tg[k].0).normalize(), tg[k].1 * hand))), 7);
             for k in 0..3 {
                 assert!((Vec3::from(placed[k]) - wp[k]).length() < 1e-5, "mirrored {mirrored}: vertex {k}");
             }
             assert!((placed[1] - placed[0]).cross(placed[2] - placed[0]).dot(Vec3A::from(nm * n[0])) > 0.0, "mirrored {mirrored}: it faces as its normals do");
-            for (a, b) in [(got.n0, flat.n0), (got.n1, flat.n1), (got.n2, flat.n2), (got.t, flat.t)] {
+            for (a, b) in [(got.n0, flat.n0), (got.n1, flat.n1), (got.n2, flat.n2), (got.t, flat.t), (got.t1, flat.t1), (got.t2, flat.t2)] {
                 assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5, "mirrored {mirrored}: {a:?} vs {b:?}");
                 assert_eq!(a[3], b[3], "mirrored {mirrored}: the UV packed there, the tangent frame's hand");
             }
@@ -2866,8 +2862,7 @@ mod instance_tests {
         let mut cutout = GpuMaterial::default();
         cutout.uv2[3] = 0.5;
         let mats = [opaque, cutout];
-        let p = [Vec3::ZERO, Vec3::X, Vec3::Y];
-        let a = |m: u32| tri_attr(p, [Vec3::Z; 3], [Vec2::ZERO, Vec2::X, Vec2::Y], None, m);
+        let a = |m: u32| tri_attr([Vec3::Z; 3], [Vec2::ZERO, Vec2::X, Vec2::Y], None, m);
         let inst = |shadow: bool| Instance { mesh: 0, world: Mat4::IDENTITY, object: 0, cast_shadow: shadow, name: "x".into(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
         assert_eq!(instance_tri_flags(&inst(true), &a(0), &mats), 0);
         assert_eq!(instance_tri_flags(&inst(true), &a(1), &mats), TRI_MASKED);

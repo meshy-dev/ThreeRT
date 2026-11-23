@@ -143,7 +143,7 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 
 @group(0) @binding(0) var<uniform> P: Params;
 // The scene's vertices (indexed.rs `Vertex`), each kept once, a record of three rows: (position, u), (normal, v),
-// (tangent, hand; zeros: it has none). A triangle is three of them, by its indices in `words` (`tri_data`).
+// (tangent, hand; a hand of 0: it has none). A triangle is three of them, by its indices in `words` (`tri_data`).
 @group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
 const VERTEX_VEC4: u32 = 3u;
 // Software traversal's trees (hardware traversal has no binding for them): their nodes, and their leaves'
@@ -348,11 +348,11 @@ fn emitter_is_card(em: EmitterTri) -> bool {
     return material_at(tri_row(em.part).x).tex1.z == MAT_EMITTER_CARD;
 }
 // A triangle read whole: its first corner and its edges, and its attributes as a hit has them: normals and UVs a
-// corner; `uv.w`: its section (an instance's: `part`) or its material; `t`: its first vertex's tangent, zeros where
-// that has none (`hit_tangent`); `x`: -, its object (an instance's: where its attributes are placed, `inst_x`), -,
-// its emitter entry + 1. `inst`, `part`: as a hit has them (`Hit`): with an instance its vertices count from the
-// mesh's first and `part` is its section; without, `part` is its row.
-struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32> }
+// corner; `uv.w`: its section (an instance's: `part`) or its material; `x`: -, its object (an instance's: where its
+// attributes are placed, `inst_x`), -, its emitter entry + 1. `vi`: where its three vertices are in `vertices`
+// (their tangents are read where a frame is asked: `hit_tangent`). `inst`, `part`: as a hit has them (`Hit`): with an
+// instance its vertices count from the mesh's first and `part` is its section; without, `part` is its row.
+struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32>, vi: vec3<u32> }
 fn tri_data(ti: u32, inst: u32, part: u32) -> TriData {
     var base = 0u;
     var row = vec4<u32>(part, 0u, 0u, 0u);
@@ -376,15 +376,18 @@ fn tri_data(ti: u32, inst: u32, part: u32) -> TriData {
         n1 = vec4<f32>(flat, n1.w);
         n2 = vec4<f32>(flat, n2.w);
     }
-    return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(row.x)), vertices[i.x + 2u],
-                            vec4<f32>(0.0, bitcast<f32>(row.y), 0.0, bitcast<f32>(row.w))), p0.xyz, e1, e2);
+    return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(row.x)),
+                            vec4<f32>(0.0, bitcast<f32>(row.y), 0.0, bitcast<f32>(row.w))), p0.xyz, e1, e2, i);
 }
-// A triangle's tangent frame in the world: (tangent, hand). Its first vertex's where that has one (a file's, a
-// particle's); else the triangle's own, from its edges, its UVs and its first normal as `td` has them (its model's
-// space). Then placed by its instance, if one places it. Asked where a frame is read: a normal map, a function.
-fn hit_tangent(td: TriData, inst: u32) -> vec4<f32> {
-    var t = td.a.t;
-    if (all(t.xyz == vec3<f32>(0.0))) {
+// The tangent frame at a point of a triangle (barycentrics u, v), in the world: (tangent, hand). Its three vertices'
+// tangents there (a file's, a particle's), the hand its first vertex's; a triangle without tangents (a hand of 0)
+// has its own, from its edges, its UVs and its first normal as `td` has them (its model's space). Then placed by its
+// instance, if one places it. Not of unit length where it is its vertices': who asks makes it so against the
+// normal. Asked where a frame is read: a normal map, a function.
+fn hit_tangent(td: TriData, inst: u32, u: f32, v: f32) -> vec4<f32> {
+    let t0 = vertices[td.vi.x + 2u];
+    var t = vec4<f32>(t0.xyz * (1.0 - u - v) + vertices[td.vi.y + 2u].xyz * u + vertices[td.vi.z + 2u].xyz * v, t0.w);
+    if (t0.w == 0.0) {
         let a = td.a;
         let uv0 = vec2<f32>(a.n0.w, a.n1.w);
         let d1 = vec2<f32>(a.n2.w, a.uv.x) - uv0;
@@ -408,13 +411,19 @@ fn hit_tangent(td: TriData, inst: u32) -> vec4<f32> {
     }
     if (has(F_INST) && inst != NO_INST) {
         let r = instance_at(inst);
-        t = vec4<f32>(normalize(inst_vec(r, t.xyz)), t.w * inst_sign(r));
+        t = vec4<f32>(unit_or_zero(inst_vec(r, t.xyz)), t.w * inst_sign(r));
     }
     return t;
 }
+// A vector of unit length, or zeros where it has no direction (or is not finite).
+fn unit_or_zero(v: vec3<f32>) -> vec3<f32> {
+    let d = dot(v, v);
+    if (d > 0.0 && (bitcast<u32>(d) & 0x7f800000u) != 0x7f800000u) { return normalize(v); }
+    return vec3<f32>(0.0);
+}
 
-// A model-space triangle's shading attributes placed by instance r (scene::instance_attr). (Not its tangent, which
-// is placed where it is read: `hit_tangent`.)
+// A model-space triangle's shading attributes placed by instance r (scene::instance_attr). (Not its tangents, which
+// are placed where they are read: `hit_tangent`.)
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;
     b.n0 = inst_normal(r, a.n0);
@@ -1306,7 +1315,7 @@ fn mat_in_at(ti: u32, inst: u32, part: u32, u: f32, v: f32, view: vec3<f32>, lod
     // (Its frame placed as its attributes are: by F_IFUNC.)
     var placed = NO_INST;
     if (has(F_IFUNC)) { placed = inst; }
-    let tw = hit_tangent(td, placed);
+    let tw = hit_tangent(td, placed, u, v);
     let t = normalize(tw.xyz - n * dot(n, tw.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
     return MatIn(p, n, ng, t, cross(n, t) * tw.w, mesh_uv(a, m, u, v), mesh_lod(mesh_density(e1, e2, a, m), 1.0, 1.0), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
@@ -1440,7 +1449,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let near = cur_depth == 0u || mirror_path;
     if (has(F_TEX) && m.tex0.y >= 0 && near) {
         let tn = tex(m.tex0.y, uv, lod).xyz * 2.0 - 1.0;
-        let tw = hit_tangent(td, h.inst);
+        let tw = hit_tangent(td, h.inst, h.u, h.v);
         let tp = tw.xyz - n * dot(n, tw.xyz);
         if (dot(tp, tp) > 1e-12) {
             let t = normalize(tp);
@@ -1451,7 +1460,7 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
         let oi = object_of(a);
-        let tw = hit_tangent(td, h.inst);
+        let tw = hit_tangent(td, h.inst, h.u, h.v);
         var t = normalize(tw.xyz - n * dot(n, tw.xyz) + vec3<f32>(1e-9));
         let nv = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v) * select(-1.0, 1.0, front || dot(a.n0.xyz, ng) > 0.0);
         let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * tw.w, mesh_uv(a, m, h.u, h.v), mesh_lod(density, 1.0, 1.0), -d,

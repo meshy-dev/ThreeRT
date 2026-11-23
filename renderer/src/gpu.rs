@@ -4076,7 +4076,7 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((seed >> 40) as f32) / (1u64 << 24) as f32
         };
-        let (mut rows, mut want): (Vec<[f32; 36]>, Vec<f64>) = (vec![], vec![]);
+        let (mut rows, mut want): (Vec<[f32; 32]>, Vec<f64>) = (vec![], vec![]);
         for k in 0..512 {
             // Sizes from a millimetre to a hundred metres, UVs from a hundredth of the texture to a hundred repeats,
             // footprints from a tenth of a millimetre to ten metres, a divisor from a thousandth to one.
@@ -4094,13 +4094,14 @@ mod tests {
                 8 => uv2 = [uv0[0] + (uv1[0] - uv0[0]) * 3.0, uv0[1] + (uv1[1] - uv0[1]) * 3.0],
                 _ => {}
             }
-            let mut row = [0f32; 36];
+            let mut row = [0f32; 32];
             row[..3].copy_from_slice(&e1);
             row[4..7].copy_from_slice(&e2);
             (row[3], row[7]) = (fp2, over);
             // (The attributes' UV words: n0.w, n1.w = uv0; n2.w, uv.x = uv1; uv.y, uv.z = uv2.)
             (row[8 + 3], row[8 + 7], row[8 + 11], row[8 + 12], row[8 + 13], row[8 + 14]) = (uv0[0], uv0[1], uv1[0], uv1[1], uv2[0], uv2[1]);
-            (row[32], row[33]) = (rep[0], rep[1]);
+            // (The attributes: five vec4s; then the material's.)
+            (row[28], row[29]) = (rep[0], rep[1]);
             rows.push(row);
             let d = |a: [f32; 3]| a.map(|x| x as f64);
             let (a, b) = (d(e1), d(e2));

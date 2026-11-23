@@ -1826,7 +1826,7 @@ impl LiveCore {
             let (first, verts, attrs, blas) = &mut self.sc.dynamic;
             for (j, (node, p, n, uv, tg)) in r.rest_local.iter().enumerate() {
                 let (pw, nw, uvw, tw) = scene::placed_tri(scene::RigidModel::part_world(m, *node, &globals), p, n, uv, *tg);
-                let a = scene::tri_attr(pw, nw, uvw, tw, d.mats[j]);
+                let a = scene::tri_attr(nw, uvw, tw, d.mats[j]);
                 let k = d.finals[j] as usize - *first;
                 let (e1, e2) = (pw[1] - pw[0], pw[2] - pw[0]);
                 verts[k * 3..k * 3 + 3].copy_from_slice(&[[pw[0].x, pw[0].y, pw[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
@@ -2549,9 +2549,13 @@ impl LiveCore {
                                 vertices[v][0] = [p.x, p.y, p.z, q.uv[c].x];
                                 vertices[v][1] = [normal.x, normal.y, normal.z, q.uv[c].y];
                             }
-                            let v0 = index[j][0] as usize;
-                            if let Some((tangent, hand)) = q.tangent.filter(|_| model[v0].t[3].to_bits() & crate::skin::CORNER_TANGENT != 0) {
-                                vertices[v0][2] = [tangent.x, tangent.y, tangent.z, hand];
+                            if let Some(tangent) = q.tangent {
+                                for c in 0..3 {
+                                    let v = index[j][c] as usize;
+                                    if model[v].t[3].to_bits() & crate::skin::CORNER_TANGENT != 0 {
+                                        vertices[v][2] = [tangent[c].0.x, tangent[c].0.y, tangent[c].0.z, tangent[c].1];
+                                    }
+                                }
                             }
                             t.push(q.p.map(glam::Vec3A::from));
                         }

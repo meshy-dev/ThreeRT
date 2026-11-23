@@ -1762,8 +1762,8 @@ mod units_tests {
 
     /// `prepare`'s vertices and indices (indexed.rs) are its triangles: every triangle read through its indices (a
     /// mesh's from the mesh's first vertex, a world-space one's from 0) has the corners, the edges, the normals and
-    /// the UVs the kernel's arrays have for it, bit for bit, the tangent of one that has its own, and its row's four
-    /// words. Flattened, with units, and as hardware traversal has the scene; with two posed skinned models. A mesh's
+    /// the UVs the kernel's arrays have for it, bit for bit, its corners' tangents (zeros: it has none), and its row's
+    /// four words. Flattened, with units, and as hardware traversal has the scene; with two posed skinned models. A mesh's
     /// vertices are fewer than its triangles' corners (the ring: 82 for 80 triangles), and the vertices that move are
     /// one run. No GPU.
     #[test]
@@ -1793,8 +1793,7 @@ mod units_tests {
                     assert_eq!([bits(&n[0]), bits(&n[1]), bits(&n[2])], [bits(&a.n0[..3]), bits(&a.n1[..3]), bits(&a.n2[..3])], "{what}: triangle {k}'s normals");
                 }
                 assert_eq!(bits(&uv.concat()), bits(&[a.n0[3], a.n1[3], a.n2[3], a.uv[0], a.uv[1], a.uv[2]]), "{what}: triangle {k}'s UVs");
-                let own = a.x[0].to_bits() & indexed::OWN_TANGENT != 0;
-                assert_eq!(bits(&tangent), bits(&if own { a.t } else { [0.0; 4] }), "{what}: triangle {k}'s own tangent on its first vertex, or none");
+                assert_eq!(tangent.map(|t| bits(&t)), [a.t, a.t1, a.t2].map(|t| bits(&t)), "{what}: triangle {k}'s tangents, a corner each, or none");
                 // (A mesh's triangle: its section and its index in it, nothing else. One no instance places: its
                 // material, its object, its flags, its emitter + 1.)
                 let pool = (pool_first..pool_first + sc.pool_tris.len()).contains(&k);
@@ -1814,7 +1813,7 @@ mod units_tests {
             }
             // The ring's mesh: 80 triangles of 82 vertices. Each skinned model's mesh: its own vertices, as many as
             // the other's (one model), fewer than its corners; and they are the vertices that move.
-            assert!(sc.attrs.iter().any(|a| a.x[0].to_bits() & indexed::OWN_TANGENT != 0) && sc.attrs.iter().any(|a| a.x[0].to_bits() & indexed::OWN_TANGENT == 0), "{what}: triangles with a tangent of their own and without");
+            assert!(sc.attrs.iter().any(|a| a.t[3] != 0.0) && sc.attrs.iter().any(|a| a.t[3] == 0.0), "{what}: triangles with tangents and without");
             let ring = sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count == 80).expect("the ring's mesh");
             assert_eq!(ring.1 .1, 82, "{what}: the ring's vertices");
             let skinned: Vec<(u32, u32)> = sc.meshes.iter().zip(&x.meshes).filter(|(m, _)| m.deforms).map(|(_, v)| *v).collect();

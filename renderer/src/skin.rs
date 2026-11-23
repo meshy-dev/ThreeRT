@@ -63,7 +63,7 @@ pub struct ModelTri {
     pub p: [Vec3; 3],
     pub n: [Vec3; 3],
     pub uv: [Vec2; 3],
-    pub tangent: Option<(Vec3, f32)>,
+    pub tangent: Option<crate::scene::CornerTangents>,
     /// glTF material index.
     pub material: Option<usize>,
 }
@@ -398,9 +398,8 @@ impl Model {
             // (A node that mirrors: the winding stays front-facing, as `triangles` has it.)
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if mirrored { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
-                // (A triangle's tangent is its first corner's.)
-                let tangent = p.tangents.as_ref().map(|tv| tv[a as usize]);
-                out.push([corner(a as usize, tangent), corner(b as usize, tangent), corner(c as usize, tangent)]);
+                let tangent = |v: u32| p.tangents.as_ref().map(|tv| tv[v as usize]);
+                out.push([corner(a as usize, tangent(a)), corner(b as usize, tangent(b)), corner(c as usize, tangent(c))]);
             }
         }
         Ok(out)
@@ -424,7 +423,7 @@ impl Model {
             let nm = Mat3::from_mat4(m).inverse().transpose();
             let pos: Vec<Vec3> = p.positions.iter().map(|v| m.transform_point3(*v)).collect();
             let nrm: Option<Vec<Vec3>> = p.normals.as_ref().map(|n| n.iter().map(|v| (nm * *v).normalize_or_zero()).collect());
-            // (A mirroring placement: the winding stays front-facing, and an authored tangent's frame changes hand.)
+            // (A mirroring placement: the winding stays front-facing, and a tangent's frame changes hand.)
             let flip = !local && m.determinant() < 0.0;
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if flip { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
@@ -432,10 +431,7 @@ impl Model {
                 let tp = [pos[a], pos[b], pos[c]];
                 let gn = (tp[1] - tp[0]).cross(tp[2] - tp[0]).normalize_or_zero();
                 let n = nrm.as_ref().map(|n| [n[a], n[b], n[c]]).unwrap_or([gn; 3]);
-                let tangent = p.tangents.as_ref().map(|tv| {
-                    let tt = tv[a];
-                    (m.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if flip { -tt[3] } else { tt[3] })
-                });
+                let tangent = p.tangents.as_ref().map(|tv| [a, b, c].map(|v| (m.transform_vector3(Vec3::new(tv[v][0], tv[v][1], tv[v][2])).normalize_or_zero(), if flip { -tv[v][3] } else { tv[v][3] })));
                 out.push((p.node, ModelTri { p: tp, n, uv: [p.uvs[a], p.uvs[b], p.uvs[c]], tangent, material: p.material }));
             }
         }
@@ -505,9 +501,10 @@ impl Model {
                 let gn = (tp[1] - tp[0]).cross(tp[2] - tp[0]).normalize_or_zero();
                 let n = nrm.as_ref().map(|n| [n[a], n[b], n[c]]).unwrap_or([gn; 3]);
                 let tangent = p.tangents.as_ref().map(|tv| {
-                    let tt = tv[a];
-                    let by = blends.get(a).copied().unwrap_or(m);
-                    (by.transform_vector3(Vec3::new(tt[0], tt[1], tt[2])).normalize_or_zero(), if mirrored { -tt[3] } else { tt[3] })
+                    [a, b, c].map(|v| {
+                        let by = blends.get(v).copied().unwrap_or(m);
+                        (by.transform_vector3(Vec3::new(tv[v][0], tv[v][1], tv[v][2])).normalize_or_zero(), if mirrored { -tv[v][3] } else { tv[v][3] })
+                    })
                 });
                 out.push(ModelTri { p: tp, n, uv: [p.uvs[a], p.uvs[b], p.uvs[c]], tangent, material: p.material });
             }
@@ -594,7 +591,7 @@ mod tests {
         for p in &mut m.prims {
             p.tangents = Some(vec![[1.0, 0.0, 0.0, 1.0]; p.positions.len()]);
         }
-        let hand = |t: &ModelTri| t.tangent.unwrap().1;
+        let hand = |t: &ModelTri| t.tangent.unwrap()[0].1;
         let straight = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
         let mirrored = straight * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
         assert!(m.triangles(straight, None, None).unwrap().iter().all(|t| hand(t) == 1.0));
@@ -642,8 +639,8 @@ mod tests {
                         if c.t[3].to_bits() & CORNER_NORMAL != 0 {
                             assert!((n - t.n[k]).length() < 1e-5, "normal {n} against {}", t.n[k]);
                         }
-                        if let (0, Some((tt, _))) = (k, t.tangent) {
-                            assert!((tg - tt).length() < 1e-5, "tangent {tg} against {tt}");
+                        if let Some(tc) = t.tangent {
+                            assert!((tg - tc[k].0).length() < 1e-5, "tangent {tg} against {}", tc[k].0);
                         }
                         seen += 1;
                     }
@@ -747,7 +744,7 @@ mod bench {
         let mut x = 0.0;
         for _ in 0..100 {
             for t in &tris {
-                x += crate::scene::tri_attr(t.p, t.n, t.uv, t.tangent, 0).t[0];
+                x += crate::scene::tri_attr(t.n, t.uv, t.tangent, 0).t[0];
             }
         }
         eprintln!("tri_attr: {:.3} ms per pose ({x})", t0.elapsed().as_secs_f64() * 1000.0 / 100.0);

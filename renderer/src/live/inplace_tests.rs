@@ -174,14 +174,12 @@ fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u3
     let before: Vec<crate::indexed::Vertex> = prev.map_or(vec![], |_| read_back(c, &up.prev_vertices, 0, up.prev_vertices.size()));
     let mut out = Triangles { rows, ..Default::default() };
     for tri in index.chunks_exact(3) {
-        for (k, &i) in tri.iter().enumerate() {
+        for &i in tri {
             let v = &vertices[(base + i) as usize];
             out.p.extend(&v[0][..3]);
             out.n.extend(&v[1][..3]);
             out.uv.extend([v[0][3], v[1][3]]);
-            if k == 0 {
-                out.t.extend(v[2]);
-            }
+            out.t.extend(v[2]);
             if let Some(p) = prev {
                 out.prev.extend(&before[(p + i) as usize][0][..3]);
             }
@@ -191,7 +189,7 @@ fn triangles_on_gpu(c: &LiveCore, first: u64, n: u64, base: u32, prev: Option<u3
 }
 
 /// A skinned model's mesh as the CPU skin gives it for a pose, in the same form: a normal where the model has one
-/// (else zeros: the triangle's own is made where it is hit), a tangent where the model has its own.
+/// (else zeros: the triangle's own is made where it is hit), a tangent a corner where the model has them.
 fn skinned_on_cpu(c: &LiveCore, sk: &scene::Skinned, a: &crate::desc::Animation) -> Triangles {
     let tris = scene::model_gltf(&sk.uri, Path::new("..")).unwrap().triangles(glam::Mat4::IDENTITY, None, Some(a)).unwrap();
     let (model, index) = &c.sc.skins[sk.source as usize];
@@ -203,11 +201,11 @@ fn skinned_on_cpu(c: &LiveCore, sk: &scene::Skinned, a: &crate::desc::Animation)
             out.p.extend(q.p[corner].to_array());
             out.n.extend(if has(j, corner, crate::skin::CORNER_NORMAL) { q.n[corner].to_array() } else { [0.0; 3] });
             out.uv.extend(q.uv[corner].to_array());
+            out.t.extend(match q.tangent.filter(|_| has(j, corner, crate::skin::CORNER_TANGENT)) {
+                Some(t) => [t[corner].0.x, t[corner].0.y, t[corner].0.z, t[corner].1],
+                None => [0.0; 4],
+            });
         }
-        out.t.extend(match q.tangent.filter(|_| has(j, 0, crate::skin::CORNER_TANGENT)) {
-            Some((t, hand)) => [t.x, t.y, t.z, hand],
-            None => [0.0; 4],
-        });
         out.rows.extend([section, 0, 0, rank]);
     }
     out
@@ -234,7 +232,7 @@ fn skinned_is_the_cpus(what: &str, c: &LiveCore, sk: &scene::Skinned, name: &str
     same_numbers(&format!("{what}: the corners"), &got.p, &want.p, 9);
     same_numbers(&format!("{what}: the normals"), &got.n, &want.n, 9);
     same_numbers(&format!("{what}: the UVs"), &got.uv, &want.uv, 6);
-    same_numbers(&format!("{what}: the tangents"), &got.t, &want.t, 4);
+    same_numbers(&format!("{what}: the tangents"), &got.t, &want.t, 12);
     assert!(record.n[1][3].to_bits() & scene::INST_DEFORMS != 0 && inst.bits & scene::INST_DEFORMS != 0, "{what}: the record says its mesh deforms");
     if c.g.hwrt {
         for (j, &(_, section, rank)) in sk.order.iter().enumerate() {
