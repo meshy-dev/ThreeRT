@@ -199,6 +199,8 @@ export interface SettingsDesc {
 export interface Engine extends RenderingBinding {
   /** `groups`: (first index, index count, material index) per group, for meshes with several materials. */
   /** `colors`: the vertex colours (three.js's `color` attribute), linear RGB per vertex. */
+  /** A file under the asset root, whole or a range (native only; a page's throws): `readAsset` below. */
+  readAsset?(path: string, offset?: number, length?: number): ArrayBuffer;
   geometry(id: number, positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, desc: TextureDesc, data: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
@@ -1646,7 +1648,7 @@ function samePose(a: AnimationDesc | null, b: AnimationDesc | null): boolean {
  * docs/RUNTIME.md "Streaming"): what a game reads as it goes, such as a city's baked cells as the camera moves.
  */
 export function readAsset(path: string, offset?: number, length?: number): ArrayBuffer {
-  const e = (globalThis as { __engine?: { readAsset?: (path: string, offset?: number, length?: number) => ArrayBuffer } }).__engine;
+  const e = (globalThis as { __engine?: Partial<Pick<Engine, "readAsset">> }).__engine;
   if (!e?.readAsset) throw new Error("readAsset: this host reads no assets (the native renderer does)");
   return offset === undefined ? e.readAsset(path) : e.readAsset(path, offset, length ?? 0);
 }
@@ -1709,6 +1711,9 @@ function resolveOrientation(o: Object3D): Quaternion {
 /** An engine that records the calls (tests, headless inspection). */
 export class RecordingEngine implements Engine {
   calls: [string, ...unknown[]][] = [];
+  readAsset(path: string): ArrayBuffer {
+    throw new Error(`readAsset ${path}: the recording engine reads no assets`);
+  }
   geometry(...a: Parameters<Engine["geometry"]>) { this.calls.push(["geometry", ...a.filter((x, k) => k < 5 || x || (k === 5 && a[6]))]); }
   texture(...a: Parameters<Engine["texture"]>) { this.calls.push(["texture", ...a]); }
   shader(...a: Parameters<Engine["shader"]>) { this.calls.push(["shader", ...a]); }

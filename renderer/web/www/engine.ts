@@ -22,7 +22,7 @@ export interface EngineExports {
   voxelContacts(body: number, on: boolean): void;
   voxelGone(): string;
   voxelFrame(dt: number): string;
-  readAsset(path: string, offset?: number, length?: number): ArrayBuffer;
+  readAsset(path: string, offset?: number, length?: number): Uint8Array;
   geometry(id: number, p: Float32Array, n: Float32Array, uv: Float32Array, idx: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, d: string, data?: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
