@@ -2788,7 +2788,8 @@ no rebuild. Against the tangents two sample files carry themselves, 897,150 corn
 of the other hand. A scene's own geometries, which have no tangent attribute, keep the frame made at the hit.
 Pictures: offline at 8 samples against the build before, three scenes without normal-mapped models are the same
 bytes; the home showcase (models without tangents under normal maps) differs in 5.4 % of its pixels, by 0.08 steps
-in the mean; the museum in 1.2 %.
+in the mean; the museum in 1.2 %. A frame's GPU time in twelve scenes, one run against the build before: between
+-1.2 % and +0.6 %, which one run does not tell from none.
 Tests: a quad whose file has a tangent of its own on each side, by the gradient a function draws of it
 (`material/function-vertex-tangents`: 1 with one tangent a triangle); two quads whose file gives one hand each, by
 the side their bitangent points to (`material/function-file-hand`); the tangents made for a quad, upright and
