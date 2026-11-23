@@ -780,7 +780,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         }
     }
     // (Nor a particle system's material: its triangles are its pass's.)
-    for i in sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0) {
+    // (Not a translucent system's, which has no emitter and no class: its material's function changes in place.)
+    for i in sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0 && !i.hidden) {
         moving_mats.insert(scene::row_material(&sc.rows[i.rows as usize]));
     }
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
@@ -1842,8 +1843,9 @@ mod units_tests {
     /// particle (a quad's corners once each, in the order the pass writes them), among the vertices that move; the
     /// instance places nothing and has the system's first object. One the lights are not sampled by has a row that
     /// keeps its material's emission out of the light list; one they are sampled by has an emitter a triangle, its
-    /// instance's, weighed by half the particle's nominal area. Stateless and stateful systems alike. A particle
-    /// system's material is not one whose emitters an edit makes in place. Under software traversal (the passes do
+    /// instance's, weighed by half the particle's nominal area. Stateless and stateful systems alike. A translucent
+    /// system's instance is hidden from the scene's acceleration structure (the translucency pass has it). An
+    /// opaque particle system's material is not one whose emitters an edit makes in place. Under software traversal (the passes do
     /// not run there) no kernel asks for a particle's object. No GPU.
     #[test]
     fn a_particle_system_is_a_mesh_of_quads_and_an_instance() {
@@ -1854,6 +1856,9 @@ mod units_tests {
             w.set_object(id, format!("sparks{id}"), None, Kind::Particles { count, emitter: "rise".into(), params: vec![], material: 7, emitter_area }, true, false).unwrap();
             w.set_transform(id, Vec3::new(0.3, 0.2, 1.0), Quat::IDENTITY, Vec3::ONE).unwrap();
         }
+        // (A translucent system, of a transparent material.)
+        w.set_material(8, serde_json::from_value(serde_json::json!({ "name": "smoke", "color": [0.5, 0.5, 0.5], "opacity": 0.5, "transparent": true, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
+        w.set_object(44, "smoke".into(), None, Kind::Particles { count: 2, emitter: "rise".into(), params: vec![], material: 8, emitter_area: 0.0 }, true, false).unwrap();
         // (Stateful systems too: one of each kind.)
         w.set_particle_program("puff", "fn pe_puff(i: EIn, p: array<vec4<f32>, 8>) -> PState { return PState(i.pivot, vec3<f32>(0.0), 0.0, 1.0, vec4<f32>(1.0), 0.1); }".into(), "fn pu_puff(s: PState, i: UIn, p: array<vec4<f32>, 8>) -> PState { return s; }".into(), String::new());
         for (id, capacity, emitter_area) in [(42, 5, 0.0), (43, 1, 0.04)] {
@@ -1909,6 +1914,15 @@ mod units_tests {
                 assert_eq!(p.emitter_runs.particles.iter().filter(|run| run[0] <= row[2] && row[2] + count * 2 <= run[0] + run[1]).count(), 1, "{what}: its emitters are taken again from its vertices every frame");
             }
             assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 6, "{what}: no other emitter by a nominal area");
+            // The translucent system: a mesh and an instance too, the instance out of the scene's acceleration
+            // structure (the translucency pass has it); no world-space translucent triangle; its material is the
+            // translucency pass's, and one an edit may change in place.
+            let smoke = &sc.particles[2];
+            let i3 = sc.instances.iter().find(|i| i.mesh == smoke.mesh).expect("its instance");
+            assert!(smoke.translucent && i3.hidden && i3.bits & scene::INST_PARTICLES != 0 && sc.rows[i3.rows as usize][3] == scene::ROW_UNSAMPLED, "{what}: the translucent system's instance");
+            assert_eq!((sc.meshes[smoke.mesh as usize].count, sc.trans_tris.len(), i3.object), (4, 0, smoke.object), "{what}: its quads are its mesh's");
+            assert_eq!((sc.translucent_mats(), p.moving_mats.contains(&sc.retained.materials[&8])), (vec![sc.retained.materials[&8]], false), "{what}: its material");
+            assert!(sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0 && i.mesh != smoke.mesh).all(|i| !i.hidden), "{what}: the opaque systems' instances are the scene's");
         }
     }
 

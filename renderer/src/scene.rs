@@ -756,6 +756,18 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// The materials of the translucent particle systems (the translucency pass's: its kernel has their functions
+    /// alone), each once, in order.
+    pub fn translucent_mats(&self) -> Vec<u32> {
+        let mut m: Vec<u32> = self.trans_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
+        for p in self.particles.iter().filter(|p| p.translucent && p.mesh != u32::MAX) {
+            m.extend(self.instances.iter().filter(|i| i.mesh == p.mesh).map(|i| row_material(&self.rows[i.rows as usize])));
+        }
+        m.sort_unstable();
+        m.dedup();
+        m
+    }
+
     /// vec4s an object in `objects` (`object_stride`).
     pub fn object_stride(&self) -> usize {
         object_stride(self.tinted)
@@ -1121,8 +1133,9 @@ pub struct ParticleSystem {
     pub mesh: u32,
     /// A particle's nominal area where the lights are sampled by the system (m²; 0: they are not).
     pub emitter_area: f32,
-    /// Drawn by the translucency pass: `first` / `final_first` index the translucent triangles (`Scene::trans_tris`,
-    /// from `trans_first` on the GPU).
+    /// Drawn by the translucency pass: its instance is hidden from the scene's acceleration structure and is in
+    /// that pass's. (World-space triangles: `first` / `final_first` index `Scene::trans_tris`, from `trans_first`
+    /// on the GPU.)
     pub translucent: bool,
     pub first: u32,
     pub final_first: u32,
@@ -2199,12 +2212,15 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 }
                 // A system the kernel traces as any geometry: a mesh of its own in the pool, a quad a particle, and one
                 // instance of it. The pass writes its vertices where the particles are (the instance places nothing),
-                // and its BLAS is built again after the pass. (Not yet a translucent one.)
-                if instancing && !translucent {
+                // and its BLAS is built again after the pass.
+                if instancing {
                     for _ in 0..*count {
                         objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                     }
-                    let mesh = particle_mesh(*count, p, mat, object, *emitter_area > 0.0, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
+                    let mesh = particle_mesh(*count, p, mat, object, !translucent && *emitter_area > 0.0, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
+                    // (A translucent system is the translucency pass's: its instance is in that pass's acceleration
+                    // structure, not in the scene's.)
+                    instances.last_mut().expect("the system's instance").hidden = translucent;
                     particles.push(ParticleSystem { mesh, emitter_area: *emitter_area, translucent, first: 0, final_first: 0, count: *count, object, func, params: pf, flags, seed: *id, custom: n.custom, hidden: !shown });
                     continue;
                 }

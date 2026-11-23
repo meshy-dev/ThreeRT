@@ -254,9 +254,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     let shaders = sc.shaders.clone();
     let volume_fns = sc.volume_fns.clone();
-    let mut translucent_mats: Vec<u32> = sc.trans_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
-    translucent_mats.sort_unstable();
-    translucent_mats.dedup();
+    let translucent_mats = sc.translucent_mats();
     let translucent_used = translucent_mats.iter().filter_map(|&m| sc.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
     // (The light tree is the tables' by now: its nodes from there.)
     let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
