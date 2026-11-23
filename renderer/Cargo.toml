@@ -26,6 +26,7 @@ sha2 = "0.10"
 # The clock of a frame: std's natively (a re-export, nothing changes), the page's `performance.now()` in a browser,
 # where std's `Instant` panics.
 web-time = "1.1"
+bevy_mikktspace = "1.0.0"
 
 # The native shell only: the window, the embedded script runtime, blocking on the GPU's futures, the denoiser. The
 # engine's library builds without them for wasm32 (docs/RUNTIME.md "The engine's library in a browser"): there the

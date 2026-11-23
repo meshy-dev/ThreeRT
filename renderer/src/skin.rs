@@ -25,6 +25,49 @@ struct Prim {
     skin: Option<(Vec<[u16; 4]>, Vec<[f32; 4]>)>,
 }
 
+impl Prim {
+    /// A primitive with UVs and without tangents has them made (tangents.rs): a corner each, so a vertex whose
+    /// corners come out with different tangents is a vertex for each afterwards (its position, normal, UV, joints
+    /// and weights with it), as a file with tangents has them. A triangle the algorithm gives no frame has none (a
+    /// hand of 0); a primitive none of whose triangles has one stays as it is. Without normals: by each triangle's
+    /// own.
+    fn make_tangents(&mut self) {
+        let face = |k: usize| [0, 1, 2].map(|c| self.indices[k * 3 + c] as usize);
+        let made = crate::tangents::generate(self.indices.len() / 3, |k, c| {
+            let v = face(k);
+            let normal = match &self.normals {
+                Some(n) => n[v[c]],
+                None => (self.positions[v[1]] - self.positions[v[0]]).cross(self.positions[v[2]] - self.positions[v[0]]).normalize_or_zero(),
+            };
+            (self.positions[v[c]].to_array(), normal.to_array(), self.uvs[v[c]].to_array())
+        });
+        if made.iter().all(|t| t.is_none()) {
+            return;
+        }
+        // (A vertex of the file and a tangent: a vertex. `from`: the file's vertex each is.)
+        let mut seen: HashMap<(u32, [u32; 4]), u32> = HashMap::new();
+        let (mut from, mut tangents, mut indices) = (vec![], vec![], Vec::with_capacity(self.indices.len()));
+        for (k, t) in made.iter().enumerate() {
+            for c in 0..3 {
+                let (v, tangent) = (self.indices[k * 3 + c], t.map_or([0.0; 4], |t| t[c]));
+                indices.push(*seen.entry((v, tangent.map(f32::to_bits))).or_insert_with(|| {
+                    from.push(v as usize);
+                    tangents.push(tangent);
+                    from.len() as u32 - 1
+                }));
+            }
+        }
+        fn pick<T: Copy>(of: &[T], from: &[usize]) -> Vec<T> {
+            from.iter().map(|&v| of[v]).collect()
+        }
+        self.positions = pick(&self.positions, &from);
+        self.uvs = pick(&self.uvs, &from);
+        self.normals = self.normals.as_ref().map(|n| pick(n, &from));
+        self.skin = self.skin.as_ref().map(|(j, w)| (pick(j, &from), pick(w, &from)));
+        (self.tangents, self.indices) = (Some(tangents), indices);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Path {
     Translation,
@@ -144,16 +187,21 @@ impl Model {
                     (Some(_), Some(j), Some(w)) => Some((j.into_u16().collect(), w.into_f32().collect())),
                     _ => None,
                 };
-                prims.push(Prim {
+                let uvs: Option<Vec<Vec2>> = r.read_tex_coords(0).map(|t| t.into_f32().map(Vec2::from).collect());
+                let mut p = Prim {
                     node: ni,
                     material: prim.material().index(),
                     normals: r.read_normals().map(|it| it.map(Vec3::from).collect()),
-                    uvs: r.read_tex_coords(0).map(|t| t.into_f32().map(Vec2::from).collect()).unwrap_or_else(|| vec![Vec2::ZERO; n]),
                     tangents: r.read_tangents().map(|t| t.collect()),
                     indices: r.read_indices().map(|i| i.into_u32().collect()).unwrap_or_else(|| (0..n as u32).collect()),
                     positions,
                     skin,
-                });
+                    uvs: uvs.clone().unwrap_or_else(|| vec![Vec2::ZERO; n]),
+                };
+                if uvs.is_some() && p.tangents.is_none() {
+                    p.make_tangents();
+                }
+                prims.push(p);
             }
         }
         let mut names = HashMap::new();
@@ -398,7 +446,8 @@ impl Model {
             // (A node that mirrors: the winding stays front-facing, as `triangles` has it.)
             for t in p.indices.chunks_exact(3) {
                 let (a, b, c) = if mirrored { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
-                let tangent = |v: u32| p.tangents.as_ref().map(|tv| tv[v as usize]);
+                // (A hand of 0: the vertex has none.)
+                let tangent = |v: u32| p.tangents.as_ref().map(|tv| tv[v as usize]).filter(|t| t[3] != 0.0);
                 out.push([corner(a as usize, tangent(a)), corner(b as usize, tangent(b)), corner(c as usize, tangent(c))]);
             }
         }
@@ -581,6 +630,46 @@ mod tests {
         let posed = m.triangles(world, None, Some(&pose)).unwrap();
         let w = world * g[1];
         assert!(posed.iter().any(|t| (0..3).all(|k| (t.p[k] - w.transform_point3(local[0].1.p[k])).length() < 1e-5)));
+    }
+
+    /// A primitive with UVs and without tangents has them made, a corner each. Two quads along an edge, the texture
+    /// mirrored across it (the edge's two vertices have one UV for both sides): afterwards each of the two is a
+    /// vertex a side, with its side's tangent (u's direction there) and hand (the bitangent points up the image on
+    /// both), and with the file's position, normal, UV, joints and weights. One whose UVs have no area keeps none.
+    #[test]
+    fn a_primitive_without_tangents_has_them_made_a_corner_each() {
+        let at = [(-1.0, 0.0), (0.0, 0.0), (0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, 1.0)];
+        let prim = |uv: &dyn Fn(f32, f32) -> Vec2| Prim {
+            node: 0,
+            material: None,
+            positions: at.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect(),
+            normals: Some(vec![Vec3::Z; 6]),
+            uvs: at.iter().map(|&(x, y)| uv(x, y)).collect(),
+            tangents: None,
+            indices: vec![0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2],
+            skin: Some(((0..6).map(|k| [k, 0, 0, 0]).collect(), (0..6).map(|k| [1.0 - k as f32 * 0.1, k as f32 * 0.1, 0.0, 0.0]).collect())),
+        };
+        let mut p = prim(&|x, y| Vec2::new(x.abs(), 1.0 - y));
+        p.make_tangents();
+        let tangents = p.tangents.as_ref().expect("tangents");
+        assert_eq!((p.positions.len(), tangents.len(), p.indices.len()), (8, 8, 12), "the edge's two vertices twice");
+        let (joints, weights) = p.skin.as_ref().unwrap();
+        for (k, tri) in p.indices.chunks_exact(3).enumerate() {
+            let side = if k < 2 { -1.0 } else { 1.0 };
+            for &v in tri {
+                let (v, from) = (v as usize, joints[v as usize][0] as usize);
+                assert_eq!(tangents[v], [side, 0.0, 0.0, side], "triangle {k}: its side's tangent and hand");
+                let up = Vec3::Z.cross(Vec3::new(tangents[v][0], tangents[v][1], tangents[v][2])) * tangents[v][3];
+                assert_eq!(up, Vec3::Y, "triangle {k}: the bitangent points up the image");
+                assert_eq!((p.positions[v], p.normals.as_ref().unwrap()[v], p.uvs[v]), (Vec3::new(at[from].0, at[from].1, 0.0), Vec3::Z, Vec2::new(at[from].0.abs(), 1.0 - at[from].1)), "triangle {k}: the file's vertex {from}");
+                assert_eq!(weights[v], [1.0 - from as f32 * 0.1, from as f32 * 0.1, 0.0, 0.0], "triangle {k}: its weights");
+            }
+        }
+        // (The file's triangles, in its order: each corner the vertex it was.)
+        assert_eq!(p.indices.iter().map(|&v| joints[v as usize][0]).collect::<Vec<_>>(), [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2]);
+        let mut flat = prim(&|_, _| Vec2::splat(0.5));
+        flat.make_tangents();
+        assert!(flat.tangents.is_none() && flat.positions.len() == 6, "UVs without area: no tangents, the primitive as it was");
     }
 
     /// An authored tangent's frame changes hand where a placement mirrors (the winding is swapped there too); in a

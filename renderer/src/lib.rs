@@ -28,6 +28,7 @@ pub mod skin;
 pub mod sample;
 pub mod sky;
 pub mod tables;
+pub mod tangents;
 pub mod units;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod userfiles;
