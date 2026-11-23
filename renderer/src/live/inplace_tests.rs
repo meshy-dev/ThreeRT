@@ -4606,3 +4606,138 @@ fn volumes_come_and_go_in_place() {
     check("every volume removed", &mut live, &mut w, &[]);
     assert_eq!(live.sc.up.kernel.features & (gpu::F_MEDIA | gpu::F_HMEDIA), 0, "no medium: the kernel without its media code");
 }
+
+/// Density grids come, change and go in place with the volumes that name them, in a scene that had none: a volume
+/// of a grid the scene had not (the atlas made), a second grid of other cells (the atlas made again, both stacked),
+/// the first with another size, new data; a grid with a program (the grids' pass made), its parameters (the same
+/// grid still: nothing is made again), another grid beside it and the program's code changed (what it had simulated
+/// stays), a program whose name comes first (the programs' numbers move), a simulated grid's volume moved (its
+/// program runs in the box as it is now), a second volume of one grid and the first of them removed (the program
+/// runs in the other's box), every one removed. After each: no rebuild; the
+/// grids, the atlas, the media and the kernel's media features are a build's of the edited world, and so is the
+/// picture.
+#[test]
+fn density_grids_come_and_change_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let volume = |grid: u32, density: f32| Kind::Volume { function: "smoke".into(), params: vec![density], shape: 0, majorant: 8.0, g: 0.0, homogeneous: false, animated: false, grid: Some(grid) };
+    let place = |w: &mut World, id: u32, grid: u32, density: f32, at: Vec3, size: f32| {
+        w.set_object(id, format!("smoke {id}"), None, volume(grid, density), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::IDENTITY, Vec3::splat(size)).unwrap();
+    };
+    let mut w = world();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert_eq!(live.g.grids_state(&live.sc.up).0, vec![], "a scene without a grid");
+    let last = std::cell::RefCell::new(picture(&mut live, 24));
+    // (The commit alone: what the grids hold before a frame runs their programs.)
+    let commit = |what: &str, live: &mut LiveCore, w: &mut World| assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+    let check = |what: &str, live: &mut LiveCore, w: &mut World, nodes: &[u32]| {
+        commit(what, live, w);
+        let mut fresh = open(w).unwrap();
+        assert_eq!(live.g.grids_state(&live.sc.up), fresh.g.grids_state(&fresh.sc.up), "{what}: the grids and their atlas");
+        assert_eq!((&live.sc.up.media_nodes[..], live.sc.base.time[3]), (nodes, nodes.len() as f32), "{what}: the media and the kernel's count of them");
+        assert_eq!(&fresh.sc.up.media_nodes[..], nodes, "{what}: a build's");
+        let media = gpu::F_MEDIA | gpu::F_HMEDIA | gpu::F_GRID;
+        assert_eq!(live.sc.up.kernel.features & media, fresh.sc.up.kernel.features & media, "{what}: the kernel's media features");
+        assert_eq!(gpu::Gpu::has_grid_sim(&live.sc.up), gpu::Gpu::has_grid_sim(&fresh.sc.up), "{what}: whether the grids' pass runs");
+        // (The programs run to where they stay in both, then the pictures: a build's grids start from their data.)
+        for c in [&mut *live, &mut fresh] {
+            picture(c, 48);
+            forget(c);
+        }
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last.borrow(), &b) > 0.1, "{what}: the picture is {:.2} steps from the one before", apart(&last.borrow(), &b));
+        *last.borrow_mut() = b;
+    };
+    let program = |name: &str, body: &str| format!("fn gp_{name}(s_in: Cell, i: CIn, p: array<vec4<f32>, 8>) -> Cell {{\n    var s = s_in;\n    {body}\n    return s;\n}}\n");
+    let cells = |dims: [u32; 3], f: &dyn Fn([u32; 3]) -> f32| -> Vec<f32> { (0..dims[2]).flat_map(|z| (0..dims[1]).flat_map(move |y| (0..dims[0]).map(move |x| [x, y, z]))).map(f).collect() };
+    // The scene's first grid: dense in its left half.
+    w.set_volume_fn("smoke", "fn vf_smoke(i: VIn, p: array<vec4<f32>, 8>) -> VOut {\n    var o = VOut(0.0, vec3<f32>(0.9, 0.6, 0.3), vec3<f32>(0.0));\n    o.extinction = p[0].x * vgrid(i, i.lp).x;\n    return o;\n}\n".into(), String::new());
+    w.set_grid(1, [4, 4, 4], 1, Some(&cells([4, 4, 4], &|c| (c[0] < 2) as u32 as f32)), None).unwrap();
+    place(&mut w, 40, 1, 4.0, Vec3::new(-0.5, 0.0, 1.2), 0.9);
+    assert!(!w.changes.structural, "a new grid and its volume: the media table's");
+    check("the scene's first grid", &mut live, &mut w, &[40]);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_GRID, 0);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 1, [1, 2, 3]), [1.0, 0.0, 0.0, 0.0], "its data");
+    assert_eq!(live.g.grid_cell(&live.sc.up, 1, [2, 2, 3]), [0.0; 4]);
+    // A second, of other cells: the atlas is wider now, the first below it.
+    w.set_grid(2, [8, 2, 2], 1, Some(&[1.0; 32]), None).unwrap();
+    place(&mut w, 41, 2, 3.0, Vec3::new(0.6, -0.3, 1.0), 0.7);
+    check("a second grid", &mut live, &mut w, &[40, 41]);
+    assert_eq!(live.g.grids_state(&live.sc.up).1, [8, 4, 6], "an atlas of both");
+    assert_eq!(live.g.grid_cell(&live.sc.up, 1, [1, 2, 3]), [1.0, 0.0, 0.0, 0.0], "the first's data in the new atlas");
+    // The first with another size: dense in its upper half.
+    w.set_grid(1, [2, 6, 2], 1, Some(&cells([2, 6, 2], &|c| (c[1] >= 3) as u32 as f32)), None).unwrap();
+    check("a grid of another size", &mut live, &mut w, &[40, 41]);
+    // New data: uploaded, nothing made again.
+    w.set_grid(2, [8, 2, 2], 1, Some(&[0.1; 32]), None).unwrap();
+    assert!(!w.changes.media && w.grid_dirty.contains(&2));
+    check("new data", &mut live, &mut w, &[40, 41]);
+    // A grid with a program: it fills up to its first parameter.
+    w.set_grid_program("fill", program("fill", "s.a.x = clamp(s.a.x + 0.05, p[0].y, p[0].x);"), String::new());
+    w.set_grid(3, [4, 4, 4], 1, None, Some(("fill".into(), vec![1.0, 0.0]))).unwrap();
+    place(&mut w, 42, 3, 3.0, Vec3::new(0.1, 0.5, 1.4), 0.6);
+    check("a grid with a program", &mut live, &mut w, &[40, 41, 42]);
+    assert!(gpu::Gpu::has_grid_sim(&live.sc.up));
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 1.0, "filled");
+    // Its parameters: the same grid still.
+    w.set_grid(3, [4, 4, 4], 1, None, Some(("fill".into(), vec![2.0, 0.0]))).unwrap();
+    commit("a program's parameters", &mut live, &mut w);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 1.0, "what it had simulated stays");
+    check("a program's parameters", &mut live, &mut w, &[40, 41, 42]);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 2.0, "filled to the new parameter");
+    // Another grid beside it: all are made again, and what the program had simulated goes with its grid.
+    w.set_grid(4, [2, 2, 2], 1, Some(&[1.0; 8]), None).unwrap();
+    place(&mut w, 43, 4, 4.0, Vec3::new(-0.6, -0.5, 1.6), 0.5);
+    commit("another grid beside a simulated one", &mut live, &mut w);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 2.0, "what it had simulated is in the new atlas");
+    check("another grid beside a simulated one", &mut live, &mut w, &[40, 41, 42, 43]);
+    // The program's code: it empties now (down to its second parameter).
+    w.set_grid_program("fill", program("fill", "s.a.x = clamp(s.a.x - 0.05, p[0].y, p[0].x);"), String::new());
+    assert!(!w.changes.structural, "a grid program's code: the media table's");
+    commit("a program's code", &mut live, &mut w);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 2.0, "what it had simulated stays");
+    check("a program's code", &mut live, &mut w, &[40, 41, 42, 43]);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 0.0, "emptied");
+    // A program whose name comes first (the others' numbers move), and the grid's floor raised: it is its own
+    // program that runs on it still.
+    w.set_grid_program("an_earlier", program("an_earlier", "s.a.x = 7.0;"), String::new());
+    w.set_grid(3, [4, 4, 4], 1, None, Some(("fill".into(), vec![2.0, 1.5]))).unwrap();
+    check("a program whose name comes first", &mut live, &mut w, &[40, 41, 42, 43]);
+    assert_eq!(live.g.grid_cell(&live.sc.up, 3, [1, 1, 1])[0], 1.5, "its own program");
+    // A program that reads the world (dense where x > 0.3 m), then its volume moved, where it stood still.
+    let row = |live: &LiveCore| [0, 1, 2, 3].map(|x| live.g.grid_cell(&live.sc.up, 3, [x, 1, 1])[0]);
+    w.set_grid_program("fill", program("fill", "s.a.x = select(p[0].y, p[0].x, i.p.x > 0.3);"), String::new());
+    w.set_grid(3, [4, 4, 4], 1, None, Some(("fill".into(), vec![2.0, 0.0]))).unwrap();
+    check("a program that reads the world", &mut live, &mut w, &[40, 41, 42, 43]);
+    assert_eq!(row(&live), [0.0, 0.0, 0.0, 2.0], "the box's last quarter is past x = 0.3");
+    w.set_transform(42, Vec3::new(0.6, 0.5, 1.4), glam::Quat::IDENTITY, Vec3::splat(0.6)).unwrap();
+    assert!(!w.changes.structural && w.changes.promoted.is_empty(), "a still volume's move: the media table's");
+    check("a simulated grid's volume moved", &mut live, &mut w, &[40, 41, 42, 43]);
+    assert_eq!(row(&live), [2.0; 4], "its program runs in the box as it is now");
+    // A second volume of the simulated grid, then the first of them removed: the grid is the other's now, and its
+    // program runs in the other's box (half of it past x = 0.3).
+    place(&mut w, 44, 3, 3.0, Vec3::new(0.3, -0.55, 1.8), 0.5);
+    check("a second volume of one grid", &mut live, &mut w, &[40, 41, 42, 43, 44]);
+    assert_eq!(row(&live), [2.0; 4], "the first's box still");
+    w.remove(42);
+    commit("the first volume of a grid removed", &mut live, &mut w);
+    assert_eq!(row(&live), [2.0; 4], "what it had simulated stays");
+    check("the first volume of a grid removed", &mut live, &mut w, &[40, 41, 43, 44]);
+    assert_eq!(row(&live), [0.0, 0.0, 2.0, 2.0], "the other's box");
+    // The simulated grid's last volume removed: no program runs.
+    w.remove(44);
+    check("the simulated grid's volume removed", &mut live, &mut w, &[40, 41, 43]);
+    assert!(!gpu::Gpu::has_grid_sim(&live.sc.up));
+    // Every one removed.
+    for id in [40, 41, 43] {
+        w.remove(id);
+    }
+    check("every volume removed", &mut live, &mut w, &[]);
+    assert_eq!((live.g.grids_state(&live.sc.up).0, live.sc.up.kernel.features & (gpu::F_MEDIA | gpu::F_GRID)), (vec![], 0), "no grid: the kernel without its media code");
+}

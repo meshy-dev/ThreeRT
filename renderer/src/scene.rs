@@ -1049,7 +1049,38 @@ pub struct GridBuild {
     pub made: u32,
 }
 
-/// The world -> local rows of a medium whose node has world matrix `m` (pathtrace.wgsl `Medium.w0..w2`).
+/// Where density grid `gid` lies in the atlas, as a medium's record has it (b.zw: its first layer and its cells, as
+/// bits). The first volume that names a grid has it built (`grids`: stacked along z in the order they come; `node`
+/// and `medium`: that volume's), its program by its rank among `programs`. The build and the live view's media
+/// table both come here.
+pub fn grid_of(w: &World, grids: &mut Vec<GridBuild>, programs: &[(String, String, String)], gid: u32, node: u32, medium: u32) -> Result<[f32; 2]> {
+    let k = match grids.iter().position(|b| b.id == gid) {
+        Some(k) => k,
+        None => {
+            let dg = w.grids.get(&gid).ok_or_else(|| anyhow!("unknown density grid {gid}"))?;
+            let program = match &dg.program {
+                Some((name, _)) => Some(programs.iter().position(|(k, _, _)| k == name).ok_or_else(|| anyhow!("unknown grid program {name}"))? as u32),
+                None => None,
+            };
+            let mut gp = [0.0f32; 32];
+            for (k, v) in dg.program.iter().flat_map(|(_, p)| p.iter()).take(32).enumerate() {
+                gp[k] = *v;
+            }
+            let z0 = grids.iter().map(|b| b.dims[2]).sum::<u32>();
+            let cells = grids.iter().map(|b| b.dims).chain([dg.dims]).map(|d| d.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
+            // (The atlas is as wide and high as the widest and highest grid: its texels count too.)
+            let atlas = grids.iter().map(|b| b.dims[0]).chain([dg.dims[0]]).max().unwrap() as u64 * grids.iter().map(|b| b.dims[1]).chain([dg.dims[1]]).max().unwrap() as u64 * (z0 + dg.dims[2]) as u64;
+            if cells > world::GRID_MAX_SCENE_CELLS || atlas > 2 * world::GRID_MAX_SCENE_CELLS || z0 + dg.dims[2] > world::GRID_MAX_LAYERS {
+                return Err(anyhow!("the scene's density grids exceed {} cells or {} layers along z together (or differ too much in width and height)", world::GRID_MAX_SCENE_CELLS, world::GRID_MAX_LAYERS));
+            }
+            grids.push(GridBuild { id: gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node, medium, made: dg.made });
+            grids.len() - 1
+        }
+    };
+    let b = &grids[k];
+    Ok([f32::from_bits(b.z0), f32::from_bits(b.dims[0] | b.dims[1] << 10 | b.dims[2] << 20)])
+}
+
 impl MediumGpu {
     /// A volume's record: the object `o` (a `Kind::Volume`) placed by `m`, its function's number, whether it is shown
     /// (a hidden one is built with no shape, to be shown in place), and its density grid's place (`grid`: b.zw).
@@ -1063,6 +1094,7 @@ impl MediumGpu {
     }
 }
 
+/// The world -> local rows of a medium whose node has world matrix `m` (pathtrace.wgsl `Medium.w0..w2`).
 pub fn medium_rows(m: glam::Mat4) -> [[f32; 4]; 3] {
     let inv = m.inverse();
     [inv.row(0).to_array(), inv.row(1).to_array(), inv.row(2).to_array()]
@@ -2114,34 +2146,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 // Its density grid: where it lies in the atlas and its cells, as bits in b.zw (pathtrace.wgsl `vgrid`).
                 let mut at = [0.0f32; 2];
                 if let Some(gid) = grid {
-                    let dg = w.grids.get(gid).ok_or_else(|| anyhow!("object {}: unknown density grid {gid}", n.name))?;
                     if *shape != 0 {
                         return Err(anyhow!("object {}: a density grid needs a box volume", n.name));
                     }
-                    let k = match grids.iter().position(|b| b.id == *gid) {
-                        Some(k) => k,
-                        None => {
-                            let program = match &dg.program {
-                                Some((name, _)) => Some(grid_programs.iter().position(|(k, _, _)| k == name).ok_or_else(|| anyhow!("object {}: unknown grid program {name}", n.name))? as u32),
-                                None => None,
-                            };
-                            let mut gp = [0.0f32; 32];
-                            for (k, v) in dg.program.iter().flat_map(|(_, p)| p.iter()).take(32).enumerate() {
-                                gp[k] = *v;
-                            }
-                            let z0 = grids.iter().map(|b| b.dims[2]).sum::<u32>();
-                            let cells = grids.iter().chain([&GridBuild { id: 0, dims: dg.dims, z0, data: None, program: None, params: [0.0; 32], node: 0, medium: 0, made: 0 }]).map(|b| b.dims.iter().map(|&d| d as u64).product::<u64>()).sum::<u64>();
-                            // (The atlas is as wide and high as the widest and highest grid: its texels count too.)
-                            let atlas = grids.iter().map(|b| b.dims[0]).chain([dg.dims[0]]).max().unwrap() as u64 * grids.iter().map(|b| b.dims[1]).chain([dg.dims[1]]).max().unwrap() as u64 * (z0 + dg.dims[2]) as u64;
-                            if cells > world::GRID_MAX_SCENE_CELLS || atlas > 2 * world::GRID_MAX_SCENE_CELLS || z0 + dg.dims[2] > world::GRID_MAX_LAYERS {
-                                return Err(anyhow!("object {}: the scene's density grids exceed {} cells or {} layers along z together (or differ too much in width and height)", n.name, world::GRID_MAX_SCENE_CELLS, world::GRID_MAX_LAYERS));
-                            }
-                            grids.push(GridBuild { id: *gid, dims: dg.dims, z0, data: dg.data.clone(), program, params: gp, node: *id, medium: media.len() as u32, made: dg.made });
-                            grids.len() - 1
-                        }
-                    };
-                    let b = &grids[k];
-                    at = [f32::from_bits(b.z0), f32::from_bits(b.dims[0] | b.dims[1] << 10 | b.dims[2] << 20)];
+                    at = grid_of(w, &mut grids, &grid_programs, *gid, *id, media.len() as u32).with_context(|| format!("object {}", n.name))?;
                 }
                 if media.len() >= MAX_MEDIA {
                     return Err(anyhow!("object {}: more than {MAX_MEDIA} volumes shown at once (the kernel takes {MAX_MEDIA}; the rest would not be drawn)", n.name));

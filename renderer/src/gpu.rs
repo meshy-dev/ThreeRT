@@ -724,27 +724,29 @@ struct GridSim {
 pub struct GridsGpu {
     atlas: wgpu::Texture,
     pipeline: Option<wgpu::ComputePipeline>,
+    /// The grid programs the pipeline was made from (none without one).
+    programs: Vec<(String, String, String)>,
     grids: Vec<GridGpu>,
     step: std::cell::Cell<u32>,
 }
 
 /// grid_sim.wgsl with the scene's grid programs (`fn gp_<name>`) and their dispatch.
-fn grid_sim_source(scene: &Scene) -> String {
+fn grid_sim_source(programs: &[(String, String, String)]) -> String {
     let base = include_str!("../shaders/grid_sim.wgsl");
     let mut f = String::new();
     let mut seen = std::collections::HashSet::new();
-    for (_, _, helpers) in &scene.grid_programs {
+    for (_, _, helpers) in programs {
         if !helpers.is_empty() && seen.insert(helpers.clone()) {
             f.push_str(helpers);
             f.push('\n');
         }
     }
-    for (_, code, _) in &scene.grid_programs {
+    for (_, code, _) in programs {
         f.push_str(code);
         f.push('\n');
     }
     f.push_str("fn grid_program(f: u32, s: Cell, i: CIn, p: array<vec4<f32>, 8>) -> Cell {\n    switch f {\n");
-    for (k, (id, _, _)) in scene.grid_programs.iter().enumerate() {
+    for (k, (id, _, _)) in programs.iter().enumerate() {
         f.push_str(&format!("        case {k}u {{ return gp_{id}(s, i, p); }}\n"));
     }
     f.push_str("        default { return s; }\n    }\n}\n");
@@ -2709,59 +2711,7 @@ impl Gpu {
         timings.push(("tri_data_mb".into(), (ix.vertices.len() * crate::indexed::VERTEX_BYTES + ix.indices.len() * 12 + ix.gpu_rows().len() * 16 + ix.leaves.len() * crate::indexed::LEAF_BYTES + nodes.len()) as f64 / (1 << 20) as f64));
         let (words, region_words, proc_room) = self.upload_words(scene, env_cdf, room.proc_words, room.tris, room.records, timings)?;
         let room = EditRoom { proc_words: proc_room, ..room };
-        // Density grids: field A of each in the atlas (stacked along z), their data; for a grid with a program, its
-        // other textures (A', B, B'), its two half steps and its sources.
-        let grids = (!scene.grids.is_empty()).then(|| {
-            let dims = [scene.grids.iter().map(|g| g.dims[0]).max().unwrap(), scene.grids.iter().map(|g| g.dims[1]).max().unwrap(), scene.grids.iter().map(|g| g.dims[2]).sum()];
-            let atlas = grid_texture(d, "grid atlas", dims, true);
-            let atlas_view = atlas.create_view(&Default::default());
-            let smp = d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
-            let grids = scene
-                .grids
-                .iter()
-                .map(|g| {
-                    if let Some(data) = &g.data {
-                        self.write_grid(&atlas, g.z0, g.dims, data);
-                    }
-                    let sim = g.program.map(|program| {
-                        let tex = |label: &str| grid_texture(d, label, g.dims, true).create_view(&Default::default());
-                        let field_b = grid_texture(d, "grid B", g.dims, true);
-                        let (a2, b, b2) = (tex("grid A'"), field_b.create_view(&Default::default()), tex("grid B'"));
-                        let sources = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid sources"), size: (crate::world::GRID_MAX_SOURCES * 48) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                        let step = |src_a: &wgpu::TextureView, src_b: &wgpu::TextureView, dst_a: &wgpu::TextureView, dst_b: &wgpu::TextureView| {
-                            let u = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid step"), size: std::mem::size_of::<GridStepGpu>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                            fn tv(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
-                                wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
-                            }
-                            let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("grid step"),
-                                layout: &self.grid_layout,
-                                entries: &[
-                                    wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() },
-                                    tv(1, src_a),
-                                    tv(2, src_b),
-                                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&smp) },
-                                    tv(4, dst_a),
-                                    tv(5, dst_b),
-                                    wgpu::BindGroupEntry { binding: 6, resource: sources.as_entire_binding() },
-                                ],
-                            });
-                            (u, bg)
-                        };
-                        let steps = [step(&atlas_view, &b, &a2, &b2), step(&a2, &b2, &atlas_view, &b)];
-                        let m = &scene.media[g.medium as usize];
-                        GridSim { b: field_b, program, params: g.params, steps, sources, placed: std::cell::Cell::new((m.w, m.c)) }
-                    });
-                    GridGpu { id: g.id, node: g.node, dims: g.dims, z0: g.z0, made: g.made, sim }
-                })
-                .collect::<Vec<_>>();
-            let pipeline = grids.iter().any(|g| g.sim.is_some()).then(|| {
-                let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grid sim"), source: wgpu::ShaderSource::Wgsl(grid_sim_source(scene).into()) });
-                let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("grid sim"), bind_group_layouts: &[Some(&self.grid_layout)], immediate_size: 0 });
-                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("grid sim"), layout: Some(&layout), module: &module, entry_point: Some("grid_sim"), compilation_options: Default::default(), cache: self.cache() })
-            });
-            GridsGpu { atlas, pipeline, grids, step: std::cell::Cell::new(0) }
-        });
+        let grids = self.make_grids(&scene.grids, &scene.media, &scene.grid_programs);
         let grid_view = grids.as_ref().map_or_else(|| self.no_grid_view.clone(), |g| g.atlas.create_view(&Default::default()));
         let b_accum = accum.clone();
         let b_params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: std::mem::size_of::<Params>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -3424,6 +3374,11 @@ impl Gpu {
     /// again from its data: any structural change in a game (an object hidden, a texture) wiped its smoke.
     pub fn carry_grids(&self, old: &Uploaded, new: &Uploaded) {
         let (Some(from), Some(to)) = (&old.grids, &new.grids) else { return };
+        self.carry(from, to);
+    }
+
+    /// `carry_grids`, of the grids themselves.
+    fn carry(&self, from: &GridsGpu, to: &GridsGpu) {
         let mut e = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("carry grids") });
         let mut any = false;
         for g in &to.grids {
@@ -3644,6 +3599,129 @@ impl Gpu {
         found
     }
 
+    /// The scene's density grids on the GPU: field A of each in the atlas (stacked along z), their data; for a grid
+    /// with a program, its other textures (A', B, B'), its two half steps and its sources; the programs' pipeline.
+    /// `media`: the media table (a grid's program runs in its volume's box); `programs`: every grid program, in the
+    /// order of their numbers. None: no grid.
+    fn make_grids(&self, grids: &[crate::scene::GridBuild], media: &[crate::scene::MediumGpu], programs: &[(String, String, String)]) -> Option<GridsGpu> {
+        if grids.is_empty() {
+            return None;
+        }
+        let d = &self.device;
+        let dims = [grids.iter().map(|g| g.dims[0]).max().unwrap(), grids.iter().map(|g| g.dims[1]).max().unwrap(), grids.iter().map(|g| g.dims[2]).sum()];
+        let atlas = grid_texture(d, "grid atlas", dims, true);
+        let atlas_view = atlas.create_view(&Default::default());
+        let smp = d.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        let made = grids
+            .iter()
+            .map(|g| {
+                if let Some(data) = &g.data {
+                    self.write_grid(&atlas, g.z0, g.dims, data);
+                }
+                let sim = g.program.map(|program| {
+                    let tex = |label: &str| grid_texture(d, label, g.dims, true).create_view(&Default::default());
+                    let field_b = grid_texture(d, "grid B", g.dims, true);
+                    let (a2, b, b2) = (tex("grid A'"), field_b.create_view(&Default::default()), tex("grid B'"));
+                    let sources = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid sources"), size: (crate::world::GRID_MAX_SOURCES * 48) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                    let step = |src_a: &wgpu::TextureView, src_b: &wgpu::TextureView, dst_a: &wgpu::TextureView, dst_b: &wgpu::TextureView| {
+                        let u = d.create_buffer(&wgpu::BufferDescriptor { label: Some("grid step"), size: std::mem::size_of::<GridStepGpu>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                        fn tv(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+                            wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
+                        }
+                        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("grid step"),
+                            layout: &self.grid_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: u.as_entire_binding() },
+                                tv(1, src_a),
+                                tv(2, src_b),
+                                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&smp) },
+                                tv(4, dst_a),
+                                tv(5, dst_b),
+                                wgpu::BindGroupEntry { binding: 6, resource: sources.as_entire_binding() },
+                            ],
+                        });
+                        (u, bg)
+                    };
+                    let steps = [step(&atlas_view, &b, &a2, &b2), step(&a2, &b2, &atlas_view, &b)];
+                    let m = &media[g.medium as usize];
+                    GridSim { b: field_b, program, params: g.params, steps, sources, placed: std::cell::Cell::new((m.w, m.c)) }
+                });
+                GridGpu { id: g.id, node: g.node, dims: g.dims, z0: g.z0, made: g.made, sim }
+            })
+            .collect::<Vec<_>>();
+        let pipeline = made.iter().any(|g| g.sim.is_some()).then(|| {
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grid sim"), source: wgpu::ShaderSource::Wgsl(grid_sim_source(programs).into()) });
+            let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("grid sim"), bind_group_layouts: &[Some(&self.grid_layout)], immediate_size: 0 });
+            d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("grid sim"), layout: Some(&layout), module: &module, entry_point: Some("grid_sim"), compilation_options: Default::default(), cache: self.cache() })
+        });
+        let programs = if pipeline.is_some() { programs.to_vec() } else { vec![] };
+        Some(GridsGpu { atlas, pipeline, programs, grids: made, step: std::cell::Cell::new(0) })
+    }
+
+    /// The uploaded scene's density grids as `grids`, in place: a volume with a grid came or went, a grid has other
+    /// cells or another program, a program's code changed. Grids that are the same still take their parameters and
+    /// their volumes' placement; else all are made again, and what the programs had simulated goes with the grids that are the same (`carry`).
+    /// Whether they were made again (the atlas is another texture: the bind groups hold the old one).
+    pub fn put_grids(&self, up: &mut Uploaded, grids: &[crate::scene::GridBuild], media: &[crate::scene::MediumGpu], programs: &[(String, String, String)]) -> bool {
+        let same = match &mut up.grids {
+            None => grids.is_empty(),
+            Some(have) => {
+                let same = have.grids.len() == grids.len()
+                    && have.grids.iter().zip(grids).all(|(h, g)| (h.id, h.node, h.dims, h.z0, h.made) == (g.id, g.node, g.dims, g.z0, g.made) && h.sim.as_ref().map(|s| s.program) == g.program)
+                    && (have.pipeline.is_none() || have.programs == programs);
+                if same {
+                    // (And its volume's box and customData as the table has them now: its program runs there.)
+                    for (h, g) in have.grids.iter_mut().zip(grids) {
+                        if let Some(sim) = &mut h.sim {
+                            let m = &media[g.medium as usize];
+                            (sim.params, sim.placed) = (g.params, std::cell::Cell::new((m.w, m.c)));
+                        }
+                    }
+                }
+                same
+            }
+        };
+        if same {
+            return false;
+        }
+        let made = self.make_grids(grids, media, programs);
+        if let (Some(from), Some(to)) = (&up.grids, &made) {
+            self.carry(from, to);
+        }
+        up.bg_parts.grid_view = made.as_ref().map_or_else(|| self.no_grid_view.clone(), |g| g.atlas.create_view(&Default::default()));
+        up.grids = made;
+        true
+    }
+
+    /// The scene's density grids as they are now: each one's id, volume node, cells, first layer in the atlas and
+    /// program; the atlas's size.
+    #[cfg(test)]
+    pub fn grids_state(&self, up: &Uploaded) -> (Vec<(u32, u32, [u32; 3], u32, Option<u32>)>, [u32; 3]) {
+        let Some(gs) = &up.grids else { return (vec![], [0; 3]) };
+        let size = gs.atlas.size();
+        (gs.grids.iter().map(|g| (g.id, g.node, g.dims, g.z0, g.sim.as_ref().map(|s| s.program))).collect(), [size.width, size.height, size.depth_or_array_layers])
+    }
+
+    /// Field A of one cell of density grid `id`, read back.
+    #[cfg(test)]
+    pub fn grid_cell(&self, up: &Uploaded, id: u32, cell: [u32; 3]) -> [f32; 4] {
+        let gs = up.grids.as_ref().expect("grids");
+        let g = gs.grids.iter().find(|g| g.id == id).expect("the grid");
+        let to = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 8, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut e = self.device.create_command_encoder(&Default::default());
+        e.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &gs.atlas, mip_level: 0, origin: wgpu::Origin3d { x: cell[0], y: cell[1], z: g.z0 + cell[2] }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &to, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None } },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([e.finish()]);
+        to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let halves: [half::f16; 4] = bytemuck::pod_read_unaligned(&to.slice(..).get_mapped_range().unwrap());
+        halves.map(|h| h.to_f32())
+    }
+
     /// The media table as `media` (each one's node in `nodes`), in place: volumes that came, went or were set again
     /// while the scene runs. Whether the table is another buffer now (it grew: the bind groups hold the old one).
     pub fn put_media(&self, up: &mut Uploaded, media: &[crate::scene::MediumGpu], nodes: Vec<u32>) -> bool {
@@ -3658,13 +3736,6 @@ impl Gpu {
         up.media_hidden = std::cell::RefCell::new(media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect());
         up.media_nodes = nodes;
         grew
-    }
-
-    /// Where density grid `id` lies in the uploaded scene's atlas, as a medium's record has it (b.zw: its first
-    /// layer, its cells; bits), if the atlas has it.
-    pub fn grid_place(&self, up: &Uploaded, id: u32) -> Option<[f32; 2]> {
-        let g = up.grids.as_ref()?.grids.iter().find(|g| g.id == id)?;
-        Some([f32::from_bits(g.z0), f32::from_bits(g.dims[0] | g.dims[1] << 10 | g.dims[2] << 20)])
     }
 
     pub fn set_medium(&self, up: &Uploaded, node: u32, rows: Option<[[f32; 4]; 3]>, custom: Option<[f32; 4]>) {

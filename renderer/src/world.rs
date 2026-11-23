@@ -1203,11 +1203,12 @@ impl World {
             return;
         }
         self.grid_programs.insert(name.to_string(), (code, helpers));
-        mark_structural(&mut self.changes, line!());
+        // (The grids' pass, in place: made again with the media table.)
+        self.changes.media = true;
     }
 
     /// Creates or replaces a density grid. New data for a grid of the same size and program is uploaded in place; a
-    /// new grid, another size or another program rebuilds the scene.
+    /// new grid, another size or another program has the scene's grids made again with the media table.
     pub fn set_grid(&mut self, id: u32, dims: [u32; 3], channels: u32, data: Option<&[f32]>, program: Option<(String, Vec<f32>)>) -> Result<()> {
         let cells = dims.iter().map(|&d| d as u64).product::<u64>();
         if dims.iter().any(|&d| d == 0 || d > GRID_MAX_AXIS) || cells > GRID_MAX_CELLS {
@@ -1243,12 +1244,12 @@ impl World {
                 self.grid_dirty.insert(id);
             }
         } else {
-            mark_structural(&mut self.changes, line!());
+            self.changes.media = true;
         }
         // (No data with a same grid: its contents stay, e.g. a simulated grid whose parameters were sent again.)
         let keep = if same && data.is_none() { self.grids.get(&id).and_then(|g| g.data.clone()) } else { None };
-        // The same grid still, for what its program has simulated: its size and its program's name (new parameters
-        // rebuild the scene, and the smoke stays).
+        // The same grid still, for what its program has simulated: its size and its program's name (with new
+        // parameters the smoke stays).
         let made = match self.grids.get(&id) {
             Some(g) if g.dims == dims && g.program.as_ref().map(|p| &p.0) == program.as_ref().map(|p| &p.0) => g.made,
             _ => {
@@ -1400,9 +1401,10 @@ mod tests {
         assert!(c.poses.contains(&2) && c.moved.contains(&2) && c.shown.contains(&2), "the other's changes are kept");
     }
 
-    /// Density grids: sizes and data are checked; a new grid, another size or another program rebuilds the scene, new
-    /// data for the same grid is uploaded in place (a grid sent again without data keeps what it had); sources go only
-    /// to volumes with a grid, 12 finite floats each, at most GRID_MAX_SOURCES pending.
+    /// Density grids: sizes and data are checked; a new grid, another size, another program or other parameters are
+    /// the media table's change (the grids are made again in place), new data for the same grid is uploaded in place
+    /// (a grid sent again without data keeps what it had); sources go only to volumes with a grid, 12 finite floats
+    /// each, at most GRID_MAX_SOURCES pending.
     #[test]
     fn density_grids_are_checked_and_updated_in_place() {
         let mut w = World::default();
@@ -1415,23 +1417,32 @@ mod tests {
         assert!(w.grids.is_empty());
         w.take_changes();
         w.set_grid(1, [2, 2, 2], 1, Some(&[0.5; 8]), None).unwrap();
-        assert!(w.take_changes().structural, "a new grid");
+        let media = |w: &mut World| {
+            let c = w.take_changes();
+            assert!(!c.structural, "no rebuild");
+            c.media
+        };
+        assert!(media(&mut w), "a new grid");
         assert_eq!(w.grids[&1].data.as_ref().unwrap()[..5], [0.5, 0.0, 0.0, 0.0, 0.5], "one channel: A's first");
         w.set_grid(1, [2, 2, 2], 4, Some(&[2.0; 32]), None).unwrap();
-        assert!(!w.take_changes().structural && w.grid_dirty.contains(&1), "new data: in place");
+        assert!(!media(&mut w) && w.grid_dirty.contains(&1), "new data: uploaded in place");
         w.grid_dirty.clear();
         w.set_grid(1, [2, 2, 2], 1, None, None).unwrap();
-        assert!(!w.take_changes().structural && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
+        assert!(!media(&mut w) && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
-        assert!(w.take_changes().structural, "another program");
+        assert!(media(&mut w), "another program");
         let made = w.grids[&1].made;
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![2.0]))).unwrap();
-        assert!(w.take_changes().structural && w.grids[&1].made == made, "new parameters rebuild; it is the same grid still (what it simulated is carried)");
+        assert!(media(&mut w) && w.grids[&1].made == made, "new parameters; it is the same grid still (what it simulated stays)");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
         assert!(w.grids[&1].made != made, "another program: another grid");
         let made = w.grids[&1].made;
         w.set_grid(1, [2, 2, 4], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
-        assert!(w.take_changes().structural && w.grids[&1].made != made, "another size");
+        assert!(media(&mut w) && w.grids[&1].made != made, "another size");
+        w.set_grid_program("q", "s.a.x = 1.0;".into(), String::new());
+        assert!(media(&mut w), "a grid program's code");
+        w.set_grid_program("q", "s.a.x = 1.0;".into(), String::new());
+        assert!(!media(&mut w), "the same code again");
         // Sources.
         let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid };
         w.set_object(5, "plain".into(), None, volume(None), false, false).unwrap();

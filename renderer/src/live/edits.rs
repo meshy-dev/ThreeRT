@@ -1507,8 +1507,9 @@ impl LiveCore {
     /// (`functions`). The table is made whole, as the build makes it: the volumes shown, and the hidden ones while
     /// the kernel has room for them, in the world's order; each function under the number it has, one the scene had
     /// not under the next. The kernel's count of them and its media features follow (a first volume's passes are
-    /// made as any variant is). Err: a volume whose density grid the atlas has not, or more volumes than the kernel
-    /// takes; the caller rebuilds.
+    /// made as any variant is). The density grids follow the volumes that name them (`Gpu::put_grids`). Err: a
+    /// volume or a grid a build refuses too (more volumes than the kernel takes, grids over the atlas's limits); the
+    /// caller rebuilds.
     fn set_media(&mut self, world: &World, functions: bool) -> std::result::Result<(), String> {
         use crate::world::Kind;
         let sc = &mut self.sc;
@@ -1524,7 +1525,9 @@ impl LiveCore {
         }
         let volumes: Vec<u32> = world.ordered().into_iter().filter(|id| matches!(world.objects[id].kind, Kind::Volume { .. })).collect();
         let mut to_show = volumes.iter().filter(|id| world.shown(**id)).count();
-        let (mut media, mut nodes) = (vec![], vec![]);
+        // (The density grids the volumes name, as the build stacks them: `scene::grid_of`.)
+        let programs: Vec<(String, String, String)> = world.grid_programs.iter().map(|(k, (c, h))| (k.clone(), c.clone(), h.clone())).collect();
+        let (mut media, mut nodes, mut grids) = (vec![], vec![], vec![]);
         for id in volumes {
             let o = &world.objects[&id];
             let Kind::Volume { function, shape, grid, .. } = &o.kind else { continue };
@@ -1539,7 +1542,7 @@ impl LiveCore {
             let at = match grid {
                 None => [0.0; 2],
                 Some(_) if *shape != 0 => return Err(format!("object {}: a density grid needs a box volume", o.name)),
-                Some(g) => self.g.grid_place(&sc.up, *g).ok_or("a density grid the scene's atlas has not")?,
+                Some(g) => scene::grid_of(world, &mut grids, &programs, *g, id, media.len() as u32).map_err(|e| format!("object {}: {e:#}", o.name))?,
             };
             if media.len() >= scene::MAX_MEDIA {
                 return Err(format!("more than {} volumes shown at once", scene::MAX_MEDIA));
@@ -1547,12 +1550,13 @@ impl LiveCore {
             media.push(scene::MediumGpu::of(o, world.world_matrix(id), number, shown, at).expect("a volume"));
             nodes.push(id);
         }
+        let regridded = self.g.put_grids(&mut sc.up, &grids, &media, &programs);
         // (As `gpu::instance_features` has them: any medium, a homogeneous one, a grid or a function that reads one.)
         let reads_grid = !media.is_empty() && sc.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid("));
         let bits = if media.is_empty() { 0 } else { gpu::F_MEDIA } | if media.iter().any(|m| m.a[2] != 0) { gpu::F_HMEDIA } else { 0 } | if sc.up.grids.is_some() || reads_grid { gpu::F_GRID } else { 0 };
         sc.instance_features = sc.instance_features & !(gpu::F_MEDIA | gpu::F_HMEDIA | gpu::F_GRID) | bits;
         sc.base.time[3] = media.len() as f32;
-        if self.g.put_media(&mut sc.up, &media, nodes) {
+        if self.g.put_media(&mut sc.up, &media, nodes) | regridded {
             self.g.rebind_scene(&mut self.sc.up);
         }
         self.sc.up.kernel.features = self.kernel_features();
