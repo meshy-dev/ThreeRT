@@ -807,10 +807,11 @@ fn edits_in_place_leave_what_a_build_does() {
     assert!(!live.commit(&mut w).unwrap() && live.cam == away && live.view.dof.is_some(), "a depth of field and an exposure: the view stays");
     w.set_camera_desc(6, camera(40.0, Some(3.0), manual(2.0))).unwrap();
     assert!(!live.commit(&mut w).unwrap() && live.cam == live.view.camera && live.cam != away, "a lens: the view takes the scene's camera");
-    // A commit that rebuilds (another group: what a build places) and brings another preset with it.
-    w.set_object(13, "more".into(), None, Kind::Group, true, false).unwrap();
+    // A commit that rebuilds (a rect light with a card: its triangles are a build's to place) and brings another
+    // preset with it.
+    w.set_object(13, "card".into(), None, Kind::Light(serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 50, "width": 0.2, "height": 0.2, "visible": true })).unwrap()), true, false).unwrap();
     w.set_settings(Settings { preset: "cinematic".into(), overrides: Some(serde_json::json!({ "post": { "vignette": 0.3 } })), ..w.settings.clone() });
-    assert!(live.commit(&mut w).unwrap(), "another group: a rebuild");
+    assert!(live.commit(&mut w).unwrap(), "a rect light's card: a rebuild");
     let mut fresh = open(&w).unwrap();
     (picture(&mut live, 1), picture(&mut fresh, 1));
     same_state("a rebuild with another preset", &live, &fresh);
@@ -4386,4 +4387,65 @@ fn material_functions_come_and_change_in_place() {
     // A material that drops its function.
     w.set_material(7, mat(None));
     check("a material without its function", &mut live, &mut w);
+}
+
+/// Lights come, change and go in place: a point light with a shadow, a spot light without, the point light without
+/// its shadow (another class: the table is sorted again), a rect light without a card, the point light removed, the
+/// directional light removed, every light removed; a group that comes and goes draws nothing. After each: no
+/// rebuild, the view's state (the light table, the kernel's counts of it) is a build's of the edited world, and so
+/// is the picture.
+#[test]
+fn lights_come_and_go_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let light = |v: serde_json::Value| -> crate::desc::Light { serde_json::from_value(v).unwrap() };
+    let point = |shadow: bool| light(serde_json::json!({ "type": "point", "color": [1.0, 0.6, 0.2], "castShadow": shadow, "intensity": 400.0, "radius": 0.02, "range": 0.0 }));
+    let mut w = world();
+    // (The lamp away: the lights light the scene.)
+    w.set_visible(12, false).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let mut last = picture(&mut live, 24);
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World, lights: usize| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert_eq!((live.sc.tables.lights.len(), live.sc.base.counts[0]), (lights, lights as u32), "{what}: the table's lights and the kernel's count of them");
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        same_state(what, live, &fresh);
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &b) > 0.1, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        last = b;
+    };
+    w.set_object(40, "point".into(), None, Kind::Light(point(true)), true, false).unwrap();
+    w.set_transform(40, Vec3::new(-0.5, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    check("a point light", &mut live, &mut w, 2);
+    w.set_object(41, "spot".into(), None, Kind::Light(light(serde_json::json!({ "type": "spot", "color": [0.2, 0.5, 1.0], "castShadow": false, "intensity": 900.0, "radius": 0.02, "range": 0.0, "angle": 0.5, "penumbra": 0.3 }))), true, false).unwrap();
+    w.set_transform(41, Vec3::new(0.5, -0.2, 1.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    check("a spot light without a shadow", &mut live, &mut w, 3);
+    w.set_light(40, point(false)).unwrap();
+    assert!(!w.changes.structural, "a light of another class: its entry's change");
+    check("the point light without its shadow", &mut live, &mut w, 3);
+    w.set_object(42, "rect".into(), None, Kind::Light(light(serde_json::json!({ "type": "rect", "color": [1.0, 1.0, 1.0], "castShadow": true, "intensity": 3000.0, "width": 0.4, "height": 0.4, "visible": false }))), true, false).unwrap();
+    w.set_transform(42, Vec3::new(0.0, 0.7, 1.2), glam::Quat::from_rotation_x(-0.8), Vec3::ONE).unwrap();
+    check("a rect light without a card", &mut live, &mut w, 4);
+    // A group that comes and goes: nothing to do.
+    w.set_object(50, "group".into(), None, Kind::Group, true, false).unwrap();
+    assert!(!w.changes.structural && !live.commit(&mut w).unwrap(), "a new group: nothing rebuilt");
+    w.remove(50);
+    assert!(!w.changes.structural && !live.commit(&mut w).unwrap(), "the group removed: nothing rebuilt");
+    w.remove(40);
+    check("the point light removed", &mut live, &mut w, 3);
+    w.remove(20);
+    check("the directional light removed", &mut live, &mut w, 2);
+    w.remove(41);
+    w.remove(42);
+    check("every light removed", &mut live, &mut w, 0);
+    // One again, in a scene without a light.
+    w.set_object(43, "point".into(), None, Kind::Light(point(true)), true, false).unwrap();
+    w.set_transform(43, Vec3::new(0.3, 0.3, 0.9), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    check("a light in a scene without one", &mut live, &mut w, 1);
 }

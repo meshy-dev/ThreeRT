@@ -508,6 +508,13 @@ impl World {
         Ok(())
     }
 
+    /// Whether an object of kind `k` is a light that is an entry of the kernel's light table and nothing else: not a
+    /// rect light with a card (its card is triangles), not the atmosphere's sun (the sky's bake has it).
+    fn table_light(&self, id: u32, k: &Kind) -> bool {
+        let sun = matches!(self.environment.sky, desc::Sky::Atmosphere { sun: Some(s), .. } if s == id);
+        matches!(k, Kind::Light(l) if !sun && !matches!(l, desc::Light::Rect { visible: true, .. }))
+    }
+
     /// Creates or replaces a texture. A new one is placed in the texture pages when a material first names it; one
     /// that changed (its pixels, its wrap, its repeat or offset) has its materials made again, in place
     /// (`Changes::textures`). The same texture set again changes nothing.
@@ -609,6 +616,10 @@ impl World {
                 self.instanced.remove(&id);
             }
         }
+        // A light that is the light table's alone, new or set again as one under the same parent: its entry, in
+        // place. A new group draws nothing.
+        let relit = self.table_light(id, &kind) && self.objects.get(&id).is_none_or(|o| self.table_light(id, &o.kind) && o.parent == parent);
+        let grouped = matches!(kind, Kind::Group) && !self.objects.contains_key(&id);
         let was_parent = self.objects.get(&id).map(|o| o.parent);
         if was_parent != Some(parent) {
             if let Some(Some(p)) = was_parent {
@@ -629,6 +640,9 @@ impl World {
             self.changes.added.insert(id);
         } else if rematerialed {
             self.changes.instanced.insert(id);
+        } else if relit {
+            self.changes.lights.insert(id);
+        } else if grouped {
         } else {
             if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
                 let o = &self.objects[&id];
@@ -945,9 +959,14 @@ impl World {
     }
 
     pub fn set_light(&mut self, id: u32, l: desc::Light) -> Result<()> {
+        // Its entry in the light table, in place: another kind of light or another shadow flag too (the table is
+        // sorted again). A rect light's card that comes or goes is triangles, and the atmosphere's sun is the sky's:
+        // those rebuild where their class changes.
+        let table = self.table_light(id, &Kind::Light(l.clone()));
+        let was = self.objects.get(&id).is_some_and(|o| self.table_light(id, &o.kind));
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         match &o.kind {
-            Kind::Light(old) if light_class(old) == light_class(&l) => {
+            Kind::Light(old) if light_class(old) == light_class(&l) || (table && was) => {
                 self.changes.lights.insert(id);
             }
             _ => mark_structural(&mut self.changes, line!()),
@@ -1024,11 +1043,16 @@ impl World {
         // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or
         // model (or never added, if it came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot
         // take out).
+        // A light of the light table alone: its entry goes, in place. A group draws nothing.
         let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
-        if doomed.iter().all(|d| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || (doomed.len() > 1 && matches!(o.kind, Kind::Group)))) {
-            for d in &doomed {
+        let lit: Vec<bool> = doomed.iter().map(|d| self.objects.get(d).is_some_and(|o| self.table_light(*d, &o.kind))).collect();
+        if doomed.iter().zip(&lit).all(|(d, lit)| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || matches!(o.kind, Kind::Group) || *lit)) {
+            for (d, lit) in doomed.iter().zip(&lit) {
                 self.instanced.remove(d);
-                if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
+                if *lit {
+                    self.objects.remove(d);
+                    self.changes.lights.insert(*d);
+                } else if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
                     self.changes.removed.insert(*d);
                 }
                 // What else this batch changed of it goes with it (a pose, a move, its visibility: there is nothing
@@ -1605,7 +1629,27 @@ mod tests {
         w.set_object(16, "lamp".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "range": 0, "radius": 0.01 })).unwrap()), true, false).unwrap();
         w.take_changes();
         w.remove(15);
-        assert!(w.take_changes().structural, "a group with a light");
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&16) && c.removed.is_empty(), "a group with a light: the light's entry goes, in place");
+        // A light alone, and a group alone: in place too. A light set again as one: its entry's change.
+        let lamp = |shadow: bool| Kind::Light(serde_json::from_value(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": shadow, "intensity": 1, "range": 0, "radius": 0.01 })).unwrap());
+        w.set_object(17, "lamp".into(), None, lamp(true), true, false).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&17), "a new light: its entry, in place");
+        w.set_object(17, "lamp".into(), None, lamp(false), true, false).unwrap();
+        assert!(!w.changes.structural && w.take_changes().lights.contains(&17), "the light set again without its shadow");
+        w.set_object(18, "set".into(), None, Kind::Group, true, false).unwrap();
+        assert!(!w.take_changes().structural, "a new group draws nothing");
+        w.remove(18);
+        w.remove(17);
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&17), "a group and a light removed");
+        // Not in place: something else among them (a rect light with a card is triangles).
+        w.set_object(15, "set".into(), None, Kind::Group, true, false).unwrap();
+        w.set_object(16, "card".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 1, "height": 1, "visible": true })).unwrap()), true, false).unwrap();
+        assert!(w.take_changes().structural, "a rect light with a card: a rebuild");
+        w.remove(15);
+        assert!(w.take_changes().structural, "a group with a rect light's card");
         // Under a still group in a movable subtree (`movable` walks the ancestors, as the build does).
         w.set_object(8, "rig".into(), None, Kind::Group, true, true).unwrap();
         w.set_object(9, "still".into(), Some(8), Kind::Group, true, false).unwrap();

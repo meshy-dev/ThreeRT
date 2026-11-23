@@ -1030,6 +1030,16 @@ impl LiveCore {
             }
             applied = None;
         }
+        // Lights that came or went past what the kernel sums exactly: the light tiles come or go with their buffers,
+        // a rebuild's to make.
+        if applied.is_some_and(|d| d.lights) {
+            let lists = gpu::light_tiles_on() && self.sc.tables.lights.iter().filter(|l| l.pos[3] != 0.0 && l.ext[3] >= 0.5).count() > gpu::RIS_EXACT;
+            if lists != (self.sc.instance_features & gpu::F_LISTS != 0) {
+                self.fallback = Some("as many shadow-casting local lights as bring the light tiles, or take them away".into());
+                self.fallbacks += 1;
+                applied = None;
+            }
+        }
         // (Features the edits asked for: the scene's from now on. A rebuild finds them itself.)
         let more = self.more_features.take();
         let Some(d) = applied else {
@@ -1049,11 +1059,25 @@ impl LiveCore {
             self.sc.instance_features |= more;
             self.sc.up.kernel.features = self.kernel_features();
         }
+        if d.lights {
+            if d.lights_moved {
+                self.sc.tables.regroup_lights();
+            }
+            // (More lights than the table has room for: it grows.)
+            let l = &self.sc.tables.lights;
+            let need = [(Table::Lights, std::mem::size_of_val(&l[..]) as u64), (Table::LightGroups, crate::light_groups(l).len() as u64 * 16)];
+            if need.iter().any(|&(t, n)| n > self.sc.up.heap.cap(t)) {
+                self.sc.up.heap.grow_all(&self.g.device, &self.g.queue, &need.map(|(t, n)| (t, n * 2)));
+                self.g.rebind_scene(&mut self.sc.up);
+            }
+            // The kernel's counts of them: all, the directional ones, where the shadowed ones start.
+            let l = &self.sc.tables.lights;
+            self.sc.base.counts[0] = l.len() as u32;
+            self.sc.base.counts2[0] = l.iter().filter(|l| l.pos[3] == 0.0).count() as u32;
+            self.sc.base.counts2[3] = l.iter().position(|l| crate::light_class(l) == 2).unwrap_or(l.len()) as u32;
+        }
         let (q, up, e) = (&self.g.queue, &self.sc.up, &mut self.sc.tables);
         if d.lights && !e.lights.is_empty() {
-            if d.lights_moved {
-                e.regroup_lights();
-            }
             up.put_lights(q, &e.lights);
         }
         if d.objects {
