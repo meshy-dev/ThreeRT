@@ -3667,8 +3667,9 @@ impl Gpu {
         let same = match &mut up.grids {
             None => grids.is_empty(),
             Some(have) => {
+                // (The same grids in the same order lie at the same places.)
                 let same = have.grids.len() == grids.len()
-                    && have.grids.iter().zip(grids).all(|(h, g)| (h.id, h.dims, h.z0, h.made) == (g.id, g.dims, g.z0, g.made) && h.sim.as_ref().map(|s| s.program) == g.program)
+                    && have.grids.iter().zip(grids).all(|(h, g)| (h.id, h.dims, h.made) == (g.id, g.dims, g.made) && h.sim.as_ref().map(|s| s.program) == g.program)
                     && (have.pipeline.is_none() || have.programs == programs);
                 if same {
                     // (And its volume, with the volume's box and customData as the table has them now: its program

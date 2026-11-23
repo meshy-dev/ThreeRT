@@ -2776,7 +2776,7 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
-**Textures, models, functions and lights come in place; the kernel is made beside the frames (2026-11-24).**
+**Textures, models, functions and lights come in place; the kernel is made beside the frames (2026-11-23).**
 A game that brought a texture, a model, a material function or a light while it ran had the scene built again from
 the world, and a feature a scene first used had the next frame wait for the driver's compile. On Bistro (2.8 M
 triangles, 960 x 540, an M5 Pro), the frame the edit landed in:
@@ -2804,6 +2804,37 @@ Tests: each kind of edit against a build of the edited world, state and picture 
 Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
+
+**Volumes and density grids come in place (2026-11-23, after it).** A volume that came, went or was set again
+while a game ran, a still volume's first move, a volume function, a new density grid and a grid program each had
+the scene built again. On Bistro (as above), the frame the edit landed in:
+
+| | before | now |
+|---|---|---|
+| a homogeneous volume comes (the scene's first medium) | 1.4 to 1.6 s | no long frame (18 ms at most) |
+| a volume with a 32³ density grid comes | 1.3 to 1.4 s | no long frame (27 ms) |
+| a volume whose 32³ grid a program simulates comes | 1.2 to 1.4 s | 128 ms, the program's pass compiled; 19 ms once the driver has it |
+| the first volume goes | 1.1 to 1.2 s | no long frame (21 ms) |
+| the simulated one goes | 1.2 s | no long frame (18 ms) |
+
+Before, a rebuild that needed a kernel variant the driver had not compiled took 5.1 to 5.4 s instead; now the
+variant is made beside the frames, and the volume is drawn when it is there.
+
+The media table is made whole from the world by the code the build has for it (`LiveCore::set_media`,
+`scene::MediumGpu::of`), volume functions are numbered in the order they come, and the kernel's count of media
+and its media features follow. The density grids follow the volumes that name them (`Gpu::put_grids`), stacked by
+the function the build stacks them with (`scene::grid_of`): when a grid comes, goes, or has another size or
+program, or a program's code changes, the atlas and the programs' pass are made again and what the programs had
+simulated is copied on the GPU to the grids that are the same still; new parameters, and a grid that passes to
+another of its volumes, make nothing again.
+Costs that stay: a grid program's pass is compiled in the frame it comes in (the 128 ms above), and one atlas
+holds every grid, so all are made again when one comes or goes.
+Tests: `volumes_come_and_go_in_place` and `density_grids_come_and_change_in_place`, each edit against a build of
+the edited world, state and picture, with the cells a program had simulated read back; the world's rules.
+Mutations: 21. 18 failed a test. Two had none, a media table that grew and was not bound again (the tests had
+two volumes, the table room for two) and a grid counted the same although its volume was another, and have their
+cases now. One was no fault: where a grid lies follows from the grids before it, and that comparison is gone.
+Found by review: a still volume that was moved left its grid's program running in the box where it had stood.
 
 **A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
 had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a
