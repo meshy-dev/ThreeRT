@@ -754,6 +754,9 @@ impl LiveCore {
         // Objects shown or hidden by their own `visible`: in place when the build has them (a rain curtain the weather
         // turns off, a pool's idle fireball and its light cost nothing while off), else with the rebuild.
         if !changes.structural {
+            // (The world's children, once for all the objects this commit shows or hides: a world scan each made a
+            // streamed level shown whole, hundreds of meshes, cost 100 ms.)
+            let children = if changes.shown.is_empty() { Default::default() } else { world.children() };
             for id in std::mem::take(&mut changes.shown) {
                 let hide = !world.shown(id);
                 let done = match world.objects.get(&id).map(|o| &o.kind) {
@@ -770,7 +773,7 @@ impl LiveCore {
                         changes.lights.insert(id);
                         true
                     }
-                    Some(crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { .. } | crate::world::Kind::Group) => self.show_meshes(world, id, &mut changes, &mut top),
+                    Some(crate::world::Kind::Mesh { .. } | crate::world::Kind::Model { .. } | crate::world::Kind::Group) => self.show_meshes(world, id, &children, &mut changes, &mut top),
                     _ => false,
                 };
                 if !done {
@@ -1350,9 +1353,8 @@ impl LiveCore {
     /// hidden one, and its row's power (`Tables::apply`: a hidden mesh's emitters at no weight). False where
     /// something under it is drawn another way, or a mesh is not such an instance (the build flattened it, or an edit
     /// took it out while it was hidden): the caller rebuilds.
-    fn show_meshes(&mut self, world: &World, id: u32, changes: &mut crate::world::Changes, build: &mut gpu::TopBuild) -> bool {
-        let children = world.children();
-        for k in world.subtree_with(id, &children) {
+    fn show_meshes(&mut self, world: &World, id: u32, children: &std::collections::HashMap<u32, Vec<u32>>, changes: &mut crate::world::Changes, build: &mut gpu::TopBuild) -> bool {
+        for k in world.subtree_with(id, children) {
             match &world.objects[&k].kind {
                 crate::world::Kind::Group | crate::world::Kind::Camera(_) => {}
                 // (One this commit adds is placed as it is, shown or not: `edit_geometry`.)

@@ -122,3 +122,6 @@ opt-level = 2
 [patch.crates-io]
 glamx = { path = "third_party/glamx" }
 parry3d = { path = "third_party/parry3d" }
+# The TLAS built from the instances that changed (third_party/wgpu-core/PATCH.md).
+wgpu = { path = "third_party/wgpu" }
+wgpu-core = { path = "third_party/wgpu-core" }
