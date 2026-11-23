@@ -705,7 +705,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             ps.final_first = finals[&ps.first];
             debug_assert!((0..ps.count * 2).all(|j| finals[&(ps.first + j)] == ps.final_first + j));
         }
-        for ps in sc.gpu_particles.iter_mut() {
+        for ps in sc.gpu_particles.iter_mut().filter(|p| p.mesh == u32::MAX) {
             ps.final_first = finals[&ps.first];
             debug_assert!((0..ps.capacity * 2).all(|j| finals[&(ps.first + j)] == ps.final_first + j));
         }
@@ -954,7 +954,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
     meshes.sort_by_key(|&m| sc.meshes[m].first);
     // (A particle system's mesh: quads the pass writes.)
-    let quads: std::collections::HashSet<u32> = sc.particles.iter().map(|p| p.mesh).collect();
+    let quads: std::collections::HashSet<u32> = sc.particles.iter().map(|p| p.mesh).chain(sc.gpu_particles.iter().map(|p| p.mesh)).collect();
     // (A skinned mesh with its source: the model's vertices are found with its first mesh.)
     let scopes: Vec<(indexed::Scope, Option<u32>)> = meshes
         .par_iter()
@@ -1842,10 +1842,17 @@ mod units_tests {
             w.set_object(id, format!("sparks{id}"), None, Kind::Particles { count, emitter: "rise".into(), params: vec![], material: 7, emitter_area }, true, false).unwrap();
             w.set_transform(id, Vec3::new(0.3, 0.2, 1.0), Quat::IDENTITY, Vec3::ONE).unwrap();
         }
+        // (Stateful systems too: one of each kind.)
+        w.set_particle_program("puff", "fn pe_puff(i: EIn, p: array<vec4<f32>, 8>) -> PState { return PState(i.pivot, vec3<f32>(0.0), 0.0, 1.0, vec4<f32>(1.0), 0.1); }".into(), "fn pu_puff(s: PState, i: UIn, p: array<vec4<f32>, 8>) -> PState { return s; }".into(), String::new());
+        for (id, capacity, emitter_area) in [(42, 5, 0.0), (43, 1, 0.04)] {
+            w.set_object(id, format!("puffs{id}"), None, Kind::GpuParticles { capacity, program: "puff".into(), params: vec![], material: 7, emitter_area, rate: 1.0, collide: Default::default() }, true, false).unwrap();
+        }
         for (what, hwrt, units) in [("units", false, true), ("hardware traversal", true, false)] {
             let mut sc = scene::build(&w, std::path::Path::new(".."), &default_presets_dir(), None).unwrap();
             let p = prepare_as(hwrt, units, &mut sc, &mut vec![]);
             let (own, sampled) = (&sc.particles[0], &sc.particles[1]);
+            let (stateful, stateful_sampled) = (&sc.gpu_particles[0], &sc.gpu_particles[1]);
+            assert_eq!((stateful.capacity, stateful_sampled.mesh), (5, u32::MAX), "{what}: the stateful systems, as the stateless");
             assert_eq!((own.count, sampled.count, sampled.mesh), (3, 2, u32::MAX), "{what}: a system the lights are sampled by is world-space triangles");
             let part = gpu::instance_features(&sc) & gpu::F_PART;
             if !hwrt {
@@ -1868,9 +1875,15 @@ mod units_tests {
             let row = sc.rows[i.rows as usize];
             assert_eq!((row[2], row[3]), (scene::NO_EMITTER, scene::ROW_UNSAMPLED), "{what}: its emission is not in the light list");
             assert!(p.emitter_tris.iter().all(|e| e.inst == NO_INST || sc.instances[e.inst as usize].mesh != own.mesh), "{what}: no emitter of it");
-            // (The one the lights are sampled by: world-space triangles that move, with emitters.)
-            assert_eq!(sc.tri_flags.iter().filter(|f| **f & scene::TRI_DYNAMIC != 0).count(), 4, "{what}: the sampled system's four triangles");
-            assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 4, "{what}: its emitters, by a nominal area");
+            // The stateful system: a mesh of five quads after the first's, its own instance and objects.
+            let (m2, v2) = (sc.meshes[stateful.mesh as usize], sc.indexed.meshes[stateful.mesh as usize]);
+            assert_eq!((m2.count, m2.deforms, v2.1), (10, true, 20), "{what}: the stateful system's quads");
+            let i2 = sc.instances.iter().find(|i| i.mesh == stateful.mesh).expect("its instance");
+            assert_eq!((i2.object, i2.bits & scene::INST_PARTICLES), (stateful.object, scene::INST_PARTICLES), "{what}: its first particle's object");
+            assert!(stateful.object >= own.object + 3 || own.object >= stateful.object + 5, "{what}: the systems' objects apart");
+            // (The ones the lights are sampled by: world-space triangles that move, with emitters.)
+            assert_eq!(sc.tri_flags.iter().filter(|f| **f & scene::TRI_DYNAMIC != 0).count(), 6, "{what}: the sampled systems' six triangles");
+            assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 6, "{what}: their emitters, by a nominal area");
         }
     }
 

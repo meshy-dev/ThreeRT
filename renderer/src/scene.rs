@@ -1138,10 +1138,12 @@ pub struct ParticleSystem {
     pub hidden: bool,
 }
 
-/// A `GpuParticles` node as built: its quads (`first` in build order, `final_first` in the GPU's), its objects (and
-/// states) from `object`, its program and parameters, emission and collision.
+/// A `GpuParticles` node as built: its quads (a mesh of its own, `mesh`, as `ParticleSystem::mesh`; or world-space
+/// triangles, `first` in build order, `final_first` in the GPU's), its objects (and states) from `object`, its
+/// program and parameters, emission and collision.
 #[derive(Clone, Debug)]
 pub struct GpuParticleSystem {
+    pub mesh: u32,
     pub node: u32,
     pub first: u32,
     pub final_first: u32,
@@ -2197,21 +2199,10 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 // and its BLAS is built again after the pass. (Not yet one the lights are sampled by, nor a
                 // translucent one.)
                 if instancing && !translucent && *emitter_area <= 0.0 {
-                    let pfirst = pool_tris.len() as u32;
-                    for k in 0..*count {
-                        for (j, uv) in corners.into_iter().enumerate() {
-                            pool_tris.push([p; 3]);
-                            pool_attrs.push(section_attr([Vec3::Z; 3], uv, Some([(Vec3::X, 1.0); 3]), 0, k * 2 + j as u32));
-                        }
+                    for _ in 0..*count {
                         objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                     }
-                    meshes.push(InstMesh { deforms: true, sect_first: sections.len() as u32, sect_count: 1, ..own_inst_mesh(&pool_tris[pfirst as usize..], pfirst) });
-                    let mesh = meshes.len() as u32 - 1;
-                    sections.push(Section { first: 0, count: count * 2, slot: 0 });
-                    let mut mine = [row_of(mat, &materials)];
-                    mine[0][3] = ROW_UNSAMPLED;
-                    instances.push(Instance { mesh, world: Mat4::IDENTITY, object, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) | INST_PARTICLES, prev: 0, verts: 0 });
-                    rows.extend(mine);
+                    let mesh = particle_mesh(*count, p, mat, object, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
                     particles.push(ParticleSystem { mesh, translucent, first: 0, final_first: 0, count: *count, object, func, params: pf, flags, seed: *id, custom: n.custom, hidden: !shown });
                     continue;
                 }
@@ -2246,6 +2237,19 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let pivot = m.transform_point3(Vec3::ZERO);
                 let p = Vec3A::from(pivot);
                 let object = (objects.len() / stride) as u32;
+                let mut pf = [0.0f32; 32];
+                for (k, v) in params.iter().take(32).enumerate() {
+                    pf[k] = *v;
+                }
+                // (A mesh of its own and one instance, as a `Particles` system the lights are not sampled by.)
+                if instancing && *emitter_area <= 0.0 {
+                    for _ in 0..*capacity {
+                        objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
+                    }
+                    let mesh = particle_mesh(*capacity, p, mat, object, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
+                    gpu_particles.push(GpuParticleSystem { mesh, node: *id, first: 0, final_first: 0, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
+                    continue;
+                }
                 let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
                 for k in 0..*capacity {
                     for uv in corners {
@@ -2258,11 +2262,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                     objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                 }
-                let mut pf = [0.0f32; 32];
-                for (k, v) in params.iter().take(32).enumerate() {
-                    pf[k] = *v;
-                }
-                gpu_particles.push(GpuParticleSystem { node: *id, first, final_first: first, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
+                gpu_particles.push(GpuParticleSystem { mesh: u32::MAX, node: *id, first, final_first: first, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
                 tri_nodes.push((n.name.clone(), first, tris.len() as u32));
             }
             Kind::Camera(c) if st.camera == Some(*id) => camera = Some(camera_data(m, c)),
@@ -2746,6 +2746,39 @@ pub fn mesh_class(g: &GpuMaterial) -> u32 {
 /// `classed`'s last list: what leaves a mesh and is flattened at each placement (`flatten_coincident`'s pairs; the
 /// emitters of a mesh that deforms).
 pub const FLAT: usize = 3;
+
+/// The build's arrays a mesh of the pool and its instance are added to.
+pub struct Pool<'a> {
+    pub tris: &'a mut Vec<[Vec3A; 3]>,
+    pub attrs: &'a mut Vec<GpuTriAttr>,
+    pub meshes: &'a mut Vec<InstMesh>,
+    pub sections: &'a mut Vec<Section>,
+    pub instances: &'a mut Vec<Instance>,
+    pub rows: &'a mut Vec<Row>,
+}
+
+/// A particle system's mesh and its one instance (`ParticleSystem::mesh`): `count` quads collapsed at `pivot` until
+/// the pass places them, one section of material `mat`; the instance places nothing (the pass writes the vertices
+/// in the world), has the system's first object (`object`: one a particle) and a row that keeps the material's
+/// emission out of the light list. The mesh.
+fn particle_mesh(count: u32, pivot: Vec3A, mat: u32, object: u32, n: &world::Object, materials: &[GpuMaterial], pool: &mut Pool) -> u32 {
+    let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
+    let first = pool.tris.len() as u32;
+    for k in 0..count {
+        for (j, uv) in corners.into_iter().enumerate() {
+            pool.tris.push([pivot; 3]);
+            pool.attrs.push(section_attr([Vec3::Z; 3], uv, Some([(Vec3::X, 1.0); 3]), 0, k * 2 + j as u32));
+        }
+    }
+    pool.meshes.push(InstMesh { deforms: true, sect_first: pool.sections.len() as u32, sect_count: 1, ..own_inst_mesh(&pool.tris[first as usize..], first) });
+    let mesh = pool.meshes.len() as u32 - 1;
+    pool.sections.push(Section { first: 0, count: count * 2, slot: 0 });
+    let mut mine = [row_of(mat, materials)];
+    mine[0][3] = ROW_UNSAMPLED;
+    pool.instances.push(Instance { mesh, world: Mat4::IDENTITY, object, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: pool.rows.len() as u32, bits: rows_bits(&mine) | INST_PARTICLES, prev: 0, verts: 0 });
+    pool.rows.extend(mine);
+    mesh
+}
 
 /// The `InstMesh` of triangles at pool index `first`, with their bounds; its sections are the caller's to set.
 pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32) -> InstMesh {

@@ -906,6 +906,9 @@ pub struct GpuParticlesGpu {
     fresh: std::cell::Cell<bool>,
     grid_o: [f32; 4],
     grid_n: [u32; 4],
+    /// The systems' own meshes, and whether some systems are world-space triangles (as `ParticleGpu`'s).
+    meshes: Vec<u32>,
+    world: bool,
 }
 
 /// gpu_particles.wgsl with the scene's particle programs (`fn pe_` / `pu_<name>`) and their dispatch.
@@ -2081,7 +2084,7 @@ pub fn instance_features(scene: &Scene) -> u32 {
     let masked = any_row(crate::scene::ROW_CUTOUT);
     let deform = if scene.meshes.iter().any(|m| m.deforms) { F_DEFORM } else { 0 };
     // (Hardware traversal's: the particle passes run with it alone, and software traversal has such a mesh flat.)
-    let part = if scene.units.is_none() && scene.particles.iter().any(|p| p.mesh != u32::MAX) { F_PART } else { 0 };
+    let part = if scene.units.is_none() && scene.particles.iter().map(|p| p.mesh).chain(scene.gpu_particles.iter().map(|p| p.mesh)).any(|m| m != u32::MAX) { F_PART } else { 0 };
     media | particles | ifunc | iglass | deform | part | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
@@ -3030,7 +3033,12 @@ impl Gpu {
                     .map(|ps| {
                         let c = &ps.collide;
                         let flags = u32::from(c.plane.is_some()) | if c.voxels { 2 } else { 0 };
-                        GpuParticleSystemGpu { a: [vertex_of(ps.final_first, false), ps.capacity, ps.object, ps.program], b: [ps.seed, ix.dynamic.0, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, 0.0], e: [0; 4], p: ps.params }
+                        // (Its first vertex and whether it is a mesh of its own: as `ParticleSystemGpu`.)
+                        let (first, quads) = match ix.meshes.get(ps.mesh as usize) {
+                            Some(m) => (m.0, 1.0),
+                            None => (vertex_of(ps.final_first, false), 0.0),
+                        };
+                        GpuParticleSystemGpu { a: [first, ps.capacity, ps.object, ps.program], b: [ps.seed, ix.dynamic.0, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, quads], e: [0; 4], p: ps.params }
                     })
                     .collect();
                 let table = buf("gpu particle systems", bytemuck::cast_slice(&systems), edit);
@@ -3053,7 +3061,7 @@ impl Gpu {
                 let sm = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("stamp"), source: wgpu::ShaderSource::Wgsl(STAMP_WGSL.into()) });
                 let sp = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("stamp"), layout: None, module: &sm, entry_point: Some("stamp"), compilation_options: Default::default(), cache: self.cache() });
                 let sbg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("stamp"), layout: &sp.get_bind_group_layout(0), entries: &[e(0, &b_vertices), wgpu::BindGroupEntry { binding: 1, resource: a.tlas.as_binding() }] });
-                Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, last, state, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n })
+                Some(GpuParticlesGpu { pipeline, stamp: (sp, sbg), bg, params, table, last, state, spawns, grid, systems: std::cell::RefCell::new(systems), host: std::cell::RefCell::new(host), nodes: scene.gpu_particles.iter().map(|p| p.node).collect(), max_cap: scene.gpu_particles.iter().map(|p| p.capacity).max().unwrap_or(0), frame: std::cell::Cell::new(0), fresh: std::cell::Cell::new(true), grid_o, grid_n, meshes: scene.gpu_particles.iter().map(|p| p.mesh).filter(|m| *m != u32::MAX).collect(), world: scene.gpu_particles.iter().any(|p| p.mesh == u32::MAX) })
             }
             _ => None,
         };
@@ -3232,9 +3240,9 @@ impl Gpu {
                 }
             }
             if hidden.iter().all(|h| *h == Hidden::Idle) {
-                // (The stateful GPU particles leave the dynamic BLAS rebuild to this pass when there are stateless ones.)
+                // (The stateful GPU particles leave what they placed to this pass when there are stateless ones.)
                 if up.gpu_particles.is_some() {
-                    self.rebuild_dynamic(accel, e);
+                    self.build_particles(up, accel, false, e);
                 }
                 return;
             }
@@ -3258,15 +3266,8 @@ impl Gpu {
         if let Some((q, i)) = blas_ts {
             stamp(e, wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(i) });
         }
-        // What the pass placed, above the triangles: the systems' meshes; the dynamic groups for world-space systems
-        // (and for the stateful particles, which leave them to this pass).
-        let mut entries = mesh_entries(accel, &p.meshes);
-        if p.opaque || up.gpu_particles.is_some() {
-            entries.extend(dynamic_entries(accel));
-        }
-        if !entries.is_empty() {
-            e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
-        }
+        // (The stateful particles leave what they placed to this pass.)
+        self.build_particles(up, accel, true, e);
         if let Some(t) = &up.translucent {
             t.build(e);
         }
@@ -3368,10 +3369,25 @@ impl Gpu {
             if let Some((q, i)) = blas_ts {
                 stamp(e, wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(i) });
             }
-            self.rebuild_dynamic(accel, e);
+            self.build_particles(up, accel, false, e);
             if let Some((q, i)) = blas_ts {
                 stamp(e, wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(i + 1), end_of_pass_write_index: None });
             }
+        }
+    }
+
+    /// What the particle passes placed, above the triangles, in a frame's encoder: the BLASes of the systems' own
+    /// meshes, the dynamic groups' where a system is world-space triangles, and the TLAS. `stateless`: the stateless
+    /// systems' too (not when every one of them is idle).
+    fn build_particles(&self, up: &Uploaded, accel: &Accel, stateless: bool, e: &mut wgpu::CommandEncoder) {
+        let own = up.particles.as_ref().filter(|_| stateless);
+        let meshes: Vec<u32> = own.iter().flat_map(|p| &p.meshes).chain(up.gpu_particles.iter().flat_map(|p| &p.meshes)).copied().collect();
+        let mut entries = mesh_entries(accel, &meshes);
+        if own.is_some_and(|p| p.opaque) || up.gpu_particles.as_ref().is_some_and(|p| p.world) {
+            entries.extend(dynamic_entries(accel));
+        }
+        if !entries.is_empty() {
+            e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
         }
     }
 
@@ -3531,7 +3547,7 @@ impl Gpu {
 
     /// Whether a particle system's mesh is among the instances (they move every frame: motion vectors).
     pub fn particle_meshes(up: &Uploaded) -> bool {
-        up.particles.as_ref().is_some_and(|p| !p.meshes.is_empty())
+        up.particles.as_ref().is_some_and(|p| !p.meshes.is_empty()) || up.gpu_particles.as_ref().is_some_and(|p| !p.meshes.is_empty())
     }
 
     /// Whether the translucency pass has anything to draw: a translucent system shown (or collapsing).
@@ -4121,12 +4137,6 @@ impl Gpu {
         }
     }
 
-    /// The dynamic groups' BLASes and the TLAS, in a frame's encoder (the particle passes: their triangles are placed
-    /// by the GPU every frame).
-    pub fn rebuild_dynamic(&self, accel: &Accel, e: &mut wgpu::CommandEncoder) {
-        e.build_acceleration_structures(dynamic_entries(accel).iter(), [&accel.tlas]);
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     /// Offline translucency: the pass (translucent.wgsl) `spp` times at random points in each pixel, each with a fresh
     /// lighting estimate per hit; the mean (colour, transmittance) per pixel. Empty without translucent particles.
@@ -4203,8 +4213,9 @@ impl Gpu {
             }
             if up.particles.is_some() {
                 let mut e = d.create_command_encoder(&Default::default());
+                // (What the stateful systems placed: the stateless pass above built before they ran.)
                 if let Some(a) = &up.accel {
-                    self.rebuild_dynamic(a, &mut e);
+                    self.build_particles(&up, a, false, &mut e);
                 }
                 self.queue.submit([e.finish()]);
             }

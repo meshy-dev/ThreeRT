@@ -50,9 +50,10 @@ struct PP {
     grid_n: vec4<u32>,
 };
 
-// a: (first triangle in the GPU order, capacity, first object, program); b: (seed, first dynamic triangle, this frame's
-// first emitted slot, emitted count); c: pivot, w = collision flags (1 plane, 2 voxels); d: (plane height, restitution,
-// friction, -); e: (first spawn, spawned count, frame number, -); p: parameters.
+// a: (its first vertex, capacity, first object, program); b: (seed, the first vertex that moves, this frame's first
+// emitted slot, emitted count); c: pivot, w = collision flags (1 plane, 2 voxels); d: (plane height, restitution,
+// friction, 1: a mesh of its own, four vertices a particle (else two world-space triangles, six)); e: (first spawn,
+// spawned count, frame number, -); p: parameters.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, d: vec4<f32>, e: vec4<u32>, p: array<vec4<f32>, 8> };
 
 // (`TriAttr`: records.wgsl.)
@@ -155,6 +156,18 @@ fn put_tri(v: u32, dyn_first: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: 
     }
 }
 
+// One vertex of a system's mesh (particles.wgsl `put_vertex`).
+fn put_vertex(v: u32, dyn_first: u32, p: vec3<f32>, n: vec3<f32>, tg: vec3<f32>) {
+    let i = v * 3u;
+    vertices[i] = vec4<f32>(p, vertices[i].w);
+    vertices[i + 1u] = vec4<f32>(n, vertices[i + 1u].w);
+    vertices[i + 2u] = vec4<f32>(tg, 1.0);
+    let j = v - dyn_first;
+    let now = vec4<f32>(p, 0.0);
+    prev_verts[j * 3u] = select(last[j], now, PPS.env.x > 0.5);
+    last[j] = now;
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn gpu_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sys = systems[gid.y];
@@ -224,9 +237,17 @@ fn gpu_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let area = length(uxv);
     let n = select(to_cam, uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(u), dot(u, u) > 1e-24);
-    let t = sys.a.x + 6u * k;
-    put_tri(t, sys.b.y, c00, c10, c11, n, tg);
-    put_tri(t + 3u, sys.b.y, c00, c11, c01, n, tg);
+    if (sys.d.w > 0.5) {
+        let t = sys.a.x + 4u * k;
+        put_vertex(t, sys.b.y, c00, n, tg);
+        put_vertex(t + 1u, sys.b.y, c10, n, tg);
+        put_vertex(t + 2u, sys.b.y, c11, n, tg);
+        put_vertex(t + 3u, sys.b.y, c01, n, tg);
+    } else {
+        let t = sys.a.x + 6u * k;
+        put_tri(t, sys.b.y, c00, c10, c11, n, tg);
+        put_tri(t + 3u, sys.b.y, c00, c11, c01, n, tg);
+    }
     let oi = (sys.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(s.pos, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(vec3<f32>(4.0 * half), objects[oi + 1u].w);
