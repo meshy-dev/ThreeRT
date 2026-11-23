@@ -2979,7 +2979,7 @@ impl Gpu {
                         p.copy_from_slice(&ps.params);
                         // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
                         // (Its mesh's first vertex: four a particle.)
-                        ParticleSystemGpu { a: [ix.meshes[ps.mesh as usize].0, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, 0, 0], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        ParticleSystemGpu { a: [ix.meshes[ps.mesh as usize].0, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.meshes[ps.mesh as usize].0 - ix.dynamic.0, 0, 0], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
@@ -3009,7 +3009,7 @@ impl Gpu {
                     .map(|ps| {
                         let c = &ps.collide;
                         let flags = u32::from(c.plane.is_some()) | if c.voxels { 2 } else { 0 };
-                        GpuParticleSystemGpu { a: [ix.meshes[ps.mesh as usize].0, ps.capacity, ps.object, ps.program], b: [ps.seed, ix.dynamic.0, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, 0.0], e: [0; 4], p: ps.params }
+                        GpuParticleSystemGpu { a: [ix.meshes[ps.mesh as usize].0, ps.capacity, ps.object, ps.program], b: [ps.seed, ix.meshes[ps.mesh as usize].0 - ix.dynamic.0, 0, 0], c: [ps.pivot[0], ps.pivot[1], ps.pivot[2], flags as f32], d: [c.plane.unwrap_or(0.0), c.restitution, c.friction, 0.0], e: [0; 4], p: ps.params }
                     })
                     .collect();
                 let table = buf("gpu particle systems", bytemuck::cast_slice(&systems), edit);

@@ -41,8 +41,8 @@ struct PP {
 
 // (`TriAttr`: records.wgsl.)
 
-// a: (its mesh's first vertex (four a particle), count, first object, function); b: (seed, the first vertex that
-// moves, -, -); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
+// a: (its mesh's first vertex (four a particle), count, first object, function); b: (seed, where its vertices'
+// previous positions begin (the instance's, `scene::Instance::prev`), -, -); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
 // was shown (no last frame: motion vectors 0) (gpu.rs `set_particles_hidden`); p: parameters; d: the node's customData.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>, d: vec4<f32> };
 
@@ -53,7 +53,7 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>
 @group(0) @binding(2) var<storage, read_write> vertices: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> prev_verts: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> objects: array<vec4<f32>>;
-// This pass's last positions of the dynamic tail's particle vertices (the previous positions' indexing).
+// This pass's last positions of the particles' vertices (the previous positions' indexing).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
 
 // vec4s an object in `objects` (scene.rs `object_stride`: 4 in a scene with instance colours), the pipeline's constant.
@@ -71,14 +71,14 @@ fn unit(h: u32) -> f32 { return f32(h >> 8u) * (1.0 / 16777216.0); }
 fn particle_function(f: u32, i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(i.pivot, vec3<f32>(0.0), vec3<f32>(0.0), false, vec4<f32>(0.0)); }
 // @particle-functions-end
 
-// One vertex of a system's mesh: its position, the last frame's as the previous position, its normal and tangent.
-fn put_vertex(v: u32, dyn_first: u32, p: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
+// One vertex of a system's mesh (`v`; `j`: where its previous position is kept): its position, the last frame's as
+// the previous position, its normal and tangent.
+fn put_vertex(v: u32, j: u32, p: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
     let i = v * 3u;
     // (The w's hold the uv, left as built.)
     vertices[i] = vec4<f32>(p, vertices[i].w);
     vertices[i + 1u] = vec4<f32>(n, vertices[i + 1u].w);
     vertices[i + 2u] = vec4<f32>(tg, 1.0);
-    let j = v - dyn_first;
     let now = vec4<f32>(p, 0.0);
     prev_verts[j * 3u] = select(last[j], now, first);
     last[j] = now;
@@ -120,10 +120,11 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let first = PPS.env.z > 0.5 || s.c.w > 1.5;
     // Its mesh's quad: the corners in the order the build indexed them.
     let t = s.a.x + 4u * k;
-    put_vertex(t, s.b.y, c00, n, tg, first);
-    put_vertex(t + 1u, s.b.y, c10, n, tg, first);
-    put_vertex(t + 2u, s.b.y, c11, n, tg, first);
-    put_vertex(t + 3u, s.b.y, c01, n, tg, first);
+    let j = s.b.y + 4u * k;
+    put_vertex(t, j, c00, n, tg, first);
+    put_vertex(t + 1u, j + 1u, c10, n, tg, first);
+    put_vertex(t + 2u, j + 2u, c11, n, tg, first);
+    put_vertex(t + 3u, j + 3u, c01, n, tg, first);
     let oi = (s.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(o.center, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(2.0 * (abs(o.u) + abs(o.v)), objects[oi + 1u].w);
