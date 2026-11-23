@@ -2807,6 +2807,8 @@ indices and the 48-byte vertices cost its trace 6 % (a crowd standing still, 85 
 81 ms. A pass takes a posed mesh's leaves again from its vertices.
 On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 3.9, Zero Day 1.6 GB -> 0.95, a small scene
 15 MB -> 7.5. The BLASes themselves are as large as they were.
+A frame's GPU time under hardware traversal, twelve scenes alternated twice with the kernel before: the home
+showcase +4.2 %, the colour room +2.0, the museum +1.9, the crowd -2.5, Tokyo -1.2, the others within 1 %.
 What changes in a picture. A triangle's tangent frame, where its file gives none, is made where it is hit, not at
 the build: rounding (offline, software traversal, against the build before: two scenes the same bytes, one with
 411 of 921,600 pixels off by 2 steps at most). Under hardware traversal the driver's tree over indexed geometry is
