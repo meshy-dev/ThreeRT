@@ -287,6 +287,8 @@ pub struct Changes {
     pub materials: HashSet<u32>,
     /// Textures that were replaced by another (`World::set_texture`): the materials that name one are made again.
     pub textures: HashSet<u32>,
+    /// A material function came or changed (`World::set_shader`): the kernel's code.
+    pub functions: bool,
     /// Objects whose light parameters changed.
     pub lights: HashSet<u32>,
     pub powers: HashSet<u32>,
@@ -336,7 +338,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || self.functions || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -524,30 +526,31 @@ impl World {
         Ok(())
     }
 
+    /// Creates or replaces a material function. In place (`Changes::functions`): the scene's kernel is made with it
+    /// while the frames go on, and a material of it is drawn as it is without a function until then.
     pub fn set_shader(&mut self, name: &str, code: String, helpers: String) {
         if self.shaders.get(name).is_some_and(|(c, h)| *c == code && *h == helpers) {
             return;
         }
         self.shaders.insert(name.to_string(), (code, helpers));
-        mark_structural(&mut self.changes, line!());
+        self.changes.functions = true;
     }
 
     pub fn set_material(&mut self, id: u32, m: desc::Material) {
-        let function = |m: &desc::Material| m.shader.as_ref().map(|s| s.id.clone());
         match self.materials.get(&id) {
-            // Its parameters and its textures (a texture the scene has not is placed in the pages then), in place.
-            // Another function, or none where it had one: the kernel's code; `transparent` moves particles between
-            // the scene and the translucency pass, `vertexColors` decides which triangles carry colours: a rebuild.
-            Some(old) if function(old) == function(&m) && old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
+            // Its parameters, its textures (a texture the scene has not is placed in the pages then) and its function,
+            // in place. `transparent` moves particles between the scene and the translucency pass, `vertexColors`
+            // decides which triangles carry colours: a rebuild.
+            Some(old) if old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
                 self.changes.materials.insert(id);
             }
-            // A new one without a function, not a particle's: in place, its textures with it.
-            None if m.shader.is_none() && !m.transparent && !m.vertex_colors => {
+            // A new one that is not a particle's: in place, its textures and its function with it.
+            None if !m.transparent && !m.vertex_colors => {
                 self.changes.new_materials.insert(id);
             }
             _ => {
                 if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
-                    eprintln!("world: structural: material {id} new with a function, or changed beyond its parameters and textures");
+                    eprintln!("world: structural: material {id} is a particle's or has vertex colours, new or changed");
                 }
                 mark_structural(&mut self.changes, line!())
             }
@@ -1753,6 +1756,21 @@ mod tests {
         assert!(!c.structural && c.textures.contains(&7) && c.any(), "other pixels: the texture's change");
         w.set_texture(7, Texture { repeat: [2.0, 1.0], ..texture(2) }).unwrap();
         assert!(w.take_changes().textures.contains(&7), "another repeat: the texture's change");
+        // A material function: new, the same again (nothing), other code; a material given one.
+        w.set_shader("f", "fn mf_f() {}".into(), String::new());
+        let c = w.take_changes();
+        assert!(!c.structural && c.functions && c.any(), "a new function: the kernel's code, in place");
+        w.set_shader("f", "fn mf_f() {}".into(), String::new());
+        assert!(!w.take_changes().any(), "the same function again: no change");
+        w.set_shader("f", "fn mf_f() { }".into(), String::new());
+        assert!(w.take_changes().functions, "other code: the function's change");
+        m.shader = Some(desc::ShaderRef { id: "f".into(), params: vec![], textures: vec![] });
+        w.set_material(1, m.clone());
+        let c = w.take_changes();
+        assert!(!c.structural && c.materials.contains(&1), "a material given a function: the material's change");
+        m.shader = None;
+        w.set_material(1, m.clone());
+        w.take_changes();
         // `transparent` moves particles between the scene and the translucency pass: a rebuild.
         m.transparent = true;
         w.set_material(1, m.clone());

@@ -55,8 +55,14 @@ pub(super) struct LoadedScene {
     /// (v0, e1, e2), shading attributes, corners (a triangle that is not finite: at the origin). Their vertices on
     /// the GPU are made from these (`upload_dynamic`).
     pub(super) dynamic: (usize, Vec<[f32; 4]>, Vec<scene::GpuTriAttr>, Vec<[f32; 3]>),
-    /// Kernel feature inputs edits cannot change: textures, material functions, traversal groups.
+    /// Kernel feature inputs of the scene as a whole: whether it has textures, whether it has material functions,
+    /// its traversal groups (edits cannot change the groups).
     pub(super) fixed_features: (bool, bool, [usize; crate::GROUPS]),
+    /// The scene's material functions (name, code, helpers), each at its number (`Retained::shaders`): the build's
+    /// by name, one that came while the scene runs after them (`set_functions`).
+    pub(super) shaders: Vec<(String, String, String)>,
+    /// The materials of translucent particles' triangles: their functions are the translucency pass's.
+    pub(super) translucent_mats: Vec<u32>,
     /// Where in-place geometry edits write next (`edit_geometry`); a rebuild starts it afresh.
     pub(super) edit: EditState,
     /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
@@ -241,6 +247,10 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     tables.defer_powers = emit.is_some();
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
+    let shaders = sc.shaders.clone();
+    let mut translucent_mats: Vec<u32> = sc.trans_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
+    translucent_mats.sort_unstable();
+    translucent_mats.dedup();
     // (The light tree is the tables' by now: its nodes from there.)
     let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
@@ -324,5 +334,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

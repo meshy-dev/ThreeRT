@@ -4326,3 +4326,64 @@ fn a_new_kernel_variant_is_made_while_the_frames_go_on() {
     live.render(1, |_, _| {});
     assert_eq!(key(live.kernel.as_ref().unwrap()), key(&live.sc.up.kernel), "in lockstep the frame ran the scene's kernel");
 }
+
+/// Material functions come and change in place, in a scene that had none: a function and a new material of it on an
+/// instance (the kernel's code, `F_FUNC`, and the placement of a function's inputs by an instance, `F_IFUNC`), the
+/// function's code changed, a second function whose name sorts before the first (a build numbers them by name, the
+/// view in the order they came), a material that drops its function. After each: no rebuild, the kernel's features
+/// are a build's, and the picture is that build's.
+#[test]
+fn material_functions_come_and_change_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let mat = |function: Option<&str>| -> crate::desc::Material {
+        let shader = function.map(|id| serde_json::json!({ "id": id, "params": [], "textures": [] }));
+        serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.8, 0.8, 0.8], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "shader": shader })).unwrap()
+    };
+    let function = |name: &str, rgb: &str| format!("fn mf_{name}(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n    o.base = vec3<f32>({rgb});\n    return o;\n}}\n");
+    let mut w = world();
+    w.set_material(6, mat(None));
+    w.set_object(11, "panel".into(), None, Kind::Mesh { geometry: 3, material: 6, own_blas: true, materials: vec![] }, true, false).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert_eq!(live.sc.up.kernel.features & (gpu::F_FUNC | gpu::F_IFUNC), 0, "a scene without a function");
+    let mut last = picture(&mut live, 24);
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open(w).unwrap();
+        // (An instance of a function's material: under hardware traversal and with units. A view keeps the feature
+        // once it has it.)
+        let unkept = !(gpu::F_IFUNC | gpu::F_FUNC);
+        assert_eq!(live.sc.up.kernel.features & unkept, fresh.sc.up.kernel.features & unkept, "{what}: the kernel's features");
+        assert_eq!(fresh.sc.up.kernel.features & !live.sc.up.kernel.features, 0, "{what}: the view's kernel has what a build's has");
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &b) > 0.5, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        last = b;
+    };
+    // A function, and a new material of it on the wall.
+    w.set_shader("zz_red", function("zz_red", "0.9, 0.05, 0.05"), String::new());
+    w.set_material(7, mat(Some("zz_red")));
+    w.set_object(10, "wall".into(), None, Kind::Mesh { geometry: 2, material: 7, own_blas: true, materials: vec![] }, true, false).unwrap();
+    check("a function and a material of it", &mut live, &mut w);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_FUNC, 0, "the kernel has functions");
+    let first = live.sc.up.kernel.hash;
+    // The same function again: nothing. Other code: another kernel.
+    w.set_shader("zz_red", function("zz_red", "0.9, 0.05, 0.05"), String::new());
+    assert!(!w.changes.any(), "a function set again as it is changes nothing");
+    w.set_shader("zz_red", function("zz_red", "0.05, 0.05, 0.9"), String::new());
+    check("the function's code changed", &mut live, &mut w);
+    assert_ne!(live.sc.up.kernel.hash, first, "another module");
+    // A second function, before the first by name: the panel's material given it.
+    w.set_shader("aa_green", function("aa_green", "0.05, 0.9, 0.05"), String::new());
+    w.set_material(6, mat(Some("aa_green")));
+    check("a second function, on a material the scene had", &mut live, &mut w);
+    assert_eq!((live.sc.tables.retained.shaders.get("zz_red"), live.sc.tables.retained.shaders.get("aa_green")), (Some(&0), Some(&1)), "numbered in the order they came");
+    // A material that drops its function.
+    w.set_material(7, mat(None));
+    check("a material without its function", &mut live, &mut w);
+}

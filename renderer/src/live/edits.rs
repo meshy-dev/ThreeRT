@@ -773,6 +773,10 @@ impl LiveCore {
                 }
             }
         }
+        // Material functions that came or changed: the scene's kernel with them, before the materials of them.
+        if changes.functions && !changes.structural {
+            self.set_functions(world);
+        }
         // The textures the new and the changed materials name: those the pages have not got are placed in them now;
         // a texture that was replaced has its materials made again.
         if !changes.structural && (!changes.new_materials.is_empty() || !changes.materials.is_empty() || !changes.textures.is_empty()) {
@@ -1436,6 +1440,28 @@ impl LiveCore {
 
     /// The material table to the GPU: written in place; with more materials than its section holds (materials added
     /// while the game runs), the section is made twice the size first and the scene's bind groups made again.
+    /// The scene's kernel with the world's material functions as they are now (`World::set_shader`): each under the
+    /// number it has, one the scene had not under the next, so the kernel the view runs meanwhile draws every
+    /// material it knows as before, and a material of a function it has not as one without (its dispatch's default).
+    /// The kernel with them is another module: made as any variant is (`choose_kernel`).
+    fn set_functions(&mut self, world: &World) {
+        let sc = &mut self.sc;
+        for (name, (code, helpers)) in &world.shaders {
+            let f = (name.clone(), code.clone(), helpers.clone());
+            match sc.tables.retained.shaders.get(name) {
+                Some(&k) => sc.shaders[k as usize] = f,
+                None => {
+                    sc.tables.retained.shaders.insert(name.clone(), sc.shaders.len() as i32);
+                    sc.shaders.push(f);
+                }
+            }
+        }
+        let used: std::collections::BTreeSet<i32> = sc.translucent_mats.iter().filter_map(|&m| sc.tables.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+        sc.up.kernel = sc.up.kernel.with_material_functions(&sc.shaders, &used);
+        sc.fixed_features.1 = !sc.shaders.is_empty();
+        self.sc.up.kernel.features = self.kernel_features();
+    }
+
     /// Places in the texture pages what the commit's materials need of them (`Gpu::place_texture`), before the
     /// materials are made:
     /// - A texture a new or a changed material names and the pages have not got: decoded and placed, its rows in

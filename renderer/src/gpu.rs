@@ -1793,31 +1793,33 @@ impl Kernel {
         if live { self.approx } else { 0 }
     }
 
-    pub fn new(scene: &Scene, groups: [usize; GROUPS]) -> Kernel {
+    /// A scene's material functions and their dispatch (pathtrace.wgsl `material_function` and its kin), as they are
+    /// spliced into the kernel: `shaders` (name, code, helpers) in the order of their numbers; `translucent`: the
+    /// functions of translucent particles' materials.
+    fn material_functions(shaders: &[(String, String, String)], translucent: &std::collections::BTreeSet<i32>) -> String {
         let mut functions = String::new();
-        if !scene.shaders.is_empty() {
+        if !shaders.is_empty() {
             let mut seen = std::collections::HashSet::new();
-            for (_, _, helpers) in &scene.shaders {
+            for (_, _, helpers) in shaders {
                 if !helpers.is_empty() && seen.insert(helpers.clone()) {
                     functions.push_str(helpers);
                     functions.push('\n');
                 }
             }
-            for (_, code, _) in &scene.shaders {
+            for (_, code, _) in shaders {
                 functions.push_str(code);
                 functions.push('\n');
             }
             functions.push_str("fn material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {\n    switch f {\n");
-            for (k, (id, _, _)) in scene.shaders.iter().enumerate() {
+            for (k, (id, _, _)) in shaders.iter().enumerate() {
                 functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
             }
             functions.push_str("        default { return base; }\n    }\n}\n");
             // The translucency pass's (translucent.wgsl): only the functions of its particles' materials. With every
             // function in it, the Metal compiler failed on Tokyo's kernel once the city's ground had one (wetLayer).
-            let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
             functions.push_str("fn translucent_material_function(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {\n    switch f {\n");
-            for k in used {
-                if let Some((id, _, _)) = scene.shaders.get(k as usize) {
+            for &k in translucent {
+                if let Some((id, _, _)) = shaders.get(k as usize) {
                     functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
                 }
             }
@@ -1828,7 +1830,7 @@ impl Kernel {
             // ~0.8 ms on Tokyo, dry).
             for (name, field) in [("alpha_material_function", "opacity"), ("emissive_material_function", "emissive")] {
                 functions.push_str(&format!("fn {name}(f: i32, i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    switch f {{\n"));
-                for (k, (id, code, _)) in scene.shaders.iter().enumerate() {
+                for (k, (id, code, _)) in shaders.iter().enumerate() {
                     if writes_field(code, field) {
                         functions.push_str(&format!("        case {k} {{ return mf_{id}(i, m, base); }}\n"));
                     }
@@ -1836,6 +1838,25 @@ impl Kernel {
                 functions.push_str("        default { return base; }\n    }\n}\n");
             }
         }
+        functions
+    }
+
+    /// This kernel with other material functions (a function added or changed while the scene runs): another module
+    /// (`hash`), the volume and geometry functions as they are.
+    pub fn with_material_functions(&self, shaders: &[(String, String, String)], translucent: &std::collections::BTreeSet<i32>) -> Kernel {
+        use std::hash::{Hash, Hasher};
+        let functions = legacy_wgsl(Kernel::material_functions(shaders, translucent));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        functions.hash(&mut h);
+        self.volume_functions.hash(&mut h);
+        self.geometry_functions.hash(&mut h);
+        Kernel { functions, hash: h.finish(), ..self.clone() }
+    }
+
+    pub fn new(scene: &Scene, groups: [usize; GROUPS]) -> Kernel {
+        // (The translucency pass's functions: those of its particles' materials.)
+        let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
+        let functions = Kernel::material_functions(&scene.shaders, &used);
         let mut volume_functions = String::new();
         if !scene.volume_fns.is_empty() {
             let mut seen = std::collections::HashSet::new();
