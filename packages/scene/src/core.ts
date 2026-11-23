@@ -14,7 +14,12 @@ import type { ExposureDesc, Vec3 } from "./engine.ts";
  */
 export interface SceneChanges {
   objects: Set<Object3D>;
+  /** The whole graph is to be walked again (a binding's first sync). */
   structure: boolean;
+  /** Objects added under a parent / taken from one since the last look: the subtrees a binding binds or drops alone,
+   *  without walking the graph (a streamed city adds and removes thousands of objects among tens of thousands). */
+  added?: Set<Object3D>;
+  removed?: Set<Object3D>;
 }
 
 // An array, not a Set: `touched` runs for every write of a tracked property, and a for-of over a Set costs QuickJS an
@@ -259,8 +264,17 @@ export function unbindBody(o: Object3D): void {
   o._body = undefined;
 }
 
-function restructured(): void {
-  for (const t of trackers) t.structure = true;
+function restructured(kind: "added" | "removed", objects: Object3D[]): void {
+  for (const t of trackers) {
+    if (!t.added || !t.removed) {
+      t.structure = true;
+      continue;
+    }
+    for (const o of objects) {
+      if (kind === "added") t.added.add(o);
+      else t.removed.add(o);
+    }
+  }
 }
 
 /** Object3D.position / scale: a Vector3 that reports writes to its object. */
@@ -531,7 +545,7 @@ export class Object3D {
       o.parent = this;
       this.children.push(o);
     }
-    restructured();
+    restructured("added", objects);
     return this;
   }
 
@@ -543,7 +557,7 @@ export class Object3D {
         o.parent = null;
       }
     }
-    restructured();
+    restructured("removed", objects);
     return this;
   }
 

@@ -588,6 +588,7 @@ impl LiveCore {
                     _ => false,
                 };
                 if !done {
+                    if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:568 (shown/hidden not in place: {:?})", world.objects.get(&id).map(|o| (o.name.clone(), std::mem::discriminant(&o.kind), self.sc.tables.retained.instance(id).is_some()))); }
                     changes.structural = true;
                 }
             }
@@ -602,6 +603,7 @@ impl LiveCore {
             } else {
                 self.fallback = Some("a new material that cannot be added in place (it emits, is glass or a cutout)".into());
                 self.fallbacks += 1;
+                if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:582"); }
                 changes.structural = true;
             }
         }
@@ -616,6 +618,7 @@ impl LiveCore {
         if !changes.structural && changes.moved.iter().any(stuck) {
             self.fallback = Some("an object added in place moved".into());
             self.fallbacks += 1;
+            if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:596"); }
             changes.structural = true;
             if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
                 eprintln!("edit: rebuild (an object added in place moved)");
@@ -646,6 +649,7 @@ impl LiveCore {
                 Err(why) => {
                     self.fallback = Some(why);
                     self.fallbacks += 1;
+                    if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:626"); }
                     changes.structural = true;
                 }
             }
@@ -659,6 +663,7 @@ impl LiveCore {
         // Still objects that moved for the first time: their meshes' instances move from now on, or the scene rebuilds.
         for id in std::mem::take(&mut changes.started) {
             if !changes.structural && !self.start_moving(world, id) {
+                if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:639"); }
                 changes.structural = true;
             }
         }
@@ -782,15 +787,26 @@ impl LiveCore {
         if changes.sky && !changes.structural && !self.apply_sky(world)? {
             self.fallback = Some("a sky whose map does not fit the scene's buffers in place".into());
             self.fallbacks += 1;
+            if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:762"); }
             changes.structural = true;
         }
         if (changes.camera || changes.view || changes.settings) && !changes.structural && !self.apply_view(world, &changes)? {
+            if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:765"); }
             changes.structural = true;
         }
         let now = shader_time(self.time);
         // The tables' edits, then what the edits above left to build, once. Either may say the scene is to be rebuilt,
         // and the rebuild builds all of it.
-        let mut applied = self.sc.tables.apply(world, &changes, now).ok().flatten();
+        let applied_r = self.sc.tables.apply(world, &changes, now);
+        let log = std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1");
+        if log {
+            match &applied_r {
+                Err(e) => eprintln!("edit: rebuild (tables: {e:#})"),
+                Ok(None) => eprintln!("edit: rebuild (tables: structural {}, {} added, {} removed, {} geometries, {} new materials)", changes.structural, changes.added.len(), changes.removed.len(), changes.geometries.len(), changes.new_materials.len()),
+                Ok(Some(_)) => {}
+            }
+        }
+        let mut applied = applied_r.ok().flatten();
         // (Materials whose class changed: their instances' rows, bits and masks, before the build that reads the masks.)
         if applied.is_some_and(|d| d.reclassed) {
             if let Err(why) = self.remake_classes(world, &mut top) {
@@ -801,6 +817,9 @@ impl LiveCore {
         }
         self.sc.tables.reclassed.clear();
         if applied.is_some() && !self.build_top(top) {
+            if log {
+                eprintln!("edit: rebuild (the top-level build refused)");
+            }
             applied = None;
         }
         let Some(d) = applied else {
@@ -1236,6 +1255,7 @@ impl LiveCore {
                 }
                 self.fallback = Some(why);
                 self.fallbacks += 1;
+                if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") && !changes.structural { eprintln!("edit: structural at edits.rs:1228"); }
                 changes.structural = true;
                 false
             }
