@@ -620,6 +620,9 @@ impl World {
         // place. A new group draws nothing.
         let relit = self.table_light(id, &kind) && self.objects.get(&id).is_none_or(|o| self.table_light(id, &o.kind) && o.parent == parent);
         let grouped = matches!(kind, Kind::Group) && !self.objects.contains_key(&id);
+        // A camera, new or set again as one under the same parent: nothing is built from it; the view takes it if
+        // it is the scene's.
+        let filmed = matches!(kind, Kind::Camera(_)) && self.objects.get(&id).is_none_or(|o| matches!(o.kind, Kind::Camera(_)) && o.parent == parent);
         let was_parent = self.objects.get(&id).map(|o| o.parent);
         if was_parent != Some(parent) {
             if let Some(Some(p)) = was_parent {
@@ -643,6 +646,8 @@ impl World {
         } else if relit {
             self.changes.lights.insert(id);
         } else if grouped {
+        } else if filmed {
+            self.changes.camera |= self.settings.camera == Some(id);
         } else {
             if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
                 let o = &self.objects[&id];
@@ -769,6 +774,8 @@ impl World {
         } else if sun && self.leaf(id) {
             // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live/edits.rs `move_sun`).
             self.changes.sun = true;
+        } else if matches!(o.kind, Kind::Camera(_)) && self.leaf(id) {
+            // (A camera that is not the scene's: nothing is built from it.)
         } else {
             // Fixed geometry moved: from now on it is movable. A mesh, a still model, or a group, is its instances' to move
             // (`Changes::started`); anything else rebuilds once, to set its triangles apart.
@@ -1045,14 +1052,16 @@ impl World {
         // take out).
         // A light of the light table alone: its entry goes, in place. A group draws nothing.
         let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
+        // (So does a camera that is not the scene's.)
         let lit: Vec<bool> = doomed.iter().map(|d| self.objects.get(d).is_some_and(|o| self.table_light(*d, &o.kind))).collect();
-        if doomed.iter().zip(&lit).all(|(d, lit)| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || matches!(o.kind, Kind::Group) || *lit)) {
+        let spare = |d: &u32, o: &Object| matches!(o.kind, Kind::Camera(_)) && self.settings.camera != Some(*d);
+        if doomed.iter().zip(&lit).all(|(d, lit)| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || matches!(o.kind, Kind::Group) || *lit || spare(d, o))) {
             for (d, lit) in doomed.iter().zip(&lit) {
                 self.instanced.remove(d);
                 if *lit {
                     self.objects.remove(d);
                     self.changes.lights.insert(*d);
-                } else if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
+                } else if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group | Kind::Camera(_))) && !self.changes.added.remove(d) {
                     self.changes.removed.insert(*d);
                 }
                 // What else this batch changed of it goes with it (a pose, a move, its visibility: there is nothing
@@ -1644,6 +1653,13 @@ mod tests {
         w.remove(17);
         let c = w.take_changes();
         assert!(!c.structural && c.lights.contains(&17), "a group and a light removed");
+        // A camera that is not the scene's: created, moved and removed, nothing rebuilt.
+        let lens = || Kind::Camera(serde_json::from_value(serde_json::json!({ "fov": 50.0, "near": 0.1, "far": 100.0, "exposure": { "mode": "manual", "ev100": 0.0 } })).unwrap());
+        w.set_object(19, "spare".into(), None, lens(), true, false).unwrap();
+        w.set_transform(19, Vec3::X, Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.remove(19);
+        let c = w.take_changes();
+        assert!(!c.structural && !c.camera && c.removed.is_empty() && c.promoted.is_empty(), "a camera that is not the scene's");
         // Not in place: something else among them (a rect light with a card is triangles).
         w.set_object(15, "set".into(), None, Kind::Group, true, false).unwrap();
         w.set_object(16, "card".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 1, "height": 1, "visible": true })).unwrap()), true, false).unwrap();

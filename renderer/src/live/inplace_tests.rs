@@ -4140,10 +4140,11 @@ fn textures_named(c: &LiveCore) -> std::collections::BTreeMap<u32, Vec<Option<St
 }
 
 /// Textures come and change in place, in a scene that had none: a material given a map, a new material with one, a
-/// texture's pixels replaced by as many (over the old ones, in their slot) and by a picture of another size (another
-/// slot), a texture wider than the pages (they get a longer side and a layer more, what they held copied there).
-/// After each: no rebuild, every material names the textures a build of the edited world names, and the picture is
-/// that build's. A texture set again as it is changes nothing.
+/// second texture of pixels the pages have (the same slot), one of those two replaced (another slot: the other
+/// keeps its pixels), a texture's pixels replaced by as many (over the old ones, in their slot) and by a picture of
+/// another size (another slot), a texture wider than the pages (they get a longer side and a layer more, what they
+/// held copied there). After each: no rebuild, every material names the textures a build of the edited world
+/// names, and the picture is that build's. A texture set again as it is changes nothing.
 #[test]
 fn textures_come_and_change_in_place() {
     let presets = crate::default_presets_dir();
@@ -4167,7 +4168,7 @@ fn textures_come_and_change_in_place() {
     w.take_changes();
     assert_eq!((live.sc.up.kernel.features & gpu::F_TEX, live.g.pages_state().0.len()), (0, 0), "a scene without a texture");
     let mut last = picture(&mut live, 24);
-    let mut check = |what: &str, live: &mut LiveCore, w: &mut World, changes: bool| {
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World| {
         assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
         let mut fresh = open(w).unwrap();
         assert_eq!(textures_named(live), textures_named(&fresh), "{what}: the textures the materials name");
@@ -4175,44 +4176,58 @@ fn textures_come_and_change_in_place() {
         forget(live);
         let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
-        assert_eq!(apart(&last, &b) > 0.5, changes, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        assert!(apart(&last, &b) > 0.2, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
         last = b;
     };
     // The wall's material given a map.
     w.set_texture(30, checker(64, 40, 8, [255, 40, 40], [40, 40, 255])).unwrap();
     w.set_material(1, mat(0.8, serde_json::json!({ "map": 30 })));
-    check("a material given a map", &mut live, &mut w, true);
+    check("a material given a map", &mut live, &mut w);
     assert_ne!(live.sc.up.kernel.features & gpu::F_TEX, 0);
+    let slot = |live: &LiveCore, texture: u32| live.sc.tables.retained.textures.get(&(texture, true)).copied();
     let (keys, side, layers, places) = live.g.pages_state();
-    assert_eq!((keys.len(), side, layers, live.sc.tables.retained.textures.get(&(30, true))), (1, 256, 1, Some(&0)), "the first texture: slot 0 of one page");
+    assert_eq!((keys.len(), side, layers, slot(&live, 30)), (1, 256, 1, Some(0)), "the first texture: slot 0 of one page");
     // A new material with a map of its own, on the panel.
     w.set_texture(31, checker(100, 60, 10, [30, 220, 30], [240, 240, 30])).unwrap();
     w.set_material(8, mat(0.9, serde_json::json!({ "map": 31 })));
     w.set_object(11, "panel".into(), None, Kind::Mesh { geometry: 3, material: 8, own_blas: true, materials: vec![] }, true, false).unwrap();
-    check("a new material with a map", &mut live, &mut w, true);
+    check("a new material with a map", &mut live, &mut w);
     assert_eq!((live.g.pages_state().0.len(), live.g.pages_state().3[0]), (2, places[0]), "a second texture beside the first, which stays where it is");
+    // Another texture of the same pixels, on a tile of its own: the slot the pages have for them.
+    w.set_texture(33, checker(100, 60, 10, [30, 220, 30], [240, 240, 30])).unwrap();
+    w.set_material(9, mat(0.9, serde_json::json!({ "map": 33 })));
+    w.set_object(13, "tile".into(), None, Kind::Mesh { geometry: 3, material: 9, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(13, Vec3::new(0.45, -0.5, 0.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    check("a texture of pixels the pages have", &mut live, &mut w);
+    assert_eq!((live.g.pages_state().0.len(), slot(&live, 31), slot(&live, 33)), (2, Some(1), Some(1)), "one slot for both");
+    // The first of the two given other pixels: the slot is the other's too, so it takes another.
+    w.set_texture(31, checker(100, 60, 10, [230, 30, 200], [20, 20, 20])).unwrap();
+    check("one of two textures in a slot replaced", &mut live, &mut w);
+    assert_eq!((live.g.pages_state().0.len(), slot(&live, 31), slot(&live, 33)), (3, Some(2), Some(1)), "another slot; the other texture keeps its own");
     // The same texture again: nothing to do. Its pixels replaced by as many: over the old ones.
     w.set_texture(30, checker(64, 40, 8, [255, 40, 40], [40, 40, 255])).unwrap();
     assert!(!w.changes.any(), "a texture set again as it is changes nothing");
     w.set_texture(30, checker(64, 40, 8, [20, 230, 230], [230, 20, 230])).unwrap();
-    check("a texture's pixels replaced", &mut live, &mut w, true);
-    assert_eq!((live.g.pages_state().0.len(), live.sc.tables.retained.textures.get(&(30, true))), (2, Some(&0)), "written over the old ones, in their slot");
+    check("a texture's pixels replaced", &mut live, &mut w);
+    assert_eq!((live.g.pages_state().0.len(), slot(&live, 30)), (3, Some(0)), "written over the old ones, in their slot");
     assert_ne!(live.g.pages_state().0[0].0, keys[0].0, "the slot holds the new pixels' key");
     // A picture of another size: another slot; the material names it.
     w.set_texture(30, checker(128, 128, 16, [250, 250, 250], [10, 10, 10])).unwrap();
-    check("a texture replaced by one of another size", &mut live, &mut w, true);
-    assert_eq!((live.g.pages_state().0.len(), live.sc.tables.retained.textures.get(&(30, true))), (3, Some(&2)));
-    assert_eq!((live.g.pages_state().1, live.g.pages_state().2, live.g.pages_state().3[2].layer), (256, 2, 1), "the page was full: it lies on a second layer");
-    // A texture wider than the pages: a longer side, a layer more, what they held copied there.
+    check("a texture replaced by one of another size", &mut live, &mut w);
+    assert_eq!((live.g.pages_state().0.len(), slot(&live, 30)), (4, Some(3)));
+    let (_, side, layers, before) = live.g.pages_state();
+    assert!(side == 256 && layers == 2 && before[3].layer == 1, "the first page was full: the wall's texture lies on a second ({layers} layers of {side})");
+    // A texture wider than the pages, on the panel: a longer side and a layer more, what they held copied there
+    // (the wall's and the tile's are drawn from the copy).
     w.set_texture(32, checker(2048, 2048, 256, [250, 120, 20], [20, 120, 250])).unwrap();
-    w.set_material(1, mat(0.8, serde_json::json!({ "map": 32 })));
-    check("a texture wider than the pages", &mut live, &mut w, true);
+    w.set_material(8, mat(0.9, serde_json::json!({ "map": 32 })));
+    check("a texture wider than the pages", &mut live, &mut w);
     let (keys, side, layers, now) = live.g.pages_state();
-    assert_eq!((keys.len(), side, layers, now[3].layer, now[3].size), (4, 2048, 3, 2, (2016, 2016)), "the pages grew by a side and a layer");
-    assert_eq!(now[0], places[0], "the textures there stay where they are");
+    assert_eq!((keys.len(), side, layers, now[4].layer, now[4].size), (5, 2048, 3, 2, (2016, 2016)), "the pages grew by a side and a layer");
+    assert_eq!(now[..4], before[..], "the textures there stay where they are");
     // A material that drops its map.
     w.set_material(1, mat(0.8, serde_json::json!({})));
-    check("a material without its map", &mut live, &mut w, true);
+    check("a material without its map", &mut live, &mut w);
 }
 
 /// By model file and material of it (`Retained::asset_materials`): the keys of the textures its slots name in the

@@ -2396,9 +2396,10 @@ impl Gpu {
 
     /// Makes what `kernel_ready` asks of `k` on another thread, each pipeline on one of its own (a driver compiles a
     /// kernel variant for half a second to tens of seconds): the frame goes on with the kernel it has and takes this
-    /// one when it is ready. Nothing if it is ready, or being made. (A browser has no thread to give: made here.)
+    /// one when it is ready. Nothing if it is ready, or being made.
     pub fn warm_kernel(&self, k: &Kernel, passes: &[&'static str], translucent: bool) {
-        if self.kernel_ready(k, passes, translucent) || !self.warming.lock().unwrap().insert((k.features, k.hash, k.approx)) {
+        // (A browser has no thread to give: its frame makes its kernel itself, live/frame.rs `choose_kernel`.)
+        if cfg!(target_arch = "wasm32") || self.kernel_ready(k, passes, translucent) || !self.warming.lock().unwrap().insert((k.features, k.hash, k.approx)) {
             return;
         }
         let (maker, k, passes, warming) = (self.maker(), k.clone(), passes.to_vec(), self.warming.clone());
@@ -2416,10 +2417,7 @@ impl Gpu {
             });
             warming.lock().unwrap().remove(&(k.features, k.hash, k.approx));
         };
-        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(work);
-        #[cfg(target_arch = "wasm32")]
-        work();
     }
 
     /// The translucency pass's bind group (group 2) drawing into `target` (live: the composed image; offline: sums);
