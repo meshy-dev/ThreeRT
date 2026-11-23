@@ -290,6 +290,27 @@ mod tests {
         }
     }
 
+    /// A skinned mesh's corners are one vertex where they are skinned from the same corner of the model and have the
+    /// same UV and the same hand: two triangles along an edge whose corners there are the model's same two, one
+    /// vertex each; with the other hand on one side, each side its own.
+    #[test]
+    fn a_skinned_meshs_corners_share_by_their_models_corner_and_their_hand() {
+        let p = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::new(1.0, 1.0, 0.0)];
+        let (order, uv) = ([[0, 1, 2], [2, 1, 3]], |v: Vec3| Vec2::new(v.x, v.y));
+        let tris: Vec<[Vec3A; 3]> = order.iter().map(|o| o.map(|i| Vec3A::from(p[i]))).collect();
+        let from = |i: usize| crate::skin::SkinCorner { p: [p[i].x, p[i].y, p[i].z, 0.0], n: [0.0, 0.0, 1.0, 0.0], t: [1.0, 0.0, 0.0, f32::from_bits(crate::skin::CORNER_NORMAL | crate::skin::CORNER_TANGENT)], w: [1.0, 0.0, 0.0, 0.0] };
+        let source: Vec<[crate::skin::SkinCorner; 3]> = order.iter().map(|o| o.map(from)).collect();
+        for (what, hand, vertices) in [("one hand", 1.0, 4), ("the other hand on one side", -1.0, 6)] {
+            let attrs = vec![
+                crate::scene::tri_attr([Vec3::Z; 3], order[0].map(|i| uv(p[i])), Some([(Vec3::X, 1.0); 3]), 3),
+                crate::scene::tri_attr([Vec3::Z; 3], order[1].map(|i| uv(p[i])), Some([(Vec3::X, hand); 3]), 3),
+            ];
+            let s = shared_skinned(&source, &tris, &attrs);
+            same(what, &s, &tris, &attrs);
+            assert_eq!(s.vertices.len(), vertices, "{what}: its vertices");
+        }
+    }
+
     /// A triangle with a corner that is not finite is three times one vertex at the origin (no ray meets it; a BLAS is
     /// built from these positions), shared or apart; the others are as they were.
     #[test]

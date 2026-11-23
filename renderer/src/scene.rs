@@ -2849,6 +2849,12 @@ mod instance_tests {
                 assert_eq!(a[3], b[3], "mirrored {mirrored}: the UV packed there, the tangent frame's hand");
             }
             assert_eq!(got.uv, flat.uv, "mirrored {mirrored}");
+            // (`placed_tri` places a triangle the same way.)
+            let (_, pn, puv, ptg) = placed_tri(w, &p, &n, &uv, Some(tg));
+            let by = tri_attr(pn, puv, ptg, 7);
+            for (a, b) in [(by.n0, flat.n0), (by.n1, flat.n1), (by.n2, flat.n2), (by.t, flat.t), (by.t1, flat.t1), (by.t2, flat.t2)] {
+                assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5 && a[3] == b[3], "mirrored {mirrored}, placed_tri: {a:?} vs {b:?}");
+            }
             assert_eq!(got_colors, Some(order.map(|k| colors[k])), "mirrored {mirrored}: the vertex colours follow their vertices");
             assert_eq!(got.x[1].to_bits(), 3);
         }

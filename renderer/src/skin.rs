@@ -706,12 +706,18 @@ mod tests {
     /// primitives on nodes (`RIGID`), at rest and posed.
     #[test]
     fn corners_placed_by_the_palette_are_the_models_triangles() {
-        let arm = Model::new(gltf::import("../tests/render/data/arm.glb").unwrap()).unwrap();
+        let mut arm = Model::new(gltf::import("../tests/render/data/arm.glb").unwrap()).unwrap();
         // (Vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without
         // normals, a mesh on a node beside the skin that mirrors it; a joint turned about an axis that is neither
         // the normals' nor the tangents'.)
-        let blend = Model::new(gltf::import("../tests/render/data/skin-blend.glb").unwrap()).unwrap();
-        let rigid = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
+        let mut blend = Model::new(gltf::import("../tests/render/data/skin-blend.glb").unwrap()).unwrap();
+        let mut rigid = Model::new(gltf::import_slice(RIGID.as_bytes()).unwrap()).unwrap();
+        // (Every vertex a tangent that is no other's, so a corner that took another vertex's is seen.)
+        for m in [&mut arm, &mut blend, &mut rigid] {
+            for p in &mut m.prims {
+                p.tangents = Some((0..p.positions.len()).map(|i| Vec3::new(1.0, 0.1 * i as f32, 0.03 * i as f32).normalize().extend(1.0).to_array()).collect());
+            }
+        }
         let pose = |clip: &str, time| desc::Animation { clip: clip.into(), time, r#loop: true, nodes: Default::default() };
         let mut seen = 0;
         let bends = || vec![None, Some(pose("bend", 0.3)), Some(pose("bend", 0.8))];
@@ -728,15 +734,23 @@ mod tests {
                         if c.t[3].to_bits() & CORNER_NORMAL != 0 {
                             assert!((n - t.n[k]).length() < 1e-5, "normal {n} against {}", t.n[k]);
                         }
-                        if let Some(tc) = t.tangent {
-                            assert!((tg - tc[k].0).length() < 1e-5, "tangent {tg} against {}", tc[k].0);
-                        }
+                        let tc = t.tangent.expect("a tangent a corner");
+                        assert!((tg - tc[k].0).length() < 1e-5, "tangent {tg} against {}", tc[k].0);
                         seen += 1;
                     }
                 }
             }
         }
         assert_eq!(seen, 36 + 648 + 12, "corners compared");
+        // A model's triangles a node (`node_triangles`) are `triangles`', their tangents a corner each too.
+        for a in [None, Some(pose("move", 0.5))] {
+            let (by_node, whole) = (rigid.node_triangles(Mat4::IDENTITY, a.as_ref(), &|_| true, false).unwrap(), rigid.triangles(Mat4::IDENTITY, None, a.as_ref()).unwrap());
+            assert_eq!(by_node.len(), whole.len());
+            for ((_, t), w) in by_node.iter().zip(&whole) {
+                assert_eq!((t.p, t.tangent.unwrap()), (w.p, w.tangent.unwrap()));
+                assert!(t.tangent.unwrap()[0].0 != t.tangent.unwrap()[1].0, "a tangent a corner");
+            }
+        }
         assert_eq!((blend.palette_len(), blend.skin_source(None, None).unwrap().len()), (4, 72), "the identity, two joints and the badge's node; 72 triangles");
         // The badge's node mirrors it: its corners are in the order that keeps it front-facing, and a pose that does
         // not mirror it has them in another.
