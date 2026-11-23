@@ -1083,6 +1083,10 @@ impl<'a> Top<'a> {
 
 /// A TLAS instance transform: the world matrix's first three rows.
 /// TLAS mask of an instance: 1 casts shadows, 2 does not, 0 a hidden instance of an instanced object (no ray sees it).
+/// Triangles a batch of the scene's first BLAS build holds at most (`Gpu::upload`): the build's scratch buffer is the sum
+/// of its BLASes' (on an RTX GPU about as large as the BLASes themselves).
+const BLAS_BATCH_TRIS: u64 = 4_000_000;
+
 pub fn instance_mask(cast_shadow: bool, hidden: bool) -> u8 {
     if hidden {
         0
@@ -2920,10 +2924,36 @@ impl Gpu {
                     geometry: wgpu::BlasGeometries::AabbGeometries(vec![wgpu::BlasAabbGeometry { size, stride: 24, aabb_buffer: boxes, primitive_offset: 0 }]),
                 }))
                 .collect();
-            let mut enc = d.create_command_encoder(&Default::default());
-            enc.build_acceleration_structures(entries.iter(), [&t]);
-            self.queue.submit([enc.finish()]);
-            self.device.poll(wgpu::PollType::wait_indefinitely())?;
+            // In batches of at most BLAS_BATCH_TRIS triangles (a BLAS larger alone), each submitted and waited for, the
+            // TLAS with the last: wgpu-core gives one build a single scratch buffer for all its BLASes, the sum of theirs,
+            // and on a GPU of 8 GB a city's (a few thousand meshes) did not fit beside the scene.
+            let tris_of = |e: &wgpu::BlasBuildEntry<'_>| -> u64 {
+                match &e.geometry {
+                    wgpu::BlasGeometries::TriangleGeometries(g) => g.iter().map(|x| x.size.index_count.unwrap_or(x.size.vertex_count) as u64 / 3).sum(),
+                    wgpu::BlasGeometries::AabbGeometries(g) => g.iter().map(|x| x.size.primitive_count as u64).sum(),
+                }
+            };
+            let mut start = 0;
+            loop {
+                let mut end = start;
+                let mut tris = 0;
+                while end < entries.len() && (end == start || tris + tris_of(&entries[end]) <= BLAS_BATCH_TRIS) {
+                    tris += tris_of(&entries[end]);
+                    end += 1;
+                }
+                let mut enc = d.create_command_encoder(&Default::default());
+                if end == entries.len() {
+                    enc.build_acceleration_structures(entries[start..end].iter(), [&t]);
+                } else {
+                    enc.build_acceleration_structures(entries[start..end].iter(), std::iter::empty::<&wgpu::Tlas>());
+                }
+                self.queue.submit([enc.finish()]);
+                self.device.poll(wgpu::PollType::wait_indefinitely())?;
+                if end == entries.len() {
+                    break;
+                }
+                start = end;
+            }
             drop(entries);
             let mesh_geo = mesh_parts.into_iter().zip(mesh_sizes).collect();
             accel = Some(Accel { tlas: t, vertices: b_vertices.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), flat_verts: ix.flat, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
