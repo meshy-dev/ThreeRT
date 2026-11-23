@@ -762,6 +762,9 @@ pub struct Retained {
     pub textures: HashMap<(u32, bool), i32>,
     /// Material function name -> index (GpuMaterial.tex1[3] - 1).
     pub shaders: HashMap<String, i32>,
+    /// A model file's material -> `materials` index: by (the file, with its functions if it has any; the material's
+    /// index in the file, usize::MAX for the file's default one).
+    pub asset_materials: HashMap<(String, usize), u32>,
     /// Object -> where what it draws landed (`Proxy`): meshes, models, rect-light cards, instanced objects.
     pub proxies: HashMap<u32, Proxy>,
     /// Object of each `lights` entry, same order (`prepare` sorts both).
@@ -1111,7 +1114,7 @@ struct TexCache {
 }
 
 impl TexCache {
-    fn add(&mut self, key: (String, bool), wrap: bool, img: impl FnOnce() -> Result<std::sync::Arc<image::RgbaImage>>) -> Result<i32> {
+    fn add(&mut self, key: (String, bool), wrap: bool, mut img: impl FnMut() -> Result<std::sync::Arc<image::RgbaImage>>) -> Result<i32> {
         if let Some(i) = self.by_key.get(&key) {
             return Ok(*i);
         }
@@ -1127,7 +1130,12 @@ impl Texture {
     /// A texture of the pages: an image (its source's identity `key`: `texture_image`), read as sRGB or not, wrapped
     /// or clamped.
     pub fn of(key: &str, srgb: bool, wrap: bool, img: Arc<image::RgbaImage>) -> Texture {
-        Texture { width: img.width(), height: img.height(), rgba: img, srgb, key: format!("{key}|{srgb}|{wrap}"), wrap }
+        Texture { width: img.width(), height: img.height(), rgba: img, srgb, key: Texture::key_of(key, srgb, wrap), wrap }
+    }
+
+    /// The pages' key of the texture `of` makes.
+    pub fn key_of(key: &str, srgb: bool, wrap: bool) -> String {
+        format!("{key}|{srgb}|{wrap}")
     }
 
     /// A world's texture as a material's slot has it (`srgb_default`: whether the slot is a colour's), decoded. As
@@ -1527,7 +1535,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 Some(d) => d.clone(),
                 None => texture_image(t, assets)?,
             };
-            let slot = texcache.add((key, srgb), t.wrap, || Ok(img))?;
+            let slot = texcache.add((key, srgb), t.wrap, || Ok(img.clone()))?;
             retained.textures.insert((tid, srgb_default), slot);
             Ok(slot)
         };
@@ -1762,7 +1770,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         Some(i) => *i,
                         None => {
                             let name = gm.as_ref().and_then(|g| g.name()).unwrap_or_default().to_string();
-                            let mut gpu = gltf_material(gm, images, uri, &mut texcache, &model_images)?;
+                            let mut gpu = gltf_material(gm, images, uri, &mut |key, wrap, img| texcache.add(key, wrap, img), &model_images)?;
                             // The first function whose prefix the material's name starts with, on the glTF shading.
                             if let Some(f) = functions.iter().find(|f| name.starts_with(f.prefix.as_str())) {
                                 let mut tex = |tid: u32, srgb_default: bool| -> Result<i32> {
@@ -1771,7 +1779,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                                         Some(d) => d.clone(),
                                         None => texture_image(t, assets)?,
                                     };
-                                    texcache.add((tkey, t.srgb && srgb_default), t.wrap, || Ok(img))
+                                    texcache.add((tkey, t.srgb && srgb_default), t.wrap, || Ok(img.clone()))
                                 };
                                 apply_shader(&mut gpu, &f.shader, &retained.shaders, &mut tex).with_context(|| format!("{uri}: material {name}"))?;
                             }
@@ -2277,6 +2285,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     for d in retained.dynamics_mut() {
         d.flags = tri_flags[d.first as usize..d.first as usize + d.mats.len()].to_vec();
     }
+    retained.asset_materials = asset_materials;
     Ok(Scene {
         name: st.name.clone(),
         emitter_slot: false,
@@ -2364,7 +2373,11 @@ pub fn aerial_params(sky: &Sky) -> [f32; 4] {
 }
 
 /// `converted`: the model images already in RGBA, by texture key (scene::build converts them up front, in parallel).
-fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], key: &str, tc: &mut TexCache, converted: &HashMap<String, Arc<image::RgbaImage>>) -> Result<GpuMaterial> {
+/// A model's material as the GPU has it. `texture((key, sRGB), wrap, image)` gives a texture's slot, and decodes the
+/// image only where the texture is not there yet: the build's set (`TexCache`), or the pages of a scene that runs
+/// (live/edits.rs `place_models`). `converted`: images decoded before.
+#[allow(clippy::type_complexity)]
+pub fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], key: &str, texture: &mut dyn FnMut((String, bool), bool, &mut dyn FnMut() -> Result<Arc<image::RgbaImage>>) -> Result<i32>, converted: &HashMap<String, Arc<image::RgbaImage>>) -> Result<GpuMaterial> {
     let Some(gm) = gm else {
         return Ok(GpuMaterial { base_color: [1.0, 1.0, 1.0, 1.0], params: [0.0, 1.0, 0.5, 1.0], tex0: [-1; 4], tex1: [-1, -1, 0, 0], uv: [1.0, 1.0, 0.0, 0.0], ..Default::default() });
     };
@@ -2373,7 +2386,7 @@ fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], key: 
         let src = t.source().index();
         let k = format!("{key}#img{src}");
         let pre = converted.get(&k).cloned();
-        tc.add((k, srgb), true, || pre.map_or_else(|| Ok(Arc::new(to_rgba(&images[src])?)), Ok))
+        texture((k, srgb), true, &mut || pre.clone().map_or_else(|| Ok(Arc::new(to_rgba(&images[src])?)), Ok))
     };
     let pbr = gm.pbr_metallic_roughness();
     let mr = tex(pbr.metallic_roughness_texture().map(|t| t.texture()), false)?;
@@ -2473,7 +2486,7 @@ pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Resu
 /// (trace_hw.wgsl), and past what lies at the same t: in one BLAS the emitter under the decal went with it (black
 /// through the decal); and which of two triangles at one distance a closest hit reports is not said. Flattened, the
 /// two are in BLASes apart and the opaque one is met first, as the software BVH has it.
-fn flatten_coincident(classed: &mut [Vec<(usize, u32)>; 4], emitting: &std::collections::HashSet<u32>, p: &dyn Fn(usize) -> [Vec3; 3]) {
+pub fn flatten_coincident(classed: &mut [Vec<(usize, u32)>; 4], emitting: &std::collections::HashSet<u32>, p: &dyn Fn(usize) -> [Vec3; 3]) {
     let key = |k: usize| {
         let mut v = p(k).map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
         v.sort_unstable();
@@ -2649,7 +2662,7 @@ pub fn section_attr(n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<CornerTangents>
 }
 
 /// The triangles of `classed` that stay in a mesh (`FLAT`'s leave it), for `model_sections`.
-fn kept(classed: &[Vec<(usize, u32)>; 4]) -> Vec<(usize, u32, u32)> {
+pub fn kept(classed: &[Vec<(usize, u32)>; 4]) -> Vec<(usize, u32, u32)> {
     classed[..FLAT].iter().enumerate().flat_map(|(class, list)| list.iter().map(move |&(k, mat)| (k, mat, class as u32))).collect()
 }
 

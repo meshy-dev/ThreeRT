@@ -459,6 +459,20 @@ impl Model {
         self.globals(pose)
     }
 
+    /// The file's materials the triangles of `triangles(.., only, ..)` have, each once, in the primitives' order (None:
+    /// the file's default one).
+    pub fn used_materials(&self, only: Option<&[String]>) -> Vec<Option<usize>> {
+        let nodes: Vec<gltf::Node> = self.gltf.0.nodes().collect();
+        let mut out = vec![];
+        for p in &self.prims {
+            if only.is_some_and(|names| !nodes[p.node].name().is_some_and(|nm| names.iter().any(|x| x == nm))) || out.contains(&p.material) {
+                continue;
+            }
+            out.push(p.material);
+        }
+        out
+    }
+
     /// A rigid model's triangles of the nodes `keep` admits, with each one's node: in world space for `pose`
     /// (`world` x the node's global transform), or in the node's own space (`local`: the caller places them per node).
     /// Same order as `triangles`. Mirrored placements keep the winding front-facing in world space, as `triangles`

@@ -2468,6 +2468,11 @@ impl Gpu {
         Ok(PagesEdit { slot: pages.keys.len() as i32 - 1, info: Some(pages.info.clone()), view })
     }
 
+    /// The slot of the texture of `key` (`scene::Texture::key_of`) in the uploaded scene's pages, if they have it.
+    pub fn texture_slot(&self, key: &str) -> Option<i32> {
+        self.pages.lock().unwrap().as_ref()?.keys.iter().position(|k| k.0 == key).map(|s| s as i32)
+    }
+
     /// New pixels for the texture in `slot`, written over the old ones in the pages: where their size in the pages
     /// and their wrap are the same. False, and nothing written, where they are not (the texture is then placed as
     /// another: `place_texture`).

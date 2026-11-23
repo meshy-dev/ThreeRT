@@ -4212,3 +4212,75 @@ fn textures_come_and_change_in_place() {
     w.set_material(1, mat(0.8, serde_json::json!({})));
     check("a material without its map", &mut live, &mut w, true);
 }
+
+/// By model file and material of it (`Retained::asset_materials`): the keys of the textures its slots name in the
+/// pages, as `textures_named` has a world's materials'.
+fn model_textures_named(c: &LiveCore) -> std::collections::BTreeMap<(String, usize), Vec<Option<String>>> {
+    let keys = c.g.pages_state().0;
+    let t = &c.sc.tables;
+    t.retained.asset_materials.iter().map(|(k, &mi)| {
+        let m = &t.materials[mi as usize];
+        (k.clone(), [m.tex0[0], m.tex0[1], m.tex0[2], m.tex0[3], m.tex1[0], m.tex1[1]].iter().map(|&s| (s >= 0).then(|| keys[s as usize].0.clone())).collect())
+    }).collect()
+}
+
+/// A still model the scene has not got comes in place (tests/render/data/textured-quads.glb: a quad with a picture
+/// and a plain one, two materials of the file): its materials are entries after the scene's, its picture is placed
+/// in the pages, its mesh is made in the room; no rebuild, and the view draws what a build of the edited world
+/// draws. Another of it is another instance of that mesh. With the last of them gone the mesh is given back, and the
+/// model comes again in place, its materials and its picture the ones there were.
+#[test]
+fn a_model_the_scene_has_not_got_comes_in_place() {
+    let presets = crate::default_presets_dir();
+    let open_at_root = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    const FILE: &str = "tests/render/data/textured-quads.glb";
+    let model = || Kind::Model { uri: FILE.into(), nodes: None, animation: None, functions: vec![] };
+    let mut w = world();
+    let mut live = match open_at_root(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let mut last = picture(&mut live, 24);
+    let (materials, meshes) = (live.sc.tables.materials.len(), live.sc.meshes.len());
+    assert_eq!((live.sc.up.kernel.features & gpu::F_TEX, live.g.pages_state().0.len()), (0, 0), "a scene without a texture");
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open_at_root(w).unwrap();
+        // (A material of a model that has gone stays in the view: it names what a build's names where a build has it.)
+        let named = model_textures_named(live);
+        for (k, v) in model_textures_named(&fresh) {
+            assert_eq!(named.get(&k), Some(&v), "{what}: the textures the model's material {k:?} names");
+        }
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &b) > 0.5, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        last = b;
+    };
+    let place = |w: &mut World, id: u32, at: Vec3| {
+        w.set_object(id, format!("quads{id}"), None, model(), true, false).unwrap();
+        w.set_transform(id, at, glam::Quat::from_rotation_y(0.3), Vec3::ONE).unwrap();
+    };
+    place(&mut w, 40, Vec3::new(-0.3, 0.2, 0.7));
+    check("a model the scene has not got", &mut live, &mut w);
+    let key = (FILE.to_string(), None);
+    let mesh = *live.sc.tables.retained.model_mesh.get(&key).expect("the model's mesh");
+    assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.g.pages_state().0.len()), (materials + 2, meshes + 1, 1), "two materials, a mesh and a picture more");
+    assert_ne!(live.sc.up.kernel.features & gpu::F_TEX, 0, "the kernel's variant that samples textures");
+    assert_eq!(live.sc.meshes[mesh as usize].sections(&live.sc.sections).len(), 2, "a section a material of the file");
+    // Another of it: an instance of that mesh; nothing else is made.
+    place(&mut w, 41, Vec3::new(0.3, -0.5, 0.9));
+    check("another of the model", &mut live, &mut w);
+    assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.sc.edit.users.get(&mesh)), (materials + 2, meshes + 1, Some(&2)));
+    // Both gone: the mesh is given back.
+    w.remove(40);
+    w.remove(41);
+    check("the models removed", &mut live, &mut w);
+    assert!(!live.sc.tables.retained.model_mesh.contains_key(&key) && !live.sc.tables.retained.mesh_rows.contains_key(&mesh), "the mesh is no model's any more");
+    // It comes again: its mesh made again (in the slot the other left), its materials and its picture there still.
+    place(&mut w, 42, Vec3::new(0.2, 0.1, 0.8));
+    check("the model again", &mut live, &mut w);
+    assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.g.pages_state().0.len()), (materials + 2, meshes + 1, 1), "nothing made twice");
+}
