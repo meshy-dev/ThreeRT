@@ -152,6 +152,8 @@ fn main() -> Result<()> {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let presets = flag("--presets").map(PathBuf::from).unwrap_or_else(default_presets_dir);
+    // (What scene code's `readAsset` reads under, for every command that runs a game.)
+    threert_render::script::set_asset_root(&PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())));
     match cmd {
         "info" => {
             let g = gpu::Gpu::new()?;

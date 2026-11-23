@@ -355,7 +355,7 @@ export class SceneBinding {
   private settingsKey = "";
   private readonly trs = new Float32Array(10);
   private readonly scratch = new Float64Array(Math.max(HOT, LIGHT_VALUES));
-  private readonly changes: SceneChanges = { objects: new Set(), structure: true };
+  private readonly changes: SceneChanges = { objects: new Set(), structure: true, added: new Set(), removed: new Set() };
   private readonly untrack: () => void;
   private epoch = 0;
   // Physics: ids of bodies (a body's collider has its id) and joints, the slots of the engine's pose table, the joints
@@ -414,8 +414,10 @@ export class SceneBinding {
     const stats: SyncStats = { created: 0, updated: 0, removed: 0 };
     const ch = this.changes;
     if (ch.structure || !this.objects.has(this.camera)) {
-      // Objects were added or removed: walk the graph (creates new objects, re-parents, removes what is gone).
+      // The whole graph: walk it (creates new objects, re-parents, removes what is gone).
       ch.structure = false;
+      ch.added?.clear();
+      ch.removed?.clear();
       ch.objects.clear();
       const epoch = ++this.epoch;
       const visit = (o: Object3D, parent: number | null) => {
@@ -427,16 +429,46 @@ export class SceneBinding {
       if (this.objects.get(this.camera)?.epoch !== epoch) visit(this.camera, null);
       for (const [o, b] of this.objects) {
         if (b.epoch === epoch) continue;
-        this.dropBody(o, b);
-        if (o instanceof Joint) this.dropJoint(o);
-        this.engine.remove(b.id);
-        this.objects.delete(o);
-        this.byName.delete(b.name);
-        const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
-        if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
-        if (o instanceof Light) this.lights.delete(o);
-        if (o instanceof PerspectiveCamera) this.cameras.delete(o);
-        stats.removed++;
+        this.dropObject(o, b, stats);
+      }
+    } else if (ch.added?.size || ch.removed?.size) {
+      // Objects added or removed since the last sync: their subtrees alone. Removed first (what is no longer under the
+      // scene goes, with everything below it), then added (bound from the highest ancestor the engine has not got).
+      const inScene = (o: Object3D) => {
+        for (let p: Object3D | null = o; p; p = p.parent) if (p === this.scene) return true;
+        return o === this.camera;
+      };
+      const removed = [...(ch.removed ?? [])], added = [...(ch.added ?? [])];
+      ch.removed?.clear();
+      ch.added?.clear();
+      for (const r of removed) {
+        const stack = [r];
+        while (stack.length) {
+          const o = stack.pop()!;
+          const b = this.objects.get(o);
+          if (b && !inScene(o)) this.dropObject(o, b, stats);
+          for (const c of o.children) stack.push(c);
+        }
+      }
+      // what changed of objects the engine has (as the full walk meets them before what is new), then what is new
+      const touched = [...ch.objects].filter((o) => this.objects.has(o));
+      ch.objects.clear();
+      for (const o of touched) {
+        const b = this.objects.get(o);
+        if (b) this.bindObject(o, b.parent, stats);
+      }
+      const visit = (o: Object3D, parent: number | null) => {
+        const b = this.bindObject(o, parent, stats);
+        for (const c of o.children) visit(c, b.id);
+      };
+      const done = new Set<Object3D>();
+      for (const a of added) {
+        if (!inScene(a)) continue;
+        let top = a;
+        while (top.parent && top.parent !== this.scene && !this.objects.has(top.parent)) top = top.parent;
+        if (done.has(top)) continue;
+        done.add(top);
+        visit(top, top.parent && top.parent !== this.scene ? this.objects.get(top.parent)!.id : null);
       }
     } else if (ch.objects.size) {
       const touched = [...ch.objects];
@@ -531,6 +563,20 @@ export class SceneBinding {
   }
 
   /** Creates / re-creates the object in the engine if it is new or changed kind or parent, then sends its state. */
+  /** An object the scene no longer has: out of the engine, its names free again. */
+  private dropObject(o: Object3D, b: Bound, stats: SyncStats): void {
+    this.dropBody(o, b);
+    if (o instanceof Joint) this.dropJoint(o);
+    this.engine.remove(b.id);
+    this.objects.delete(o);
+    this.byName.delete(b.name);
+    const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
+    if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
+    if (o instanceof Light) this.lights.delete(o);
+    if (o instanceof PerspectiveCamera) this.cameras.delete(o);
+    stats.removed++;
+  }
+
   private bindObject(o: Object3D, parent: number | null, stats: SyncStats): Bound {
     let b = this.objects.get(o);
     const kind = this.kindKey(o);
@@ -1593,6 +1639,16 @@ function samePose(a: AnimationDesc | null, b: AnimationDesc | null): boolean {
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
   }
   return true;
+}
+
+/**
+ * A file under the asset root, whole or `length` bytes of it from `offset` (`__engine.readAsset`, native renderer only;
+ * docs/RUNTIME.md "Streaming"): what a game reads as it goes, such as a city's baked cells as the camera moves.
+ */
+export function readAsset(path: string, offset?: number, length?: number): ArrayBuffer {
+  const e = (globalThis as { __engine?: { readAsset?: (path: string, offset?: number, length?: number) => ArrayBuffer } }).__engine;
+  if (!e?.readAsset) throw new Error("readAsset: this host reads no assets (the native renderer does)");
+  return offset === undefined ? e.readAsset(path) : e.readAsset(path, offset, length ?? 0);
 }
 
 export function cameraDesc(c: PerspectiveCamera): CameraDesc {

@@ -829,6 +829,7 @@ fn texel(x: i32, y: i32) -> vec4<f32> {
 
 /// Opens the window. `services`: what the app answers the game's posts with (`host::NoServices`: nothing).
 pub fn run(args: ViewArgs, services: Box<dyn HostServices>) -> Result<()> {
+    crate::script::set_asset_root(&args.assets);
     let (tx, rx) = mpsc::channel::<Cmd>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {

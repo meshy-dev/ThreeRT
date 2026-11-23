@@ -97,6 +97,35 @@ const MAX_POST_BYTES: usize = 1 << 20;
 const MAX_STORE_WRITE_BYTES: usize = 96 << 20;
 const MAX_QUEUE_BYTES: usize = 192 << 20;
 
+/// The asset root scene code may read files under (`__engine.readAsset`): set by the host before a game loads.
+static ASSET_ROOT: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Where `__engine.readAsset` reads (the host's `--assets`).
+pub fn set_asset_root(root: &std::path::Path) {
+    *ASSET_ROOT.write().unwrap() = Some(root.to_path_buf());
+}
+
+/// `__engine.readAsset(path)`: a file under the asset root, whole, as an ArrayBuffer (a streamed city's tiles, baked data
+/// a game reads as it goes). Relative paths only, no `..`: nothing outside the root.
+fn read_asset(path: &str, range: Option<(u64, usize)>) -> anyhow::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let p = std::path::Path::new(path);
+    anyhow::ensure!(p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir)), "readAsset: {path}: a relative path under the asset root");
+    let root = ASSET_ROOT.read().unwrap().clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let full = root.join(p);
+    match range {
+        None => std::fs::read(&full).map_err(|e| anyhow::anyhow!("readAsset: {path}: {e}")),
+        // (a part of it: a streamed cell's next meshes, without reading the rest)
+        Some((offset, length)) => {
+            let mut f = std::fs::File::open(&full).map_err(|e| anyhow::anyhow!("readAsset: {path}: {e}"))?;
+            f.seek(SeekFrom::Start(offset))?;
+            let mut buf = vec![0u8; length];
+            f.read_exact(&mut buf).map_err(|e| anyhow::anyhow!("readAsset: {path} [{offset}, +{length}]: {e}"))?;
+            Ok(buf)
+        }
+    }
+}
+
 /// `__host_base64_encode(bytes: Uint8Array): string`.
 fn base64_encode<'js>(ctx: Ctx<'js>, bytes: Value<'js>) -> rquickjs::Result<String> {
     use base64::Engine;
@@ -360,6 +389,12 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     e.set("voxelDebris", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, v.borrow_mut().take_debris()) })?)?;
     let (v, w, d) = (voxels.clone(), world.clone(), budget.clone());
     e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_frame(&mut v.borrow_mut(), &mut w.borrow_mut(), dt).map_err(|e| thrown(&ctx, e)) })?)?;
+    // readAsset(path, offset?, length?): the file, or `length` bytes of it from `offset`
+    e.set("readAsset", Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, offset: rquickjs::function::Opt<f64>, length: rquickjs::function::Opt<f64>| -> rquickjs::Result<rquickjs::ArrayBuffer<'js>> {
+        let range = offset.0.zip(length.0).map(|(o, l)| (o as u64, l as usize));
+        let bytes = read_asset(&path, range).map_err(|e| fail(&ctx, e))?;
+        rquickjs::ArrayBuffer::new(ctx, bytes)
+    })?)?;
     let w = world.clone();
     // (…, groups?, colors?): the optional arguments as the rest (rquickjs takes seven parameters at most).
     e.set("geometry", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, p: TypedArray<f32>, n: TypedArray<f32>, uv: TypedArray<f32>, idx: TypedArray<u32>, rest: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
@@ -477,7 +512,9 @@ impl ScriptHost {
 
     fn load(code: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<()>) -> Result<ScriptHost> {
         let rt = Runtime::new()?;
-        rt.set_memory_limit(1 << 30);
+        // 1 GiB, or THREERT_SCRIPT_MB (a game that streams a city keeps its resident tiles' arrays)
+        let mb = std::env::var("THREERT_SCRIPT_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024);
+        rt.set_memory_limit(mb << 20);
         rt.set_max_stack_size(4 << 20);
         let epoch = Instant::now();
         let budget = Arc::new(Budget { epoch, deadline: AtomicU64::new(0), lent: AtomicU64::new(0) });

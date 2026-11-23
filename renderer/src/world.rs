@@ -351,6 +351,9 @@ pub fn edits_in_place(k: &Kind) -> bool {
 #[derive(Clone)]
 pub struct World {
     pub objects: BTreeMap<u32, Object>,
+    /// How many objects each object is the parent of (`remove` skips the scan for children of a childless one: a
+    /// streamed city removes thousands of objects a frame among tens of thousands). Kept by `set_object` and `remove`.
+    kids: HashMap<u32, u32>,
     pub geometries: HashMap<u32, Arc<Geometry>>,
     pub textures: HashMap<u32, Texture>,
     pub materials: HashMap<u32, desc::Material>,
@@ -391,6 +394,7 @@ impl Default for World {
     fn default() -> World {
         World {
             objects: BTreeMap::new(),
+            kids: HashMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
             materials: HashMap::new(),
@@ -444,7 +448,16 @@ pub(crate) fn check_uri(uri: &str) -> Result<()> {
     Ok(())
 }
 
+/// The scene must be rebuilt (THREERT_EDIT_LOG=1 says where it was decided).
+fn mark_structural(c: &mut Changes, line: u32) {
+    if !c.structural && std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+        eprintln!("world: structural at world.rs:{line}");
+    }
+    c.structural = true;
+}
+
 impl World {
+
     // ------------------------------------------------------------------------------------------ engine API
 
     pub fn set_geometry(&mut self, id: u32, g: Geometry) -> Result<()> {
@@ -468,7 +481,7 @@ impl World {
         let new = self.geometries.insert(id, Arc::new(g)).is_none();
         if !self.changes.structural {
             if !new && self.objects.values().any(|o| matches!(o.kind, Kind::Instanced { geometry, procedural: false, .. } if geometry == id)) {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             } else {
                 self.changes.geometries.insert(id);
             }
@@ -497,7 +510,7 @@ impl World {
             check_uri(uri)?;
         }
         self.textures.insert(id, t);
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
         Ok(())
     }
 
@@ -506,7 +519,7 @@ impl World {
             return;
         }
         self.shaders.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     pub fn set_material(&mut self, id: u32, m: desc::Material) {
@@ -520,7 +533,12 @@ impl World {
             None if [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].iter().all(Option::is_none) && m.shader.is_none() && !m.transparent && !m.vertex_colors => {
                 self.changes.new_materials.insert(id);
             }
-            _ => self.changes.structural = true,
+            _ => {
+                if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+                    eprintln!("world: structural: material {id} new with textures or a function, or changed beyond its parameters");
+                }
+                mark_structural(&mut self.changes, line!())
+            }
         }
         self.materials.insert(id, m);
     }
@@ -576,6 +594,17 @@ impl World {
                 self.instanced.remove(&id);
             }
         }
+        let was_parent = self.objects.get(&id).map(|o| o.parent);
+        if was_parent != Some(parent) {
+            if let Some(Some(p)) = was_parent {
+                if let Some(n) = self.kids.get_mut(&p) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            if let Some(p) = parent {
+                *self.kids.entry(p).or_default() += 1;
+            }
+        }
         let o = match self.objects.remove(&id) {
             Some(o) => Object { name, parent, kind, cast_shadow, movable: movable || o.movable, ..o },
             None => Object { name, parent, kind, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE, visible: true, cast_shadow, power: 1.0, custom: [0.0; 4], movable, driven: false, sway: None, sway_rot: Quat::IDENTITY },
@@ -586,7 +615,11 @@ impl World {
         } else if rematerialed {
             self.changes.instanced.insert(id);
         } else {
-            self.changes.structural = true;
+            if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+                let o = &self.objects[&id];
+                eprintln!("world: structural: object {} ({:?}) set again or not placeable in place (movable {}, parent {:?})", o.name, std::mem::discriminant(&o.kind), o.movable, o.parent);
+            }
+            mark_structural(&mut self.changes, line!());
         }
         self.changes.created.insert(id);
         Ok(())
@@ -610,7 +643,7 @@ impl World {
             o.driven = true;
             o.movable = true;
             if !self.changes.added.contains(&id) {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         Ok(())
@@ -722,7 +755,7 @@ impl World {
                 self.changes.moved.insert(id);
                 self.changes.started.insert(id);
             } else {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
     }
@@ -806,7 +839,7 @@ impl World {
             if in_place {
                 self.changes.shown.insert(id);
             } else {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         Ok(())
@@ -889,7 +922,7 @@ impl World {
             t.custom = Some(Arc::new(c));
         }
         if t.colors.is_some() != colored {
-            self.changes.structural = true;
+            mark_structural(&mut self.changes, line!());
         } else if !self.changes.created.contains(&id) {
             self.changes.instanced.insert(id);
         }
@@ -902,7 +935,7 @@ impl World {
             Kind::Light(old) if light_class(old) == light_class(&l) => {
                 self.changes.lights.insert(id);
             }
-            _ => self.changes.structural = true,
+            _ => mark_structural(&mut self.changes, line!()),
         }
         o.kind = Kind::Light(l);
         Ok(())
@@ -917,7 +950,7 @@ impl World {
         let (fov, rest) = match &o.kind {
             Kind::Camera(old) => (old.fov != c.fov, old.dof != c.dof || old.exposure != c.exposure),
             _ => {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
                 (false, false)
             }
         };
@@ -959,8 +992,19 @@ impl World {
         let mut k = 0;
         while k < doomed.len() {
             let p = doomed[k];
-            doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
+            if self.kids.get(&p).is_some_and(|&n| n > 0) {
+                doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
+            }
             k += 1;
+        }
+        // (the parents of what goes have one child fewer; what goes has none)
+        for d in &doomed {
+            if let Some(Some(p)) = self.objects.get(d).map(|o| o.parent) {
+                if let Some(n) = self.kids.get_mut(&p) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            self.kids.remove(d);
         }
         // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or
         // model (or never added, if it came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot
@@ -981,10 +1025,13 @@ impl World {
             }
             return doomed;
         }
+        if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+            eprintln!("world: structural: removal of {} objects not in place ({:?})", doomed.len(), doomed.iter().take(3).filter_map(|d| self.objects.get(d)).map(|o| (o.name.clone(), std::mem::discriminant(&o.kind))).collect::<Vec<_>>());
+        }
         for &d in &doomed {
             self.instanced.remove(&d);
             if self.objects.remove(&d).is_some() {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         doomed
@@ -1083,7 +1130,7 @@ impl World {
             return;
         }
         self.volume_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     pub fn set_grid_program(&mut self, name: &str, code: String, helpers: String) {
@@ -1091,7 +1138,7 @@ impl World {
             return;
         }
         self.grid_programs.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     /// Creates or replaces a density grid. New data for a grid of the same size and program is uploaded in place; a
@@ -1131,7 +1178,7 @@ impl World {
                 self.grid_dirty.insert(id);
             }
         } else {
-            self.changes.structural = true;
+            mark_structural(&mut self.changes, line!());
         }
         // (No data with a same grid: its contents stay, e.g. a simulated grid whose parameters were sent again.)
         let keep = if same && data.is_none() { self.grids.get(&id).and_then(|g| g.data.clone()) } else { None };
@@ -1167,7 +1214,7 @@ impl World {
             return;
         }
         self.geometry_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     pub fn set_particle_program(&mut self, name: &str, emit: String, update: String, helpers: String) {
@@ -1176,7 +1223,7 @@ impl World {
             return;
         }
         self.particle_programs.insert(name.to_string(), v);
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     /// Particles the game spawns into a `GpuParticles` node (8 floats each), taken by the live view's next frame.
@@ -1199,7 +1246,7 @@ impl World {
             return;
         }
         self.particle_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     /// Objects drawn: visible themselves and all their ancestors.

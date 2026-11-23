@@ -805,6 +805,31 @@ core.write_stream("screen", 640, 360, &rgba)?;                  // LiveCore, bef
 - The script side has no call for it: pictures come from the app (`write_stream`), not through the script
   runtime. A script's own `DataTexture` with `needsUpdate` still rebuilds, as before.
 
+## Streaming: reading assets and adding them in place
+
+A game that streams its world as the camera moves (a city of baked cells: [threert/tokyo-1980](https://github.com/threert/tokyo-1980))
+reads files under the asset root as it goes and adds what they hold without rebuilding the scene.
+
+- **`readAsset(path, offset?, length?)`** (`@threert/scene`; `__engine.readAsset`): a file under the asset root as an
+  `ArrayBuffer`, whole or `length` bytes from `offset` (relative paths, no `..`). Native renderer only. The root is the
+  host's `--assets`.
+- **The script's heap** is 1 GiB; `THREERT_SCRIPT_MB` sets another size (a resident city keeps its cells' arrays).
+- **The binding syncs what changed.** Objects added under a parent or taken from one since the last sync are bound or
+  dropped with their subtrees; the graph is walked whole only at the first sync. A world removes a childless object
+  without looking for its children (`World::remove` keeps a count of each object's children).
+- **In place:** a new mesh (any geometry) with materials the scene has; a model whose file the scene has (another
+  copy); moving or showing an object the build placed as an instance; new materials without textures that neither
+  emit nor are glass.
+- **Rebuilds:** a new group (place the meshes themselves under groups the scene made); a material with textures or a
+  function that the scene has not seen (make every material at setup, and put each on a mesh, out of sight if need
+  be); showing an object that was hidden when the scene was built or rebuilt (move it out of sight instead of hiding
+  it); a model of nodes the file lacks (it draws nothing and has no instance to hide).
+- **Emitters cost the commit**: each commit that adds or removes emitting triangles writes the emitter CDF and the
+  light tree's dynamic part over every emitter of the scene. Add a cell's emitting meshes together, and draw far lights
+  with unlit materials (`MeshBasicMaterial`, or glTF `KHR_materials_unlit`, whose emission is then what it shows): they
+  are seen and light nothing.
+- `THREERT_EDIT_LOG=1` prints where an edit or a world change decided on a rebuild.
+
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
 Decided by the user on 2026-11-10, with the measurements below.

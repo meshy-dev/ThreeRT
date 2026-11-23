@@ -2347,12 +2347,18 @@ fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], key: 
     let strength = gm.emissive_strength().unwrap_or(1.0);
     let e = gm.emissive_factor();
     let clearcoat = |k: &str| gm.extension_value("KHR_materials_clearcoat").and_then(|c| c[k].as_f64()).unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+    // KHR_materials_unlit: shown, never lit nor lighting (three.js MeshBasicMaterial, the kernel's unlit switch). An
+    // unlit material that says an emission shows it (its factor x strength, nits) as its colour: a far city's lit
+    // windows, seen and not light-sampled (tens of thousands of emitters fewer).
+    let unlit = gm.extension_value("KHR_materials_unlit").is_some();
+    let base_color = if unlit && e.iter().any(|&c| c > 0.0) { [e[0] * strength, e[1] * strength, e[2] * strength, 1.0] } else { pbr.base_color_factor() };
+    let (e, strength) = if unlit { ([0.0; 3], 0.0) } else { (e, strength) };
     Ok(GpuMaterial {
-        base_color: pbr.base_color_factor(),
+        base_color,
         emissive: [e[0] * strength, e[1] * strength, e[2] * strength, 0.0],
         params: [pbr.metallic_factor(), pbr.roughness_factor(), 0.5, gm.normal_texture().map(|n| n.scale()).unwrap_or(1.0)],
         tex0: [tex(pbr.base_color_texture().map(|t| t.texture()), true)?, tex(gm.normal_texture().map(|t| t.texture()), false)?, mr, mr],
-        tex1: [tex(gm.emissive_texture().map(|t| t.texture()), true)?, tex(gm.occlusion_texture().map(|t| t.texture()), false)?, if gm.double_sided() { MAT_DOUBLE_SIDED } else { 0 }, 0],
+        tex1: [tex(gm.emissive_texture().map(|t| t.texture()), true)?, tex(gm.occlusion_texture().map(|t| t.texture()), false)?, if unlit { MAT_UNLIT } else if gm.double_sided() { MAT_DOUBLE_SIDED } else { 0 }, 0],
         uv: [1.0, 1.0, gm.transmission().and_then(|t| t.transmission_texture()).map_or(Ok(-1), |t| tex(Some(t.texture()), false))? as f32 + 1.0, 0.0],
         // glTF MASK (and BLEND, approximated) -> alpha cutout
         uv2: [0.0, 0.0, 0.0, match gm.alpha_mode() { gltf::material::AlphaMode::Opaque => 0.0, gltf::material::AlphaMode::Mask => gm.alpha_cutoff().unwrap_or(0.5), gltf::material::AlphaMode::Blend => 0.5 }],
