@@ -864,6 +864,12 @@ reads files under the asset root as it goes and adds what they hold without rebu
   light tree's dynamic part over every emitter of the scene. Add a cell's emitting meshes together, and draw far lights
   with unlit materials (`MeshBasicMaterial`, or glTF `KHR_materials_unlit`, whose emission is then what it shows): they
   are seen and light nothing.
+- **Instances cost what changed.** An `InstancedMesh` adds its copies as TLAS instances, in place, all of them
+  sharing its geometry's BLAS; a TLAS build writes only the instances that changed since the last one
+  (`renderer/third_party/wgpu-core/PATCH.md`; upstream wgpu wrote every one, every commit), and a frame validates the
+  TLAS's distinct BLASes, not its instances. Place repeated things (a city's windows, grates, street models) as one
+  `InstancedMesh` a piece and material a cell: their triangles once, a few objects a cell. TokyoRT's Shinjuku
+  streams 470,000 instances at a commit of 4.9 ms.
 - `THREERT_EDIT_LOG=1` prints where an edit or a world change decided on a rebuild.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
