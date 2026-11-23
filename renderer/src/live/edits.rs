@@ -457,7 +457,7 @@ pub(super) fn place_instance(cx: &mut Placing, record: usize, inst: &mut scene::
             starts.get(s as usize).copied().flatten().map(|x| ((x + i) as usize, of[s as usize], s))
         };
         let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-        let made = crate::instance_emitters(inst, record as u32, &cx.pool_tris[a..b], (cx.edit.pool_first + a) as u32, &numbered, n, &cx.tables.materials, moves);
+        let made = crate::instance_emitters(inst, record as u32, &cx.pool_tris[a..b], (cx.edit.pool_first + a) as u32, &numbered, n, &cx.tables.materials, moves, None);
         for (j, (e, w)) in made.into_iter().enumerate() {
             cx.new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
             match cx.tables.emitter_tris.get_mut(first + j) {
@@ -1860,7 +1860,7 @@ impl LiveCore {
                 };
                 let first_tri = edit.pool_first + im.first as usize;
                 let (b0, b1) = (im.first as usize, (im.first + im.count) as usize);
-                for (e, w) in crate::instance_emitters(&instances[r], r as u32, &pool_tris[b0..b1], first_tri as u32, &numbered, n as usize, &tables.materials, moving.contains(&(r as u32))) {
+                for (e, w) in crate::instance_emitters(&instances[r], r as u32, &pool_tris[b0..b1], first_tri as u32, &numbered, n as usize, &tables.materials, moving.contains(&(r as u32)), None) {
                     new.push((tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                     tables.emitter_tris.push(e);
                 }
@@ -2146,7 +2146,7 @@ impl LiveCore {
                         let at = sc.tables.emitter_tris.len();
                         (inst.first_emitter, row[2]) = (at as u32, at as u32);
                         let (a, b) = (mesh.first as usize, (mesh.first + mesh.count) as usize);
-                        let made = crate::instance_emitters(inst, r as u32, &sc.pool_tris[a..b], (sc.edit.pool_first + a) as u32, &|k| Some((k, mat, 0)), mesh.count as usize, &sc.tables.materials, true);
+                        let made = crate::instance_emitters(inst, r as u32, &sc.pool_tris[a..b], (sc.edit.pool_first + a) as u32, &|k| Some((k, mat, 0)), mesh.count as usize, &sc.tables.materials, true, None);
                         for (j, (e, w)) in made.into_iter().enumerate() {
                             self.pending_emitters.push(((at + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                             sc.tables.emitter_tris.push(e);
@@ -3342,7 +3342,7 @@ impl LiveCore {
                                 let first = tables.emitter_tris.len();
                                 (inst.first_emitter, row[2]) = (first as u32, first as u32);
                                 let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-                                let made = crate::instance_emitters(&inst, (r0 + i) as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat, 0)), im.count as usize, &tables.materials, true);
+                                let made = crate::instance_emitters(&inst, (r0 + i) as u32, &pool_tris[a..b], (edit.pool_first + a) as u32, &|k| Some((k, mat, 0)), im.count as usize, &tables.materials, true, None);
                                 for (j, (e, w)) in made.into_iter().enumerate() {
                                     new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                                     tables.emitter_tris.push(e);

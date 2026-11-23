@@ -628,7 +628,7 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    // (The vertices that move: the particle's six.)
+    // (The vertices that move: the particle's four, its system's mesh.)
     let vertices = |c: &LiveCore| -> (Vec<[f32; 3]>, Vec<[f32; 2]>) {
         let (first, n) = (c.sc.dynamic_verts.0 as u64, c.sc.dynamic_verts.1 as u64);
         let size = crate::indexed::VERTEX_BYTES as u64;
@@ -636,7 +636,7 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
         (v.iter().map(|v| [v[0][0], v[0][1], v[0][2]]).collect(), v.iter().map(|v| [v[0][3], v[1][3]]).collect())
     };
     let built = vertices(&live);
-    assert!(built.1.len() == 6 && built.1.iter().any(|uv| uv[0] != 0.0) && built.1.iter().any(|uv| uv[1] != 0.0), "the particle's six vertices, with the build's UVs ({:?})", built.1);
+    assert_eq!(built.1, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], "the particle's four vertices (its mesh's quad, in the order the pass writes it), with the build's UVs");
     live.fixed_dt = Some(1.0 / 60.0);
     for _ in 0..4 {
         live.advance_time(1.0 / 60.0);
@@ -675,7 +675,7 @@ fn a_gpu_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
         (v.iter().map(|v| [v[0][0], v[0][1], v[0][2]]).collect(), v.iter().map(|v| [v[0][3], v[1][3]]).collect())
     };
     let built = vertices(&live);
-    assert!(built.1.len() == 6 && built.1.iter().any(|uv| uv[0] != 0.0) && built.1.iter().any(|uv| uv[1] != 0.0), "the particle's six vertices, with the build's UVs ({:?})", built.1);
+    assert_eq!(built.1, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], "the particle's four vertices (its mesh's quad, in the order the pass writes it), with the build's UVs");
     live.fixed_dt = Some(1.0 / 60.0);
     for _ in 0..6 {
         live.advance_time(1.0 / 60.0);

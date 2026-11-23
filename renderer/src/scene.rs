@@ -1119,6 +1119,8 @@ pub struct ParticleSystem {
     /// Its mesh among the instanced ones (four vertices and two triangles a particle, written by the pass in the
     /// world: its instance does not place it); `u32::MAX`: world-space triangles (`first`).
     pub mesh: u32,
+    /// A particle's nominal area where the lights are sampled by the system (m²; 0: they are not).
+    pub emitter_area: f32,
     /// Drawn by the translucency pass: `first` / `final_first` index the translucent triangles (`Scene::trans_tris`,
     /// from `trans_first` on the GPU).
     pub translucent: bool,
@@ -1144,6 +1146,7 @@ pub struct ParticleSystem {
 #[derive(Clone, Debug)]
 pub struct GpuParticleSystem {
     pub mesh: u32,
+    pub emitter_area: f32,
     pub node: u32,
     pub first: u32,
     pub final_first: u32,
@@ -2196,14 +2199,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 }
                 // A system the kernel traces as any geometry: a mesh of its own in the pool, a quad a particle, and one
                 // instance of it. The pass writes its vertices where the particles are (the instance places nothing),
-                // and its BLAS is built again after the pass. (Not yet one the lights are sampled by, nor a
-                // translucent one.)
-                if instancing && !translucent && *emitter_area <= 0.0 {
+                // and its BLAS is built again after the pass. (Not yet a translucent one.)
+                if instancing && !translucent {
                     for _ in 0..*count {
                         objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                     }
-                    let mesh = particle_mesh(*count, p, mat, object, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
-                    particles.push(ParticleSystem { mesh, translucent, first: 0, final_first: 0, count: *count, object, func, params: pf, flags, seed: *id, custom: n.custom, hidden: !shown });
+                    let mesh = particle_mesh(*count, p, mat, object, *emitter_area > 0.0, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
+                    particles.push(ParticleSystem { mesh, emitter_area: *emitter_area, translucent, first: 0, final_first: 0, count: *count, object, func, params: pf, flags, seed: *id, custom: n.custom, hidden: !shown });
                     continue;
                 }
                 let first = if translucent { trans_tris.len() as u32 } else { first };
@@ -2225,7 +2227,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                     objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                 }
-                particles.push(ParticleSystem { mesh: u32::MAX, translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom, hidden: !shown });
+                particles.push(ParticleSystem { mesh: u32::MAX, emitter_area: *emitter_area, translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom, hidden: !shown });
                 if !translucent {
                     tri_nodes.push((n.name.clone(), first, tris.len() as u32));
                 }
@@ -2241,13 +2243,13 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 for (k, v) in params.iter().take(32).enumerate() {
                     pf[k] = *v;
                 }
-                // (A mesh of its own and one instance, as a `Particles` system the lights are not sampled by.)
-                if instancing && *emitter_area <= 0.0 {
+                // (A mesh of its own and one instance, as a `Particles` system.)
+                if instancing {
                     for _ in 0..*capacity {
                         objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                     }
-                    let mesh = particle_mesh(*capacity, p, mat, object, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
-                    gpu_particles.push(GpuParticleSystem { mesh, node: *id, first: 0, final_first: 0, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
+                    let mesh = particle_mesh(*capacity, p, mat, object, *emitter_area > 0.0, n, &materials, &mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows });
+                    gpu_particles.push(GpuParticleSystem { mesh, emitter_area: *emitter_area, node: *id, first: 0, final_first: 0, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
                     continue;
                 }
                 let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
@@ -2262,7 +2264,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                     objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                 }
-                gpu_particles.push(GpuParticleSystem { mesh: u32::MAX, node: *id, first, final_first: first, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
+                gpu_particles.push(GpuParticleSystem { mesh: u32::MAX, emitter_area: *emitter_area, node: *id, first, final_first: first, capacity: *capacity, object, program: prog, params: pf, seed: *id, pivot: pivot.to_array(), rate: *rate, collide: collide.clone() });
                 tri_nodes.push((n.name.clone(), first, tris.len() as u32));
             }
             Kind::Camera(c) if st.camera == Some(*id) => camera = Some(camera_data(m, c)),
@@ -2759,9 +2761,9 @@ pub struct Pool<'a> {
 
 /// A particle system's mesh and its one instance (`ParticleSystem::mesh`): `count` quads collapsed at `pivot` until
 /// the pass places them, one section of material `mat`; the instance places nothing (the pass writes the vertices
-/// in the world), has the system's first object (`object`: one a particle) and a row that keeps the material's
-/// emission out of the light list. The mesh.
-fn particle_mesh(count: u32, pivot: Vec3A, mat: u32, object: u32, n: &world::Object, materials: &[GpuMaterial], pool: &mut Pool) -> u32 {
+/// in the world), has the system's first object (`object`: one a particle) and, unless the lights are sampled by
+/// the system (`sampled`), a row that keeps the material's emission out of the light list. The mesh.
+fn particle_mesh(count: u32, pivot: Vec3A, mat: u32, object: u32, sampled: bool, n: &world::Object, materials: &[GpuMaterial], pool: &mut Pool) -> u32 {
     let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
     let first = pool.tris.len() as u32;
     for k in 0..count {
@@ -2774,7 +2776,9 @@ fn particle_mesh(count: u32, pivot: Vec3A, mat: u32, object: u32, n: &world::Obj
     let mesh = pool.meshes.len() as u32 - 1;
     pool.sections.push(Section { first: 0, count: count * 2, slot: 0 });
     let mut mine = [row_of(mat, materials)];
-    mine[0][3] = ROW_UNSAMPLED;
+    if !sampled {
+        mine[0][3] = ROW_UNSAMPLED;
+    }
     pool.instances.push(Instance { mesh, world: Mat4::IDENTITY, object, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: pool.rows.len() as u32, bits: rows_bits(&mine) | INST_PARTICLES, prev: 0, verts: 0 });
     pool.rows.extend(mine);
     mesh

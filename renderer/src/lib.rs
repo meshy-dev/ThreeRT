@@ -86,7 +86,7 @@ pub struct Prepared {
     pub light_tree: Option<ltree::LightTree>,
     /// Material -> runs of its flattened static triangles (first, end in the traversal order, object): a material
     /// that starts emitting gets emitter entries in place from its runs (live/edits.rs `add_material_emitters`).
-    /// `moving_mats`: the materials of dynamic world-space triangles (`Tables::moving_mats`).
+    /// `moving_mats`: the materials of dynamic world-space triangles and of particle systems (`Tables::moving_mats`).
     pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub moving_mats: std::collections::HashSet<u32>,
     /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
@@ -192,16 +192,19 @@ impl GpuEmitterTri {
 /// `InstMesh::emitters`): one a numbered
 /// triangle, in the numbers' order, each with its triangle as the instance places it. `tris`: the mesh's, in model
 /// space; `first`: its first triangle in the triangles' table; `numbered(k)`: triangle k's number, material and
-/// section, if it emits; `record`: the instance's. A triangle of no area: no weight (area 0). A hidden instance's (an instanced
+/// section, if it emits; `record`: the instance's; `nominal`: the area a triangle is weighed by where the mesh is a
+/// particle system's (`scene::ParticleSystem::emitter_area`, half of it: the pass places the triangle, of whatever
+/// size). A triangle of no area: no weight (area 0). A hidden instance's (an instanced
 /// object's copy not shown) keep their mesh's own area: its object has no power, so they weigh nothing, and the light
 /// tree has them (`switchable_power`) for when the copy is shown.
-pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
+pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool, nominal: Option<f32>) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
     let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record, part: 0 };
     let mut out = vec![(dead, [glam::Vec3A::ZERO; 3]); count];
     for (k, t) in tris.iter().enumerate() {
         let Some((slot, mat, part)) = numbered(k) else { continue };
         let (area, c, w) = placed_emitter(inst, t, mat, materials);
-        out[slot] = (EmitterTri { tri: first + k as u32, mat, area, c, part, ..dead }, w);
+        // (A particle system's: weighed by its nominal area, whatever size its pass gives it.)
+        out[slot] = (EmitterTri { tri: first + k as u32, mat, area: nominal.unwrap_or(area), c, part, nominal: nominal.is_some(), ..dead }, w);
     }
     out
 }
@@ -730,6 +733,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // (And the instances hidden at the build, `Instance::masked`: where they stand when they are shown is theirs to
     // bound then, in the light tree's moving subtree.)
     let moving = sc.retained.moving_records();
+    // (The particle systems the lights are sampled by: half a quad's nominal area a triangle.)
+    let nominal: std::collections::HashMap<u32, f32> = sc.particles.iter().map(|p| (p.mesh, p.emitter_area)).chain(sc.gpu_particles.iter().map(|p| (p.mesh, p.emitter_area))).filter(|(m, a)| *m != u32::MAX && *a > 0.0).map(|(m, a)| (m, a * 0.5)).collect();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
         // (With sections: the emitters of its sections whose material emits, a section after another; each one's row
@@ -743,13 +748,14 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         }
         let first = emitter_tris.len() as u32;
         sc.instances[r].first_emitter = first;
+        let area = nominal.get(&sc.instances[r].mesh).copied();
         for (k, start) in starts.iter().enumerate() {
             sc.rows[at + k][2] = start.map_or(scene::NO_EMITTER, |s| first + s);
         }
         let (a, b) = (m.first as usize, (m.first + m.count) as usize);
         let attrs = &sc.attrs[pool_first + a..pool_first + b];
         let numbered = |k: usize| scene::section_slot(&attrs[k], &rows, &starts);
-        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, count as usize, &sc.materials, moving.contains(&(r as u32)) || sc.instances[r].masked) {
+        for (e, w) in instance_emitters(&sc.instances[r], r as u32, &sc.pool_tris[a..b], (pool_first + a) as u32, &numbered, count as usize, &sc.materials, moving.contains(&(r as u32)) || sc.instances[r].masked || area.is_some(), area) {
             gpu_emitter_tris.push(GpuEmitterTri::of(&e, w, 0));
             emitter_tris.push(e);
         }
@@ -772,6 +778,10 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             Some(r) if r[1] == k as u32 && r[2] == obj => r[1] += 1,
             _ => runs.push([k as u32, k as u32 + 1, obj]),
         }
+    }
+    // (Nor a particle system's material: its triangles are its pass's.)
+    for i in sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0) {
+        moving_mats.insert(scene::row_material(&sc.rows[i.rows as usize]));
     }
     let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
@@ -1828,11 +1838,13 @@ mod units_tests {
         }
     }
 
-    /// A particle system the lights are not sampled by is a mesh of its own and one instance of it: two triangles
-    /// and four vertices a particle (a quad's corners once each, in the order the pass writes them), among the
-    /// vertices that move; the instance places nothing, has the system's first object, and a row that keeps its
-    /// material's emission out of the light list. One the lights are sampled by is world-space triangles still.
-    /// Under software traversal no kernel asks for a particle's object. No GPU.
+    /// An opaque particle system is a mesh of its own and one instance of it: two triangles and four vertices a
+    /// particle (a quad's corners once each, in the order the pass writes them), among the vertices that move; the
+    /// instance places nothing and has the system's first object. One the lights are not sampled by has a row that
+    /// keeps its material's emission out of the light list; one they are sampled by has an emitter a triangle, its
+    /// instance's, weighed by half the particle's nominal area. Stateless and stateful systems alike. A particle
+    /// system's material is not one whose emitters an edit makes in place. Under software traversal (the passes do
+    /// not run there) no kernel asks for a particle's object. No GPU.
     #[test]
     fn a_particle_system_is_a_mesh_of_quads_and_an_instance() {
         let mut w = world(true);
@@ -1852,8 +1864,10 @@ mod units_tests {
             let p = prepare_as(hwrt, units, &mut sc, &mut vec![]);
             let (own, sampled) = (&sc.particles[0], &sc.particles[1]);
             let (stateful, stateful_sampled) = (&sc.gpu_particles[0], &sc.gpu_particles[1]);
-            assert_eq!((stateful.capacity, stateful_sampled.mesh), (5, u32::MAX), "{what}: the stateful systems, as the stateless");
-            assert_eq!((own.count, sampled.count, sampled.mesh), (3, 2, u32::MAX), "{what}: a system the lights are sampled by is world-space triangles");
+            assert_eq!((stateful.capacity, stateful_sampled.capacity), (5, 1), "{what}: the stateful systems, as the stateless");
+            assert!(p.moving_mats.contains(&sc.retained.materials[&7]), "{what}: the particles' material is its passes'");
+            assert_eq!((own.count, sampled.count), (3, 2));
+            assert!(sc.tri_flags.iter().all(|f| f & scene::TRI_DYNAMIC == 0) || !hwrt, "{what}: no particle is a world-space triangle");
             let part = gpu::instance_features(&sc) & gpu::F_PART;
             if !hwrt {
                 assert_eq!(part, 0, "{what}: no kernel asks for a particle's object");
@@ -1881,9 +1895,20 @@ mod units_tests {
             let i2 = sc.instances.iter().find(|i| i.mesh == stateful.mesh).expect("its instance");
             assert_eq!((i2.object, i2.bits & scene::INST_PARTICLES), (stateful.object, scene::INST_PARTICLES), "{what}: its first particle's object");
             assert!(stateful.object >= own.object + 3 || own.object >= stateful.object + 5, "{what}: the systems' objects apart");
-            // (The ones the lights are sampled by: world-space triangles that move, with emitters.)
-            assert_eq!(sc.tri_flags.iter().filter(|f| **f & scene::TRI_DYNAMIC != 0).count(), 6, "{what}: the sampled systems' six triangles");
-            assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 6, "{what}: their emitters, by a nominal area");
+            // The ones the lights are sampled by: an emitter a triangle, the instance's, from its row's first on, in
+            // the triangles' order, weighed by half the particle's nominal area.
+            for (mesh, count, area) in [(sampled.mesh, 2u32, 0.045f32), (stateful_sampled.mesh, 1, 0.02)] {
+                let r = sc.instances.iter().position(|i| i.mesh == mesh).expect("its instance");
+                let (i, m) = (&sc.instances[r], sc.meshes[mesh as usize]);
+                let row = sc.rows[i.rows as usize];
+                assert_eq!((row[2], row[3], i.bits & scene::INST_PARTICLES), (i.first_emitter, 0, scene::INST_PARTICLES), "{what}: its row has its first emitter");
+                let mine = &p.emitter_tris[row[2] as usize..][..(count * 2) as usize];
+                for (k, e) in mine.iter().enumerate() {
+                    assert_eq!((e.inst, e.part, e.tri, e.nominal, e.moves, e.area, e.obj), (r as u32, 0, (pool_first as u32 + m.first) + k as u32, true, true, area, i.object), "{what}: emitter {k} of the system");
+                }
+                assert_eq!(p.emitter_runs.particles.iter().filter(|run| run[0] <= row[2] && row[2] + count * 2 <= run[0] + run[1]).count(), 1, "{what}: its emitters are taken again from its vertices every frame");
+            }
+            assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 6, "{what}: no other emitter by a nominal area");
         }
     }
 
