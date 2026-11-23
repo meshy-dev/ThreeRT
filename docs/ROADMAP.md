@@ -2785,6 +2785,10 @@ branch never taken), under the loop guard: in six the guard stopped 14 to 43 inv
 none. Five builds of the next change's kernel (triangles as vertices and indices) drew 94,000 to 112,000 of the
 picture's 518,400 pixels wrong without the guard; with the bound each drew the right picture. Bounds checks and
 ray-query tracking, turned on alone, changed nothing and stay off. `THREERT_CHECKED=0` is the kernel as it was.
+What it costs: under hardware traversal a frame's GPU time in twelve scenes, alternated twice with the kernel before,
+is -1 % to +4 % (Zero Day +4.0, the neon street +3.8, the colour room +3.6, the crowd +2.9, the others under 2, Tokyo
+-1.0); under software traversal, whose tree walks are loops, the trace of a crowd of 3.3 M triangles is 85.3 -> 90.6 ms
+(+6 %). The pictures and the suites are the ones before.
 
 **A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
 choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
