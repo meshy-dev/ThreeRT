@@ -3660,19 +3660,21 @@ impl Gpu {
     }
 
     /// The uploaded scene's density grids as `grids`, in place: a volume with a grid came or went, a grid has other
-    /// cells or another program, a program's code changed. Grids that are the same still take their parameters and
-    /// their volumes' placement; else all are made again, and what the programs had simulated goes with the grids that are the same (`carry`).
+    /// cells or another program, a program's code changed. Grids that are the same still take their parameters,
+    /// their volumes and the volumes' placement; else all are made again, and what the programs had simulated goes with the grids that are the same (`carry`).
     /// Whether they were made again (the atlas is another texture: the bind groups hold the old one).
     pub fn put_grids(&self, up: &mut Uploaded, grids: &[crate::scene::GridBuild], media: &[crate::scene::MediumGpu], programs: &[(String, String, String)]) -> bool {
         let same = match &mut up.grids {
             None => grids.is_empty(),
             Some(have) => {
                 let same = have.grids.len() == grids.len()
-                    && have.grids.iter().zip(grids).all(|(h, g)| (h.id, h.node, h.dims, h.z0, h.made) == (g.id, g.node, g.dims, g.z0, g.made) && h.sim.as_ref().map(|s| s.program) == g.program)
+                    && have.grids.iter().zip(grids).all(|(h, g)| (h.id, h.dims, h.z0, h.made) == (g.id, g.dims, g.z0, g.made) && h.sim.as_ref().map(|s| s.program) == g.program)
                     && (have.pipeline.is_none() || have.programs == programs);
                 if same {
-                    // (And its volume's box and customData as the table has them now: its program runs there.)
+                    // (And its volume, with the volume's box and customData as the table has them now: its program
+                    // runs there.)
                     for (h, g) in have.grids.iter_mut().zip(grids) {
+                        h.node = g.node;
                         if let Some(sim) = &mut h.sim {
                             let m = &media[g.medium as usize];
                             (sim.params, sim.placed) = (g.params, std::cell::Cell::new((m.w, m.c)));

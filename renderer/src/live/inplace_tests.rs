@@ -4540,8 +4540,8 @@ fn a_translucent_particles_material_takes_another_function_in_place() {
 
 /// Volumes come, change and go in place, in a scene that had none: a box of haze (a volume function the scene had
 /// not, the scene's first medium), a homogeneous glowing sphere whose function's name sorts before the first's (a
-/// build numbers them by name, the view in the order they came), the first set again with other parameters, moved
-/// where it stood still, the second hidden (the first set again beside it) and shown, each removed. After each: no
+/// build numbers them by name, the view in the order they came), a third (the table grows), the first set again
+/// with other parameters, moved where it stood still, the second hidden (the first set again beside it) and shown, each removed. After each: no
 /// rebuild, the kernel's count of media and its features are a build's of the edited world, the media are that
 /// build's nodes, and so is the picture.
 #[test]
@@ -4584,6 +4584,14 @@ fn volumes_come_and_go_in_place() {
     w.set_transform(41, Vec3::new(0.6, -0.3, 1.0), glam::Quat::IDENTITY, Vec3::splat(0.7)).unwrap();
     check("a second volume, homogeneous", &mut live, &mut w, &[40, 41]);
     assert_ne!(live.sc.up.kernel.features & gpu::F_HMEDIA, 0);
+    // A third: more than the table had room for (it is another buffer now, which the kernel reads).
+    let room = live.sc.up.heap.cap(crate::heap::Table::Media);
+    w.set_object(42, "more haze".into(), None, volume("haze", 0, 4.0, false, vec![3.0]), true, false).unwrap();
+    w.set_transform(42, Vec3::new(0.0, 0.55, 1.6), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    check("a third volume", &mut live, &mut w, &[40, 41, 42]);
+    assert!(live.sc.up.heap.cap(crate::heap::Table::Media) > room, "the table grew");
+    w.remove(42);
+    check("the third volume removed", &mut live, &mut w, &[40, 41]);
     // The first set again: thinner.
     w.set_object(40, "haze".into(), None, volume("haze", 0, 4.0, false, vec![0.6]), true, false).unwrap();
     assert!(!w.changes.structural, "a volume set again: the media table's");
@@ -4616,8 +4624,8 @@ fn volumes_come_and_go_in_place() {
 /// the first with another size, new data; a grid with a program (the grids' pass made), its parameters (the same
 /// grid still: nothing is made again), another grid beside it and the program's code changed (what it had simulated
 /// stays), a program whose name comes first (the programs' numbers move), a simulated grid's volume moved (its
-/// program runs in the box as it is now), a second volume of one grid and the first of them removed (the program
-/// runs in the other's box), every one removed. After each: no rebuild; the
+/// program runs in the box as it is now), a second and a third volume of one grid and the first of them removed
+/// each time (the grid is the next one's, its program runs in that one's box), every one removed. After each: no rebuild; the
 /// grids, the atlas, the media and the kernel's media features are a build's of the edited world, and so is the
 /// picture.
 #[test]
@@ -4734,8 +4742,16 @@ fn density_grids_come_and_change_in_place() {
     assert_eq!(row(&live), [2.0; 4], "what it had simulated stays");
     check("the first volume of a grid removed", &mut live, &mut w, &[40, 41, 43, 44]);
     assert_eq!(row(&live), [0.0, 0.0, 2.0, 2.0], "the other's box");
-    // The simulated grid's last volume removed: no program runs.
+    // A third volume of it after the second, and the second removed: the grids lie as they did, and the grid is the
+    // third's (its box is all past x = 0.3).
+    place(&mut w, 45, 3, 3.0, Vec3::new(0.75, 0.0, 1.9), 0.4);
+    check("a third volume of one grid", &mut live, &mut w, &[40, 41, 43, 44, 45]);
+    assert_eq!(row(&live), [0.0, 0.0, 2.0, 2.0], "the second's box still");
     w.remove(44);
+    check("a grid's volume removed, the grids lying as they did", &mut live, &mut w, &[40, 41, 43, 45]);
+    assert_eq!(row(&live), [2.0; 4], "the third's box");
+    // The simulated grid's last volume removed: no program runs.
+    w.remove(45);
     check("the simulated grid's volume removed", &mut live, &mut w, &[40, 41, 43]);
     assert!(!gpu::Gpu::has_grid_sim(&live.sc.up));
     // Every one removed.

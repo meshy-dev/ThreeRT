@@ -833,10 +833,16 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
 - **Lights.** A light that is an entry of the light table alone (not a rect light with a card, not the
   atmosphere's sun) comes, goes and changes its kind or its shadow in place: the table is listed in a build's
   order, sorted, grown where it is full, and the kernel's counts follow.
+- **Volumes.** The media table is made whole from the world, as a build makes it (`LiveCore::set_media`): a volume
+  that comes, goes, is set again or is moved where it stood still. A volume function that comes takes the next
+  number; the kernel's count of media and its media features follow (a scene's first volume is another variant).
+- **Density grids.** The grids follow the volumes that name them (`Gpu::put_grids`). A new grid, another size,
+  another program or a program's code has the atlas and the programs' pass made again, and what the programs had
+  simulated is copied on the GPU to the grids that are the same still; new parameters make nothing again. A
+  program's pass is compiled in the frame it comes in.
 - **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
 
-Still a rebuild: particle systems, volumes and density grids that come or go, and their functions and programs; a
-geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
+Still a rebuild: particle systems that come or go, and their functions and programs; a geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
 not grow); a material that becomes a particle's or gets vertex colours; a rect light's card; as many shadow-casting
 local lights as bring the light tiles or take them away; the scene's first instance, procedural object, instance
 colours or vertex colours (the kernel's data is laid out for them); the atmosphere's sun shown or hidden.

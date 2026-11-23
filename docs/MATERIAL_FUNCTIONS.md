@@ -417,7 +417,9 @@ cloud.scale.set(8, 8, 8);
 - **Rendering.** As any medium: delta tracking and ratio tracking offline; live, the camera rays' march and the volume
   voxels' in-scattering (above). A medium with a grid is marched in 64 steps instead of 8 (a grid has detail 8 steps
   miss), and its empty steps skip the voxel lookup.
-- **Changing it from the game.** Write `grid.data`, set `grid.needsUpdate`: uploaded in place, no rebuild.
+- **Changing it from the game.** Write `grid.data`, set `grid.needsUpdate`: uploaded in place. A volume with a
+  grid the scene had not, a grid of another size or with another program, comes in place too (the scene's grids
+  are made again together; docs/RUNTIME.md "What comes in place").
 - **Simulating it.** With a `GridProgram`, the grid changes on the GPU every frame (`renderer/shaders/grid_sim.wgsl`,
   WGSL compute only). The grid then holds a second field B of four numbers, the program's own (a velocity, say).
   - The program is a WGSL body run once per cell, with `$Name` parameters. It gets the cell's `s.a` and `s.b` and
@@ -433,8 +435,9 @@ cloud.scale.set(8, 8, 8);
     a program that adds what a source gives adds it once). At most 64 a frame.
   - Offline, a still at scene time t runs the program for round(t × 60) frames (at most 36,000) from the setup's
     sources, then renders.
-  - A rebuild of the live scene keeps what the program has simulated, while the grid is the same grid: its size and
-    its program (new parameters keep it). A new size or another program starts it again from its data.
+  - What the program has simulated stays while the grid is the same grid: its size and its program (new
+    parameters and a change of the program's code keep it), across the scene's grids being made again and across a
+    rebuild of the live scene. A new size or another program starts it again from its data.
 
 ```ts
 // The whole of an advection: each cell takes what was upstream of it.
