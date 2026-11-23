@@ -758,7 +758,13 @@ impl LiveCore {
                 let hide = !world.shown(id);
                 let done = match world.objects.get(&id).map(|o| &o.kind) {
                     Some(crate::world::Kind::Particles { .. }) => self.g.set_particles_hidden(&self.sc.up, id, hide),
-                    Some(crate::world::Kind::Volume { shape, .. }) => self.g.set_medium_hidden(&self.sc.up, id, *shape, hide),
+                    // (A volume the build left out, for lack of room while hidden: the media table again.)
+                    Some(crate::world::Kind::Volume { shape, .. }) => {
+                        if !self.g.set_medium_hidden(&self.sc.up, id, *shape, hide) {
+                            changes.media = true;
+                        }
+                        true
+                    }
                     // (Its table entry, black while hidden: `Tables::update_light`.)
                     Some(crate::world::Kind::Light(_)) if self.sc.tables.light_index.contains_key(&id) => {
                         changes.lights.insert(id);
@@ -776,6 +782,14 @@ impl LiveCore {
         // Material functions that came or changed: the scene's kernel with them, before the materials of them.
         if changes.functions && !changes.structural {
             self.set_functions(world);
+        }
+        // Volume functions that came or changed, then the volumes: the media table as the world has them now.
+        if (changes.volume_functions || changes.media) && !changes.structural {
+            if let Err(why) = self.set_media(world, changes.volume_functions) {
+                self.fallback = Some(format!("volumes that cannot be placed in the media table ({why})"));
+                self.fallbacks += 1;
+                changes.structural = true;
+            }
         }
         // The textures the new and the changed materials name: those the pages have not got are placed in them now;
         // a texture that was replaced has its materials made again.
@@ -1487,6 +1501,62 @@ impl LiveCore {
         }
         sc.fixed_features.1 = !sc.shaders.is_empty();
         self.sc.up.kernel.features = self.kernel_features();
+    }
+
+    /// The media table as the world's volumes are now, and the kernel's volume functions where one came or changed
+    /// (`functions`). The table is made whole, as the build makes it: the volumes shown, and the hidden ones while
+    /// the kernel has room for them, in the world's order; each function under the number it has, one the scene had
+    /// not under the next. The kernel's count of them and its media features follow (a first volume's passes are
+    /// made as any variant is). Err: a volume whose density grid the atlas has not, or more volumes than the kernel
+    /// takes; the caller rebuilds.
+    fn set_media(&mut self, world: &World, functions: bool) -> std::result::Result<(), String> {
+        use crate::world::Kind;
+        let sc = &mut self.sc;
+        if functions {
+            for (name, (code, helpers)) in &world.volume_fns {
+                let f = (name.clone(), code.clone(), helpers.clone());
+                match sc.volume_fns.iter().position(|(k, _, _)| k == name) {
+                    Some(k) => sc.volume_fns[k] = f,
+                    None => sc.volume_fns.push(f),
+                }
+            }
+            sc.up.kernel = sc.up.kernel.with_volume_functions(&sc.volume_fns);
+        }
+        let volumes: Vec<u32> = world.ordered().into_iter().filter(|id| matches!(world.objects[id].kind, Kind::Volume { .. })).collect();
+        let mut to_show = volumes.iter().filter(|id| world.shown(**id)).count();
+        let (mut media, mut nodes) = (vec![], vec![]);
+        for id in volumes {
+            let o = &world.objects[&id];
+            let Kind::Volume { function, shape, grid, .. } = &o.kind else { continue };
+            let shown = world.shown(id);
+            if !(shown || (world.hidden_built(id) && media.len() + to_show < scene::MAX_MEDIA)) {
+                continue;
+            }
+            if shown {
+                to_show -= 1;
+            }
+            let number = sc.volume_fns.iter().position(|(k, _, _)| k == function).ok_or_else(|| format!("object {}: unknown volume function {function}", o.name))? as u32;
+            let at = match grid {
+                None => [0.0; 2],
+                Some(_) if *shape != 0 => return Err(format!("object {}: a density grid needs a box volume", o.name)),
+                Some(g) => self.g.grid_place(&sc.up, *g).ok_or("a density grid the scene's atlas has not")?,
+            };
+            if media.len() >= scene::MAX_MEDIA {
+                return Err(format!("more than {} volumes shown at once", scene::MAX_MEDIA));
+            }
+            media.push(scene::MediumGpu::of(o, world.world_matrix(id), number, shown, at).expect("a volume"));
+            nodes.push(id);
+        }
+        // (As `gpu::instance_features` has them: any medium, a homogeneous one, a grid or a function that reads one.)
+        let reads_grid = !media.is_empty() && sc.volume_fns.iter().any(|(_, code, helpers)| code.contains("vgrid(") || helpers.contains("vgrid("));
+        let bits = if media.is_empty() { 0 } else { gpu::F_MEDIA } | if media.iter().any(|m| m.a[2] != 0) { gpu::F_HMEDIA } else { 0 } | if sc.up.grids.is_some() || reads_grid { gpu::F_GRID } else { 0 };
+        sc.instance_features = sc.instance_features & !(gpu::F_MEDIA | gpu::F_HMEDIA | gpu::F_GRID) | bits;
+        sc.base.time[3] = media.len() as f32;
+        if self.g.put_media(&mut sc.up, &media, nodes) {
+            self.g.rebind_scene(&mut self.sc.up);
+        }
+        self.sc.up.kernel.features = self.kernel_features();
+        Ok(())
     }
 
     /// The scene's kernel with its material functions as they are now, after the commit's materials are made: where

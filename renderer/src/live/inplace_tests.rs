@@ -4537,3 +4537,72 @@ fn a_translucent_particles_material_takes_another_function_in_place() {
     w.set_material(5, glow("fc"));
     check("a function that comes with the edit", &mut live, &mut w);
 }
+
+/// Volumes come, change and go in place, in a scene that had none: a box of haze (a volume function the scene had
+/// not, the scene's first medium), a homogeneous glowing sphere whose function's name sorts before the first's (a
+/// build numbers them by name, the view in the order they came), the first set again with other parameters, moved
+/// where it stood still, hidden and shown, each removed. After each: no rebuild, the kernel's count of media and
+/// its features are a build's of the edited world, the media are that build's nodes, and so is the picture.
+#[test]
+fn volumes_come_and_go_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let function = |name: &str, body: &str| format!("fn vf_{name}(i: VIn, p: array<vec4<f32>, 8>) -> VOut {{\n    var o = VOut(0.0, vec3<f32>(1.0), vec3<f32>(0.0));\n    {body}\n    return o;\n}}\n");
+    let volume = |function: &str, shape: u32, majorant: f32, homogeneous: bool, params: Vec<f32>| Kind::Volume { function: function.into(), params, shape, majorant, g: 0.0, homogeneous, animated: false, grid: None };
+    let mut w = world();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    assert_eq!((live.sc.up.kernel.features & gpu::F_MEDIA, live.sc.base.time[3]), (0, 0.0), "a scene without a medium");
+    let last = std::cell::RefCell::new(picture(&mut live, 24));
+    let check = |what: &str, live: &mut LiveCore, w: &mut World, nodes: &[u32]| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open(w).unwrap();
+        assert_eq!((&live.sc.up.media_nodes[..], live.sc.base.time[3]), (nodes, nodes.len() as f32), "{what}: the media and the kernel's count of them");
+        assert_eq!((&fresh.sc.up.media_nodes[..], fresh.sc.base.time[3]), (nodes, nodes.len() as f32), "{what}: a build's");
+        assert_eq!(*live.sc.up.media_hidden.borrow(), *fresh.sc.up.media_hidden.borrow(), "{what}: which are hidden");
+        let media = gpu::F_MEDIA | gpu::F_HMEDIA | gpu::F_GRID;
+        assert_eq!(live.sc.up.kernel.features & media, fresh.sc.up.kernel.features & media, "{what}: the kernel's media features");
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last.borrow(), &b) > 0.1, "{what}: the picture is {:.2} steps from the one before", apart(&last.borrow(), &b));
+        *last.borrow_mut() = b;
+    };
+    // The scene's first medium, of a function it had not.
+    w.set_volume_fn("haze", function("haze", "o.extinction = p[0].x; o.albedo = vec3<f32>(0.9, 0.6, 0.3);"), String::new());
+    w.set_object(40, "haze".into(), None, volume("haze", 0, 4.0, false, vec![2.5]), true, false).unwrap();
+    w.set_transform(40, Vec3::new(-0.3, 0.0, 1.2), glam::Quat::IDENTITY, Vec3::splat(0.9)).unwrap();
+    check("the scene's first volume", &mut live, &mut w, &[40]);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_MEDIA, 0);
+    // A homogeneous sphere that glows; its function before the first by name.
+    w.set_volume_fn("aglow", function("aglow", "o.extinction = 1.0; o.albedo = vec3<f32>(0.2); o.emission = vec3<f32>(0.2, 1.5, 3.0);"), String::new());
+    w.set_object(41, "glow".into(), None, volume("aglow", 1, 1.0, true, vec![]), true, false).unwrap();
+    w.set_transform(41, Vec3::new(0.6, -0.3, 1.0), glam::Quat::IDENTITY, Vec3::splat(0.7)).unwrap();
+    check("a second volume, homogeneous", &mut live, &mut w, &[40, 41]);
+    assert_ne!(live.sc.up.kernel.features & gpu::F_HMEDIA, 0);
+    // The first set again: thinner.
+    w.set_object(40, "haze".into(), None, volume("haze", 0, 4.0, false, vec![0.6]), true, false).unwrap();
+    assert!(!w.changes.structural, "a volume set again: the media table's");
+    check("the first volume set again", &mut live, &mut w, &[40, 41]);
+    // Moved, where it stood still.
+    w.set_transform(40, Vec3::new(0.2, 0.4, 1.4), glam::Quat::from_rotation_y(0.5), Vec3::splat(0.9)).unwrap();
+    assert!(!w.changes.structural && w.changes.promoted.is_empty(), "a still volume's move: the media table's");
+    check("the first volume moved", &mut live, &mut w, &[40, 41]);
+    // Hidden and shown: its entry keeps its place.
+    w.set_visible(41, false).unwrap();
+    check("the second volume hidden", &mut live, &mut w, &[40, 41]);
+    w.set_visible(41, true).unwrap();
+    check("the second volume shown", &mut live, &mut w, &[40, 41]);
+    // The function's code changed.
+    w.set_volume_fn("haze", function("haze", "o.extinction = p[0].x * 3.0; o.albedo = vec3<f32>(0.3, 0.6, 0.9);"), String::new());
+    check("a volume function's code changed", &mut live, &mut w, &[40, 41]);
+    // Each removed.
+    w.remove(40);
+    check("the first volume removed", &mut live, &mut w, &[41]);
+    w.remove(41);
+    check("every volume removed", &mut live, &mut w, &[]);
+    assert_eq!(live.sc.up.kernel.features & (gpu::F_MEDIA | gpu::F_HMEDIA), 0, "no medium: the kernel without its media code");
+}

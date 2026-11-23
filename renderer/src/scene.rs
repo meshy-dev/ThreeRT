@@ -1020,8 +1020,8 @@ pub struct Skinned {
 }
 
 /// pathtrace.wgsl `Medium`: world -> local affine rows (the unit box / sphere's space), (function, shape or
-/// `MEDIUM_HIDDEN`, homogeneous, animated),
-/// (majorant 1/m, HG anisotropy, -, -), the node's customData, 32 parameter floats.
+/// `MEDIUM_HIDDEN`, homogeneous, animated), (majorant 1/m, HG anisotropy, its density grid's first layer in the atlas
+/// and its cells, as bits: 0 without one), the node's customData, 32 parameter floats.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MediumGpu {
@@ -1050,6 +1050,19 @@ pub struct GridBuild {
 }
 
 /// The world -> local rows of a medium whose node has world matrix `m` (pathtrace.wgsl `Medium.w0..w2`).
+impl MediumGpu {
+    /// A volume's record: the object `o` (a `Kind::Volume`) placed by `m`, its function's number, whether it is shown
+    /// (a hidden one is built with no shape, to be shown in place), and its density grid's place (`grid`: b.zw).
+    pub fn of(o: &world::Object, m: Mat4, function: u32, shown: bool, grid: [f32; 2]) -> Option<MediumGpu> {
+        let Kind::Volume { params, shape, majorant, g, homogeneous, animated, .. } = &o.kind else { return None };
+        let mut p = [0.0f32; 32];
+        for (k, v) in params.iter().take(32).enumerate() {
+            p[k] = *v;
+        }
+        Some(MediumGpu { w: medium_rows(m), a: [function, if shown { *shape } else { MEDIUM_HIDDEN }, *homogeneous as u32, *animated as u32], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), grid[0], grid[1]], c: o.custom, p })
+    }
+}
+
 pub fn medium_rows(m: glam::Mat4) -> [[f32; 4]; 3] {
     let inv = m.inverse();
     [inv.row(0).to_array(), inv.row(1).to_array(), inv.row(2).to_array()]
@@ -2093,15 +2106,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             },
             // (Hidden by its own `visible`: built while the kernel has room after the volumes shown, with no shape,
             // so that showing it is in place: gpu.rs `set_medium_hidden`.)
-            Kind::Volume { function, params, shape, majorant, g, homogeneous, animated, grid } if shown || (w.hidden_built(*id) && media.len() + media_to_show < MAX_MEDIA) => {
+            Kind::Volume { function, shape, grid, .. } if shown || (w.hidden_built(*id) && media.len() + media_to_show < MAX_MEDIA) => {
                 if shown {
                     media_to_show -= 1;
                 }
                 let func = volume_fns.iter().position(|(k, _, _)| k == function).ok_or_else(|| anyhow!("object {}: unknown volume function {function}", n.name))? as u32;
-                let mut p = [0.0f32; 32];
-                for (k, v) in params.iter().take(32).enumerate() {
-                    p[k] = *v;
-                }
                 // Its density grid: where it lies in the atlas and its cells, as bits in b.zw (pathtrace.wgsl `vgrid`).
                 let mut at = [0.0f32; 2];
                 if let Some(gid) = grid {
@@ -2137,7 +2146,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 if media.len() >= MAX_MEDIA {
                     return Err(anyhow!("object {}: more than {MAX_MEDIA} volumes shown at once (the kernel takes {MAX_MEDIA}; the rest would not be drawn)", n.name));
                 }
-                media.push(MediumGpu { w: medium_rows(m), a: [func, if shown { *shape } else { MEDIUM_HIDDEN }, *homogeneous as u32, *animated as u32], b: [majorant.max(0.0), g.clamp(-0.99, 0.99), at[0], at[1]], c: n.custom, p });
+                media.push(MediumGpu::of(n, m, func, shown, at).expect("a volume"));
                 media_nodes.push(*id);
             }
             Kind::Procedural { .. } if shown => {

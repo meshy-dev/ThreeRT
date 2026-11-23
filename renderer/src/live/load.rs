@@ -65,6 +65,9 @@ pub(super) struct LoadedScene {
     pub(super) translucent_mats: Vec<u32>,
     /// The functions of those materials the scene's kernel was made with (`LiveCore::remake_functions`).
     pub(super) translucent_used: std::collections::BTreeSet<i32>,
+    /// The scene's volume functions (name, code, helpers), each at its number: the build's by name, one that came
+    /// while the scene runs after them (`set_volume_functions`).
+    pub(super) volume_fns: Vec<(String, String, String)>,
     /// Where in-place geometry edits write next (`edit_geometry`); a rebuild starts it afresh.
     pub(super) edit: EditState,
     /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
@@ -250,6 +253,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     let shaders = sc.shaders.clone();
+    let volume_fns = sc.volume_fns.clone();
     let mut translucent_mats: Vec<u32> = sc.trans_attrs.iter().map(|a| a.uv[3].to_bits()).collect();
     translucent_mats.sort_unstable();
     translucent_mats.dedup();
@@ -337,5 +341,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

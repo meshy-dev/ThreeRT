@@ -1842,6 +1842,42 @@ impl Kernel {
         functions
     }
 
+    /// A scene's volume functions and their dispatch (pathtrace.wgsl `volume_function`), as they are spliced into the
+    /// kernel: (name, code, helpers) in the order of their numbers.
+    fn volume_functions_of(fns: &[(String, String, String)]) -> String {
+        let mut volume_functions = String::new();
+        if !fns.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            for (_, _, helpers) in fns {
+                if !helpers.is_empty() && seen.insert(helpers.clone()) {
+                    volume_functions.push_str(helpers);
+                    volume_functions.push('\n');
+                }
+            }
+            for (_, code, _) in fns {
+                volume_functions.push_str(code);
+                volume_functions.push('\n');
+            }
+            volume_functions.push_str("fn volume_function(f: u32, i: VIn, p: array<vec4<f32>, 8>) -> VOut {\n    switch f {\n");
+            for (k, (id, _, _)) in fns.iter().enumerate() {
+                volume_functions.push_str(&format!("        case {k}u {{ return vf_{id}(i, p); }}\n"));
+            }
+            volume_functions.push_str("        default { return VOut(0.0, vec3<f32>(1.0), vec3<f32>(0.0)); }\n    }\n}\n");
+        }
+        volume_functions
+    }
+
+    /// This kernel with other volume functions (one that came or changed while the scene runs): another module.
+    pub fn with_volume_functions(&self, fns: &[(String, String, String)]) -> Kernel {
+        use std::hash::{Hash, Hasher};
+        let volume_functions = legacy_wgsl(Kernel::volume_functions_of(fns));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.functions.hash(&mut h);
+        volume_functions.hash(&mut h);
+        self.geometry_functions.hash(&mut h);
+        Kernel { volume_functions, hash: h.finish(), ..self.clone() }
+    }
+
     /// This kernel with other material functions (a function added or changed while the scene runs): another module
     /// (`hash`), the volume and geometry functions as they are.
     pub fn with_material_functions(&self, shaders: &[(String, String, String)], translucent: &std::collections::BTreeSet<i32>) -> Kernel {
@@ -1858,25 +1894,7 @@ impl Kernel {
         // (The translucency pass's functions: those of its particles' materials.)
         let used: std::collections::BTreeSet<i32> = scene.trans_attrs.iter().filter_map(|a| scene.materials.get(a.uv[3].to_bits() as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
         let functions = Kernel::material_functions(&scene.shaders, &used);
-        let mut volume_functions = String::new();
-        if !scene.volume_fns.is_empty() {
-            let mut seen = std::collections::HashSet::new();
-            for (_, _, helpers) in &scene.volume_fns {
-                if !helpers.is_empty() && seen.insert(helpers.clone()) {
-                    volume_functions.push_str(helpers);
-                    volume_functions.push('\n');
-                }
-            }
-            for (_, code, _) in &scene.volume_fns {
-                volume_functions.push_str(code);
-                volume_functions.push('\n');
-            }
-            volume_functions.push_str("fn volume_function(f: u32, i: VIn, p: array<vec4<f32>, 8>) -> VOut {\n    switch f {\n");
-            for (k, (id, _, _)) in scene.volume_fns.iter().enumerate() {
-                volume_functions.push_str(&format!("        case {k}u {{ return vf_{id}(i, p); }}\n"));
-            }
-            volume_functions.push_str("        default { return VOut(0.0, vec3<f32>(1.0), vec3<f32>(0.0)); }\n    }\n}\n");
-        }
+        let volume_functions = Kernel::volume_functions_of(&scene.volume_fns);
         let mut geometry_functions = String::new();
         if !scene.geometry_fns.is_empty() {
             let mut seen = std::collections::HashSet::new();
@@ -3624,6 +3642,29 @@ impl Gpu {
             up.heap.write(&self.queue, Table::Media, at as u64, bytemuck::bytes_of(&if hide { crate::scene::MEDIUM_HIDDEN } else { shape }));
         }
         found
+    }
+
+    /// The media table as `media` (each one's node in `nodes`), in place: volumes that came, went or were set again
+    /// while the scene runs. Whether the table is another buffer now (it grew: the bind groups hold the old one).
+    pub fn put_media(&self, up: &mut Uploaded, media: &[crate::scene::MediumGpu], nodes: Vec<u32>) -> bool {
+        let bytes: &[u8] = bytemuck::cast_slice(media);
+        let grew = bytes.len() as u64 > up.heap.cap(Table::Media);
+        if grew {
+            up.heap.grow(&self.device, &self.queue, Table::Media, bytes.len() as u64);
+        }
+        if !bytes.is_empty() {
+            up.heap.write(&self.queue, Table::Media, 0, bytes);
+        }
+        up.media_hidden = std::cell::RefCell::new(media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect());
+        up.media_nodes = nodes;
+        grew
+    }
+
+    /// Where density grid `id` lies in the uploaded scene's atlas, as a medium's record has it (b.zw: its first
+    /// layer, its cells; bits), if the atlas has it.
+    pub fn grid_place(&self, up: &Uploaded, id: u32) -> Option<[f32; 2]> {
+        let g = up.grids.as_ref()?.grids.iter().find(|g| g.id == id)?;
+        Some([f32::from_bits(g.z0), f32::from_bits(g.dims[0] | g.dims[1] << 10 | g.dims[2] << 20)])
     }
 
     pub fn set_medium(&self, up: &Uploaded, node: u32, rows: Option<[[f32; 4]; 3]>, custom: Option<[f32; 4]>) {
