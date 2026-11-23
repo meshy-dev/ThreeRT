@@ -701,7 +701,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
             d.finals = (0..d.mats.len() as u32).map(|j| finals[&(d.first + j)]).collect();
         }
         // A particle system's triangles stay together (one group, the order within a group is the build order).
-        for ps in sc.particles.iter_mut().filter(|p| !p.translucent) {
+        for ps in sc.particles.iter_mut().filter(|p| !p.translucent && p.mesh == u32::MAX) {
             ps.final_first = finals[&ps.first];
             debug_assert!((0..ps.count * 2).all(|j| finals[&(ps.first + j)] == ps.final_first + j));
         }
@@ -953,6 +953,8 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
     meshes.sort_by_key(|&m| sc.meshes[m].first);
+    // (A particle system's mesh: quads the pass writes.)
+    let quads: std::collections::HashSet<u32> = sc.particles.iter().map(|p| p.mesh).collect();
     // (A skinned mesh with its source: the model's vertices are found with its first mesh.)
     let scopes: Vec<(indexed::Scope, Option<u32>)> = meshes
         .par_iter()
@@ -962,6 +964,7 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
             let (tris, attrs) = (&sc.pool_tris[r.clone()], &sc.attrs[pool_first + r.start..pool_first + r.end]);
             match source_of.get(&(m as u32)).copied().filter(|&s| im.deforms && sc.skin_sources[s as usize].len() == tris.len()) {
                 Some(s) => (indexed::shared_skinned(&sc.skin_sources[s as usize], tris, attrs), Some(s)),
+                None if quads.contains(&(m as u32)) => (indexed::quads(tris, attrs), None),
                 None => (indexed::shared(tris, attrs), None),
             }
         })

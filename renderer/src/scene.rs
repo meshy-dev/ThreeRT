@@ -94,13 +94,20 @@ pub const MESH_SECTIONS: usize = 1 << 16;
 
 /// An instance's row for a section of its mesh, as the kernel reads it (the words' heap, heap.rs `Stream::Rows`):
 /// the material with the class bits `ROW_*`, the section's first triangle in the triangles' table, its first emitter in
-/// the light list (`NO_EMITTER`: it does not emit), and a word to spare.
+/// the light list (`NO_EMITTER`: it does not emit), and a word the kernel does not read (`ROW_UNSAMPLED`).
 pub type Row = [u32; 4];
 pub const ROW_MATERIAL: u32 = 0xff_ffff;
 /// The material is alpha-tested; it is glass (shadow rays pass).
 pub const ROW_CUTOUT: u32 = 1 << 24;
 pub const ROW_GLASS: u32 = 1 << 25;
 pub const NO_EMITTER: u32 = u32::MAX;
+/// In a row's last word: the section's triangles are not in the light list although its material may emit (a
+/// particle system the lights are not sampled by: its emission reaches surfaces by their BSDF rays alone).
+pub const ROW_UNSAMPLED: u32 = 1;
+/// Whether a row's section is in the light list.
+fn row_emits(r: &Row, materials: &[GpuMaterial]) -> bool {
+    r[3] & ROW_UNSAMPLED == 0 && materials.get(row_material(r) as usize).is_some_and(emissive)
+}
 
 /// The row of a section drawn with material `mat`; where its triangles and its emitters are is set where the tables
 /// are laid out (lib.rs `prepare`, the live edits).
@@ -129,7 +136,7 @@ pub fn rows_bits(rows: &[Row]) -> u32 {
 /// How many emitters an instance with these rows has in the light list: every triangle of its sections whose
 /// material emits, a section after another, a section's in its triangles' order (`section_emitters`).
 pub fn rows_emitters(sections: &[Section], rows: &[Row], materials: &[GpuMaterial]) -> u32 {
-    sections.iter().zip(rows).filter(|(_, r)| materials.get(row_material(r) as usize).is_some_and(emissive)).map(|(s, _)| s.count).sum()
+    sections.iter().zip(rows).filter(|(_, r)| row_emits(r, materials)).map(|(s, _)| s.count).sum()
 }
 
 /// A triangle's place among its instance's emitters, its material and its section, from its attributes (its
@@ -147,7 +154,7 @@ pub fn section_emitters(sections: &[Section], rows: &[Row], materials: &[GpuMate
         .iter()
         .zip(rows)
         .map(|(s, r)| {
-            materials.get(row_material(r) as usize).is_some_and(emissive).then(|| {
+            row_emits(r, materials).then(|| {
                 at += s.count;
                 at - s.count
             })
@@ -288,8 +295,11 @@ pub const INST_CUTOUT: u32 = 16;
 pub const INST_GLASS: u32 = 32;
 /// Its mesh deforms (a posed skinned model's): its motion is its vertices' too (`Instance::prev`).
 pub const INST_DEFORMS: u32 = 64;
+/// Its mesh is a particle system's (`ParticleSystem::mesh`): a quad a particle, and an object a particle from the
+/// record's on (a hit's object is its triangle's index in the mesh / 2 past it).
+pub const INST_PARTICLES: u32 = 128;
 /// Every bit of n1.w that is the instance's own, not a unit's.
-pub const INST_BITS: u32 = INST_MIRRORED | INST_CUTOUT | INST_GLASS | INST_DEFORMS;
+pub const INST_BITS: u32 = INST_MIRRORED | INST_CUTOUT | INST_GLASS | INST_DEFORMS | INST_PARTICLES;
 
 /// Whether a placement mirrors what it places (a negative determinant).
 pub fn mirrors(w: Mat4) -> bool {
@@ -1100,11 +1110,15 @@ pub fn medium_rows(m: glam::Mat4) -> [[f32; 4]; 3] {
     [inv.row(0).to_array(), inv.row(1).to_array(), inv.row(2).to_array()]
 }
 
-/// `count` particles, each a quad (two triangles from `first`, build order; `final_first` in the GPU order after
-/// `prepare`, hardware RT) and its own object (from `object`: pivot, bounds, per-particle data), placed every frame by
-/// particle function `func` with `params` (8 vec4).
+/// `count` particles, each a quad and its own object (from `object`: pivot, bounds, per-particle data), placed every
+/// frame by particle function `func` with `params` (8 vec4). The quads are a mesh of the system's own, which one
+/// instance places as the pass writes it (`mesh`), or two world-space triangles each (from `first`, build order;
+/// `final_first` in the GPU order after `prepare`, hardware RT).
 #[derive(Clone, Debug)]
 pub struct ParticleSystem {
+    /// Its mesh among the instanced ones (four vertices and two triangles a particle, written by the pass in the
+    /// world: its instance does not place it); `u32::MAX`: world-space triangles (`first`).
+    pub mesh: u32,
     /// Drawn by the translucency pass: `first` / `final_first` index the translucent triangles (`Scene::trans_tris`,
     /// from `trans_first` on the GPU).
     pub translucent: bool,
@@ -2174,6 +2188,33 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let object = (objects.len() / stride) as u32;
                 let corners = [[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 0.0)], [Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]];
                 let translucent = w.materials.get(material).is_some_and(|m| m.transparent);
+                let mut pf = [0.0f32; 32];
+                for (k, v) in params.iter().take(32).enumerate() {
+                    pf[k] = *v;
+                }
+                // A system the kernel traces as any geometry: a mesh of its own in the pool, a quad a particle, and one
+                // instance of it. The pass writes its vertices where the particles are (the instance places nothing),
+                // and its BLAS is built again after the pass. (Not yet one the lights are sampled by, nor a
+                // translucent one.)
+                if instancing && !translucent && *emitter_area <= 0.0 {
+                    let pfirst = pool_tris.len() as u32;
+                    for k in 0..*count {
+                        for (j, uv) in corners.into_iter().enumerate() {
+                            pool_tris.push([p; 3]);
+                            pool_attrs.push(section_attr([Vec3::Z; 3], uv, Some([(Vec3::X, 1.0); 3]), 0, k * 2 + j as u32));
+                        }
+                        objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
+                    }
+                    meshes.push(InstMesh { deforms: true, sect_first: sections.len() as u32, sect_count: 1, ..own_inst_mesh(&pool_tris[pfirst as usize..], pfirst) });
+                    let mesh = meshes.len() as u32 - 1;
+                    sections.push(Section { first: 0, count: count * 2, slot: 0 });
+                    let mut mine = [row_of(mat, &materials)];
+                    mine[0][3] = ROW_UNSAMPLED;
+                    instances.push(Instance { mesh, world: Mat4::IDENTITY, object, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine) | INST_PARTICLES, prev: 0, verts: 0 });
+                    rows.extend(mine);
+                    particles.push(ParticleSystem { mesh, translucent, first: 0, final_first: 0, count: *count, object, func, params: pf, flags, seed: *id, custom: n.custom, hidden: !shown });
+                    continue;
+                }
                 let first = if translucent { trans_tris.len() as u32 } else { first };
                 for k in 0..*count {
                     for uv in corners {
@@ -2193,11 +2234,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     }
                     objects.extend_from_slice(&object_row(pivot, n.power, Vec3::ZERO, n.custom, [1.0; 3])[..stride]);
                 }
-                let mut pf = [0.0f32; 32];
-                for (k, v) in params.iter().take(32).enumerate() {
-                    pf[k] = *v;
-                }
-                particles.push(ParticleSystem { translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom, hidden: !shown });
+                particles.push(ParticleSystem { mesh: u32::MAX, translucent, first, final_first: first, count: *count, object, func, params: pf, flags: flags | TRI_DYNAMIC, seed: *id, custom: n.custom, hidden: !shown });
                 if !translucent {
                     tri_nodes.push((n.name.clone(), first, tris.len() as u32));
                 }

@@ -1,7 +1,8 @@
 //! The scene's geometry as the GPU holds it: vertices kept once, a triangle three indices and a row. The build still
 //! makes triangles with corners of their own (`Scene::tris`, `attrs`); what they share is found here, scope by scope:
-//! a mesh's triangles share within the mesh, the still world-space triangles among themselves, and what a pass or the
-//! CPU writes whole each frame (the dynamic world-space triangles, particles) has three vertices a triangle.
+//! a mesh's triangles share within the mesh, the still world-space triangles among themselves, what a pass or the
+//! CPU writes whole each frame (the dynamic world-space triangles, world-space particles) has three vertices a
+//! triangle, and a particle system's mesh four a quad.
 
 use crate::scene::GpuTriAttr;
 use glam::Vec3A;
@@ -131,6 +132,21 @@ pub fn apart(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
             s.vertices.push([[p.x, p.y, p.z, uv[0]], [n[0], n[1], n[2], uv[1]], tangent]);
         }
         s.indices.push([k as u32 * 3, k as u32 * 3 + 1, k as u32 * 3 + 2]);
+    }
+    s
+}
+
+/// A particle system's quads (two triangles each, the second the first's first and third corners and its own
+/// third) as four vertices a quad, in the order the particle pass writes them.
+pub fn quads(tris: &[[Vec3A; 3]], attrs: &[GpuTriAttr]) -> Scope {
+    let mut s = Scope::default();
+    for (q, (t, a)) in tris.chunks_exact(2).zip(attrs.chunks_exact(2)).enumerate() {
+        for (k, c) in [(0, 0), (0, 1), (0, 2), (1, 2)] {
+            let (p, (n, uv, tangent)) = (t[k][c], corner(&a[k], c));
+            s.vertices.push([[p.x, p.y, p.z, uv[0]], [n[0], n[1], n[2], uv[1]], tangent]);
+        }
+        let v = q as u32 * 4;
+        s.indices.extend([[v, v + 1, v + 2], [v, v + 2, v + 3]]);
     }
     s
 }
