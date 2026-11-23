@@ -1419,11 +1419,17 @@ impl KernelSwitches {
     }
 }
 
-/// The kernel's runtime checks: none (all indices come from our own BVH / scene builder). THREERT_CHECKED turns naga's
-/// on to diagnose a driver: 1 = every check, else a mask (2 bounds, 4 loop bounding, 8 ray-query initialization
-/// tracking).
+/// The kernel's runtime checks: loop bounding alone, wgpu's default for it (every loop has a count its compiler can
+/// see the end of). The kernel's loops end on sound data, which does not promise a compiler that they end; without
+/// the bound, kernels Metal's compiler made lost the state of whole SIMD groups on a scene with cutouts, one build and
+/// not the next. No bounds checks: all indices come from our own BVH / scene builder. THREERT_CHECKED, to diagnose a
+/// driver: 0 = none, 1 = every check, else a mask (2 bounds, 4 loop bounding, 8 ray-query initialization tracking).
 fn kernel_checks() -> wgpu::ShaderRuntimeChecks {
-    let v: u32 = std::env::var("THREERT_CHECKED").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    kernel_checks_of(std::env::var("THREERT_CHECKED").ok().and_then(|v| v.parse().ok()))
+}
+
+fn kernel_checks_of(asked: Option<u32>) -> wgpu::ShaderRuntimeChecks {
+    let v = asked.unwrap_or(4);
     if v == 1 {
         return wgpu::ShaderRuntimeChecks::checked();
     }
@@ -4265,6 +4271,13 @@ mod tests {
         }
         wesl_wgsl(include_str!("../shaders/grid_sim.wgsl"), &[], &[]);
         wesl_wgsl(include_str!("../shaders/skin.wgsl"), &[], &[]);
+    }
+
+    /// The kernel is compiled with its loops bounded and nothing else checked, unless asked.
+    #[test]
+    fn the_kernels_loops_are_bounded() {
+        let of = |v| { let c = kernel_checks_of(v); (c.force_loop_bounding, c.bounds_checks, c.ray_query_initialization_tracking) };
+        assert_eq!([of(None), of(Some(0)), of(Some(1)), of(Some(2)), of(Some(12))], [(true, false, false), (false, false, false), (true, true, true), (false, true, false), (true, false, true)]);
     }
 
     /// The skinning pass is valid WGSL, and its block size and dispatch row are the ones the CPU lays its work out by.

@@ -2776,6 +2776,16 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**The kernel's loops are bounded (2026-11-23).** The kernel was the one shader compiled without wgpu's loop
+bounding (every loop given a count its compiler can see the end of); every other pass has it. Its loops end on
+sound data, which is no promise to a compiler that they end. Without the bound, the kernels Metal's compiler made
+lost the state of whole SIMD groups (8 × 4 pixels) on the home showcase, a scene with cutouts, one build and not the
+next. Nine builds of this kernel that differ by a statement that changes nothing (a counter, a
+branch never taken), under the loop guard: in six the guard stopped 14 to 43 invocations a run; with the bound, in
+none. Five builds of the next change's kernel (triangles as vertices and indices) drew 94,000 to 112,000 of the
+picture's 518,400 pixels wrong without the guard; with the bound each drew the right picture. Bounds checks and
+ray-query tracking, turned on alone, changed nothing and stay off. `THREERT_CHECKED=0` is the kernel as it was.
+
 **A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
 choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
 its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it
