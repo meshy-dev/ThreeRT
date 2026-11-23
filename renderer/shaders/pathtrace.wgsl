@@ -71,6 +71,7 @@ fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
 override FEAT: u32 = 0xffffffffu;
 const F_MASKED: u32 = 1u;
+const F_PART: u32 = 1024u; // a particle system's mesh among the instances: a hit's object is its particle's (`tri_data`)
 const F_FOG: u32 = 64u;
 const F_VOLUME: u32 = 128u;
 const F_TEX: u32 = 256u;
@@ -299,9 +300,10 @@ fn inst_sign(r: Instance) -> f32 { return select(1.0, -1.0, (bitcast<u32>(r.n1.w
 fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(vec3<f32>(dot(r.n0.xyz, n.xyz), dot(r.n1.xyz, n.xyz), dot(r.n2.xyz, n.xyz))), n.w);
 }
-// A model-space triangle's `x` as its instance has it: the instance's object (the record's `info`).
+// A model-space triangle's `x` as its instance has it: the instance's object (the record's `info`), and for a
+// particle system's mesh the particle's past it (`tri_data` has which; 0 for every other mesh).
 fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(x.x, bitcast<f32>(info.y), x.z, x.w);
+    return vec4<f32>(x.x, bitcast<f32>(info.y + bitcast<u32>(x.y)), x.z, x.w);
 }
 // An instance's rows (scene.rs `Row`): four words a section of its mesh, from the record's info.w on. The material
 // with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). Which section
@@ -310,6 +312,8 @@ fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
 const INST_CUTOUT: u32 = 16u;
 const INST_GLASS: u32 = 32u;
 const INST_DEFORMS: u32 = 64u;
+// The instance's mesh is a particle system's: two triangles and an object a particle, from the record's object on.
+const INST_PARTICLES: u32 = 128u;
 const ROW_MATERIAL: u32 = 0xffffffu;
 const ROW_CUTOUT: u32 = 0x1000000u;
 const ROW_GLASS: u32 = 0x2000000u;
@@ -356,7 +360,14 @@ struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32>, vi: ve
 fn tri_data(ti: u32, inst: u32, part: u32) -> TriData {
     var base = 0u;
     var row = vec4<u32>(part, 0u, 0u, 0u);
-    if (has(F_INST) && inst != NO_INST) { base = instance_at(inst).info.z; } else { row = tri_row(part); }
+    if (has(F_INST) && inst != NO_INST) {
+        let r = instance_at(inst);
+        base = r.info.z;
+        // A particle system's mesh: which particle the triangle is (two each, from the mesh's first).
+        if (has(F_PART) && (bitcast<u32>(r.n1.w) & INST_PARTICLES) != 0u) { row.y = (ti - r.info.x) >> 1u; }
+    } else {
+        row = tri_row(part);
+    }
     let i = (tri_indices(ti) + vec3<u32>(base)) * VERTEX_VEC4;
     let p0 = vertices[i.x];
     let p1 = vertices[i.y];

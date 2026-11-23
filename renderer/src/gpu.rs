@@ -554,8 +554,10 @@ pub struct ParticleGpu {
     max_count: u32,
     /// Not run yet: the first run's motion vectors are zero (no last frame).
     fresh: std::cell::Cell<bool>,
-    /// Some systems are opaque (in the scene's dynamic BLASes, rebuilt every frame).
+    /// Some systems are opaque world-space triangles (in the scene's dynamic BLASes, rebuilt every frame).
     opaque: bool,
+    /// The systems' own meshes (`scene::ParticleSystem::mesh`): each one's BLAS is built again after the pass.
+    meshes: Vec<u32>,
     /// Per system: its particle count, whether the translucency pass draws it, and its state when hidden or shown in
     /// place (`set_particles_hidden`): `Shown`; `Collapse` (this frame's pass collapses its quads), `Collapsed` (zero
     /// its count next frame), `Idle`; `Showing` (this frame's pass is its first: no motion vectors), `ShowRan` (clear
@@ -1939,6 +1941,8 @@ pub const A_LIVE: u32 = 31;
 
 // Kernel features (`override FEAT` in pathtrace.wgsl).
 pub const F_MASKED: u32 = 1;
+/// A particle system's mesh among the instances (`scene::INST_PARTICLES`): a hit on one has its particle's object.
+pub const F_PART: u32 = 1024;
 pub const F_FOG: u32 = 64;
 pub const F_VOLUME: u32 = 128;
 pub const F_TEX: u32 = 256;
@@ -2076,7 +2080,9 @@ pub fn instance_features(scene: &Scene) -> u32 {
     let iglass = if mixed_glass { F_IGLASS } else { 0 };
     let masked = any_row(crate::scene::ROW_CUTOUT);
     let deform = if scene.meshes.iter().any(|m| m.deforms) { F_DEFORM } else { 0 };
-    media | particles | ifunc | iglass | deform | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
+    // (Hardware traversal's: the particle passes run with it alone, and software traversal has such a mesh flat.)
+    let part = if scene.units.is_none() && scene.particles.iter().any(|p| p.mesh != u32::MAX) { F_PART } else { 0 };
+    media | particles | ifunc | iglass | deform | part | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
@@ -2988,7 +2994,12 @@ impl Gpu {
                         let mut p = [0.0f32; 32];
                         p.copy_from_slice(&ps.params);
                         // (A system hidden at build runs nothing: its quads stay collapsed at the node.)
-                        ParticleSystemGpu { a: [vertex_of(ps.final_first, ps.translucent), if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, ps.translucent as u32, 0], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
+                        // (Its first vertex: its mesh's, four a particle; or its first world-space triangle's, six.)
+                        let (first, quads) = match ix.meshes.get(ps.mesh as usize) {
+                            Some(m) => (m.0, 1),
+                            None => (vertex_of(ps.final_first, ps.translucent), 0),
+                        };
+                        ParticleSystemGpu { a: [first, if ps.hidden { 0 } else { ps.count }, ps.object, ps.func], b: [ps.seed, ix.dynamic.0, ps.translucent as u32, quads], c: [o[0], o[1], o[2], 0.0], p, d: ps.custom }
                     })
                     .collect();
                 // COPY_DST: pivot updates (`set_particle_pivot`).
@@ -2998,11 +3009,12 @@ impl Gpu {
                 let written = ParticleTargets { vertices: &b_vertices, prev_vertices: &b_prev, heap: &heap };
                 let pbg = particle_bind_group(d, &pipeline, "particles", &[(0, &params), (1, &b_sys), (7, &last)], &written);
                 let nodes = scene.particles.iter().map(|p| p.seed).collect();
-                let opaque = scene.particles.iter().any(|p| !p.translucent);
+                let opaque = scene.particles.iter().any(|p| !p.translucent && p.mesh == u32::MAX);
+                let meshes = scene.particles.iter().map(|p| p.mesh).filter(|m| *m != u32::MAX).collect();
                 let counts = scene.particles.iter().map(|p| p.count).collect();
                 let translucent_sys = scene.particles.iter().map(|p| p.translucent).collect();
                 let hidden = std::cell::RefCell::new(scene.particles.iter().map(|p| if p.hidden { Hidden::Idle } else { Hidden::Shown }).collect());
-                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, last, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, counts, translucent: translucent_sys, hidden })
+                Some(ParticleGpu { pipeline, stamp, bg: pbg, params, table: b_sys, last, nodes, systems: systems.len() as u32, max_count: scene.particles.iter().map(|p| p.count).max().unwrap_or(0), fresh: std::cell::Cell::new(true), opaque, meshes, counts, translucent: translucent_sys, hidden })
             }
             _ => None,
         };
@@ -3246,8 +3258,14 @@ impl Gpu {
         if let Some((q, i)) = blas_ts {
             stamp(e, wgpu::ComputePassTimestampWrites { query_set: q, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(i) });
         }
-        if p.opaque {
-            self.rebuild_dynamic(accel, e);
+        // What the pass placed, above the triangles: the systems' meshes; the dynamic groups for world-space systems
+        // (and for the stateful particles, which leave them to this pass).
+        let mut entries = mesh_entries(accel, &p.meshes);
+        if p.opaque || up.gpu_particles.is_some() {
+            entries.extend(dynamic_entries(accel));
+        }
+        if !entries.is_empty() {
+            e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
         }
         if let Some(t) = &up.translucent {
             t.build(e);
@@ -3509,6 +3527,11 @@ impl Gpu {
             }
         }
         found
+    }
+
+    /// Whether a particle system's mesh is among the instances (they move every frame: motion vectors).
+    pub fn particle_meshes(up: &Uploaded) -> bool {
+        up.particles.as_ref().is_some_and(|p| !p.meshes.is_empty())
     }
 
     /// Whether the translucency pass has anything to draw: a translucent system shown (or collapsing).
@@ -4326,7 +4349,7 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
-            ("F_DEFORM", F_DEFORM),
+            ("F_DEFORM", F_DEFORM), ("F_PART", F_PART),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

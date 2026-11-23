@@ -1,9 +1,9 @@
 // Particle pass (gpu.rs `ParticleGpu`): every frame, before the trace, each particle system's particle function places
-// its particles. A particle is a quad of two dynamic triangles (scene.rs `ParticleSystem`) and its own object (pivot,
-// bounds, per-particle data for material functions). The pass writes the kernel's triangle data (positions and shading
-// attributes), last frame's positions as `prev_verts` (motion vectors; from its own copy `last`, since a repose
-// re-uploads the dynamic tail from the CPU), the BLAS input vertices and the objects; the dynamic BLASes are rebuilt
-// after it.
+// its particles. A particle is a quad (scene.rs `ParticleSystem`: of the system's own mesh, or two dynamic world-space
+// triangles) and its own object (pivot, bounds, per-particle data for material functions). The pass writes the
+// vertices (positions and shading attributes; the BLASes are built from them), last frame's positions as `prev_verts`
+// (motion vectors; from its own copy `last`, since a repose re-uploads the dynamic tail from the CPU) and the
+// objects; the systems' BLASes and the dynamic groups' are rebuilt after it.
 //
 // A particle function is a WGSL body (`ParticleFunction` in @threert/scene) run per particle:
 //     fn pf_<name>(i: PIn, p: array<vec4<f32>, 8>) -> POut { var o = POut(...); <code> return o; }
@@ -41,8 +41,9 @@ struct PP {
 
 // (`TriAttr`: records.wgsl.)
 
-// a: (its first vertex (six a particle), count, first object, function); b: (seed, the first vertex that moves,
-// translucent (1: its triangles are the translucency pass's), -); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
+// a: (its first vertex, count, first object, function); b: (seed, the first vertex that moves, translucent (1: its
+// triangles are the translucency pass's), 1: a mesh of its own, four vertices a particle (else two world-space
+// triangles, six)); c: the node's pivot, w: 1 collapse every particle (the system was just hidden), 2 its first run since it
 // was shown (no last frame: motion vectors 0) (gpu.rs `set_particles_hidden`); p: parameters; d: the node's customData.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, p: array<vec4<f32>, 8>, d: vec4<f32> };
 
@@ -92,6 +93,19 @@ fn put_tri(v: u32, dyn_first: u32, trans: bool, a: vec3<f32>, b: vec3<f32>, c: v
     }
 }
 
+// One vertex of a system's mesh: its position, the last frame's as the previous position, its normal and tangent.
+fn put_vertex(v: u32, dyn_first: u32, p: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, first: bool) {
+    let i = v * 3u;
+    // (The w's hold the uv, left as built.)
+    vertices[i] = vec4<f32>(p, vertices[i].w);
+    vertices[i + 1u] = vec4<f32>(n, vertices[i + 1u].w);
+    vertices[i + 2u] = vec4<f32>(tg, 1.0);
+    let j = v - dyn_first;
+    let now = vec4<f32>(p, 0.0);
+    prev_verts[j * 3u] = select(last[j], now, first);
+    last[j] = now;
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = systems[gid.y];
@@ -125,11 +139,20 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let area = length(uxv);
     let n = select(vec3<f32>(0.0, 0.0, 1.0), uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(o.u), dot(o.u, o.u) > 1e-24);
-    let t = s.a.x + 6u * k;
     let trans = s.b.z == 1u;
     let first = PPS.env.z > 0.5 || s.c.w > 1.5;
-    put_tri(t, s.b.y, trans, c00, c10, c11, n, tg, first);
-    put_tri(t + 3u, s.b.y, trans, c00, c11, c01, n, tg, first);
+    if (s.b.w == 1u) {
+        // Its mesh's quad: the corners in the order the build indexed them.
+        let t = s.a.x + 4u * k;
+        put_vertex(t, s.b.y, c00, n, tg, first);
+        put_vertex(t + 1u, s.b.y, c10, n, tg, first);
+        put_vertex(t + 2u, s.b.y, c11, n, tg, first);
+        put_vertex(t + 3u, s.b.y, c01, n, tg, first);
+    } else {
+        let t = s.a.x + 6u * k;
+        put_tri(t, s.b.y, trans, c00, c10, c11, n, tg, first);
+        put_tri(t + 3u, s.b.y, trans, c00, c11, c01, n, tg, first);
+    }
     let oi = (s.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(o.center, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(2.0 * (abs(o.u) + abs(o.v)), objects[oi + 1u].w);

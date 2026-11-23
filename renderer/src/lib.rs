@@ -1828,6 +1828,52 @@ mod units_tests {
         }
     }
 
+    /// A particle system the lights are not sampled by is a mesh of its own and one instance of it: two triangles
+    /// and four vertices a particle (a quad's corners once each, in the order the pass writes them), among the
+    /// vertices that move; the instance places nothing, has the system's first object, and a row that keeps its
+    /// material's emission out of the light list. One the lights are sampled by is world-space triangles still.
+    /// Under software traversal no kernel asks for a particle's object. No GPU.
+    #[test]
+    fn a_particle_system_is_a_mesh_of_quads_and_an_instance() {
+        let mut w = world(true);
+        w.set_material(7, serde_json::from_value(serde_json::json!({ "name": "spark", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 0.5, 0.2], "emissiveIntensity": 20, "doubleSided": true })).unwrap());
+        w.set_particle_fn("rise", "fn pf_rise(i: PIn, p: array<vec4<f32>, 8>) -> POut { return POut(i.pivot + vec3<f32>(f32(i.index), i.time, 0.0), vec3<f32>(0.1, 0.0, 0.0), vec3<f32>(0.0, 0.1, 0.0), true, vec4<f32>(0.0)); }".into(), String::new());
+        for (id, count, emitter_area) in [(40, 3, 0.0), (41, 2, 0.09)] {
+            w.set_object(id, format!("sparks{id}"), None, Kind::Particles { count, emitter: "rise".into(), params: vec![], material: 7, emitter_area }, true, false).unwrap();
+            w.set_transform(id, Vec3::new(0.3, 0.2, 1.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
+        for (what, hwrt, units) in [("units", false, true), ("hardware traversal", true, false)] {
+            let mut sc = scene::build(&w, std::path::Path::new(".."), &default_presets_dir(), None).unwrap();
+            let p = prepare_as(hwrt, units, &mut sc, &mut vec![]);
+            let (own, sampled) = (&sc.particles[0], &sc.particles[1]);
+            assert_eq!((own.count, sampled.count, sampled.mesh), (3, 2, u32::MAX), "{what}: a system the lights are sampled by is world-space triangles");
+            let part = gpu::instance_features(&sc) & gpu::F_PART;
+            if !hwrt {
+                assert_eq!(part, 0, "{what}: no kernel asks for a particle's object");
+                continue;
+            }
+            assert_ne!(part, 0, "{what}: the kernel asks for a particle's object");
+            let (m, v) = (sc.meshes[own.mesh as usize], sc.indexed.meshes[own.mesh as usize]);
+            assert_eq!((m.count, m.deforms, m.sect_count, v.1), (6, true, 1, 12), "{what}: two triangles and four vertices a particle");
+            let pool_first = sc.attrs.len() - sc.pool_tris.len() - sc.trans_tris.len();
+            let tris = &sc.indexed.indices[pool_first + m.first as usize..][..6];
+            assert_eq!(tris, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [8, 9, 10], [8, 10, 11]], "{what}: a quad's corners once each");
+            let uv = |k: u32| [sc.indexed.vertices[(v.0 + k) as usize][0][3], sc.indexed.vertices[(v.0 + k) as usize][1][3]];
+            assert_eq!([uv(4), uv(5), uv(6), uv(7)], [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]], "{what}: in the order the pass writes them");
+            assert!(v.0 >= sc.indexed.dynamic.0 && v.0 + v.1 <= sc.indexed.dynamic.0 + sc.indexed.dynamic.1, "{what}: among the vertices that move");
+            let of: Vec<&scene::Instance> = sc.instances.iter().filter(|i| i.mesh == own.mesh).collect();
+            assert_eq!(of.len(), 1, "{what}: one instance");
+            let i = of[0];
+            assert_eq!((i.world, i.object, i.bits & scene::INST_PARTICLES, i.prev), (glam::Mat4::IDENTITY, own.object, scene::INST_PARTICLES, v.0 - sc.indexed.dynamic.0), "{what}: it places nothing; the first particle's object; where its previous positions are");
+            let row = sc.rows[i.rows as usize];
+            assert_eq!((row[2], row[3]), (scene::NO_EMITTER, scene::ROW_UNSAMPLED), "{what}: its emission is not in the light list");
+            assert!(p.emitter_tris.iter().all(|e| e.inst == NO_INST || sc.instances[e.inst as usize].mesh != own.mesh), "{what}: no emitter of it");
+            // (The one the lights are sampled by: world-space triangles that move, with emitters.)
+            assert_eq!(sc.tri_flags.iter().filter(|f| **f & scene::TRI_DYNAMIC != 0).count(), 4, "{what}: the sampled system's four triangles");
+            assert_eq!(p.emitter_tris.iter().filter(|e| e.nominal).count(), 4, "{what}: its emitters, by a nominal area");
+        }
+    }
+
     /// The same with no still triangle at all: the still tree is then the leaf of one triangle (bvh.rs `EMPTY`), and
     /// that triangle must be one no ray meets, not the first of the units' (a mesh's, in its model space). First seen
     /// on a GPU: `geometry/instanced`, two planes, darker towards a triangle standing at the origin.
