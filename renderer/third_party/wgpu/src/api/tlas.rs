@@ -116,6 +116,7 @@ impl Tlas {
     }
 
     /// ThreeRT patch: the changed range, taken (a build's).
+    #[cfg(wgpu_core)]
     pub(crate) fn take_dirty(&self) -> Range<u32> {
         let lo = self.dirty_lo.swap(u32::MAX, Ordering::Relaxed);
         let hi = self.dirty_hi.swap(0, Ordering::Relaxed).min(self.instances.len() as u32);
