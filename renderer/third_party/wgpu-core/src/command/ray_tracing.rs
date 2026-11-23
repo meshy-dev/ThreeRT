@@ -2,7 +2,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{
     cmp::max,
     num::NonZeroU64,
-    ops::{Deref, Range},
+    ops::Deref,
 };
 
 use wgt::{math::align_to, BufferUsages, BufferUses, Features};
@@ -46,9 +46,8 @@ struct UnsafeTlasStore<'a> {
 
 struct TlasStore<'a> {
     internal: UnsafeTlasStore<'a>,
-    range: Range<usize>,
-    /// ThreeRT patch: where in the instance buffer `range` goes (the first changed slot's).
-    dst_offset: u64,
+    /// ThreeRT patch: the staging buffer's runs of changed slots and where each goes in the instance buffer.
+    copies: Vec<hal::BufferCopy>,
 }
 
 impl Global {
@@ -184,7 +183,7 @@ impl Global {
                         tlas: self.resolve_tlas_id(tlas_package.tlas_id)?,
                         instances,
                         lowest_unmodified: tlas_package.lowest_unmodified,
-                        first: tlas_package.first,
+                        ranges: tlas_package.ranges,
                         total: tlas_package.total,
                     })
                 })
@@ -231,7 +230,6 @@ pub(crate) fn build_acceleration_structures(
             u64::from(state.device.alignments.ray_tracing_scratch_buffer_alignment),
         ));
 
-        let first_byte_index = instance_buffer_staging_source.len();
 
         // ThreeRT patch (PATCH.md): the slots from `first` that changed; the TLAS keeps the rest from its last builds.
         let mut slots = tlas.slots.lock();
@@ -248,11 +246,10 @@ pub(crate) fn build_acceleration_structures(
             slots.blas.resize(total, None);
         }
         let key = |b: &Arc<Blas>| Arc::as_ptr(b) as usize;
-        let mut k = package.first as usize;
-        for instance in package.instances.iter() {
-            if k >= total {
-                break;
-            }
+        // (the slots of the changed ranges, in order, as `instances` lists them)
+        let slots_of = package.ranges.iter().flat_map(|r| r.start as usize..(r.end as usize).min(total));
+        let mut copies: Vec<hal::BufferCopy> = Vec::new();
+        for (k, instance) in slots_of.zip(package.instances.iter()) {
             if let Some(instance) = instance {
                 if instance.custom_data >= (1u32 << 24u32) {
                     return Err(BuildAccelerationStructureError::TlasInvalidCustomIndex(
@@ -328,8 +325,19 @@ pub(crate) fn build_acceleration_structures(
                     }
                 },
             };
+            // (one copy a run of adjacent slots)
+            let (at, len) = (instance_buffer_staging_source.len() as u64, bytes.len() as u64);
+            match copies.last_mut() {
+                Some(c) if c.src_offset + c.size.get() == at && c.dst_offset + c.size.get() == k as u64 * len => {
+                    c.size = wgt::BufferSize::new(c.size.get() + len).unwrap();
+                }
+                _ => {
+                    if let Some(size) = wgt::BufferSize::new(len) {
+                        copies.push(hal::BufferCopy { src_offset: at, dst_offset: k as u64 * len, size });
+                    }
+                }
+            }
             instance_buffer_staging_source.extend(bytes);
-            k += 1;
         }
         // The TLAS's dependencies: each BLAS once (the null one among them).
         let mut dependencies: Vec<Arc<Blas>> = slots.refs.values().map(|(b, _)| b.clone()).collect();
@@ -343,11 +351,6 @@ pub(crate) fn build_acceleration_structures(
         }
         // (no BLAS at all: an empty TLAS)
         let instance_count = if slots.null.is_some() { total as u32 } else { 0 };
-        let dst_offset = if k > package.first as usize {
-            (instance_buffer_staging_source.len() - first_byte_index) as u64 / (k - package.first as usize) as u64 * package.first as u64
-        } else {
-            0
-        };
 
         build_command.tlas_s_built.push(TlasBuild {
             tlas: tlas.clone(),
@@ -366,8 +369,7 @@ pub(crate) fn build_acceleration_structures(
                 ),
                 scratch_buffer_offset,
             },
-            range: first_byte_index..instance_buffer_staging_source.len(),
-            dst_offset,
+            copies,
         });
     }
 
@@ -471,16 +473,14 @@ pub(crate) fn build_acceleration_structures(
         }
 
         let mut instance_buffer_barriers = Vec::new();
-        for &TlasStore {
+        for TlasStore {
             internal: UnsafeTlasStore { ref tlas, .. },
-            ref range,
-            dst_offset,
+            copies,
         } in &tlas_storage
         {
-            let size = match wgt::BufferSize::new((range.end - range.start) as u64) {
-                None => continue,
-                Some(size) => size,
-            };
+            if copies.is_empty() {
+                continue;
+            }
             instance_buffer_barriers.push(hal::BufferBarrier::<dyn hal::DynBuffer> {
                 buffer: tlas.instance_buffer.as_ref(),
                 usage: hal::StateTransition {
@@ -496,15 +496,10 @@ pub(crate) fn build_acceleration_structures(
                         to: BufferUses::COPY_DST,
                     },
                 }]);
-                let temp = hal::BufferCopy {
-                    src_offset: range.start as u64,
-                    dst_offset,
-                    size,
-                };
                 raw_encoder.copy_buffer_to_buffer(
                     staging_buffer.as_ref().unwrap().raw(),
                     tlas.instance_buffer.as_ref(),
-                    &[temp],
+                    copies,
                 );
             }
         }

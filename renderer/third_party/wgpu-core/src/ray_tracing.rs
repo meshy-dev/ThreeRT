@@ -328,11 +328,11 @@ pub struct TlasInstance<'a> {
 
 pub struct TlasPackage<'a> {
     pub tlas_id: TlasId,
-    /// ThreeRT patch: the instances from `first` that changed since the last build (of `total`); the TLAS keeps the
-    /// others (PATCH.md).
+    /// ThreeRT patch: the instances of the slots in `ranges` (in order), those that changed since the last build (of
+    /// `total`); the TLAS keeps the others (PATCH.md).
     pub instances: Box<dyn Iterator<Item = Option<TlasInstance<'a>>> + 'a>,
     pub lowest_unmodified: u32,
-    pub first: u32,
+    pub ranges: Vec<core::ops::Range<u32>>,
     pub total: u32,
 }
 
@@ -430,8 +430,8 @@ pub struct OwnedTlasPackage<R: ReferenceType> {
     pub tlas: R::Tlas,
     pub instances: Vec<Option<OwnedTlasInstance<R>>>,
     pub lowest_unmodified: u32,
-    /// ThreeRT patch: where `instances` start among the TLAS's `total` (PATCH.md).
-    pub first: u32,
+    /// ThreeRT patch: the slots `instances` are, among the TLAS's `total` (PATCH.md).
+    pub ranges: Vec<core::ops::Range<u32>>,
     pub total: u32,
 }
 

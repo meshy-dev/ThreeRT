@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 #[cfg(wgpu_core)]
 use core::ops::Deref;
 use core::ops::{Index, IndexMut, Range};
-use core::sync::atomic::{AtomicU32, Ordering};
+use crate::util::Mutex;
 use wgt::WasmNotSendSync;
 
 /// Descriptor to create top level acceleration structures.
@@ -25,10 +25,9 @@ pub struct Tlas {
     pub(crate) inner: dispatch::DispatchTlas,
     pub(crate) instances: Vec<Option<TlasInstance>>,
     pub(crate) lowest_unmodified: u32,
-    /// ThreeRT patch: the instances changed since the last build, `dirty_lo..dirty_hi` (empty when lo >= hi). A build
-    /// hands only those to wgpu-core, which keeps the rest where the last build put them (third_party/wgpu-core/PATCH.md).
-    pub(crate) dirty_lo: AtomicU32,
-    pub(crate) dirty_hi: AtomicU32,
+    /// ThreeRT patch: the slots changed since the last build, as the ranges touched. A build hands only those to
+    /// wgpu-core, which keeps the rest where the last build put them (third_party/wgpu-core/PATCH.md).
+    pub(crate) dirty: Mutex<Vec<(u32, u32)>>,
 }
 
 impl Clone for Tlas {
@@ -37,8 +36,7 @@ impl Clone for Tlas {
             inner: self.inner.clone(),
             instances: self.instances.clone(),
             lowest_unmodified: self.lowest_unmodified,
-            dirty_lo: AtomicU32::new(self.dirty_lo.load(Ordering::Relaxed)),
-            dirty_hi: AtomicU32::new(self.dirty_hi.load(Ordering::Relaxed)),
+            dirty: Mutex::new(self.dirty.lock().clone()),
         }
     }
 }
@@ -111,16 +109,31 @@ impl Tlas {
 
     /// ThreeRT patch: marks `range` changed (the next build hands it to wgpu-core).
     fn touch(&self, range: Range<usize>) {
-        self.dirty_lo.fetch_min(range.start as u32, Ordering::Relaxed);
-        self.dirty_hi.fetch_max(range.end as u32, Ordering::Relaxed);
+        if range.start < range.end {
+            self.dirty.lock().push((range.start as u32, range.end as u32));
+        }
     }
 
-    /// ThreeRT patch: the changed range, taken (a build's).
+    /// ThreeRT patch: the changed slots, taken (a build's): sorted, ranges a few slots apart or closer merged (one copy
+    /// on the GPU each). One range from the lowest touched slot to the highest instead had a streamed city's builds
+    /// write 340,000 of 575,000 slots at the 90th percentile, its changes being scattered over the free slots.
     #[cfg(wgpu_core)]
-    pub(crate) fn take_dirty(&self) -> Range<u32> {
-        let lo = self.dirty_lo.swap(u32::MAX, Ordering::Relaxed);
-        let hi = self.dirty_hi.swap(0, Ordering::Relaxed).min(self.instances.len() as u32);
-        if lo >= hi { 0..0 } else { lo..hi }
+    pub(crate) fn take_dirty(&self) -> Vec<Range<u32>> {
+        let mut d = core::mem::take(&mut *self.dirty.lock());
+        d.sort_unstable();
+        let n = self.instances.len() as u32;
+        let mut out: Vec<Range<u32>> = Vec::new();
+        for (a, b) in d {
+            let (a, b) = (a.min(n), b.min(n));
+            if a >= b {
+                continue;
+            }
+            match out.last_mut() {
+                Some(r) if a <= r.end + 8 => r.end = r.end.max(b),
+                _ => out.push(a..b),
+            }
+        }
+        out
     }
 
     /// Get a mutable slice to a range of instances.

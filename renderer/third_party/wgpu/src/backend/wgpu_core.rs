@@ -2872,11 +2872,13 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
         });
 
         let tlas = tlas.into_iter().map(|e| {
-            // ThreeRT patch: the instances changed since the last build, from `first` of `total` (wgpu-core keeps the
-            // rest where its last build put them).
-            let dirty = e.take_dirty();
-            let instances = e.instances[dirty.start as usize..dirty.end as usize]
-                .iter()
+            // ThreeRT patch: the instances changed since the last build, range after range of `total` (wgpu-core keeps
+            // the rest where its last build put them).
+            let ranges = e.take_dirty();
+            let instances = ranges
+                .clone()
+                .into_iter()
+                .flat_map(move |r| e.instances[r.start as usize..r.end as usize].iter())
                 .map(|instance: &Option<crate::TlasInstance>| {
                     instance
                         .as_ref()
@@ -2891,7 +2893,7 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
                 tlas_id: e.inner.as_core().id,
                 instances: Box::new(instances),
                 lowest_unmodified: e.lowest_unmodified,
-                first: dirty.start,
+                ranges,
                 total: e.instances.len() as u32,
             }
         });
