@@ -2831,10 +2831,12 @@ Costs that stay: a grid program's pass is compiled in the frame it comes in (the
 holds every grid, so all are made again when one comes or goes.
 Tests: `volumes_come_and_go_in_place` and `density_grids_come_and_change_in_place`, each edit against a build of
 the edited world, state and picture, with the cells a program had simulated read back; the world's rules.
-Mutations: 21. 18 failed a test. Two had none, a media table that grew and was not bound again (the tests had
+Mutations: 23. 20 failed a test. Two had none, a media table that grew and was not bound again (the tests had
 two volumes, the table room for two) and a grid counted the same although its volume was another, and have their
 cases now. One was no fault: where a grid lies follows from the grids before it, and that comparison is gone.
-Found by review: a still volume that was moved left its grid's program running in the box where it had stood.
+Found by review: a still volume that was moved left its grid's program running in the box where it had stood; a
+volume edit in place did not hold the lighting's histories short for the frames after it, as a rebuild did (nor
+had a volume shown or hidden in place before this).
 
 **A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
 had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a

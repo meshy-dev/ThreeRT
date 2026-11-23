@@ -766,6 +766,8 @@ impl LiveCore {
                         if !self.g.set_medium_hidden(&self.sc.up, id, *shape, hide) {
                             changes.media = true;
                         }
+                        // (What it shadows and dims changes with it: `live_lighting`.)
+                        self.lit_changed = self.frame.max(1);
                         true
                     }
                     // (Its table entry, black while hidden: `Tables::update_light`.)
@@ -788,10 +790,15 @@ impl LiveCore {
         }
         // Volume functions that came or changed, then the volumes: the media table as the world has them now.
         if (changes.volume_functions || changes.media) && !changes.structural {
-            if let Err(why) = self.set_media(world, changes.volume_functions) {
-                self.fallback = Some(format!("volumes that cannot be placed in the media table ({why})"));
-                self.fallbacks += 1;
-                changes.structural = true;
+            match self.set_media(world, changes.volume_functions) {
+                // As after a rebuild: what the volumes shadow and dim changed, the histories are held short and
+                // validated a pixel at a time (`live_lighting`).
+                Ok(()) => self.lit_changed = self.frame.max(1),
+                Err(why) => {
+                    self.fallback = Some(format!("volumes that cannot be placed in the media table ({why})"));
+                    self.fallbacks += 1;
+                    changes.structural = true;
+                }
             }
         }
         // The textures the new and the changed materials name: those the pages have not got are placed in them now;
