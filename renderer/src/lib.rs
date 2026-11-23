@@ -107,14 +107,13 @@ pub fn emitter_tri(k: usize, tri_verts: &[[f32; 4]], a: &scene::GpuTriAttr, mate
     }
     let v = |j: usize| Vec3::new(tri_verts[k * 3 + j][0], tri_verts[k * 3 + j][1], tri_verts[k * 3 + j][2]);
     let (e1, e2) = (v(1), v(2));
-    let nominal = a.x[2] > 0.0;
-    let area = if nominal { a.x[2] } else { 0.5 * e1.cross(e2).length() };
+    let area = 0.5 * e1.cross(e2).length();
     if !(area * lum > 0.0) {
         return None;
     }
     let c = v(0) + (e1 + e2) / 3.0;
     let moves = tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0;
-    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal, in_tree: false, inst: NO_INST, part: 0 })
+    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
 }
 
 /// An emissive triangle of the emitter CDF: triangle (traversal order), material, object, area.
@@ -671,21 +670,8 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     let layout = scene::proc_layout(&sc.procs, !hwrt);
     sc.proc_records = sc.procs.iter().zip(&layout.headers).map(|(p, &h)| p.gpu(h)).collect();
     sc.proc_layout = (!sc.procs.is_empty()).then_some(layout);
-    // Translucent particles (hardware RT): after the pool, in no group (only the translucency pass traces them).
-    sc.trans_first = (tri_verts.len() / 3) as u32;
-    if hwrt {
-        for (t, a) in sc.trans_tris.iter().zip(&sc.trans_attrs) {
-            let [a0, b, c] = *t;
-            let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
-            tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(0)]);
-            tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
-            tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
-            attrs.push(*a);
-        }
-    }
     sc.attrs = attrs;
-    // Vertex colours (scene.rs `tri_colors`), with the triangles: the flattened ones in traversal order, the pool, the
-    // translucent particles (white).
+    // Vertex colours (scene.rs `tri_colors`), with the triangles: the flattened ones in traversal order, the pool.
     sc.gpu_vcolors = if sc.vcolors.is_empty() && sc.pool_vcolors.is_empty() {
         vec![]
     } else {
@@ -697,24 +683,12 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         v
     };
     // Posed models: where each of their triangles landed (they are re-skinned in place, hardware RT only).
-    if hwrt && (sc.retained.dynamics_mut().next().is_some() || !sc.particles.is_empty() || !sc.gpu_particles.is_empty()) {
+    if hwrt && sc.retained.dynamics_mut().next().is_some() {
         let first_dynamic: usize = groups[..4].iter().sum();
         let finals: std::collections::HashMap<u32, u32> = bvh.order[first_dynamic..].iter().enumerate().map(|(k, &i)| (i, (first_dynamic + k) as u32)).collect();
         for d in sc.retained.dynamics_mut() {
             d.finals = (0..d.mats.len() as u32).map(|j| finals[&(d.first + j)]).collect();
         }
-        // A particle system's triangles stay together (one group, the order within a group is the build order).
-        for ps in sc.particles.iter_mut().filter(|p| !p.translucent && p.mesh == u32::MAX) {
-            ps.final_first = finals[&ps.first];
-            debug_assert!((0..ps.count * 2).all(|j| finals[&(ps.first + j)] == ps.final_first + j));
-        }
-        for ps in sc.gpu_particles.iter_mut().filter(|p| p.mesh == u32::MAX) {
-            ps.final_first = finals[&ps.first];
-            debug_assert!((0..ps.capacity * 2).all(|j| finals[&(ps.first + j)] == ps.final_first + j));
-        }
-    }
-    for ps in sc.particles.iter_mut().filter(|p| p.translucent) {
-        ps.final_first = sc.trans_first + ps.first;
     }
     timings.push(("bvh_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
 
@@ -734,7 +708,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
     // bound then, in the light tree's moving subtree.)
     let moving = sc.retained.moving_records();
     // (The particle systems the lights are sampled by: half a quad's nominal area a triangle.)
-    let nominal: std::collections::HashMap<u32, f32> = sc.particles.iter().map(|p| (p.mesh, p.emitter_area)).chain(sc.gpu_particles.iter().map(|p| (p.mesh, p.emitter_area))).filter(|(m, a)| *m != u32::MAX && *a > 0.0).map(|(m, a)| (m, a * 0.5)).collect();
+    let nominal: std::collections::HashMap<u32, f32> = sc.particles.iter().map(|p| (p.mesh, p.emitter_area)).chain(sc.gpu_particles.iter().map(|p| (p.mesh, p.emitter_area))).filter(|(_, a)| *a > 0.0).map(|(m, a)| (m, a * 0.5)).collect();
     for r in 0..sc.instances.len() {
         let m = sc.meshes[sc.instances[r].mesh as usize];
         // (With sections: the emitters of its sections whose material emits, a section after another; each one's row
@@ -940,8 +914,6 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
     params.word_first[1][2] = sc.indexed.dynamic.0;
-    // (Hardware traversal: the translucent particles' rows follow the world-space triangles'.)
-    params.word_first[1][3] = sc.indexed.pool_first;
     Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
 }
 
@@ -999,13 +971,6 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
     // The triangle of a still tree over nothing: without area.
     if no_still {
         out.indices.push([0; 3]);
-    }
-    // The translucent particles' (what `tri_verts` has after the pool: under hardware traversal).
-    if out.indices.len() < sc.attrs.len() {
-        let first = out.indices.len();
-        out.translucent = out.vertices.len() as u32;
-        out.translucent_tris = (first as u32, sc.trans_tris.len() as u32);
-        out.push(indexed::apart(&sc.trans_tris, &sc.attrs[first..]), out.translucent);
     }
     assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
     // A row a triangle. One no instance places: its material, its object, its flags, its emitter + 1. A mesh's: its
@@ -1795,7 +1760,7 @@ mod units_tests {
             let x = &sc.indexed;
             assert_eq!((x.indices.len(), x.rows.len()), (sc.attrs.len(), sc.attrs.len()), "{what}");
             // (A pool triangle's mesh: its vertices count from the mesh's first.)
-            let pool_first = sc.attrs.len() - sc.pool_tris.len() - sc.trans_tris.len() * usize::from(hwrt) - usize::from(sc.units.is_some() && sc.tris.is_empty());
+            let pool_first = sc.attrs.len() - sc.pool_tris.len() - usize::from(sc.units.is_some() && sc.tris.is_empty());
             let base = |k: usize| sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count > 0 && (pool_first + m.first as usize..pool_first + (m.first + m.count) as usize).contains(&k)).map_or(0, |(_, v)| v.0);
             let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
             for (k, a) in sc.attrs.iter().enumerate() {
@@ -1870,9 +1835,9 @@ mod units_tests {
             let (own, sampled) = (&sc.particles[0], &sc.particles[1]);
             let (stateful, stateful_sampled) = (&sc.gpu_particles[0], &sc.gpu_particles[1]);
             assert_eq!((stateful.capacity, stateful_sampled.capacity), (5, 1), "{what}: the stateful systems, as the stateless");
+            assert!(sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0).count() == 5 && sc.tri_flags.iter().all(|f| f & scene::TRI_DYNAMIC == 0), "{what}: five systems, an instance each, none a world-space triangle");
             assert!(p.moving_mats.contains(&sc.retained.materials[&7]), "{what}: the particles' material is its passes'");
             assert_eq!((own.count, sampled.count), (3, 2));
-            assert!(sc.tri_flags.iter().all(|f| f & scene::TRI_DYNAMIC == 0) || !hwrt, "{what}: no particle is a world-space triangle");
             let part = gpu::instance_features(&sc) & gpu::F_PART;
             if !hwrt {
                 assert_eq!(part, 0, "{what}: no kernel asks for a particle's object");
@@ -1881,7 +1846,7 @@ mod units_tests {
             assert_ne!(part, 0, "{what}: the kernel asks for a particle's object");
             let (m, v) = (sc.meshes[own.mesh as usize], sc.indexed.meshes[own.mesh as usize]);
             assert_eq!((m.count, m.deforms, m.sect_count, v.1), (6, true, 1, 12), "{what}: two triangles and four vertices a particle");
-            let pool_first = sc.attrs.len() - sc.pool_tris.len() - sc.trans_tris.len();
+            let pool_first = sc.attrs.len() - sc.pool_tris.len();
             let tris = &sc.indexed.indices[pool_first + m.first as usize..][..6];
             assert_eq!(tris, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [8, 9, 10], [8, 10, 11]], "{what}: a quad's corners once each");
             let uv = |k: u32| [sc.indexed.vertices[(v.0 + k) as usize][0][3], sc.indexed.vertices[(v.0 + k) as usize][1][3]];
@@ -1920,7 +1885,7 @@ mod units_tests {
             let smoke = &sc.particles[2];
             let i3 = sc.instances.iter().find(|i| i.mesh == smoke.mesh).expect("its instance");
             assert!(smoke.translucent && i3.hidden && i3.bits & scene::INST_PARTICLES != 0 && sc.rows[i3.rows as usize][3] == scene::ROW_UNSAMPLED, "{what}: the translucent system's instance");
-            assert_eq!((sc.meshes[smoke.mesh as usize].count, sc.trans_tris.len(), i3.object), (4, 0, smoke.object), "{what}: its quads are its mesh's");
+            assert_eq!((sc.meshes[smoke.mesh as usize].count, i3.object), (4, smoke.object), "{what}: its quads are its mesh's");
             assert_eq!((sc.translucent_mats(), p.moving_mats.contains(&sc.retained.materials[&8])), (vec![sc.retained.materials[&8]], false), "{what}: its material");
             assert!(sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0 && i.mesh != smoke.mesh).all(|i| !i.hidden), "{what}: the opaque systems' instances are the scene's");
         }

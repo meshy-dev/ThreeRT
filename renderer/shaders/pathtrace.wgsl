@@ -337,7 +337,7 @@ fn tri_indices(ti: u32) -> vec3<u32> {
     let k = P.word_first[1].x + ti * 3u;
     return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
 }
-// The row of a triangle no instance places (a light's card, a particle's, a scene's that is flattened), four words:
+// The row of a triangle no instance places (a light's card, a scene's that is flattened), four words:
 // its material, its object, its flags (TRI_*), its emitter entry + 1. A mesh's triangle has none: which section of
 // its mesh it is in is its hit's to say (`Hit.part`), and the rest is its instance's.
 fn tri_row(row: u32) -> vec4<u32> {

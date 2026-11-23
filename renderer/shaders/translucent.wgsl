@@ -4,9 +4,8 @@
 //
 // Particles drawn with a `transparent` material are in none of the scene's acceleration structures: they cast no
 // shadow and show in no reflection or GI (UE's default for translucency). They have a TLAS of their own, `tacc`: an
-// instance of it a system's mesh, its custom data the instance's record as in the scene's (F_PART); or, in a scene
-// built without instances, one BLAS of world-space triangles that lie after everything else in the kernel's tables
-// (from TPS.size.z). This pass draws them, per output pixel, over the opaque image:
+// instance of it a system's mesh, its custom data the instance's record as in the scene's. This pass draws them,
+// per output pixel, over the opaque image:
 // - depth: the particle ray stops at the opaque surface the pixel sees (live: the traced first hits under the pixel;
 //   offline: a ray), so nothing behind a wall shows;
 // - overlap: ordered blending, the TL_LAYERS nearest particle hits sorted by distance, front to back;
@@ -17,7 +16,7 @@
 // accumulates (colour, transmittance) per sample, laid over the converged image.
 
 @if(hwrt) struct TP {
-    size: vec4<u32>, // output width, height, first translucent triangle, mode (0 offline: accumulate; 1 live: over the image)
+    size: vec4<u32>, // output width, height, -, mode (0 offline: accumulate; 1 live: over the image)
     view: vec4<u32>, // live: traced width, height (the opaque first hits); training budget (points per frame); 1 = at the traced resolution
     misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, 1 = train only (THREERT_TL_HIDE: what is behind), -, -
 };
@@ -59,22 +58,14 @@
 // Material of a translucent particle at a hit of `tacc` (its primitive, its instance's custom data, barycentrics b):
 // colour, opacity and emission after maps and its material function.
 @if(hwrt) fn particle_material(prim: u32, custom: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
-    var ti = TPS.size.z + prim;
-    var inst = NO_INST;
-    var part = 0u;
-    if (has(F_PART)) {
-        // A system's mesh: its triangles from the record's first, one section.
-        inst = hit_inst(custom);
-        ti = instance_at(inst).info.x + prim;
-    } else {
-        // (A world-space triangle's row: the translucent triangles' rows follow the other rows, from
-        // `P.word_first[1].w` on.)
-        part = P.word_first[1].w + prim;
-    }
-    let td = tri_data(ti, inst, part);
+    // Its system's mesh: the triangles from the instance's record's first, one section; its particle's object from
+    // the instance's first.
+    let inst = hit_inst(custom);
+    let rec = instance_at(inst);
+    let ti = rec.info.x + prim;
+    let td = tri_data(ti, inst, 0u);
     var a = td.a;
-    // (Its particle's object, from the instance's first.)
-    if (has(F_PART)) { a.x = inst_x(instance_at(inst).info, a.x); }
+    a.x = inst_x(rec.info, a.x);
     let m = material_at(material_of(a, inst));
     let uv = mesh_uv(a, m, b.x, b.y);
     let tl = mesh_lod(mesh_density(td.e1, td.e2, a, m), 1.0, 1.0) + lod - LOD_BIAS;
@@ -86,7 +77,7 @@
     }
     r.emissive = emission(m, uv, tl) * obj_power(a);
     if (has(F_FUNC) && m.tex1.w > 0) {
-        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, inst, part, b.x, b.y, view, lod), m, r);
+        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, inst, 0u, b.x, b.y, view, lod), m, r);
     }
     return r;
 }

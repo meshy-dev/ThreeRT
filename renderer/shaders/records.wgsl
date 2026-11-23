@@ -3,7 +3,7 @@
 // `live_source`, build.rs).
 
 // A triangle's shading attributes as a hit reads them of its three vertices (pathtrace.wgsl `tri_data`): normals (w:
-// uv parts), uv parts (w: material index, bits), x: (a spare word, object (bits), a particle's area, its emitter
+// uv parts), uv parts (w: material index, bits), x: (a spare word, object (bits), a spare word, its emitter
 // entry + 1 (bits; 0: it is not light-sampled)). (Its tangents are read where a frame is asked, `hit_tangent`; its
 // texel density is computed where it is hit, `mesh_density`.) A triangle of a mesh with sections: uv.w its section,
 // x.w its index in it (its instance's row has the material and where the section's emitters start: `material_of`,
