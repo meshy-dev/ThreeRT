@@ -4559,7 +4559,9 @@ fn volumes_come_and_go_in_place() {
     assert_eq!((live.sc.up.kernel.features & gpu::F_MEDIA, live.sc.base.time[3]), (0, 0.0), "a scene without a medium");
     let last = std::cell::RefCell::new(picture(&mut live, 24));
     let check = |what: &str, live: &mut LiveCore, w: &mut World, nodes: &[u32]| {
+        live.lit_changed = 0;
         assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert!(live.live_lighting(), "{what}: the lighting changed, as after a rebuild (the histories are held short)");
         let mut fresh = open(w).unwrap();
         assert_eq!((&live.sc.up.media_nodes[..], live.sc.base.time[3]), (nodes, nodes.len() as f32), "{what}: the media and the kernel's count of them");
         assert_eq!((&fresh.sc.up.media_nodes[..], fresh.sc.base.time[3]), (nodes, nodes.len() as f32), "{what}: a build's");
@@ -4646,7 +4648,14 @@ fn density_grids_come_and_change_in_place() {
     assert_eq!(live.g.grids_state(&live.sc.up).0, vec![], "a scene without a grid");
     let last = std::cell::RefCell::new(picture(&mut live, 24));
     // (The commit alone: what the grids hold before a frame runs their programs.)
-    let commit = |what: &str, live: &mut LiveCore, w: &mut World| assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+    let commit = |what: &str, live: &mut LiveCore, w: &mut World| {
+        // (An edit of the scene, not a grid's new data alone, which is uploaded: the lighting changed, as after a
+        // rebuild, and the histories are held short.)
+        let edit = w.changes.any();
+        live.lit_changed = 0;
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        assert_eq!(live.live_lighting(), edit, "{what}: whether the lighting changed");
+    };
     let check = |what: &str, live: &mut LiveCore, w: &mut World, nodes: &[u32]| {
         commit(what, live, w);
         let mut fresh = open(w).unwrap();
