@@ -4541,8 +4541,9 @@ fn a_translucent_particles_material_takes_another_function_in_place() {
 /// Volumes come, change and go in place, in a scene that had none: a box of haze (a volume function the scene had
 /// not, the scene's first medium), a homogeneous glowing sphere whose function's name sorts before the first's (a
 /// build numbers them by name, the view in the order they came), the first set again with other parameters, moved
-/// where it stood still, hidden and shown, each removed. After each: no rebuild, the kernel's count of media and
-/// its features are a build's of the edited world, the media are that build's nodes, and so is the picture.
+/// where it stood still, the second hidden (the first set again beside it) and shown, each removed. After each: no
+/// rebuild, the kernel's count of media and its features are a build's of the edited world, the media are that
+/// build's nodes, and so is the picture.
 #[test]
 fn volumes_come_and_go_in_place() {
     let presets = crate::default_presets_dir();
@@ -4594,6 +4595,9 @@ fn volumes_come_and_go_in_place() {
     // Hidden and shown: its entry keeps its place.
     w.set_visible(41, false).unwrap();
     check("the second volume hidden", &mut live, &mut w, &[40, 41]);
+    // The first set again beside it: the table is made whole, the hidden one without its shape still.
+    w.set_object(40, "haze".into(), None, volume("haze", 0, 4.0, false, vec![1.8]), true, false).unwrap();
+    check("a volume set again beside a hidden one", &mut live, &mut w, &[40, 41]);
     w.set_visible(41, true).unwrap();
     check("the second volume shown", &mut live, &mut w, &[40, 41]);
     // The function's code changed.
