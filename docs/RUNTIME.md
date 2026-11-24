@@ -843,7 +843,8 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
 - **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
 
 Still a rebuild: particle systems that come or go, and their functions and programs; a geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
-not grow); a material that becomes a particle's or gets vertex colours; a rect light's card; as many shadow-casting
+not grow); a material that becomes a particle's or gets vertex colours; a rect light's card that comes, goes or takes
+another size (its colour is in place, and a movable one's move); as many shadow-casting
 local lights as bring the light tiles or take them away; the scene's first instance, procedural object, instance
 colours or vertex colours (the kernel's data is laid out for them); the atmosphere's sun shown or hidden.
 
@@ -1618,7 +1619,7 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   the section has the material and where the section's triangles and emitters start; its instance's record has
   its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
   light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
-- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (a light's card, a flattened scene's)
+- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (what the build still flattens)
   has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the world-space
   triangles'.
 - **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an

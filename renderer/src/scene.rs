@@ -804,11 +804,11 @@ pub struct Retained {
     /// Whether the scene said a mesh's geometry will be edited or driven (`own_blas`, `driven`): it gets room for
     /// edits in place (gpu.rs `EditRoom`).
     pub edits_meshes: bool,
-    /// Static models' instanced meshes by (uri, nodes), those with nothing flattened per placement: a model added in
-    /// place is another instance of one (live/edits.rs `edit_geometry`).
+    /// Static models' instanced meshes by (uri, nodes), those without a second mesh (`InstMesh::over`): a model added
+    /// in place is another instance of one (live/edits.rs `edit_geometry`).
     pub model_mesh: HashMap<(String, Option<Vec<String>>), u32>,
     /// Posed rigid models' parts by (uri, `rigid_pose_key`), each its node (`STILL_NODES`) and its mesh, where every
-    /// part is a mesh with nothing flattened beside: one added in place is an instance of each.
+    /// part is a mesh without a second one: one added in place is an instance of each.
     pub rigid_meshes: HashMap<(String, String), Vec<(usize, u32)>>,
     /// A model's mesh's rows as every instance of it has them (the file's materials, `model_sections`; where a
     /// section's triangles and emitters are is each instance's to fill).
@@ -1014,7 +1014,7 @@ struct RigidPart {
 /// A posed skinned model's mesh: the model's triangles in its own space, a mesh a model. The skinning pass skins it at
 /// each new pose (gpu.rs `skin`: the CPU sends the pose's matrices) and its BLAS is built again; the model moves as
 /// its instance (hardware RT). Never shared: two models in one pose are two meshes (a mesh shared came apart when
-/// one of them took another pose, and that was a rebuild). Only meshes without triangles flattened per placement.
+/// one of them took another pose, and that was a rebuild). Only a model none of whose triangles emits.
 #[derive(Clone, Debug)]
 pub struct Skinned {
     pub mesh: u32,
@@ -1159,7 +1159,7 @@ pub struct GpuParticleSystem {
     pub collide: world::ParticleCollide,
 }
 
-/// A dynamic object's triangles (posed model, or movable mesh / model / rect-light card): their range in build order,
+/// A dynamic object's triangles (a posed model's, or a movable mesh's or model's the build flattened): their range in build order,
 /// and per triangle the material and flags.
 #[derive(Clone, Default)]
 pub struct DynamicModel {
@@ -1647,7 +1647,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     // Whether a mesh's triangles carry its geometry's vertex colours: any of its materials asks for them.
     let colored = |g: &world::Geometry, mats: &mut dyn Iterator<Item = &u32>| !g.colors.is_empty() && mats.filter(|k| w.materials.get(k).is_some_and(|m| m.vertex_colors)).count() > 0;
     let mut pool_attrs: Vec<GpuTriAttr> = vec![];
-    // Model-space triangles of instanced meshes that each placement flattens (`flatten_coincident`'s pairs).
     let mut meshes: Vec<InstMesh> = vec![];
     let mut instances: Vec<Instance> = vec![];
     let (mut sections, mut rows): (Vec<Section>, Vec<Row>) = (vec![], vec![]);
@@ -1864,9 +1863,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     };
                     Ok((i, mesh_class(&materials[i as usize]), emissive(&materials[i as usize])))
                 };
-                // A posed model's triangles are dynamic (re-skinned in place). A movable one is an instance whose
-                // transform moves (hardware RT), unless it has triangles flattened per placement: then they are dynamic
-                // too (re-transformed in place).
+                // A posed model the build flattens has dynamic triangles (re-skinned in place). A movable one is an
+                // instance whose transform moves.
                 let posed = animation.is_some() && glb.animated();
                 let movable = w.movable(*id);
                 let dynamic = posed || movable;
@@ -2696,8 +2694,7 @@ pub fn mesh_class(g: &GpuMaterial) -> u32 {
     }
 }
 
-/// `classed`'s last list: what leaves a mesh and is flattened at each placement (`flatten_coincident`'s pairs; the
-/// emitters of a mesh that deforms).
+/// `classed`'s last list: the emitters of a mesh that deforms, which leave it (the model is flattened then).
 pub const FLAT: usize = 3;
 
 /// The build's arrays a mesh of the pool and its instance are added to.

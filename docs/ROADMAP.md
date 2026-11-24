@@ -2879,6 +2879,22 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**A light's card, a coincident pair and a model without size are instances (2026-11-25, after it).** Three of the
+things the build still flattened into world-space triangles:
+- A visible rect light's card is an instance of one card mesh, a unit quad: its size is its transform's, its
+  material its row's, and it moves as its instance, under software traversal too. An emitter's entry in the light
+  list says whether it is a card's (it lights one side), where the kernel read the triangle's material. A card
+  of another size is the build's: it was taken in place, and only its material changed.
+- A triangle on exactly another's vertices (a cutout on an emitter, glass on what is under it) alone leaves its
+  mesh, for the model's second mesh, with an instance beside the first: a BLAS apart, as the flattened pair was.
+  A posed rigid model with such a part is hidden and removed in place now. A movable still model with one moves
+  by a rebuild (it was re-transformed on the CPU).
+- A model placed without size is an instance no ray sees, as a mesh is.
+
+Flattened still: a posed skinned model with triangles that emit, and a scene under `THREERT_INSTANCING=0`; under
+software traversal, what has no unit. Which of a pair is drawn is as it was: a scene with the pair near and far
+renders to main's picture, byte for byte, under both traversals.
+
 **Five A/B switches and the uniform tables are removed (2026-11-25).** Switches whose question was answered, or
 that nothing set: `THREERT_EDIT_BLAS` (an edit mesh's BLAS is built fast), `THREERT_LIGHT_GROUPS` (measured:
 +4.6 ms of trace without the groups), `THREERT_RIGID_NODES` (measured: 4 to 10 % of GPU time with every node

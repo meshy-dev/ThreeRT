@@ -2797,8 +2797,8 @@ impl LiveCore {
             // triangles and its skinning job stay until the next rebuild, as the build's do.)
             let its_own = |i: &scene::InstanceRef| whole(i, instances, meshes) || (matches!(i.mesh, scene::MeshKind::Skinned(_)) && instances.get(i.instance as usize).is_some_and(|x| top.has_mesh(x.mesh)));
             let at = slot_of(*id, edit, tables).or_else(|| tables.retained.instance(*id).filter(|i| its_own(i)).map(|i| (inst_base + i.instance as usize, i.instance as usize)));
-            // Drawn, and not at a record an edit can clear (a model with triangles flattened beside its instance,
-            // anything the build flattened): a rebuild takes it out.
+            // Drawn, and not at a record an edit can clear (a model of two instances, anything the build flattened): a
+            // rebuild takes it out.
             if at.is_none() && tables.retained.proxies.contains_key(id) {
                 return Err("an object the build placed otherwise (a model in parts, something it flattened) removed".into());
             }
