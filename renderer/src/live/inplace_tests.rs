@@ -3258,6 +3258,12 @@ fn a_posed_skinned_models_emitters_follow_its_pose() {
     let its = |c: &LiveCore| c.sc.tables.emitter_tris.iter().filter(|e| e.inst == sk.instance && e.area > 0.0).copied().collect::<Vec<_>>();
     assert!(live.sc.tris.is_empty() && !its(&live).is_empty() && its(&live).iter().all(|e| e.moves), "its emitters are its instance's, moving ones");
     list_is_its_triangles("as loaded", &live);
+    // (The codes the load uploaded are on record: the first write of the weights sends those that change, not all.)
+    {
+        let t = &live.sc.tables;
+        let order = crate::emitter_order(&t.emitter_tris, t.light_tree.as_ref());
+        assert_eq!(live.sc.codes_sent, crate::emitter_codes(&t.emitter_tris, &order, t.light_tree.as_ref()), "as loaded: the light list's codes as the GPU has them");
+    }
     let loaded = picture(&mut live, 48);
     for time in [0.8, 0.3] {
         let what = format!("posed at {time}");

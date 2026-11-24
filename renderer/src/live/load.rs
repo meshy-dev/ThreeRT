@@ -74,8 +74,8 @@ pub(super) struct LoadedScene {
     /// and the flattened triangles' build indices in traversal order (positions in `tris`).
     pub(super) mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
     pub(super) tri_order: Vec<u32>,
-    /// The light list's path codes as the last `write_emitters` wrote them (`GpuEmitterTri::code`, by emitter): it
-    /// writes only those that changed since. Empty after a load or a rebuild (the next write sends them all).
+    /// The light list's path codes as the GPU has them (`GpuEmitterTri::code`, by emitter): the upload's, then what
+    /// `write_emitters` wrote, which writes only those that changed since.
     pub(super) codes_sent: Vec<u32>,
 }
 
@@ -255,6 +255,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let translucent_mats = sc.translucent_mats();
     let translucent_used = translucent_mats.iter().filter_map(|&m| sc.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
     // (The light tree is the tables' by now: its nodes from there.)
+    // (The codes the upload writes with the list: `write_emitters` sends those that change after.)
+    let codes_sent: Vec<u32> = prep.gpu_emitter_tris.iter().map(|t| t.code).collect();
     let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     if !g.merged {
@@ -335,5 +337,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent }, view, env))
 }
