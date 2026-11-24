@@ -3108,11 +3108,11 @@ fn a_model_with_emitters_is_placed_again_in_place() {
     lit_as_a_build("another posed rigid model placed after one was removed", &mut live, &mut open(&w).unwrap());
 }
 
-/// A posed rigid model with triangles flattened beside its parts (tests/render/data/panel-decal.glb: a cutout on
-/// exactly an emitter's vertices leaves the mesh with it) is hidden, and removed, by a rebuild: an instance's mask
-/// hides no world-space triangle. The picture is a build's.
+/// A posed rigid model with a part's second mesh (tests/render/data/panel-decal.glb: a cutout on exactly an
+/// emitter's vertices is a mesh apart, an instance beside the part's) is hidden, and removed, as its instances are:
+/// in place. The picture is a build's.
 #[test]
-fn a_posed_rigid_model_with_flattened_triangles_is_hidden_and_removed_by_a_rebuild() {
+fn a_posed_rigid_model_with_a_second_mesh_is_hidden_and_removed_in_place() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
     let model = || Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation: Some(crate::desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() }), functions: vec![] };
@@ -3136,20 +3136,23 @@ fn a_posed_rigid_model_with_flattened_triangles_is_hidden_and_removed_by_a_rebui
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    assert!(!live.sc.tables.retained.rigid(32).expect("a posed rigid model").rest.mats.is_empty(), "the model has triangles flattened beside its part");
+    {
+        let r = live.sc.tables.retained.rigid(32).expect("a posed rigid model");
+        assert!(live.sc.tris.is_empty() && r.records().iter().any(|&i| live.sc.meshes.iter().any(|m| m.over == live.sc.instances[i as usize].mesh)), "one of its instances is of a part's second mesh");
+    }
     let before = picture(&mut live, 48);
     w.set_visible(32, false).unwrap();
-    assert!(live.commit(&mut w).unwrap(), "hidden: a rebuild");
-    let hidden = pictured("a posed rigid model with flattened triangles hidden", &mut live, &w);
+    assert!(!live.commit(&mut w).unwrap(), "hidden: in place ({:?})", live.fallback);
+    let hidden = pictured("a posed rigid model with a second mesh hidden", &mut live, &w);
     assert!(apart(&before, &hidden) > 0.5, "it is gone from the picture ({:.2} steps)", apart(&before, &hidden));
     let mut w = scene();
     let mut live = open(&w).unwrap();
     w.take_changes();
     w.remove(32);
-    assert!(live.commit(&mut w).unwrap(), "removed: a rebuild");
-    let removed = pictured("a posed rigid model with flattened triangles removed", &mut live, &w);
+    assert!(!live.commit(&mut w).unwrap(), "removed: in place ({:?})", live.fallback);
+    let removed = pictured("a posed rigid model with a second mesh removed", &mut live, &w);
     assert!(apart(&hidden, &removed) < 0.5, "as when it was hidden ({:.2} steps)", apart(&hidden, &removed));
-    // Placed again: what is flattened beside its part is a build's to make.
+    // Placed again: a model with a second mesh is a build's to make.
     let mut w = scene();
     // (A mesh the scene says it edits: room for what is placed.)
     w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
@@ -3160,7 +3163,7 @@ fn a_posed_rigid_model_with_flattened_triangles_is_hidden_and_removed_by_a_rebui
     w.set_object(33, "again".into(), None, model(), true, false).unwrap();
     w.set_transform(33, Vec3::new(0.6, -0.4, 0.8), glam::Quat::IDENTITY, Vec3::splat(0.08)).unwrap();
     assert!(live.commit(&mut w).unwrap(), "placed again: a rebuild");
-    let two = pictured("a posed rigid model with flattened triangles placed again", &mut live, &w);
+    let two = pictured("a posed rigid model with a second mesh placed again", &mut live, &w);
     assert!(apart(&one, &two) > 0.5, "the second is in the picture ({:.2} steps)", apart(&one, &two));
 }
 
