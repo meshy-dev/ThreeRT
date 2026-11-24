@@ -17,6 +17,14 @@ No demos that repeat what is already proven.
 
 ## Direction
 
+Direction of 2026-11-25 (the user's, relayed by the supervisor, who rewrites the roadmap by it): the look comes
+first, judged by eye. A day flight recorded after 6a–6c showed no visible gain: the work had been held to "no
+regression" (ΔE / SSIM, frame time), so it added correct but small detail (streaks 3 mm off a wall, hoods seen at
+ΔE 0.07) that the live view's resolution and denoiser erase. The user wants the street level close to a photograph's
+quality soon. So a look item is done only when the Golden Gai pose, as the live view shows it, reads clearly better
+before / after, beside photographs of the place; order: shopfront windows and glass, Golden Gai's mass, the ground,
+the city's edge, then Shibuya. Tone mapping and exposure are left alone for now (the user's call).
+
 Direction of 2026-11-24 (the user's, relayed by the supervisor, who rewrites the roadmap by it): § 0's order changes.
 The streamed city lives in its own repository, [threert/TokyoRT](https://github.com/threert/TokyoRT) (this engine as
 its submodule); its step 2 architecture is in (cells by distance, the kit as instances, in-place adds, incremental
@@ -560,10 +568,18 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
           (roof rims, rooftop plant, the windows' tone by kind of building, trees), each a little. A far level the dress
           makes itself (an L2 bake: walls, roofs and flat window quads, ~5–10 M triangles for the area, in place of the
           source mesher's buildings) would agree by construction; it is a later item. § 0's order goes on to (4).
-    - (4) step 6a–6d below, in that order;
+    - (4) step 6a–6d below, in that order (6a–6c landed 2026-11-24 as TokyoRT #12, #14–#16; see step 6 for what
+        changed on 2026-11-25);
     - (5) the rest of step 2: Shibuya stitched in (~20 km²), the drive, expressway and flight paths, resident memory,
         the first frame;
     - (6) then 3 → 4 → 5 → 7. Step 1b (weather) waits: its place is the user's to set.
+  Order since 2026-11-25 (the user's, after a day flight showed no visible gain from 6a–6c), replacing (4) above; (1)–(3)
+  stand as recorded:
+    - (4a) 6d, windows and glass, shopfronts first;
+    - (4b) Golden Gai's mass (6e below), the Golden Gai half of 6b folded in;
+    - (4c) the ground again (6f), visible at eye height;
+    - (4d) the city's edge (6g);
+    - (5) and (6) as above. Tone mapping and exposure wait (the user's call).
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
      - the far field as proxies (merged, simplified tile meshes; roofs and facades as photo-textured blocks);
@@ -649,6 +665,19 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          mop bucket at a bar's back door; the A-board, planters and umbrella stand at its front.
        - 6d. **Windows and glass.** Shopfronts first: rooms with depth behind the glass (interior mapping), the street
          reflected in it, things standing behind it, dirt on it. Upper windows after. Placeholder posters replaced.
+     - Acceptance for every look item from 2026-11-25 (the user's): a clear, at-a-glance gain at the Golden Gai pose
+       (`tools/quality.ts` pose `goldengai`) as the live view shows it (1280 × 720, its resolution scale, denoised),
+       before / after side by side and beside photographs of the place (references only: no photograph enters the
+       repository or a texture). A gain seen only in an offline zoom does not count. Frame time A/B as before; ΔE /
+       SSIM still reported, no longer the test of a look item. The aim is the street level close to a photograph.
+       - 6d as above, first.
+       - 6e. **Golden Gai's mass.** Above the ground floor: stacked signs, outside stairs, balconies, bundled pipes and
+         cables, clutter, so the outline stops reading as a box. Replaces 6b for Golden Gai's small buildings (6b, #15,
+         dressed only the mid-size ones).
+       - 6f. **The ground, at eye height.** Drain covers along the walls, dark patches, water and grime stains, seams,
+         with contrast enough to read from 1.7 m (6a's ground marks did not).
+       - 6g. **The city's edge.** Above ~140 m the land beyond Shinjuku is a flat grey plain and the city stops ~1 km
+         out: carry it on (far city, haze) so the world does not end in view.
   7. **Milestone 2, the open city.** Shinjuku and Shibuya at night, and by day:
      - a montage per view: our offline render | ThreeRT live | the source three.js app, each tile with its frame rate
        and ΔE / SSIM;
