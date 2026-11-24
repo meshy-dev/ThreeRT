@@ -75,6 +75,20 @@ test("BufferGeometry: attributes, setIndex, groups, transforms and bounds as thr
   }
 });
 
+test("Box3.containsBox: touching faces are contained but overlap alone is not, as three.js does", () => {
+  const outer = new THREE.Box3(new THREE.Vector3(-2, -3, -4), new THREE.Vector3(4, 5, 6));
+  const inside = new THREE.Box3(new THREE.Vector3(-2, -1, 0), new THREE.Vector3(3, 5, 6));
+  const overlapping = new THREE.Box3(new THREE.Vector3(3, 0, 0), new THREE.Vector3(7, 2, 3));
+  const separate = new THREE.Box3(new THREE.Vector3(7, 0, 0), new THREE.Vector3(8, 2, 3));
+
+  assert.equal(outer.containsBox(inside), true, "inclusive on the min x and max y/z faces");
+  assert.equal(outer.containsBox(overlapping), false, "one overlapping box extends past max x");
+  assert.equal(outer.intersectsBox(overlapping), true, "overlap is not full containment");
+  assert.equal(outer.containsBox(separate), false, "separated boxes are not contained");
+  assert.equal(inside.containsBox(outer), false, "containment is directional");
+  assert.equal(outer.containsBox(outer.clone()), true, "equal bounds contain one another");
+});
+
 test("vertex colours: the geometry's `color` attribute (RGB, RGBA, normalized bytes) to the engine, `vertexColors` on the material", () => {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera();
@@ -96,6 +110,20 @@ test("vertex colours: the geometry's `color` attribute (RGB, RGBA, normalized by
   const mats = ofType(calls, "material").map((c) => c[2] as MaterialDesc);
   assert.deepEqual(mats.map((d) => d.vertexColors ?? false), [true, false]);
   assert.deepEqual(compatNotes().slice(before).filter((n) => n.startsWith("unsupported:")), []);
+});
+
+test("Quaternion.rotateTowards: bounded angular step and no overshoot, as three.js does", () => {
+  const current = new THREE.Quaternion();
+  const target = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+  assert.equal(current.rotateTowards(target, Math.PI / 2), current);
+  assert.ok(Math.abs(current.y - Math.SQRT1_2) < 1e-12, "90-degree yaw has sin(pi/4)");
+  assert.ok(Math.abs(current.w - Math.SQRT1_2) < 1e-12, "90-degree yaw has cos(pi/4)");
+  assert.ok(Math.abs(current.angleTo(target) - Math.PI / 2) < 1e-12, "90 degrees remain");
+  assert.equal(current.rotateTowards(target, 4 * Math.PI), current);
+  assert.ok(current.angleTo(target) < 1e-12, "a large step stops at the target");
+  const arrived = current.toArray();
+  assert.equal(current.rotateTowards(target, Math.PI / 8), current);
+  assert.deepEqual(current.toArray(), arrived, "already at the target does not change");
 });
 
 test("Object3D: clone (geometry shared, own id), attach (world transform kept), local moves, world / local", () => {
@@ -126,6 +154,97 @@ test("Object3D: clone (geometry shared, own id), attach (world transform kept), 
   assert.ok(o.getWorldDirection(new THREE.Vector3()).distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-9);
 });
 
+test("Object3D.add: notifies the child and then the parent after parenting, as three.js does", () => {
+  const parent = new THREE.Group();
+  const child = new THREE.Object3D();
+  const order: string[] = [];
+  child.addEventListener("added", (event) => {
+    assert.equal(event.target, child);
+    assert.equal(child.parent, parent, "the parent is assigned before the added event");
+    order.push("added");
+  });
+  parent.addEventListener("childadded", (event) => {
+    assert.equal(event.target, parent);
+    assert.equal(event.child, child, "the parent event names the child");
+    assert.equal(child.parent, parent);
+    order.push("childadded");
+  });
+  assert.equal(parent.add(child), parent);
+  assert.deepEqual(order, ["added", "childadded"]);
+});
+
+test("Mesh.copy and clone: material arrays are independent, but geometry and materials are shared, as three.js does", () => {
+  const geometry = new THREE.BoxGeometry();
+  const red = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+  const blue = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+  const green = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+  const source = new THREE.Mesh(geometry, [red, blue]);
+
+  const clone = source.clone();
+  assert.equal(clone.geometry, geometry, "clone shares the source geometry");
+  assert.notEqual(clone.materials, source.materials, "clone has its own material array");
+  assert.equal(clone.materials[0], red, "first material instance is shared");
+  assert.equal(clone.materials[1], blue, "second material instance is shared");
+  clone.materials[0] = green;
+  assert.equal(source.materials[0], red, "changing the clone's slots does not mutate the source");
+
+  const copy = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
+  assert.equal(copy.copy(source), copy);
+  assert.equal(copy.geometry, geometry, "copy shares the source geometry");
+  assert.notEqual(copy.materials, source.materials, "copy has its own material array");
+  assert.equal(copy.materials[0], red);
+  assert.equal(copy.materials[1], blue);
+  copy.materials[1] = green;
+  assert.equal(source.materials[1], blue, "changing copied slots does not mutate the source");
+
+  const single = new THREE.Mesh(geometry, red);
+  assert.equal(single.clone().material, red, "a single material remains shared");
+});
+
+test("Object3D.attach preserves world position with matrixAutoUpdate disabled, as three.js r187", () => {
+  const source = new THREE.Group();
+  source.position.set(5, 0, 0);
+  const target = new THREE.Group();
+  target.position.set(-2, 0, 0);
+  const child = new THREE.Object3D();
+  child.position.set(3, 0, 0);
+  child.updateMatrix();
+  child.matrixAutoUpdate = false;
+  source.add(child);
+
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [8, 0, 0], "source world x: 5 + 3");
+  assert.equal(target.attach(child), target);
+  assert.equal(child.parent, target);
+  assert.deepEqual(child.position.toArray(), [10, 0, 0], "new local x: 8 - (-2)");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [8, 0, 0], "world position must stay fixed");
+  assert.equal(child.matrix.elements[12], 10, "explicit matrix must use the new local translation");
+});
+
+test("Object3D.matrixWorldAutoUpdate: manual world matrices survive updates and world helpers", () => {
+  const parent = new THREE.Group();
+  const child = new THREE.Object3D();
+  parent.position.set(1, 2, 3);
+  child.position.set(2, 0, 0);
+  parent.add(child);
+  parent.matrixWorldAutoUpdate = false;
+  parent.matrixWorld.makeTranslation(10, 20, 30);
+
+  parent.updateWorldMatrix(true, true);
+  assert.deepEqual(parent.getWorldPosition(new THREE.Vector3()).toArray(), [10, 20, 30], "preserves the authored parent matrix");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [12, 20, 30], "children inherit the authored parent matrix");
+  assert.deepEqual(child.localToWorld(new THREE.Vector3(0, 0, 1)).toArray(), [12, 20, 31]);
+  assert.deepEqual(child.worldToLocal(new THREE.Vector3(12, 20, 31)).toArray(), [0, 0, 1]);
+
+  const copy = parent.clone(false);
+  assert.equal(copy.matrixWorldAutoUpdate, false, "clones retain the manual-world setting");
+  assert.deepEqual(copy.getWorldPosition(new THREE.Vector3()).toArray(), [10, 20, 30]);
+
+  parent.matrixWorldAutoUpdate = true;
+  parent.updateWorldMatrix(true, true);
+  assert.deepEqual(parent.getWorldPosition(new THREE.Vector3()).toArray(), [1, 2, 3], "automatic world updates resume");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [3, 2, 3]);
+});
+
 test("Raycaster: the nearest hit first, front faces of single-sided materials, instanceId, near / far", () => {
   const scene = new THREE.Scene();
   const near = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshStandardMaterial());
@@ -151,6 +270,41 @@ test("Raycaster: the nearest hit first, front faces of single-sided materials, i
   cam.position.set(0, 0, 5);
   r2.setFromCamera(new THREE.Vector2(0, 0), cam);
   assert.ok(r2.ray.direction.distanceTo(new THREE.Vector3(0, 0, -1)) < 1e-9);
+});
+
+test("Object3D.remove: notifies the child and then its old parent after unparenting, as three.js does", () => {
+  const [a, b, x, y, z] = ["a", "b", "x", "y", "z"].map((name) => Object.assign(new THREE.Object3D(), { name }));
+  const log: string[] = [];
+  for (const p of [a, b])
+    p.addEventListener("childremoved", (event) => {
+      const c = event.child as THREE.Object3D;
+      assert.equal(event.target, p);
+      assert.ok(c.parent === null && !p.children.includes(c), "the child is detached before childremoved");
+      log.push(`${p.name} childremoved ${c.name}`);
+    });
+  for (const c of [x, y, z])
+    c.addEventListener("removed", (event) => {
+      assert.equal(event.target, c);
+      assert.equal(c.parent, null, "the parent is cleared before removed");
+      log.push(`${c.name} removed`);
+    });
+  const take = () => log.splice(0);
+  a.add(x, y, z);
+  assert.equal(a.remove(x), a);
+  assert.deepEqual(take(), ["x removed", "a childremoved x"]);
+  a.remove(x);
+  b.remove(y);
+  assert.deepEqual(take(), [], "removing a non-child notifies nobody");
+  b.add(y);
+  assert.deepEqual(take(), ["y removed", "a childremoved y"], "add takes it from its old parent first");
+  y.removeFromParent();
+  assert.deepEqual(take(), ["y removed", "b childremoved y"]);
+  b.attach(z);
+  assert.deepEqual(take(), ["z removed", "a childremoved z"]);
+  a.add(x, y);
+  a.clear();
+  assert.deepEqual(take(), ["x removed", "a childremoved x", "y removed", "a childremoved y"]);
+  assert.equal(a.children.length, 0);
 });
 
 test("the binding: ambient lights as the environment, black background, three.js exposure; background, fog, groups, unlit", () => {
@@ -182,6 +336,37 @@ test("the binding: ambient lights as the environment, black background, three.js
   assert.ok(Math.abs(env2.background![0] - 1) < 1e-9, "a white background at the light's level (pi / pi)");
   assert.ok(Math.abs(env2.fog!.density - Math.log(20) / 20) < 1e-9 && env2.fog!.startDistance === 10 && env2.fog!.heightFalloff === 0);
   assert.ok(compatNotes().some((n) => n.startsWith("mapped: MeshPhongMaterial")));
+});
+
+test("Raycaster: a single-material mesh is hit outside its geometry groups, as three.js does and the engine draws it", () => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    -3, -1, 0, -1, -1, 0, -3, 1, 0,
+     1, -1, 0,  3, -1, 0,  1, 1, 0,
+  ], 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute([
+    0, 0, 1, 0, 0, 1,
+    0, 0, 1, 0, 0, 1,
+  ], 2));
+  geometry.setIndex([0, 1, 2, 3, 4, 5]);
+  geometry.addGroup(0, 3, 0); // only triangle 0 is in a group; triangle 1 must still be hit for one material
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+  const rc = new THREE.Raycaster(new THREE.Vector3(1.5, -0.3, 5), new THREE.Vector3(0, 0, -1));
+  const target: THREE.Intersection[] = [];
+  const hits = rc.intersectObject(mesh, false, target);
+  assert.equal(hits, target, "the optional target array is returned by identity");
+  assert.equal(hits.length, 1, "a single-material mesh raycasts faces outside geometry groups");
+  assert.equal(hits[0].object, mesh);
+  assert.equal(hits[0].faceIndex, 1);
+  assert.equal(hits[0].face!.materialIndex, 0);
+  assert.ok(Math.abs(hits[0].distance - 5) < 1e-9);
+  assert.deepEqual(hits[0].point.toArray(), [1.5, -0.3, 0]);
+  assert.ok(hits[0].uv!.distanceTo(new THREE.Vector2(0.25, 0.35)) < 1e-9);
+  const twoMaterials = [new THREE.MeshStandardMaterial(), new THREE.MeshStandardMaterial()];
+  assert.equal(rc.intersectObject(new THREE.Mesh(geometry, twoMaterials)).length, 0, "several materials: only grouped faces");
+  const ungrouped = geometry.clone();
+  ungrouped.clearGroups();
+  assert.equal(rc.intersectObject(new THREE.Mesh(ungrouped, twoMaterials)).length, 1, "several materials, no groups: drawn with the first, so hit");
 });
 
 test("Bugbot on #125: exposure edited in place is the scene's; a transformed geometry's faceted copy is made again; a cloned InstancedMesh has its own tables", () => {
@@ -226,4 +411,21 @@ test("Bugbot on #125 (2): setAutoExposure() with its defaults is set; a cloned c
   const { calls } = bind(scene, a);
   const cam = ofType(calls, "object").map((c) => c[2] as ObjectDesc).find((d) => d.kind === "camera") as { camera: { exposure: { mode: string } } };
   assert.equal(cam.camera.exposure.mode, "auto");
+});
+
+test("Object3D.setRotationFromMatrix: replaces the rotation and ignores translation, as three.js does", () => {
+  const object = new THREE.Object3D();
+  object.position.set(2, 3, 4);
+  object.rotateX(Math.PI / 3);
+  const matrix = new THREE.Matrix4().makeRotationZ(Math.PI / 2).setPosition(10, 20, 30);
+
+  object.setRotationFromMatrix(matrix);
+  assert.ok(new THREE.Vector3(1, 0, 0).applyQuaternion(object.quaternion).distanceTo(new THREE.Vector3(0, 1, 0)) < 1e-9,
+    "Z +90 degrees replaces the previous X rotation");
+  assert.ok(Math.abs(object.rotation.z - Math.PI / 2) < 1e-9, "Euler rotation stays synchronized");
+  assert.deepEqual(object.position.toArray(), [2, 3, 4], "matrix translation does not move the object");
+
+  object.translateX(2);
+  assert.ok(object.position.distanceTo(new THREE.Vector3(2, 5, 4)) < 1e-9,
+    "subsequent local movement uses the extracted rotation");
 });

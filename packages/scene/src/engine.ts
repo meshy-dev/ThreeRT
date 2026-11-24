@@ -273,7 +273,8 @@ interface Bound {
   name: string;
   parent: number | null;
   kind: string;
-  trs: Float64Array;
+  /** The transform last sent (a plain array: a typed one is two objects, its buffer the second). */
+  trs: number[];
   visible: boolean;
   power: number;
   /** Per-instance data last sent. */
@@ -286,7 +287,9 @@ interface Bound {
   /** Model pose last sent (clip, time, loop). */
   anim: AnimationDesc | null;
   /** An instanced mesh's instances last sent: count, and each attribute with its version. */
-  inst: { count: number; m: [unknown, number]; c: [unknown, number]; d: [unknown, number] } | null;
+  /** An instanced mesh's count and the tables (and their versions) last sent: one record, flat (each instanced mesh's
+   *  was four objects, and the script engine's cycle collector walks every object). */
+  inst: { count: number; m: unknown; mv: number; c: unknown; cv: number; d: unknown; dv: number } | null;
   /** Sync that last reached it in a walk of the graph. */
   epoch: number;
   /** Its rigid body in the engine, and what it was made from (a change makes it anew). */
@@ -358,6 +361,8 @@ export class SceneBinding {
   private readonly trs = new Float32Array(10);
   private readonly scratch = new Float64Array(Math.max(HOT, LIGHT_VALUES));
   private readonly changes: SceneChanges = { objects: new Set(), structure: true, added: new Set(), removed: new Set() };
+  /** In-place Matrix4 edits have no setter to report a change. Revisit only opted-in objects each sync. */
+  private readonly manualWorld = new Set<Object3D>();
   private readonly untrack: () => void;
   private epoch = 0;
   // Physics: ids of bodies (a body's collider has its id) and joints, the slots of the engine's pose table, the joints
@@ -391,6 +396,7 @@ export class SceneBinding {
   /** Stops tracking the scene's changes (the binding is not used any more). */
   dispose(): void {
     this.untrack();
+    this.manualWorld.clear();
   }
 
   /** The object the engine knows under `name` (picking reports names). */
@@ -415,6 +421,7 @@ export class SceneBinding {
   sync(): SyncStats {
     const stats: SyncStats = { created: 0, updated: 0, removed: 0 };
     const ch = this.changes;
+    for (const o of this.manualWorld) ch.objects.add(o);
     if (ch.structure || !this.objects.has(this.camera)) {
       // The whole graph: walk it (creates new objects, re-parents, removes what is gone).
       ch.structure = false;
@@ -571,6 +578,7 @@ export class SceneBinding {
     if (o instanceof Joint) this.dropJoint(o);
     this.engine.remove(b.id);
     this.objects.delete(o);
+    this.manualWorld.delete(o);
     this.byName.delete(b.name);
     const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
     if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
@@ -586,7 +594,7 @@ export class SceneBinding {
       const created = !b;
       if (!b) {
         const name = this.uniqueName(o);
-        b = { id: this.nextId++, name, parent, kind, trs: new Float64Array(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
+        b = { id: this.nextId++, name, parent, kind, trs: new Array<number>(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
         this.objects.set(o, b);
         this.byName.set(name, o);
         if (o instanceof Light) this.lights.set(o, b);
@@ -612,6 +620,8 @@ export class SceneBinding {
     // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
     // object's scale in the world): those under it are made anew at the new size, once the sync has sent every
     // transform.
+    if (o.matrixWorldAutoUpdate) this.manualWorld.delete(o);
+    else this.manualWorld.add(o);
     if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
@@ -693,18 +703,18 @@ export class SceneBinding {
   private sendInstances(o: InstancedMesh, b: Bound, stats: SyncStats): void {
     const cap = o.instanceMatrix.count;
     if (!Number.isInteger(o.count) || o.count < 0 || o.count > cap) throw new TypeError(`${b.name}: count must be an integer from 0 to ${cap}`);
-    const s = (b.inst ??= { count: -1, m: [null, -1], c: [null, -1], d: [null, -1] });
-    const fresh = (a: { version: number; array: Float32Array } | null, last: [unknown, number], size: number, what: string): Float32Array | null => {
-      if (!a || (last[0] === a && last[1] === a.version)) return null;
+    const s = (b.inst ??= { count: -1, m: null, mv: -1, c: null, cv: -1, d: null, dv: -1 });
+    const fresh = (a: { version: number; array: Float32Array } | null, k: "m" | "c" | "d", v: "mv" | "cv" | "dv", size: number, what: string): Float32Array | null => {
+      if (!a || (s[k] === a && s[v] === a.version)) return null;
       const arr = a.array;
       if (arr.length !== cap * size) throw new TypeError(`${b.name}: ${what} must have ${size} numbers for each of the ${cap} instances`);
-      last[0] = a;
-      last[1] = a.version;
+      s[k] = a;
+      s[v] = a.version;
       return arr;
     };
-    const m = fresh(o.instanceMatrix, s.m, 16, "instanceMatrix");
-    const c = fresh(o.instanceColor, s.c, 3, "instanceColor");
-    const d = fresh(o.instanceCustomData, s.d, 4, "instanceCustomData");
+    const m = fresh(o.instanceMatrix, "m", "mv", 16, "instanceMatrix");
+    const c = fresh(o.instanceColor, "c", "cv", 3, "instanceColor");
+    const d = fresh(o.instanceCustomData, "d", "dv", 4, "instanceCustomData");
     if (m || c || d || o.count !== s.count) {
       s.count = o.count;
       this.engine.instances(b.id, o.count, m, c, d);
@@ -714,11 +724,34 @@ export class SceneBinding {
 
   /** Sends the object's transform if it changed. True if its scale did (and it had been sent before). */
   private sendTransform(o: Object3D, b: Bound, stats: SyncStats): boolean {
-    const q = resolveOrientation(o);
     const t = this.trs;
-    t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
-    t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
-    t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    if (o.matrixWorldAutoUpdate) {
+      const q = resolveOrientation(o);
+      t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    } else {
+      // The renderer's object tree stores local TRS, while matrixWorld is authored in world space.
+      // Its parent is the engine parent, not necessarily Object3D.parent (the scene root is not bound).
+      const local = o.matrixWorld.clone();
+      if (b.parent !== null && o.parent) {
+        o.parent.updateWorldMatrix(true, false);
+        local.premultiply(o.parent.matrixWorld.clone().invert());
+      }
+      const p = new Vector3(), q = new Quaternion(), s = new Vector3();
+      local.decompose(p, q, s);
+      // A sheared or singular matrix cannot be represented by the renderer's TRS API.
+      // Fail explicitly rather than silently draw it somewhere different from matrixWorld.
+      const recomposed = new Matrix4().compose(p, q, s).elements;
+      for (let i = 0; i < 16; i++) {
+        const expected = local.elements[i], actual = recomposed[i];
+        if (!Number.isFinite(expected) || !Number.isFinite(actual) || Math.abs(expected - actual) > 1e-6 * Math.max(1, Math.abs(expected)))
+          throw new TypeError(`${b.name}: matrixWorld must be a finite, decomposable TRS matrix to render`);
+      }
+      t[0] = p.x; t[1] = p.y; t[2] = p.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = s.x; t[8] = s.y; t[9] = s.z;
+    }
     let moved = false, posed = false, scaled = false;
     for (let k = 0; k < 10; k++) {
       if (b.trs[k] !== t[k]) {

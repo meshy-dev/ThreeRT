@@ -11,6 +11,16 @@ No demos that repeat what is already proven.
 
 ## Direction
 
+Direction of 2026-11-24 (the user's, relayed by the supervisor, who rewrites the roadmap by it): § 0's order changes.
+The streamed city lives in its own repository, [threert/TokyoRT](https://github.com/threert/TokyoRT) (this engine as
+its submodule); its step 2 architecture is in (cells by distance, the kit as instances, in-place adds, incremental
+TLAS), none of step 2's acceptance is met yet. The user's review of a street-level day shot (Golden Gai) found the
+popping between levels the most visible fault, and the street level reading as generated: ground too clean, walls as
+boxes, weathering as tiled noise, windows without depth, props without purpose. So, after the script engine's GC
+hitches: a ΔE / SSIM tool against the offline render, then the popping, then the street level's look (step 6, split
+into 6a–6d), and only then the rest of step 2 (Shibuya stitched in) and steps 3 onward. Every PR reports frame start
+p95 and ΔE / SSIM; detail does not buy back frame time. A supervisor checks the line every two hours.
+
 Direction of 2026-11-10 (the user's, relayed by the supervisor, who rewrites the roadmap by it): the day / night cycle
 and the weather are developed and measured on Tokyo, in this phase (§ 0 steps 1a and 1b), after step 1 and before
 streaming; there is no separate scene for them. The main line takes over the time of day the supervisor brought
@@ -523,7 +533,19 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        - The translucency pass compiles only its particles' material functions: with every function of Tokyo's kernel
          in it, the Metal compiler failed on the `translucent` pipeline once the ground had wetLayer and the rain
          curtain was in the scene.
-  Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7.
+  Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7 (until 2026-11-24).
+  Order since 2026-11-24 (the user's; the work in threert/TokyoRT, engine changes here):
+    - (1) step 2's frame budget: the script engine's GC hitches (~100 ms a few times a minute over ~1 M live JS objects)
+        → p99 ≤ 25 ms, no frame over 50 ms, by making fewer objects, not by switching collection off;
+    - (2) a ΔE / SSIM tool for the streamed city: fixed poses, live against our offline render, and streamed against
+        everything resident at full detail (step 2's ΔE ≤ 1.0 / SSIM ≥ 0.98); every PR reports it from here on;
+    - (3) popping between levels (step 2's "streaming invisible"): first the levels agree (colour, material and outline
+        of the same building far, mid and near: the far level's dark Tochō against the mid level's light curtain wall),
+        then a dithered transition for the ~140 m swap; ΔE across a swap at fixed poses;
+    - (4) step 6a–6d below, in that order;
+    - (5) the rest of step 2: Shibuya stitched in (~20 km²), the drive, expressway and flight paths, resident memory,
+        the first frame;
+    - (6) then 3 → 4 → 5 → 7. Step 1b (weather) waits: its place is the user's to set.
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
      - the far field as proxies (merged, simplified tile meshes; roofs and facades as photo-textured blocks);
@@ -536,6 +558,44 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          height: frame start p95 ≤ 16.7 ms, p99 ≤ 25 ms, no frame over 50 ms;
        - streaming invisible: 5 poses against everything resident at full detail ΔE ≤ 1.0, SSIM ≥ 0.98 (§ 5 item 5's
          bar); popping in motion within the bench-ghosting limits.
+     - Status, part 1 (2026-11-23 → 24, threert/TokyoRT #1–#10; engine #200, #202, #203, #205, #206): one area
+       (Shinjuku, 3.4 × 2.8 km) streamed by level around a flying camera; none of the acceptance is met yet. Step 6's
+       street level was done ahead of it (generated finishes, street models, trees, curtain-wall towers: TokyoRT #1,
+       #5, #6), and step 1b (weather) skipped, both the user's call.
+       - The levels: far (the compiled 256 m tiles, always resident, a quadrant hidden where a nearer level shows it),
+         L1 within 480 m and L0 within 140 m (598 baked 128 m cells: 166 M triangles of their own at L0, 63 M at L1);
+         what repeats is a kit of 8,350 pieces placed as instances (1.7 M copies at L0, 0.45 M at L1; 15 GB of cells
+         where drawing each window out was 23 GB). A cell arrives in place, a frame budget at a time.
+       - Engine: the TLAS built from the instances that changed, as slot ranges (vendored wgpu 30, #200, #203: commit
+         18.9 → 4.9 ms with 470 k instances); the first BLAS build in batches of ≤ 4 M triangles (#202); a scene object
+         8 script objects, none a cycle, so the script's GC no longer pauses (#205: frames with > 30 ms of script in
+         a tour 3 → 0); an offline render's seek under setup's budget (#206).
+       - The tour (`tools/tour.ts`, 90 s of fast flight, M3 Max, MetalFX's denoiser, after the first 20 s): frame
+         interval p50 / p95 / p99 by day 17.4 / 31.9 / 40.6 ms, by night 17.0 / 47.7 / 60.7 ms. Not the bar
+         (p95 16.7, p99 25, none over 50 ms): the slow frames left are commits and acceleration-structure builds.
+         First frame 10–20 s.
+       - Quality (`tools/quality.ts`, `threert-render compare`, ΔE76 / p99 / SSIM, day, 1280 × 720; offline renders
+         at 128 spp, deterministic, so their floor is 0):
+
+         | pose | L0 ↔ L1 at 140 m | L1 ↔ far at 480 m | as streamed vs 2 × radii | live vs offline |
+         |---|---|---|---|---|
+         | Golden Gai alley | 0.00 / 0.0 / 1.000 | 0.00 / 0.0 / 1.000 | 0.04 / 0.8 / 1.000 | 1.47 / 11.5 / 0.935 |
+         | street | 0.00 / 0.0 / 1.000 | 0.01 / 0.4 / 1.000 | 0.04 / 0.7 / 1.000 | 2.07 / 20.7 / 0.951 |
+         | block, 60 m up | 0.00 / 0.0 / 1.000 | 0.11 / 0.8 / 0.996 | 0.12 / 1.0 / 0.996 | 1.69 / 15.8 / 0.953 |
+         | west avenue | 0.00 / 0.0 / 1.000 | 0.08 / 0.9 / 1.000 | 0.08 / 0.9 / 0.999 | 4.94 / 23.7 / 0.860 |
+         | towers, 170 m up | 0.00 / 0.0 / 1.000 | 0.43 / 14.8 / 0.971 | 1.18 / 32.9 / 0.965 | 3.37 / 21.0 / 0.900 |
+         | skyline, 240 m up | 0.01 / 0.4 / 1.000 | 0.85 / 24.2 / 0.965 | 2.79 / 34.5 / 0.876 | 2.77 / 18.8 / 0.899 |
+
+         - The 140 m switch does not show. The 480 m one does: the far level colours buildings from the source app's
+           palette pulled to a cool aerial grey, the dressing in warm, light finishes. That is order item (3)'s first
+           part.
+         - "2 × radii" (L0 to 280 m, L1 to 960 m) stands for everything at full detail: L0 to 300 m is past the
+           renderer's 4 GB vertex buffer.
+         - Streaming in flight, the live frame held at a tour second against the same pose settled (the live view's
+           own noise beside it): 20 s 0.42 / 0.994 (noise 0.39 / 0.995), 45 s while climbing 0.74 / 0.979 (0.48 /
+           0.992), 70 s 0.70 / 0.987 (0.63 / 0.989).
+         - Live against offline is over the bar at every pose: the live path's own distance (denoiser, the sun's
+           glints in glass), the same kind as step 1's table, not streaming.
   3. **The city's lights.** Lit windows that switch on and off, signs, LED screens, street lamps and headlights as
      emitters, 10^5–10^6 across the loaded tiles, in the light tree. Switching an emitter on or off costs no rebuild.
      If the voxel line's "dynamic emission" contract (§ 6 step 3) lands first, use it rather than duplicate it.
@@ -557,6 +617,20 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
      generated facades read flat.
      - Acceptance: street-level poses live vs our offline render no worse than step 1; crops beside photos of the same
        places (qualitative, in the PR); the budget held.
+     - Brought forward (the user's review, 2026-11-24, a Golden Gai day shot): what the street level lacks, in order.
+       Each part lands with a before / after pair at the same day poses, frame start p95 and ΔE / SSIM. Repeated parts
+       go into the kit (instances), so detail costs memory once.
+       - 6a. **Weathering by cause, and the ground.** Ageing that follows rain, gravity, sun, structure and use, not a
+         tiled noise: streaks under sills and air conditioners, splash and grime at the wall's foot, the cleaner band
+         under eaves, sun-faded faces. The ground: gutters, manholes, asphalt patches, seams, dust at the kerb, slight
+         unevenness (gratings and manholes are kit pieces already: their density and placement). The stucco's relief is
+         too coarse and strong where the sun rakes it.
+       - 6b. **Secondary structure on the walls.** Pipes, meters, conduits, vents, layered window frames, eaves, door
+         sills and joints: what keeps a building from reading as a box.
+       - 6c. **Props with a purpose.** Props in groups by what happens there: beer crates, bins, the exhaust duct and the
+         mop bucket at a bar's back door; the A-board, planters and umbrella stand at its front.
+       - 6d. **Windows and glass.** Shopfronts first: rooms with depth behind the glass (interior mapping), the street
+         reflected in it, things standing behind it, dirt on it. Upper windows after. Placeholder posters replaced.
   7. **Milestone 2, the open city.** Shinjuku and Shibuya at night, and by day:
      - a montage per view: our offline render | ThreeRT live | the source three.js app, each tile with its frame rate
        and ΔE / SSIM;

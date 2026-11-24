@@ -515,6 +515,12 @@ impl ScriptHost {
         // 1 GiB, or THREERT_SCRIPT_MB (a game that streams a city keeps its resident tiles' arrays)
         let mb = std::env::var("THREERT_SCRIPT_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024);
         rt.set_memory_limit(mb << 20);
+        // QuickJS collects cycles first at 256 KB of heap, then whenever the heap is half as large again as at the last
+        // collection; a collection walks every object (a streamed city: ~0.5 M of them, ~45 ms). The scene package
+        // makes no cycles of its own (its objects are freed as they go), so the first collection waits for 256 MB, or
+        // THREERT_SCRIPT_GC_MB; after it, QuickJS's own rule.
+        let gc_mb = std::env::var("THREERT_SCRIPT_GC_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(256);
+        rt.set_gc_threshold(gc_mb << 20);
         rt.set_max_stack_size(4 << 20);
         let epoch = Instant::now();
         let budget = Arc::new(Budget { epoch, deadline: AtomicU64::new(0), lent: AtomicU64::new(0) });
@@ -768,9 +774,11 @@ impl ScriptHost {
     /// Sets the frame script's clock to `t` (s) and shows the scene settled at that moment (an offline render at a scene
     /// time; frames from there advance it as before).
     /// Bundles built before `seek` existed have none: nothing to do then.
+    /// Under setup's budget, not a frame's: it is no frame anyone waits on, and its entry also syncs all that setup
+    /// made (a streamed city's hundred cells at the radii an offline render asks for take more than a frame's 50 ms).
     pub fn seek(&self, t: f32) -> Result<()> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
-        self.call(FRAME_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
+        self.call(SETUP_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
             Some(f) => f.call((t as f64, now)),
             None => Ok(()),
         })

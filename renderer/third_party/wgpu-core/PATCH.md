@@ -21,17 +21,19 @@ far up a slot was touched, nothing uses it, and its comment says as much.
 
 ## What
 
-- **wgpu** (`src/api/tlas.rs`, `src/api/device.rs`, `src/backend/wgpu_core.rs`): a `Tlas` keeps the range of slots
-  touched since its last build (`dirty_lo..dirty_hi`, atomics: a build reads it through `&Tlas`). Every mutable
-  accessor (`index_mut`, `get_mut_single`, `get_mut_slice`, both `IndexMut`s) widens it; a new TLAS starts with all of
-  its slots dirty. A build hands wgpu-core that range alone, with where it starts (`first`) and how many slots the
-  TLAS has (`total`), and resets it.
+- **wgpu** (`src/api/tlas.rs`, `src/api/device.rs`, `src/backend/wgpu_core.rs`): a `Tlas` keeps the ranges of
+  slots touched since its last build (`dirty`, behind a mutex: a build reads it through `&Tlas`). Every mutable
+  accessor (`index_mut`, `get_mut_single`, `get_mut_slice`, both `IndexMut`s) adds to it; a new TLAS starts with all
+  of its slots dirty. A build hands wgpu-core those slots alone, as sorted ranges (a few slots apart or closer merged),
+  with how many slots the TLAS has (`total`), and empties the list. (One range from the lowest touched slot to the
+  highest, the first version, wrote 340,000 of a streamed city's 575,000 slots at the 90th percentile: its changes fall
+  in free slots all over.)
 - **wgpu-core** (`src/ray_tracing.rs`, `src/resource.rs`, `src/device/ray_tracing.rs`, `src/command/ray_tracing.rs`,
-  `src/lock/rank.rs`, `src/device/trace/record.rs`): `TlasPackage` / `OwnedTlasPackage` carry `first` and `total`. A
+  `src/lock/rank.rs`, `src/device/trace/record.rs`): `TlasPackage` / `OwnedTlasPackage` carry `ranges` and `total`. A
   TLAS keeps its slots between builds (`resource::TlasSlots`: each slot's BLAS, each BLAS once with how many slots name
   it). A build:
-  - serialises the changed slots alone and copies them to their place in the TLAS's instance buffer (the slots keep
-    their positions: upstream packs the present instances together, so one removed moved all after it);
+  - serialises the changed slots alone and copies each run of them to its place in the TLAS's instance buffer (the
+    slots keep their positions: upstream packs the present instances together, so one removed moved all after it);
   - writes an empty slot as a copy of the TLAS's first BLAS (`TlasSlots::null`, held for the TLAS's life) with mask 0
     and a zero transform: no extent, never hit;
   - builds over all `total` slots, from the instance buffer as it now is;

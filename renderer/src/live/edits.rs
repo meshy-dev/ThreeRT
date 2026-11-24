@@ -9,8 +9,9 @@ fn emitter_run(tris: &[crate::EmitterTri], instances: &[scene::Instance], record
     first..first + tris[first..].iter().take_while(|e| e.inst == record).count()
 }
 
-/// Writes to one buffer gathered during an edit and sent merged: adjacent ranges as one `write_buffer` (an edit writes
-/// hundreds of small records and meshes, contiguous in the room). Overlapping writes go in the order they came.
+/// Writes to one buffer gathered during an edit and sent merged: adjacent or overlapping ranges as one `write_buffer`
+/// (an edit writes hundreds of small records and meshes, contiguous in the room), overlapping bytes as the last write
+/// to them has them.
 #[derive(Default)]
 pub(super) struct Gather {
     pub(super) parts: Vec<(u64, Vec<u8>)>,
@@ -33,29 +34,32 @@ impl Gather {
     }
 
     fn flush_at(self, q: &wgpu::Queue, b: &wgpu::Buffer, base: u64) {
-        let mut parts = self.parts;
-        let mut sorted = parts.clone();
-        sorted.sort_by_key(|p| p.0);
-        if sorted.windows(2).any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0) {
-            for (at, bytes) in parts.drain(..) {
-                q.write_buffer(b, base + at, &bytes);
+        // Runs of the parts that touch or overlap, each one write; within a run the parts are copied in the order they
+        // came, so a later write wins where they overlap. (Overlapping parts, a new emitter's record and its path code
+        // written after, sent each part as a write of its own: 110,000 of them, 400 ms, in a commit of a streamed city.)
+        let parts = self.parts;
+        let mut by_at: Vec<usize> = (0..parts.len()).collect();
+        by_at.sort_by_key(|&i| parts[i].0);
+        let mut runs: Vec<(u64, u64)> = vec![];
+        let mut run_of = vec![0usize; parts.len()];
+        for &i in &by_at {
+            let (at, end) = (parts[i].0, parts[i].0 + parts[i].1.len() as u64);
+            match runs.last_mut() {
+                Some(r) if at <= r.1 => r.1 = r.1.max(end),
+                _ => runs.push((at, end)),
             }
-            return;
+            run_of[i] = runs.len() - 1;
         }
-        let mut run: Option<(u64, Vec<u8>)> = None;
-        for (at, bytes) in sorted {
-            match &mut run {
-                Some((start, data)) if *start + data.len() as u64 == at => data.extend_from_slice(&bytes),
-                _ => {
-                    if let Some((start, data)) = run.take() {
-                        q.write_buffer(b, base + start, &data);
-                    }
-                    run = Some((at, bytes));
-                }
+        let mut data: Vec<Vec<u8>> = runs.iter().map(|&(a, e)| vec![0u8; (e - a) as usize]).collect();
+        for (i, (at, bytes)) in parts.iter().enumerate() {
+            let k = run_of[i];
+            let o = (at - runs[k].0) as usize;
+            data[k][o..o + bytes.len()].copy_from_slice(bytes);
+        }
+        for ((start, _), d) in runs.iter().zip(&data) {
+            if !d.is_empty() {
+                q.write_buffer(b, base + start, d);
             }
-        }
-        if let Some((start, data)) = run {
-            q.write_buffer(b, base + start, &data);
         }
     }
 }

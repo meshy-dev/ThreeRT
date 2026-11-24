@@ -782,8 +782,7 @@ impl Device {
             instances: vec![None; desc.max_instances as usize],
             lowest_unmodified: 0,
             // (the first build writes every instance)
-            dirty_lo: core::sync::atomic::AtomicU32::new(0),
-            dirty_hi: core::sync::atomic::AtomicU32::new(desc.max_instances),
+            dirty: crate::util::Mutex::new(alloc::vec![(0, desc.max_instances)]),
         }
     }
 }
