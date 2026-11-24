@@ -115,7 +115,10 @@ export class Quaternion {
   _z: number;
   /** @internal */
   _w: number;
-  _onChange: () => void = () => {};
+  /** Called after a change (an object's rotation / quaternion keep each other and the object in step). */
+  _onChange(): void {}
+  /** @internal The object whose rotation this is, if any (weakly: no cycle). */
+  declare _owner: WeakRef<object> | undefined;
   constructor(x = 0, y = 0, z = 0, w = 1) {
     this._x = x;
     this._y = y;
@@ -257,7 +260,10 @@ export class Euler {
   private _y: number;
   private _z: number;
   order: EulerOrder;
-  _onChange: () => void = () => {};
+  /** Called after a change (an object's rotation / quaternion keep each other and the object in step). */
+  _onChange(): void {}
+  /** @internal The object whose rotation this is, if any (weakly: no cycle). */
+  declare _owner: WeakRef<object> | undefined;
   constructor(x = 0, y = 0, z = 0, order: EulerOrder = "XYZ") {
     this._x = x;
     this._y = y;

@@ -172,7 +172,7 @@ export class VoxelBody extends Object3D {
     this.asleep = r.asleep;
     this.name = `voxel body ${r.body}`;
     // (Known to the physics bindings by its body id: contacts and hits find it; it has no slot in the pose table.)
-    bindBody(this, { id: r.body, slot: -1, epoch: 0, trs: new Float64Array(10), euler: false });
+    bindBody(this, { id: r.body, slot: -1, epoch: 0, trs: new Array<number>(10).fill(0), euler: false });
     const p = this.position as Vector3 & { _x: number; _y: number; _z: number }, q = this.quaternion, e = this.rotation;
     const place = (at: readonly number[], rot: readonly number[]) => {
       [p._x, p._y, p._z] = at;

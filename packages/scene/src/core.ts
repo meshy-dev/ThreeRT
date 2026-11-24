@@ -131,7 +131,7 @@ export interface BoundBody {
   /** The physics epoch its pose was last read in. */
   epoch: number;
   /** The binding's record of the transform the engine has (position, quaternion, scale). */
-  trs: Float64Array;
+  trs: number[];
   /** `rotation` is behind `quaternion` (set when a pose is read; `rotation` catches up when it is read). */
   euler: boolean;
 }
@@ -282,10 +282,12 @@ class TrackedVector3 extends Vector3 {
   declare _x: number;
   declare _y: number;
   declare _z: number;
-  declare _owner: Object3D | undefined;
-  constructor(owner: Object3D, x = 0, y = 0, z = 0) {
+  declare _owner: WeakRef<Object3D> | undefined;
+  constructor(owner: WeakRef<Object3D>, x = 0, y = 0, z = 0) {
     super(x, y, z);
-    // Not enumerable: JSON / structuredClone / spreads of a position must not drag the scene graph along.
+    // Not enumerable: JSON / structuredClone / spreads of a position must not drag the scene graph along. Weak: an
+    // object and its position made a reference cycle, which only QuickJS's cycle collector freed (a pause of ~100 ms
+    // over a streamed city's million objects).
     Object.defineProperty(this, "_owner", { value: owner });
   }
   toJSON() {
@@ -296,7 +298,8 @@ class TrackedVector3 extends Vector3 {
     this._x = x;
     this._y = y;
     this._z = z;
-    if (this._owner) touched(this._owner);
+    const o = this._owner?.deref();
+    if (o) touched(o);
     return this;
   }
 }
@@ -308,7 +311,8 @@ for (const k of ["x", "y", "z"] as const) {
     },
     set(this: TrackedVector3, v: number) {
       this[slot] = v;
-      if (this._owner) touched(this._owner);
+      const o = this._owner?.deref();
+      if (o) touched(o);
     },
   });
 }
@@ -332,7 +336,23 @@ export interface SwayDesc {
 let objectIds = 0;
 
 /** What `Object3D.copy` does not take over as it is (transforms are copied by value, children cloned). */
-const COPY_SKIP = new Set(["parent", "children", "position", "quaternion", "rotation", "scale", "up", "matrix", "matrixWorld", "userData", "tags", "_id", "_autoId", "uuid", "_body", "_listeners"]);
+const COPY_SKIP = new Set(["parent", "children", "position", "quaternion", "rotation", "scale", "up", "matrix", "matrixWorld", "userData", "tags", "_id", "_autoId", "uuid", "_body", "_listeners", "_ref", "_up", "_matrix", "_matrixWorld", "_userData", "_tags", "_custom", "_children"]);
+const NO_CHILDREN = Object.freeze([]) as unknown as Object3D[];
+const NO_CUSTOM: readonly [number, number, number, number] = Object.freeze([0, 0, 0, 0] as [number, number, number, number]);
+/** An object's rotation changed: its quaternion follows (the object through the rotation's weak owner). */
+function rotationChanged(this: Euler): void {
+  const o = this._owner?.deref() as Object3D | undefined;
+  if (!o) return;
+  o.quaternion.setFromEuler(this, false);
+  touched(o);
+}
+/** An object's quaternion changed: its rotation follows. */
+function quaternionChanged(this: Quaternion): void {
+  const o = this._owner?.deref() as Object3D | undefined;
+  if (!o) return;
+  o.rotation.setFromQuaternion(this, false);
+  touched(o);
+}
 
 export class Object3D {
   readonly isObject3D = true;
@@ -341,29 +361,63 @@ export class Object3D {
   declare private _id: string | undefined;
   private readonly _autoId = ++objectIds;
   parent: Object3D | null = null;
-  children: Object3D[] = [];
-  readonly position: Vector3 = new TrackedVector3(this);
+  declare private _children: Object3D[] | undefined;
+  /** The children; an object with none shares one empty list (most of a scene's objects are leaves). */
+  get children(): Object3D[] {
+    return this._children ?? NO_CHILDREN;
+  }
+  set children(v: Object3D[]) {
+    this._children = v;
+  }
+  /** @internal The object, weakly: what its transform's parts report their changes to (no reference cycle). */
+  readonly _ref: WeakRef<Object3D> = new WeakRef(this);
+  readonly position: Vector3 = new TrackedVector3(this._ref);
   readonly quaternion = new Quaternion();
   readonly rotation = new Euler();
-  readonly scale: Vector3 = new TrackedVector3(this, 1, 1, 1);
-  readonly up = new Vector3(0, 1, 0);
+  readonly scale: Vector3 = new TrackedVector3(this._ref, 1, 1, 1);
+  // (What most objects never use is made when first asked for: a streamed city holds tens of thousands of objects, and
+  // the script engine's cycle collector walks every object there is.)
+  declare private _up: Vector3 | undefined;
+  /** The object's up (`lookAt`), made when first asked for. */
+  get up(): Vector3 {
+    return (this._up ??= new Vector3(0, 1, 0));
+  }
   private _visible = true;
   private _power = 1;
-  private _custom: [number, number, number, number] = [0, 0, 0, 0];
+  declare private _custom: [number, number, number, number] | undefined;
   private _sway: SwayDesc | null = null;
   private _castShadow = true;
   private _movable = false;
   receiveShadow = true;
-  tags: string[] = [];
-  userData: Record<string, unknown> = {};
+  declare private _tags: string[] | undefined;
+  declare private _userData: Record<string, unknown> | undefined;
+  get tags(): string[] {
+    return (this._tags ??= []);
+  }
+  set tags(v: string[]) {
+    this._tags = v;
+  }
+  get userData(): Record<string, unknown> {
+    return (this._userData ??= {});
+  }
+  set userData(v: Record<string, unknown>) {
+    this._userData = v;
+  }
   /**
    * The local transform as a matrix (three.js): `updateMatrix()` composes it from position / quaternion / scale, which
    * `updateWorldMatrix` does first while `matrixAutoUpdate` is on. The engine is always sent position / rotation /
    * scale, so a matrix set by hand moves only what reads it (`matrixWorld`, `setMatrixAt(i, o.matrix)`).
    */
-  readonly matrix = new Matrix4();
+  get matrix(): Matrix4 {
+    return (this._matrix ??= new Matrix4());
+  }
+  declare private _matrix: Matrix4 | undefined;
   matrixAutoUpdate = true;
-  readonly matrixWorld = new Matrix4();
+  /** The world transform as a matrix (`updateWorldMatrix`), made when first asked for. */
+  get matrixWorld(): Matrix4 {
+    return (this._matrixWorld ??= new Matrix4());
+  }
+  declare private _matrixWorld: Matrix4 | undefined;
 
   /**
    * The stable id set by scene code (picking, gameplay events, the editor; the binding names the object by it); until
@@ -468,14 +522,12 @@ export class Object3D {
   }
 
   constructor() {
-    this.rotation._onChange = () => {
-      this.quaternion.setFromEuler(this.rotation, false);
-      touched(this);
-    };
-    this.quaternion._onChange = () => {
-      this.rotation.setFromQuaternion(this.quaternion, false);
-      touched(this);
-    };
+    // (shared functions, the object weakly: a closure over the object per rotation and quaternion made two cycles and
+    // two objects more an object)
+    for (const [part, changed] of [[this.rotation, rotationChanged], [this.quaternion, quaternionChanged]] as const) {
+      Object.defineProperty(part, "_owner", { value: this._ref, writable: true });
+      (part as { _onChange: () => void })._onChange = changed as () => void;
+    }
   }
 
   get visible(): boolean {
@@ -498,7 +550,7 @@ export class Object3D {
    * variation seed, a tint, a state). Each instance of a shared mesh or model can carry its own.
    */
   get customData(): readonly [number, number, number, number] {
-    return this._custom;
+    return this._custom ?? NO_CUSTOM;
   }
   set customData(v: readonly number[]) {
     this._custom = [v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 0];
@@ -543,7 +595,7 @@ export class Object3D {
       if ((o as { engineOwned?: boolean }).engineOwned) throw new TypeError(`${o.name || o.type}: the engine draws it; it is in no scene`);
       o.parent?.remove(o);
       o.parent = this;
-      this.children.push(o);
+      (this._children ??= []).push(o);
     }
     restructured("added", objects);
     return this;
@@ -1694,7 +1746,8 @@ export class InstancedBufferAttribute {
   usage = StaticDrawUsage;
   /** Bumped by `needsUpdate = true`: the binding sends the array again. */
   version = 0;
-  declare _owner: Object3D | undefined;
+  /** The instanced mesh whose table it is, weakly (no reference cycle). */
+  declare _owner: WeakRef<Object3D> | undefined;
   constructor(array: ArrayLike<number>, itemSize: number) {
     this.array = array instanceof Float32Array ? array : Float32Array.from(array);
     this.itemSize = itemSize;
@@ -1706,7 +1759,8 @@ export class InstancedBufferAttribute {
   set needsUpdate(v: boolean) {
     if (!v) return;
     this.version++;
-    if (this._owner) touched(this._owner);
+    const o = this._owner?.deref();
+    if (o) touched(o);
   }
   setUsage(usage: number): this {
     this.usage = usage;
@@ -1836,7 +1890,7 @@ export class InstancedMesh extends Object3D {
     return this;
   }
   private own(a: InstancedBufferAttribute): InstancedBufferAttribute {
-    a._owner = this;
+    a._owner = this._ref;
     return a;
   }
 }

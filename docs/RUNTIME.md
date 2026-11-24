@@ -856,6 +856,12 @@ reads files under the asset root as it goes and adds what they hold without rebu
   `ArrayBuffer`, whole or `length` bytes from `offset` (relative paths, no `..`). Native renderer only. The root is the
   host's `--assets`.
 - **The script's heap** is 1 GiB; `THREERT_SCRIPT_MB` sets another size (a resident city keeps its cells' arrays).
+- **The script's objects are few and acyclic.** QuickJS frees an object when its last reference goes; only reference
+  cycles wait for its cycle collector, which walks every object there is (a streamed city's ~0.5 M: ~45 ms, a frame
+  lost). A scene object is 8 JS objects (an instanced mesh 13): what most never use (`up`, `tags`, `userData`,
+  `customData`, `matrix`, `matrixWorld`, an empty `children`) is made when first asked for, and its transform's parts
+  and instance tables reach it through one `WeakRef`, not a back-pointer each. The first collection waits for 256 MB
+  of heap (`THREERT_SCRIPT_GC_MB`), then QuickJS's own rule (the heap half as large again).
 - **The binding syncs what changed.** Objects added under a parent or taken from one since the last sync are bound or
   dropped with their subtrees; the graph is walked whole only at the first sync. A world removes a childless object
   without looking for its children (`World::remove` keeps a count of each object's children).

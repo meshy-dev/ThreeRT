@@ -273,7 +273,8 @@ interface Bound {
   name: string;
   parent: number | null;
   kind: string;
-  trs: Float64Array;
+  /** The transform last sent (a plain array: a typed one is two objects, its buffer the second). */
+  trs: number[];
   visible: boolean;
   power: number;
   /** Per-instance data last sent. */
@@ -286,7 +287,9 @@ interface Bound {
   /** Model pose last sent (clip, time, loop). */
   anim: AnimationDesc | null;
   /** An instanced mesh's instances last sent: count, and each attribute with its version. */
-  inst: { count: number; m: [unknown, number]; c: [unknown, number]; d: [unknown, number] } | null;
+  /** An instanced mesh's count and the tables (and their versions) last sent: one record, flat (each instanced mesh's
+   *  was four objects, and the script engine's cycle collector walks every object). */
+  inst: { count: number; m: unknown; mv: number; c: unknown; cv: number; d: unknown; dv: number } | null;
   /** Sync that last reached it in a walk of the graph. */
   epoch: number;
   /** Its rigid body in the engine, and what it was made from (a change makes it anew). */
@@ -586,7 +589,7 @@ export class SceneBinding {
       const created = !b;
       if (!b) {
         const name = this.uniqueName(o);
-        b = { id: this.nextId++, name, parent, kind, trs: new Float64Array(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
+        b = { id: this.nextId++, name, parent, kind, trs: new Array<number>(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
         this.objects.set(o, b);
         this.byName.set(name, o);
         if (o instanceof Light) this.lights.set(o, b);
@@ -693,18 +696,18 @@ export class SceneBinding {
   private sendInstances(o: InstancedMesh, b: Bound, stats: SyncStats): void {
     const cap = o.instanceMatrix.count;
     if (!Number.isInteger(o.count) || o.count < 0 || o.count > cap) throw new TypeError(`${b.name}: count must be an integer from 0 to ${cap}`);
-    const s = (b.inst ??= { count: -1, m: [null, -1], c: [null, -1], d: [null, -1] });
-    const fresh = (a: { version: number; array: Float32Array } | null, last: [unknown, number], size: number, what: string): Float32Array | null => {
-      if (!a || (last[0] === a && last[1] === a.version)) return null;
+    const s = (b.inst ??= { count: -1, m: null, mv: -1, c: null, cv: -1, d: null, dv: -1 });
+    const fresh = (a: { version: number; array: Float32Array } | null, k: "m" | "c" | "d", v: "mv" | "cv" | "dv", size: number, what: string): Float32Array | null => {
+      if (!a || (s[k] === a && s[v] === a.version)) return null;
       const arr = a.array;
       if (arr.length !== cap * size) throw new TypeError(`${b.name}: ${what} must have ${size} numbers for each of the ${cap} instances`);
-      last[0] = a;
-      last[1] = a.version;
+      s[k] = a;
+      s[v] = a.version;
       return arr;
     };
-    const m = fresh(o.instanceMatrix, s.m, 16, "instanceMatrix");
-    const c = fresh(o.instanceColor, s.c, 3, "instanceColor");
-    const d = fresh(o.instanceCustomData, s.d, 4, "instanceCustomData");
+    const m = fresh(o.instanceMatrix, "m", "mv", 16, "instanceMatrix");
+    const c = fresh(o.instanceColor, "c", "cv", 3, "instanceColor");
+    const d = fresh(o.instanceCustomData, "d", "dv", 4, "instanceCustomData");
     if (m || c || d || o.count !== s.count) {
       s.count = o.count;
       this.engine.instances(b.id, o.count, m, c, d);
