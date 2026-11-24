@@ -1,43 +1,21 @@
 //! The live passes' GPU side: the shader module and its pipelines (`Passes`), the screen-size buffers and the bind
-//! groups (`Targets`), from the layout live.wgsl declares and `layout`'s table; and the tonemap LUT and bloom pyramid
-//! they are sized for.
+//! groups (`Targets`), from the layout live.wgsl declares and `layout`'s table; and the colour table of the final pass.
 
 use super::*;
 
-/// Bloom pyramid level j (0..4: 1/4 .. 1/64 resolution) size; stage k (0..5) runs on level max(k - 1, 0).
-pub(super) fn bloom_dim(w: u32, h: u32, j: u32) -> (u32, u32) {
-    (w.div_ceil(4).div_ceil(1 << j), h.div_ceil(4).div_ceil(1 << j))
-}
+/// The colour table the final pass samples (`lut`): colour grading and the tone curve of a preset (`post::Tonemapper`)
+/// for exposed linear sRGB on a log2 axis (`post::lut_coord`, the same in live.wgsl `post`), as sRGB-encoded display
+/// values (the pass has no encoding left to do; half floats hold them to 1 / 2048). LUT texels a side.
+pub(super) const LUT: u32 = post::LUT_SIZE;
 
-pub(super) fn bloom_stage_level(k: u32) -> u32 {
-    k.max(1) - 1
-}
-
-/// UE Standard bloom per stage: Gaussian radius in texels of its level (BloomNSize % of the stage width * size scale
-/// / 2, as `post::bloom`) and tint (BloomNTint * intensity / 6).
-pub(super) fn bloom_stages(pp: &crate::desc::PostPreset, w: u32, h: u32) -> ([f32; 6], [f32; 6]) {
-    let (mut r, mut t) = ([0f32; 6], [0f32; 6]);
-    for k in 0..6 {
-        let (lw, _) = bloom_dim(w, h, bloom_stage_level(k as u32));
-        r[k] = lw as f32 * pp.bloom.sizes.get(k).copied().unwrap_or(0.0) * pp.bloom.size_scale * 0.01 * 0.5;
-        t[k] = pp.bloom.tints.get(k).copied().unwrap_or(0.0) * pp.bloom.intensity / 6.0;
-    }
-    (r, t)
-}
-
-pub(super) const LOG_OFFSET: f32 = 0.0026883; // must match live.wgsl lin_to_log input offset
-pub(super) const LUT: u32 = 32;
-
-/// UE-style 32^3 LUT: log-encoded linear input -> display sRGB, built from the exact CPU port of the filmic tonemapper.
 pub(super) fn tonemap_lut(p: &crate::desc::PostPreset) -> Vec<u16> {
     let tm = post::Tonemapper::new(p);
     let mut out = Vec::with_capacity((LUT * LUT * LUT * 4) as usize);
-    let log_to_lin = |v: f32| (2f32.powf((v - 444.0 / 1023.0) * 14.0) * 0.18 - LOG_OFFSET).max(0.0);
     for b in 0..LUT {
         for g in 0..LUT {
             for r in 0..LUT {
-                let enc = |k: u32| log_to_lin(k as f32 / (LUT - 1) as f32);
-                let d = tm.apply(Vec3::new(enc(r), enc(g), enc(b)));
+                let at = |k: u32| post::lut_value(k as f32 / (LUT - 1) as f32);
+                let d = tm.apply(Vec3::new(at(r), at(g), at(b)));
                 for c in [d.x, d.y, d.z, 1.0] {
                     out.push(half::f16::from_f32(post::linear_to_srgb(c.clamp(0.0, 1.0))).to_bits());
                 }
@@ -196,8 +174,7 @@ impl Targets {
         let n = (w * h) as u64;
         let sb = |label: &str, bytes: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let quarter = (w.div_ceil(4) * h.div_ceil(4)) as u64;
-        let texels = |j: u32| bloom_dim(w, h, j).0 as u64 * bloom_dim(w, h, j).1 as u64;
-        let bloom_texels = (0..5).map(texels).sum::<u64>() + (0..6).map(|k| texels(bloom_stage_level(k))).sum::<u64>();
+        let bloom_texels = post::bloom_texels(w, h);
         let bufs: Vec<(u32, Buf)> = layout::BINDINGS
             .iter()
             .filter_map(|b| {

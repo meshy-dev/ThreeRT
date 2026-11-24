@@ -50,6 +50,24 @@ Why (measured on 2026-11-07, the authoring session's last 24 h):
 - **Aborted tool calls.** Do not retry the identical command. Take another route (for example a scratch build in a
   temporary worktree) or skip the step and record the gap in the PR. Stop only when nothing else can be done.
 
+## Sources
+
+What the renderer's code may be written from is in [PROVENANCE.md](PROVENANCE.md); it binds both sessions.
+
+- **Never read source code that cannot be MIT-licensed** while doing renderer work: Unreal Engine's engine source
+  (`Engine/Shaders`, `Engine/Source`: the EULA), NVIDIA NRD or other RTX SDK source, any SDK or engine without an
+  open-source licence compatible with MIT. Not to "check how they do it", not for a constant, not through a mirror or
+  a quoted snippet. A session that has read such source for another purpose does not write renderer code afterwards;
+  it says so and hands the item on.
+- **Unreal is a black box here.** Its pictures, its documented settings and its scripting API (`ue5/`) are the
+  reference; its source is not. When a parity gap needs explaining, measure it (A/B renders), read the public
+  documentation, papers and talks, or ask the user.
+- **Cite.** A formula, constant or method taken from a paper, a talk or open-source code is cited in a comment where
+  it is used; code under a licence that asks for a notice goes in `THIRD_PARTY_NOTICES.md`. The PR description lists
+  the sources of any algorithm it adds or changes.
+- **The supervisor checks it.** A PR whose diff or description names a proprietary source file, or cites "its
+  source" for a product that is not open source, is not merged; it goes back with this section.
+
 ## One PR per item
 
 - Branch from the latest `origin/main`; open one PR per item with base `main`. No stacked PRs.

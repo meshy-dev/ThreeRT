@@ -12,8 +12,7 @@ Scene (mirror of tools/volume-scene.ts; keep in sync): a 30 x 30 m floor and a 1
 at (0, 1.4, 0), 50-degree vertical field of view, manual exposure EV100 3. Coordinates: ours are Y-up metres,
 UE = 100 * (x, z, y) cm.
 
-The fog is a Heterogeneous Volume with a Local Fog Volume's density (VolumetricFog.usf's voxelization, as
-packages/scene FogVolume): the path tracer does not render Local Fog Volumes, and the Local Fog Volume through Lumen's
+The fog is a Heterogeneous Volume with the density of packages/scene's FogVolume (the same formula, below): the path tracer does not render Local Fog Volumes, and the Local Fog Volume through Lumen's
 volumetric fog hung the editor on this Mac ("lfv": true tries it). The smoke column and the
 fireball are Heterogeneous Volumes in both: Volume-domain materials whose Custom nodes are our volume functions in
 HLSL. A Heterogeneous Volume's extinction and emission are per local cm (before the actor's scale), measured: world
@@ -127,16 +126,14 @@ float3 LP = (P - Center) / Size;
 """
 
 BODIES = {
+    # The same density as packages/scene/src/effects.ts LOCAL_FOG (see there), in HLSL: U is the point in the unit
+    # sphere (radius 1, y up), the fog is where its radial part and its height part both are.
     "Fog": """
 float3 U = LP * 2.0;
-float fade = saturate(1.0 - length(U));
-float ext = 0.0;
-if (fade > 0.0) {
-    float height = Height > 0.0 ? Height * exp(min(-Falloff * (U.y - Offset), 80.0)) : 0.0;
-    float a = exp(-height);
-    float b = exp(-Radial * pow(fade, 0.82));
-    ext = max(-log(max(a - a * b + b, 1e-30)), 0.0);
-}
+float radial = max(Radial, 0.0) * max(1.0 - dot(U, U), 0.0);
+float height = max(Height, 0.0) * exp(clamp(-Falloff * (U.y - Offset), -40.0, 40.0));
+float x = min(height / max(radial, 1e-9), 40.0);
+float ext = radial * (x < 0.02 ? x * (1.0 - x * (0.5 - x / 6.0)) : 1.0 - exp(-x));
 float3 alb = Albedo;
 float3 emi = 0;
 """,

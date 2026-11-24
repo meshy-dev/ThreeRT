@@ -8,27 +8,30 @@
 //   judge, reject      - what of the output-grid colour history this frame's samples contradict
 //   upscale            - the composed frame, by its sub-pixel jitter, into the output grid's one colour history
 //   dof*, mblur        - depth of field and motion blur on the output grid
-//   bloom_*            - UE Standard bloom: six Gaussian stages on a 1/4 .. 1/64 downsample chain, summed from the widest up
-//   post               - exposure, bloom, UE cos^4 vignette, UE filmic tonemap via a log-encoded 3D LUT, BGRA8 output
+//   lum_down, exposure - quarter-resolution luminance: auto exposure's histogram, local exposure's layers, bloom's source
+//   bloom_*            - bloom: a sum of Gaussians on a 1/4 .. 1/128 pyramid, the widest summed directly on its top
+//   post               - exposure, local exposure, bloom, vignette, grading and tone curve (a 3D table), grain, BGRA8 output
+// (The post chain is post.rs's, pass for pass: what each step is and where it comes from is said there.)
 
 struct Cam { pos: vec4<f32>, fwd: vec4<f32>, right: vec4<f32>, up: vec4<f32> }; // pos.w = tan(fov/2), fwd.w = aspect
 struct LiveParams {
     cur: Cam,
     prev: Cam,
     size: vec4<u32>,   // width, height, frame, reset history (1)
-    misc: vec4<f32>,   // exposure scale, max history, vignette intensity, bloom on (1) / off (0)
-    misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), -, samples this frame
+    misc: vec4<f32>,   // exposure scale, max history, vignette, the bloom pyramid is needed (1) / not (0)
+    misc2: vec4<f32>,  // denoise strength, sample clamp (display units at the current exposure), motion blur's length over this frame's motion (0 = none), samples this frame
     mode: vec4<u32>,   // view mode (0 lit, 1 base color, 2 world normal, 3 lit no denoise, 4 raw sample, 5 history), display whites a unit of a reconstruction provider's input is (reconstruction.wgsl `rc_radiance_unit`), the scene's lighting is changing (live/mod.rs `live_lighting`), -
-    post: vec4<f32>,   // chromatic aberration (UE scene fringe), film grain, bloom threshold (<= 0 off), -
-    ae: vec4<f32>,     // auto exposure: low / high fraction, histogram log2 min / max
+    post: vec4<f32>,   // chromatic aberration, film grain, bloom threshold (exposed luminance; < 0: everything blooms), longest motion blur (output pixels)
+    ae: vec4<f32>,     // auto exposure: low / high fraction of the histogram, its log2 luminance min / max
     ae2: vec4<f32>,    // compensation (2^bias; manual: the exposure), min / max average luminance, mode (1 = auto)
-    ae3: vec4<f32>,    // speed up / down (EV/s), frame time (s), snap to target
+    ae3: vec4<f32>,    // speed toward brighter / darker scenes (EV/s), frame time (s), snap to target
     lx: vec4<f32>,     // local exposure: highlight contrast, shadow contrast, blurred-luminance blend, detail strength
     isz: vec4<u32>,    // traced (internal) width, height (= size.xy at 100% render scale); the previous frame's (0 = none)
-    br: vec4<f32>,     // bloom stage 0..3 Gaussian radius, texels of the stage's level
-    br2: vec4<f32>,    // bloom stage 4, 5 radius, -, -
-    bt: vec4<f32>,     // bloom stage 0..3 tint (BloomN Tint * intensity / 6)
-    bt2: vec4<f32>,    // bloom stage 4, 5 tint, -, -
+    bl: vec4<f32>,     // bloom (post.rs `BloomPlan`): weight of pyramid level 0..3
+    bl2: vec4<f32>,    // of level 4, 5; the wide pass's reach (texels of the coarsest level; 0 = nothing to sum); weight of the output's own five-pixel kernel
+    bw: array<vec4<f32>, 3>, // the wide Gaussians 0..5: a (weight, 1 / (2 sigma^2)) pair each (sigma in texels of the coarsest level)
+    lb: vec4<f32>,     // local exposure's wide blur of log luminance: weight of level 0..3
+    lb2: vec4<f32>,    // of level 4, 5; its wide Gaussian's weight, 1 / (2 sigma^2)
     dof: vec4<f32>,    // depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -
     jit: vec4<f32>,    // this frame's sub-pixel jitter (every traced sample's: x, y in 0 .. 1 of a traced pixel), -, -
     state: vec4<u32>,  // which half of the lasting buffers is this frame's (0 / 1; `this_half`), -, -, -
@@ -50,8 +53,12 @@ struct LiveParams {
 // (`this_half`), and the previous frame's, which they read (`last_half`); live/frame.rs alternates them (`L.state.x`). A half
 // is L.size.x * L.size.y elements, indexed by traced sample (by output pixel: `color_hist`).
 //   diffuse_hist  the diffuse irradiance's history: rgb, frames (`dtemporal`; the à-trous passes read its length)
-//   diffuse_mom   its luminance moments: mean, mean square, the fast mean's luminance, 1 where written (`dtemporal`)
-//   diffuse_fast  its fast mean in colour, f16 rgb (`dtemporal`; `fast_load`: ReBLUR's fast history)
+//   diffuse_mom   its luminance moments: mean, mean square, -, 1 where written (`dtemporal`); z: within the frame
+//                 the diffuse history's drift factor (`dtemporal`), then the specular history's change chart
+//                 (`stemporal` reads the one and writes the other into the half `dtemporal` has written: `spec_chart`)
+//   diffuse_fast  the diffuse history's change chart and drift ("The response of the histories"), eight bits each:
+//                 x the level of the samples' share against the history (rgb) and the drift, y the pooled residual
+//                 average (rgb) and the root of its mean square (`dtemporal`)
 //   spec_hist     the specular history: rgb, frames (`stemporal`)
 //   gbuffer       octahedral normal, view depth (0 = sky), roughness (`stemporal`; `GB`); once the temporal passes
 //                 have read the previous half, `lock_carry` puts its locks' depths into it (`judge` reads it)
@@ -72,6 +79,9 @@ struct LiveParams {
 //                 then in slot 0 `reject`'s verdict
 //   lumq          depth of field's tiles (`dof_tiles`, `dof`), then the quarter-resolution log2 luminance
 //                 (`lum_down`, `lum_blur`)
+//   bloom_a       the bloom pyramid: its levels one after another (`bloom_at`), each the picture's until its `bloom_up`
+//                 makes it the sum from there down; then the coarsest eight times more: `bloom_wide`'s sum and
+//                 `bloom_wide_rows`' row blurs
 //   lock_fwd      per traced sample: the previous frame's lock that lands on it (`lock_carry` writes, `track` reads
 //                 and clears it for the next frame)
 @group(0) @binding(2) var<storage, read_write> diffuse_hist: array<vec4<f32>>;
@@ -85,14 +95,13 @@ struct LiveParams {
 @group(0) @binding(10) var<storage, read_write> out_px: array<u32>;
 @group(0) @binding(11) var lut: texture_3d<f32>;
 @group(0) @binding(12) var lut_samp: sampler;
-@group(0) @binding(13) var<storage, read_write> ae_bins: array<atomic<u32>, 64>;   // fixed point (x 256)
+@group(0) @binding(13) var<storage, read_write> ae_bins: array<atomic<u32>, 128>;  // the luminance histogram: 64 counts, then 64 sums (`lum_down`)
 @group(0) @binding(14) var<storage, read_write> ae_state: array<vec4<f32>, 2>;    // exposure, target, mean log2 lum, valid
 @group(0) @binding(15) var<storage, read_write> lumq: array<f32>;                 // quarter res log2 luminance (unexposed)
 @group(0) @binding(16) var<storage, read_write> lumb: array<f32>;                 // edge-aware blur of lumq
 @group(0) @binding(17) var<storage, read_write> fa: array<vec4<f32>>;
 @group(0) @binding(18) var<storage, read_write> fb: array<vec4<f32>>;
-@group(0) @binding(19) var<storage, read_write> bloom_a: array<vec4<f32>>;    // bloom pyramid levels, then stage sums
-@group(0) @binding(20) var<storage, read_write> bloom_b: array<vec4<f32>>;    // horizontal blur scratch
+@group(0) @binding(19) var<storage, read_write> bloom_a: array<vec4<f32>>;    // rgb bloom, w log2 luminance
 @group(0) @binding(21) var<storage, read_write> spec_pp: array<vec2<u32>>;
 @group(0) @binding(22) var<storage, read_write> sb: array<vec4<f32>>;
 // What the trace leaves (the kernel's group 1, live/targets.rs `Targets::kernel`). Reflection resolve: the specular-lobe rays,
@@ -146,7 +155,8 @@ fn finite_or_zero(v: vec3<f32>) -> vec3<f32> {
     return select(v, vec3<f32>(0.0), non_finite(v));
 }
 
-// YCoCg (UE LumenRGBToYCoCg): neighbourhood clamps in a luma / chroma space.
+// YCoCg (Malvar & Sullivan 2003, "YCoCg-R: A Color Space with RGB Reversibility and Low Dynamic Range", the lossy form):
+// neighbourhood statistics in a luma / chroma space.
 fn ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
 }
@@ -191,14 +201,16 @@ const NEAR_MIRROR: f32 = 0.2;
 
 // ------------------------------------------------------------------------------------------------ reflection resolve
 
+// The specular lobe's distribution and visibility terms, as pathtrace.wgsl has them (`d_ggx`,
+// `vis_smith_joint_approx`: GGX of Walter et al. 2007; the height-correlated Smith visibility of Heitz 2014 in Hammon's
+// square-root-free form, GDC 2017), for the reflection resolve's weights.
 fn d_ggx(a2: f32, noh: f32) -> f32 {
     let d = (noh * a2 - noh) * noh + 1.0;
     return a2 / (3.14159265 * d * d);
 }
 
 fn vis_smith(a2: f32, nov: f32, nol: f32) -> f32 {
-    let a = sqrt(a2);
-    return 0.5 / max(nol * (nov * (1.0 - a) + a) + nov * (nol * (1.0 - a) + a), 1e-7);
+    return 0.5 / max(mix(2.0 * nol * nov, nol + nov, sqrt(a2)), 1e-7);
 }
 
 fn oct_dec(u: u32) -> vec3<f32> {
@@ -385,13 +397,6 @@ fn medium_share(q: u32) -> f32 {
     return floor(sample_px[q].normal.w) / 255.0;
 }
 
-// The diffuse irradiance's fast mean in colour (f16 rgb; a quarter of each new sample, as its luminance in the
-// moments), per traced sample (`diffuse_fast`): `dtemporal` reads the previous frame's and writes this frame's.
-fn fast_load(j: u32) -> vec3<f32> {
-    let v = diffuse_fast[last_half(j)];
-    return vec3<f32>(unpack2x16float(v.x), unpack2x16float(v.y).x);
-}
-
 fn sample_color(q: u32) -> vec3<f32> {
     return (sample_diffuse(q) + sample_specular(q)) * medium_tr(q) + sample_emission(q);
 }
@@ -458,16 +463,186 @@ fn same_surface_n(tx: i32, ty: i32, z: f32, n: vec3<f32>, t: f32, ncos: f32) -> 
 
 // History length (frames) from which `dtemporal` reprojects the pixel's centre instead of its jittered sample.
 const HIST_CENTRE: f32 = 16.0;
-// The most frames the irradiance history holds where the pixel moves a pixel a frame or more (it is resampled every
-// frame, each time a little blurrier), and the relative difference of its fast mean from its slow one, beyond their
-// noise, at which anti-lag leaves it two frames (`dtemporal`).
-const HIST_MOVING: f32 = 48.0;
-const ANTILAG: f32 = 0.15;
-// The fast-history clamp's band, in standard errors of the fast means' mean around the pixel (`dtemporal`). At 2 the
-// Bistro slice at rest read dE 2.92 for 2.82 (it found noise); at 3, 2.83.
-const FAST_BAND: f32 = 3.0;
 // Diffuse history length from which the firefly cut stops (dtemporal).
 const FIREFLY_FRAMES: f32 = 16.0;
+
+// ---- The response of the histories: how long a pixel's history may be, and how it follows the lighting.
+// (Written 2026-11; docs/RUNTIME.md "The temporal response of the live denoiser". Sources are named where a rule
+// rests on one, and only texts that were opened for this work: Schied, Peters and Dachsbacher 2018, "Gradient
+// Estimation for Real-Time Adaptive Temporal Filtering"; Karis 2014, "High-Quality Temporal Supersampling",
+// SIGGRAPH Advances in Real-Time Rendering course slides; Stachowiak 2015, "Stochastic Screen-Space Reflections",
+// same course, slides and notes; the NIST/SEMATECH e-Handbook of Statistical Methods, § 6.3.2.4, "EWMA Control
+// Charts". The rest is this project's own.)
+//
+// Within the frame's bound (`L.misc.y`) a history's length is the pixel's own:
+// - In motion. A history that moves over the grid is resampled bilinearly every frame, and each resampling blurs it
+//   (Karis 2014, slide 47, "reprojection diffusion": reduce the feedback when reprojecting off the pixel). A
+//   bilinear tap at a fraction f of a pixel is a two-point kernel of variance f (1 - f) pixels^2, so a history n
+//   frames long has been blurred by about n times that; `moving_frames` bounds n so that the blur stays under a
+//   variance budget, with f (1 - f) taken at the pixel's speed (its upper envelope beyond half a pixel a frame, so
+//   the bound does not come and go with the fraction).
+// - On animated shading: ANIM_FRAMES.
+// - While the scene's lighting changes (`L.mode.z`), by a change chart per pixel, and a drift:
+//   The renderer cannot re-trace last frame's path with last frame's random numbers, so the temporal gradient of
+//   Schied et al. 2018 is not to be had; a difference of two independent one-sample estimates carries both their
+//   variances (their § 3.2). What is to be had is each frame's sample against the pixel's own history. That is the
+//   setting of a control chart: a stream of noisy readings whose mean may shift, watched by an exponentially
+//   weighted moving average of the readings, which signals when it leaves a band of k of its own standard
+//   deviations (NIST e-Handbook § 6.3.2.4, which credits the chart to Roberts 1959).
+//   - The reading is not the sample but its share against the history, s / (s + h') per channel (`chart_share`): 0
+//     for a dark sample, about a half for one at the history's level, towards 1 for one far above. A path-traced
+//     sample is heavy-tailed (most are dark, a few carry the light), and a chart on the samples themselves reads
+//     every run of dark ones as the light having gone. A share is bounded, so one sample moves the chart by a
+//     bounded step however bright it is, and the chart counts how many samples changed sides, not by how much.
+//   - Its residual is taken from the pixel's own running mean of that share (the level: about a half on a steadily
+//     lit pixel, near 0 on one lit by rare bright samples), so every pixel's residual has mean 0 while its lighting
+//     holds, whatever its surface, shadow edges or noise are. Residuals of different pixels can then be pooled.
+//   - Pooled, because one pixel's few frames prove nothing: each frame the average is read from the pixel where
+//     this one was and four at distance sqrt 5 around it (`chart_tap`), averaged, and this frame's residual added
+//     with weight CHART_A. That recursion spreads over a few pixels' radius and CHART_A^-1 frames: about 250
+//     residuals stand behind a pooled value, where one pixel's own average has 15 (the pooled value's deviation,
+//     measured on white residuals: 0.063 of one residual's, CHART_SD; 0.073 without the pixel's own tap). The
+//     pooled value is read before this frame's residual is added: the test lags a frame, and is on four times as
+//     many samples.
+//   - The band: CHART_K deviations of the pooled value, the residuals' own mean square pooled the same way standing
+//     in for their variance (a bright sample is in the residual and in the mean square alike), and never less than
+//     CHART_FLOOR. (K is 3.5 and not the handbook's usual 3: the residuals are not white. A bright sample raises
+//     the history it is measured against, and the samples after it read low until it has faded.)
+//   - The response is Schied et al.'s (eq. 15): the blend weight a becomes a + drop (1 - a), `drop` rising from 0 at
+//     the band to 1 at 1 + CHART_GAIN^-1 bands (`chart_drop`). The history's length is what that weight leaves, so
+//     the frames after it are plain accumulation from the shorter history. The level starts again with the history
+//     (its weight is the history's, CHART_LEVEL frames at most), and a history of a frame or two is no level to
+//     compare with: its residual counts by CHART_MATURE.
+//   - In colour: the chart is kept per channel, and the largest channel's deviation decides. A red light switched
+//     off next to a white one moves the red channel's share by far more than the luminance.
+//   - The drift. A chart whose level follows the history sees a change and then gets used to it: under a light that
+//     falls a little every frame (a dusk) the shares settle at a lower level, the residuals return to 0, and the
+//     history trails the light by its whole length for as long as the fall lasts (the model: 2.4 times the light
+//     after 170 frames of a fall of 2.6 % a frame under a bound of 24 frames; bench-window's tokyo-dusk under 48:
+//     the city's diffuse light 3.5 times the held frame's). What does not get used to it is the plain relative
+//     residual (l - h) / h of the luminance: its mean is 0 for a history that is the samples' mean, whatever their
+//     distribution, and minus the lag for one that trails. It is pooled as the chart's average is, each pixel's
+//     weighted by 1 / (1 + cv^2), cv its samples' own relative deviation (from the luminance moments; a pixel lit
+//     by rare bright samples has a large one and counts for little, and its residual is bounded above by
+//     DRIFT_CLIP besides, which is where a bounded mean of a skewed sample is biased: on such pixels the drift is
+//     blind, and says so). The response is not to shorten the history but to move it: each frame the history (and
+//     its moments) is scaled by 1 + DRIFT_GAIN x the pooled residual, less what the pixel's noise allows the
+//     pooled value to be by chance (DRIFT_ALLOW of its deviations, DRIFT_ALLOW_UP above, where a sample's tail
+//     is). A proportional correction on a pooled error: it takes the lag out and leaves the noise of a full
+//     history, where a shorter history took the lag out by letting the noise in. The same factor goes to the
+//     specular history of a rough surface (`stemporal`).
+//   The constants are from a model of these rules on synthetic samples (tools/chart-model.py: a grid of pixels;
+//   steady, exponential, one bright sample in 10 and in 100, a steady half with rare bright ones), then set on the
+//   benches (docs/RUNTIME.md has the tables). In the model (frame bound 24), the mean of the histories over the
+//   truth 2 / 4 / 8 / 16 frames after the light fell to 1/13: 7.6 / 1.00 / 1.00 / 1.00 on steady samples, 12.0 /
+//   0.99 / 0.99 / 1.01 on exponential ones; halved: 1.90 / 1.48 / 1.01 / 1.00 and 1.92 / 1.80 / 1.20 / 1.04; under
+//   a fall of 2.6 % a frame, after 170 frames: 1.13 and 1.28 (without the drift 2.41 and 2.21), a steady half with
+//   one bright sample in 10: 1.49 (2.41), one bright sample in 10 alone: 2.25 (as without); with nothing changing
+//   the histories kept 24.0 of 24 frames and their mean within 0.5 % on every kind but the last (1.8 % low), and
+//   histories that started again (a surface uncovered) were 14 to 16 frames long after 16. What was tried and
+//   dropped there: letting the chart's average give up the share it was acted on (the response stalled at partial
+//   drops), a level that does not follow the history (false signals on exponential samples, 0.2 % of pixels a
+//   frame), a level that counts a history's first share (every history that started again read its next frames as
+//   the light having fallen: 1.3 frames long after 8), a floor of 0.025 (a steady pixel with rare bright samples
+//   signalled on 1.4 % of pixels a frame), shortening the history by the drift instead of moving it (under a fall of
+//   0.7 % a frame, steady samples: 1.10 of the light on 14 frames for 1.07 on 48), and a drift not weighted by the pixels' noise (it darkened pixels lit by
+//   rare samples by a fifth).
+//   The chart's and the drift's state lasts in `diffuse_fast` (per traced sample, eight bits each, rounded at
+//   random so that a weight below a step still moves it in the mean: x the level's three channels and the drift; y
+//   the residual average's three channels and the root of the mean square) and is kept up whether or not the
+//   lighting changes, so that it is warm when it does. With `L.mode.z` 0 nothing responds: the history is the
+//   plain mean of its frames.
+// The specular history has the same chart on one channel (the mean of the three, `stemporal`), in `diffuse_mom`.z.
+
+// The blur a moving history may have gathered, as a variance (previous traced pixels^2): diffuse irradiance (64
+// frames at half a pixel a frame and faster), and the specular history (32 frames).
+// The bound trades blur for noise, and which costs more depends on the scene and on how long the motion lasts; what
+// a reflection needs in a move of the camera is not this bound but the parallax's (`stemporal`). Measured on the
+// integrated tree, 2026-11-24, bench-ghosting --quick (Bistro night; excess dE over the settled frame: mid-turn,
+// mid-strafe, half a second after turning back, after strafing back, 0.1 s after a stop), with the parallax bound
+// as it is, for budgets of 8 and 8, 16 and 8, 16 and 16: 0.89 / 1.42 / 1.12 / 1.21 / 1.33, 0.87 / 1.39 / 1.13 /
+// 1.22 / 1.31, 0.88 / 1.39 / 1.14 / 1.22 / 1.31 (the previous release: 0.85 / 1.60 / 1.13 / 1.25 / 1.34; these
+// with rough surfaces still held to their neighbourhood in a move, which was then dropped for its cost: the last
+// figure is 1.36 now). And
+// bench-window's rooms-turn (768 lamps, a 24-frame turn out of a settled view) in the tree before it had specular
+// light, dE to offline at the last moving frame for a diffuse budget of 4 / 8 / none: 2.23 / 2.12 / 1.99: a turn
+// that short gathers little blur, and a history cut for it is that much noisier for seconds. (Not 4 for another
+// reason too: its 16 frames are FIREFLY_FRAMES and HIST_CENTRE, and a history held at exactly their threshold
+// falls to either side of it by rounding.)
+const MOVE_BLUR: f32 = 16.0;
+const SPEC_MOVE_BLUR: f32 = 8.0;
+// Frames of history on animated shading.
+const ANIM_FRAMES: f32 = 4.0;
+// The change chart. CHART_A: the weight of a frame's residual in the pooled average. CHART_SD: the pooled average's
+// standard deviation, in deviations of one residual (see above). CHART_K: the band, in deviations. CHART_FLOOR: the
+// least deviation of the pooled share that counts. CHART_GAIN: `drop` per band beyond the band. CHART_MATURE: the
+// history length from which a pixel's residual counts in full (a history of a frame or two is no level to compare
+// with). CHART_LEVEL: the frames the level averages over at most. CHART_CHANNEL: the share of the history's
+// luminance added to each channel's own level in the share's denominator, so that a channel the light has next to
+// none of does not read its own noise as change. CHART_DARK: the light (display units at the current exposure)
+// below which a change is none.
+const CHART_A: f32 = 0.125;
+const CHART_SD: f32 = 0.063;
+const CHART_K: f32 = 3.5;
+const CHART_FLOOR: f32 = 0.04;
+const CHART_GAIN: f32 = 2.0;
+const CHART_MATURE: f32 = 4.0;
+const CHART_LEVEL: f32 = 32.0;
+const CHART_CHANNEL: f32 = 0.25;
+const CHART_DARK: f32 = 1.0e-3;
+// The drift. DRIFT_GAIN: the share of the pooled relative residual taken out of the history a frame. DRIFT_ALLOW,
+// DRIFT_ALLOW_UP: what of it is the noise's, in deviations of the pooled value, below and above (a sample's
+// distribution has its tail above). DRIFT_CLIP: the most a sample's relative residual counts for.
+const DRIFT_GAIN: f32 = 0.25;
+const DRIFT_ALLOW: f32 = 2.0;
+const DRIFT_ALLOW_UP: f32 = 4.0;
+const DRIFT_CLIP: f32 = 7.0;
+
+// The most frames a history moving `speed` pixels a frame over its grid may hold for its blur to stay under `blur`.
+fn moving_frames(speed: f32, blur: f32) -> f32 {
+    let f = min(speed, 0.5);
+    return blur / max(f * (1.0 - f), 1.0e-6);
+}
+
+// The four pixels the chart's average is pooled from, around where the pixel was: a quarter turn apart at distance
+// sqrt 5, mirrored every other frame (the recursion's reach is then the same along both diagonals).
+fn chart_tap(k: i32) -> vec2<i32> {
+    var o = vec2<i32>(-2, -1);
+    if (k == 1) { o = vec2<i32>(1, -2); }
+    if (k == 2) { o = vec2<i32>(2, 1); }
+    if (k == 3) { o = vec2<i32>(-1, 2); }
+    if ((L.size.z & 1u) == 1u) { o.x = -o.x; }
+    return o;
+}
+
+// A sample's share against the history h (`level`: the history's own, luminance or mean), per channel.
+fn chart_share(s: vec3<f32>, h: vec3<f32>, level: f32) -> vec3<f32> {
+    return s / (s + h + vec3<f32>(CHART_CHANNEL * level + CHART_DARK / max(exposure_scale(), 1.0e-8)));
+}
+
+// The weight of this frame's share in the level, the history `frames` long with it: the level is the mean of the
+// shares since the history started, but for the first (a share against no history is 1 whatever the light: counted,
+// every history that started again read its next frames as the light having fallen, and started again: in the
+// model 14 to 23 % of such pixels signalled a frame and their histories were 1.3 frames long after 8).
+fn chart_level_weight(frames: f32) -> f32 {
+    return 1.0 / clamp(frames - 1.0, 1.0, CHART_LEVEL);
+}
+
+fn chart_mature(frames: f32) -> f32 {
+    return clamp((frames - 1.0) / (CHART_MATURE - 1.0), 0.0, 1.0);
+}
+
+// The share of the history a pooled residual average `dev` (its size) takes, `spread` the pooled mean square: none
+// within the band, all of it from 1 + 1 / CHART_GAIN bands on.
+fn chart_drop(dev: f32, spread: f32) -> f32 {
+    return clamp((dev / max(CHART_K * CHART_SD * sqrt(max(spread, 0.0)), CHART_FLOOR) - 1.0) * CHART_GAIN, 0.0, 1.0);
+}
+
+// Three numbers in 0 .. 1 for sample q this frame, to round the chart's level at random.
+fn chart_dither(q: u32) -> vec3<f32> {
+    let k = q * 2654435761u + L.size.z * 40503u;
+    return vec3<f32>(f32((k * 3u) >> 8u), f32((k * 5u + 0x9e3779b9u) >> 8u), f32((k * 7u + 0x3c6ef372u) >> 8u)) / 16777216.0;
+}
 
 // Diffuse temporal accumulation on the traced grid: the sample's irradiance (diffuse lighting / albedo) blended into
 // the previous traced grid's history at its reprojected position (motion vectors for moving objects), with its
@@ -489,13 +664,11 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     var l = lum(irr);
     var hd = vec4<f32>(0.0);
     var hm = vec4<f32>(0.0);
-    var hf = vec3<f32>(0.0);     // the fast mean in colour, reprojected
-    var slow_c = vec3<f32>(0.0); // the slow and the fast means in colour around the point
-    var fast_c = vec3<f32>(0.0);
-    var around = vec2<f32>(-1.0);
-    var fast_sd = 0.0; // of the fast luminances around the point (their spread in space), and how many
-    var fast_n = 1.0;
-    var speed = 0.0; // output pixels this frame
+    // (For the response below: how far the pixel's centre moved over the previous traced grid this frame, in its
+    // pixels; the history tap that counts most, -1: none; and the previous grid's pixel the history was read around.)
+    var speed = 0.0;
+    var near_tap = -1;
+    var around = vec2<i32>(0);
     let ps = vec2<i32>(L.isz.zw);
     if (L.size.w == 0u && ps.x > 0) {
         let mv = motion_in[q];
@@ -516,10 +689,14 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             // (Bistro's street and facades at 256 frames held 8-30). The centre fetch takes 0.5 (depth unchanged).
             let centred = diffuse_hist[last_half(u32(jc.y * ps.x + jc.x))].w >= HIST_CENTRE;
             if (centred) { tc = tcc; }
+            // (Nothing moved and the grid is the same one: exactly none, not the reprojection's rounding.)
+            if (camera_moves() || (mv.w > 0.5 && t > 0.0) || any(ps != vec2<i32>(L.isz.xy))) { speed = length(tcc - vec2<f32>(f32(gid.x), f32(gid.y))); }
+            around = vec2<i32>(round(tc));
             let x0 = i32(floor(tc.x));
             let y0 = i32(floor(tc.y));
             let f = tc - floor(tc);
             var wsum = 0.0;
+            var most = 0.0;
             for (var k = 0; k < 4; k++) {
                 let tx = x0 + (k & 1);
                 let ty = y0 + (k >> 1u);
@@ -528,125 +705,117 @@ fn dtemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let j = u32(ty * ps.x + tx);
                 hd += diffuse_hist[last_half(j)] * bw;
                 hm += diffuse_mom[last_half(j)] * bw;
-                hf += fast_load(j) * bw;
                 wsum += bw;
+                if (bw > most) {
+                    most = bw;
+                    near_tap = i32(j);
+                }
             }
             if (wsum > 1e-3) {
                 hd /= wsum;
                 hm /= wsum;
-                hf /= wsum;
             } else {
                 hd = vec4<f32>(0.0);
                 hm = vec4<f32>(0.0);
             }
-            if (non_finite(hd.rgb) || non_finite(hm.xyz) || non_finite(hf)) {
+            if (non_finite(hd.rgb) || non_finite(hm.xyz)) {
                 hd = vec4<f32>(0.0);
                 hm = vec4<f32>(0.0);
             }
-            speed = length(sp - 0.5 - pp.xy);
-            // Slow / fast means over the 3x3 around it on the same surface (anti-lag compares them).
-            if (t > 0.0 && L.mode.z != 0u) {
-                var acc = vec2<f32>(0.0);
-                var acc2 = 0.0;
-                var na = 0.0;
-                for (var k = 0; k < 9; k++) {
-                    let tx = i32(round(tc.x)) + k % 3 - 1;
-                    let ty = i32(round(tc.y)) + k / 3 - 1;
-                    if (tx < 0 || ty < 0 || tx >= ps.x || ty >= ps.y || !same_surface(tx, ty, pp.z, n, t)) { continue; }
-                    let j = u32(ty * ps.x + tx);
-                    let m = diffuse_mom[last_half(j)];
-                    if (m.w <= 0.0 || non_finite(m.xyz)) { continue; }
-                    slow_c += diffuse_hist[last_half(j)].rgb;
-                    fast_c += fast_load(j);
-                    acc += vec2<f32>(m.x, m.z);
-                    acc2 += m.z * m.z;
-                    na += 1.0;
-                }
-                if (na > 0.0) {
-                    around = acc / na;
-                    slow_c /= na;
-                    fast_c /= na;
-                    fast_sd = sqrt(max(acc2 / na - around.y * around.y, 0.0));
-                    fast_n = na;
-                }
-            }
+            if (hd.w <= 0.0) { near_tap = -1; }
         }
     }
-    // How long the history may be at most is the frame's (`misc.y`: live/mod.rs HISTORY_LIVE while the scene's lighting
-    // changes, far longer once it has settled); within it, each pixel's own: less where it moves (until 2026-11-12 the
-    // whole frame's was held to 48 while the camera moved), a few frames on animated shading, and anti-lag below.
-    let cap = mix(select(L.misc.y, min(L.misc.y, 4.0), anim), min(L.misc.y, select(HIST_MOVING, 4.0, anim)), clamp(speed, 0.0, 1.0));
+    // ---- How long this pixel's history may be, and how it follows a change of the lighting ("The response of the
+    // histories" above).
+    // The change chart's state where this pixel was: its level at the history tap that counts most, the pooled
+    // residual and its mean square from that tap and four pixels around (`chart_tap`).
+    var level = vec3<f32>(0.0);
+    var pooled = vec3<f32>(0.0);
+    var spread = 0.0;
+    var drift = 0.0;
+    if (near_tap >= 0) {
+        let own = diffuse_fast[last_half(u32(near_tap))];
+        let l0 = unpack4x8snorm(own.x);
+        level = l0.xyz * (127.0 / 255.0) + 0.5;
+        drift = l0.w;
+        let e0 = unpack4x8snorm(own.y);
+        pooled = e0.xyz;
+        spread = e0.w * e0.w;
+        var taps = 1.0;
+        for (var k = 0; k < 4; k++) {
+            let c = around + chart_tap(k);
+            if (c.x < 0 || c.y < 0 || c.x >= ps.x || c.y >= ps.y) { continue; }
+            let tap = diffuse_fast[last_half(u32(c.y * ps.x + c.x))];
+            let e = unpack4x8snorm(tap.y);
+            pooled += e.xyz;
+            spread += e.w * e.w;
+            drift += unpack4x8snorm(tap.x).w;
+            taps += 1.0;
+        }
+        pooled /= max(taps, 1.0);
+        spread /= max(taps, 1.0);
+        drift *= 0.5 / max(taps, 1.0);
+    }
+    // The drift ("The response of the histories"): what the pooled relative residual says the history is off by,
+    // less what the pixel's own noise allows it to be, taken out of the history at DRIFT_GAIN a frame. The
+    // luminance moments go with it.
+    let cv2 = max(hm.y / max(hm.x * hm.x, 1.0e-12) - 1.0, 0.0);
+    let trust = 1.0 / (1.0 + cv2);
+    var drifted = 1.0;
+    if (L.mode.z != 0u && !anim) {
+        let allow = select(DRIFT_ALLOW, DRIFT_ALLOW_UP, drift > 0.0) * CHART_SD * trust * sqrt(cv2);
+        drifted = 1.0 + DRIFT_GAIN * sign(drift) * max(abs(drift) - allow, 0.0) / max(trust, 0.5);
+        hd = vec4<f32>(hd.rgb * drifted, hd.w);
+        hm = vec4<f32>(hm.x * drifted, hm.y * drifted * drifted, hm.z, hm.w);
+    }
+    let cap = min(select(L.misc.y, min(L.misc.y, ANIM_FRAMES), anim), moving_frames(speed, MOVE_BLUR));
     var m1 = hm.x;
     var m2 = hm.y;
     let sd = sqrt(max(m2 - m1 * m1, 0.0));
     if (hd.w >= 4.0 && hd.w < FIREFLY_FRAMES) {
         // Firefly, while the history is young (after a disocclusion or a lighting change): a sample moves the pixel by
         // (l - mean) / frames; cut only what would show as a sparkle (more than half the mean above it). Not from
-        // FIREFLY_FRAMES on: histories are capped (48 frames moving, 32 while the scene's lighting changes), so a cut tied to the frame count
+        // FIREFLY_FRAMES on: histories are capped while the view moves or the lighting changes, so a cut tied to the frame count
         // kept clipping the rare bright samples of small strong lights for good. Bistro crowd at 10 s, held: diffuse
         // 0.70 of our offline render with it, 0.82 without; moving ΔE 15.3 -> 12.9.
         let hi = m1 + 4.0 * sd + 0.5 * m1 * hd.w + 1e-4;
         if (l > hi) { irr *= hi / l; l = hi; }
     }
-    let fast = select(l, mix(hm.z, l, 0.25), hd.w > 0.0);
-    var count = min(hd.w + 1.0, cap);
-    // The fast-history clamp (ReBLUR's), before the cut below: the cut acts once, on luminance, and the history it
-    // leaves still holds the old light (a lamp switched off left its pool on the wall 3.3 times too bright after half
-    // a second, 17 % after 4 s, falling as 1 / frames; a sign's, in its colour). So every frame the slow means around
-    // the point are held, a channel each, to the band of the fast means there: their mean +- FAST_BAND of its standard
-    // error (the fast luminances' spread over the root of their number; both means are of the same pixels, so what
-    // differs between neighbours cancels), and this pixel's history is changed as they are: by the same ratios, or
-    // by the difference itself in a channel the history has next to none of. Its luminance mean follows it (once:
-    // the cut then moves it toward the fast mean, it does not scale it again). What is left of the history counts
-    // for as many frames less, by the channel changed most among those that matter (a twentieth of the largest): the
-    // pixel goes back to the spatial filter. While the lighting is live, as the cut: on a settled scene there is
-    // nothing to find.
-    var hist = hd.rgb;
-    if (L.mode.z != 0u && around.x >= 0.0 && hd.w > 0.0 && !non_finite(fast_c) && !non_finite(slow_c)) {
-        let rel = FAST_BAND * fast_sd / sqrt(fast_n) / max(around.y, 1e-6);
-        let to = clamp(slow_c, fast_c * max(1.0 - rel, 0.0), fast_c * (1.0 + rel) + 1e-4);
-        if (any(to != slow_c)) {
-            let has = slow_c > vec3<f32>(1e-5);
-            let r = select(vec3<f32>(1.0), to / slow_c, has);
-            hist = max(hist * r + select(to - slow_c, vec3<f32>(0.0), has), vec3<f32>(0.0));
-            let was = lum(slow_c);
-            if (was > 1e-5) {
-                let rl = lum(to) / was;
-                m1 *= rl;
-                m2 = m1 * m1 + sd * sd * rl * rl;
-            } else {
-                m1 = max(m1 + lum(to) - was, 0.0);
-                m2 = m1 * m1 + sd * sd;
-            }
-            let big = max(slow_c, to);
-            let left = select(vec3<f32>(1.0), min(slow_c, to) / max(big, vec3<f32>(1e-6)), big > vec3<f32>(0.05 * max(big.x, max(big.y, big.z))));
-            count = max(min(count, hd.w * min(left.x, min(left.y, left.z)) + 1.0), 2.0);
-        }
-    }
-    // Anti-lag (as ReBLUR's): around this point the fast average left the slow one by more than its
-    // (neighbourhood-averaged) noise allows: the lighting changed here (a sign switched off, a door opened, a wall
-    // gone, a spark passing). The history is cut by how far, down to two frames at ANTILAG of the mean: a slow change
-    // shortens it a little every frame until it follows, a sudden one restarts it. While the scene's lighting changes
-    // (`mode.z`): once it has settled there is nothing to find, and what the test then finds is noise (a still Bistro
-    // read dE 2.43 against offline with it always on, 2.23 without).
-    // (The specular has none: at one sample a pixel its fast mean is noise, and cutting by it cost more than the lag:
-    // the Bistro slice at 5 s read dE 2.98 with it for 2.82.)
-    if (L.mode.z != 0u && hd.w >= 6.0 && around.x >= 0.0) {
-        let over = abs(around.y - around.x) - 3.0 * 0.38 * sd / 3.0 - 1e-4;
-        let keep = 1.0 - clamp(over / (ANTILAG * max(max(around.x, around.y), 1e-6)), 0.0, 1.0);
-        if (keep < 1.0) {
-            count = max(min(count, hd.w * keep + 1.0), 2.0);
-            m1 = mix(around.y, m1, keep);
-            m2 = m1 * m1 + sd * sd;
-        }
-    }
-    let a = 1.0 / max(count, 1.0);
-    let mom = vec4<f32>(mix(m1, l, a), mix(m2, l * l, a), fast, 1.0);
-    let d = mix(hist, irr, a);
-    let fc = select(irr, mix(hf, irr, 0.25), hd.w > 0.0);
-    diffuse_fast[this_half(q)] = vec2<u32>(pack2x16float(min(fc.rg, vec2<f32>(6.0e4))), pack2x16float(vec2<f32>(min(fc.b, 6.0e4), 0.0)));
+    // This frame's sample against the history, per channel, as a share (`chart_share`), and its residual from the
+    // level: by how much more or less of the light the sample holds than this pixel's samples usually do.
+    let hist = max(hd.rgb, vec3<f32>(0.0));
+    let hist_l = lum(hist);
+    let share = chart_share(max(irr, vec3<f32>(0.0)), hist, hist_l);
+    let res = (share - level) * chart_mature(hd.w);
+    // (The relative residual, for the drift: bounded above, weighted by how far the pixel's samples can be trusted.)
+    let rel = clamp((l - hist_l) / (hist_l + CHART_DARK / max(exposure_scale(), 1.0e-8)), -1.0, DRIFT_CLIP) * chart_mature(hd.w) * trust;
+    // The response: only while the scene's lighting changes, and not on animated shading (a few frames already).
+    var drop = 0.0;
+    if (L.mode.z != 0u && !anim) { drop = chart_drop(max(max(abs(pooled.x), abs(pooled.y)), abs(pooled.z)), spread); }
+    // (Schied et al. 2018, eq. 15: the blend weight is the plain one, moved towards 1 by the share of the history the
+    // change takes.)
+    let plain = 1.0 / max(min(hd.w + 1.0, cap), 1.0);
+    let a = plain + drop * (1.0 - plain);
+    let count = 1.0 / a;
+    // (z: the drift's factor this frame, for `stemporal`, which then puts its own chart there.)
+    let mom = vec4<f32>(mix(m1, l, a), mix(m2, l * l, a), drifted, 1.0);
+    let d = mix(hd.rgb, irr, a);
     diffuse_hist[this_half(q)] = vec4<f32>(d, count);
     diffuse_mom[this_half(q)] = mom;
+    // The chart's state: the level follows the history (it starts again with it); the pooled averages take this
+    // frame's residual. (None on animated shading or the sky.)
+    let level_now = mix(level, share, chart_level_weight(count));
+    var e_now = vec4<f32>(0.0);
+    var drift_now = 0.0;
+    if (!anim && t > 0.0) {
+        e_now = vec4<f32>(mix(pooled, res, CHART_A), sqrt(mix(spread, max(max(res.x * res.x, res.y * res.y), res.z * res.z), CHART_A)));
+        // (Less what a signal of the chart has just acted on: the history it leaves is of this frame, and a drift
+        // read before it would be taken out again, an overshoot of a few per cent after a lamp came on.)
+        drift_now = clamp(mix(drift, rel, CHART_A), -0.5, 0.5) * (1.0 - drop);
+    }
+    // (Eight bits each, rounded at random: the level about a half, the drift doubled.)
+    let dither = (vec4<f32>(chart_dither(q), fract(chart_dither(q).x * 7.0 + 0.37)) - 0.5) / 127.0;
+    diffuse_fast[this_half(q)] = vec2<u32>(pack4x8snorm(vec4<f32>((level_now - 0.5) * (255.0 / 127.0), 2.0 * drift_now) + dither), pack4x8snorm(e_now));
     // Denoiser input; w = variance of the accumulated mean luminance (its noise estimate).
     fb[q] = vec4<f32>(max(d, vec3<f32>(0.0)), max(mom.y - mom.x * mom.x, 0.0) / max(count, 1.0));
 }
@@ -798,16 +967,110 @@ fn spec_history(pp: vec3<f32>, n: vec3<f32>, t: f32, rough: f32, virt: bool) -> 
     return h;
 }
 
-// The most a specular history may trail behind its reflection, output pixels (`stemporal`).
-const SPEC_TRAIL: f32 = 2.0;
-// How far from this frame's neighbourhood mean a specular history may lie, in deviations of the neighbourhood
-// (`stemporal`'s variance clipping).
-const SPEC_CLIP: f32 = 2.0;
-const SPEC_CLIP_REL: f32 = 0.5;
+// ---- The specular history's rules (`stemporal`; the lengths and the chart as "The response of the histories").
+// Set on the integrated tree, 2026-11-24 (bench-ghosting, bench-object-ghosting, bench-temporal's water and edit,
+// bench-window; docs/RUNTIME.md has the tables).
+// A reflection's history is tried through the reflection too when the two places lie this far apart (previous traced
+// pixels): nearer, they are one fetch.
+const SPEC_PAR_MIN: f32 = 0.25;
+// The roughness from which the reflection's own place is not tried (no second fetch), and from which the surface's
+// history starts to lose against the reflection's below it.
+const SPEC_VIRT_ROUGH: f32 = 0.6;
+const SPEC_VIRT_FROM: f32 = 0.3;
+// What the surface's history counts for on a mirror, where it is right only if nothing in the reflection differs.
+const SPEC_SURFACE_MIRROR: f32 = 0.1;
+// The neighbourhood's band, in its deviations, and as a share of the history's level.
+const SPEC_GAMMA: f32 = 1.25;
+const SPEC_REL: f32 = 0.1;
+// The chart level below which a pixel counts as lit by rare samples (a dark neighbourhood is then no evidence against
+// its history), and from which it counts as steadily lit.
+const SPEC_RARE: f32 = 0.3;
+const SPEC_STEADY: f32 = 0.45;
+// How far a history may have slid against what it shows (previous traced pixels, summed over its frames) on a
+// surface of roughness 0, and how much further by roughness squared (the lobe's width: a blurred image hides a
+// slide); the share of the parallax that counts on a mirror, where the reflection's own place is known; and the
+// share of the bound lifted where the reflection's history is found there and agrees with this frame.
+const SPEC_SLIDE: f32 = 4.0;
+const SPEC_SLIDE_ROUGH: f32 = 32.0;
+const SPEC_PAR_MIRROR: f32 = 0.25;
+const SPEC_FOUND: f32 = 0.9;
+// On animated shading: the share of the band's allowance for rare samples that is kept. bench-temporal --shot
+// water (a canal's waves under two lamps and a sign; dE to the converged frame of the same moment, the water's
+// reflections, time held / running), for 1 (no clamp there) / 0.5 / 0.25 / 0: 1.16 / 3.22 / 3.67 / 3.77 and 20.6 /
+// 12.5 / 10.8 / 9.0 (the previous release: 3.08 and 13.4); with a bound of 2 frames and no clamp 5.51 and 12.2.
+const SPEC_ANIM_RARE: f32 = 0.5;
+// The most frames while the scene's lighting changes: on a mirror, at the roughness where a reflection is still
+// sharp but the filter already reaches (SPEC_GLOSS), and from SPEC_VIRT_ROUGH on (there the frame's bound alone).
+const SPEC_LIVE_MIRROR: f32 = 24.0;
+const SPEC_LIVE_GLOSS: f32 = 12.0;
+const SPEC_GLOSS: f32 = 0.3;
+// A traced sample's specular lighting, as `sample_specular`, the ceiling `cl` (`sample_clamp`) read once.
+fn spec_sample(q: u32, cl: f32) -> vec3<f32> {
+    var s = sample_px[q].spec.rgb / max(L.misc2.w, 1.0) + refl_res[q].rgb;
+    if (non_finite(s)) { s = vec3<f32>(0.0); }
+    let l = lum(s);
+    if (l > cl) { s *= cl / l; }
+    return max(s, vec3<f32>(0.0));
+}
 
-// Specular temporal accumulation on the traced grid (UE 5.8 Lumen reflections, LumenReflectionDenoiserTemporal.usf): the
-// surface history and the reflection-hit one (reprojected through the mirror image of what it shows); the one closer to
-// this frame's neighbourhood mean wins. Writes the specular filter's input and the traced grid's g-buffer.
+// The specular chart's state, a whole number below 2^24 in `diffuse_mom`.z (a float holds it exactly; 0, a cleared
+// buffer, is no state): the level (8 bits, rounded at random), the residual average (8 bits, signed) and the root of
+// the residuals' mean square (8 bits).
+fn spec_chart(v: f32) -> vec3<f32> {
+    let u = u32(clamp(v, 0.0, 16777215.0));
+    return vec3<f32>(f32(u & 255u) / 255.0, f32(i32(((u >> 8u) & 255u) ^ 128u) - 128) / 127.0, f32((u >> 16u) & 255u) / 255.0);
+}
+
+fn spec_chart_pack(level: f32, e: f32, rms: f32, dither: f32) -> f32 {
+    let a = u32(clamp(level * 255.0 + dither, 0.0, 255.0));
+    let b = u32(i32(round(clamp(e, -1.0, 1.0) * 127.0))) & 255u;
+    let c = u32(clamp(round(rms * 255.0), 0.0, 255.0));
+    return f32(a | (b << 8u) | (c << 16u));
+}
+
+// Specular temporal accumulation on the traced grid: this frame's specular sample (with the resolved reflection,
+// `refl`) blended into its history. Writes `spec_hist` (rgb, frames), the specular filter's input (`spec_store(0u, ..)`),
+// the specular chart's state (`diffuse_mom`.z of this frame's half, which `dtemporal` has written by then) and the
+// traced grid's g-buffer.
+// - Where the history is. A reflection's image does not move with the surface that shows it: "reflected objects
+//   move according to their depth, not the depth of the surface which reflects them", and reprojected by the
+//   surface they smear (Stachowiak 2015, notes to the slides on temporal reprojection, who reproject by the average
+//   depth of what is reflected). Here: seen in a plane mirror, a thing at distance d behind the surface point at
+//   distance t lies at t + d along the view ray. Both places are read when they differ: where the surface point was
+//   (`prev_pixel`, moving objects by their motion), and where that point behind the surface was (for a surface
+//   that moved: carried by twice its move along its normal, the law of reflection for an image of what stands
+//   still). Which to believe is this frame's samples' to say: each history is held against the mean and deviation
+//   of the nine samples around, in YCoCg (a box along luma, Karis 2014, slide 33; a statistical one in place of his
+//   minimum and maximum, as Schied et al. 2018 § 2 report of Patney et al. 2016), and counts by exp(-e^2), e its
+//   distance in bands, times what the roughness says before any sample does (the reflection's place on a mirror,
+//   the surface's from SPEC_VIRT_ROUGH).
+// - How long it may be: the frame's bound; the bound of a history resampled in motion (`moving_frames`); and a bound
+//   by the parallax, the distance between the two places a frame: a history n frames long has slid n times that
+//   against one of them, and may by SPEC_SLIDE pixels and more the wider the lobe. The parallax is none in a turn
+//   of the camera, when nothing bounds, and in a move it is what a reflection needs: where the sample has no hit
+//   distance the parallax of a far reflection is taken (the most it can be), and rough surfaces are bound too (a
+//   lamp's highlight on wet stones slides with the view as a mirror's image does, only blurred: without that, the
+//   street 0.1 s after a stop read an excess dE of 1.78 for 1.33). On a mirror only a share of it counts, and
+//   little of it where the reflection's history was found in its place and agrees with this frame. While the
+//   lighting changes, a bound by roughness: shortest where a reflection is sharp enough to show a lag and the
+//   filter already reaches (SPEC_GLOSS), longer on a mirror, which has the temporal mean alone against its noise,
+//   and the frame's bound alone on rough surfaces, whose reflection is too blurred to show one. Their histories
+//   take the diffuse history's drift instead (above).
+// - What it follows, while the lighting changes or the reflection moves against its surface, and always on animated
+//   shading: the chart (above), on the mean of the three channels, pooled around where the surface point was; and
+//   the neighbourhood's band: the history is clamped into mean +- (SPEC_GAMMA deviations + a share of its own
+//   level), Karis's neighbourhood clamp (slides 30 to 34) on those statistics, with one more term. One sample a
+//   pixel is heavy-tailed: where the light comes by rare bright samples, nine dark ones around say nothing against
+//   a history that holds their mean, and clipping it to them every frame darkens the reflection for good. The
+//   chart's level knows which pixels those are (the mean share of their samples is far below a half): there the
+//   band is as wide as the history's level (it cannot be clamped down, only up, when all nine are brighter), and
+//   tight only where the samples were steady (a mirror's image of a lamp, which nine dark samples do contradict).
+//   A reflection that passes is steady while it is there: when the clamp raises a history (all nine samples above
+//   it at once) the level is set to a steady one, and a pixel takes the highest level of the pixels its chart
+//   pools from, so that the rim of a passing reflection is treated as its middle. (Without the two, a light thrown
+//   over a polished floor left its reflection along its path, hollowed out: bench-object-ghosting's orb 0.1 s
+//   after it lands, dE / trail 4.88 / 280 px for 3.63 / 96.) What the clamp takes shortens the history by the same
+//   share.
 @compute @workgroup_size(8, 8, 1)
 fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iw = L.isz.x;
@@ -830,95 +1093,183 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         p = L.cur.pos.xyz + dir * t;
         depth = dot(p - L.cur.pos.xyz, L.cur.fwd.xyz);
     }
-    let cur = sample_specular(q);
-    // This frame's neighbourhood mean and spread (same surface), in YCoCg.
-    var m1 = vec3<f32>(0.0);
-    var m2 = vec3<f32>(0.0);
-    var mn = 0.0;
-    for (var k = 0; k < 9; k++) {
-        let qx = i32(gid.x) + k % 3 - 1;
-        let qy = i32(gid.y) + k / 3 - 1;
-        if (qx < 0 || qy < 0 || qx >= i32(iw) || qy >= i32(ih)) { continue; }
-        let j = u32(qy) * iw + u32(qx);
-        let s = sample_px[j];
-        var ok = false;
-        if (t > 0.0) {
-            ok = s.color.w > 0.0 && abs(s.color.w - t) < 0.05 * t + 0.01 && dot(normalize(s.normal.xyz + vec3<f32>(1e-6)), n) > 0.8;
-        } else {
-            ok = s.color.w == 0.0;
-        }
-        if (!ok) { continue; }
-        let yq = ycocg(sample_specular(j));
-        m1 += yq;
-        m2 += yq * yq;
-        mn += 1.0;
-    }
-    let smean = m1 / max(mn, 1.0);
-    let ssd = sqrt(max(m2 / max(mn, 1.0) - smean * smean, vec3<f32>(0.0)));
-    // Reflection hit distance for the mirror-image reprojection: on near mirrors the resolved one (pass `refl`).
-    let st = select(px.spec.w, refl_res[q].w, refl_res[q].w > 0.0 && rough < NEAR_MIRROR);
+    let cl = sample_clamp();
+    let cur = spec_sample(q, cl);
     let mv = motion_in[q];
-    var hs = vec4<f32>(0.0);
-    var hv = vec4<f32>(0.0);
-    // What bounds this pixel's history, in output pixels a frame: its own speed (a resampled history blurs a little
-    // every frame) and its reflection's parallax, how far what it reflects moved against the surface (none in a turn of
-    // the camera; the history then trails behind the reflection).
+    let live = L.mode.z != 0u;
+    // The diffuse history's drift factor at this pixel this frame (`dtemporal` left it in this frame's half).
+    let drifted = diffuse_mom[this_half(q)].z;
+    let ps = vec2<i32>(L.isz.zw);
+    var h = vec4<f32>(0.0);  // the surface's history
+    var hv = vec4<f32>(0.0); // the reflection's
     var speed = 0.0;
-    var parallax = 0.0;
-    if (L.size.w == 0u && L.isz.z > 0u) {
-        let pp = prev_pixel(p + select(vec3<f32>(0.0), mv.xyz, mv.w > 0.5 && t > 0.0));
-        if (pp.z > 0.0) {
-            hs = spec_history(pp, n, t, rough, false);
-            speed = length(sp - 0.5 - pp.xy);
-            // (A moving reflector: the camera-only reprojection ignores its own motion, here and below. Its speed.)
-            parallax = speed;
-            if (mv.w <= 0.5) {
-                // Of the reflected point where this frame has one, else of the farthest (the sample took the diffuse
-                // lobe, or the sky): the most it can be.
-                let pf = prev_pixel(L.cur.pos.xyz + dir * (t + select(1.0e3, min(st, 1.0e3), t > 0.0 && st > 0.0)));
-                parallax = select(0.0, length(pf.xy - pp.xy), pf.z > 0.0);
+    var par = 0.0;
+    var chart = vec3<f32>(0.0); // the level where the surface point was, the pooled residual average and mean square
+    var around_level = 0.0;     // the highest level among the pooled pixels
+    if (L.size.w == 0u && ps.x > 0) {
+        let object_moves = mv.w > 0.5 && t > 0.0;
+        let moved = select(vec3<f32>(0.0), mv.xyz, object_moves);
+        let pps = prev_pixel(p + moved);
+        if (pps.z > 0.0) {
+            let k = vec2<f32>(ps) / vec2<f32>(f32(L.size.x), f32(L.size.y));
+            let in_motion = camera_moves() || object_moves || any(ps != vec2<i32>(L.isz.xy));
+            if (in_motion) { speed = length((pps.xy - (sp - 0.5)) * k); }
+            h = spec_history(pps, n, t, rough, false);
+            // The reflection's hit distance: this sample's ray's, or the resolved one (`refl`) on a near mirror and
+            // where the sample has none (it took the diffuse lobe). With neither, the frame knows nothing of the
+            // reflection's place: the surface's history, and for the bound the parallax of a reflection far away,
+            // which is the most it can be (none in a turn of the camera, the surface's own motion against the
+            // distance in a move).
+            var dist = px.spec.w;
+            if (rough < NEAR_MIRROR || !(dist > 0.0 && dist < 1.0e3)) { dist = refl_res[q].w; }
+            let known = dist > 0.0 && dist < 1.0e3;
+            if (t > 0.0 && in_motion) {
+                // (Where the reflection's image was: with the camera's move alone for a still surface. A surface
+                // that moved carried the image of what stands still by twice its move along its normal, the law of
+                // reflection at a plane; not by its move, which slides the mirror under an image that stays.)
+                let ppv = prev_pixel(p + dir * select(1.0e4, dist, known) + 2.0 * dot(moved, n) * n);
+                if (ppv.z > 0.0) {
+                    par = length((ppv.xy - pps.xy) * k);
+                    if (known && par >= SPEC_PAR_MIN && rough < SPEC_VIRT_ROUGH) { hv = spec_history(ppv, n, t, rough, true); }
+                }
+            }
+            // The chart's state: the level at the pixel the surface point was in, the averages from it and four
+            // around it.
+            let c0 = vec2<i32>(round((pps.xy + 0.5) * k - 0.5));
+            if (t > 0.0 && c0.x >= 0 && c0.y >= 0 && c0.x < ps.x && c0.y < ps.y) {
+                chart = spec_chart(diffuse_mom[last_half(u32(c0.y * ps.x + c0.x))].z);
+                around_level = chart.x;
+                chart.z *= chart.z;
+                var taps = 1.0;
+                for (var j = 0; j < 4; j++) {
+                    let c = c0 + chart_tap(j);
+                    if (c.x < 0 || c.y < 0 || c.x >= ps.x || c.y >= ps.y) { continue; }
+                    let e = spec_chart(diffuse_mom[last_half(u32(c.y * ps.x + c.x))].z);
+                    around_level = max(around_level, e.x);
+                    chart.y += e.y;
+                    chart.z += e.z * e.z;
+                    taps += 1.0;
+                }
+                chart.y /= max(taps, 1.0);
+                chart.z /= max(taps, 1.0);
             }
         }
-        if (t > 0.0 && st > 0.0 && mv.w <= 0.5) {
-            let pv = prev_pixel(L.cur.pos.xyz + dir * (t + min(st, 1.0e3)));
-            if (pv.z > 0.0) { hv = spec_history(pv, n, t, rough, true); }
+    }
+    // This frame's samples around: needed to choose between two histories, and to hold one to them while the lighting
+    // changes or the reflection moves against its surface. (A settled scene seen from a still camera, or in a turn,
+    // reads none: its history is the plain mean of its frames.)
+    // The light that drifts for the diffuse history drifts for a rough reflection of it too: the same factor, from
+    // SPEC_GLOSS on (a sharp reflection is of one thing, and has its own short bound).
+    if (live && drifted > 0.0) {
+        let share = smoothstep(SPEC_GLOSS, SPEC_VIRT_ROUGH, rough);
+        h = vec4<f32>(h.rgb * mix(1.0, drifted, share), h.w);
+        hv = vec4<f32>(hv.rgb * mix(1.0, drifted, share), hv.w);
+    }
+    // Animated shading (waves, ripples): the surface holds still and its normal does not, so what it reflects is
+    // another thing each frame. Its history is held to this frame's samples whether or not the lighting changes,
+    // with SPEC_ANIM_RARE of the allowance for rare samples (a glint that has moved on is not one; a glint under a
+    // stopped clock is). A bound in frames did worse both ways: short, the stopped water is noise; long, the
+    // running water is the blur of its waves.
+    let anim = px.albedo.w > 1.5 && rough < SPEC_GLOSS;
+    let two = hv.w > 0.0;
+    // (In a move of the camera: below SPEC_VIRT_ROUGH. A rough surface has the parallax bound alone: held to the
+    // nine samples too, the street 0.1 s after a stop read an excess dE of 1.31 for 1.36, for nine more taps on
+    // every rough pixel in every move.)
+    let held = (live || anim || (par >= SPEC_PAR_MIN && rough < SPEC_VIRT_ROUGH)) && (h.w > 0.0 || two);
+    var clamped = 0.0; // the share of the history the clamp took
+    var found = 0.0;   // how far the reflection's history was found, and agrees with this frame
+    var risen = 0.0;   // the share by which the clamp raised the history
+    if (two || held) {
+        var s1 = vec3<f32>(0.0);
+        var s2 = vec3<f32>(0.0);
+        var sn = 0.0;
+        for (var j = 0; j < 9; j++) {
+            let qx = i32(gid.x) + j % 3 - 1;
+            let qy = i32(gid.y) + j / 3 - 1;
+            if (qx < 0 || qy < 0 || qx >= i32(iw) || qy >= i32(ih)) { continue; }
+            let y = ycocg(select(spec_sample(u32(qy) * iw + u32(qx), cl), cur, j == 4));
+            s1 += y;
+            s2 += y * y;
+            sn += 1.0;
+        }
+        let mean = s1 / sn;
+        let dev = sqrt(max(s2 / sn - mean * mean, vec3<f32>(0.0)));
+        let dark = CHART_DARK / max(exposure_scale(), 1.0e-8);
+        if (two) {
+            // Each history's distance from the samples' mean, in bands, and what the roughness says of each.
+            let band = SPEC_GAMMA * dev + SPEC_REL * mean.x + dark;
+            let ds = abs(ycocg(h.rgb) - mean) / band;
+            let dv = abs(ycocg(hv.rgb) - mean) / band;
+            let es = min(max(max(ds.x, ds.y), ds.z), 3.0);
+            let ev = min(max(max(dv.x, dv.y), dv.z), 3.0);
+            let of_surface = smoothstep(SPEC_VIRT_FROM, SPEC_VIRT_ROUGH, rough);
+            let ws = select(0.0, mix(SPEC_SURFACE_MIRROR, 1.0, smoothstep(0.0, SPEC_VIRT_FROM, rough)) * exp(-es * es), h.w > 0.0);
+            let wv = (1.0 - of_surface) * exp(-ev * ev);
+            h = (h * ws + hv * wv) / max(ws + wv, 1.0e-6);
+            found = wv / max(ws + wv, 1.0e-6) * exp(-ev * ev);
+        }
+        if (held && h.w > 0.0) {
+            let hy = ycocg(h.rgb);
+            // (Steadily lit: by the level, and by a history long enough for its level to mean it. While the lighting
+            // changes, by the level here or of a pooled pixel beside it, the rim of a passing reflection being lit
+            // as its middle is, and from a history half as long. Not so in a move of the camera under a settled
+            // light, where the reflections slide but nothing comes or goes: bench-ghosting's strafe read an excess
+            // dE of 1.77 with the wider rule for 1.39.)
+            let steady = smoothstep(SPEC_RARE, SPEC_STEADY, select(chart.x, around_level, live)) * chart_mature(select(0.5, 1.0, live) * h.w);
+            let rare = (1.0 - steady) * select(1.0, SPEC_ANIM_RARE, anim);
+            // (Chroma to twice the luma: a saturated colour's Co is.)
+            let band = SPEC_GAMMA * dev + (SPEC_REL + rare) * max(hy.x, 0.0) * vec3<f32>(1.0, 2.0, 2.0) + dark;
+            let hc = clamp(hy, mean - band, mean + band);
+            let took = abs(hc - hy);
+            clamped = clamp(max(max(took.x, took.y), took.z) / (max(hy.x, mean.x) + dark), 0.0, 1.0);
+            // (Raised: all nine samples are above the history at once. That is no rare sample but a light that
+            // has come, a reflection passing: the level is told so below, or when it has passed, the nine dark
+            // samples would count for nothing against it: a thrown light's reflection stayed along its path.)
+            if (live && hc.x > hy.x) { risen = clamped; }
+            h = vec4<f32>(max(ycocg_rgb(hc), vec3<f32>(0.0)), h.w);
         }
     }
-    let cap = select(L.misc.y, min(L.misc.y, 4.0), px.albedo.w > 1.5);
-    let ys = ycocg(hs.rgb);
-    let yv = ycocg(hv.rgb);
-    var surf = select(0.0, 0.8, length(smean - yv) > length(smean - ys) + 0.01 / exposure_scale());
-    surf = select(surf, 1.0, hv.w <= 0.0);
-    surf = select(surf, 0.0, hs.w <= 0.0 && hv.w > 0.0);
-    // The history held within SPEC_CLIP deviations of this frame's neighbourhood (variance clipping, as Lumen's
-    // reflection temporal clamps its history): what a still surface reflects can move while the surface and the camera
-    // hold still (a light carried past a polished floor), and nothing else tells its history so. Unclipped, the
-    // reflection of a thrown orb stayed on the floor along its whole path for the length of the history.
-    // While the scene's lighting changes (`mode.z`: something moved, a light switched), as the diffuse anti-lag: a
-    // settled scene has nothing to find, and clipping it cuts what the history averaged out of one sample a pixel.
-    // (Plus SPEC_CLIP_REL of the neighbourhood's luminance: one sample a pixel is heavy-tailed, most of the nine are
-    // dark next to a rare bright one, and a deviation's box alone pulled a right history down and let the next bright
-    // sample flash, a square at a time. What moved past is many times brighter than what is left.)
-    let slack = SPEC_CLIP * ssd + vec3<f32>(SPEC_CLIP_REL * abs(smean.x) + 0.002 / exposure_scale(), 0.0, 0.0);
-    var hy = mix(yv, ys, surf);
-    if (L.mode.z != 0u && mn >= 3.0) { hy = clamp(hy, smean - slack, smean + slack); }
-    // The history's length is the pixel's own (until 2026-11-13 every pixel's was held to 2 .. 12 frames by roughness
-    // while the camera moved or turned at all, and to 4 for 8 frames after it translated): HIST_MOVING at a pixel a
-    // frame, as the diffuse; and no longer than keeps its trail behind the reflection (frames x parallax) within
-    // SPEC_TRAIL pixels, 2 frames at least on a mirror, 4 from roughness 0.05 (below that the filter has nothing to
-    // work with).
-    var max_s = mix(cap, min(cap, HIST_MOVING), clamp(speed, 0.0, 1.0));
-    max_s = min(max_s, clamp(SPEC_TRAIL / max(parallax, 1e-4), mix(2.0, 4.0, clamp(rough / 0.05, 0.0, 1.0)), cap));
-    let frames_s = select(hv.w, hs.w, surf > 0.5);
-    var count_s = 1.0;
-    var s_out = cur;
-    if (hs.w > 0.0 || hv.w > 0.0) {
-        count_s = min(min(frames_s + 1.0, max_s), cap);
-        s_out = mix(max(ycocg_rgb(hy), vec3<f32>(0.0)), cur, clamp(1.0 / max(count_s, 1e-4), 0.0, 1.0));
+    // The chart: this frame's share against the history (one channel: the mean of the three), its residual from the
+    // level, and, while the lighting changes, what the pooled average takes of the history.
+    let third = vec3<f32>(1.0 / 3.0);
+    let level = dot(h.rgb, third);
+    let share = chart_share(vec3<f32>(dot(cur, third)), vec3<f32>(level), level).x;
+    let res = (share - chart.x) * chart_mature(h.w);
+    var drop = 0.0;
+    if (live) { drop = chart_drop(abs(chart.y), chart.z); }
+    // The history's length.
+    var cap = min(L.misc.y, moving_frames(speed, SPEC_MOVE_BLUR));
+    if (par > 0.0) {
+        // (The share of the parallax that counts: SPEC_PAR_MIRROR on a mirror, all of it from NEAR_MIRROR, none
+        // from SPEC_VIRT_ROUGH, where the reflection stays with its surface.)
+        // Less where the reflection's history was found where it should be and agrees with this frame's samples:
+        // the bound is for a place that is not known.
+        let counts = mix(SPEC_PAR_MIRROR, 1.0, smoothstep(0.0, NEAR_MIRROR, rough)) * (1.0 - SPEC_FOUND * found);
+        cap = min(cap, 1.0 + (SPEC_SLIDE + SPEC_SLIDE_ROUGH * rough * rough) / max(par * counts, 1.0e-6));
     }
-    s_out = select(max(s_out, vec3<f32>(0.0)), vec3<f32>(0.0), non_finite(s_out));
+    if (live) {
+        let sharp = mix(SPEC_LIVE_MIRROR, SPEC_LIVE_GLOSS, smoothstep(0.0, SPEC_GLOSS, rough));
+        cap = min(cap, mix(sharp, max(L.misc.y, sharp), smoothstep(SPEC_GLOSS, SPEC_VIRT_ROUGH, rough)));
+    }
+    // What the clamp took shortens the history by the same share, as the chart's signal does (the response's rule),
+    // but not below CHART_MATURE frames, and the chart's level does not start again for it as it does with a history
+    // the chart itself cut. The clamp leaves the history at the band's edge, still off (by several times the light
+    // where the samples are noisy), and the chart is what follows the rest: a history too short to count in it, or
+    // a level learnt against a history still off, and the chart went quiet. (A synthetic signal through this pass,
+    // the lamp's pool 8 frames after it went out, over the settled frame: 1.58 so, 1.23 as it is; and not
+    // shortened at all, the pool 8 frames after the lamp came on: 0.88 for 0.94.)
+    let plain = 1.0 / max(min(h.w + 1.0, cap), 1.0);
+    let a = max(plain + drop * (1.0 - plain), min(plain + clamped * (1.0 - plain), max(plain, 1.0 / CHART_MATURE)));
+    let count_s = 1.0 / a;
+    let count_chart = 1.0 / (plain + drop * (1.0 - plain));
+    let s_out = max(mix(h.rgb, cur, a), vec3<f32>(0.0));
     spec_hist[this_half(q)] = vec4<f32>(s_out, count_s);
     spec_store(0u, q, vec4<f32>(s_out, count_s));
+    var state = 0.0;
+    if (t > 0.0) {
+        state = spec_chart_pack(mix(mix(chart.x, share, chart_level_weight(count_chart)), 1.0 / (2.0 + CHART_CHANNEL), risen), mix(chart.y, res, CHART_A), sqrt(mix(chart.z, res * res, CHART_A)), chart_dither(q).x);
+    }
+    diffuse_mom[this_half(q)].z = state;
     // `moves`: a moving object's surface that crossed a traced sample this frame. One that moved less (a leaf in the
     // wind, a walker far away) has not left its place among the nine: what it shows and hides is the jitter's, as at
     // a still edge, and the rules for what a moving object uncovers made every such edge start again each frame.
@@ -931,6 +1282,12 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     gbuffer[this_half(q)] = gb_pack(n, depth, rough, swept);
 }
 
+// The specular filter's reach (traced pixels) a unit of roughness squared. bench-window's rooms-turn (a floor of
+// roughness 0.3 under 768 lamps, turning), p99 dE to offline at the last moving frame and 30 frames after the
+// stop: 3.88 and 2.74 at 25 (the floor got the first pass alone), 3.32 and 2.43 from 64 on (all three; the previous
+// release: 3.44 and 2.50).
+const SPEC_REACH: f32 = 64.0;
+
 // The specular filter (`spec_filter`'s kernel) on the traced grid: three passes over `spec_pp`, slot 0 -> 1 -> 0 -> 1.
 fn spec_filter_traced(gid: vec3<u32>, step: i32, from_a: bool) {
     let w = L.isz.x;
@@ -942,7 +1299,11 @@ fn spec_filter_traced(gid: vec3<u32>, step: i32, from_a: bool) {
     let g = gb_unpack(gbuffer[this_half(i)]);
     let rough = g.rough;
     let fresh = c.w < 4.0;
-    let reach = select(4.0 * clamp(rough * 8.0, 0.0, 1.0), 4.0, fresh);
+    // How far the filter reaches at this roughness (traced pixels; a pass of `step` runs when that is within it): by
+    // the lobe's width, which goes with roughness squared (the alpha of this renderer's microfacet lobe). None on a
+    // mirror, whose image has nothing to average with; the first pass from roughness 0.125, the second from 0.18,
+    // all three from 0.25.
+    let reach = SPEC_REACH * rough * rough;
     let npow = select(64.0, 8.0, fresh);
     let strength = (0.25 + smoothstep(0.08, 0.5, rough)) / sqrt(max(c.w, 1.0)) * 4.0;
     var outv = c.rgb;
@@ -1644,79 +2005,129 @@ fn exposure_scale() -> f32 {
 fn qw() -> u32 { return (L.size.x + 3u) / 4u; }
 fn qh() -> u32 { return (L.size.y + 3u) / 4u; }
 
-// Quarter-resolution log2 luminance (UE eye adaptation: uniform RGB weights) and the UE histogram (64 buckets over
-// [log min, log max], each sample split between its two buckets).
+// The exposure the frame's metering and thresholds go by: the manual one, or auto exposure's as the last frame left
+// it (its first frame: the exposure the view starts with).
+fn metering_exposure() -> f32 {
+    if (L.ae2.w > 0.5 && ae_state[0].w > 0.5) { return ae_state[0].x; }
+    return L.misc.x;
+}
+
+const AE_BINS: u32 = 64u;
+// What a sample's position in the histogram's range (0 .. 1) is multiplied by in a bin's sum: as fine as 32 bits hold
+// for every quarter-resolution texel in one bin.
+fn ae_fix() -> f32 { return min(65536.0, floor(4.0e9 / f32(qw() * qh()))); }
+
+// How much of a pixel blooms (post.rs `bloom_share`): all of it under a negative threshold, else from the threshold
+// (exposed luminance) to one unit above it.
+fn bloom_share(exposed: f32) -> f32 {
+    if (L.post.z < 0.0) { return 1.0; }
+    return clamp(exposed - L.post.z, 0.0, 1.0);
+}
+
+// The quarter-resolution view of the image (`fa`, unexposed), one read of it for three users. Per 4 x 4 block: the
+// log2 of its mean luminance into `lumq` (`lum_blur` and local exposure read it; not under 12 stops below middle grey
+// at the frame's exposure, post.rs `log_floor`); the same into auto exposure's histogram (`ae_bins`: a count and the
+// sum of the positions in the range per bin; luminances outside the range are not counted, post.rs `exposure_scale`);
+// and the mean of what blooms with that log2 luminance as the bloom pyramid's level 0 (post.rs `Pyramid`).
 @compute @workgroup_size(8, 8, 1)
 fn lum_down(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= qw() || gid.y >= qh()) { return; }
-    var acc = vec3<f32>(0.0);
+    let e = metering_exposure();
+    var glow = vec3<f32>(0.0);
+    var sum = 0.0;
     var n = 0.0;
-    for (var y = 0u; y < 4u; y++) {
-        for (var x = 0u; x < 4u; x++) {
-            let sx = gid.x * 4u + x;
-            let sy = gid.y * 4u + y;
-            if (sx < L.size.x && sy < L.size.y) {
-                acc += finite_or_zero(fa[sy * L.size.x + sx].rgb);
-                n += 1.0;
+    for (var y = gid.y * 4u; y < min(gid.y * 4u + 4u, L.size.y); y++) {
+        for (var x = gid.x * 4u; x < min(gid.x * 4u + 4u, L.size.x); x++) {
+            let c = finite_or_zero(max(fa[y * L.size.x + x].rgb, vec3<f32>(0.0)));
+            let l = lum(c);
+            glow += c * bloom_share(l * e);
+            sum += l;
+            n += 1.0;
+        }
+    }
+    let mean = sum / max(n, 1.0);
+    let floor_l = log2(0.18 / 4096.0 / max(e, 1e-20));
+    var l2 = floor_l;
+    if (mean > 0.0) {
+        l2 = log2(mean);
+        if (L.ae2.w > 0.5) {
+            let t = (l2 - L.ae.z) / (L.ae.w - L.ae.z);
+            if (t >= 0.0 && t <= 1.0) {
+                let b = min(u32(t * f32(AE_BINS)), AE_BINS - 1u);
+                atomicAdd(&ae_bins[b], 1u);
+                atomicAdd(&ae_bins[AE_BINS + b], u32(t * ae_fix() + 0.5));
             }
         }
     }
-    let c = acc / max(n, 1.0);
-    let ll = log2(max((c.r + c.g + c.b) / 3.0, 1e-6));
-    lumq[gid.y * qw() + gid.x] = ll;
-    if (L.ae2.w > 0.5) {
-        let fb = clamp((ll - L.ae.z) / (L.ae.w - L.ae.z), 0.0, 1.0) * 63.0;
-        let b0 = min(u32(floor(fb)), 63u);
-        let w1 = fb - f32(b0);
-        atomicAdd(&ae_bins[b0], u32((1.0 - w1) * 256.0 + 0.5));
-        atomicAdd(&ae_bins[min(b0 + 1u, 63u)], u32(w1 * 256.0 + 0.5));
-    }
+    let q = gid.y * qw() + gid.x;
+    lumq[q] = max(l2, floor_l);
+    if (L.misc.w > 0.5) { bloom_a[q] = vec4<f32>(glow / max(n, 1.0), max(l2, floor_l)); }
 }
 
-// UE ComputeAverageLuminanceWithoutOutlier + EyeAdaptationCommon: average log2 luminance between the low / high
-// percentiles, target exposure = 2^bias * 0.18 / clamp(average, min, max), adapted at the up / down speed.
+// Beyond this distance from its target (stops) auto exposure moves at its speed; within it, it closes in
+// exponentially (no stop at the speed's last step). Unreal's documentation describes the same two regimes and this
+// default distance.
+const AE_EASE: f32 = 1.5;
+
+// Auto exposure (L.ae2.w > 0.5) from the histogram, into `ae_state[0]` = (exposure scale, its target, log2 of the
+// metered average luminance, 1 = valid): post.rs `metered_average` (the average luminance between the low and the
+// high fraction of the histogram) and `auto_target` (middle grey x compensation over it, the average within its
+// limits), then the exposure moved toward the target at the speed for a scene that got brighter / darker (L.ae3;
+// snapped on a reset). One invocation does it and clears the histogram for the next frame.
 @compute @workgroup_size(64, 1, 1)
 fn exposure(@builtin(local_invocation_id) lid: vec3<u32>) {
-    if (lid.x != 0u) { return; }
-    var h: array<f32, 64>;
-    var total = 0.0;
-    var mean_sum = 0.0;
-    for (var i = 0u; i < 64u; i++) {
-        h[i] = f32(atomicLoad(&ae_bins[i])) / 256.0;
-        atomicStore(&ae_bins[i], 0u);
-        total += h[i];
-        mean_sum += h[i] * (L.ae.z + f32(i) / 63.0 * (L.ae.w - L.ae.z));
-    }
-    if (L.ae2.w < 0.5 || total <= 0.0) { return; }
-    var min_f = min(L.ae.x, L.ae.y) * total;
-    var max_f = L.ae.y * total;
-    var sum = 0.0;
-    var cnt = 0.0;
-    for (var i = 0u; i < 64u; i++) {
-        var v = h[i];
-        let sub = min(v, min_f);
-        v -= sub;
-        min_f -= sub;
-        max_f -= sub;
-        v = min(v, max_f);
-        max_f -= v;
-        sum += v * (L.ae.z + f32(i) / 63.0 * (L.ae.w - L.ae.z));
-        cnt += v;
-    }
-    let avg = select(L.ae2.y, exp2(sum / cnt), cnt > 0.0);
-    let target_ = L.ae2.x * 0.18 / clamp(avg, L.ae2.y, L.ae2.z);
-    var e = target_;
+    if (lid.x != 0u || L.ae2.w < 0.5) { return; }
     let prev = ae_state[0];
-    if (prev.w > 0.5 && L.ae3.w < 0.5) {
-        let d = log2(target_) - log2(prev.x);
-        let speed = select(L.ae3.y, L.ae3.x, d > 0.0);
-        let step = speed * L.ae3.z;
-        e = exp2(log2(prev.x) + clamp(d, -step, step));
+    var total = 0.0;
+    for (var b = 0u; b < AE_BINS; b++) { total += f32(atomicLoad(&ae_bins[b])); }
+    var goal = select(L.misc.x, prev.y, prev.w > 0.5);
+    var avg_log = prev.z;
+    if (total > 0.0) {
+        let lo = clamp(L.ae.x, 0.0, 1.0) * total;
+        let hi = max(clamp(L.ae.y, 0.0, 1.0), clamp(L.ae.x, 0.0, 1.0)) * total;
+        let fix = ae_fix();
+        var seen = 0.0;
+        var sum = 0.0;
+        var n = 0.0;
+        var at_low = -1.0;
+        for (var b = 0u; b < AE_BINS; b++) {
+            let c = f32(atomicLoad(&ae_bins[b]));
+            if (c > 0.0) {
+                let l = exp2(L.ae.z + f32(atomicLoad(&ae_bins[AE_BINS + b])) / (c * fix) * (L.ae.w - L.ae.z));
+                let part = min(seen + c, hi) - max(seen, lo);
+                if (part > 0.0) {
+                    sum += part * l;
+                    n += part;
+                }
+                // (A window narrower than one sample: the sample at the low bound.)
+                if (at_low < 0.0 && seen + c >= lo) { at_low = l; }
+            }
+            seen += c;
+        }
+        var avg = at_low;
+        if (n > 0.0) { avg = sum / n; }
+        if (avg > 0.0) {
+            goal = 0.18 * L.ae2.x / clamp(avg, L.ae2.y, L.ae2.z);
+            avg_log = log2(avg);
+        }
     }
-    ae_state[0] = vec4<f32>(e, target_, mean_sum / total, 1.0);
+    var e = goal;
+    if (prev.w > 0.5 && prev.x > 0.0 && L.ae3.w < 0.5) {
+        // Stops still to go: positive when the scene got brighter (the exposure has to come down).
+        let d = log2(prev.x / goal);
+        let speed = select(L.ae3.y, L.ae3.x, d > 0.0) * L.ae3.z;
+        let far = max(abs(d) - AE_EASE, 0.0);
+        let linear = min(far, speed);
+        // (What of the frame's time the linear part did not use closes in exponentially.)
+        var rest = abs(d) - linear;
+        if (far <= speed) { rest *= exp(-(speed - linear) / AE_EASE); }
+        e = goal * exp2(sign(d) * rest);
+    }
+    ae_state[0] = vec4<f32>(e, goal, avg_log, 1.0);
+    for (var b = 0u; b < 2u * AE_BINS; b++) { atomicStore(&ae_bins[b], 0u); }
 }
 
-// Edge-aware blur of the quarter-res log luminance (stand-in for UE's bilateral grid): range weight on log2 lum.
+// Edge-aware blur of the quarter-res log luminance (local exposure's base layer): range weight on log2 lum.
 @compute @workgroup_size(8, 8, 1)
 fn lum_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
     let W = qw();
@@ -1739,155 +2150,200 @@ fn lum_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
     lumb[gid.y * W + gid.x] = acc / ws;
 }
 
-// UE local exposure (CalculateLogLocalExposure, zero thresholds) for exposed log2 luminance `l`.
-fn local_exposure(l: f32, x: f32, y: f32, e: f32) -> f32 {
+// Local exposure's factor (post.rs `local_exposure_factor`: a base / detail decomposition of log luminance) for exposed
+// log2 luminance `l` at output pixel (x, y), exposure scale `e`: the base is `lumb` (the edge-aware blur of `lumq`)
+// blended with `wide` (the wide plain blur, the bloom pyramid's fourth channel) by L.lx.z; its distance from the pivot
+// (middle grey, times auto exposure's compensation) is scaled by L.lx.x above and L.lx.y below, the detail by L.lx.w.
+fn local_exposure(l: f32, x: f32, y: f32, e: f32, wide: f32) -> f32 {
     if (L.lx.x == 1.0 && L.lx.y == 1.0 && L.lx.w == 1.0) { return 1.0; }
-    let qx = clamp(u32(x / 4.0), 0u, qw() - 1u);
-    let qy = clamp(u32(y / 4.0), 0u, qh() - 1u);
-    let bil = lumb[qy * qw() + qx] + log2(e);
-    let wide = select(bil, ae_state[0].z + log2(e), L.ae2.w > 0.5);
-    let base = mix(bil, wide, L.lx.z);
-    let mid = log2(0.18 * L.ae2.x);
-    let contrast = select(L.lx.y, L.lx.x, base > mid);
-    return exp2((base - mid) * (contrast - 1.0) + (l - base) * (L.lx.w - 1.0));
+    let p = (vec2<f32>(x, y) + 0.5) / 4.0 - 0.5;
+    let p0 = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let hi = vec2<i32>(i32(qw()) - 1, i32(qh()) - 1);
+    let a = clamp(p0, vec2<i32>(0), hi);
+    let b = clamp(p0 + 1, vec2<i32>(0), hi);
+    let W = i32(qw());
+    let edge = mix(mix(lumb[a.y * W + a.x], lumb[a.y * W + b.x], f.x), mix(lumb[b.y * W + a.x], lumb[b.y * W + b.x], f.x), f.y);
+    let le = log2(max(e, 1e-20));
+    let base = mix(edge, wide, L.lx.z) + le;
+    let pivot = log2(0.18 * select(1.0, L.ae2.x, L.ae2.w > 0.5));
+    let o = pivot + (base - pivot) * select(L.lx.y, L.lx.x, base > pivot) + (l - base) * L.lx.w;
+    return exp2(clamp(o - l, -8.0, 8.0));
 }
 
 // ------------------------------------------------------------------------------------------------ bloom
 
-// Pyramid level j (0..4) is 1/4 .. 1/64 resolution; bloom stage k (0..5) blurs level max(k - 1, 0) (UE stage k runs at
-// 1/2^(k+1); stage 0 at 1/4 here). bloom_a holds the five levels, then the six stage sums.
-fn bw() -> u32 { return (L.size.x + 3u) / 4u; }
-fn bh() -> u32 { return (L.size.y + 3u) / 4u; }
-fn lvl_dim(j: u32) -> vec2<u32> { return vec2<u32>((bw() + (1u << j) - 1u) >> j, (bh() + (1u << j) - 1u) >> j); }
-fn lvl_off(j: u32) -> u32 {
-    var o = 0u;
-    for (var i = 0u; i < j; i++) { let d = lvl_dim(i); o += d.x * d.y; }
-    return o;
-}
-fn stage_lvl(k: u32) -> u32 { return max(k, 1u) - 1u; }
-fn stage_off(k: u32) -> u32 {
-    var o = lvl_off(5u);
-    for (var i = 0u; i < k; i++) { let d = lvl_dim(stage_lvl(i)); o += d.x * d.y; }
-    return o;
-}
-fn stage_radius(k: u32) -> f32 { return select(L.br2[(k - 4u) & 1u], L.br[k & 3u], k < 4u); }
-fn stage_tint(k: u32) -> f32 { return select(L.bt2[(k - 4u) & 1u], L.bt[k & 3u], k < 4u); }
+// Bloom (post.rs `BloomPlan`, `Pyramid`: the same arithmetic on the CPU): a sum of Gaussians of the picture, one a
+// stage, as a weighted sum of the levels of an image pyramid (Burt & Adelson 1983, "The Laplacian Pyramid as a
+// Compact Image Code": each level the one above under a small binomial kernel, at half the resolution) with the
+// Gaussians wider than its coarsest level summed directly on that level's few texels. Level 0 is `lum_down`'s
+// (a quarter of the output each way), `bloom_down1..5` make the rest, `bloom_wide_rows` and `bloom_wide` the coarsest
+// level's part of the sum, `bloom_up4..0` add each level by its weight to the sum from below, bilinearly; `bloom_at`
+// reads level 0. The fourth channel carries log2 luminance through the same passes with weights of its own: the wide
+// blur local exposure blends its base with. 12 passes after `lum_down`, of 1/64 of the output's pixels and less. A stage
+// narrower than level 0 can be (under about 2 output pixels: the first stages of a small output) is blended with a
+// five-pixel kernel of the output's own pixels in `post`.
+// (The offline chain takes each stage's Gaussian to its own shape, post.rs `gaussian`: next to a light hundreds of
+// times brighter than its surroundings the pyramid's compact kernels end sooner than a Gaussian's tail.)
+const BLOOM_TOP: u32 = 5u;
 
-@compute @workgroup_size(8, 8, 1)
-fn bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= bw() || gid.y >= bh()) { return; }
-    var acc = vec3<f32>(0.0);
-    var n = 0.0;
-    for (var y = 0u; y < 4u; y++) {
-        for (var x = 0u; x < 4u; x++) {
-            let sx = gid.x * 4u + x;
-            let sy = gid.y * 4u + y;
-            if (sx < L.size.x && sy < L.size.y) {
-                acc += finite_or_zero(fa[sy * L.size.x + sx].rgb);
-                n += 1.0;
-            }
+fn bloom_size(j: u32) -> vec2<u32> {
+    var d = vec2<u32>(qw(), qh());
+    for (var k = 0u; k < j; k++) { d = (d + 1u) / 2u; }
+    return max(d, vec2<u32>(1u));
+}
+
+// Where level j starts in `bloom_a` (BLOOM_TOP + 1: `bloom_wide`'s sum; after it, `bloom_wide_rows`' copies).
+fn bloom_base(j: u32) -> u32 {
+    var d = max(vec2<u32>(qw(), qh()), vec2<u32>(1u));
+    var o = 0u;
+    for (var k = 0u; k < j; k++) {
+        o += d.x * d.y;
+        if (k < BLOOM_TOP) { d = max((d + 1u) / 2u, vec2<u32>(1u)); }
+    }
+    return o;
+}
+
+fn bloom_texel(base: u32, d: vec2<u32>, x: i32, y: i32) -> vec4<f32> {
+    return bloom_a[base + u32(clamp(y, 0, i32(d.y) - 1)) * d.x + u32(clamp(x, 0, i32(d.x) - 1))];
+}
+
+fn bloom_bilinear(base: u32, d: vec2<u32>, p: vec2<f32>) -> vec4<f32> {
+    let p0 = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    return mix(mix(bloom_texel(base, d, p0.x, p0.y), bloom_texel(base, d, p0.x + 1, p0.y), f.x), mix(bloom_texel(base, d, p0.x, p0.y + 1), bloom_texel(base, d, p0.x + 1, p0.y + 1), f.x), f.y);
+}
+
+// Level j from level j - 1: the binomial [1 3 3 1] / 8 each way, centred between its texels.
+fn bloom_down(gid: vec3<u32>, j: u32) {
+    let d = bloom_size(j);
+    if (L.misc.w < 0.5 || gid.x >= d.x || gid.y >= d.y) { return; }
+    let sd = bloom_size(j - 1u);
+    let so = bloom_base(j - 1u);
+    var s = vec4<f32>(0.0);
+    for (var dy = 0; dy < 4; dy++) {
+        for (var dx = 0; dx < 4; dx++) {
+            let k = select(0.375, 0.125, dx == 0 || dx == 3) * select(0.375, 0.125, dy == 0 || dy == 3);
+            s += bloom_texel(so, sd, i32(gid.x) * 2 + dx - 1, i32(gid.y) * 2 + dy - 1) * k;
         }
     }
-    var c = acc / max(n, 1.0) * exposure_scale();
-    if (L.post.z > 0.0) {
-        // UE bloom threshold: Color * saturate((Luminance - Threshold) * 0.5), Luminance = dot(c, (0.3, 0.59, 0.11))
-        c *= clamp((dot(c, vec3<f32>(0.3, 0.59, 0.11)) - L.post.z) * 0.5, 0.0, 1.0);
-    }
-    bloom_a[gid.y * bw() + gid.x] = vec4<f32>(c, 1.0);
+    bloom_a[bloom_base(j) + gid.y * d.x + gid.x] = s;
 }
 
-// Level j from level j - 1 (2x2 box, edge clamped).
-fn bloom_downsample(gid: vec3<u32>, j: u32) {
-    let d = lvl_dim(j);
-    if (gid.x >= d.x || gid.y >= d.y) { return; }
-    let s = lvl_dim(j - 1u);
-    let so = lvl_off(j - 1u);
-    var acc = vec3<f32>(0.0);
-    for (var k = 0u; k < 4u; k++) {
-        let x = min(gid.x * 2u + (k & 1u), s.x - 1u);
-        let y = min(gid.y * 2u + (k >> 1u), s.y - 1u);
-        acc += bloom_a[so + y * s.x + x].rgb;
-    }
-    bloom_a[lvl_off(j) + gid.y * d.x + gid.x] = vec4<f32>(acc * 0.25, 1.0);
+@compute @workgroup_size(8, 8, 1)
+fn bloom_down1(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_down(gid, 1u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_down2(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_down(gid, 2u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_down3(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_down(gid, 3u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_down4(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_down(gid, 4u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_down5(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_down(gid, 5u); }
+
+// The Gaussians wider than the pyramid, summed on the coarsest level's texels within L.bl2.z of each (the edge texels
+// repeat outward), each way in turn: a Gaussian is the product of its two axes, so one pass blurs the rows once per
+// Gaussian (its own copy of the level behind the pyramid in `bloom_a`: BLOOM_TOP + 2 + k; the last for the fourth
+// channel's) and the next the columns, adding them by their weights (L.bw; L.lb2.zw for the fourth channel) to the
+// level's own share: the coarsest level's part of the sum (BLOOM_TOP + 1). Each kernel is divided by its own sum.
+const BLOOM_WIDE: u32 = 6u;
+
+fn bloom_wide_pair(k: u32) -> vec2<f32> {
+    if (k == BLOOM_WIDE) { return L.lb2.zw; }
+    let pair = L.bw[k / 2u];
+    if ((k & 1u) == 0u) { return pair.xy; }
+    return pair.zw;
 }
 
-// UE Compute1DGaussianFilterKernel: weights exp(-16.7 (x/R)^2), R clamped to 31 texels.
-fn bloom_blur(gid: vec3<u32>, k: u32, horizontal: bool) {
-    let j = stage_lvl(k);
-    let d = lvl_dim(j);
-    if (gid.x >= d.x || gid.y >= d.y) { return; }
-    let rf = clamp(stage_radius(k), 1e-4, 31.0);
-    let r = i32(ceil(rf));
-    let src = select(0u, lvl_off(j), horizontal);
-    var acc = vec3<f32>(0.0);
-    var ws = 0.0;
-    for (var t = -r; t <= r; t++) {
-        let x = select(i32(gid.x), clamp(i32(gid.x) + t, 0, i32(d.x) - 1), horizontal);
-        let y = select(clamp(i32(gid.y) + t, 0, i32(d.y) - 1), i32(gid.y), horizontal);
-        let wt = exp(-16.7 * (f32(t) / rf) * (f32(t) / rf));
-        let q = u32(y) * d.x + u32(x);
-        acc += select(bloom_b[q].rgb, bloom_a[src + q].rgb, horizontal) * wt;
-        ws += wt;
+@compute @workgroup_size(8, 8, 1)
+fn bloom_wide_rows(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let d = bloom_size(BLOOM_TOP);
+    let r = i32(L.bl2.z);
+    if (L.misc.w < 0.5 || r <= 0 || gid.x >= d.x || gid.y >= d.y) { return; }
+    let o = bloom_base(BLOOM_TOP);
+    let n = d.x * d.y;
+    for (var k = 0u; k <= BLOOM_WIDE; k++) {
+        let pair = bloom_wide_pair(k);
+        if (pair.x <= 0.0) { continue; }
+        var s = vec4<f32>(0.0);
+        var ws = 0.0;
+        for (var dx = -r; dx <= r; dx++) {
+            let g = exp(-f32(dx * dx) * pair.y);
+            s += bloom_texel(o, d, i32(gid.x) + dx, i32(gid.y)) * g;
+            ws += g;
+        }
+        bloom_a[o + (2u + k) * n + gid.y * d.x + gid.x] = s / ws;
     }
-    let i = gid.y * d.x + gid.x;
-    if (horizontal) {
-        bloom_b[i] = vec4<f32>(acc / ws, 1.0);
-        return;
-    }
-    // Stage sum: this stage's blur * tint + the next (wider, coarser) stage's sum, bilinearly upsampled.
-    var c = acc / ws * stage_tint(k);
-    if (k < 5u) {
-        let dn = lvl_dim(stage_lvl(k + 1u));
-        let f = vec2<f32>(dn) / vec2<f32>(d);
-        let fx = clamp((f32(gid.x) + 0.5) * f.x - 0.5, 0.0, f32(dn.x - 1u));
-        let fy = clamp((f32(gid.y) + 0.5) * f.y - 0.5, 0.0, f32(dn.y - 1u));
-        c += sample_level(stage_off(k + 1u), dn, fx, fy);
-    }
-    bloom_a[stage_off(k) + i] = vec4<f32>(c, 1.0);
 }
 
-fn sample_level(off: u32, d: vec2<u32>, fx: f32, fy: f32) -> vec3<f32> {
-    let x0 = u32(floor(fx));
-    let y0 = u32(floor(fy));
-    let x1 = min(x0 + 1u, d.x - 1u);
-    let y1 = min(y0 + 1u, d.y - 1u);
-    let ax = fx - f32(x0);
-    let ay = fy - f32(y0);
-    let a = mix(bloom_a[off + y0 * d.x + x0].rgb, bloom_a[off + y0 * d.x + x1].rgb, ax);
-    let b = mix(bloom_a[off + y1 * d.x + x0].rgb, bloom_a[off + y1 * d.x + x1].rgb, ax);
-    return mix(a, b, ay);
+@compute @workgroup_size(8, 8, 1)
+fn bloom_wide(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let d = bloom_size(BLOOM_TOP);
+    if (L.misc.w < 0.5 || gid.x >= d.x || gid.y >= d.y) { return; }
+    let o = bloom_base(BLOOM_TOP);
+    let n = d.x * d.y;
+    let own = bloom_a[o + gid.y * d.x + gid.x];
+    var sum = vec4<f32>(own.rgb * L.bl2.y, own.w * L.lb2.y);
+    let r = i32(L.bl2.z);
+    for (var k = 0u; k <= BLOOM_WIDE; k++) {
+        let pair = bloom_wide_pair(k);
+        if (r <= 0 || pair.x <= 0.0) { continue; }
+        var s = vec4<f32>(0.0);
+        var ws = 0.0;
+        for (var dy = -r; dy <= r; dy++) {
+            let g = exp(-f32(dy * dy) * pair.y);
+            s += bloom_texel(o + (2u + k) * n, d, i32(gid.x), i32(gid.y) + dy) * g;
+            ws += g;
+        }
+        s *= pair.x / ws;
+        if (k == BLOOM_WIDE) { sum.w += s.w; } else { sum += vec4<f32>(s.rgb, 0.0); }
+    }
+    bloom_a[o + n + gid.y * d.x + gid.x] = sum;
 }
 
-@compute @workgroup_size(8, 8, 1) fn bloom_dn1(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_downsample(gid, 1u); }
-@compute @workgroup_size(8, 8, 1) fn bloom_dn2(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_downsample(gid, 2u); }
-@compute @workgroup_size(8, 8, 1) fn bloom_dn3(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_downsample(gid, 3u); }
-@compute @workgroup_size(8, 8, 1) fn bloom_dn4(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_downsample(gid, 4u); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h5(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 5u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v5(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 5u, false); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h4(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 4u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v4(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 4u, false); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h3(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 3u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v3(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 3u, false); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h2(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 2u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v2(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 2u, false); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h1(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 1u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v1(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 1u, false); }
-@compute @workgroup_size(8, 8, 1) fn bloom_h0(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 0u, true); }
-@compute @workgroup_size(8, 8, 1) fn bloom_v0(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_blur(gid, 0u, false); }
+// Level j becomes the sum from it down: itself by its weights, plus the level below's sum, bilinear.
+fn bloom_up(gid: vec3<u32>, j: u32) {
+    let d = bloom_size(j);
+    if (L.misc.w < 0.5 || gid.x >= d.x || gid.y >= d.y) { return; }
+    let o = bloom_base(j) + gid.y * d.x + gid.x;
+    var src = j + 1u;
+    if (src == BLOOM_TOP) { src = BLOOM_TOP + 1u; }
+    let below = bloom_bilinear(bloom_base(src), bloom_size(j + 1u), (vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5) / 2.0 - 0.5);
+    let own = bloom_a[o];
+    var wc = L.bl2[j & 3u];
+    var wb = L.lb2[j & 3u];
+    if (j < 4u) {
+        wc = L.bl[j];
+        wb = L.lb[j];
+    }
+    bloom_a[o] = vec4<f32>(own.rgb * wc + below.rgb, own.w * wb + below.w);
+}
 
-fn bloom_at(x: f32, y: f32) -> vec3<f32> {
-    let d = lvl_dim(0u);
-    return sample_level(stage_off(0u), d, clamp(x / 4.0 - 0.5, 0.0, f32(d.x - 1u)), clamp(y / 4.0 - 0.5, 0.0, f32(d.y - 1u)));
+@compute @workgroup_size(8, 8, 1)
+fn bloom_up4(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_up(gid, 4u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_up3(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_up(gid, 3u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_up2(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_up(gid, 2u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_up1(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_up(gid, 1u); }
+@compute @workgroup_size(8, 8, 1)
+fn bloom_up0(@builtin(global_invocation_id) gid: vec3<u32>) { bloom_up(gid, 0u); }
+
+// The pyramid's sum at output pixel (x, y): rgb the bloom to add (unexposed), w the wide blur of log2 luminance.
+fn bloom_at(x: f32, y: f32) -> vec4<f32> {
+    return bloom_bilinear(0u, vec2<u32>(qw(), qh()), (vec2<f32>(x, y) + 0.5) / 4.0 - 0.5);
 }
 
 // ------------------------------------------------------------------------------------------------ depth of field
 
-// Signed circle-of-confusion radius (output px) at view depth z (0 = sky), negative in front of the focus plane: UE's
-// physical model (DiaphragmDOFUtils.cpp, FPhysicalCocModel): (z - focus) / z x the CoC of infinity, clamped to
-// r.DOF.Kernel.MaxForeground / MaxBackgroundRadius (2.5 % of the width).
+// The signed circle-of-confusion radius (output px) at view depth z (0 = sky: as far as can be), negative in front
+// of the focus plane: a thin lens' (live/mod.rs `dof_params`: L.dof.x the radius of a point at infinity, L.dof.y the
+// focus distance), r_inf (1 - s / z), held to the largest radius L.dof.z.
 fn dof_coc(z: f32) -> f32 {
-    let zz = select(1.0e9, z, z > 0.0);
-    return clamp((zz - L.dof.y) / zz * L.dof.x, -L.dof.z, L.dof.z);
+    if (L.dof.x <= 0.0) { return 0.0; }
+    if (z <= 0.0) { return min(L.dof.x, L.dof.z); }
+    return clamp(L.dof.x * (1.0 - L.dof.y / z), -L.dof.z, L.dof.z);
 }
 
 const DOF_TILE: u32 = 16u;
@@ -2093,56 +2549,87 @@ fn view_sample(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ------------------------------------------------------------------------------------------------ post
 
-// UE LinToLog (PostProcessCombineLUTs): LUT input encoding for the 32^3 tonemap LUT.
-fn lin_to_log(c: vec3<f32>) -> vec3<f32> {
-    return clamp(log2(c) / 14.0 - log2(0.18) / 14.0 + 444.0 / 1023.0, vec3<f32>(0.0), vec3<f32>(1.0));
+// The colour table's axis (post.rs `lut_coord`): log2 of the exposed linear value over LUT_LOG_MIN .. LUT_LOG_MAX.
+const LUT_LOG_MIN: f32 = -10.5;
+const LUT_LOG_MAX: f32 = 6.5;
+// post.rs `VIGNETTE_FIELD`, `FRINGE`, `GRAIN`.
+const VIGNETTE_FIELD: f32 = 1.425;
+const FRINGE: f32 = 0.002;
+const GRAIN: f32 = 0.085;
+
+// A 32-bit integer hash (Chris Wellons' "lowbias32", public domain: https://nullprogram.com/blog/2018/07/31/).
+fn hash32(v: u32) -> u32 {
+    var x = v;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
 }
 
+// The image (`fa`) at p (pixels, centres at integers), bilinear.
+fn image_bilinear(p: vec2<f32>) -> vec3<f32> {
+    let hi = vec2<i32>(i32(L.size.x) - 1, i32(L.size.y) - 1);
+    let p0 = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let a = clamp(p0, vec2<i32>(0), hi);
+    let b = clamp(p0 + 1, vec2<i32>(0), hi);
+    let W = i32(L.size.x);
+    return mix(mix(fa[a.y * W + a.x].rgb, fa[a.y * W + b.x].rgb, f.x), mix(fa[b.y * W + a.x].rgb, fa[b.y * W + b.x].rgb, f.x), f.y);
+}
+
+// The final pass: post.rs `finish`, step for step. Chromatic aberration (red and blue read from where the lens puts
+// them: magnified / reduced about the centre), exposure, local exposure, bloom added, the cos^4 vignette, colour
+// grading and the tone curve (the `lut` texture, live/targets.rs `tonemap_lut`: sRGB-encoded display values by the
+// log2 of the exposed linear colour, trilinear), film grain, 8-bit output (BGRA in memory) into `out_px`.
 @compute @workgroup_size(8, 8, 1)
 fn post(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = L.size.x;
     let h = L.size.y;
     if (gid.x >= w || gid.y >= h) { return; }
     let i = gid.y * w + gid.x;
-    let x = f32(gid.x) + 0.5;
-    let y = f32(gid.y) + 0.5;
     let mode = L.mode.x;
     // (The view modes that show a buffer as it is are `view_raw`'s picture.)
     if (mode == 1u || mode == 2u || mode == 5u) { return; }
-    var src = fa[i].rgb;
-    if (L.post.x > 0.0 && mode == 0u) {
-        // Scene fringe: red sampled radially outward, blue inward (nearest texel).
-        let k = L.post.x * 0.0025;
-        let d = vec2<f32>(x / f32(w) - 0.5, y / f32(h) - 0.5);
-        let pr = vec2<i32>((vec2<f32>(0.5) + d * (1.0 + k)) * vec2<f32>(f32(w), f32(h)));
-        let pb = vec2<i32>((vec2<f32>(0.5) + d * (1.0 - k)) * vec2<f32>(f32(w), f32(h)));
-        let cr = clamp(pr, vec2<i32>(0), vec2<i32>(i32(w) - 1, i32(h) - 1));
-        let cb = clamp(pb, vec2<i32>(0), vec2<i32>(i32(w) - 1, i32(h) - 1));
-        src = vec3<f32>(fa[u32(cr.y) * w + u32(cr.x)].r, src.g, fa[u32(cb.y) * w + u32(cb.x)].b);
-    }
     let e = exposure_scale();
-    let ll = log2(max((src.r + src.g + src.b) / 3.0 * e, 1e-9));
-    var c = src * e * local_exposure(ll, x, y, e) + bloom_at(x, y) * L.misc.w;
-    if (L.misc.z > 0.0) {
-        let aspect = f32(h) / f32(w);
-        let scale = sqrt(2.0) / sqrt(1.0 + aspect * aspect);
-        let pos = vec2<f32>(x / f32(w) * 2.0 - 1.0, 1.0 - y / f32(h) * 2.0) * vec2<f32>(1.0, aspect) * scale * L.misc.z;
-        let t2 = dot(pos, pos);
-        let v = 1.0 / (t2 + 1.0);
-        c *= v * v;
+    let centre = vec2<f32>(f32(w), f32(h)) * 0.5;
+    let at = vec2<f32>(f32(gid.x), f32(gid.y)) + 0.5 - centre;
+    var c = fa[i].rgb;
+    if (L.post.x > 0.0) {
+        let k = L.post.x * FRINGE;
+        c = vec3<f32>(image_bilinear(centre + at * (1.0 - k) - 0.5).r, c.g, image_bilinear(centre + at * (1.0 + k) - 0.5).b);
     }
-    let log_c = lin_to_log(max(c, vec3<f32>(0.0)) + 0.0026883);
-    let uvw = log_c * (31.0 / 32.0) + 0.5 / 32.0;
-    var srgb = textureSampleLevel(lut, lut_samp, uvw, 0.0).rgb;
+    c = finite_or_zero(max(c, vec3<f32>(0.0))) * e;
+    if (L.misc.w > 0.5) {
+        let glow = bloom_at(f32(gid.x), f32(gid.y));
+        let floor_l = log2(0.18 / 4096.0);
+        c *= local_exposure(max(log2(max(lum(c), 1e-30)), floor_l), f32(gid.x), f32(gid.y), e, glow.w);
+        c += glow.rgb * e;
+    }
+    if (L.bl2.w > 0.0) {
+        // The bloom stages narrower than the pyramid's first level (post.rs `BloomPlan::fine`; at output sizes where
+        // there are any): the pixel and its four neighbours, a fifth each (a kernel of variance 0.4 each way).
+        var s = vec3<f32>(0.0);
+        for (var k = 0; k < 5; k++) {
+            let x = u32(clamp(i32(gid.x) + select(0, k * 2 - 1, k < 2), 0, i32(w) - 1));
+            let y = u32(clamp(i32(gid.y) + select(0, k * 2 - 5, k > 1 && k < 4), 0, i32(h) - 1));
+            let t = finite_or_zero(max(fa[y * w + x].rgb, vec3<f32>(0.0)));
+            s += t * bloom_share(lum(t) * e);
+        }
+        c += s * (0.2 * L.bl2.w * e);
+    }
+    let t = VIGNETTE_FIELD * L.misc.z * length(at) / length(centre);
+    c /= (1.0 + t * t) * (1.0 + t * t);
+    let n = f32(textureDimensions(lut).x);
+    let u = clamp((log2(max(c, vec3<f32>(1e-9))) - LUT_LOG_MIN) / (LUT_LOG_MAX - LUT_LOG_MIN), vec3<f32>(0.0), vec3<f32>(1.0));
+    var d = textureSampleLevel(lut, lut_samp, (u * (n - 1.0) + 0.5) / n, 0.0).rgb;
     if (L.post.y > 0.0) {
-        // Film grain: mid-tone weighted multiplicative noise, new every frame.
-        var hsh = (i ^ (L.size.z * 0x9e3779b9u)) * 747796405u + 2891336453u;
-        hsh = ((hsh >> ((hsh >> 28u) + 4u)) ^ hsh) * 277803737u;
-        hsh = (hsh >> 22u) ^ hsh;
-        let n = f32(hsh >> 8u) / 16777216.0 - 0.5;
-        let l = clamp(lum(srgb), 0.0, 1.0);
-        srgb *= 1.0 + L.post.y * n * 0.6 * max(1.0 - (2.0 * l - 1.0) * (2.0 * l - 1.0), 0.15);
+        // Film grain (post.rs `grain`): zero-mean, triangular, the same on the three channels, most in the mid-tones.
+        let r = hash32(gid.x ^ hash32(gid.y ^ hash32(L.size.z)));
+        let v = lum(d);
+        d += min(L.post.y, 1.0) * GRAIN * (f32(r & 0xffffu) / 65536.0 + f32(r >> 16u) / 65536.0 - 1.0) * 4.0 * v * (1.0 - v);
     }
-    let q = vec3<u32>(clamp(srgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0 + 0.5);
+    let q = vec3<u32>(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0 + 0.5);
     out_px[i] = q.z | (q.y << 8u) | (q.x << 16u) | (255u << 24u); // BGRA in memory
 }

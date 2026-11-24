@@ -9,28 +9,32 @@
 
 use super::*;
 
-/// Auto / local exposure settings (UE PostProcessVolume semantics).
+/// The exposure settings as live.wgsl's passes read them (`LiveParams::ae`, `ae2`, `ae3`.xy = `speed`, `lx`).
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct ExposureSettings {
+    /// Auto exposure's metering: low / high fraction of the histogram, its log2 luminance min / max.
     pub(super) ae: [f32; 4],
+    /// The manual exposure scale, or auto exposure's compensation as a factor (2^compensation); the least / most
+    /// average luminance auto exposure follows (what its EV100 limits expose as middle grey); 1 = auto.
     pub(super) ae2: [f32; 4],
+    /// Adaptation speed toward brighter / darker scenes, EV per second.
     pub(super) speed: [f32; 2],
+    /// Local exposure: highlight contrast, shadow contrast, blurred-luminance blend, detail strength.
     pub(super) lx: [f32; 4],
 }
 
 impl ExposureSettings {
     fn new(exp: &crate::desc::Exposure, pp: &crate::desc::PostPreset) -> Self {
-        let a = &pp.auto_exposure;
-        let le = &pp.local_exposure;
+        let (ae, lx) = (&pp.auto_exposure, &pp.local_exposure);
         let ae2 = match exp {
             crate::desc::Exposure::Manual { ev100 } => [2f32.powf(-ev100), 0.0, 0.0, 0.0],
-            crate::desc::Exposure::Auto { compensation, min_ev100, max_ev100 } => [2f32.powf(*compensation), 0.18 * 2f32.powf(*min_ev100), 0.18 * 2f32.powf(*max_ev100), 1.0],
+            crate::desc::Exposure::Auto { compensation, min_ev100, max_ev100 } => [2f32.powf(*compensation), post::MIDDLE_GREY * 2f32.powf(*min_ev100), post::MIDDLE_GREY * 2f32.powf(max_ev100.max(*min_ev100)), 1.0],
         };
         ExposureSettings {
-            ae: [a.low_percent.clamp(1.0, 99.0) / 100.0, a.high_percent.clamp(1.0, 99.0) / 100.0, a.histogram_log_min, a.histogram_log_max.max(a.histogram_log_min + 1.0)],
+            ae: [ae.low_percent / 100.0, ae.high_percent / 100.0, ae.histogram_log_min, ae.histogram_log_max.max(ae.histogram_log_min + 1.0)],
             ae2,
-            speed: [a.speed_up.max(0.01), a.speed_down.max(0.01)],
-            lx: [le.highlight_contrast, le.shadow_contrast, le.blurred_luminance_blend, le.detail_strength],
+            speed: [ae.speed_up.max(0.0), ae.speed_down.max(0.0)],
+            lx: [lx.highlight_contrast, lx.shadow_contrast, lx.blurred_luminance_blend.clamp(0.0, 1.0), lx.detail_strength],
         }
     }
 }

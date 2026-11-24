@@ -212,8 +212,8 @@ impl LiveCore {
         // the cap only bounds smearing of view-dependent shading (glossy reflections).
         // Diffuse lighting reprojects exactly with the camera; view-dependent specular is handled per pixel (temporal pass).
         // The most frames a pixel's history holds: HISTORY_LIVE while the scene's lighting changes, HISTORY_FRAMES once
-        // it has settled. Within it the length is each pixel's own (live.wgsl `dtemporal`: less where it moves, anti-lag
-        // where its lighting changes, restarted where its surface is new). No edit cuts it: until 2026-11-12 a
+        // it has settled. Within it the length is each pixel's own (live.wgsl "The response of the histories": less
+        // where it moves, cut by its change chart where its lighting changes, restarted where its surface is new). No edit cuts it: until 2026-11-12 a
         // lighting edit left every pixel 16 frames and a geometry edit 4, the whole frame for a change in one corner.
         let cap = if self.reset { 1.0 } else if self.live_lighting() { HISTORY_LIVE } else { HISTORY_FRAMES };
         self.history_len = if self.reset { 1.0 } else { (self.history_len + 1.0).min(cap) };
@@ -460,16 +460,18 @@ impl LiveCore {
             }
             g.queue.submit([e.finish()]);
         }
-        let (r, t) = self.bloom;
+        let b = &self.bloom;
+        // Motion blur's length over this frame's motion: the shutter is open `amount` of a frame; with a target
+        // frame rate, of a frame at that rate (the blur is as long at any real rate: a frame twice as short moves
+        // half as far and is blurred twice its motion). 0 while nothing moves (the pass then costs nothing).
+        let dt = self.frame_dt.clamp(1.0 / 240.0, 0.25);
+        let shutter = if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * dt) } else { self.blur.0 };
         let lp = LiveParams {
             cur: cam.uniform(self.aspect),
             prev: self.prev_cam.uniform(self.aspect),
             size: [w, h, self.frame, (self.reset || reconstruction.history_free()) as u32],
-            misc: [self.view.exposure, cap, self.vignette, (self.bloom.1.iter().sum::<f32>() > 0.0) as u32 as f32],
-            // misc2.z: motion blur, this frame's motion (pixels) -> blur length. UE (PostProcessMotionBlur.cpp,
-            // UpdateMotionBlurTimeScale) blurs over +- amount / 2 x the motion x (1 / target FPS) / frame time, the
-            // actual frame time without a target. 0 while nothing moves (the pass then costs nothing).
-            misc2: [1.0, SAMPLE_CEILING, if !blur { 0.0 } else if self.blur.1 > 0.0 { self.blur.0 / (self.blur.1 * self.frame_dt.clamp(1.0 / 240.0, 0.25)) } else { self.blur.0 }, spp.max(1) as f32],
+            misc: [self.view.exposure, cap, self.vignette, b.on as u32 as f32],
+            misc2: [1.0, SAMPLE_CEILING, shutter, spp.max(1) as f32],
             mode: [self.view_mode, self.reconstructor.white_units() as u32, self.live_lighting() as u32, reconstruction.raw_signal() as u32],
             post: self.post,
             ae: self.view.exposure_settings.ae,
@@ -477,10 +479,11 @@ impl LiveCore {
             ae3: [self.view.exposure_settings.speed[0], self.view.exposure_settings.speed[1], self.frame_dt.clamp(1.0 / 240.0, 0.25), (self.reset || self.frame == 0 || exposure_snap()) as u32 as f32],
             lx: self.view.exposure_settings.lx,
             isz: [iw, ih, self.prev_isz.0, self.prev_isz.1],
-            br: [r[0], r[1], r[2], r[3]],
-            br2: [r[4], r[5], 0.0, 0.0],
-            bt: [t[0], t[1], t[2], t[3]],
-            bt2: [t[4], t[5], 0.0, 0.0],
+            bl: [b.level[0], b.level[1], b.level[2], b.level[3]],
+            bl2: [b.level[4], b.level[5], if b.has_wide() { b.radius as f32 } else { 0.0 }, b.fine],
+            bw: [[b.wide[0][0], b.wide[0][1], b.wide[1][0], b.wide[1][1]], [b.wide[2][0], b.wide[2][1], b.wide[3][0], b.wide[3][1]], [b.wide[4][0], b.wide[4][1], b.wide[5][0], b.wide[5][1]]],
+            lb: [b.base_level[0], b.base_level[1], b.base_level[2], b.base_level[3]],
+            lb2: [b.base_level[4], b.base_level[5], b.base_wide[0], b.base_wide[1]],
             dof: dof_params(self.view.dof.as_ref(), cam.tan_half_fov, w, h),
             jit: [jitter.0, jitter.1, 0.0, 0.0],
             state: [1 - self.frame % 2, 0, 0, 0],

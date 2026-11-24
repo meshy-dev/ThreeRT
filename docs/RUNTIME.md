@@ -1876,6 +1876,258 @@ On an Apple M1 running macOS 27.2.1, the glass camera move scored 0.909 SSIM wit
 output, median GPU frame times with the camera held still were 9.69, 9.78 and 10.22 ms respectively.
 On the Cornell box the built-in path scored highest for both camera poses.
 
+## The post chain
+
+`renderer/src/post.rs` (offline: `post::finish`, and the reference) and the last passes of
+`renderer/shaders/live.wgsl` (`lum_down` .. `post`) take scene-linear radiance in nits (Rec.709 primaries, D65) to
+8-bit sRGB. The settings are a preset's `post` block (`desc::PostPreset`), the camera's exposure and depth of field.
+Their names follow Unreal's Post Process Volume settings and mean what its public documentation says, so a scene's
+look can be compared with the same settings in Unreal; the methods are ours, from public sources, with the free
+constants fitted to measurements of the look the presets ask for (`renderer/examples/post_check.rs` is the check;
+licences in `THIRD_PARTY_NOTICES.md`).
+
+In the order a pixel goes through it:
+
+| Step | Settings | What it does | From |
+|---|---|---|---|
+| Exposure | camera `setManualExposure(ev100)` / `setAutoExposure(compensation, minEv100, maxEv100)`; `autoExposure.lowPercent`, `highPercent`, `histogramLogMin`, `histogramLogMax`, `speedUp`, `speedDown` | Manual: scale 2^-EV100 (EV100 0 shows 1 nit as 1.0). Auto: a 64-bin histogram of the log2 luminance of the frame at quarter resolution, within the histogram range (what is outside is not counted); the average luminance between the two percentiles is exposed as middle grey (0.18) x 2^compensation, the average held within what `minEv100` .. `maxEv100` expose as middle grey. Live, the exposure moves to that target at `speedUp` (the scene got brighter) / `speedDown` EV per second, exponentially within the last 1.5 stops, and snaps on a reset. | own design after the settings' documented meaning |
+| Depth of field, motion blur | camera `dof`; `motionBlur.amount`, `max`, `targetFps` | Live passes on the exposed-to-be image (`dof`, `mblur`). The lens is a thin lens: circle of confusion r_inf (1 - s / z), at most 2.5 % of the width. The blur is `amount` of a frame's motion, of a frame at `targetFps` when that is set. | thin-lens optics; own design |
+| Local exposure | `localExposure.highlightContrast`, `shadowContrast`, `detailStrength`, `blurredLuminanceBlend`, `blurredLuminanceKernel` | Log luminance is split into a base (an edge-aware blur at quarter resolution, blended with a wide Gaussian of `blurredLuminanceKernel` % of the width) and the detail left over; the base's distance from middle grey (x auto exposure's compensation) is scaled above / below it, the detail by `detailStrength`. All 1: off. | Durand & Dorsey 2002 |
+| Bloom | `bloom.intensity`, `threshold`, `sizeScale`, `sizes`, `tints` | Added to the picture: `intensity` x 0.175 x the sum over up to six stages of `tints[k]` x a Gaussian blur of standard deviation 0.1 x `sizes[k]` x `sizeScale` percent of the width, of what blooms (everything under a negative threshold; else from the threshold, in exposed luminance, to one unit above it). Offline each Gaussian is taken to its own shape. Live they are a weighted sum of the levels of a 1/4 .. 1/128 pyramid (each stage as the two levels around its width; wider ones summed on the coarsest level; a five-pixel kernel of the output for stages under about two pixels): 12 small passes after `lum_down`. Next to a light hundreds of times brighter than its surroundings the live glow ends a few pixels sooner than offline. | own design; pyramid: Burt & Adelson 1983 |
+| Vignette | `vignette` | cos^4 of the field angle, whose tangent at the corner is 1.425 x the setting (0.4: the corners at 57 %). | cos^4 law |
+| Chromatic aberration | `chromaticAberration` (0 .. 5) | Red is read from a picture magnified by 0.2 % a unit about the centre, blue from one reduced by as much. | own design |
+| Colour grading | `colorGrading.whiteTemp`, `whiteTint`, `saturation`, `contrast`, `shadowsGain`, `highlightsGain` | White balance: Bradford adaptation from the illuminant of that temperature (CIE daylight locus from 4000 K, Planckian below 3000 K; the tint shifts it across the locus) to the 6500 K white. Then, on scene-linear ACEScg: saturation about the luminance, contrast as a power about 0.18, gains weighted to shadows (luminance under 0.09) and highlights (from 0.5, whole from 1). Scalar or RGB; 1 = none. | CIE 15, Krystek 1985, Lam 1985; own design |
+| Tone curve | `colorGrading.expandGamut`, `blueCorrection` | The Academy's reference rendering for an sRGB display (ACES 1.x RRT + ODT: its "glow" and "red modifier", per-channel tone scale in ACEScg between its 0.96 and 0.93 desaturations) with a tone curve of our own, two logistic branches in log exposure (`post::ToneCurve`: toe a power law to black, shoulder closing on 1.04). In front of it: the gamut expansion (bright saturated colours re-read in a wider gamut, by `expandGamut`), and the Academy's blue-light-artifact fix by `blueCorrection`, undone after the curve. Live this and the grading are a 48^3 table over log2 exposure (-10.5 .. 6.5 stops). | ACES 1.3 reference transforms (AMPAS licence); curve and expansion fitted |
+| Film grain | `filmGrain` (0 .. 1) | Zero-mean luminance noise on the encoded value, strongest in the mid-tones, new each frame (`THREERT_NO_GRAIN=1`: none). | own design |
+
+Measured against the previous release's look (its tables and seven reference pictures): the neutral ramp within 0.0004
+in sRGB-encoded value, 6 657 colours at a mean CIE dE2000 of 0.19 (99th percentile 1.1), the grading tables at 0.17 ..
+0.26, the pictures at 0.12 .. 0.39 (99th percentile under 1.9). `node tools/post-live.ts` puts the live passes against
+`post::finish` of the same frame (mean dE2000 0.15 .. 0.57 on the seven scenes at 960 x 540).
+
+## The temporal response of the live denoiser
+
+The live view traces about one path a pixel and accumulates: the diffuse irradiance in `dtemporal`, the specular
+light in `stemporal` (`live.wgsl`; the section "The response of the histories" there has the rules, their sources
+and what was tried). A frame bounds every history (`L.misc.y`: `HISTORY_LIVE`, 24 frames, while the scene's
+lighting changes, 4096 once it has settled); within that, each pixel's history has a length of its own.
+
+- **In motion.** A history that moves over the grid is resampled bilinearly every frame, and each resampling blurs
+  it a little (Karis 2014 calls it reprojection diffusion): a tap at a fraction f of a pixel is a two-point kernel
+  of variance f (1 - f) pixels². The length is bounded so that the blur gathered stays under a budget
+  (`moving_frames`; `MOVE_BLUR`, `SPEC_MOVE_BLUR` pixels²: 64 and 32 frames at half a pixel a frame and faster, more
+  below). Holding still, nothing bounds. The bound trades blur for noise; what a reflection needs in a move of the
+  camera is not this bound but the parallax's (below).
+- **Animated shading** (signs, screens): `ANIM_FRAMES` for the diffuse history.
+- **While the lighting changes** (`L.mode.z`: something moved or was edited in the last 45 frames), a change chart
+  per pixel, and a drift. The renderer cannot trace last frame's path again with its random numbers (the temporal
+  gradient of Schied et al. 2018), so what it has is each frame's sample against the pixel's own history, and the
+  question is a control chart's: has the mean of a noisy stream shifted. The chart is an exponentially weighted
+  moving average watched against a band of its own deviations (NIST e-Handbook of Statistical Methods § 6.3.2.4),
+  with three choices made for one-sample path tracing:
+  - The reading is the sample's *share* against the history, s / (s + h') per channel: 0 for a dark sample, about a
+    half at the history's level, towards 1 far above it. A sample is heavy-tailed (most are dark, a few carry the
+    light); a share is bounded, so no single sample moves the chart by more than a fixed step, and a run of dark
+    samples on a pixel lit by rare bright ones reads as what it is, the usual.
+  - The residual is taken from the pixel's own running mean of that share (its level), so it has mean 0 while the
+    lighting holds, whatever the surface, and residuals of neighbouring pixels can be pooled.
+  - Pooled by recursion: each frame the average is read from the pixel itself and four pixels at distance √5 around
+    where it was, and this frame's residual is added with weight 1/8. About 250 residuals stand behind a pooled
+    value (a pixel's own average has 15), over a radius of a few pixels and about eight frames.
+
+  The chart signals when the pooled average leaves a band (`CHART_K` of its deviations, from the residuals' pooled
+  mean square; at least `CHART_FLOOR`), and the response is Schied et al.'s blend rule (their eq. 15): the weight a
+  becomes a + drop (1 - a). The diffuse chart is kept per channel (a red sign switched off beside a white lamp
+  moves the red channel's share far more than the luminance); the specular one on the mean of the three.
+
+  **The drift.** A chart whose level follows the history sees a change and then gets used to it: under a light that
+  falls a little every frame (a dusk) the shares settle at a lower level, and the history trails the light by its
+  whole length for as long as the fall lasts. What does not get used to it is the plain relative residual
+  (l - h) / h of the luminance, whose mean is 0 for a history that is the samples' mean and minus the lag for one
+  that trails. It is pooled as the chart's average is, each pixel's weighted by how far its samples can be trusted
+  (1 / (1 + cv²), cv their relative deviation), and the response is not a shorter history but a moved one: each
+  frame the history is scaled by 1 + `DRIFT_GAIN` × the pooled residual, less what the pixel's noise allows the
+  pooled value to be by chance. The lag goes and the noise stays that of a full history. The same factor goes to
+  the specular history of rough surfaces. Pixels lit by rare bright samples are left out (a bounded mean of a
+  skewed sample is biased; their weight is small): there the frame's bound alone follows.
+
+  The state of both lasts in `diffuse_fast` (diffuse) and `diffuse_mom`.z (specular) and is kept up while the
+  lighting is settled too, when nothing responds: with `L.mode.z` 0 the diffuse history is the plain mean of its
+  frames, and a still view converges on the offline render.
+
+`stemporal` adds what a reflection needs:
+
+- **Where the history is.** A reflection's image does not move with the surface that shows it but by the depth of
+  what is reflected (Stachowiak 2015). The history is read where the surface point was and, when the two differ by
+  a quarter pixel or more, where the point at the surface's distance plus the reflection's hit distance along the
+  view ray was (the image in a plane mirror; for a surface that moved, carried by twice its move along its normal).
+  This frame's nine samples around decide: each history counts by its distance from their mean in YCoCg, in bands
+  of `SPEC_GAMMA` deviations (Karis 2014's neighbourhood box, as a mean and deviations), times what the roughness
+  says beforehand (the reflection's place on a mirror, the surface's from roughness 0.6).
+- **How long.** Besides the frame's and the motion's bound: by the parallax, the distance between those two places
+  a frame (none in a camera turn), so that the history has not slid against what it shows by more than
+  `SPEC_SLIDE` pixels, more with roughness² (a blurred image hides a slide). Where the sample has no hit distance,
+  the parallax of a far reflection is assumed; rough surfaces are bound too (a lamp's highlight on wet stones
+  slides with the view); on a mirror a share of it counts, and little where the reflection's history was found in
+  its place and agrees. While the lighting changes, also by roughness: shortest (`SPEC_LIVE_GLOSS`) where a
+  reflection is sharp and the filter already reaches, longer on a mirror (`SPEC_LIVE_MIRROR`), the frame's bound on
+  rough surfaces.
+- **What it follows**, while the lighting changes or the reflection moves against its surface, and always on
+  animated shading (waves): the chart, and the neighbourhood's band: the history is clamped into the nine samples'
+  mean ± (`SPEC_GAMMA` deviations + `SPEC_REL` of its own level). Where the light comes by rare bright samples,
+  nine dark ones say nothing against a history that holds their mean; the chart's level knows those pixels (their
+  mean share is far below a half), and there the band is as wide as the history's level: it can be raised, not
+  cut. A reflection that passes is steady while it is there: a history the clamp raises (all nine samples above
+  it) has its level set so, and while the lighting changes a pixel takes the highest level among the pixels its
+  chart pools from, so a passing reflection's rim goes with its middle. On animated shading half of the allowance
+  is kept (`SPEC_ANIM_RARE`): a glint that has moved on is not a rare sample, a glint under a stopped clock is.
+- **The filter's reach** (`sfilt*`): `SPEC_REACH` × roughness² traced pixels (the lobe's width): none on a mirror,
+  all three passes from roughness 0.25.
+
+**Measured** on the integrated tree, 2026-11-24 (this machine; the previous release, the tree with the first
+version of these rules, and now). `test-render`: 271 of 271 pass. The two wall-clock shots (the Bistro move and the
+volumes) vary with what else the GPU is doing (the volumes shot, this build, four runs that evening: 0.33 to
+0.37 at its first frame, and once 0.52 under another session's load); the others run in lockstep and repeat.
+
+`node tools/bench-ghosting.ts --quick --check` (passes; excess ΔE / p95 excess / trail px):
+
+| | previous | first version | now |
+|---|---|---|---|
+| turn-mid ground | 0.85 / 2.8 / 5 | 0.92 / 2.79 / 4 | 0.87 / 2.82 / 6 |
+| strafe-mid ground | 1.6 / 3.9 / 5 | 1.37 / 3.26 / 5 | 1.38 / 3.41 / 5 |
+| turn-return+0.5s all | 1.13 / 3.74 / 10 | 1.13 / 3.65 / 9 | 1.13 / 3.77 / 10 |
+| strafe-return+0.5s all | 1.25 / 3.97 / 10 | 1.22 / 3.74 / 9 | 1.22 / 3.95 / 10 |
+| stop+0.1s ground | 1.34 / 3.38 / 6 | 1.49 / 3.83 / 5 | 1.36 / 3.53 / 5 |
+
+`node tools/bench-object-ghosting.ts --repeat 3` (ΔE / p95 / trail px over the swept band):
+
+| | previous | first version | now |
+|---|---|---|---|
+| device-slide mid | 1.78 / 6.10 / 31 | 1.86 / 6.74 / 31 | 1.79 / 6.58 / 31 |
+| device-slide end | 1.97 / 6.23 / 29 | 1.75 / 6.85 / 29 | 1.79 / 6.72 / 29 |
+| device-slide end+0.1s | 0.95 / 3.38 / 15 | 1.05 / 4.02 / 22 | 1.03 / 3.79 / 23 |
+| device-slide end+0.3s | 0.70 / 1.86 / 3 | 0.73 / 1.99 / 3 | 0.70 / 1.89 / 3 |
+| device-lift mid | 2.39 / 12.26 / 121 | 2.19 / 10.75 / 119 | 2.17 / 10.72 / 117 |
+| device-lift end | 0.96 / 2.60 / 14 | 0.94 / 2.80 / 14 | 0.92 / 2.71 / 14 |
+| device-lift end+0.1s | 0.74 / 1.85 / 7 | 0.72 / 1.99 / 6 | 0.71 / 1.80 / 6 |
+| device-lift end+0.3s | 0.52 / 1.20 / 2 | 0.52 / 1.33 / 2 | 0.50 / 1.09 / 2 |
+| orb-throw mid | 13.12 / 29.26 / 645 | 10.31 / 24.21 / 399 | 9.25 / 23.32 / 346 |
+| orb-throw end | 10.21 / 30.77 / 436 | 8.84 / 28.67 / 399 | 7.35 / 23.51 / 295 |
+| orb-throw end+0.1s | 5.23 / 15.98 / 173 | 5.48 / 14.68 / 281 | 3.75 / 10.62 / 97 |
+| orb-throw end+0.3s | 2.96 / 9.03 / 155 | 3.71 / 9.28 / 191 | 1.96 / 5.72 / 59 |
+| walker-run mid | 0.35 / 1.07 / 15 | 0.40 / 1.07 / 39 | 0.39 / 1.07 / 33 |
+| walker-run end | 0.44 / 1.09 / 29 | 0.48 / 1.11 / 28 | 0.47 / 1.09 / 28 |
+| walker-run end+0.1s | 0.35 / 1.07 / 21 | 0.38 / 1.09 / 15 | 0.37 / 1.08 / 17 |
+| walker-run end+0.3s | 0.29 / 0.93 / 6 | 0.32 / 1.06 / 4 | 0.30 / 0.94 / 3 |
+
+`node tools/bench-temporal.ts --shot edit` (ΔE 32 frames after the switch / luminance over the settled frame's at 32 frames / frames until within 2 % for good, 0: never in 256):
+
+| | previous | first version | now |
+|---|---|---|---|
+| lamp off, pool | 1.39 / 1.137 / 128 | 0.59 / 1.032 / 64 | 0.6 / 1.032 / 64 |
+| lamp off, bounce | 1.03 / 1.177 / 128 | 1.2 / 1.215 / 256 | 0.75 / 1.081 / 64 |
+| lamp off, room | 0.96 / 1.015 / 32 | 1.08 / 1.034 / 64 | 0.85 / 1.012 / 32 |
+| lamp on, pool | 0.93 / 0.977 / 64 | 0.48 / 0.992 / 16 | 0.43 / 0.993 / 16 |
+| lamp on, bounce | 2.61 / 0.758 / 0 | 2.04 / 0.819 / 0 | 1.64 / 0.857 / 256 |
+| lamp on, room | 1.42 / 0.955 / 128 | 1.35 / 0.965 / 64 | 1.05 / 0.975 / 64 |
+| sign off, signfloor | 1.37 / 1.058 / 64 | 0.8 / 0.972 / 128 | 0.9 / 0.972 / 128 |
+| sign off, room | 1.23 / 1.029 / 64 | 1.19 / 1.022 / 64 | 1.14 / 1.006 / 32 |
+| sign on, signfloor | 3.53 / 0.836 / 256 | 0.8 / 0.97 / 64 | 0.88 / 0.964 / 64 |
+| sign on, room | 2.28 / 0.931 / 128 | 1.12 / 0.968 / 64 | 1.14 / 0.97 / 64 |
+
+`node tools/bench-temporal.ts --shot water` (still ΔE / moving ΔE, at scene times 6, 7, 8 s):
+
+| | previous | first version | now |
+|---|---|---|---|
+| water, time held | 1.67 / 1.55 / 1.45 | 0.68 / 0.66 / 0.62 | 1.36 / 1.28 / 1.2 |
+| water, running | 4.62 / 4.71 / 4.48 | 7.08 / 6.99 / 6.77 | 4.15 / 4.11 / 4.13 |
+| reflections, time held | 3.08 / 3.01 / 2.77 | 1.16 / 1.16 / 1.11 | 3.22 / 3.04 / 2.88 |
+| reflections, running | 13.35 / 12.9 / 12.25 | 20.57 / 20.7 / 20.67 | 12.45 / 12.03 / 11.6 |
+
+`node tools/bench-temporal.ts --shot foliage` (still ΔE / moving ΔE, at scene times 6, 7, 8 s):
+
+| | previous | first version | now |
+|---|---|---|---|
+| plants, time held | 0.21 / 0.22 / 0.22 | 0.22 / 0.22 / 0.22 | 0.22 / 0.22 / 0.22 |
+| plants, running | 0.9 / 0.92 / 0.95 | 0.83 / 0.85 / 0.88 | 0.88 / 0.9 / 0.93 |
+| ferns, time held | 0.23 / 0.23 / 0.23 | 0.24 / 0.24 / 0.24 | 0.24 / 0.24 / 0.23 |
+| ferns, running | 1.03 / 1.14 / 0.99 | 0.93 / 1.04 / 0.9 | 0.98 / 1.08 / 0.94 |
+
+`node tools/bench-temporal.ts` --shot volumes (ΔE / p95 at move20, move40, move59, 0.5 s after the stop):
+
+| | previous | first version | now |
+|---|---|---|---|
+| ΔE | 0.33 / 0.36 / 0.37 / 0.22 | 0.42 / 0.56 / 0.56 / 0.32 | 0.33 / 0.36 / 0.36 / 0.22 |
+| p95 | 1.04 / 1.12 / 1.08 / 0.82 | 1.32 / 1.99 / 1.79 / 0.84 | 1.03 / 1.12 / 1.06 / 0.82 |
+
+`node tools/bench-temporal.ts` (the Bistro move) (ΔE / p95 at move20, move40, move59, 0.5 s after the stop):
+
+| | previous | first version | now |
+|---|---|---|---|
+| ΔE | 2.45 / 2.51 / 2.47 / 2.08 | 1.84 / 1.91 / 1.81 / 1.44 | 1.89 / 1.97 / 1.93 / 1.55 |
+| p95 | 7.69 / 7.97 / 7.83 / 6.56 | 6.07 / 6.18 / 5.83 / 4.45 | 6.4 / 6.53 / 6.5 / 5.05 |
+
+`node tools/bench-window.ts` (ΔE / p99 against offline, or for the dusk against the same moment held):
+
+| | previous | first version | now |
+|---|---|---|---|
+| still-bistro, held | 1.81 / 13.62 | 1.83 / 13.93 | 1.83 / 13.92 |
+| still-rooms, held | 0.63 / 1.82 | 0.59 / 1.79 | 0.59 / 1.77 |
+| still-rooms-wide, held | 0.77 / 1.99 | 0.77 / 2 | 0.76 / 1.95 |
+| still-glass, held | 1.28 / 27.19 | 1.27 / 26.89 | 1.27 / 26.87 |
+| rooms-turn, last | 0.89 / 3.44 | 0.92 / 3.94 | 3.32 / 0.9942 |
+| rooms-turn, stop1 | 0.88 / 3.33 | 0.91 / 3.81 | 3.22 / 0.9944 |
+| rooms-turn, stop6 | 0.87 / 3 | 0.9 / 3.43 | 2.9 / 0.995 |
+| rooms-turn, stop30 | 0.89 / 2.5 | 0.93 / 2.77 | 2.44 / 0.9954 |
+| rooms-turn, settled | 1.03 / 2.36 | 1.05 / 2.39 | 2.31 / 0.9957 |
+| slice, 40.5 s | 6.05 / 23.22 | 4.6 / 25.53 | 24.71 / 0.8425 |
+| tokyo-dusk, 6 s, skyline | 1.35 / 11.56 | 1.79 / 14.98 | 1.26 / 11.35 |
+| tokyo-dusk, 6 s | 1.12 / 8.46 | 2.61 / 16.02 | 1.11 / 8.52 |
+| tokyo-dusk, 7 s, skyline | 0.86 / 8.49 | 1.18 / 10.96 | 0.86 / 8.81 |
+| tokyo-dusk, 7 s | 0.6 / 5.46 | 1.44 / 10.27 | 0.61 / 5.48 |
+| tokyo-dusk, 8 s, skyline | 0.31 / 3.87 | 0.51 / 5.39 | 0.4 / 4.95 |
+| tokyo-dusk, 8 s | 0.5 / 5.81 | 0.87 / 6.65 | 0.5 / 5.66 |
+| tokyo-turn, last, tower | 2 / 33.29 | 1.99 / 33.22 | 33.24 / 0.9268 |
+| tokyo-turn, last | 2.43 / 35.84 | 2.4 / 35.69 | 35.69 / 0.9142 |
+| tokyo-turn, stop1, tower | 1.9 / 31.18 | 1.89 / 31.13 | 31.16 / 0.9336 |
+| tokyo-turn, stop1 | 2.3 / 34 | 2.27 / 33.82 | 33.82 / 0.9225 |
+| tokyo-turn, stop6, tower | 1.66 / 26.59 | 1.64 / 26.61 | 26.64 / 0.9506 |
+| tokyo-turn, stop6 | 1.9 / 28.41 | 1.87 / 28.24 | 28.24 / 0.9443 |
+| tokyo-turn, stop30, tower | 1.41 / 22.21 | 1.4 / 22.35 | 22.38 / 0.9647 |
+| tokyo-turn, stop30 | 1.51 / 22.94 | 1.48 / 22.79 | 22.78 / 0.9607 |
+| tokyo-turn, settled, tower | 1.39 / 22.25 | 1.38 / 22.29 | 22.27 / 0.9656 |
+| tokyo-turn, settled | 1.37 / 21.43 | 1.34 / 21.37 | 21.34 / 0.9656 |
+| tokyo-orbit, last, tower | 3.95 / 51.11 | 3.98 / 50.49 | 50.49 / 0.8647 |
+| tokyo-orbit, last | 2.29 / 35.2 | 2.28 / 35.08 | 35.08 / 0.9131 |
+| tokyo-orbit, stop1, tower | 3.8 / 49.36 | 3.82 / 49.2 | 49.36 / 0.875 |
+| tokyo-orbit, stop1 | 2.16 / 33.39 | 2.15 / 33.29 | 33.31 / 0.9213 |
+| tokyo-orbit, stop6, tower | 3.14 / 41.65 | 3.16 / 41.73 | 41.59 / 0.9183 |
+| tokyo-orbit, stop6 | 1.77 / 27.28 | 1.76 / 27.2 | 27.2 / 0.9449 |
+| tokyo-orbit, stop30, tower | 2.64 / 36.45 | 2.64 / 36.03 | 36.19 / 0.9409 |
+| tokyo-orbit, stop30 | 1.4 / 22.1 | 1.39 / 22.01 | 22.05 / 0.9608 |
+| tokyo-orbit, settled, tower | 2.52 / 35.5 | 2.51 / 35.38 | 35.38 / 0.9455 |
+| tokyo-orbit, settled | 1.28 / 20.67 | 1.26 / 20.64 | 20.64 / 0.9659 |
+
+What is still worse than the previous release, and why it is left: the dragged device's p95 at the middle and the
+end of its slide and its row 0.1 s after (the errors there are the screen's text copies and the strip the device
+uncovers, which the upscaler owns: with every rule of this section switched off the same rows read p95 6.84 at
+the end and 4.07 after); the runner's rows by 0.01 to 0.04 and its trail at mid-run (33 px for 15; 42 with the
+rules off); the dusk's skyline at 8 s (the diffuse and specular signals alone read 0.12 and 0.04 there, and the row
+does not move with the frame bound, 0.40 to 0.42 from 16 to 32 frames: what differs is in the directly seen sky and
+lamps); the slice's p99 (24.7 for 23.2, its mean 4.99 for 6.05); the mid-turn on the street (0.87 for 0.85) and
+0.1 s after the stop there (1.36 for 1.34); and
+the frames until the floor beside the switched-off sign stays within 2 % (128 for 64: the histories the chart cut
+are 1 to 3 % low until the rare bright samples have come in again, where the previous release was 6 % high at 32
+frames).
+
+The GPU time of the two passes on Bistro night (1280 × 720, scale 0.5; rounds the project's own check called
+quiet; the machine's GPU was shared, and its clock runs at two speeds, so compare within a round), still / on the
+perf smoke's move: `dtemporal` 0.11 / 0.14 ms (the first version in this tree: 0.11 / 0.14 to 0.19), `stemporal`
+0.12 to 0.13 / 0.19 ms (0.13 / 0.16 to 0.18) with rough surfaces still held to their neighbourhood in a move; with
+that dropped, in rounds under another session's load: 0.14 to 0.15 moving (the first version in the same rounds:
+0.15).
+
+
 ## Moving objects in the live view
 
 The live view's histories (the irradiance and specular ones on the traced grid, the upscaler's colour on the output
@@ -1895,8 +2147,8 @@ over a polished floor, a character running over a sunlit floor, the camera still
   and a carried lock that lands on a moving surface is dropped (`track`): a moving screen's text left copies of
   itself for a jitter sequence.
 - **Reflections follow what moves past them.** While the lighting is live (a moving object sets it), a still
-  surface's specular history is clipped to this frame's neighbourhood (`SPEC_CLIP` deviations plus `SPEC_CLIP_REL`
-  of its luminance): a light carried past a polished floor left its reflection along its path.
+  surface's specular history is held to this frame's neighbourhood and to its change chart ("The temporal response
+  of the live denoiser", `stemporal`): a light carried past a polished floor left its reflection along its path.
 - **Where the light changed, the history waits for it.** While the lighting is live, a traced sample whose light
   jumped since the previous frame (by `LIGHT_CHANGE` of itself and `LIGHT_FLICKER` times its own flicker: a shadow's
   edge passed, a lamp's pool moved) starts its flicker count again (`track`), and the output pixels around it hold
@@ -1908,13 +2160,10 @@ over a polished floor, a character running over a sunlit floor, the camera still
 
 ![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
 
-Not covered: the specular clip also cuts a right history where the lighting is live all the time (a crowd's
-reflections are darker than offline's). A short-term specular history to clip against is no answer: at one sample
-a pixel it is noise (tried and dropped: `dtemporal`'s anti-lag note). The clip is transitional: it goes when a
-change in the lighting can be told from noise (last frame's path traced again with its random numbers). A fast
-light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
-history and its anti-lag), and the band just uncovered starts from this frame's samples (more aliased for a frame or
-two, as any disocclusion).
+Not covered: a change of the light too small or too noisy for the change chart and the drift, and any change
+where the light comes by rare samples, trail by the frame's bound (`HISTORY_LIVE`). A fast light's effect on diffuse
+lighting (a shadow it casts) still lags by the two to four frames the chart needs, and the band just uncovered
+starts from this frame's samples (more aliased for a frame or two, as any disocclusion).
 
 ## Glass
 

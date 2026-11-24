@@ -1,7 +1,8 @@
 // Standard material library: Three-like constructors for the materials scenes keep needing (wet ground with puddles and
 // rain ripples, neon signs, facades with lit windows, LED screens, painted metal, ...), so an agent fills in parameters
 // instead of writing shading code. Each is a MaterialFunction (docs/MATERIAL_FUNCTIONS.md) taken from the master
-// materials of a UE 5.8 night-street level (Custom HLSL, written against UE space via ue_pos / ue_vec, cm); the
+// materials of this project's own night-street level in Unreal (Custom HLSL that we wrote there, against UE space via
+// ue_pos / ue_vec, cm); the
 // constructors take metres and three.js names (`map`, `roughnessMap`, `normalMap`, `color`, `roughness` as the map's
 // multiplier) and convert. Colours: linear triples or sRGB hex, like `Color`. Parameters are read when a material is
 // made; `set({...})` changes them later.

@@ -5,7 +5,7 @@ A material function is a WGSL body attached to a material, run by the path trace
 a Custom-HLSL node. The DSL declares it once with named parameters and texture slots, and each material instance binds
 its own values. Expressiveness lives in code instead of in a growing list of built-in material fields, so a UE master
 material can be ported line for line (the standard library's nine street materials, below, were ported this way from
-the master materials of a UE 5.8 night-street level).
+the master materials we wrote for this project's own UE 5.8 night-street level).
 
 ```ts
 import { MaterialFunction, MeshStandardMaterial, Texture } from "@threert/scene";
@@ -341,17 +341,34 @@ any number of times:
 The kernel compiles all of it out when no scene node is a volume (feature bit F_MEDIA): existing scenes render
 byte-identical and pay nothing.
 
-`FogVolume` in the standard library is UE 5.8's Local Fog Volume, as UE voxelizes it into volumetric fog
-(VolumetricFog.usf). It takes UE's settings under the same names and defaults: `radialExtinction`,
-`heightExtinction`, `heightFalloff`, `heightOffset`, `albedo`, `emissive` and `phaseG`.
-- In the unit sphere (radius 1), the radial part is RadialFogExtinction × saturate(1 − d)^0.82, and the height part is
-  HeightFogExtinction × exp(−HeightFogFalloff × (z − HeightFogOffset)).
-- The two combine as coverages, not as a sum: with A = e^−height and B = e^−radial, the extinction is
-  −log(A + B − AB) per metre.
-- So fog needs both parts: with no height part there is no fog. UE's default falloff of 1000 cuts the sphere flat at
-  the offset.
-- The node's scale is the diameter: UE's scale 1.2 (a 1.2 m radius) is `scale.set(2.4, 2.4, 2.4)`.
-- `volume/local-fog` checks the density against the optical depth integrated numerically: 0.2823 for 0.2863.
+`FogVolume` is a sphere of fog (the node's scale is its diameter). Its settings have the names and meanings of the
+settings of Unreal's Local Fog Volume (its documentation page "Local Fog Volumes"), so a scene can carry the numbers
+over:
+
+| option | default | meaning |
+|---|---|---|
+| `radialExtinction` | 1 | extinction (1/m) at the centre of the part that fades toward the sphere's surface |
+| `heightExtinction` | 1 | extinction (1/m) of the part that fades with height, at the height `heightOffset` |
+| `heightFalloff` | 1000 | how fast the height part falls off upward, per unit of the unit sphere (radius 1) |
+| `heightOffset` | 0 | the height the height part is measured from, in the unit sphere (0 = the centre, 1 = the top) |
+| `albedo` | white | scattering / extinction |
+| `emissive` | black | emitted radiance per unit extinction, nits |
+| `phaseG` | 0.2 | the Henyey-Greenstein g |
+
+The density is ThreeRT's own. With `u` the point in the unit sphere (radius 1, y up):
+
+```
+radial     = radialExtinction × (1 − |u|²)
+height     = heightExtinction × exp(−heightFalloff × (u.y − heightOffset))
+extinction = radial × (1 − exp(−height / radial))
+```
+
+The fog is where both parts are. The combination follows the thinner of the two smoothly, and is never denser than
+either: where the height part is thin the fog is the height part, where it is dense the fog is the radial part. With
+the default falloff of 1000 the height part is a flat cut: the sphere's fog below `heightOffset`, nothing above it.
+A falloff of a few units gives a pool that thins upward. `fogVolumeExtinction(options, u)` gives the same number in
+TypeScript. The volume's majorant is set from the options (the radial part at the centre with the height part at
+its densest in the sphere), so a `FogVolume` needs none.
 
 Layer A checks it against analytic values:
 - `volume/box-transmittance`: Beer–Lambert;
@@ -386,7 +403,7 @@ in front of its wall, lit by the moon alone, reads +5.7 % live over the offline 
 isotropic phase function (the smoke's is HG 0.2), a third from the 8-step march's transmittance.
 
 The standard library has three volume presets:
-- `FogVolume`: UE 5.8's Local Fog Volume (its density formula and settings, above).
+- `FogVolume`: a sphere of fog that fades towards its edge and with height (above).
 - `SmokeColumn`: fBm noise drifting upward, thinning toward the edge and top.
 - `Fireball`: grows from `customData[0]`, emits by temperature, cools to smoke, can repeat.
 

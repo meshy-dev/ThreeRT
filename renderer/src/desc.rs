@@ -307,25 +307,30 @@ pub struct Preset {
     pub native: NativePreset,
 }
 
+/// The post chain's settings (`post` of a preset; post.rs says what each does). Their names and meanings follow
+/// Unreal's Post Process Volume settings as its documentation describes them, so that a scene's look can be compared
+/// with the same settings there. The presets also carry a `tonemapper` block (Unreal's Film slope / toe / shoulder /
+/// clips) for the comparison scripts in ue5/: the renderer's tone curve (`post::ToneCurve`) is fitted to the look
+/// those values give and reads none of them.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PostPreset {
-    pub tonemapper: Tonemapper,
     pub color_grading: ColorGrading,
     pub bloom: Bloom,
+    /// Vignette (0 = off): natural cos^4 falloff toward the corners (`post::vignette`).
     pub vignette: f32,
     pub auto_exposure: AutoExposure,
-    /// UE FilmGrainIntensity (0..1).
+    /// Film grain (0..1; 0 = off): zero-mean luminance noise, strongest in the mid-tones, new each frame.
     #[serde(default)]
     pub film_grain: f32,
-    /// UE SceneFringeIntensity (chromatic aberration, 0..5).
+    /// Chromatic aberration (0..5; 0 = off): red and blue apart, growing from the centre.
     #[serde(default)]
     pub chromatic_aberration: f32,
-    /// UE local exposure (bilateral): contrast of the low-frequency luminance around middle grey.
+    /// Local exposure: contrast of the large-scale luminance about middle grey.
     #[serde(default)]
     pub local_exposure: LocalExposure,
-    /// UE motion blur (amount, max, target FPS; UE's defaults when absent). The presets switch it off, like their UE
-    /// references (r.MotionBlurQuality 0): stills and temporal benchmarks compare unblurred frames.
+    /// Motion blur (amount, max, target FPS). The presets switch it off: stills and temporal benchmarks compare
+    /// unblurred frames.
     #[serde(default)]
     pub motion_blur: MotionBlur,
 }
@@ -333,11 +338,11 @@ pub struct PostPreset {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MotionBlur {
-    /// UE MotionBlurAmount: shutter as a fraction of the target frame time (0 = off).
+    /// The shutter as a fraction of the frame time (0 = off).
     pub amount: f32,
-    /// UE MotionBlurMax: longest blur, percent of the screen width.
+    /// Longest blur, percent of the view width.
     pub max: f32,
-    /// UE MotionBlurTargetFPS: blur length as if the game ran at this rate.
+    /// Blur length as if the frames came at this rate (0: at the rate they come).
     pub target_fps: f32,
 }
 
@@ -347,15 +352,18 @@ impl Default for MotionBlur {
     }
 }
 
+/// Local exposure (`post::local_exposure_factor`): all three of the first at 1 = off.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LocalExposure {
+    /// Scale of the base layer's distance above / below middle grey (< 1 compresses highlights / lifts shadows).
     pub highlight_contrast: f32,
     pub shadow_contrast: f32,
+    /// Scale of the detail layer (> 1 boosts local detail).
     pub detail_strength: f32,
-    /// Base luminance = lerp(bilateral grid, wide blur, blend) (UE BlurredLuminanceBlend 0.6).
+    /// The base layer: the edge-aware blur of log luminance, blended by this much with a wide plain blur.
     pub blurred_luminance_blend: f32,
-    /// Wide blur kernel, percent of the view width (UE 50).
+    /// The wide blur's size, percent of the view width (a bloom stage's measure: `post::BloomPlan`).
     pub blurred_luminance_kernel: f32,
 }
 
@@ -365,28 +373,25 @@ impl Default for LocalExposure {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Tonemapper {
-    pub slope: f32,
-    pub toe: f32,
-    pub shoulder: f32,
-    pub black_clip: f32,
-    pub white_clip: f32,
-    pub tone_curve_amount: f32,
-}
-
+/// Colour grading, on scene-linear colour before the tone curve (`post::Tonemapper`).
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ColorGrading {
+    /// Gamut expansion (0 = none, 1 = the presets' look): bright saturated colours are pushed beyond sRGB's gamut
+    /// before the tone curve.
+    #[serde(default = "one")]
     pub expand_gamut: f32,
+    /// How much of the Academy's blue-light-artifact fix the tone curve works under (0 .. 1): bright blues
+    /// desaturate instead of turning violet.
+    #[serde(default = "blue")]
     pub blue_correction: f32,
-    /// UE white balance: the scene illuminant (K) that renders as white, and green-magenta tint.
+    /// White balance: the scene illuminant (K) that renders as white, and its green-magenta tint.
     #[serde(default = "d65")]
     pub white_temp: f32,
     #[serde(default)]
     pub white_tint: f32,
-    /// UE ColorSaturation / ColorContrast (global), ColorGainShadows / ColorGainHighlights: scalar or RGB.
+    /// Saturation and contrast of the whole picture, gain of its shadows and of its highlights: scalar or RGB,
+    /// 1 = none.
     #[serde(default = "one3")]
     pub saturation: Rgb,
     #[serde(default = "one3")]
@@ -426,29 +431,37 @@ fn d65() -> f32 {
     6500.0
 }
 
+fn blue() -> f32 {
+    0.6
+}
+
+/// Bloom (`post::BloomPlan`): a sum of Gaussian blurs of the picture, added to it.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Bloom {
+    /// Scale of the whole glow (0 = off).
     pub intensity: f32,
+    /// Exposed luminance from which a pixel blooms, fading in over one unit above it (< 0: everything blooms).
     pub threshold: f32,
+    /// The stages' sizes (percent of the view width, times `size_scale`) and weights: up to six.
     pub size_scale: f32,
     pub sizes: Vec<f32>,
     pub tints: Vec<f32>,
 }
 
+/// Auto exposure's metering (`post::exposure_scale`).
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoExposure {
+    /// The percentiles of the luminance histogram between which the average is taken.
     pub low_percent: f32,
     pub high_percent: f32,
-    /// Histogram range, log2 luminance. The presets use UE 5's extended range (EV100 -10 .. 20, which with the default
-    /// lens attenuation 0.78 is the same log2 luminance: Scene.cpp, r.DefaultFeature.AutoExposure.
-    /// ExtendDefaultLuminanceRange, on in every UE 5 project template). UE's legacy range, -8 .. 4, saturates in
-    /// daylight (a 3000-nit sky would pin the exposure at EV 6.5); scenes ported from a project without the extended
-    /// range set it explicitly.
+    /// The histogram's range, log2 luminance (nits). The presets use -10 .. 20, the extended range Unreal's
+    /// documentation describes (there in EV100): a range of -8 .. 4 saturates in daylight (a 3000-nit sky would pin
+    /// the exposure at its top); scenes ported from a project with that range set it explicitly.
     pub histogram_log_min: f32,
     pub histogram_log_max: f32,
-    /// Eye adaptation speed toward brighter / darker targets, EV per second (UE defaults 3 / 1; real-time only).
+    /// Adaptation speed toward brighter / darker scenes, EV per second (real-time only).
     #[serde(default = "three")]
     pub speed_up: f32,
     #[serde(default = "one")]

@@ -1231,45 +1231,167 @@ pub fn sky_sampled(brightest: f32, floor: f32, has_env: bool) -> bool {
     brightest >= floor && (!has_env || env_nee_on())
 }
 
-/// UE GGXEnergyLookup equivalent: E.x = integral of D*Vis*NoL (F = 1), E.y = same weighted by (1-VoH)^5.
-pub fn energy_lut() -> Vec<[f32; 4]> {
-    let n = 32usize;
-    let mut vals = vec![[0f32; 2]; n * n];
-    for ry in 0..n {
-        let roughness = (ry as f32 / (n - 1) as f32).max(0.02);
-        let a = roughness * roughness;
-        let a2 = a * a;
-        for vx in 0..n {
-            let nov = (vx as f32 / (n - 1) as f32).max(1e-3);
-            let v = Vec3::new((1.0 - nov * nov).sqrt(), 0.0, nov);
-            let (mut ex, mut ey) = (0.0f64, 0.0f64);
-            let samples = 1024;
-            for i in 0..samples {
-                // Hammersley + GGX NDF sampling of H.
-                let u1 = (i as f32 + 0.5) / samples as f32;
-                let u2 = (i as u32).reverse_bits() as f32 / 4294967296.0;
-                let phi = 2.0 * std::f32::consts::PI * u2;
-                let cos_t = ((1.0 - u1) / (1.0 + (a2 - 1.0) * u1)).sqrt();
-                let sin_t = (1.0 - cos_t * cos_t).sqrt();
-                let hv = Vec3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
-                let l = 2.0 * v.dot(hv) * hv - v;
-                let (nol, noh, voh) = (l.z, hv.z, v.dot(hv));
-                if nol > 0.0 && voh > 0.0 {
-                    let av = a;
-                    let vis_v = nol * (nov * (1.0 - av) + av);
-                    let vis_l = nov * (nol * (1.0 - av) + av);
-                    let vis = 0.5 / (vis_v + vis_l);
-                    // pdf_L = D * NoH / (4 VoH)  =>  D*Vis*NoL / pdf = Vis * NoL * 4 VoH / NoH
-                    let est = (vis * nol * 4.0 * voh / noh) as f64;
-                    let fc = (1.0 - voh).powi(5) as f64;
-                    ex += est;
-                    ey += est * fc;
-                }
+/// The energy table's nodes (pathtrace.wgsl `ENERGY_N`): along a row sqrt(cos(view)) from 0 to 1 (the albedo changes
+/// fastest at grazing views, where a table over the cosine itself is 20 times further off), over the rows the
+/// roughness from 0 to 1.
+pub const ENERGY_N: usize = 32;
+
+/// The specular lobe's directional albedo toward a view at cosine `mu`, for `alpha` = roughness^2, as the two terms of
+/// Karis's split sum ("Real Shading in Unreal Engine 4", SIGGRAPH 2013 course notes, "Environment BRDF"): with
+/// Schlick's Fresnel F = f0 + (f90 - f0) (1 - v.h)^5 the lobe reflects f0 x `.0` + f90 x `.1` of a uniform white
+/// surround, and `.0 + .1` at F = 1 (E(mu) of Kulla & Conty 2017). The lobe is the kernel's, single scattering: GGX D
+/// (Walter et al. 2007) with the square-root-free height-correlated Smith visibility (`vis_smith_joint_approx`:
+/// Hammon 2017).
+/// The integral is taken over visible normals (Heitz, "Sampling the GGX Distribution of Visible Normals", JCGT 2018):
+/// a light direction mirrored off a visible normal has density G1(v) D / (4 n.v), so the lobe's value x cosine over
+/// it is F x (V 4 n.v n.l) / G1(v), bounded. Midpoint rule over the unit disk the normals are drawn from, `nr` rings
+/// x 2 `nphi` angles (half of them computed: the lobe is symmetric about the plane of incidence). The rings crowd
+/// toward the rim (u = 1 - (1 - t)^2), where the normals tilt far and the reflected ray nears the horizon: the
+/// approximate visibility falls to 0 there over a range of n.l about alpha wide, which even rings miss (48 x 16
+/// points: 1.6e-4 from the converged value; 24 x 24 even ones: 9e-3).
+pub fn specular_albedo(mu: f64, alpha: f64, nr: usize, nphi: usize) -> (f64, f64) {
+    let mu = mu.clamp(1e-4, 1.0);
+    if alpha < 1e-6 {
+        // A mirror: the half vector is the normal.
+        let fc = (1.0 - mu).powi(5);
+        return (1.0 - fc, fc);
+    }
+    // The view direction (in the x-z plane, n = +z) in the space where the visible normals' hemisphere is a half ball
+    // (Heitz 2018, section 3); the basis around it is t1 = +y, t2 = (-vh.z, 0, vh.x).
+    let (vx, vz) = ((1.0 - mu * mu).max(0.0).sqrt(), mu);
+    let k = (alpha * alpha * vx * vx + vz * vz).sqrt();
+    let (hx, hz) = (alpha * vx / k, vz / k);
+    let s = 0.5 * (1.0 + hz);
+    // 1 / G1(v) = 1 + Lambda(v) (Heitz 2014, "Understanding the Masking-Shadowing Function", GGX's Lambda).
+    let inv_g1 = 0.5 * (1.0 + (1.0 + alpha * alpha * (1.0 - mu * mu) / (mu * mu)).sqrt());
+    let (mut a, mut b) = (0.0, 0.0);
+    for i in 0..nr {
+        let t = (i as f64 + 0.5) / nr as f64;
+        let (r, w) = ((1.0 - (1.0 - t) * (1.0 - t)).sqrt(), 2.0 * (1.0 - t));
+        for j in 0..nphi {
+            let phi = std::f64::consts::PI * ((j as f64 + 0.5) / nphi as f64 - 0.5);
+            let p1 = r * phi.cos();
+            let p2 = (1.0 - s) * (1.0 - p1 * p1).max(0.0).sqrt() + s * r * phi.sin();
+            let pz = (1.0 - p1 * p1 - p2 * p2).max(0.0).sqrt();
+            // The visible normal, stretched back.
+            let m = [alpha * (pz * hx - p2 * hz), alpha * p1, (p2 * hx + pz * hz).max(0.0)];
+            let len = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+            let voh = (vx * m[0] + vz * m[2]) / len;
+            let nol = 2.0 * voh * m[2] / len - vz;
+            if nol <= 0.0 || voh <= 0.0 {
+                continue;
             }
-            vals[ry * n + vx] = [(ex / samples as f64).min(1.0) as f32, (ey / samples as f64) as f32];
+            // V x 4 n.v n.l, V = 0.5 / (n.l (n.v (1 - alpha) + alpha) + n.v (n.l (1 - alpha) + alpha)): the kernel's
+            // 0.5 / mix(2 n.l n.v, n.l + n.v, alpha).
+            let g2 = 2.0 * mu * nol / (nol * (mu * (1.0 - alpha) + alpha) + mu * (nol * (1.0 - alpha) + alpha));
+            let fc = (1.0 - voh).powi(5);
+            a += w * (1.0 - fc) * g2;
+            b += w * fc * g2;
         }
     }
-    vals.chunks(2).map(|c| [c[0][0], c[0][1], c[1][0], c[1][1]]).collect()
+    let k = inv_g1 / (nr * nphi) as f64;
+    (a * k, b * k)
+}
+
+/// The table pathtrace.wgsl's `energy_lookup` reads (`heap::Table::Energy`): `specular_albedo` at `ENERGY_N` x
+/// `ENERGY_N` nodes, node (ix, iy) at cos(view) (ix / 31)^2 and roughness iy / 31, row after row, two nodes (four
+/// numbers) a vec4. Computed once a process (about 10 ms).
+pub fn energy_lut() -> Vec<[f32; 4]> {
+    static LUT: std::sync::OnceLock<Vec<[f32; 4]>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let n = ENERGY_N;
+        let mut vals = Vec::with_capacity(2 * n * n);
+        for iy in 0..n {
+            let r = iy as f64 / (n - 1) as f64;
+            for ix in 0..n {
+                let x = ix as f64 / (n - 1) as f64;
+                let (a, b) = specular_albedo(x * x, r * r, 48, 8);
+                vals.extend([a as f32, b as f32]);
+            }
+        }
+        vals.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+    })
+    .clone()
+}
+
+#[cfg(test)]
+mod energy_tests {
+    use super::*;
+
+    /// The kernel's `energy_lookup`: the table between its nodes.
+    fn lookup(lut: &[[f32; 4]], roughness: f64, mu: f64) -> (f64, f64) {
+        let n = ENERGY_N;
+        let node = |i: usize| (lut[i / 2][2 * (i % 2)] as f64, lut[i / 2][2 * (i % 2) + 1] as f64);
+        let (x, y) = (mu.clamp(0.0, 1.0).sqrt() * (n - 1) as f64, roughness.clamp(0.0, 1.0) * (n - 1) as f64);
+        let (x0, y0) = ((x as usize).min(n - 2), (y as usize).min(n - 2));
+        let (fx, fy) = (x - x0 as f64, y - y0 as f64);
+        let mix = |p: (f64, f64), q: (f64, f64), t: f64| (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t);
+        let i = y0 * n + x0;
+        mix(mix(node(i), node(i + 1), fx), mix(node(i + n), node(i + n + 1), fx), fy)
+    }
+
+    /// The lobe's value x cosine integrated over the hemisphere of light directions at F = 1 (`n` x 2 `n` points,
+    /// midpoint rule over theta and half the azimuth): what the kernel's light samples sum. The table's estimator is
+    /// its sampling.
+    fn quadrature(mu: f64, alpha: f64, n: usize) -> f64 {
+        let a2 = alpha * alpha;
+        let v = [(1.0 - mu * mu).sqrt(), mu];
+        let mut sum = 0.0;
+        for i in 0..n {
+            let (st, c) = (std::f64::consts::FRAC_PI_2 * (i as f64 + 0.5) / n as f64).sin_cos();
+            for j in 0..2 * n {
+                let phi = std::f64::consts::PI * (j as f64 + 0.5) / (2 * n) as f64;
+                let (x, z) = (st * phi.cos(), st * phi.sin());
+                let h = [v[0] + x, v[1] + c, z];
+                let noh = h[1] / (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+                let d = (noh * a2 - noh) * noh + 1.0;
+                let vis = 0.5 / (c * (mu * (1.0 - alpha) + alpha) + mu * (c * (1.0 - alpha) + alpha));
+                sum += a2 / (std::f64::consts::PI * d * d) * vis * c * st;
+            }
+        }
+        sum * std::f64::consts::PI * std::f64::consts::PI / (2 * n * n) as f64
+    }
+
+    #[test]
+    fn the_albedo_is_the_lobes_integral() {
+        for (r, mu) in [(0.3, 0.9), (0.5, 0.7071), (0.5, 0.2), (0.8, 0.5), (1.0, 1.0), (1.0, 0.1), (0.25, 0.4)] {
+            let ((a, b), q) = (specular_albedo(mu, r * r, 48, 8), quadrature(mu, r * r, 800));
+            eprintln!("roughness {r}, cos {mu}: {a:.4} + {b:.4} = {:.4}; quadrature {q:.4}", a + b);
+            assert!((a + b - q).abs() < 1e-3, "roughness {r}, cos {mu}: {:.4} for {q:.4}", a + b);
+        }
+        // A mirror reflects everything, by Fresnel at the view's angle; a smooth lobe nearly so.
+        let (a, b) = specular_albedo(0.5, 0.0, 48, 8);
+        assert!((a + b - 1.0).abs() < 1e-12 && (b - 0.5f64.powi(5)).abs() < 1e-12);
+        let (a, b) = specular_albedo(0.5, 0.02 * 0.02, 48, 8);
+        assert!((a + b - 1.0).abs() < 2e-3 && (b - 0.5f64.powi(5)).abs() < 2e-3, "{a} {b}");
+    }
+
+    #[test]
+    fn the_table_follows_the_albedo_between_its_nodes() {
+        let t = std::time::Instant::now();
+        let lut = energy_lut();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(lut.len(), 512);
+        assert!(lut.iter().flatten().all(|e| (0.0..=1.0 + 1e-4).contains(e)));
+        // Between the nodes, at the kernel's roughnesses (0.02 and up) and all but the last half degree of grazing
+        // views (below it a smooth lobe's albedo falls from 1 to a half within a cosine of alpha: no table follows).
+        let (mut worst, mut at, mut sum) = (0.0f64, (0.0, 0.0), 0.0);
+        for iy in 0..48 {
+            let r = 0.02 + 0.98 * (iy as f64 + 0.37) / 48.0;
+            for ix in 0..48 {
+                let mu = 0.01 + 0.99 * (ix as f64 + 0.61) / 48.0;
+                let ((a, b), (ta, tb)) = (specular_albedo(mu, r * r, 96, 12), lookup(&lut, r, mu));
+                let e = (ta - a).abs().max((tb - b).abs()).max((ta + tb - a - b).abs() / (a + b));
+                sum += e / (48.0 * 48.0);
+                if e > worst {
+                    (worst, at) = (e, (r, mu));
+                }
+            }
+        }
+        eprintln!("energy table: {ms:.1} ms; error between nodes: mean {sum:.5}, worst {worst:.5} at roughness {:.3}, cos {:.3}", at.0, at.1);
+        assert!(worst < 0.02 && sum < 0.002, "{worst} at {at:?}, mean {sum}");
+        assert!(cfg!(debug_assertions) || ms < 50.0, "{ms} ms");
+    }
 }
 
 /// The glass energy table's nodes (pathtrace.wgsl GLASS_E_MU, _ROUGH, _IOR): cos(view) as its square root, roughness,

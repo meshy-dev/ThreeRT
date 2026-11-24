@@ -557,10 +557,10 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
 
     let t = Instant::now();
     let img = post::Image { w, h, px: color };
-    // Local exposure's middle grey follows the exposure compensation (UE: auto bias; manual: bias = -EV100).
+    // Local exposure's pivot over middle grey (post::finish): auto exposure's compensation; none under manual exposure.
     let compensation = match &sc.camera.exposure {
         threert_render::desc::Exposure::Auto { compensation, .. } => 2f32.powf(*compensation),
-        threert_render::desc::Exposure::Manual { ev100 } => 2f32.powf(-ev100),
+        threert_render::desc::Exposure::Manual { .. } => 1.0,
     };
     let rgba = post::finish(&img, exposure, compensation, &preset.post);
     timings.push(("post_ms".into(), t.elapsed().as_secs_f64() * 1000.0));

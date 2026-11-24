@@ -49,3 +49,50 @@ test("windSway: the plant becomes movable, its sway reaches the engine once and 
   assert.ok(Math.abs(sum / 10000 - 0.6 * 0.2) < 2e-3, `mean lean ${sum / 10000}`);
   assert.ok(Math.abs(windAngle(s, 0.7, 0.3) - windAngle(s, 0.7 + 10 * period, 0.3)) < 1e-9, "periodic");
 });
+
+test("FogVolume: the fog is where its radial and height parts both are, never denser than either; the majorant bounds it", async () => {
+  const { FogVolume, fogVolumeExtinction } = await import("../src/index.ts");
+  // The defaults (those of the settings' documentation): radial 1, height 1, falloff 1000, offset 0, white, g 0.2.
+  const fog = new FogVolume();
+  assert.equal(fog.shape, "sphere");
+  assert.equal(fog.anisotropy, 0.2);
+  assert.deepEqual(fog.volume.params, { Radial: 1, Height: 1, Falloff: 1000, Offset: 0, Albedo: [1, 1, 1, 0], Emissive: [0, 0, 0, 0] });
+  // A flat cut at the offset: the radial part below it (1 - |u|^2 of the centre's extinction), nothing above.
+  assert.ok(Math.abs(fogVolumeExtinction({}, [0, -0.5, 0]) - 0.75) < 1e-9);
+  assert.ok(Math.abs(fogVolumeExtinction({}, [0.6, -0.1, 0]) - (1 - 0.37)) < 1e-9);
+  assert.ok(fogVolumeExtinction({}, [0, 0.05, 0]) < 1e-12);
+  assert.equal(fogVolumeExtinction({}, [0, -1, 0]), 0);
+  assert.equal(fogVolumeExtinction({}, [0.8, -0.7, 0.3]), 0, "outside the sphere");
+  let s = 11;
+  const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let k = 0; k < 400; k++) {
+    const o = { radialExtinction: 4 * rnd(), heightExtinction: 3 * rnd(), heightFalloff: k % 7 === 0 ? 1000 : 12 * rnd() - 4, heightOffset: 2 * rnd() - 1 };
+    const majorant = new FogVolume(o).majorant;
+    assert.ok(majorant > 0 && Number.isFinite(majorant));
+    let densest = 0;
+    for (let j = 0; j < 300; j++) {
+      const u: [number, number, number] = [2 * rnd() - 1, 2 * rnd() - 1, 2 * rnd() - 1];
+      const r2 = u[0] * u[0] + u[1] * u[1] + u[2] * u[2];
+      const e = fogVolumeExtinction(o, u);
+      const radial = o.radialExtinction * Math.max(1 - r2, 0), height = o.heightExtinction * Math.exp(-o.heightFalloff * (u[1] - o.heightOffset));
+      assert.ok(e >= 0 && e <= radial + 1e-12 && e <= height * (1 + 1e-9) + 1e-12, `${JSON.stringify(o)} at ${u}: ${e} against ${radial}, ${height}`);
+      assert.ok(e <= majorant, `${JSON.stringify(o)} at ${u}: ${e} over the majorant ${majorant}`);
+      densest = Math.max(densest, e);
+      // Thicker parts, thicker fog.
+      const least = e * (1 - 1e-12);
+      assert.ok(fogVolumeExtinction({ ...o, radialExtinction: o.radialExtinction * 1.5 }, u) >= least && fogVolumeExtinction({ ...o, heightExtinction: o.heightExtinction * 1.5 }, u) >= least);
+    }
+    // The bottom of the sphere's axis is where the height part is densest (the top with a negative falloff): the
+    // majorant is what the centre's radial part and that give, so no point comes over it, and it is no looser than
+    // the radial part alone.
+    assert.ok(majorant <= Math.max(o.radialExtinction * 1.0001, 1e-4) + 1e-12);
+  }
+  // No radial part or no height part: no fog (the smallest majorant a volume may have).
+  assert.equal(fogVolumeExtinction({ radialExtinction: 0 }, [0, -0.2, 0]), 0);
+  assert.equal(fogVolumeExtinction({ heightExtinction: 0 }, [0, -0.2, 0]), 0);
+  assert.equal(new FogVolume({ radialExtinction: 0 }).majorant, 1e-4);
+  // A gentle falloff: a pool that thins upward, the height part where it is the thinner one.
+  const pool = { radialExtinction: 5, heightExtinction: 0.01, heightFalloff: 2, heightOffset: 0 };
+  assert.ok(Math.abs(fogVolumeExtinction(pool, [0, 0.3, 0]) / (0.01 * Math.exp(-0.6)) - 1) < 2e-3);
+  assert.ok(fogVolumeExtinction(pool, [0, -0.3, 0]) > fogVolumeExtinction(pool, [0, 0.3, 0]));
+});
