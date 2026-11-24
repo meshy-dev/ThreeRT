@@ -475,6 +475,32 @@ fn an_emitting_particle_lights_both_its_sides_beside_a_lights_card() {
     assert!(b > 20.0 && (a / b - 1.0).abs() < 0.05, "the wall beside the particle: {a:.1} of 255 with its back to the wall, {b:.1} with its face");
 }
 
+/// A rect light's card lights its front side alone: a wall it faces is lit, and with its back to the wall the wall is
+/// dark (the light list's entry says that an emitter is a card's: `EMITTER_CARD`). Under either traversal.
+#[test]
+fn a_card_lights_its_front_side_alone() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
+    let scene = |turned: bool| {
+        let mut w = wall_world(3.0, serde_json::json!({ "name": "none", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true }));
+        let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 5, "width": 0.4, "height": 0.4, "range": 0 })).unwrap();
+        w.set_object(21, "card".into(), None, Kind::Light(card), true, false).unwrap();
+        // (Half a metre before the wall; a rect light shines down its own -Z: at the wall, or turned, at the camera.)
+        w.set_transform(21, Vec3::new(0.0, 0.0, 0.5), glam::Quat::from_rotation_y(if turned { std::f32::consts::PI } else { 0.0 }), Vec3::ONE).unwrap();
+        w
+    };
+    let (mut facing, mut turned) = match (open(&scene(false)), open(&scene(true))) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
+    };
+    let e = &facing.sc.tables.emitter_tris;
+    assert!(e.len() == 2 && e.iter().all(|e| e.card && e.inst != crate::NO_INST), "the light list: the card's two triangles, its instance's");
+    // (The wall beside the card, as the camera sees it.)
+    let region = [26, 18, 36, 36];
+    let (a, b) = (region_mean(&picture(&mut facing, 64), region), region_mean(&picture(&mut turned, 64), region));
+    assert!(a > 20.0 && b < a * 0.1, "the wall beside the card: {a:.1} of 255 with the card's face to it, {b:.1} with its back");
+}
+
 /// A mesh changed in place to triangles of more vertices (a crease: its two triangles share no corner any more) takes
 /// another run of vertices, and the mesh that lies after it keeps its own; changed back, it stays where it is. Each
 /// is read back through its indices, and the picture is a build's.

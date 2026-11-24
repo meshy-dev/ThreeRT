@@ -3260,6 +3260,7 @@ mod instance_tests {
         w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
         let model = |animation| Kind::Model { uri: "tests/render/data/panel-decal.glb".into(), nodes: None, animation, functions: vec![] };
         w.set_object(1, "still".into(), None, model(None), true, false).unwrap();
+        w.set_transform(1, Vec3::new(3.0, 1.0, -2.0), glam::Quat::from_rotation_y(0.5), Vec3::splat(1.5)).unwrap();
         w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() })), true, false).unwrap();
         let sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!(sc.tris.len(), 0, "no world-space triangle");
@@ -3277,7 +3278,7 @@ mod instance_tests {
         };
         assert_eq!(of("still"), [(4, true, 2, vec![0, 0]), (2, false, 0, vec![ROW_CUTOUT])], "the model's mesh (the grey quad and the emitter), then the cutout's");
         let still: Vec<&Instance> = sc.instances.iter().filter(|i| i.name == "still").collect();
-        assert!(still[0].world == still[1].world && still[0].object == still[1].object && sc.meshes[still[0].mesh as usize].over == still[1].mesh, "the second instance is of the mesh's second, at the same place, of the same object");
+        assert!(still[0].world == still[1].world && still[0].world != Mat4::IDENTITY && still[0].object == still[1].object && sc.meshes[still[0].mesh as usize].over == still[1].mesh, "the second instance is of the mesh's second, at the same place, of the same object");
         assert!(matches!(sc.retained.proxies[&1].draw, Draw::Fixed), "a model of two instances is the build's to change");
         // The posed model's moving node: the same two meshes of its own, both instances the pose's to place.
         assert_eq!(of("posed"), of("still"));
