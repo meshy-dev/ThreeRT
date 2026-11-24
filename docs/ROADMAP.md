@@ -2908,6 +2908,19 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**The build flattens nothing (2026-11-25, after them).** The last two things it flattened:
+- A posed skinned model with triangles that emit was flattened whole and skinned on the CPU. It is a skinned
+  instance as any other, and the triangles are its instance's emitters: at a new pose the light list's copies are
+  taken again on the GPU from the skinned vertices, the CPU places the emitting triangles alone (the light tree's
+  moving subtree is refit by them) and their weights follow the pose's areas. One placed without size is an
+  instance no ray sees.
+- `THREERT_INSTANCING=0`, the flattened reference of the instancing step, is gone with the build's arms it alone
+  reached (a mesh's, an instanced object's copies', a model's). `tools/check-instancing.ts` holds software
+  traversal to hardware traversal's render now.
+
+World-space triangles are left under software traversal alone, where an instance is no unit (lib.rs
+`flatten_instances`, `flatten_deforming`); what read them under hardware traversal is not deleted yet.
+
 **A light's card, a coincident pair and a model without size are instances (2026-11-25, after it).** Three of the
 things the build still flattened into world-space triangles:
 - A visible rect light's card is an instance of one card mesh, a unit quad: its size is its transform's, its
@@ -2920,8 +2933,8 @@ things the build still flattened into world-space triangles:
   by a rebuild (it was re-transformed on the CPU).
 - A model placed without size is an instance no ray sees, as a mesh is.
 
-Flattened still: a posed skinned model with triangles that emit, and a scene under `THREERT_INSTANCING=0`; under
-software traversal, what has no unit. Which of a pair is drawn is as it was: a scene with the pair near and far
+Flattened still then: a posed skinned model with triangles that emit, and a scene under `THREERT_INSTANCING=0`;
+under software traversal, what has no unit. Which of a pair is drawn is as it was: a scene with the pair near and far
 renders to main's picture, byte for byte, under both traversals.
 
 **Five A/B switches and the uniform tables are removed (2026-11-25).** Switches whose question was answered, or

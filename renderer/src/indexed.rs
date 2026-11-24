@@ -14,7 +14,7 @@ use std::hash::Hash;
 pub type Vertex = [[f32; 4]; 3];
 pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
 
-/// The row of a triangle no instance places (what the build flattens): its material, its
+/// The row of a triangle no instance places (software traversal's, of an instance that is no unit): its material, its
 /// object, its flags (`scene::TRI_*`), its emitter entry + 1. A mesh's triangle needs none on the GPU: a ray's hit
 /// says which section of its mesh it is in, and the rest is its instance's. (The build has one for every triangle,
 /// a mesh's with its section and its index there: `Indexed::rows`.)

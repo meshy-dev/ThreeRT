@@ -2977,8 +2977,8 @@ impl LiveCore {
                     if !functions.is_empty() {
                         return Err("a model with material functions (its materials load with a rebuild)".into());
                     }
-                    if features & gpu::F_INST == 0 || m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
-                        return Err("a model the build would flatten (no size, instancing off, or the scene's first instance)".into());
+                    if features & gpu::F_INST == 0 || m.determinant() == 0.0 {
+                        return Err("a model without size, or the scene's first instance".into());
                     }
                     // (Shadow rays pass the glass among a caster's other sections under a kernel feature: a scene where
                     // no instance of the model cast a shadow was built without it.)
@@ -3226,9 +3226,9 @@ impl LiveCore {
                     if features & gpu::F_INST == 0 {
                         return Err("the scene's first instanced mesh (kernel feature)".into());
                     }
-                    // An instanced object placed without size, or instancing off (the build flattens).
-                    if (capacity.is_some() && m.determinant() == 0.0) || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
-                        return Err("an instanced object without size, or instancing off".into());
+                    // An instanced object placed without size.
+                    if capacity.is_some() && m.determinant() == 0.0 {
+                        return Err("an instanced object without size".into());
                     }
                     let mats = ids.iter().map(|k| tables.retained.materials.get(k).copied().ok_or("unknown material")).collect::<std::result::Result<Vec<u32>, _>>()?;
                     let mat = mats[0];

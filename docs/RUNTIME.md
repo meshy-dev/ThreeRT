@@ -1619,7 +1619,8 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   the section has the material and where the section's triangles and emitters start; its instance's record has
   its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
   light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
-- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (what the build still flattens)
+- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (software traversal's, where an
+  instance is no unit: the build places every triangle by an instance)
   has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the world-space
   triangles'.
 - **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an
@@ -1638,8 +1639,7 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   triangle's index in the mesh / 2 past it (kernel feature `F_PART`). A system the lights are sampled by has an
   emitter a triangle among its instance's, weighed by half the particle's nominal area and taken again from the
   vertices every frame. A translucent system's instance is hidden from the scene's TLAS and is an instance of
-  the translucency pass's own. The same whatever `THREERT_INSTANCING` says; under software traversal the passes
-  do not run.
+  the translucency pass's own. Under software traversal the passes do not run.
 - **Tangents.** A vertex's own: the tangent at a hit is its triangle's three vertices' there, the hand its first
   vertex's, placed by its instance (`hit_tangent`; read only where a frame is asked, by a normal map or a
   function). A model's file gives them; a primitive of a file that has UVs and no tangents has them made where it
