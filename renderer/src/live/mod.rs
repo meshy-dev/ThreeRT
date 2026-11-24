@@ -423,14 +423,6 @@ fn govern_by_clock() -> bool {
     *F.get_or_init(|| std::env::var("THREERT_GOVERN_CLOCK").map(|v| v == "1").unwrap_or(cfg!(target_os = "android")))
 }
 
-/// THREERT_CACHE_FLAGS: experiment switches of the radiance cache (pathtrace.wgsl `cfl`), 0 = defaults: 2 = no hit
-/// lighting (reflection hits use the cache's total), 4 = no training tiles, 8 = the exact light loop at reflection
-/// hits, 16 = no reflection resolve. THREERT_CACHE=0 turns the cache off.
-fn cache_flags() -> u32 {
-    static F: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_CACHE_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
-}
-
 /// THREERT_FREEZE_TIME=1: animation holds still (shader time 0, the frame script gets dt 0: signs, screens, flicker groups),
 /// so frames taken at different times compare (tools/bench-ghosting.ts).
 fn freeze_time() -> bool {
@@ -525,17 +517,6 @@ const CACHE_FRAMES_LIT: f32 = 4.0;
 const HISTORY_LIVE: f32 = 24.0;
 /// The most once the scene has settled: holding still, the frame converges on the offline render.
 const HISTORY_FRAMES: f32 = 4096.0;
-
-/// THREERT_TL_HIDE (diagnostics): the translucency pass trains the volume voxels but draws nothing, so frames show what is
-/// behind translucent particles; `odd` hides them on odd frames only (rain on / off pairs from one run).
-fn translucent_hidden(frame: u32) -> bool {
-    static F: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    match F.get_or_init(|| std::env::var("THREERT_TL_HIDE").ok().map(|v| v == "odd")) {
-        None => false,
-        Some(false) => true,
-        Some(true) => frame % 2 == 1,
-    }
-}
 
 impl LiveCore {
     /// Advances the scene time by a frame's dt (the frame script's: at most 0.1 s).
@@ -1407,7 +1388,7 @@ mod instanced_tests {
         if views.merged {
             return eprintln!("skipped: the merged layout reads the tables whole already");
         }
-        assert!(whole.whole_tables && !views.whole_tables && !whole.uniform_tables);
+        assert!(whole.whole_tables && !views.whole_tables);
         let w = lit_world();
         let presets = crate::default_presets_dir();
         let offline = |g: &gpu::Gpu| {
@@ -1438,79 +1419,5 @@ mod instanced_tests {
         let (x, y) = (live(views, &mut w2), live(whole, &mut w3));
         assert!(x.iter().any(|v| *v != 0), "the live frame has a picture");
         assert_eq!(x, y, "the live frames differ between the views and the tables read whole");
-    }
-
-    /// The uniform tables (`gpu::GpuOptions::uniform_tables`: what a device is opened with on Android), on this
-    /// machine's GPU: a lit scene with an instanced mesh renders offline to the default device's image, bit for bit;
-    /// live, the four uniform buffers hold what their tables hold when a frame is traced, and after an edit in place
-    /// what the tables hold then. (Skipped without a GPU.)
-    #[test]
-    fn the_uniform_tables_render_what_the_tables_do() {
-        let open = |uniform: bool| gpu::Gpu::new_with(gpu::GpuOptions { uniform_tables: Some(uniform), ..Default::default() });
-        let (plain, uniform) = match (open(false), open(true)) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
-        };
-        if uniform.merged {
-            return eprintln!("skipped: the merged layout has no uniform tables");
-        }
-        assert!(uniform.uniform_tables && !plain.uniform_tables);
-        let mut w = lit_world();
-        let presets = crate::default_presets_dir();
-
-        // Offline: the same bytes.
-        let offline = |g: &gpu::Gpu| {
-            let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
-            (sc.width, sc.height) = (64, 36);
-            let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
-            frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
-        };
-        let (a, b) = (offline(&plain), offline(&uniform));
-        let lit = a.iter().filter(|v| f32::from_bits(**v) > 0.0).count();
-        assert!(lit > a.len() / 16, "the scene is lit ({lit} of {} numbers)", a.len());
-        let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-        assert_eq!(differ, 0, "{differ} of {} numbers differ between the storage tables and the uniform ones", a.len());
-        drop(plain);
-
-        // Live: the uniform buffers follow the tables.
-        let mut core = LiveCore::new(uniform, &w, Path::new("."), &presets, 64, 36).unwrap();
-        w.take_changes();
-        let read = |core: &LiveCore, buf: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
-            let d = &core.g.device;
-            let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            let mut e = d.create_command_encoder(&Default::default());
-            e.copy_buffer_to_buffer(buf, at, &to, 0, bytes);
-            core.g.queue.submit([e.finish()]);
-            to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
-            bytes
-        };
-        // Each table's section and its uniform copy, over what both hold.
-        let pairs = |core: &LiveCore| -> Vec<(Vec<u8>, Vec<u8>)> {
-            let up = &core.sc.up;
-            let copies = up.uniform.as_ref().expect("the uniform tables' buffers");
-            crate::merged::UNIFORM_TABLES.iter().zip(copies).map(|(t, c)| {
-                let n = up.heap.cap(t.table).min(c.size()) & !3;
-                (read(core, &up.heap.buffer, up.heap.at(t.table), n), read(core, c, 0, n))
-            }).collect()
-        };
-        core.render(1, |_, _| {});
-        let first = pairs(&core);
-        for (k, (table, copy)) in first.iter().enumerate() {
-            assert!(!table.is_empty() && table == copy, "table {k} and its uniform buffer differ after a frame");
-        }
-        assert!(first[1].0.iter().any(|b| *b != 0), "the objects' table has the scene's objects");
-        // The panel moves in place: its object's entry and its instance's record change, and the next frame's
-        // uniform buffers have them.
-        w.set_transform(11, Vec3::new(0.3, 0.2, 0.75), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-        assert!(!core.commit(&mut w).unwrap(), "moved in place");
-        core.render(1, |_, _| {});
-        let moved = pairs(&core);
-        for (k, (table, copy)) in moved.iter().enumerate() {
-            assert!(table == copy, "table {k} and its uniform buffer differ after an edit");
-        }
-        assert!(moved[1].1 != first[1].1 || moved[2].1 != first[2].1, "the move reached the uniform buffers");
     }
 }

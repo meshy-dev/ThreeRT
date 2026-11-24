@@ -1601,7 +1601,7 @@ pipeline. The real-time pipeline moves toward Lumen's structure — split signal
     plus a cosine-sampled ray each, ending in the cache again, so it carries every bounce. Pixels that find their voxel
     cold trace one vertex and use that meanwhile. Per voxel the history is capped at 256 samples and 32 frames (4 for
     45 frames after a lighting edit); voxels unused for 120 frames are freed. 2^18 entries, 13.6 MB, resolve 0.14 ms.
-    `THREERT_CACHE=0` turns it off; `THREERT_CACHE_FLAGS` switches its parts for cost attribution.
+    `THREERT_CACHE=0` turns it off.
   - Diffuse history holds irradiance (lighting / albedo, smooth), remodulated by albedo. Albedo and emission history
     is resampled with Catmull-Rom and clamped into this frame's 3 × 3 range (TAA: both are noise-free). It is held to
     4 frames while the view moves and 16 when still, so texture and sign detail no longer blur through repeated
@@ -2878,6 +2878,17 @@ Tests: each kind of edit against a build of the edited world, state and picture 
 Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
+
+**Five A/B switches and the uniform tables are removed (2026-11-25).** Switches whose question was answered, or
+that nothing set: `THREERT_EDIT_BLAS` (an edit mesh's BLAS is built fast), `THREERT_LIGHT_GROUPS` (measured:
++4.6 ms of trace without the groups), `THREERT_RIGID_NODES` (measured: 4 to 10 % of GPU time with every node
+apart), `THREERT_CACHE_FLAGS` (the radiance cache's four experiment bits, read at four places in the kernel) and
+`THREERT_TL_HIDE` (a diagnostic of the translucency pass). And the uniform tables, Android's first way round a
+driver that misread four of the kernel's tables (docs/RUNTIME.md "Android"): since the device reads the tables
+whole (2026-11-16) no platform had them by default. Their kernel blocks, the per-frame copies, the bounds and
+their three tests are gone, with `GpuOptions::uniform_tables` and `THREERT_UNIFORM_TABLES`. The records that
+name these switches are of their time. Kept: `THREERT_LTREE` and `THREERT_LT_RIS` (the light
+sampler's kind and its candidate count), `THREERT_TABLE_VIEWS`.
 
 **The raster experiment is removed (2026-11-24, after it).** Primary visibility by rasterization (§ 1's decision
 experiment, `THREERT_RASTER=1`) stayed in the code after its verdict: a render pass of the world-space triangles,

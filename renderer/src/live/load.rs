@@ -322,7 +322,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         dead_meshes: vec![],
         grows: 0,
         rebind: false,
-        uniform_said: false,
         base: room_base,
         rows: Holes::new(rows.len(), rows.len() + room.records),
         row_runs: Default::default(),

@@ -1527,13 +1527,13 @@ The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `records.wgsl
 translation (`@if(flag)` on a declaration or a statement, `@if(flag) { .. } @else { .. }` on a block of
 declarations). wesl-rs (WESL's compiler in Rust, natively and in a browser alike) makes a kernel's WGSL from a
 variant (gpu.rs `KernelVariant`, `kernel_wgsl`): the traversal (`hwrt`), a device's switches (`strict`,
-`cutout_lite`, `cutout_lite2`, `last_direct`, `last_sun`, `light_pick`), software traversal's units (`units`), the binding layout (`merged`, the browser's; `uniform_tables`, Android's) and the loop guard (`guard`).
+`cutout_lite`, `cutout_lite2`, `last_direct`, `last_sun`, `light_pick`), software traversal's units (`units`), the binding layout (`merged`, the browser's; `whole_tables`, Android's) and the loop guard (`guard`).
 pathtrace.wgsl's head names them; a flag the source names that a kernel is not given is an error. A scene's other
 features are bits of `FEAT`, a pipeline-overridable constant: one kernel source for all of them (`OBJECT_STRIDE`
 too is an override, from F_TINT).
 - The numbers a variant is compiled for are WESL constants, which the source imports (`import constants::..`; gpu.rs
-  `KernelVariant::constants`): the uniform tables' lengths, the loop guard's limit. One
-  the source imports and is not given is an error.
+  `KernelVariant::constants`): the loop guard's count's words and its limit. One the source imports and is not
+  given is an error.
 - The kernel reads its tables and its group-1 buffers only through functions (`material_at`, `instance_at`,
   `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
   nothing else of the kernel knows which it is in.
@@ -2249,33 +2249,17 @@ on the device", and differs where it says so.
     its own at offset 0 each frame, the emitters' table hung the same: the binding, not its sharing a buffer with
     `tables` or its offset. Read whole: no hang.
   - Without the views the kernel reads all seven from `tables` (binding 4) by the offsets in the parameters
-    (`Params::table_first`), as the merged layout does (pathtrace.wgsl `@if(merged || whole_tables)`), and there are
-    no uniform tables (below), so none of their bounds either. On the device the frame costs what it does with the
-    uniform copies (Foundry at 249 × 140, one bounce: 52 ms read whole, 51 ms with the uniform copies and the other
-    three read whole). `THREERT_TABLE_VIEWS=1` on the device brings back the views (and the uniform copies), for A/B.
+    (`Params::table_first`), as the merged layout does (pathtrace.wgsl `@if(merged || whole_tables)`). On the
+    device the frame cost what it did with the uniform copies (below; Foundry at 249 × 140, one bounce: 52 ms read
+    whole, 51 ms with the copies and the other three read whole). `THREERT_TABLE_VIEWS=1` on the device brings back
+    the views, for A/B.
   - Elsewhere the views stay; `THREERT_TABLE_VIEWS=0` reads the tables whole on any device, to the same image bit
     for bit (`live::instanced_tests::the_tables_read_whole_render_what_the_views_do`, offline and live after a power
     edit).
-- **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android with the views,
-  `THREERT_TABLE_VIEWS=1`; never with the merged layout or the tables read whole). The driver gave the kernel other buffers' contents for four of its read-only storage buffers, each
-  a binding of its own then: `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18), all numbered
-  after the acceleration structure (13). As uniform buffers they read right.
-  - Since 2026-11-15 the four are views of their sections of the tables' buffer ("The scene's tables"), still at
-    bindings of their own (15 to 18), and the acceleration structure is the group's last binding (19). The device
-    did not read those views right either (2026-11-16, `THREERT_TABLE_VIEWS=1 THREERT_UNIFORM_TABLES=0`: Range all
-    white), and with the uniform copies the other three views were still wrong (above): Android now reads the
-    tables whole and has no uniform copies; they stay for `THREERT_TABLE_VIEWS=1`.
-  - The kernel's source has them under `@if(uniform_tables)` (pathtrace.wgsl): four sized uniform arrays at
-    bindings 15 to 18 (merged.rs `UNIFORM_TABLES`; their lengths WESL constants), and their accessors hold every
-    index to the array (`min(i, last)`), so nothing is read outside a uniform buffer.
-  - The renderer writes the tables' buffer. `Gpu::sync_tables` copies the four sections into their uniform buffers
-    in a frame's encoder, after the particle passes (which write their objects' entries on the GPU) and before the
-    trace.
-  - A uniform binding holds 64 KiB, so the arrays are bounded: 2,048 textures, 4,096 object entries (1,365 objects;
-    1,024 with instance colours), 409 instance records (model instances, procedural objects, `dynamicGeometry`
-    meshes), all 32 media. A scene with more reads the last entry for the rest, and the renderer says so on stderr
-    when it uploads the scene and once when in-place edits pass a bound. `THREERT_UNIFORM_TABLES=0` binds the
-    views of their sections.
+- **Uniform tables** (removed 2026-11-25). The first way round the same driver: four of the tables (`tex_info`,
+  `objects`, `instances`, `media`) copied each frame into uniform buffers of 64 KiB, which bounded them (409
+  instance records). With the tables read whole no platform had them by default, and they went; the records
+  below that name them and `THREERT_UNIFORM_TABLES` are of that time.
 - **The kernel's other storage buffers stay as they are**, each for its reason:
 
   | buffer | size | decision |

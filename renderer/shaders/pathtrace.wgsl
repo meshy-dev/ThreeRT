@@ -15,13 +15,11 @@
 //   units                 software traversal's second level (gpu.rs `F_UNITS`); a scene's other features are bits
 //                         of `FEAT`, a pipeline-overridable constant
 //   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
-//   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
 //   whole_tables          the seven typed tables read from the tables' buffer whole, as `merged` reads them, and
 //                         no views of their sections (gpu.rs `GpuOptions::table_views`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
 // The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
-// uniform tables' lengths, the loop guard's limit.
-@if(uniform_tables) import constants::{UT_TEX_INFO, UT_OBJECTS, UT_INSTANCES, UT_MEDIA};
+// loop guard's words and its limit.
 @if(merged || guard) import constants::GUARD_WORDS;
 @if(guard) import constants::LOOP_GUARD_LIMIT;
 @if(hwrt) enable wgpu_ray_query;
@@ -258,28 +256,14 @@ fn emitter_tri_at(i: u32) -> EmitterTri {
     fn material_at(i: u32) -> Material { return materials[i]; }
     fn light_at(i: u32) -> Light { return lights[i]; }
     fn emitter_at(i: u32) -> vec4<f32> { return emitters[i]; }
-    @if(uniform_tables) {
-        // The uniform tables (merged.rs `UNIFORM_TABLES`): these four from sized uniform arrays, copies of their
-        // sections, every index held to the array (a scene with more entries than one holds reads the last for the
-        // rest; nothing outside the buffer is read).
-        @group(0) @binding(15) var<uniform> tex_info: array<vec4<f32>, UT_TEX_INFO>;
-        @group(0) @binding(16) var<uniform> objects: array<vec4<f32>, UT_OBJECTS>;
-        @group(0) @binding(17) var<uniform> instances: array<Instance, UT_INSTANCES>;
-        @group(0) @binding(18) var<uniform> media: array<Medium, UT_MEDIA>;
-        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[min(i, UT_TEX_INFO - 1u)]; }
-        fn object_at(i: u32) -> vec4<f32> { return objects[min(i, UT_OBJECTS - 1u)]; }
-        fn instance_at(i: u32) -> Instance { return instances[min(i, UT_INSTANCES - 1u)]; }
-        fn medium_at(i: u32) -> Medium { return media[min(i, UT_MEDIA - 1u)]; }
-    } @else {
-        @group(0) @binding(15) var<storage, read> tex_info: array<vec4<f32>>;
-        @group(0) @binding(16) var<storage, read> objects: array<vec4<f32>>;
-        @group(0) @binding(17) var<storage, read> instances: array<Instance>;
-        @group(0) @binding(18) var<storage, read> media: array<Medium>;
-        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
-        fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
-        fn instance_at(i: u32) -> Instance { return instances[i]; }
-        fn medium_at(i: u32) -> Medium { return media[i]; }
-    }
+    @group(0) @binding(15) var<storage, read> tex_info: array<vec4<f32>>;
+    @group(0) @binding(16) var<storage, read> objects: array<vec4<f32>>;
+    @group(0) @binding(17) var<storage, read> instances: array<Instance>;
+    @group(0) @binding(18) var<storage, read> media: array<Medium>;
+    fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
+    fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
+    fn instance_at(i: u32) -> Instance { return instances[i]; }
+    fn medium_at(i: u32) -> Medium { return media[i]; }
 }
 // Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z; one cell in scenes without.
 @group(0) @binding(10) var grid_tex: texture_3d<f32>;
@@ -3326,8 +3310,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 }
 
 fn resolve_bound() -> bool { return LIVE && refl_len() >= 2u * P.size.x * P.size.y; }
-// THREERT_CACHE_FLAGS bit 16 turns the resolve off (rays then stay in their pixel's specular, the resolve reads zeros).
-fn resolve_on() -> bool { return resolve_bound() && P.motion.y == 0.0 && (u32(P.cache.w) & 16u) == 0u; }
+fn resolve_on() -> bool { return resolve_bound() && P.motion.y == 0.0; }
 
 // Density of l under the base specular lobe alone (VNDF sampling).
 fn pdf_spec(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -3612,7 +3595,7 @@ fn cache_end(s: Surface, d: vec3<f32>, cone: vec2<f32>, thr: vec3<f32>, depth: u
     cur_depth = depth;
     var c = thr * cache_reflectance(lb1) * e.rgb;
     // Resampled lights, not the exact loop camera hits get (that costs 2x here: mirror pixels are scattered).
-    mirror_path = mirror_path && (u32(P.cache.w) & 8u) != 0u;
+    mirror_path = false;
     // (The lights alone: the sky's light is in the cache's indirect part, whole. Its samples taken afresh
     // here against the white-lobe ones the cache left out do not add up on a glossy surface: a white metal
     // ground in a mirror read 0.80 of a uniform sky. The lights' still are: weights of two lobes, right for a
@@ -4170,8 +4153,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Live: the path ends in the radiance cache at its first bounce (`cache_end`).
         if (cache_on() && depth >= 1u && !(has(F_GLASS) && s.transmission > 0.0)) {
-            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u && (u32(P.cache.w) & 2u) == 0u;
-            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u && (u32(P.cache.w) & 4u) == 0u;
+            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u;
+            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u;
             @if(merged) { radiance += cache_end(s, d, vec2<f32>(width, cone_a), thr, depth, train, hit_light, straight); }
             @if(!merged) {
                 // Here only what a warm voxel holds; a pixel with more to trace is left for `finish`.

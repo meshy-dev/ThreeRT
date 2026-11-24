@@ -106,9 +106,6 @@ pub(super) struct EditState {
     /// Times the room grew (frame log `grows`), and whether the scene bind group must be made again.
     pub(super) grows: u32,
     pub(super) rebind: bool,
-    /// The uniform tables (`gpu::Gpu::uniform_tables`): an edit placed entries past what their arrays hold, and it
-    /// was said (once a scene, as its upload says it of the scene's own).
-    pub(super) uniform_said: bool,
     /// (triangles, records, objects, words, TLAS instances) the scene itself has: the room starts there.
     pub(super) base: (usize, usize, usize, usize, usize),
     /// The instances' rows (`scene::Row`) edits can place, as the records are, and the run each record an edit placed
@@ -3501,14 +3498,6 @@ impl LiveCore {
         // Buffers that grew: the scene bind group over them.
         if std::mem::take(&mut edit.rebind) {
             g.rebind_scene(up);
-        }
-        // The uniform tables: entries the edits placed past what a uniform buffer holds read as its last one.
-        if g.uniform_tables && !edit.uniform_said {
-            let notes = gpu::uniform_overflow([0, (edit.objects.end * tables.stride) as u64, edit.records.end as u64, 0]);
-            for note in &notes {
-                eprintln!("threert: {note}");
-            }
-            edit.uniform_said = !notes.is_empty();
         }
         split.objects = ch.added.len() + ch.removed.len();
         self.edit_split.add(&split);

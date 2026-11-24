@@ -18,7 +18,7 @@
 @if(hwrt) struct TP {
     size: vec4<u32>, // output width, height, -, mode (0 offline: accumulate; 1 live: over the image)
     view: vec4<u32>, // live: traced width, height (the opaque first hits); training budget (points per frame); 1 = at the traced resolution
-    misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, 1 = train only (THREERT_TL_HIDE: what is behind), -, -
+    misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, -, -, -
 };
 
 @if(hwrt) @group(2) @binding(0) var tacc: acceleration_structure;
@@ -176,10 +176,8 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (low) {
         tlow[pix] = vec4<f32>(col, tr);
     } else if (live) {
-        if (TPS.misc.y < 0.5) {
-            let c = timg[pix];
-            timg[pix] = vec4<f32>(c.rgb * tr + col, c.w);
-        }
+        let c = timg[pix];
+        timg[pix] = vec4<f32>(c.rgb * tr + col, c.w);
     } else {
         timg[pix] += vec4<f32>(col, tr);
     }
@@ -191,7 +189,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = TPS.size.x;
     let h = TPS.size.y;
-    if (gid.x >= w || gid.y >= h || TPS.misc.y >= 0.5) { return; }
+    if (gid.x >= w || gid.y >= h) { return; }
     let iw = TPS.view.x;
     let ih = TPS.view.y;
     let fx = clamp((f32(gid.x) + 0.5) * f32(iw) / f32(w) - 0.5, 0.0, f32(iw - 1u));

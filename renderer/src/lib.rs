@@ -392,15 +392,12 @@ pub fn light_order(lights: &[scene::GpuLight]) -> Vec<usize> {
 /// The light groups' table: per group of LIGHT_GROUP local lights (counted from the first local one) the sphere
 /// (centre, radius) holding every point its lights reach. Black lights (off, or hidden: `scene::gpu_light_shown`)
 /// reach nothing and are in no sphere; a group of them alone has radius -1 (no point is in it).
-/// THREERT_LIGHT_GROUPS=0: unbounded spheres, every light tested (A/B).
 pub fn light_groups(lights: &[scene::GpuLight]) -> Vec<[f32; 4]> {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let off = *OFF.get_or_init(|| std::env::var("THREERT_LIGHT_GROUPS").is_ok_and(|v| v == "0"));
     let nd = lights.iter().take_while(|l| l.pos[3] == 0.0).count();
     let mut out = vec![];
     for g in lights[nd..].chunks(LIGHT_GROUP) {
         let lit = |l: &&scene::GpuLight| l.color[..3].iter().any(|c| *c > 0.0);
-        if !off && !g.iter().any(|l| lit(&l)) {
+        if !g.iter().any(|l| lit(&l)) {
             out.push([0.0, 0.0, 0.0, -1.0]);
             continue;
         }
@@ -414,9 +411,6 @@ pub fn light_groups(lights: &[scene::GpuLight]) -> Vec<[f32; 4]> {
         for l in g.iter().filter(lit) {
             let reach = light_reach(l);
             r = if reach == f32::MAX { f32::MAX } else { r.max(c.distance(Vec3::from_slice(&l.pos[..3])) + reach) };
-        }
-        if off {
-            r = f32::MAX;
         }
         // Margin for rounding in the kernel's distance (positions up to a few km).
         if r < f32::MAX {

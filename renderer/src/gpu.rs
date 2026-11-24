@@ -48,8 +48,6 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
-    /// The kernel's bounded tables are uniform buffers (`GpuOptions::uniform_tables`; merged.rs `UNIFORM_TABLES`).
-    pub uniform_tables: bool,
     /// The kernel reads its seven typed tables from the tables' buffer whole, not from views of their sections
     /// (`GpuOptions::table_views`; merged.rs `TABLE_VIEWS`).
     pub whole_tables: bool,
@@ -330,7 +328,6 @@ const ACC_BINDING: u32 = 19;
 pub(crate) struct LayoutShape {
     pub hwrt: bool,
     pub merged: bool,
-    pub uniform_tables: bool,
     /// No views of the tables' sections (`Gpu::whole_tables`).
     pub whole_tables: bool,
     pub guard: bool,
@@ -352,8 +349,8 @@ const ACCELERATION_STRUCTURE: wgpu::BindingType = wgpu::BindingType::Acceleratio
 /// (what the kernel writes), group 2 (the translucency pass's; hardware traversal). A test holds them to what every
 /// variant of the kernel's source declares (`the_kernels_layouts_are_its_declarations`).
 pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupLayoutEntry>; 3] {
-    use crate::merged::{DEFERRED_BINDING, GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS, UNIFORM_TABLES};
-    let LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard } = shape;
+    use crate::merged::{DEFERRED_BINDING, GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS};
+    let LayoutShape { hwrt, merged, whole_tables, guard } = shape;
     let (read, write) = (storage_buffer(true), storage_buffer(false));
     // Group 0: the parameters; the vertices; the tables' heap, the words' heap; the previous frame's vertices of
     // those that move; the texture pages and their sampler, the environment, the density grids' atlas
@@ -376,11 +373,9 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
         scene.push(layout_entry(3, read));
     }
     // The tables the kernel reads at every hit or light, bound again as typed views of their sections (the merged
-    // layout has no binding for them, nor has a device that reads them from the buffer whole), four of them uniform
-    // copies where a driver needs it.
+    // layout has no binding for them, nor has a device that reads them from the buffer whole).
     if !merged && !whole_tables {
-        let copied = |b: u32| uniform_tables && UNIFORM_TABLES.iter().any(|t| t.binding == b);
-        scene.extend(TABLE_VIEWS.iter().map(|&(_, b)| layout_entry(b, if copied(b) { UNIFORM_BUFFER } else { read })));
+        scene.extend(TABLE_VIEWS.iter().map(|&(_, b)| layout_entry(b, read)));
     }
     if hwrt {
         scene.push(layout_entry(ACC_BINDING, ACCELERATION_STRUCTURE));
@@ -403,22 +398,6 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
     // training points and their count, the image at reduced scale.
     let translucent = if hwrt { vec![layout_entry(0, ACCELERATION_STRUCTURE), layout_entry(1, UNIFORM_BUFFER), layout_entry(2, write), layout_entry(3, write), layout_entry(4, write), layout_entry(5, write)] } else { vec![] };
     [scene, live, translucent]
-}
-
-/// A note for each uniform table that a scene has more entries of (`used`, merged.rs `UNIFORM_TABLES`' order) than
-/// its array holds: the kernel reads the last entry for the rest.
-pub(crate) fn uniform_overflow(used: [u64; 4]) -> Vec<String> {
-    crate::merged::UNIFORM_TABLES
-        .iter()
-        .zip(used)
-        .filter(|(t, used)| *used > t.len as u64)
-        .map(|(t, used)| format!("uniform tables: the scene has {used} entries of `{}`, a uniform buffer holds {} (the rest read as the last one; THREERT_UNIFORM_TABLES=0 reads the tables' heap)", t.name, t.len))
-        .collect()
-}
-
-/// The bytes of a table that its uniform copy takes: what both hold, in whole words (a copy's unit).
-fn uniform_copy_bytes(table: u64, copy: u64) -> u64 {
-    table.min(copy) & !3
 }
 
 
@@ -445,7 +424,6 @@ struct SceneBuffers<'a> {
     accum: &'a wgpu::Buffer,
     parts: &'a BindParts,
     accel: Option<&'a Accel>,
-    uniform: Option<&'a [wgpu::Buffer; 4]>,
 }
 
 /// The scene's buffers a particle pass writes (particles.wgsl, gpu_particles.wgsl: bindings 2 to 6; the objects'
@@ -474,9 +452,6 @@ pub struct Uploaded {
     /// The scene's tables (heap.rs): materials, lights, emitters, objects, instances, media and the rest, each a
     /// section that edits write in place (`Heap::write`) and grow (`Heap::grow`, then `Gpu::rebind_scene`).
     pub heap: Heap<Table>,
-    /// The uniform tables (`Gpu::uniform_tables`): the uniform buffers the kernel reads four tables from (merged.rs
-    /// `UNIFORM_TABLES`' order; `Gpu::sync_tables` copies their sections there each frame).
-    pub uniform: Option<[wgpu::Buffer; 4]>,
     /// The trace's samples, a `Pixel` a pixel: the view's buffer (a live view's targets', an offline render's own:
     /// `accum_buffer`). A handle of it here, for the scene's bind group, where the kernel's layout has it;
     /// `Gpu::set_accum` gives it another (a view of another size).
@@ -1116,10 +1091,8 @@ pub struct KernelVariant {
     pub features: u32,
     /// The merged layout (merged.rs).
     pub merged: bool,
-    /// Four tables in uniform buffers (merged.rs `UNIFORM_TABLES`; `GpuOptions::uniform_tables`). Never with `merged`.
-    pub uniform_tables: bool,
     /// The seven typed tables read from the tables' buffer whole, as the merged layout reads them, with the layout as
-    /// written otherwise (`GpuOptions::table_views`). Never with `uniform_tables`.
+    /// written otherwise (`GpuOptions::table_views`).
     pub whole_tables: bool,
     /// The loop guard's limit, in a kernel with the guard (`loop_guard_of`, `guard_loops`).
     pub guard: Option<u32>,
@@ -1132,7 +1105,7 @@ impl KernelVariant {
     }
 
     /// The flags of the kernel's conditional translation (pathtrace.wgsl's head).
-    pub fn flags(&self) -> [(&'static str, bool); 12] {
+    pub fn flags(&self) -> [(&'static str, bool); 11] {
         let (k, f) = (&self.switches, |bit: u32| self.features & bit != 0);
         [
             ("hwrt", self.hwrt),
@@ -1144,20 +1117,16 @@ impl KernelVariant {
             ("light_pick", k.light_pick),
             ("units", f(F_UNITS)),
             ("merged", self.merged),
-            ("uniform_tables", self.uniform_tables),
             ("whole_tables", self.whole_tables),
             ("guard", self.guard.is_some()),
         ]
     }
 
-    /// The numbers the variant is compiled for, WESL constants (`import constants::`): the uniform tables' lengths
-    /// (`UT_<table>`), the loop guard's count's words and its limit.
+    /// The numbers the variant is compiled for, WESL constants (`import constants::`): the loop guard's count's
+    /// words and its limit.
     pub fn constants(&self) -> Vec<(String, u32)> {
-        use crate::merged::{GUARD_WORDS, UNIFORM_TABLES};
+        use crate::merged::GUARD_WORDS;
         let mut out = vec![];
-        if self.uniform_tables {
-            out.extend(UNIFORM_TABLES.iter().map(|t| (format!("UT_{}", t.name.to_uppercase()), t.len)));
-        }
         if self.merged || self.guard.is_some() {
             out.push(("GUARD_WORDS".into(), GUARD_WORDS));
         }
@@ -1176,8 +1145,6 @@ pub fn kernel_wgsl(src: &str, v: &KernelVariant) -> String {
 
 /// `kernel_wgsl`, saying what did not compile instead of panicking (a scene's own functions are a game's code).
 pub fn try_kernel_wgsl(src: &str, v: &KernelVariant) -> Result<String, String> {
-    assert!(!(v.merged && v.uniform_tables), "the uniform tables are never in the merged layout");
-    assert!(!(v.whole_tables && v.uniform_tables), "the uniform tables are copies of views the kernel reading the tables whole does not have");
     let mut out = try_wesl_wgsl(src, &v.flags(), &v.constants())?;
     if v.guard.is_some() {
         guard_loops(&mut out);
@@ -1372,15 +1339,10 @@ fn guard_room(hwrt: bool) -> bool {
 /// are without any of this. What a phone's GPU needed and why: docs/RUNTIME.md "Android (Adreno)".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuOptions {
-    /// The kernel's bounded tables (texture pages, objects, instances, media) as uniform buffers instead of storage
-    /// buffers (merged.rs `UNIFORM_TABLES`). None: where a driver needs it, which is Android. Never with the merged
-    /// layout, whose tables are one buffer of its own.
-    pub uniform_tables: Option<bool>,
     /// The seven tables the kernel reads at every hit or light (materials, lights, emitters, texture rects, objects,
     /// instances, media) as views of their sections, each a binding of its own (merged.rs `TABLE_VIEWS`), or read from
     /// the tables' buffer whole by the offsets in the parameters, as the merged layout reads them. None: views, but on
-    /// Android: Adreno 740's driver read the views wrong (docs/RUNTIME.md "Android"). Without views there are no
-    /// uniform tables either.
+    /// Android: Adreno 740's driver read the views wrong (docs/RUNTIME.md "Android").
     pub table_views: Option<bool>,
     /// A directory to keep compiled pipelines in between runs (pipeline_cache.rs). None: nothing is kept.
     pub pipeline_cache: Option<std::path::PathBuf>,
@@ -1391,7 +1353,7 @@ pub struct GpuOptions {
 }
 
 impl GpuOptions {
-    /// THREERT_UNIFORM_TABLES=1|0, THREERT_PIPELINE_CACHE=<directory>, THREERT_APPROX=<bits of `A_*`>, and the
+    /// THREERT_TABLE_VIEWS=1|0, THREERT_PIPELINE_CACHE=<directory>, THREERT_APPROX=<bits of `A_*`>, and the
     /// kernel's switches (`KernelSwitches::from_env`).
     pub fn from_env() -> GpuOptions {
         Self::from_vars(&|name| std::env::var(name).ok(), cfg!(target_os = "android"))
@@ -1400,7 +1362,6 @@ impl GpuOptions {
     /// `from_env`, of these variables on this platform.
     fn from_vars(var: &dyn Fn(&str) -> Option<String>, android: bool) -> GpuOptions {
         GpuOptions {
-            uniform_tables: var("THREERT_UNIFORM_TABLES").map(|v| v == "1"),
             table_views: var("THREERT_TABLE_VIEWS").map(|v| v == "1"),
             pipeline_cache: var("THREERT_PIPELINE_CACHE").filter(|d| !d.is_empty()).map(std::path::PathBuf::from),
             kernel: KernelSwitches::from_vars(var, android),
@@ -1412,12 +1373,6 @@ impl GpuOptions {
     /// in the merged layout.
     fn table_views_on(&self, merged: bool, android: bool) -> bool {
         !merged && self.table_views.unwrap_or(!android)
-    }
-
-    /// Whether the device has the uniform tables (copies of four of the views): as asked, else on Android; only with
-    /// the views.
-    fn uniform_tables_on(&self, merged: bool, android: bool) -> bool {
-        self.table_views_on(merged, android) && self.uniform_tables.unwrap_or(android)
     }
 }
 
@@ -2261,17 +2216,16 @@ impl Gpu {
         #[cfg(not(dlss))]
         let (device, queue) = adapter.request_device(&device_desc).await?;
         let pipeline_cache = cache_feature.and_then(|_| crate::pipeline_cache::PipelineCache::open(&device, options.pipeline_cache.as_ref()?, &adapter_info));
-        let uniform_tables = options.uniform_tables_on(merged, cfg!(target_os = "android"));
         let whole_tables = !merged && !options.table_views_on(merged, cfg!(target_os = "android"));
         let switches = options.kernel;
         let approx = options.approx.unwrap_or(A_LIVE) & A_LIVE;
         let src = kernel_template();
         // Bounds checks are not needed: all indices come from our own BVH / scene builder.
         let module = unsafe {
-            let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, whole_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
+            let wgsl = kernel_wgsl(&src, &KernelVariant { merged, whole_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         };
-        let [entries, live_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: guard_room(hwrt) });
+        let [entries, live_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, whole_tables, guard: guard_room(hwrt) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
         let live_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live"), entries: &live_entries });
         let no_grid_view = grid_texture(&device, "no grid", [1, 1, 1], false).create_view(&Default::default());
@@ -2305,7 +2259,7 @@ impl Gpu {
             dlss_sdk,
             #[cfg(dlss)]
             dlss_rr,
-            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: std::sync::Arc::new(src), module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), warming: Default::default(), layout, live_layout, no_live, no_live_bufs, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
+            instance, adapter, timestamps, device, queue, adapter_info, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: std::sync::Arc::new(src), module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), warming: Default::default(), layout, live_layout, no_live, no_live_bufs, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
         })
     }
 
@@ -2381,7 +2335,7 @@ impl Gpu {
             device: self.device.clone(),
             source: self.source.clone(),
             module: self.module.clone(),
-            variant: KernelVariant { merged: self.merged, uniform_tables: self.uniform_tables, whole_tables: self.whole_tables, ..KernelVariant::new(self.hwrt, self.switches, 0) },
+            variant: KernelVariant { merged: self.merged, whole_tables: self.whole_tables, ..KernelVariant::new(self.hwrt, self.switches, 0) },
             layout: self.pipeline_layout.clone(),
             tl_layout: self.tl_pipeline_layout.clone(),
             modules: self.modules.clone(),
@@ -2543,10 +2497,6 @@ impl Gpu {
         let pages = cache.as_mut().ok_or_else(|| anyhow!("no scene's pages to place a texture in"))?;
         if let Some(slot) = pages.keys.iter().position(|k| k.0 == t.key) {
             return Ok(PagesEdit { slot: slot as i32, info: None, view: None });
-        }
-        let rows = crate::merged::UNIFORM_TABLES.iter().find(|u| u.table == crate::heap::Table::TexInfo).map_or(u32::MAX, |u| u.len);
-        if self.uniform_tables && (pages.keys.len() as u32 + 1) * 2 > rows {
-            return Err(anyhow!("more textures than this device's texture table holds ({})", rows / 2));
         }
         let (side, layers) = (pages.atlas.side, pages.atlas.layers());
         // (On a copy: one that finds no room leaves the pages' record as it was.)
@@ -2940,17 +2890,8 @@ impl Gpu {
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
         }
-        // The uniform tables: four tables' sections again in uniform buffers (merged.rs `UNIFORM_TABLES`).
-        let uniform = self.uniform_tables.then(|| {
-            // What the scene has of each, against what its array holds (the sections have the edits' room after it).
-            let used = [tex_info.len() as u64, scene.objects.len() as u64, records.len() as u64, scene.media.len() as u64];
-            for note in uniform_overflow(used) {
-                eprintln!("threert: {note}");
-            }
-            self.uniform_copies(&heap)
-        });
         let bg_parts = BindParts { nodes: b_nodes, leaves: b_leaves, tex_view, env_view, sampler, grid_view };
-        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, vertices: &b_vertices, heap: &heap, words: &words, prev_vertices: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref(), uniform: uniform.as_ref() });
+        let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, vertices: &b_vertices, heap: &heap, words: &words, prev_vertices: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref() });
         let kernel = Kernel { approx: self.approx, ..Kernel::new(scene, groups) };
         // Translucent particles (hardware RT): the translucency pass's own TLAS, built again after the particle pass:
         // an instance of it a system's mesh, the instance's record in its custom data as in the scene's TLAS.
@@ -3066,7 +3007,7 @@ impl Gpu {
             Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_vertices, &heap, &words), particles: self.emitter_fill(&emitter_runs.particles, &b_vertices, &heap, &words) },
             None => EmitterFills::default(),
         };
-        Ok(Uploaded { bg, bg_parts, heap, uniform, accum: b_accum, params: b_params, kernel, vertices: b_vertices, prev_vertices: b_prev, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
+        Ok(Uploaded { bg, bg_parts, heap, accum: b_accum, params: b_params, kernel, vertices: b_vertices, prev_vertices: b_prev, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
     }
 
     /// Bytes Metal allocates for an AABB BLAS over `count` boxes in `boxes` (its own size query through wgpu-hal; None
@@ -3825,8 +3766,7 @@ impl Gpu {
                 flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
             })
             .collect();
-        let flags = if std::env::var("THREERT_EDIT_BLAS").is_ok_and(|v| v == "trace") { wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE } else { wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD };
-        let blas = self.device.create_blas(&wgpu::CreateBlasDescriptor { label: Some("edit mesh"), flags, update_mode: wgpu::AccelerationStructureUpdateMode::Build }, wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: sizes.clone() });
+        let blas = self.device.create_blas(&wgpu::CreateBlasDescriptor { label: Some("edit mesh"), flags: wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD, update_mode: wgpu::AccelerationStructureUpdateMode::Build }, wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: sizes.clone() });
         (blas, (parts, sizes))
     }
 
@@ -3834,7 +3774,7 @@ impl Gpu {
     /// `edit_geometry`), its first `opaque` ones opaque: its BLAS, which the commit's build builds (`TopBuild::meshes`). Returns its index.
     pub fn add_mesh(&self, accel: &mut Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> u32 {
         // Built fast rather than traced fast (edits come every frame under destruction; the batches of pieces are rebuilt
-        // every frame); THREERT_EDIT_BLAS=trace for the A/B (`mesh_blas_for`).
+        // every frame): `mesh_blas_for`.
         let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
         accel.meshes.push(blas);
         accel.mesh_geo.push(geo);
@@ -3887,11 +3827,7 @@ impl Gpu {
         }
         if !self.merged && !self.whole_tables {
             for &(table, binding) in &crate::merged::TABLE_VIEWS {
-                let copy = b.uniform.and_then(|u| u.iter().zip(&crate::merged::UNIFORM_TABLES).find(|(_, t)| t.binding == binding).map(|(c, _)| c));
-                entries.push(match copy {
-                    Some(c) => buffer_entry(binding, c),
-                    None => wgpu::BindGroupEntry { binding, resource: b.heap.binding(table) },
-                });
+                entries.push(wgpu::BindGroupEntry { binding, resource: b.heap.binding(table) });
             }
         }
         if let Some(a) = b.accel {
@@ -3915,7 +3851,7 @@ impl Gpu {
         if let Some(a) = &mut up.accel {
             (a.vertices, a.indices, a.index_first) = (up.vertices.clone(), up.words.buffer.clone(), (up.words.at(Stream::Indices) / 4) as u32);
         }
-        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, vertices: &up.vertices, heap: &up.heap, words: &up.words, prev_vertices: &up.prev_vertices, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref(), uniform: up.uniform.as_ref() });
+        up.bg = self.scene_bind_group(&SceneBuffers { params: &up.params, vertices: &up.vertices, heap: &up.heap, words: &up.words, prev_vertices: &up.prev_vertices, accum: &up.accum, parts: &up.bg_parts, accel: up.accel.as_ref() });
         if up.accel.is_none() {
             return;
         }
@@ -4030,34 +3966,6 @@ impl Gpu {
         self.device.poll(wgpu::PollType::wait_indefinitely())?;
         let n = u32::from_le_bytes(read.slice(..).get_mapped_range()?[..4].try_into().expect("four bytes"));
         Ok(Some(n))
-    }
-
-    /// The uniform tables' buffers (merged.rs `UNIFORM_TABLES`' order), filled from their sections as they are now.
-    fn uniform_copies(&self, heap: &Heap<Table>) -> [wgpu::Buffer; 4] {
-        let copies = crate::merged::UNIFORM_TABLES.each_ref().map(|t| {
-            // (COPY_SRC: read back by the test that holds them to the tables, and by whoever diagnoses a driver.)
-            self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(t.name), size: t.stride * t.len as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
-        });
-        let mut e = self.device.create_command_encoder(&Default::default());
-        Self::copy_uniform(&mut e, heap, &copies);
-        self.queue.submit([e.finish()]);
-        copies
-    }
-
-    fn copy_uniform(e: &mut wgpu::CommandEncoder, heap: &Heap<Table>, copies: &[wgpu::Buffer; 4]) {
-        for (t, dst) in crate::merged::UNIFORM_TABLES.iter().zip(copies) {
-            e.copy_buffer_to_buffer(&heap.buffer, heap.at(t.table), dst, 0, uniform_copy_bytes(heap.cap(t.table), dst.size()));
-        }
-    }
-
-    /// The uniform tables: their sections as they are now, copied into the four uniform buffers. The renderer writes
-    /// the tables' heap; the passes that read the scene read these copies, so they are made in their encoder, before
-    /// them, each frame, after whatever writes a table on the GPU in that encoder (the particle passes write their
-    /// objects' entries).
-    pub fn sync_tables(&self, up: &Uploaded, e: &mut wgpu::CommandEncoder) {
-        if let Some(u) = &up.uniform {
-            Self::copy_uniform(e, &up.heap, u);
-        }
     }
 
     /// Software traversal's top tree again, over the units as they are now, written to its range of the node buffer
@@ -4225,7 +4133,6 @@ impl Gpu {
         let t1 = Instant::now();
         let mut enc = d.create_command_encoder(&Default::default());
         enc.clear_buffer(b_accum, 0, None);
-        self.sync_tables(&up, &mut enc);
         self.queue.submit([enc.finish()]);
         // One dispatch per sample; params are rewritten between submissions. Batch a few per submit.
         let batch = 4u32;
@@ -4515,9 +4422,9 @@ mod tests {
             out
         };
         let mut checked = 0;
-        for (hwrt, merged, uniform_tables, whole_tables) in [(true, false, false, false), (true, false, true, false), (true, false, false, true), (false, false, false, false), (false, false, true, false), (false, false, false, true), (false, true, false, false)] {
+        for (hwrt, merged, whole_tables) in [(true, false, false), (true, false, true), (false, false, false), (false, false, true), (false, true, false)] {
             for room in [false, true] {
-                let mut layout: Vec<Entry> = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: room }).iter().enumerate().flat_map(|(g, es)| es.iter().map(move |e| (g as u32, e.binding, e.ty))).collect();
+                let mut layout: Vec<Entry> = kernel_layout_entries(LayoutShape { hwrt, merged, whole_tables, guard: room }).iter().enumerate().flat_map(|(g, es)| es.iter().map(move |e| (g as u32, e.binding, e.ty))).collect();
                 layout.sort_by_key(|e| (e.0, e.1));
                 for guard in [None, Some(1 << 16)] {
                     // (As written, a kernel with the guard needs the room.)
@@ -4529,20 +4436,20 @@ mod tests {
                         if guard.is_none() && !merged {
                             want.retain(|e| (e.0, e.1) != (1, crate::merged::GUARD_BINDING));
                         }
-                        let v = KernelVariant { merged, uniform_tables, whole_tables, guard, ..KernelVariant::new(hwrt, KernelSwitches::default(), features) };
+                        let v = KernelVariant { merged, whole_tables, guard, ..KernelVariant::new(hwrt, KernelSwitches::default(), features) };
                         assert_eq!(declared(&v), want, "{v:?} in a layout {} room for the guard", if room { "with" } else { "without" });
                         checked += 1;
                     }
                 }
             }
         }
-        assert_eq!(checked, 3 * 3 + 3 * 6 + 8);
+        assert_eq!(checked, 2 * 3 + 2 * 6 + 8);
     }
 
     /// The native default has no loop guard, and the live passes are their file. Every variant the kernel's flags
     /// make is valid WGSL (naga, wgpu's front end): each traversal with no switch, each alone and all of them, by no
-    /// scene feature, each alone and all of them (units are software traversal's), with the uniform tables, with the
-    /// tables read whole, and with the loop guard. (The merged layout's: merged.rs.) Prints the default variants'
+    /// scene feature, each alone and all of them (units are software traversal's), with the tables read whole, and
+    /// with the loop guard. (The merged layout's: merged.rs.) Prints the default variants'
     /// SHA-256 (`--nocapture`).
     #[test]
     fn every_kernel_variant_is_valid() {
@@ -4572,7 +4479,6 @@ mod tests {
                     naga_valid(&kernel_wgsl(&template, &KernelVariant::new(hwrt, k, if hwrt { f & !F_UNITS } else { f })));
                 }
                 let all_features = KernelVariant::new(hwrt, k, if hwrt { F_SOURCE & !F_UNITS } else { F_SOURCE });
-                naga_valid(&kernel_wgsl(&template, &KernelVariant { uniform_tables: true, ..all_features }));
                 naga_valid(&kernel_wgsl(&template, &KernelVariant { whole_tables: true, ..all_features }));
                 naga_valid(&kernel_wgsl(&template, &KernelVariant { guard: Some(1 << 16), ..all_features }));
             }
@@ -4625,16 +4531,16 @@ mod tests {
     }
 
     /// With nothing set, every platform but Android opens the device as it was before the options existed: no
-    /// uniform tables, no pipeline cache, the kernel's source the files (`every_kernel_variant_is_valid` prints the
-    /// default variants' hashes). Android's defaults are the uniform tables and the switches its GPUs needed; the environment overrides
-    /// either way, and the merged layout never has the uniform tables.
+    /// pipeline cache, the kernel's source the files (`every_kernel_variant_is_valid` prints the default variants'
+    /// hashes). Android's defaults are the tables read whole and the switches its GPUs needed; the environment
+    /// overrides either way, and the merged layout never has the views.
     #[test]
     fn the_options_default_to_the_device_as_written() {
         let vars = |set: &'static [(&'static str, &'static str)]| move |name: &str| set.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
         let desktop = GpuOptions::from_vars(&vars(&[]), false);
         assert_eq!(desktop, GpuOptions::default());
         assert_eq!(desktop.kernel, KernelSwitches { strict: false, cutout_lite: 0, last_direct: false, last_sun: false, light_pick: false });
-        assert!(!desktop.uniform_tables_on(false, false) && desktop.table_views_on(false, false));
+        assert!(desktop.table_views_on(false, false));
         for hwrt in [false, true] {
             assert!(KernelVariant::new(hwrt, desktop.kernel, 0).flags().iter().all(|&(name, on)| on == (name == "hwrt" && hwrt)));
         }
@@ -4643,21 +4549,19 @@ mod tests {
         // `sun`: the directional lights alone at the last vertex, in place of all of them, on either platform.
         let sun = GpuOptions::from_vars(&vars(&[("THREERT_LAST_DIRECT", "sun")]), true);
         assert_eq!((sun.kernel.last_direct, sun.kernel.last_sun), (false, true));
-        assert_eq!((android.uniform_tables, android.table_views, android.pipeline_cache.clone()), (None, None, None));
-        // Android reads the tables whole (no views, so no uniform copies of four of them); with the views asked for,
-        // the uniform copies as before.
-        assert!(!android.table_views_on(false, true) && !android.uniform_tables_on(false, true) && !android.uniform_tables_on(true, true));
+        assert_eq!((android.table_views, android.pipeline_cache.clone()), (None, None));
+        // Android reads the tables whole; with the views asked for, the views.
+        assert!(!android.table_views_on(false, true));
         let views = GpuOptions::from_vars(&vars(&[("THREERT_TABLE_VIEWS", "1")]), true);
-        assert!(views.table_views_on(false, true) && views.uniform_tables_on(false, true) && !views.table_views_on(true, true));
+        assert!(views.table_views_on(false, true) && !views.table_views_on(true, true));
         // Set: what is asked, on either platform.
-        let off = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "0"), ("THREERT_KERNEL_STRICT", "0"), ("THREERT_CUTOUT_LITE", "0"), ("THREERT_LAST_DIRECT", "0")]), true);
-        assert_eq!((off.kernel, off.uniform_tables_on(false, true)), (KernelSwitches::default(), false));
-        let on = GpuOptions::from_vars(&vars(&[("THREERT_UNIFORM_TABLES", "1"), ("THREERT_CUTOUT_LITE", "2"), ("THREERT_LIGHT_PICK", "1"), ("THREERT_PIPELINE_CACHE", "/data/cache/pipelines")]), false);
-        assert!(on.uniform_tables_on(false, false) && !on.uniform_tables_on(true, false));
-        // Elsewhere the views unless asked otherwise; without them no uniform tables, whatever is asked.
+        let off = GpuOptions::from_vars(&vars(&[("THREERT_KERNEL_STRICT", "0"), ("THREERT_CUTOUT_LITE", "0"), ("THREERT_LAST_DIRECT", "0")]), true);
+        assert_eq!(off.kernel, KernelSwitches::default());
+        let on = GpuOptions::from_vars(&vars(&[("THREERT_CUTOUT_LITE", "2"), ("THREERT_LIGHT_PICK", "1"), ("THREERT_PIPELINE_CACHE", "/data/cache/pipelines")]), false);
+        // Elsewhere the views unless asked otherwise.
         assert!(on.table_views_on(false, false) && !on.table_views_on(true, false));
-        let whole = GpuOptions::from_vars(&vars(&[("THREERT_TABLE_VIEWS", "0"), ("THREERT_UNIFORM_TABLES", "1")]), false);
-        assert!(!whole.table_views_on(false, false) && !whole.uniform_tables_on(false, false));
+        let whole = GpuOptions::from_vars(&vars(&[("THREERT_TABLE_VIEWS", "0")]), false);
+        assert!(!whole.table_views_on(false, false));
         assert_eq!(on.kernel, KernelSwitches { strict: false, cutout_lite: 2, last_direct: false, last_sun: false, light_pick: true });
         assert_eq!(on.pipeline_cache.as_deref(), Some(std::path::Path::new("/data/cache/pipelines")));
         assert_eq!(GpuOptions::from_vars(&vars(&[("THREERT_PIPELINE_CACHE", "")]), true).pipeline_cache, None);
@@ -4729,31 +4633,6 @@ mod tests {
             assert_eq!(lit.contains("let steps = 4u;"), hwrt);
             assert_eq!(v(hwrt, KernelSwitches { cutout_lite: 2, ..Default::default() }) == plain, !hwrt);
         }
-    }
-
-    /// The uniform tables' buffers: each array fits a uniform binding of 64 KiB, the media's holds every medium a
-    /// scene may have, and the four are at their own bindings, before the acceleration structure's. A copy takes what
-    /// the table's section and its uniform buffer both hold, in whole words; a scene with more entries than an array
-    /// is said, by name.
-    #[test]
-    fn the_uniform_tables_fit_their_bindings() {
-        use crate::merged::UNIFORM_TABLES;
-        for t in &UNIFORM_TABLES {
-            assert!(kernel_template().contains(&format!("@group(0) @binding({}) var<uniform> {}: array<", t.binding, t.name)), "{}", t.name);
-            let bytes = t.stride * t.len as u64;
-            assert!(bytes <= 65536 && bytes % 16 == 0 && t.binding < ACC_BINDING, "{}: {bytes} bytes", t.name);
-        }
-        assert_eq!(UNIFORM_TABLES.each_ref().map(|t| t.table), [Table::TexInfo, Table::Objects, Table::Instances, Table::Media]);
-        assert_eq!(UNIFORM_TABLES[3].len as usize, crate::scene::MAX_MEDIA);
-        assert_eq!(UNIFORM_TABLES[2].len as u64, 65536 / UNIFORM_TABLES[2].stride);
-        assert_eq!([UNIFORM_TABLES[2].stride as usize, UNIFORM_TABLES[3].stride as usize], [std::mem::size_of::<crate::scene::GpuInstance>(), std::mem::size_of::<crate::scene::MediumGpu>()]);
-        assert!(kernel_template().contains(&format!("@group(0) @binding({ACC_BINDING}) var acc: acceleration_structure;")));
-        // A table shorter than its array, one with the edits' room past it, one whose size is not the array's multiple.
-        assert_eq!([uniform_copy_bytes(512, 65536), uniform_copy_bytes(1 << 20, 65536), uniform_copy_bytes(65600, 65440), uniform_copy_bytes(0, 7168), uniform_copy_bytes(7, 64)], [512, 65536, 65440, 0, 4]);
-        assert!(uniform_overflow([4096, 4096, 409, 32]).is_empty());
-        let notes = uniform_overflow([4096, 4099, 1024, 32]);
-        assert_eq!(notes.len(), 2);
-        assert!(notes[0].contains("4099 entries of `objects`") && notes[0].contains("holds 4096") && notes[1].contains("1024 entries of `instances`"), "{notes:?}");
     }
 
     /// The order of a layout's entries and of a bind group's is not the device's to see: wgpu puts both in binding

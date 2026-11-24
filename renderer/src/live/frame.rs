@@ -336,7 +336,7 @@ impl LiveCore {
                 // Light-sampled particles (sparks: Particles emitterArea) move their light every frame: the cache and
                 // the temporal pass keep the short history of a lighting edit while the scene has them.
                 let lit = self.live_lighting();
-                p.cache = [1.0, CACHE_SAMPLES, if lit { CACHE_FRAMES_LIT } else { CACHE_FRAMES }, cache_flags() as f32];
+                p.cache = [1.0, CACHE_SAMPLES, if lit { CACHE_FRAMES_LIT } else { CACHE_FRAMES }, 0.0];
             }
             p.time[0] = shader_time(self.time);
             p.cam_pos = [cam.pos.x, cam.pos.y, cam.pos.z, cam.tan_half_fov];
@@ -389,11 +389,6 @@ impl LiveCore {
             // The particles' emitters in the light list, where the passes above placed them.
             if let (Some(f), 0) = (&self.sc.up.fills.particles, k) {
                 g.fill_emitters(f, &mut e);
-            }
-            // (The uniform tables: their sections as this frame's edits and the particle passes above left them, where
-            // the kernel reads them; merged.rs.)
-            if k == 0 {
-                g.sync_tables(&self.sc.up, &mut e);
             }
             {
                 let tw = match (&self.profile, &self.timer, timed) {
@@ -499,7 +494,7 @@ impl LiveCore {
             let target = if lp.misc2[2] > 0.0 || lp.dof[0] > 0.0 { &self.targets.buf("sb").buffer } else { &self.targets.buf("fa").buffer };
             // Below full resolution the particles are drawn per traced pixel, then laid over the output (`translucent_up`).
             let low = (iw, ih) != (w, h);
-            let tp = gpu::TranslucentParams { size: [w, h, 0, 1], view: [iw, ih, gpu::VOLUME_TRAIN_CAP, low as u32], misc: [VOLUME_TRAIN_SHARE, translucent_hidden(self.frame) as u32 as f32, 0.0, 0.0] };
+            let tp = gpu::TranslucentParams { size: [w, h, 0, 1], view: [iw, ih, gpu::VOLUME_TRAIN_CAP, low as u32], misc: [VOLUME_TRAIN_SHARE, 0.0, 0.0, 0.0] };
             g.queue.write_buffer(&t.params, 0, bytemuck::bytes_of(&tp));
             (pipes, g.translucent_bind_group(t, target, self.targets.translucent_low.as_ref().expect("made at the frame's start")), &t.count)
         });

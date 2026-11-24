@@ -1880,10 +1880,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let pkey = (key.clone(), rigid_pose_key(a));
                     if !rigid_parts.contains_key(&pkey) {
                         let moving = glb.moving_nodes(a)?;
-                        // (THREERT_RIGID_NODES=all: no node merged, every one an instance of a mesh of its own: the A/B
-                        // against the merged still part.)
-                        let all = std::env::var("THREERT_RIGID_NODES").is_ok_and(|v| v == "all");
-                        let apart = |ni: usize| all || moving[ni];
+                        let apart = |ni: usize| moving[ni];
                         // The nodes left alone, in the model's space as the pose has them (the pose does not move
                         // them); then each node apart, in its own (the order within a node is the file's).
                         let mut lists: Vec<(usize, Vec<crate::skin::ModelTri>)> = vec![];
