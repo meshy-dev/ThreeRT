@@ -2058,7 +2058,7 @@ on the device", and differs where it says so.
   initialization) tells a driver's fault from the kernel's.
 - **The pipeline cache** (`GpuOptions::pipeline_cache`, `THREERT_PIPELINE_CACHE=<directory>`; `pipeline_cache.rs`).
   The driver compiles a kernel variant for about ten seconds. With a directory given, the device has a wgpu
-  `PipelineCache` (Vulkan only), every compute pipeline of the engine and the raster pass's are made with it, and it
+  `PipelineCache` (Vulkan only), every compute pipeline of the engine is made with it, and it
   is saved after a kernel variant, a scene's passes and the live passes are compiled. Opening a game a second time
   went from 10.6 s to 0.4 s (the author's; on this source a scene's pipelines compile for 16 to 31 s the first time
   and are there in under a second from the cache, below).
@@ -2117,8 +2117,8 @@ source under ThreeRT for Android 0.4.0, which sets `THREERT_PIPELINE_CACHE` and 
   figure.
 - **Hardware against software traversal** (`THREERT_HWRT=0`, same size and bounce): Sunlit room 78 ms against
   149 ms and Material balls 74 against 96 are faster without ray queries; OpenStrikeRT is 336 against 146. A ray
-  query has a high fixed cost on this driver; ray queries stay the default. `THREERT_RASTER=1` (raster primary
-  visibility): Sunlit room 136 against 149 ms.
+  query has a high fixed cost on this driver; ray queries stay the default. (Raster primary visibility, an
+  experiment since removed, read 136 against 149 ms in the Sunlit room.)
 - **Not looked at on the device:** voxel worlds and procedural geometry (then `env_cdf`'s second half), particles, media,
   a map with cutout foliage (`THREERT_CUTOUT_LITE`'s figures are the author's), `THREERT_ENV_NEE=1`, and the
   motion vectors of moving objects (`prev_verts`): soldiers were looked at standing, not frame by frame in motion.

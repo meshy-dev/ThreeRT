@@ -1,5 +1,5 @@
 //! One frame of the live view (`LiveCore::render`): the trace, the live passes, the radiance cache's and the media's
-//! training, the raster visibility pass, and the GPU timing and profile.
+//! training, and the GPU timing and profile.
 
 use super::*;
 
@@ -21,15 +21,15 @@ pub(super) const TIMER_SLOTS: usize = 4;
 /// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
 pub(super) const TIMER_GAP_MS: f32 = 2.0;
 
-/// A frame's GPU time (ms) from its slot's timestamps (trace, post, raster, particle pass pairs; zero: not run): from
-/// its first pass (particles, raster or trace) to the end of its post pass. The post pass follows the trace's command
+/// A frame's GPU time (ms) from its slot's timestamps (trace, post, a free pair, particle pass pairs; zero: not run):
+/// from its first pass (particles or trace) to the end of its post pass. The post pass follows the trace's command
 /// buffer within ~0.2 ms, after the frame's further samples (`spp` - 1 more traces, untimed, each about as long as
 /// the first). In 2–3 % of the crowd scene's frames (Metal) a slot read the post pair of the frame that used the slot
 /// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
 /// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
 /// its passes, the further traces at the first one's length.
 pub(super) fn frame_gpu_ms(t: &[u64; 8], spp: u32, period_ns: f32) -> Option<f32> {
-    let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
+    let start = [t[6], t[0]].into_iter().filter(|&v| v > 0).min()?;
     if t[3] <= start {
         return None;
     }
@@ -45,7 +45,7 @@ impl FrameTimer {
     pub(super) fn new(d: &wgpu::Device) -> FrameTimer {
         let n = TIMER_SLOTS as u64;
         FrameTimer {
-            // Per slot: trace pass begin / end, post pass begin / end, raster pass begin / end, particle pass begin / end
+            // Per slot: trace pass begin / end, post pass begin / end, a free pair, particle pass begin / end
             // (Metal writes a pass's timestamps in pairs).
             queries: d.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame timer"), ty: wgpu::QueryType::Timestamp, count: (n * 8) as u32 }),
             resolve: d.create_buffer(&wgpu::BufferDescriptor { label: None, size: n * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
@@ -76,103 +76,6 @@ impl FrameTimer {
             self.slot = (k + 1) % TIMER_SLOTS;
         }
         (latest, slot)
-    }
-}
-
-/// Primary visibility by rasterization (the decision experiment of docs/ROADMAP.md § 1): every triangle drawn into a
-/// triangle-index target (+ depth) at the frame's sub-pixel jitter; the kernel starts each live path at that triangle
-/// instead of tracing the camera ray. `live --raster` / THREERT_RASTER=1.
-pub(super) struct Raster {
-    pub(super) pipeline: wgpu::RenderPipeline,
-    pub(super) layout: wgpu::BindGroupLayout,
-    pub(super) uniform: wgpu::Buffer,
-    pub(super) vis: wgpu::TextureView,
-    pub(super) depth: wgpu::TextureView,
-}
-
-pub(super) const RASTER_WGSL: &str = r#"
-struct R { pos: vec4<f32>, fwd: vec4<f32>, right: vec4<f32>, up: vec4<f32>, jit: vec4<f32> }; // pos.w = tan(fov/2), fwd.w = aspect, right.w = the indices' first word, jit = ndc offset xy, near
-@group(0) @binding(0) var<uniform> r: R;
-@group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>; // a vertex: three rows, the first (position, u) (kernel layout)
-@group(0) @binding(2) var<storage, read> words: array<u32>; // the triangles' indices, three a triangle
-struct V { @builtin(position) p: vec4<f32>, @location(0) @interpolate(flat) id: u32 };
-@vertex fn vs(@builtin(vertex_index) vi: u32) -> V {
-    let ti = vi / 3u;
-    let p = vertices[words[bitcast<u32>(r.right.w) + vi] * 3u].xyz;
-    let d = p - r.pos.xyz;
-    let z = dot(d, r.fwd.xyz);
-    // Reversed infinite depth: near / z.
-    return V(vec4<f32>(dot(d, r.right.xyz) / (r.pos.w * r.fwd.w) + r.jit.x * z, dot(d, r.up.xyz) / r.pos.w + r.jit.y * z, r.jit.z, z), ti + 1u);
-}
-@fragment fn fs(v: V) -> @location(0) u32 { return v.id; }
-"#;
-
-impl Raster {
-    pub(super) fn new(g: &gpu::Gpu, w: u32, h: u32) -> Raster {
-        let d = &g.device;
-        let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("raster"), source: wgpu::ShaderSource::Wgsl(RASTER_WGSL.into()) });
-        let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("raster"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-            ],
-        });
-        let pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster vis"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
-            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), targets: &[Some(wgpu::TextureFormat::R32Uint.into())], compilation_options: Default::default() }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: g.cache(),
-        });
-        g.save_pipeline_cache();
-        let tex = |format, usage| {
-            d.create_texture(&wgpu::TextureDescriptor { label: Some("raster"), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
-                .create_view(&Default::default())
-        };
-        let vis = tex(wgpu::TextureFormat::R32Uint, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let depth = tex(wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let uniform = d.create_buffer(&wgpu::BufferDescriptor { label: Some("raster"), size: 80, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Raster { pipeline, layout, uniform, vis, depth }
-    }
-
-    /// Records the visibility pass for the scene's first `tris` triangles (their vertices; their indices in
-    /// the words' heap) at internal size (iw, ih), sampling at jitter (jx, jy).
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn record(&self, g: &gpu::Gpu, e: &mut wgpu::CommandEncoder, vertices: &wgpu::Buffer, words: &crate::heap::Heap<crate::heap::Stream>, tris: u32, cam: &Camera, aspect: f32, (iw, ih): (u32, u32), (jx, jy): (f32, f32), timestamps: Option<wgpu::RenderPassTimestampWrites>) {
-        let u: [[f32; 4]; 5] = [
-            [cam.pos.x, cam.pos.y, cam.pos.z, cam.tan_half_fov],
-            [cam.fwd.x, cam.fwd.y, cam.fwd.z, aspect],
-            [cam.right.x, cam.right.y, cam.right.z, f32::from_bits((words.at(crate::heap::Stream::Indices) / 4) as u32)],
-            [cam.up.x, cam.up.y, cam.up.z, 0.0],
-            // Pixel centres sample at +0.5; shift the image so they sample at the jittered position instead.
-            [2.0 * (0.5 - jx) / iw as f32, -2.0 * (0.5 - jy) / ih as f32, 0.01, 0.0],
-        ];
-        g.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&u));
-        let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: vertices.as_entire_binding() }, wgpu::BindGroupEntry { binding: 2, resource: words.buffer.as_entire_binding() }],
-        });
-        let mut pass = e.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("raster vis"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.vis, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store } })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }), stencil_ops: None }),
-            timestamp_writes: timestamps,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_viewport(0.0, 0.0, iw as f32, ih as f32, 0.0, 1.0);
-        pass.set_scissor_rect(0, 0, iw, ih);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.draw(0..tris * 3, 0..1);
     }
 }
 
@@ -392,7 +295,7 @@ impl LiveCore {
         let media_composite = media.then(|| g.kernel_pass(kernel, "media_composite"));
         // The pixels a sample's trace leaves at the radiance cache (pathtrace.wgsl `finish`).
         let finish = self.targets.kernel.deferred.as_ref().filter(|_| self.cache.is_some()).map(|d| (g.kernel_pass(kernel, "finish"), d));
-        // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's and the raster visibility pass's: 8 phases at
+        // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
         let jitter = if reconstruction.unjittered() {
@@ -424,8 +327,7 @@ impl LiveCore {
             if let Some(u) = &self.sc.up.units {
                 (p.motion[2], p.motion[3]) = (f32::from_bits(u.layout.top_first), f32::from_bits(u.count));
             }
-            p.raster = [(self.raster.is_some() && !self.sc.instanced) as u32 as f32, jitter.0, jitter.1, 0.0];
-            p.raster[3] = if self.rays { 0.0 } else { 1.0 };
+            p.jitter = [jitter.0, jitter.1, if self.rays { 0.0 } else { 1.0 }, 0.0];
             if moving {
                 // The kernel finds the first dynamic triangle in Params::group_first (group 4), a u32.
                 p.motion[0] = 1.0;
@@ -450,8 +352,7 @@ impl LiveCore {
             self.targets.kernel.place(&mut p);
             g.queue.write_buffer(&self.sc.up.params, 0, bytemuck::bytes_of(&p));
             let mut e = g.device.create_command_encoder(&Default::default());
-            // Particles: placed for this frame's time and camera, then the dynamic BLASes rebuilt (before the raster and
-            // the trace).
+            // Particles: placed for this frame's time and camera, then their BLASes built again (before the trace).
             // The grid programs (density grids changed on the GPU), before anything reads the grids.
             if k == 0 && gpu::Gpu::has_grid_sim(&self.sc.up) {
                 let sources = std::mem::take(&mut self.grid_sources);
@@ -493,10 +394,6 @@ impl LiveCore {
             // the kernel reads them; merged.rs.)
             if k == 0 {
                 g.sync_tables(&self.sc.up, &mut e);
-            }
-            if let (Some(r), 0, false) = (&self.raster, k, self.sc.instanced) {
-                let tw = self.timer.as_ref().zip(timed).map(|(t, slot)| wgpu::RenderPassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: Some(slot as u32 * 8 + 4), end_of_pass_write_index: Some(slot as u32 * 8 + 5) });
-                r.record(g, &mut e, &self.sc.up.vertices, &self.sc.up.words, self.sc.tris.len() as u32, &cam, self.aspect, (iw, ih), jitter, tw);
             }
             {
                 let tw = match (&self.profile, &self.timer, timed) {
@@ -550,8 +447,8 @@ impl LiveCore {
                 let at = slot as u64 * 4 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
                 e.resolve_query_set(&t.queries, q..q + 2, &t.resolve, at);
                 e.copy_buffer_to_buffer(&t.resolve, at, &t.reads[slot].0, 0, 16);
-                // Raster and particle pairs (pairs 2 and 3); zeros when the pass did not run.
-                for (pair, ran) in [(2u32, self.raster.is_some() && !self.sc.instanced), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
+                // The free pair and the particle pair (pairs 2 and 3); zeros when the pass did not run.
+                for (pair, ran) in [(2u32, false), (3, self.sc.up.particles.is_some() || self.sc.up.gpu_particles.is_some())] {
                     let at = at + pair as u64 * wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
                     if ran {
                         e.resolve_query_set(&t.queries, q + pair * 2..q + pair * 2 + 2, &t.resolve, at);

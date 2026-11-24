@@ -112,7 +112,7 @@ struct Params {
     fog_color: vec4<f32>, // ambient inscattering radiance, max opacity
     vol: vec4<f32>,       // volumetric scattering albedo (0 = off), HG anisotropy, extinction scale in range, -
     vol2: vec4<f32>,      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    raster: vec4<f32>,    // live: primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1)
+    jitter: vec4<f32>,    // live: this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1); -
     cache: vec4<f32>,     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     motion: vec4<f32>,    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1].x)
     group_first: array<vec4<u32>, 2>, // first global triangle of each traversal group ([1].x = the first dynamic one)
@@ -449,7 +449,7 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
 
 // Path vertex index of the current shading point (cheaper procedural detail / fewer candidates past the first hit).
 var<private> cur_depth: u32;
-// Live "ray tracing off" (P.raster.w, LiveCore::rays): set once the camera's own ray has found its surface. From then
+// Live "ray tracing off" (P.jitter.z, LiveCore::rays): set once the camera's own ray has found its surface. From then
 // on `trace` reports a miss, so nothing is shadowed, a bounce sees the sky and a mirror reflects the sky: what a
 // rasterizer without shadow maps draws, on any GPU, from the same scene and the same shading. The switch is a uniform:
 // no kernel is rebuilt to flip it.
@@ -743,24 +743,6 @@ fn proc_normal(h: Hit) -> vec3<f32> {
     let p = proc_bits(h.u);
     let n = proc_unoct(vec2<f32>(f32(p & 0x7fffu), f32(p >> 15u)) / 32767.0 * 2.0 - 1.0);
     return normalize(vec3<f32>(dot(r.n0.xyz, n), dot(r.n1.xyz, n), dot(r.n2.xyz, n)));
-}
-
-// Live primary visibility rasterized by the viewport (triangle index + 1, 0 = sky) at this frame's jitter.
-@group(1) @binding(0) var vis_tex: texture_2d<u32>;
-
-// The camera ray's hit on a known triangle (two-sided, no t range): the raster pass already resolved visibility.
-fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
-    let ix = tri_indices(ti) * VERTEX_VEC4;
-    let a = vertices[ix.x].xyz;
-    let e1 = vertices[ix.y].xyz - a;
-    let e2 = vertices[ix.z].xyz - a;
-    let p = cross(d, e2);
-    let det = dot(e1, p);
-    let inv = 1.0 / select(det, 1e-20, abs(det) < 1e-20);
-    let s = o - a;
-    let u = dot(s, p) * inv;
-    let q = cross(s, e1);
-    return Hit(dot(e2, q) * inv, ti, clamp(u, 0.0, 1.0), clamp(dot(d, q) * inv, 0.0, 1.0), NO_INST, ti);
 }
 
 // The software BVH walk (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
@@ -3631,7 +3613,7 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let depth = (fl >> 8u) & 0xffu;
     cur_depth = depth;
     mirror_path = (fl & DF_MIRROR) != 0u;
-    rays_off = LIVE && P.raster.w > 0.5;
+    rays_off = LIVE && P.jitter.z > 0.5;
     if (has(F_LISTS)) {
         lt_list = r0.z & ~(LT_LIST - 1u);
         lt_list_n = r0.z & (LT_LIST - 1u);
@@ -3701,11 +3683,11 @@ fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: b
     // Rough surfaces have no single reflected point. A stochastic second-bounce hit would move
     // their guide even when both the object and camera stand still.
     accum[q].spec.w = 0.0;
-    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.raster.w == 0.0 &&
+    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 &&
         (any(specular.rgb > vec3<f32>(0.005)) || diffuse.w > 0.0)) {
         cur_depth = 1u;
         mirror_path = true;
-        let ndc = ((vec2<f32>(gid.xy) + P.raster.yz) / vec2<f32>(P.size.xy) * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+        let ndc = ((vec2<f32>(gid.xy) + P.jitter.xy) / vec2<f32>(P.size.xy) * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
         let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * ndc.x * P.cam_pos.w * P.cam_fwd.w + P.cam_up.xyz * ndc.y * P.cam_pos.w);
         let x = P.cam_pos.xyz + d * px.color.w;
         let width = px.color.w * 2.0 * P.cam_pos.w / lod_height();
@@ -3809,7 +3791,7 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     cur_depth = 0u;
     mirror_path = false;
     var px = accum[pix];
-    let ndc = vec2<f32>((f32(gid.x) + P.raster.y) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.raster.z) / f32(h) * 2.0);
+    let ndc = vec2<f32>((f32(gid.x) + P.jitter.x) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.jitter.y) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let ft = px.color.w;
     let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true, rng_dim(D_MEDIA));
@@ -3870,15 +3852,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     cur_depth = 0u;
     let cam = rng4(rng_dim(D_CAMERA));
 
-    // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
-    let raster = LIVE && P.raster.x > 0.5 && P.cam_right.w <= 0.0;
     // Live: one sub-pixel jitter a frame for the whole image (live/frame.rs: Halton 2, 3), which the temporal upscaler
-    // resolves (live.wgsl `upscale`) and the raster pass draws at. Offline, every sample draws its own.
+    // resolves (live.wgsl `upscale`). Offline, every sample draws its own.
     var jx = cam.x;
     var jy = cam.y;
     if (LIVE) {
-        jx = P.raster.y;
-        jy = P.raster.z;
+        jx = P.jitter.x;
+        jy = P.jitter.y;
     }
     let ndc = vec2<f32>((f32(gid.x) + jx) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + jy) / f32(h) * 2.0);
     var d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
@@ -3944,23 +3924,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mirror_path = false;
     for (var depth = 0u; depth <= P.counts.z; depth++) {
         cur_depth = depth;
-        var hit: Hit;
-        if (raster && depth == 0u) {
-            let id = textureLoad(vis_tex, vec2<i32>(gid.xy), 0).x;
-            if (id == 0u) {
-                hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
-            } else {
-                hit = tri_hit(id - 1u, o, d);
-                // The raster pass draws cutout triangles whole: the alpha test decides here, else trace past them.
-                if (has(F_MASKED) && (tri_flags(hit.part) & TRI_MASKED) != 0u && !alpha_pass(hit.tri, NO_INST, hit.part, hit.u, hit.v, hit.t)) {
-                    hit = trace(o, d, INF, TRACE_CLOSEST);
-                }
-            }
-        } else {
-            hit = trace(o, d, INF, TRACE_CLOSEST);
-        }
+        var hit = trace(o, d, INF, TRACE_CLOSEST);
         // Ray tracing off: the camera ray above was the last one traced for this pixel.
-        if (depth == 0u) { rays_off = LIVE && P.raster.w > 0.5; }
+        if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
             let t0 = select(0.0, P.fog.w, depth == 0u);

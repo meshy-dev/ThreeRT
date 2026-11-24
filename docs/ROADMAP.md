@@ -2891,6 +2891,16 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**The raster experiment is removed (2026-11-24, after it).** Primary visibility by rasterization (§ 1's decision
+experiment, `THREERT_RASTER=1`) stayed in the code after its verdict: a render pass of the world-space triangles,
+a texture in the kernel's second bind group, a parameter and a branch at every path's first hit. It drew nothing
+in a scene with a mesh since meshes became instances. All of it is gone; § 1 keeps the experiment's record and
+figures. The kernel's parameter has the frame's jitter and the "rays off" switch still (`jitter`).
+Tests: the "rays off" switch had none and has one (`rays_off_is_another_picture_and_on_again_the_first`: what was
+in shadow is lit, on again the picture is the first); three mutations of the parameter's places, one of which the
+test's first form let through. A live keyframe of a heavy interior reads as before, with and without the loop
+guard.
+
 **A particle system is a mesh and an instance (2026-11-24).** Particles were world-space triangles of their own
 kind: two a particle among the scene's dynamic triangles (the translucent ones after everything else, in a BLAS of
 their own), a row a triangle, their emitters by a nominal area in the triangles' attributes, every size fixed when

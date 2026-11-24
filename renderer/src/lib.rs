@@ -845,7 +845,7 @@ pub fn prepare_as(hwrt: bool, units: bool, sc: &mut scene::Scene, timings: &mut 
         fog_color: [0.0; 4],
         vol: [0.0; 4],
         vol2: [0.0; 4],
-        raster: [0.0; 4],
+        jitter: [0.0; 4],
         cache: [0.0; 4],
         // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
         // `render --signals`'.)

@@ -40,9 +40,6 @@ pub(super) struct LoadedScene {
     /// Some object's move is an instance's transform (`Retained::moves_instances`: kept where the proxies change,
     /// here and in a geometry edit): the frame's kernel then writes motion vectors.
     pub(super) moving_instances: bool,
-    /// The scene has instanced meshes or procedural geometry (the raster experiment draws only flattened triangles:
-    /// primary visibility is traced).
-    pub(super) instanced: bool,
     /// Kernel features of the scene's structure (gpu::instance_features), which edits cannot change.
     pub(super) instance_features: u32,
     pub(super) name: String,
@@ -281,7 +278,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     base.ltile[3] = super::LIST_CANDIDATES;
     base.cam_fwd[3] = w as f32 / h as f32;
     let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
-    let instanced = !sc.gpu_instances.is_empty() || !sc.procs.is_empty();
     let instance_features = gpu::instance_features(&sc);
     let pool_place: Vec<[u32; 2]> = if up.units.is_some() { sc.pool_attrs.iter().map(|a| [a.uv[3].to_bits(), a.x[3].to_bits()]).collect() } else { vec![] };
     let (pool_tris, meshes, instances) = (std::mem::take(&mut sc.pool_tris), std::mem::take(&mut sc.meshes), std::mem::take(&mut sc.instances));
@@ -339,5 +335,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instanced, instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent: vec![] }, view, env))
 }

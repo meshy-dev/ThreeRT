@@ -78,14 +78,12 @@ pub struct Gpu {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     warming: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(u32, u64, u32)>>>,
     layout: wgpu::BindGroupLayout,
-    /// Group 1, the live viewport's: primary visibility (texture_2d<u32>), the radiance cache (`CacheBuffers`) and
-    /// what the live passes read of a trace (`KernelBufs`). Offline renders bind `no_vis` (1x1 texture `no_vis_view`,
-    /// one-entry cache).
-    pub vis_layout: wgpu::BindGroupLayout,
-    pub no_vis: wgpu::BindGroup,
-    /// `no_vis`'s buffers (the merged layout: an offline kernel's source is written for their lengths).
-    no_vis_bufs: KernelBufs,
-    pub no_vis_view: wgpu::TextureView,
+    /// Group 1, the live viewport's: the radiance cache (`CacheBuffers`) and what the live passes read of a trace
+    /// (`KernelBufs`). Offline renders bind `no_live` (a one-entry cache).
+    pub live_layout: wgpu::BindGroupLayout,
+    pub no_live: wgpu::BindGroup,
+    /// `no_live`'s buffers (the merged layout: an offline kernel's source is written for their lengths).
+    no_live_bufs: KernelBufs,
     /// Binding 19 of scenes without density grids (one cell), and the grid pass's bind group layout (grid_sim.wgsl).
     no_grid_view: wgpu::TextureView,
     grid_layout: wgpu::BindGroupLayout,
@@ -101,10 +99,10 @@ pub struct Gpu {
     /// pipelines (`translucent`, `volume_train`) by the kernel's variant key.
     tl_layout: Option<wgpu::BindGroupLayout>,
     tl_pipeline_layout: Option<wgpu::PipelineLayout>,
-    /// Its group 1: `vis_layout` without `finish`'s records, which the pass does not read (with them its three groups
-    /// are one buffer past Metal's 29 a stage), and `no_vis` made for it.
-    pub tl_vis_layout: Option<wgpu::BindGroupLayout>,
-    no_vis_tl: Option<wgpu::BindGroup>,
+    /// Its group 1: `live_layout` without `finish`'s records, which the pass does not read (with them its three groups
+    /// are one buffer past Metal's 29 a stage), and `no_live` made for it.
+    pub tl_live_layout: Option<wgpu::BindGroupLayout>,
+    no_live_tl: Option<wgpu::BindGroup>,
     tl_pipelines: PipelineMap<(u32, u64, bool, u32), TranslucentPipelines>,
     /// The kernel's passes beside `main` (`kernel_pass`) by kernel variant and entry point.
     kernel_passes: PipelineMap<(u32, u64, &'static str, u32)>,
@@ -143,7 +141,7 @@ pub struct Params {
     pub fog_color: [f32; 4], // ambient inscattering radiance rgb, max opacity
     pub vol: [f32; 4],       // volumetric scattering albedo (0 = off), phase anisotropy, extinction scale in range, -
     pub vol2: [f32; 4],      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    pub raster: [f32; 4],    // live primary visibility from the raster pass (1 = on), sub-pixel jitter x, y; ray tracing off (1)
+    pub jitter: [f32; 4],    // live: this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1); -
     pub cache: [f32; 4],     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
     pub motion: [f32; 4],    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1][0])
     /// First global triangle of each traversal group (`Prepared::groups`; group 4 = the first dynamic one). Hardware
@@ -385,11 +383,10 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
     if hwrt {
         scene.push(layout_entry(ACC_BINDING, ACCELERATION_STRUCTURE));
     }
-    // Group 1: the raster pass's visibility; then, merged, the one buffer (`heap::Live`, the loop guard's count in
-    // it); as written, the radiance cache's three, the light tiles' lists, the specular rays, the motion vectors, the
+    // Group 1: merged, the one buffer (`heap::Live`, the loop guard's count in it); as written, the radiance cache's three, the light tiles' lists, the specular rays, the motion vectors, the
     // direct light, the pixels left for `finish`, and the loop guard's count where a kernel of this device may have
     // the guard (one without it does not name the binding).
-    let mut live = vec![layout_entry(0, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false })];
+    let mut live = vec![];
     if merged {
         live.push(layout_entry(LIVE_BINDING, write));
     } else {
@@ -1732,21 +1729,20 @@ pub(crate) fn live_sizes(entries: u64, refl: u64, motion: u64, direct: u64, list
     [CACHE_SIZE * 4, CACHE_SIZE * 32, crate::merged::GUARD_WORDS as u64 * 4, entries * 32, refl, motion, direct, lists]
 }
 
-/// Group-1 bind group of the kernel: a primary-visibility texture, the radiance cache and the
-/// reflection resolve's inputs (`KernelBufs`); in the merged layout, the texture and the one buffer.
-/// `deferred`: with `finish`'s records (`vis_layout`; the translucency pass's `tl_vis_layout` is without).
-pub fn vis_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView, b: &KernelBufs, deferred: bool) -> wgpu::BindGroup {
+/// Group-1 bind group of the kernel: the radiance cache and the reflection resolve's inputs (`KernelBufs`); in the
+/// merged layout, the one buffer.
+/// `deferred`: with `finish`'s records (`live_layout`; the translucency pass's `tl_live_layout` is without).
+pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, deferred: bool) -> wgpu::BindGroup {
     fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry { binding, resource: b.binding() }
     }
-    let tex = wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) };
     match &b.merged {
-        Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &[tex, wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
+        Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &[wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
         None => {
-            let mut entries = vec![tex, e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
+            let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
             entries.extend(b.deferred.as_ref().filter(|_| deferred).map(|r| e(crate::merged::DEFERRED_BINDING, r)));
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
-            d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vis"), layout, entries: &entries })
+            d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &entries })
         }
     }
 }
@@ -2273,20 +2269,9 @@ impl Gpu {
             let wgsl = kernel_wgsl(&src, &KernelVariant { merged, uniform_tables, whole_tables, guard: loop_guard_of(false), ..KernelVariant::new(hwrt, switches, 0) });
             device.create_shader_module_trusted(wgpu::ShaderModuleDescriptor { label: Some("pathtrace"), source: wgpu::ShaderSource::Wgsl(wgsl.into()) }, kernel_checks())
         };
-        let [entries, vis_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: guard_room(hwrt) });
+        let [entries, live_entries, tl_entries] = kernel_layout_entries(LayoutShape { hwrt, merged, uniform_tables, whole_tables, guard: guard_room(hwrt) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries });
-        let vis_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis"), entries: &vis_entries });
-        let one = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("no vis"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let no_vis_view = one.create_view(&Default::default());
+        let live_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live"), entries: &live_entries });
         let no_grid_view = grid_texture(&device, "no grid", [1, 1, 1], false).create_view(&Default::default());
         let grid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("grid sim"),
@@ -2300,15 +2285,15 @@ impl Gpu {
                 layout_entry(6, storage_buffer(true)),
             ],
         });
-        let no_vis_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
-        let no_vis = vis_bind_group(&device, &vis_layout, &no_vis_view, &no_vis_bufs, true);
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&vis_layout)], immediate_size: 0 });
-        let (tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl) = if hwrt {
+        let no_live_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
+        let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, true);
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&live_layout)], immediate_size: 0 });
+        let (tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl) = if hwrt {
             let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucent"), entries: &tl_entries });
-            let tl_vis: Vec<_> = vis_entries.iter().filter(|e| merged || e.binding != crate::merged::DEFERRED_BINDING).copied().collect();
-            let vl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vis, translucent"), entries: &tl_vis });
+            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || e.binding != crate::merged::DEFERRED_BINDING).copied().collect();
+            let vl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live, translucent"), entries: &tl_vis });
             let tpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("translucent"), bind_group_layouts: &[Some(&layout), Some(&vl), Some(&l)], immediate_size: 0 });
-            let nv = vis_bind_group(&device, &vl, &no_vis_view, &no_vis_bufs, false);
+            let nv = live_bind_group(&device, &vl, &no_live_bufs, false);
             (Some(l), Some(tpl), Some(vl), Some(nv))
         } else {
             (None, None, None, None)
@@ -2318,7 +2303,7 @@ impl Gpu {
             dlss_sdk,
             #[cfg(dlss)]
             dlss_rr,
-            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: std::sync::Arc::new(src), module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), warming: Default::default(), layout, vis_layout, no_vis, no_vis_bufs, no_vis_view, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_vis_layout, no_vis_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
+            instance, adapter, timestamps, device, queue, adapter_info, uniform_tables, whole_tables, switches, approx, approx_default: approx, pipeline_cache, source: std::sync::Arc::new(src), module, merged, modules: Default::default(), pipeline_layout: pl, pipelines: Default::default(), warming: Default::default(), layout, live_layout, no_live, no_live_bufs, no_grid_view, grid_layout, fill: Default::default(), hwrt, pages: Default::default(), streams: Default::default(), tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl, tl_pipelines: Default::default(), kernel_passes: Default::default(), proc_cache: Default::default(), proc_blases: Default::default(),
         })
     }
 
@@ -4148,14 +4133,14 @@ impl Gpu {
             let mut p = base;
             p.size[2] = s;
             up.place(&mut p);
-            self.no_vis_bufs.place(&mut p);
+            self.no_live_bufs.place(&mut p);
             self.queue.write_buffer(&up.params, 0, bytemuck::bytes_of(&p));
             let mut enc = d.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("translucent"), timestamp_writes: None });
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &up.bg, &[]);
-                pass.set_bind_group(1, self.no_vis_tl.as_ref().unwrap(), &[]);
+                pass.set_bind_group(1, self.no_live_tl.as_ref().unwrap(), &[]);
                 pass.set_bind_group(2, &tbg, &[]);
                 pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             }
@@ -4232,7 +4217,7 @@ impl Gpu {
         }
         let (b_accum, b_params, bg) = (&up.accum, &up.params, &up.bg);
         let accum_size = b_accum.size();
-        let stopped_before = self.guard_trips(&self.no_vis_bufs, &up.kernel)?;
+        let stopped_before = self.guard_trips(&self.no_live_bufs, &up.kernel)?;
 
 
         let t1 = Instant::now();
@@ -4248,14 +4233,14 @@ impl Gpu {
                 let mut p = base;
                 p.size[2] = s + k;
                 up.place(&mut p);
-                self.no_vis_bufs.place(&mut p);
+                self.no_live_bufs.place(&mut p);
                 self.queue.write_buffer(b_params, 0, bytemuck::bytes_of(&p));
                 let mut enc = d.create_command_encoder(&Default::default());
                 {
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
                     pass.set_pipeline(&pipeline);
                     pass.set_bind_group(0, bg, &[]);
-                    pass.set_bind_group(1, &self.no_vis, &[]);
+                    pass.set_bind_group(1, &self.no_live, &[]);
                     pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
                 }
                 self.queue.submit([enc.finish()]);
@@ -4265,7 +4250,7 @@ impl Gpu {
         }
         timings.push(("trace_ms".into(), t1.elapsed().as_secs_f64() * 1000.0));
         // The loop guard, if the kernel has it: a render in which it stopped a loop has wrong pixels, and is an error.
-        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_vis_bufs, &up.kernel)?) {
+        if let (Some(before), Some(now)) = (stopped_before, self.guard_trips(&self.no_live_bufs, &up.kernel)?) {
             if now != before {
                 return Err(anyhow!("the loop guard stopped {} of the kernel's invocations at {} iterations (THREERT_LOOP_GUARD): a traversal that does not end on this scene's data, or a limit too low for it", now.wrapping_sub(before), loop_guard_of(up.kernel.features & F_UNITS != 0).unwrap_or(0)));
             }

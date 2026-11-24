@@ -482,37 +482,6 @@ fn an_emitting_particle_lights_both_its_sides_beside_a_lights_card() {
     assert!(b > 20.0 && (a / b - 1.0).abs() < 0.05, "the wall beside the particle: {a:.1} of 255 with its back to the wall, {b:.1} with its face");
 }
 
-/// Primary visibility by rasterization (`Raster`): a path starts at the triangle the pass drew at its pixel, which is
-/// the one its camera ray hits: the picture is the traced one's. The pass draws world-space triangles and is off in a
-/// scene with instances, which every mesh of a world is: a scene of rect lights' cards alone.
-#[test]
-fn a_rasterized_first_hit_is_the_traced_one() {
-    let presets = crate::default_presets_dir();
-    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
-    let mut w = World::default();
-    // (Turned to face the camera: a card lights the side of its node's -z.)
-    for (id, at, turn) in [(21, Vec3::new(-0.9, 0.2, 0.0), 3.6), (22, Vec3::new(0.8, -0.3, 1.0), 2.5)] {
-        let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 0.6, 0.3], "castShadow": true, "intensity": 3, "width": 1.2, "height": 0.8, "range": 0 })).unwrap();
-        w.set_object(id, format!("card{id}"), None, Kind::Light(card), true, false).unwrap();
-        w.set_transform(id, at, glam::Quat::from_rotation_y(turn), Vec3::ONE).unwrap();
-    }
-    w.set_object(4, "camera".into(), None, Kind::Camera(camera(50.0, None, manual(0.0))), true, false).unwrap();
-    w.set_transform(4, Vec3::new(0.0, 0.0, 5.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-    w.set_settings(Settings { camera: Some(4), ..Default::default() });
-    let (mut traced, mut drawn) = match (open(&w), open(&w)) {
-        (Ok(a), Ok(b)) => (a, b),
-        (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
-    };
-    assert!(!drawn.sc.instanced && drawn.sc.tris.len() == 4 && traced.raster.is_none(), "a scene of four world-space triangles, traced unless asked");
-    drawn.raster = Some(super::frame::Raster::new(&drawn.g, drawn.w, drawn.h));
-    (drawn.kernel_bg, drawn.tl_kernel_bg) = super::kernel_bind_groups(&drawn.g, drawn.raster.as_ref(), &drawn.targets);
-    let (a, b) = (picture(&mut traced, 64), picture(&mut drawn, 64));
-    let lit = a.chunks_exact(4).filter(|p| p[0] > 100).count();
-    assert!(lit > a.len() / 4 / 50, "the cards are in the picture ({lit} pixels)");
-    // (0 steps as measured; 4.9 with each index read one word on.)
-    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from the traced one", apart(&a, &b));
-}
-
 /// A mesh changed in place to triangles of more vertices (a crease: its two triangles share no corner any more) takes
 /// another run of vertices, and the mesh that lies after it keeps its own; changed back, it stays where it is. Each
 /// is read back through its indices, and the picture is a build's.
@@ -611,6 +580,33 @@ fn a_moved_card_beside_another_is_written_where_it_lies() {
         let (a, b) = (picture(&mut live, 32), picture(&mut fresh, 32));
         assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
     }
+}
+
+/// Ray tracing off and on again (`LiveCore::set_rays`): off, nothing is shadowed (what the panel shadowed on the
+/// wall is lit); on again, the picture is the first one's.
+#[test]
+fn rays_off_is_another_picture_and_on_again_the_first() {
+    let presets = crate::default_presets_dir();
+    let w = world();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    // (Pixels more than 20 steps apart in a colour: where a shadow was, where light had bounced.)
+    let changed = |a: &[u8], b: &[u8]| a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(x, y)| (0..3).any(|c| x[c].abs_diff(y[c]) > 20)).count();
+    let on = picture(&mut live, 48);
+    live.set_rays(false);
+    forget(&mut live);
+    let off = picture(&mut live, 48);
+    live.set_rays(true);
+    forget(&mut live);
+    let again = picture(&mut live, 48);
+    // What changes is what was in shadow: lit now, none dimmed as much. (Measured: 47 pixels, none on again.)
+    let by = |a: &[u8], b: &[u8], up: bool| a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(x, y)| (0..3).any(|c| if up { y[c] > x[c].saturating_add(20) } else { x[c] > y[c].saturating_add(20) })).count();
+    let (lit, dimmed) = (by(&on, &off, true), by(&on, &off, false));
+    eprintln!("rays off: {lit} pixels lit, {dimmed} dimmed");
+    assert!(changed(&on, &off) > 20 && lit > 20 && dimmed * 4 < lit, "rays off: {} pixels of the traced picture changed, {lit} lit and {dimmed} dimmed", changed(&on, &off));
+    assert!(changed(&on, &again) < 4 && apart(&on, &again) < 0.2, "rays on again: {} pixels from the first picture, {:.2} steps", changed(&on, &again), apart(&on, &again));
 }
 
 /// A particle that drifts, beside a system that stands still: its vertices' previous positions are the pass's last

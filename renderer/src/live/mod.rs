@@ -161,10 +161,9 @@ struct LiveParams {
 pub(super) const LIST_CANDIDATES: u32 = 2;
 
 /// The kernel's group-1 bind groups over a view's targets: the trace's, and the translucency pass's where the device
-/// has one (`gpu::Gpu::tl_vis_layout`: without `finish`'s records).
-fn kernel_bind_groups(g: &gpu::Gpu, raster: Option<&Raster>, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
-    let vis = raster.map_or(&g.no_vis_view, |r| &r.vis);
-    (gpu::vis_bind_group(&g.device, &g.vis_layout, vis, &targets.kernel, true), g.tl_vis_layout.as_ref().map(|l| gpu::vis_bind_group(&g.device, l, vis, &targets.kernel, false)))
+/// has one (`gpu::Gpu::tl_live_layout`: without `finish`'s records).
+fn kernel_bind_groups(g: &gpu::Gpu, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
+    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, true), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, false)))
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -347,13 +346,11 @@ pub struct LiveCore {
     profile: Option<Profile>,
     /// GPU time per frame without stalls (timestamp queries; None: measured by draining the queue twice a second).
     timer: Option<FrameTimer>,
-    /// Rasterized primary visibility (None: the kernel traces camera rays).
-    raster: Option<Raster>,
     /// World-space radiance cache (pathtrace.wgsl; None: THREERT_CACHE=0, paths trace every bounce).
     cache: Option<RadianceCache>,
     /// Kernel group 1: primary visibility + radiance cache + what the live passes read of a trace.
     kernel_bg: wgpu::BindGroup,
-    /// The same for the translucency pass (`gpu::Gpu::tl_vis_layout`; hardware traversal).
+    /// The same for the translucency pass (`gpu::Gpu::tl_live_layout`; hardware traversal).
     tl_kernel_bg: Option<wgpu::BindGroup>,
     /// Span (relative to the dynamic tail) re-transformed by the last in-place update whose previous-frame vertices
     /// (`Uploaded::prev_verts`) still hold the frame before it: synced to the current ones next frame.
@@ -561,9 +558,8 @@ impl LiveCore {
             }
         });
         let timer = (g.timestamps && profile.is_none()).then(|| FrameTimer::new(&g.device));
-        let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline() });
-        let (kernel_bg, tl_kernel_bg) = kernel_bind_groups(&g, raster.as_ref(), &targets);
+        let (kernel_bg, tl_kernel_bg) = kernel_bind_groups(&g, &targets);
         // (Read whenever a kernel of this session may have the guard: under software traversal a scene's first unit
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
@@ -580,7 +576,7 @@ impl LiveCore {
         let mut core = LiveCore {
             kernel: None,
             more_features: Default::default(),
-            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();
         Ok(core)
@@ -822,7 +818,7 @@ impl LiveCore {
             return;
         }
         self.targets.kernel.deferred = Some(gpu::deferred_buffer(&self.g.device, (pixels + pixels / 4).min(self.w as u64 * self.h as u64)));
-        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
     }
 
     /// The view at another size (its host's window, in pixels): the targets that follow the size are made again
@@ -840,13 +836,10 @@ impl LiveCore {
         (self.w, self.h, self.aspect) = (w, h, w as f32 / h as f32);
         self.reconstructor.invalidate();
         self.targets.resize(&self.g, &self.passes, w, h);
-        if self.raster.is_some() {
-            self.raster = Some(Raster::new(&self.g, w, h));
-        }
         if let Some(c) = &mut self.cache {
             c.bufs = self.targets.kernel.cache.clone();
         }
-        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
         self.g.set_accum(&mut self.sc.up, &self.targets.accum);
         self.apply_post();
         // As a new view: no history, no frame before this one.

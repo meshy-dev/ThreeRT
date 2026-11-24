@@ -647,8 +647,7 @@ What procedural surfaces are, today (ROADMAP § 6 step 1):
 - Not light-sampled: an emissive procedural surface lights others only through their BSDF rays (as emissive media).
 - Always instances: moving a `ProceduralMesh` rewrites its record and TLAS transform, never rebuilds the scene; its
   motion vectors come from the previous transform. Replacing its boxes or data (`needsUpdate`) rebuilds.
-- Live primary visibility is traced (the raster experiment draws triangles only), and a click picks the boxes (the CPU
-  does not run the function).
+- A click picks the boxes (the CPU does not run the function).
 
 Hits carry `PROC_BIT | material << 23 | box` as their triangle, the octahedral object-space normal (15 bits per
 component) in u, the attribute in v and the mesh's record (pathtrace.wgsl `proc_hit`), so `surface()` takes them apart
