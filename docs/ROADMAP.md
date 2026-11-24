@@ -2805,6 +2805,21 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**A particle system is a mesh and an instance (2026-11-24).** Particles were world-space triangles of their own
+kind: two a particle among the scene's dynamic triangles (the translucent ones after everything else, in a BLAS of
+their own), a row a triangle, their emitters by a nominal area in the triangles' attributes, every size fixed when
+the scene was uploaded. Now a system is what any geometry that deforms is: a mesh of the pool (a quad a particle,
+four vertices), one instance, a BLAS of its own built again after the particle passes. Stateless and stateful
+systems, those the lights are sampled by (their triangles are the instance's emitters) and translucent ones (an
+instance of the translucency pass's TLAS each) alike; a particle keeps its own object, which a hit finds from its
+instance's and its triangle. The world-space form is gone from the build, the layout, the passes and the kernel.
+TBD-PT
+Not changed: a system that comes or goes, a particle function or program, still rebuild the scene.
+Tests: the build's five kinds of system (`a_particle_system_is_a_mesh_of_quads_and_an_instance`); a particle's
+previous positions and the motion at its pixels beside another system; `translucent/systems` (two translucent
+systems, their order reversed between the image's sides).
+Mutations: TBD-PM
+
 **Volumes and density grids come in place (2026-11-23, after it).** A volume that came, went or was set again
 while a game ran, a still volume's first move, a volume function, a new density grid and a grid program each had
 the scene built again. On Bistro (as above), the frame the edit landed in:

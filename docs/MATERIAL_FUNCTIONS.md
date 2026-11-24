@@ -146,10 +146,11 @@ vec4(0)); <code> return o; }`:
 | `custom` | the material function's `i.custom` for this particle; `i.op` / `i.ob` are its center and bounds |
 
 Parameters are `$Name`, as in material functions. A particle function has no state: it is a function of time, the camera
-and its random numbers, so every client places the same particles and a frame can be re-rendered. Each particle is two
-dynamic triangles and an object of its own; a compute pass (`renderer/shaders/particles.wgsl`) writes them (positions,
-shading normal and tangent from `u` / `v`), last frame's positions (motion vectors) and the BLAS input, then the dynamic
-BLASes and the TLAS are rebuilt. Moving the node moves `i.pivot`. Offline renders
+and its random numbers, so every client places the same particles and a frame can be re-rendered. A particle system is
+a mesh of its own, a quad a particle, and one instance of it; each particle has an object of its own. A compute pass
+(`renderer/shaders/particles.wgsl`) writes the mesh's vertices (positions, shading normal and tangent from `u` / `v`)
+and last frame's positions (motion vectors), then the system's BLAS and the TLAS are built again. Moving the node
+moves `i.pivot`. Offline renders
 place the particles once, at the scene time. Particles need hardware ray tracing (with software traversal they stay
 collapsed at the pivot) and cast no shadow by default.
 
@@ -191,8 +192,8 @@ sparks.customData = [f.state.boomAt, 0, 0, 0];
 A particle node whose material is `transparent` (three.js's flag) is drawn by the translucency pass instead
 (`renderer/shaders/translucent.wgsl`), as UE draws translucent materials:
 
-- **Outside the scene.** Its triangles are in no acceleration structure the path tracer uses, only in their own. They
-  cast no shadow and show in no reflection, refraction or GI (UE's default for translucency; docs/ROADMAP.md, Known
+- **Outside the scene.** Its mesh is in no acceleration structure the path tracer uses, only in the pass's own (an
+  instance of it a system). They cast no shadow and show in no reflection, refraction or GI (UE's default for translucency; docs/ROADMAP.md, Known
   parity gaps).
 - **Over the image.** Per output pixel, after the temporal filter (live) or over the converged image (offline), a ray
   goes as far as the opaque surface the pixel shows. Then:

@@ -1424,7 +1424,7 @@ and in the merged layout alike, **and the same 23 fail on main's build, with the
   `hidden-in-place-live`, `instance-data`, `lit-normal`, `lit-orientation`, `motion-repose`, `node-custom`,
   `quad-placement`, `shown-in-place-live` (13; `particles/burst-not-yet` expects nothing drawn and passes);
   `gpu-particles/beside-particles`, `plane`, `voxels`, `voxels-live`, `voxels-side` (5); `translucent/depth`,
-  `translucent/order` (translucent particles);
+  `translucent/order`, `translucent/systems` (translucent particles);
 - `volume/lighting`, `volume/lighting-offline` (6 for 1): their subject is one translucent particle in front of a
   6-nit wall, so these two are the same missing particles: the region reads the wall;
 - `surface/windows` (0.3934 for 0.4234): not explained. Its scene is one plane with the library's facade windows
@@ -1612,9 +1612,9 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   the section has the material and where the section's triangles and emitters start; its instance's record has
   its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
   light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
-- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (a light's card, a particle's, a
-  flattened scene's) has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the
-  world-space triangles', then the translucent particles'.
+- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (a light's card, a flattened scene's)
+  has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the world-space
+  triangles'.
 - **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an
   acceleration structure does: 48 bytes each, in the triangles' order, (v0, id), (v1 - v0, id), (v2 - v0, -). A
   candidate's test reads nothing else. The ids: a world-space triangle's flags; a mesh's section, and its index in
@@ -1623,7 +1623,16 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
 - **A hit reads** its triangle's indices and its three vertices' records (`tri_data(triangle, instance, part)`).
 - **What shares.** Corners equal bit for bit in position, normal, UV and tangent are one vertex: the still
   world-space triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles
-  the CPU or a pass writes whole (those that move in world space, particles) keep three vertices each.
+  the CPU writes whole (those that move in world space) keep three vertices each.
+- **Particle systems.** A system is a mesh of the pool, four vertices and two triangles a particle, and one
+  instance that places nothing (`scene::particle_mesh`, `INST_PARTICLES`): its pass writes the vertices in the
+  world and their previous positions, and its BLAS is built again after the passes, with the TLAS
+  (`Gpu::build_particles`). A particle has an object of its own, from the instance's on: a hit's is its
+  triangle's index in the mesh / 2 past it (kernel feature `F_PART`). A system the lights are sampled by has an
+  emitter a triangle among its instance's, weighed by half the particle's nominal area and taken again from the
+  vertices every frame. A translucent system's instance is hidden from the scene's TLAS and is an instance of
+  the translucency pass's own. The same whatever `THREERT_INSTANCING` says; under software traversal the passes
+  do not run.
 - **Tangents.** A vertex's own: the tangent at a hit is its triangle's three vertices' there, the hand its first
   vertex's, placed by its instance (`hit_tangent`; read only where a frame is asked, by a normal map or a
   function). A model's file gives them; a primitive of a file that has UVs and no tangents has them made where it

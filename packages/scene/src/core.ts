@@ -1308,7 +1308,7 @@ export interface ParticleBinding {
 /**
  * `count` particles that `emitter` places every frame (GPU), drawn with `material` (alpha-tested materials give soft
  * streaks and sprites; the material function reads each particle's `i.custom`). Particles cast no shadow by default.
- * Hardware ray tracing only (they are dynamic triangles).
+ * Hardware ray tracing only (a GPU pass places them every frame).
  */
 export class Particles extends Object3D {
   override type = "Particles";
@@ -1390,7 +1390,7 @@ export interface ParticleCollide {
  * `spawn` (the game's own, e.g. debris turned to dust), changed by `program`, collided as `collide` says, and drawn as
  * camera-facing quads with `material` (lit; emissive materials glow, with `emitterArea` as for `Particles`). Each
  * particle's colour is the material function's `i.custom`. When more are born than there is room for, the oldest slots
- * are reused. Hardware ray tracing only (they are dynamic triangles); particles cast no shadow by default.
+ * are reused. Hardware ray tracing only (a GPU pass places them every frame); particles cast no shadow by default.
  */
 export class GpuParticles extends Object3D {
   override type = "GpuParticles";
