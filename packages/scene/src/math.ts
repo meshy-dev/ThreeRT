@@ -303,7 +303,7 @@ export class Euler {
   private _x: number;
   private _y: number;
   private _z: number;
-  order: EulerOrder;
+  private _order: EulerOrder;
   /** Called after a change (an object's rotation / quaternion keep each other and the object in step). */
   _onChange(): void {}
   /** @internal The object whose rotation this is, if any (weakly: no cycle). */
@@ -312,8 +312,11 @@ export class Euler {
     this._x = x;
     this._y = y;
     this._z = z;
-    this.order = order;
+    this._order = order;
   }
+  /** Assigning the order recomposes the object's quaternion, as three.js does. */
+  get order() { return this._order; }
+  set order(value: EulerOrder) { this._order = value; this._onChange(); }
   get x() { return this._x; }
   set x(v) { this._x = v; this._onChange(); }
   get y() { return this._y; }
@@ -324,7 +327,7 @@ export class Euler {
     this._x = x;
     this._y = y;
     this._z = z;
-    this.order = order;
+    this._order = order;
     this._onChange();
     return this;
   }
@@ -344,7 +347,7 @@ export class Euler {
       this._x = Math.atan2(m32, m22);
       this._z = 0;
     }
-    this.order = "XYZ";
+    this._order = "XYZ";
     if (notify) this._onChange();
     return this;
   }
