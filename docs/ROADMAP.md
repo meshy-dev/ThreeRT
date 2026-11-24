@@ -548,6 +548,12 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
           at most 0.39 against two runs of the same build's 0.14–0.26 (TokyoRT `tools/quality.ts --swap`). Taken up
           again if a recording shows a 140 m flicker (replayed in lockstep frame by frame first). The pop seen was the
           480 m switch (TokyoRT #11).
+        - the 480 m switch after TokyoRT #11 (the far level in the dress's colours): towers SSIM 0.983, within the bar;
+          the skyline 0.967, not. Each far building's own window module (bays, layout, fractions, as the dress draws
+          them) moved it to 0.968 for 8 % more far triangles, so it was not kept: what is left is structure all over
+          (roof rims, rooftop plant, the windows' tone by kind of building, trees), each a little. A far level the dress
+          makes itself (an L2 bake: walls, roofs and flat window quads, ~5–10 M triangles for the area, in place of the
+          source mesher's buildings) would agree by construction; it is a later item. § 0's order goes on to (4).
     - (4) step 6a–6d below, in that order;
     - (5) the rest of step 2: Shibuya stitched in (~20 km²), the drive, expressway and flight paths, resident memory,
         the first frame;
