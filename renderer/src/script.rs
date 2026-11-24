@@ -774,9 +774,11 @@ impl ScriptHost {
     /// Sets the frame script's clock to `t` (s) and shows the scene settled at that moment (an offline render at a scene
     /// time; frames from there advance it as before).
     /// Bundles built before `seek` existed have none: nothing to do then.
+    /// Under setup's budget, not a frame's: it is no frame anyone waits on, and its entry also syncs all that setup
+    /// made (a streamed city's hundred cells at the radii an offline render asks for take more than a frame's 50 ms).
     pub fn seek(&self, t: f32) -> Result<()> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
-        self.call(FRAME_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
+        self.call(SETUP_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
             Some(f) => f.call((t as f64, now)),
             None => Ok(()),
         })
