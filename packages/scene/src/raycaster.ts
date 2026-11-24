@@ -9,7 +9,7 @@
 // what a shape overlaps or meets when moved. Both see the world as the engine has it, with or without a tick since
 // the last change; what the running script changed in the scene reaches the engine when it returns (docs/RUNTIME.md,
 // World handlers).
-import { getEngineBodies, InstancedMesh, Mesh, Object3D, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
+import { getEngineBodies, InstancedMesh, Layers, Mesh, Object3D, onLayers, type PerspectiveCamera, physicsBodies, physicsQuery, ProceduralGeometry, ProceduralMesh } from "./core.ts";
 import { Box3, Matrix4, Quaternion, Ray, Vector2, Vector3 } from "./math.ts";
 import type { BufferGeometry } from "./geometry.ts";
 
@@ -84,6 +84,9 @@ export class Raycaster {
   near: number;
   far: number;
   camera: PerspectiveCamera | null = null;
+  /** three.js: `intersectObject(s)` tests only objects on one of these layers (layer 0 alone by default); their
+   *  children are visited whatever the parent's layers. */
+  layers = new Layers();
   params = { Mesh: {}, Line: { threshold: 1 }, Points: { threshold: 1 } };
   constructor(origin?: Vector3, direction?: Vector3, near = 0, far = Infinity) {
     this.ray = new Ray(origin?.clone(), direction?.clone());
@@ -132,6 +135,13 @@ export class Raycaster {
 
   private visit(o: Object3D, recursive: boolean, out: Intersection[]): void {
     o.updateWorldMatrix(true, false);
+    // (An object on none of the ray's layers is not tested; its children still are, as three.js.)
+    if (onLayers(o, this.layers)) this.test(o, out);
+    if (recursive) for (const c of o.children) this.visit(c, true, out);
+  }
+
+  /** The ray against the object itself. */
+  private test(o: Object3D, out: Intersection[]): void {
     if (o instanceof InstancedMesh) {
       if (!(o.geometry instanceof ProceduralGeometry)) {
         const m = new Matrix4();
@@ -147,7 +157,6 @@ export class Raycaster {
     } else if (o instanceof ProceduralMesh) {
       this.boxes(o, o.geometry.boxes, o.matrixWorld, out);
     }
-    if (recursive) for (const c of o.children) this.visit(c, true, out);
   }
 
   private local(world: Matrix4): Ray {

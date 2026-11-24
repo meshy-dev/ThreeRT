@@ -193,7 +193,7 @@ export class VoxelBody extends Object3D {
     };
     Object.defineProperty(this, "position", { configurable: true, enumerable: true, get: () => (pull(), p) });
     Object.defineProperty(this, "quaternion", { configurable: true, enumerable: true, get: () => (pull(), q) });
-    Object.defineProperty(this, "rotation", { configurable: true, enumerable: true, get: () => (pull(), e.setFromQuaternion(q, false), e) });
+    Object.defineProperty(this, "rotation", { configurable: true, enumerable: true, get: () => (pull(), e.setFromQuaternion(q, undefined, false), e) });
   }
 
   /** @internal The engine's record of it, taken in. */

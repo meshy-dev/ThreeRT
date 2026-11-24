@@ -47,6 +47,102 @@ export class Vector3 {
   multiplyScalar(s: number): this {
     return this.set(this.x * s, this.y * s, this.z * s);
   }
+  // Component-wise arithmetic, as three.js r187 has it. Each goes through set(), so a tracked position reports one change.
+  setX(x: number): this {
+    return this.set(x, this.y, this.z);
+  }
+  setY(y: number): this {
+    return this.set(this.x, y, this.z);
+  }
+  setZ(z: number): this {
+    return this.set(this.x, this.y, z);
+  }
+  getComponent(index: number): number {
+    if (index === 0) return this.x;
+    if (index === 1) return this.y;
+    if (index === 2) return this.z;
+    throw new RangeError(`index is out of range: ${index}`);
+  }
+  addScalar(s: number): this {
+    return this.set(this.x + s, this.y + s, this.z + s);
+  }
+  addVectors(a: Vector3, b: Vector3): this {
+    return this.set(a.x + b.x, a.y + b.y, a.z + b.z);
+  }
+  subScalar(s: number): this {
+    return this.set(this.x - s, this.y - s, this.z - s);
+  }
+  multiply(v: Vector3): this {
+    return this.set(this.x * v.x, this.y * v.y, this.z * v.z);
+  }
+  multiplyVectors(a: Vector3, b: Vector3): this {
+    return this.set(a.x * b.x, a.y * b.y, a.z * b.z);
+  }
+  divide(v: Vector3): this {
+    return this.set(this.x / v.x, this.y / v.y, this.z / v.z);
+  }
+  divideScalar(s: number): this {
+    return this.multiplyScalar(1 / s);
+  }
+  min(v: Vector3): this {
+    return this.set(Math.min(this.x, v.x), Math.min(this.y, v.y), Math.min(this.z, v.z));
+  }
+  max(v: Vector3): this {
+    return this.set(Math.max(this.x, v.x), Math.max(this.y, v.y), Math.max(this.z, v.z));
+  }
+  /** Assumes min <= max component-wise, as three.js does. */
+  clamp(min: Vector3, max: Vector3): this {
+    return this.set(
+      Math.max(min.x, Math.min(max.x, this.x)),
+      Math.max(min.y, Math.min(max.y, this.y)),
+      Math.max(min.z, Math.min(max.z, this.z)),
+    );
+  }
+  clampScalar(minVal: number, maxVal: number): this {
+    return this.set(
+      Math.max(minVal, Math.min(maxVal, this.x)),
+      Math.max(minVal, Math.min(maxVal, this.y)),
+      Math.max(minVal, Math.min(maxVal, this.z)),
+    );
+  }
+  clampLength(min: number, max: number): this {
+    const l = this.length();
+    return this.divideScalar(l || 1).multiplyScalar(Math.max(min, Math.min(max, l)));
+  }
+  floor(): this {
+    return this.set(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z));
+  }
+  ceil(): this {
+    return this.set(Math.ceil(this.x), Math.ceil(this.y), Math.ceil(this.z));
+  }
+  round(): this {
+    return this.set(Math.round(this.x), Math.round(this.y), Math.round(this.z));
+  }
+  roundToZero(): this {
+    return this.set(Math.trunc(this.x), Math.trunc(this.y), Math.trunc(this.z));
+  }
+  negate(): this {
+    return this.set(-this.x, -this.y, -this.z);
+  }
+  manhattanLength(): number {
+    return Math.abs(this.x) + Math.abs(this.y) + Math.abs(this.z);
+  }
+  setLength(length: number): this {
+    return this.normalize().multiplyScalar(length);
+  }
+  lerpVectors(v1: Vector3, v2: Vector3, alpha: number): this {
+    return this.set(v1.x + (v2.x - v1.x) * alpha, v1.y + (v2.y - v1.y) * alpha, v1.z + (v2.z - v1.z) * alpha);
+  }
+  distanceToSquared(v: Vector3): number {
+    const dx = this.x - v.x, dy = this.y - v.y, dz = this.z - v.z;
+    return dx * dx + dy * dy + dz * dz;
+  }
+  manhattanDistanceTo(v: Vector3): number {
+    return Math.abs(this.x - v.x) + Math.abs(this.y - v.y) + Math.abs(this.z - v.z);
+  }
+  equals(v: Vector3): boolean {
+    return v.x === this.x && v.y === this.y && v.z === this.z;
+  }
   dot(v: Vector3): number {
     return this.x * v.x + this.y * v.y + this.z * v.z;
   }
@@ -87,6 +183,15 @@ export class Vector3 {
       (e[1] * x + e[5] * y + e[9] * z + e[13]) * w,
       (e[2] * x + e[6] * y + e[10] * z + e[14]) * w,
     );
+  }
+  applyMatrix3(m: Matrix3): this {
+    const e = m.elements;
+    const { x, y, z } = this;
+    return this.set(e[0] * x + e[3] * y + e[6] * z, e[1] * x + e[4] * y + e[7] * z, e[2] * x + e[5] * y + e[8] * z);
+  }
+  /** Transforms a normal by `Matrix3.getNormalMatrix` output and renormalizes, as three.js does. */
+  applyNormalMatrix(m: Matrix3): this {
+    return this.applyMatrix3(m).normalize();
   }
   transformDirection(m: Matrix4): this {
     const e = m.elements;
@@ -278,7 +383,23 @@ export class Quaternion {
   }
   /** The inverse rotation (of a unit quaternion). */
   invert(): this {
+    return this.conjugate();
+  }
+  conjugate(): this {
     return this.set(-this._x, -this._y, -this._z, this._w);
+  }
+  identity(): this {
+    return this.set(0, 0, 0, 1);
+  }
+  lengthSq(): number {
+    return this._x * this._x + this._y * this._y + this._z * this._z + this._w * this._w;
+  }
+  length(): number {
+    return Math.sqrt(this.lengthSq());
+  }
+  /** Set to the spherical interpolation of `qa` to `qb` at `t` (three.js). */
+  slerpQuaternions(qa: Quaternion, qb: Quaternion, t: number): this {
+    return this.copy(qa).slerp(qb, t);
   }
   equals(q: Quaternion): boolean {
     return q._x === this._x && q._y === this._y && q._z === this._z && q._w === this._w;
@@ -289,8 +410,14 @@ export class Quaternion {
     const x0 = Math.random(), r1 = Math.sqrt(1 - x0), r2 = Math.sqrt(x0);
     return this.set(r1 * Math.sin(theta1), r1 * Math.cos(theta1), r2 * Math.sin(theta2), r2 * Math.cos(theta2));
   }
-  toArray(): [number, number, number, number] {
-    return [this._x, this._y, this._z, this._w];
+  toArray(): [number, number, number, number];
+  toArray<T extends { [i: number]: number }>(array: T, offset?: number): T;
+  toArray(array: { [i: number]: number } = [], offset = 0): { [i: number]: number } {
+    array[offset] = this._x;
+    array[offset + 1] = this._y;
+    array[offset + 2] = this._z;
+    array[offset + 3] = this._w;
+    return array;
   }
   fromArray(a: ArrayLike<number>, o = 0): this {
     return this.set(a[o], a[o + 1], a[o + 2], a[o + 3]);
@@ -331,25 +458,110 @@ export class Euler {
     this._onChange();
     return this;
   }
-  setFromQuaternion(q: Quaternion, notify = true): this {
-    const m = new Matrix4().makeRotationFromQuaternion(q);
+  copy(euler: Euler): this {
+    return this.set(euler._x, euler._y, euler._z, euler._order);
+  }
+  clone(): Euler {
+    return new Euler(this._x, this._y, this._z, this._order);
+  }
+  equals(euler: Euler): boolean {
+    return euler._x === this._x && euler._y === this._y && euler._z === this._z && euler._order === this._order;
+  }
+  /** `[x, y, z, order?]`; a missing order keeps the current one, as three.js does. */
+  fromArray(array: ArrayLike<number | EulerOrder>): this {
+    const order = array[3] === undefined ? this._order : (array[3] as EulerOrder);
+    return this.set(array[0] as number, array[1] as number, array[2] as number, order);
+  }
+  toArray(array: Array<number | EulerOrder> = [], offset = 0): Array<number | EulerOrder> {
+    array[offset] = this._x;
+    array[offset + 1] = this._y;
+    array[offset + 2] = this._z;
+    array[offset + 3] = this._order;
+    return array;
+  }
+  setFromVector3(v: Vector3, order: EulerOrder = this._order): this {
+    return this.set(v.x, v.y, v.z, order);
+  }
+  /** The angles of the (unscaled) rotation in `m`, in any of the six orders (three.js r187). */
+  setFromRotationMatrix(m: Matrix4, order: EulerOrder = this._order, update = true): this {
     const te = m.elements;
     const clamp = (v: number) => Math.min(1, Math.max(-1, v));
     const m11 = te[0], m12 = te[4], m13 = te[8];
-    const m22 = te[5], m23 = te[9];
-    const m32 = te[6], m33 = te[10];
-    // Only XYZ is needed for the rotation<->quaternion sync; other orders go through Quaternion.setFromEuler.
-    this._y = Math.asin(clamp(m13));
-    if (Math.abs(m13) < 0.9999999) {
-      this._x = Math.atan2(-m23, m33);
-      this._z = Math.atan2(-m12, m11);
-    } else {
-      this._x = Math.atan2(m32, m22);
-      this._z = 0;
+    const m21 = te[1], m22 = te[5], m23 = te[9];
+    const m31 = te[2], m32 = te[6], m33 = te[10];
+    switch (order) {
+      case "XYZ":
+        this._y = Math.asin(clamp(m13));
+        if (Math.abs(m13) < 0.9999999) {
+          this._x = Math.atan2(-m23, m33);
+          this._z = Math.atan2(-m12, m11);
+        } else {
+          this._x = Math.atan2(m32, m22);
+          this._z = 0;
+        }
+        break;
+      case "YXZ":
+        this._x = Math.asin(-clamp(m23));
+        if (Math.abs(m23) < 0.9999999) {
+          this._y = Math.atan2(m13, m33);
+          this._z = Math.atan2(m21, m22);
+        } else {
+          this._y = Math.atan2(-m31, m11);
+          this._z = 0;
+        }
+        break;
+      case "ZXY":
+        this._x = Math.asin(clamp(m32));
+        if (Math.abs(m32) < 0.9999999) {
+          this._y = Math.atan2(-m31, m33);
+          this._z = Math.atan2(-m12, m22);
+        } else {
+          this._y = 0;
+          this._z = Math.atan2(m21, m11);
+        }
+        break;
+      case "ZYX":
+        this._y = Math.asin(-clamp(m31));
+        if (Math.abs(m31) < 0.9999999) {
+          this._x = Math.atan2(m32, m33);
+          this._z = Math.atan2(m21, m11);
+        } else {
+          this._x = 0;
+          this._z = Math.atan2(-m12, m22);
+        }
+        break;
+      case "YZX":
+        this._z = Math.asin(clamp(m21));
+        if (Math.abs(m21) < 0.9999999) {
+          this._x = Math.atan2(-m23, m22);
+          this._y = Math.atan2(-m31, m11);
+        } else {
+          this._x = 0;
+          this._y = Math.atan2(m13, m33);
+        }
+        break;
+      case "XZY":
+        this._z = Math.asin(-clamp(m12));
+        if (Math.abs(m12) < 0.9999999) {
+          this._x = Math.atan2(m32, m22);
+          this._y = Math.atan2(m13, m11);
+        } else {
+          this._x = Math.atan2(-m23, m33);
+          this._y = 0;
+        }
+        break;
     }
-    this._order = "XYZ";
-    if (notify) this._onChange();
+    this._order = order;
+    if (update) this._onChange();
     return this;
+  }
+  /** The angles of `q` in `order` (default: this Euler's own order, which an object's rotation keeps). */
+  setFromQuaternion(q: Quaternion, order: EulerOrder = this._order, update = true): this {
+    return this.setFromRotationMatrix(new Matrix4().makeRotationFromQuaternion(q), order, update);
+  }
+  /** The same rotation, expressed in `newOrder` (three.js; may flip to an equivalent solution). */
+  reorder(newOrder: EulerOrder): this {
+    return this.setFromQuaternion(new Quaternion().setFromEuler(this), newOrder);
   }
 }
 
@@ -368,6 +580,11 @@ export class Matrix4 {
   }
   clone(): Matrix4 {
     return new Matrix4().copy(this);
+  }
+  /** `m` as the upper 3x3, with no translation, as three.js does. */
+  setFromMatrix3(m: Matrix3): this {
+    const me = m.elements;
+    return this.set(me[0], me[3], me[6], 0, me[1], me[4], me[7], 0, me[2], me[5], me[8], 0, 0, 0, 0, 1);
   }
   compose(p: Vector3, q: Quaternion, s: Vector3): this {
     return this.composeComponents(p.x, p.y, p.z, q.x, q.y, q.z, q.w, s.x, s.y, s.z);
@@ -424,6 +641,63 @@ export class Matrix4 {
     te[2] = x.z; te[6] = y.z; te[10] = z.z;
     return this;
   }
+  /** Determinant of the upper 3x3 (rotation and scale) part. */
+  determinantAffine(): number {
+    const te = this.elements;
+    return te[0] * (te[5] * te[10] - te[9] * te[6])
+      - te[4] * (te[1] * te[10] - te[9] * te[2])
+      + te[8] * (te[1] * te[6] - te[5] * te[2]);
+  }
+  /** Sets the rotation part from three basis vectors and clears the translation, as three.js does. */
+  makeBasis(xAxis: Vector3, yAxis: Vector3, zAxis: Vector3): this {
+    return this.set(
+      xAxis.x, yAxis.x, zAxis.x, 0,
+      xAxis.y, yAxis.y, zAxis.y, 0,
+      xAxis.z, yAxis.z, zAxis.z, 0,
+      0, 0, 0, 1,
+    );
+  }
+  /** The first three columns; the unit axes for a singular matrix, as three.js r187. */
+  extractBasis(xAxis: Vector3, yAxis: Vector3, zAxis: Vector3): this {
+    if (this.determinantAffine() === 0) {
+      xAxis.set(1, 0, 0);
+      yAxis.set(0, 1, 0);
+      zAxis.set(0, 0, 1);
+      return this;
+    }
+    const te = this.elements;
+    xAxis.set(te[0], te[1], te[2]);
+    yAxis.set(te[4], te[5], te[6]);
+    zAxis.set(te[8], te[9], te[10]);
+    return this;
+  }
+  /** `m`'s rotation with scale and translation removed; identity for a singular `m`, as three.js r187. */
+  extractRotation(m: Matrix4): this {
+    if (m.determinantAffine() === 0) return this.identity();
+    const me = m.elements;
+    const scaleX = 1 / Math.hypot(me[0], me[1], me[2]);
+    const scaleY = 1 / Math.hypot(me[4], me[5], me[6]);
+    const scaleZ = 1 / Math.hypot(me[8], me[9], me[10]);
+    this.elements = [
+      me[0] * scaleX, me[1] * scaleX, me[2] * scaleX, 0,
+      me[4] * scaleY, me[5] * scaleY, me[6] * scaleY, 0,
+      me[8] * scaleZ, me[9] * scaleZ, me[10] * scaleZ, 0,
+      0, 0, 0, 1,
+    ];
+    return this;
+  }
+  /** Rotation of `angle` radians about the unit vector `axis`. */
+  makeRotationAxis(axis: Vector3, angle: number): this {
+    const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+    const x = axis.x, y = axis.y, z = axis.z;
+    const tx = t * x, ty = t * y;
+    return this.set(
+      tx * x + c, tx * y - s * z, tx * z + s * y, 0,
+      tx * y + s * z, ty * y + c, ty * z - s * x, 0,
+      tx * z - s * y, ty * z + s * x, t * z * z + c, 0,
+      0, 0, 0, 1,
+    );
+  }
   decompose(p: Vector3, q: Quaternion, s: Vector3): this {
     const te = this.elements;
     p.set(te[12], te[13], te[14]);
@@ -461,6 +735,30 @@ export class Matrix4 {
       n43 * (+n11 * n24 * n32 - n11 * n22 * n34 - n14 * n21 * n32 + n12 * n21 * n34 + n14 * n22 * n31 - n12 * n24 * n31) +
       n44 * (-n13 * n22 * n31 - n11 * n23 * n32 + n11 * n22 * n33 + n13 * n21 * n32 - n12 * n21 * n33 + n12 * n23 * n31)
     );
+  }
+  /** Multiplies every element by `s`, as three.js does. */
+  multiplyScalar(s: number): this {
+    const te = this.elements;
+    for (let k = 0; k < 16; k++) te[k] *= s;
+    return this;
+  }
+  /** Scales the first three columns by `v`, as three.js does. */
+  scale(v: Vector3): this {
+    const te = this.elements;
+    const x = v.x, y = v.y, z = v.z;
+    te[0] *= x; te[4] *= y; te[8] *= z;
+    te[1] *= x; te[5] *= y; te[9] *= z;
+    te[2] *= x; te[6] *= y; te[10] *= z;
+    te[3] *= x; te[7] *= y; te[11] *= z;
+    return this;
+  }
+  /** The largest of the three basis-column lengths. */
+  getMaxScaleOnAxis(): number {
+    const te = this.elements;
+    const scaleXSq = te[0] * te[0] + te[1] * te[1] + te[2] * te[2];
+    const scaleYSq = te[4] * te[4] + te[5] * te[5] + te[6] * te[6];
+    const scaleZSq = te[8] * te[8] + te[9] * te[9] + te[10] * te[10];
+    return Math.sqrt(Math.max(scaleXSq, scaleYSq, scaleZSq));
   }
   /** Transpose in place, as three.js does. */
   transpose(): this {
@@ -550,8 +848,115 @@ export class Matrix4 {
   }
 }
 
+/** A 3x3 matrix, column-major `elements`, as three.js. */
+export class Matrix3 {
+  readonly isMatrix3 = true;
+  elements: number[];
+  /** Row-major arguments, as three.js. */
+  constructor(n11?: number, n12?: number, n13?: number, n21?: number, n22?: number, n23?: number, n31?: number, n32?: number, n33?: number) {
+    this.elements = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    if (n11 !== undefined) this.set(n11, n12!, n13!, n21!, n22!, n23!, n31!, n32!, n33!);
+  }
+  /** Row-major arguments, as three.js. */
+  set(n11: number, n12: number, n13: number, n21: number, n22: number, n23: number, n31: number, n32: number, n33: number): this {
+    const te = this.elements;
+    te[0] = n11; te[1] = n21; te[2] = n31;
+    te[3] = n12; te[4] = n22; te[5] = n32;
+    te[6] = n13; te[7] = n23; te[8] = n33;
+    return this;
+  }
+  identity(): this {
+    return this.set(1, 0, 0, 0, 1, 0, 0, 0, 1);
+  }
+  copy(m: Matrix3): this {
+    for (let k = 0; k < 9; k++) this.elements[k] = m.elements[k];
+    return this;
+  }
+  clone(): Matrix3 {
+    return new Matrix3().copy(this);
+  }
+  /** The upper 3x3 of `m`. */
+  setFromMatrix4(m: Matrix4): this {
+    const me = m.elements;
+    return this.set(me[0], me[4], me[8], me[1], me[5], me[9], me[2], me[6], me[10]);
+  }
+  multiply(m: Matrix3): this {
+    return this.multiplyMatrices(this, m);
+  }
+  premultiply(m: Matrix3): this {
+    return this.multiplyMatrices(m, this);
+  }
+  multiplyMatrices(a: Matrix3, b: Matrix3): this {
+    const ae = a.elements, be = b.elements;
+    const a11 = ae[0], a12 = ae[3], a13 = ae[6];
+    const a21 = ae[1], a22 = ae[4], a23 = ae[7];
+    const a31 = ae[2], a32 = ae[5], a33 = ae[8];
+    const b11 = be[0], b12 = be[3], b13 = be[6];
+    const b21 = be[1], b22 = be[4], b23 = be[7];
+    const b31 = be[2], b32 = be[5], b33 = be[8];
+    return this.set(
+      a11 * b11 + a12 * b21 + a13 * b31, a11 * b12 + a12 * b22 + a13 * b32, a11 * b13 + a12 * b23 + a13 * b33,
+      a21 * b11 + a22 * b21 + a23 * b31, a21 * b12 + a22 * b22 + a23 * b32, a21 * b13 + a22 * b23 + a23 * b33,
+      a31 * b11 + a32 * b21 + a33 * b31, a31 * b12 + a32 * b22 + a33 * b32, a31 * b13 + a32 * b23 + a33 * b33,
+    );
+  }
+  multiplyScalar(s: number): this {
+    for (let k = 0; k < 9; k++) this.elements[k] *= s;
+    return this;
+  }
+  determinant(): number {
+    const [a, b, c, d, e, f, g, h, i] = this.elements;
+    return a * e * i - a * f * h - b * d * i + b * f * g + c * d * h - c * e * g;
+  }
+  /** The inverse (all zeros for a singular matrix, as three.js). */
+  invert(): this {
+    const [n11, n21, n31, n12, n22, n32, n13, n23, n33] = this.elements;
+    const t11 = n33 * n22 - n32 * n23, t12 = n32 * n13 - n33 * n12, t13 = n23 * n12 - n22 * n13;
+    const det = n11 * t11 + n21 * t12 + n31 * t13;
+    if (det === 0) return this.set(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    const d = 1 / det;
+    const te = this.elements;
+    te[0] = t11 * d;
+    te[1] = (n31 * n23 - n33 * n21) * d;
+    te[2] = (n32 * n21 - n31 * n22) * d;
+    te[3] = t12 * d;
+    te[4] = (n33 * n11 - n31 * n13) * d;
+    te[5] = (n31 * n12 - n32 * n11) * d;
+    te[6] = t13 * d;
+    te[7] = (n21 * n13 - n23 * n11) * d;
+    te[8] = (n22 * n11 - n21 * n12) * d;
+    return this;
+  }
+  /** Transpose in place, as three.js does. */
+  transpose(): this {
+    const m = this.elements;
+    let tmp: number;
+    tmp = m[1]; m[1] = m[3]; m[3] = tmp;
+    tmp = m[2]; m[2] = m[6]; m[6] = tmp;
+    tmp = m[5]; m[5] = m[7]; m[7] = tmp;
+    return this;
+  }
+  /** Inverse transpose of `m`'s upper 3x3: transforms normals under non-uniform scale. */
+  getNormalMatrix(m: Matrix4): this {
+    return this.setFromMatrix4(m).invert().transpose();
+  }
+  equals(m: Matrix3): boolean {
+    return this.elements.every((v, k) => v === m.elements[k]);
+  }
+  /** Column-major, as `elements`. */
+  fromArray(a: ArrayLike<number>, offset = 0): this {
+    for (let k = 0; k < 9; k++) this.elements[k] = a[k + offset];
+    return this;
+  }
+  toArray<T extends { [k: number]: number } = number[]>(a: T = [] as unknown as T, offset = 0): T {
+    for (let k = 0; k < 9; k++) a[k + offset] = this.elements[k];
+    return a;
+  }
+}
+
 /** Colors are stored in linear sRGB (Rec.709 primaries), like three.js with ColorManagement enabled. */
 export class Color {
+  readonly isColor = true;
   r = 1;
   g = 1;
   b = 1;
@@ -586,6 +991,13 @@ export class Color {
     if (named !== undefined) return this.setHex(named);
     throw new Error(`unsupported color: ${style}`);
   }
+  /** A CSS color keyword (sRGB) such as `"skyblue"`; unknown names warn and leave the color unchanged, as three.js. */
+  setColorName(style: string): this {
+    const hex = NAMED_COLORS[style.toLowerCase()];
+    if (hex !== undefined) return this.setHex(hex);
+    console.warn(`THREE.Color: Unknown color ${style}`);
+    return this;
+  }
   /** Linear components. */
   setRGB(r: number, g: number, b: number): this {
     this.r = r; this.g = g; this.b = b;
@@ -595,11 +1007,38 @@ export class Color {
     this.r *= s; this.g *= s; this.b *= s;
     return this;
   }
+  /** All three linear components to `scalar`. */
+  setScalar(scalar: number): this {
+    return this.setRGB(scalar, scalar, scalar);
+  }
+  /** Linear components from a vector's x, y, z. */
+  setFromVector3(v: { x: number; y: number; z: number }): this {
+    return this.setRGB(v.x, v.y, v.z);
+  }
+  /** Multiplies the linear components by a column-major 3x3 matrix, as three.js. */
+  applyMatrix3(m: { elements: ArrayLike<number> }): this {
+    const { r, g, b } = this, e = m.elements;
+    return this.setRGB(e[0] * r + e[3] * g + e[6] * b, e[1] * r + e[4] * g + e[7] * b, e[2] * r + e[5] * g + e[8] * b);
+  }
   clone(): Color {
     return new Color().setRGB(this.r, this.g, this.b);
   }
   copy(c: Color): this {
     return this.setRGB(c.r, c.g, c.b);
+  }
+  /** Copies `c`, decoding its components from sRGB to linear. */
+  copySRGBToLinear(c: Color): this {
+    return this.setRGB(srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b));
+  }
+  /** Copies `c`, encoding its components from linear to sRGB. */
+  copyLinearToSRGB(c: Color): this {
+    return this.setRGB(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b));
+  }
+  convertSRGBToLinear(): this {
+    return this.copySRGBToLinear(this);
+  }
+  convertLinearToSRGB(): this {
+    return this.copyLinearToSRGB(this);
   }
   /** Hue, saturation, lightness in 0..1, sRGB-encoded as CSS / three.js (converted to linear). */
   setHSL(h: number, s: number, l: number): this {
@@ -642,6 +1081,17 @@ export class Color {
   multiply(c: Color): this {
     return this.setRGB(this.r * c.r, this.g * c.g, this.b * c.b);
   }
+  /** Sets this color to `color1 + color2`. */
+  addColors(color1: Color, color2: Color): this {
+    return this.setRGB(color1.r + color2.r, color1.g + color2.g, color1.b + color2.b);
+  }
+  addScalar(s: number): this {
+    return this.setRGB(this.r + s, this.g + s, this.b + s);
+  }
+  /** Subtracts `c`, clamping each component at 0, as three.js. */
+  sub(c: Color): this {
+    return this.setRGB(Math.max(0, this.r - c.r), Math.max(0, this.g - c.g), Math.max(0, this.b - c.b));
+  }
   /** A CSS colour string, as three.js. */
   getStyle(): string {
     return `#${this.getHex().toString(16).padStart(6, "0")}`;
@@ -653,6 +1103,28 @@ export class Color {
   getHex(): number {
     const k = (v: number) => Math.round(Math.min(Math.max(linearToSrgb(v), 0), 1) * 255);
     return (k(this.r) << 16) | (k(this.g) << 8) | k(this.b);
+  }
+  /** `getHex` as six lowercase hex digits, without `#`. */
+  getHexString(): string {
+    return this.getHex().toString(16).padStart(6, "0");
+  }
+  /** The linear components, into `target`. */
+  getRGB<T extends { r: number; g: number; b: number }>(target: T): T {
+    target.r = this.r; target.g = this.g; target.b = this.b;
+    return target;
+  }
+  /** Linear components from item `index` of a 3-component attribute. */
+  fromBufferAttribute(attribute: { getX(i: number): number; getY(i: number): number; getZ(i: number): number }, index: number): this {
+    return this.setRGB(attribute.getX(index), attribute.getY(index), attribute.getZ(index));
+  }
+  /** The sRGB hex, as three.js serializes a color. */
+  toJSON(): number {
+    return this.getHex();
+  }
+  *[Symbol.iterator](): Generator<number, void, undefined> {
+    yield this.r;
+    yield this.g;
+    yield this.b;
   }
   fromArray(a: ArrayLike<number>, offset = 0): this {
     return this.setRGB(a[offset], a[offset + 1], a[offset + 2]);
@@ -666,6 +1138,10 @@ export class Color {
     return a;
   }
   /** Color temperature in Kelvin -> linear sRGB (normalized to max component 1). */
+  /** CSS color keywords to sRGB hex, as three.js `Color.NAMES`. */
+  static get NAMES(): Readonly<Record<string, number>> {
+    return NAMED_COLORS;
+  }
   static fromTemperature(kelvin: number): Color {
     return new Color().setRGB(...kelvinToLinearRGB(kelvin));
   }
@@ -716,6 +1192,110 @@ export class Vector2 {
   multiplyScalar(s: number): this {
     return this.set(this.x * s, this.y * s);
   }
+  // Component-wise arithmetic and plane geometry, as three.js r187 has them.
+  setX(x: number): this {
+    return this.set(x, this.y);
+  }
+  setY(y: number): this {
+    return this.set(this.x, y);
+  }
+  setComponent(index: number, value: number): this {
+    if (index === 0) this.x = value;
+    else if (index === 1) this.y = value;
+    else throw new RangeError(`index is out of range: ${index}`);
+    return this;
+  }
+  getComponent(index: number): number {
+    if (index === 0) return this.x;
+    if (index === 1) return this.y;
+    throw new RangeError(`index is out of range: ${index}`);
+  }
+  addScalar(s: number): this {
+    return this.set(this.x + s, this.y + s);
+  }
+  addVectors(a: Vector2, b: Vector2): this {
+    return this.set(a.x + b.x, a.y + b.y);
+  }
+  addScaledVector(v: Vector2, s: number): this {
+    return this.set(this.x + v.x * s, this.y + v.y * s);
+  }
+  subScalar(s: number): this {
+    return this.set(this.x - s, this.y - s);
+  }
+  subVectors(a: Vector2, b: Vector2): this {
+    return this.set(a.x - b.x, a.y - b.y);
+  }
+  multiply(v: Vector2): this {
+    return this.set(this.x * v.x, this.y * v.y);
+  }
+  divide(v: Vector2): this {
+    return this.set(this.x / v.x, this.y / v.y);
+  }
+  divideScalar(s: number): this {
+    return this.multiplyScalar(1 / s);
+  }
+  min(v: Vector2): this {
+    return this.set(Math.min(this.x, v.x), Math.min(this.y, v.y));
+  }
+  max(v: Vector2): this {
+    return this.set(Math.max(this.x, v.x), Math.max(this.y, v.y));
+  }
+  /** Assumes min <= max component-wise, as three.js does. */
+  clamp(min: Vector2, max: Vector2): this {
+    return this.set(Math.max(min.x, Math.min(max.x, this.x)), Math.max(min.y, Math.min(max.y, this.y)));
+  }
+  clampScalar(minVal: number, maxVal: number): this {
+    return this.set(Math.max(minVal, Math.min(maxVal, this.x)), Math.max(minVal, Math.min(maxVal, this.y)));
+  }
+  clampLength(min: number, max: number): this {
+    const l = this.length();
+    return this.divideScalar(l || 1).multiplyScalar(Math.max(min, Math.min(max, l)));
+  }
+  floor(): this {
+    return this.set(Math.floor(this.x), Math.floor(this.y));
+  }
+  ceil(): this {
+    return this.set(Math.ceil(this.x), Math.ceil(this.y));
+  }
+  round(): this {
+    return this.set(Math.round(this.x), Math.round(this.y));
+  }
+  negate(): this {
+    return this.set(-this.x, -this.y);
+  }
+  lengthSq(): number {
+    return this.x * this.x + this.y * this.y;
+  }
+  manhattanLength(): number {
+    return Math.abs(this.x) + Math.abs(this.y);
+  }
+  setLength(length: number): this {
+    return this.normalize().multiplyScalar(length);
+  }
+  /** The angle from the +x axis, in [0, 2π). */
+  angle(): number {
+    return Math.atan2(-this.y, -this.x) + Math.PI;
+  }
+  angleTo(v: Vector2): number {
+    const denominator = Math.sqrt(this.lengthSq() * v.lengthSq());
+    if (denominator === 0) return Math.PI / 2;
+    return Math.acos(Math.max(-1, Math.min(1, this.dot(v) / denominator)));
+  }
+  distanceToSquared(v: Vector2): number {
+    const dx = this.x - v.x, dy = this.y - v.y;
+    return dx * dx + dy * dy;
+  }
+  manhattanDistanceTo(v: Vector2): number {
+    return Math.abs(this.x - v.x) + Math.abs(this.y - v.y);
+  }
+  lerpVectors(v1: Vector2, v2: Vector2, alpha: number): this {
+    return this.set(v1.x + (v2.x - v1.x) * alpha, v1.y + (v2.y - v1.y) * alpha);
+  }
+  rotateAround(center: Vector2, angle: number): this {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const x = this.x - center.x, y = this.y - center.y;
+    return this.set(x * c - y * s + center.x, x * s + y * c + center.y);
+  }
   roundToZero(): this {
     return this.set(Math.trunc(this.x), Math.trunc(this.y));
   }
@@ -729,8 +1309,8 @@ export class Vector2 {
     return Math.hypot(this.x, this.y);
   }
   normalize(): this {
-    const l = this.length() || 1;
-    return this.set(this.x / l, this.y / l);
+    // Through divideScalar (a multiply by 1 / length), as three.js does, so normalize and setLength round alike.
+    return this.divideScalar(this.length() || 1);
   }
   distanceTo(v: Vector2): number {
     return Math.hypot(this.x - v.x, this.y - v.y);
@@ -818,6 +1398,32 @@ export class Box3 {
       this.min.y <= b.min.y && b.max.y <= this.max.y &&
       this.min.z <= b.min.z && b.max.z <= this.max.z;
   }
+  /** `point` clamped into this box, written to `target` (three.js). */
+  clampPoint(point: Vector3, target = new Vector3()): Vector3 {
+    const { min, max } = this;
+    return target.set(Math.max(min.x, Math.min(max.x, point.x)), Math.max(min.y, Math.min(max.y, point.y)), Math.max(min.z, Math.min(max.z, point.z)));
+  }
+  /** The distance from `point` to this box: 0 inside (three.js). */
+  distanceToPoint(point: Vector3): number {
+    return this.clampPoint(point).distanceTo(point);
+  }
+  /** Whether `sphere` touches this box (three.js). */
+  intersectsSphere(sphere: Sphere): boolean {
+    const c = this.clampPoint(sphere.center);
+    const dx = c.x - sphere.center.x, dy = c.y - sphere.center.y, dz = c.z - sphere.center.z;
+    return dx * dx + dy * dy + dz * dz <= sphere.radius * sphere.radius;
+  }
+  /** The sphere around this box; an empty box gives an empty sphere (three.js). */
+  getBoundingSphere(target = new Sphere()): Sphere {
+    if (this.isEmpty()) {
+      target.center.set(0, 0, 0);
+      target.radius = -1;
+    } else {
+      this.getCenter(target.center);
+      target.radius = this.getSize().length() * 0.5;
+    }
+    return target;
+  }
   intersectsBox(b: Box3): boolean {
     return b.max.x >= this.min.x && b.min.x <= this.max.x && b.max.y >= this.min.y && b.min.y <= this.max.y && b.max.z >= this.min.z && b.min.z <= this.max.z;
   }
@@ -831,11 +1437,60 @@ export class Box3 {
 
 /** A sphere (three.js Sphere): bounds. */
 export class Sphere {
+  readonly isSphere = true;
   center: Vector3;
   radius: number;
   constructor(center = new Vector3(), radius = -1) {
     this.center = center;
     this.radius = radius;
+  }
+  set(center: Vector3, radius: number): this {
+    this.center.copy(center);
+    this.radius = radius;
+    return this;
+  }
+  copy(sphere: Sphere): this {
+    return this.set(sphere.center, sphere.radius);
+  }
+  /** A negative radius is empty; a zero radius is a point (three.js). */
+  isEmpty(): boolean {
+    return this.radius < 0;
+  }
+  makeEmpty(): this {
+    this.center.set(0, 0, 0);
+    this.radius = -1;
+    return this;
+  }
+  containsPoint(point: Vector3): boolean {
+    const dx = point.x - this.center.x, dy = point.y - this.center.y, dz = point.z - this.center.z;
+    return dx * dx + dy * dy + dz * dz <= this.radius * this.radius;
+  }
+  /** Signed: negative inside the sphere (three.js). */
+  distanceToPoint(point: Vector3): number {
+    return point.distanceTo(this.center) - this.radius;
+  }
+  intersectsSphere(sphere: Sphere): boolean {
+    const r = this.radius + sphere.radius;
+    const dx = sphere.center.x - this.center.x, dy = sphere.center.y - this.center.y, dz = sphere.center.z - this.center.z;
+    return dx * dx + dy * dy + dz * dz <= r * r;
+  }
+  /** The centre transformed by `m`, the radius scaled by its largest axis scale (three.js). */
+  applyMatrix4(m: Matrix4): this {
+    const e = m.elements;
+    const sx = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+    const sy = e[4] * e[4] + e[5] * e[5] + e[6] * e[6];
+    const sz = e[8] * e[8] + e[9] * e[9] + e[10] * e[10];
+    this.center.applyMatrix4(m);
+    this.radius *= Math.sqrt(Math.max(sx, sy, sz));
+    return this;
+  }
+  translate(offset: Vector3): this {
+    this.center.add(offset);
+    return this;
+  }
+  equals(sphere: Sphere): boolean {
+    const a = this.center, b = sphere.center;
+    return a.x === b.x && a.y === b.y && a.z === b.z && sphere.radius === this.radius;
   }
   setFromArray(a: ArrayLike<number>): this {
     const b = new Box3().setFromArray(a);
@@ -925,6 +1580,115 @@ export class Ray {
     const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
     return t >= 0 ? { t, u, v } : null;
   }
+  /** The distance along the ray to `plane` (0 if the origin lies on it), or null if the ray does not reach it. */
+  distanceToPlane(plane: Plane): number | null {
+    const denom = plane.normal.dot(this.direction);
+    if (denom === 0) return plane.distanceToPoint(this.origin) === 0 ? 0 : null;
+    const t = -(this.origin.dot(plane.normal) + plane.constant) / denom;
+    return t >= 0 ? t : null;
+  }
+  /** Where the ray meets `plane`, or null. */
+  intersectPlane(plane: Plane, target = new Vector3()): Vector3 | null {
+    const t = this.distanceToPlane(plane);
+    return t === null ? null : this.at(t, target);
+  }
+  intersectsPlane(plane: Plane): boolean {
+    const d = plane.distanceToPoint(this.origin);
+    if (d === 0) return true;
+    return plane.normal.dot(this.direction) * d < 0;
+  }
+}
+
+/** An infinite plane: the points p with `normal · p + constant = 0` (three.js's Plane). */
+export class Plane {
+  normal: Vector3;
+  constant: number;
+  constructor(normal = new Vector3(1, 0, 0), constant = 0) {
+    this.normal = normal;
+    this.constant = constant;
+  }
+  set(normal: Vector3, constant: number): this {
+    this.normal.copy(normal);
+    this.constant = constant;
+    return this;
+  }
+  setComponents(x: number, y: number, z: number, w: number): this {
+    this.normal.set(x, y, z);
+    this.constant = w;
+    return this;
+  }
+  setFromNormalAndCoplanarPoint(normal: Vector3, point: Vector3): this {
+    this.normal.copy(normal);
+    this.constant = -point.dot(this.normal);
+    return this;
+  }
+  /** The plane through a, b and c, facing the side from which they run counter-clockwise. */
+  setFromCoplanarPoints(a: Vector3, b: Vector3, c: Vector3): this {
+    const n = new Vector3().subVectors(c, b).cross(new Vector3().subVectors(a, b)).normalize();
+    return this.setFromNormalAndCoplanarPoint(n, a);
+  }
+  copy(plane: Plane): this {
+    this.normal.copy(plane.normal);
+    this.constant = plane.constant;
+    return this;
+  }
+  clone(): Plane {
+    return new Plane().copy(this);
+  }
+  /** Scales normal and constant so that the normal has unit length. */
+  normalize(): this {
+    const inv = 1 / this.normal.length();
+    this.normal.multiplyScalar(inv);
+    this.constant *= inv;
+    return this;
+  }
+  negate(): this {
+    this.constant *= -1;
+    this.normal.multiplyScalar(-1);
+    return this;
+  }
+  /** Signed distance (positive on the side the normal points to). */
+  distanceToPoint(point: Vector3): number {
+    return this.normal.dot(point) + this.constant;
+  }
+  distanceToSphere(sphere: Sphere): number {
+    return this.distanceToPoint(sphere.center) - sphere.radius;
+  }
+  projectPoint(point: Vector3, target = new Vector3()): Vector3 {
+    return target.copy(point).addScaledVector(this.normal, -this.distanceToPoint(point));
+  }
+  coplanarPoint(target = new Vector3()): Vector3 {
+    return target.copy(this.normal).multiplyScalar(-this.constant);
+  }
+  intersectsSphere(sphere: Sphere): boolean {
+    return Math.abs(this.distanceToPoint(sphere.center)) <= sphere.radius;
+  }
+  intersectsBox(box: Box3): boolean {
+    const n = this.normal;
+    let min = 0, max = 0;
+    for (const k of ["x", "y", "z"] as const) {
+      const lo = n[k] * box.min[k], hi = n[k] * box.max[k];
+      min += Math.min(lo, hi);
+      max += Math.max(lo, hi);
+    }
+    return min <= -this.constant && max >= -this.constant;
+  }
+  /** The plane moved by `m`; its normal goes through m's normal matrix (the inverse transpose of its upper 3 x 3). */
+  applyMatrix4(m: Matrix4): this {
+    const p = this.coplanarPoint().applyMatrix4(m);
+    const e = m.clone().invert().elements;
+    const { x, y, z } = this.normal;
+    this.normal.set(e[0] * x + e[1] * y + e[2] * z, e[4] * x + e[5] * y + e[6] * z, e[8] * x + e[9] * y + e[10] * z).normalize();
+    this.constant = -p.dot(this.normal);
+    return this;
+  }
+  translate(offset: Vector3): this {
+    this.constant -= offset.dot(this.normal);
+    return this;
+  }
+  equals(plane: Plane): boolean {
+    return plane.normal.x === this.normal.x && plane.normal.y === this.normal.y && plane.normal.z === this.normal.z && plane.constant === this.constant;
+  }
 }
 
 export function srgbToLinear(c: number): number {
@@ -956,10 +1720,37 @@ export function kelvinToLinearRGB(T: number): [number, number, number] {
   return [Math.max(r, 0) / m, Math.max(g, 0) / m, Math.max(b, 0) / m];
 }
 
+/** CSS color keywords, as three.js `Color.NAMES` (sRGB hex). */
 const NAMED_COLORS: Record<string, number> = {
-  white: 0xffffff, black: 0x000000, red: 0xff0000, green: 0x008000, lime: 0x00ff00, blue: 0x0000ff,
-  yellow: 0xffff00, cyan: 0x00ffff, magenta: 0xff00ff, orange: 0xffa500, gray: 0x808080, grey: 0x808080,
-  gold: 0xffd700, silver: 0xc0c0c0, purple: 0x800080, pink: 0xffc0cb, brown: 0xa52a2a, skyblue: 0x87ceeb,
+  aliceblue: 0xf0f8ff, antiquewhite: 0xfaebd7, aqua: 0x00ffff, aquamarine: 0x7fffd4, azure: 0xf0ffff, beige: 0xf5f5dc,
+  bisque: 0xffe4c4, black: 0x000000, blanchedalmond: 0xffebcd, blue: 0x0000ff, blueviolet: 0x8a2be2, brown: 0xa52a2a,
+  burlywood: 0xdeb887, cadetblue: 0x5f9ea0, chartreuse: 0x7fff00, chocolate: 0xd2691e, coral: 0xff7f50,
+  cornflowerblue: 0x6495ed, cornsilk: 0xfff8dc, crimson: 0xdc143c, cyan: 0x00ffff, darkblue: 0x00008b,
+  darkcyan: 0x008b8b, darkgoldenrod: 0xb8860b, darkgray: 0xa9a9a9, darkgreen: 0x006400, darkgrey: 0xa9a9a9,
+  darkkhaki: 0xbdb76b, darkmagenta: 0x8b008b, darkolivegreen: 0x556b2f, darkorange: 0xff8c00, darkorchid: 0x9932cc,
+  darkred: 0x8b0000, darksalmon: 0xe9967a, darkseagreen: 0x8fbc8f, darkslateblue: 0x483d8b, darkslategray: 0x2f4f4f,
+  darkslategrey: 0x2f4f4f, darkturquoise: 0x00ced1, darkviolet: 0x9400d3, deeppink: 0xff1493, deepskyblue: 0x00bfff,
+  dimgray: 0x696969, dimgrey: 0x696969, dodgerblue: 0x1e90ff, firebrick: 0xb22222, floralwhite: 0xfffaf0,
+  forestgreen: 0x228b22, fuchsia: 0xff00ff, gainsboro: 0xdcdcdc, ghostwhite: 0xf8f8ff, gold: 0xffd700,
+  goldenrod: 0xdaa520, gray: 0x808080, green: 0x008000, greenyellow: 0xadff2f, grey: 0x808080, honeydew: 0xf0fff0,
+  hotpink: 0xff69b4, indianred: 0xcd5c5c, indigo: 0x4b0082, ivory: 0xfffff0, khaki: 0xf0e68c, lavender: 0xe6e6fa,
+  lavenderblush: 0xfff0f5, lawngreen: 0x7cfc00, lemonchiffon: 0xfffacd, lightblue: 0xadd8e6, lightcoral: 0xf08080,
+  lightcyan: 0xe0ffff, lightgoldenrodyellow: 0xfafad2, lightgray: 0xd3d3d3, lightgreen: 0x90ee90, lightgrey: 0xd3d3d3,
+  lightpink: 0xffb6c1, lightsalmon: 0xffa07a, lightseagreen: 0x20b2aa, lightskyblue: 0x87cefa,
+  lightslategray: 0x778899, lightslategrey: 0x778899, lightsteelblue: 0xb0c4de, lightyellow: 0xffffe0, lime: 0x00ff00,
+  limegreen: 0x32cd32, linen: 0xfaf0e6, magenta: 0xff00ff, maroon: 0x800000, mediumaquamarine: 0x66cdaa,
+  mediumblue: 0x0000cd, mediumorchid: 0xba55d3, mediumpurple: 0x9370db, mediumseagreen: 0x3cb371,
+  mediumslateblue: 0x7b68ee, mediumspringgreen: 0x00fa9a, mediumturquoise: 0x48d1cc, mediumvioletred: 0xc71585,
+  midnightblue: 0x191970, mintcream: 0xf5fffa, mistyrose: 0xffe4e1, moccasin: 0xffe4b5, navajowhite: 0xffdead,
+  navy: 0x000080, oldlace: 0xfdf5e6, olive: 0x808000, olivedrab: 0x6b8e23, orange: 0xffa500, orangered: 0xff4500,
+  orchid: 0xda70d6, palegoldenrod: 0xeee8aa, palegreen: 0x98fb98, paleturquoise: 0xafeeee, palevioletred: 0xdb7093,
+  papayawhip: 0xffefd5, peachpuff: 0xffdab9, peru: 0xcd853f, pink: 0xffc0cb, plum: 0xdda0dd, powderblue: 0xb0e0e6,
+  purple: 0x800080, rebeccapurple: 0x663399, red: 0xff0000, rosybrown: 0xbc8f8f, royalblue: 0x4169e1,
+  saddlebrown: 0x8b4513, salmon: 0xfa8072, sandybrown: 0xf4a460, seagreen: 0x2e8b57, seashell: 0xfff5ee,
+  sienna: 0xa0522d, silver: 0xc0c0c0, skyblue: 0x87ceeb, slateblue: 0x6a5acd, slategray: 0x708090,
+  slategrey: 0x708090, snow: 0xfffafa, springgreen: 0x00ff7f, steelblue: 0x4682b4, tan: 0xd2b48c, teal: 0x008080,
+  thistle: 0xd8bfd8, tomato: 0xff6347, turquoise: 0x40e0d0, violet: 0xee82ee, wheat: 0xf5deb3, white: 0xffffff,
+  whitesmoke: 0xf5f5f5, yellow: 0xffff00, yellowgreen: 0x9acd32,
 };
 
 export const MathUtils = {
@@ -970,4 +1761,76 @@ export const MathUtils = {
   clamp: (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v)),
   euclideanModulo: (n: number, m: number) => ((n % m) + m) % m,
   lerp: (a: number, b: number, t: number) => a + (b - a) * t,
+  /** Maps `x` from the range [a1, a2] to [b1, b2]. */
+  mapLinear: (x: number, a1: number, a2: number, b1: number, b2: number) => b1 + ((x - a1) * (b2 - b1)) / (a2 - a1),
+  /** The fraction of `value` between `x` and `y`; 0 when the range is empty. */
+  inverseLerp: (x: number, y: number, value: number) => (x !== y ? (value - x) / (y - x) : 0),
+  /** Frame-rate independent damping towards `y` (`lambda` per second, `dt` in seconds). */
+  damp: (x: number, y: number, lambda: number, dt: number) => x + (y - x) * (1 - Math.exp(-lambda * dt)),
+  pingpong: (x: number, length = 1) => length - Math.abs((((x % (length * 2)) + length * 2) % (length * 2)) - length),
+  smoothstep(x: number, min: number, max: number): number {
+    if (x <= min) return 0;
+    if (x >= max) return 1;
+    x = (x - min) / (max - min);
+    return x * x * (3 - 2 * x);
+  },
+  smootherstep(x: number, min: number, max: number): number {
+    if (x <= min) return 0;
+    if (x >= max) return 1;
+    x = (x - min) / (max - min);
+    return x * x * x * (x * (x * 6 - 15) + 10);
+  },
+  /** A random integer in [low, high]. */
+  randInt: (low: number, high: number) => low + Math.floor(Math.random() * (high - low + 1)),
+  /** A random float in [low, high). */
+  randFloat: (low: number, high: number) => low + Math.random() * (high - low),
+  /** A random float in (-range / 2, range / 2]. */
+  randFloatSpread: (range: number) => range * (0.5 - Math.random()),
+  /** Deterministic pseudo-random float in [0, 1) (Mulberry32); passing `s` reseeds. */
+  seededRandom(s?: number): number {
+    if (s !== undefined) seed = s;
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  },
+  /** An RFC 4122 version 4 UUID, lowercase. */
+  generateUUID(): string {
+    const d0 = (Math.random() * 0xffffffff) | 0, d1 = (Math.random() * 0xffffffff) | 0;
+    const d2 = (Math.random() * 0xffffffff) | 0, d3 = (Math.random() * 0xffffffff) | 0;
+    const h = (v: number) => HEX[v & 0xff];
+    return (
+      h(d0) + h(d0 >> 8) + h(d0 >> 16) + h(d0 >> 24) + "-" + h(d1) + h(d1 >> 8) + "-" +
+      h(((d1 >> 16) & 0x0f) | 0x40) + h(d1 >> 24) + "-" + h((d2 & 0x3f) | 0x80) + h(d2 >> 8) + "-" +
+      h(d2 >> 16) + h(d2 >> 24) + h(d3) + h(d3 >> 8) + h(d3 >> 16) + h(d3 >> 24)
+    );
+  },
+  isPowerOfTwo: (value: number) => (value & (value - 1)) === 0 && value !== 0,
+  ceilPowerOfTwo: (value: number) => Math.pow(2, Math.ceil(Math.log(value) / Math.LN2)),
+  floorPowerOfTwo: (value: number) => Math.pow(2, Math.floor(Math.log(value) / Math.LN2)),
+  /** A float in [0, 1] (or [-1, 1]) as the normalized integer `array`'s component type stores. */
+  normalize(value: number, array: ArrayLike<number>): number {
+    if (array.constructor === Float32Array) return value;
+    return Math.round(value * normalizationScale(array));
+  },
+  /** A normalized integer from `array`'s component type, as a float in [0, 1] (or [-1, 1] when signed). */
+  denormalize(value: number, array: ArrayLike<number>): number {
+    if (array.constructor === Float32Array) return value;
+    return Math.max(value / normalizationScale(array), -1);
+  },
 };
+
+function normalizationScale(array: ArrayLike<number>): number {
+  switch (array.constructor) {
+    case Uint32Array: return 4294967295;
+    case Uint16Array: return 65535;
+    case Uint8Array: case Uint8ClampedArray: return 255;
+    case Int32Array: return 2147483647;
+    case Int16Array: return 32767;
+    case Int8Array: return 127;
+  }
+  throw new Error("THREE.MathUtils: Invalid component type.");
+}
+
+let seed = 1234567;
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));

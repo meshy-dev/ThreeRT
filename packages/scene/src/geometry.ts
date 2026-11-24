@@ -1,6 +1,7 @@
 // three.js-compatible geometry generators. Vertex layout and winding match three (CCW front faces).
 
 import { Box3, Matrix4, type Quaternion, Sphere, Vector3 } from "./math.ts";
+import type { InterleavedBufferAttribute } from "./interleaved.ts";
 
 let geometryIds = 0;
 
@@ -9,7 +10,7 @@ let geometryIds = 0;
 export const StaticDrawUsage = 35044;
 export const DynamicDrawUsage = 35048;
 
-type NumberArray = Float32Array | Uint32Array | Uint16Array | Uint8Array | Int32Array | Int16Array | Int8Array;
+type NumberArray = Float32Array | Uint32Array | Uint16Array | Uint8Array | Uint8ClampedArray | Int32Array | Int16Array | Int8Array;
 
 /**
  * A geometry's per-vertex numbers (three.js BufferAttribute): `itemSize` per vertex in `array`. After writing them
@@ -44,57 +45,66 @@ export class BufferAttribute {
     this.usage = usage;
     return this;
   }
+  /** A stored component as a number: a normalized integer attribute's in 0..1 (or -1..1), as three.js reads it. */
+  private _get(o: number): number {
+    const v = this.array[o];
+    return this.normalized ? denormalize(v, this.array) : v;
+  }
+  /** Stores a component: a normalized integer attribute's from 0..1 (or -1..1), as three.js writes it. */
+  private _set(o: number, v: number): void {
+    this.array[o] = this.normalized ? normalize(v, this.array) : v;
+  }
   getComponent(i: number, k: number): number {
-    return this.array[i * this.itemSize + k];
+    return this._get(i * this.itemSize + k);
   }
   setComponent(i: number, k: number, v: number): this {
-    this.array[i * this.itemSize + k] = v;
+    this._set(i * this.itemSize + k, v);
     return this;
   }
   getX(i: number): number {
-    return this.array[i * this.itemSize];
+    return this._get(i * this.itemSize);
   }
   getY(i: number): number {
-    return this.array[i * this.itemSize + 1];
+    return this._get(i * this.itemSize + 1);
   }
   getZ(i: number): number {
-    return this.array[i * this.itemSize + 2];
+    return this._get(i * this.itemSize + 2);
   }
   getW(i: number): number {
-    return this.array[i * this.itemSize + 3];
+    return this._get(i * this.itemSize + 3);
   }
   setX(i: number, v: number): this {
-    this.array[i * this.itemSize] = v;
+    this._set(i * this.itemSize, v);
     return this;
   }
   setY(i: number, v: number): this {
-    this.array[i * this.itemSize + 1] = v;
+    this._set(i * this.itemSize + 1, v);
     return this;
   }
   setZ(i: number, v: number): this {
-    this.array[i * this.itemSize + 2] = v;
+    this._set(i * this.itemSize + 2, v);
     return this;
   }
   setW(i: number, v: number): this {
-    this.array[i * this.itemSize + 3] = v;
+    this._set(i * this.itemSize + 3, v);
     return this;
   }
   setXY(i: number, x: number, y: number): this {
     const o = i * this.itemSize;
-    this.array[o] = x;
-    this.array[o + 1] = y;
+    this._set(o, x);
+    this._set(o + 1, y);
     return this;
   }
   setXYZ(i: number, x: number, y: number, z: number): this {
     const o = i * this.itemSize;
-    this.array[o] = x;
-    this.array[o + 1] = y;
-    this.array[o + 2] = z;
+    this._set(o, x);
+    this._set(o + 1, y);
+    this._set(o + 2, z);
     return this;
   }
   setXYZW(i: number, x: number, y: number, z: number, w: number): this {
     this.setXYZ(i, x, y, z);
-    this.array[i * this.itemSize + 3] = w;
+    this._set(i * this.itemSize + 3, w);
     return this;
   }
   set(values: ArrayLike<number>, offset = 0): this {
@@ -117,7 +127,7 @@ export class BufferAttribute {
   applyMatrix4(m: Matrix4): this {
     const v = new Vector3();
     for (let i = 0; i < this.count; i++) {
-      v.fromArray(this.array, i * this.itemSize).applyMatrix4(m);
+      v.set(this.getX(i), this.getY(i), this.getZ(i)).applyMatrix4(m);
       this.setXYZ(i, v.x, v.y, v.z);
     }
     return this;
@@ -126,7 +136,7 @@ export class BufferAttribute {
   transformDirection(m: Matrix4): this {
     const v = new Vector3();
     for (let i = 0; i < this.count; i++) {
-      v.fromArray(this.array, i * this.itemSize).transformDirection(m);
+      v.set(this.getX(i), this.getY(i), this.getZ(i)).transformDirection(m);
       this.setXYZ(i, v.x, v.y, v.z);
     }
     return this;
@@ -149,6 +159,31 @@ export class Uint32BufferAttribute extends BufferAttribute {
 export class Uint16BufferAttribute extends BufferAttribute {
   constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
     super(typeof array === "number" ? new Uint16Array(array) : Uint16Array.from(array), itemSize, normalized);
+  }
+}
+export class Int32BufferAttribute extends BufferAttribute {
+  constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
+    super(typeof array === "number" ? new Int32Array(array) : Int32Array.from(array), itemSize, normalized);
+  }
+}
+export class Int16BufferAttribute extends BufferAttribute {
+  constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
+    super(typeof array === "number" ? new Int16Array(array) : Int16Array.from(array), itemSize, normalized);
+  }
+}
+export class Uint8ClampedBufferAttribute extends BufferAttribute {
+  constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
+    super(typeof array === "number" ? new Uint8ClampedArray(array) : Uint8ClampedArray.from(array), itemSize, normalized);
+  }
+}
+export class Uint8BufferAttribute extends BufferAttribute {
+  constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
+    super(typeof array === "number" ? new Uint8Array(array) : Uint8Array.from(array), itemSize, normalized);
+  }
+}
+export class Int8BufferAttribute extends BufferAttribute {
+  constructor(array: ArrayLike<number> | number, itemSize: number, normalized = false) {
+    super(typeof array === "number" ? new Int8Array(array) : Int8Array.from(array), itemSize, normalized);
   }
 }
 
@@ -212,7 +247,9 @@ export class BufferGeometry {
     this.needsUpdate = true;
     this.version++;
   }
-  setAttribute(name: string, attribute: BufferAttribute): this {
+  /** An `InterleavedBufferAttribute` is taken de-interleaved (its `clone()`): set it again after editing its buffer. */
+  setAttribute(name: string, attribute: BufferAttribute | InterleavedBufferAttribute): this {
+    if (!(attribute instanceof BufferAttribute)) attribute = attribute.clone();
     const a = name === "position" || name === "normal" || name === "uv" ? asFloat32(attribute) : attribute;
     a._geometry = this;
     this.attributes[name] = a;
@@ -383,6 +420,23 @@ export class BufferGeometry {
     }
     return { min, max };
   }
+}
+
+/** three.js's normalization scale of an integer array type (MathUtils.getNormalizationScale). */
+function normalizationScale(array: NumberArray): number {
+  if (array instanceof Uint32Array) return 4294967295;
+  if (array instanceof Uint16Array) return 65535;
+  if (array instanceof Uint8Array || (array as unknown) instanceof Uint8ClampedArray) return 255;
+  if (array instanceof Int32Array) return 2147483647;
+  if (array instanceof Int16Array) return 32767;
+  if (array instanceof Int8Array) return 127;
+  throw new Error("BufferAttribute: invalid component type for a normalized attribute");
+}
+function denormalize(v: number, array: NumberArray): number {
+  return array instanceof Float32Array ? v : Math.max(v / normalizationScale(array), -1);
+}
+function normalize(v: number, array: NumberArray): number {
+  return array instanceof Float32Array ? v : Math.round(v * normalizationScale(array));
 }
 
 function matrix(): Matrix4 {

@@ -31,3 +31,26 @@ test("Quaternion.setFromUnitVectors: quarter-turn, opposite axes, and identity",
   assert.ok(unchanged.angleTo(new THREE.Quaternion()) < 1e-12);
   assert.ok(Math.abs(unchanged.dot(unchanged) - 1) < 1e-12);
 });
+
+test("Quaternion.identity / conjugate / length / lengthSq / slerpQuaternions / toArray(array, offset), as three.js has them", () => {
+  const q = new THREE.Quaternion(1, 2, 3, 4);
+  assert.equal(q.lengthSq(), 30);
+  assert.ok(Math.abs(q.length() - Math.sqrt(30)) < 1e-12);
+  assert.deepEqual(q.clone().conjugate().toArray(), [-1, -2, -3, 4]);
+  assert.deepEqual(q.clone().identity().toArray(), [0, 0, 0, 1]);
+  assert.deepEqual(q.toArray([9], 1), [9, 1, 2, 3, 4]);
+  const into = new Float32Array(4);
+  assert.equal(q.toArray(into), into);
+  assert.deepEqual([...into], [1, 2, 3, 4]);
+
+  const a = new THREE.Quaternion();
+  const b = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+  const mid = new THREE.Quaternion().slerpQuaternions(a, b, 0.5);
+  const expected = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4);
+  assert.ok(Math.abs(mid.dot(expected) - 1) < 1e-12);
+  assert.deepEqual(a.toArray(), [0, 0, 0, 1], "the inputs are left alone");
+
+  const object = new THREE.Object3D();
+  object.quaternion.slerpQuaternions(a, b, 1);
+  assert.ok(Math.abs(object.rotation.y - Math.PI / 2) < 1e-9, "the object's rotation follows");
+});

@@ -1,5 +1,6 @@
 export * from "./math.ts";
 export * from "./geometry.ts";
+export * from "./interleaved.ts";
 export * from "./core.ts";
 export * from "./engine.ts";
 export { rendering, type RenderingRequest, type RenderingStatus, type ReconstructionMethod, type ReconstructionRequest, type QualityRequest, type FrameGenerationRequest, type LatencyRequest, type SkipReason } from "./rendering.ts";
