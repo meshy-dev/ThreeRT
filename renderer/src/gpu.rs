@@ -83,6 +83,7 @@ pub struct Gpu {
     pub live_layout: wgpu::BindGroupLayout,
     pub no_live: wgpu::BindGroup,
     /// `no_live`'s buffers (the merged layout: an offline kernel's source is written for their lengths).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     no_live_bufs: KernelBufs,
     /// Binding 19 of scenes without density grids (one cell), and the grid pass's bind group layout (grid_sim.wgsl).
     no_grid_view: wgpu::TextureView,
@@ -102,6 +103,7 @@ pub struct Gpu {
     /// Its group 1: `live_layout` without `finish`'s records, which the pass does not read (with them its three groups
     /// are one buffer past Metal's 29 a stage), and `no_live` made for it.
     pub tl_live_layout: Option<wgpu::BindGroupLayout>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     no_live_tl: Option<wgpu::BindGroup>,
     tl_pipelines: PipelineMap<(u32, u64, bool, u32), TranslucentPipelines>,
     /// The kernel's passes beside `main` (`kernel_pass`) by kernel variant and entry point.
