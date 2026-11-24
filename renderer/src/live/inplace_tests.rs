@@ -643,9 +643,15 @@ fn a_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
     let built = vertices(&live);
     assert!(built.1.len() == 12 && built.1.chunks(4).all(|q| q == [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]), "four vertices a particle (its mesh's quad, in the order the pass writes it), with the build's UVs: {:?}", built.1);
     live.fixed_dt = Some(1.0 / 60.0);
-    for _ in 0..4 {
+    for k in 0..4 {
         live.advance_time(1.0 / 60.0);
         live.render(1, |_, _| {});
+        // (A pass's first run has no last frame: the previous positions are the positions, and nothing moves.)
+        if k == 0 {
+            let m = &live.targets.kernel.motion;
+            let moved = read_back::<f32>(&live, &m.buffer, m.offset, m.size).chunks_exact(4).filter(|p| p[3] > 0.5 && Vec3::new(p[0], p[1], p[2]).length() > 1e-4).count();
+            assert_eq!(moved, 0, "the first frame: no pixel moves");
+        }
     }
     let now = vertices(&live);
     assert!(now.0 != built.0 && now.1 == built.1, "the pass moved the vertices and left their UVs ({:?} -> {:?})", built.1, now.1);
@@ -686,9 +692,15 @@ fn a_gpu_particle_that_moves_has_its_last_positions_and_keeps_its_uvs() {
     let built = vertices(&live);
     assert!(built.1.len() == 12 && built.1.chunks(4).all(|q| q == [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]), "four vertices a particle (its mesh's quad, in the order the pass writes it), with the build's UVs: {:?}", built.1);
     live.fixed_dt = Some(1.0 / 60.0);
-    for _ in 0..6 {
+    for k in 0..6 {
         live.advance_time(1.0 / 60.0);
         live.render(1, |_, _| {});
+        // (A pass's first run has no last frame: the previous positions are the positions, and nothing moves.)
+        if k == 0 {
+            let m = &live.targets.kernel.motion;
+            let moved = read_back::<f32>(&live, &m.buffer, m.offset, m.size).chunks_exact(4).filter(|p| p[3] > 0.5 && Vec3::new(p[0], p[1], p[2]).length() > 1e-4).count();
+            assert_eq!(moved, 0, "the first frame: no pixel moves");
+        }
     }
     let now = vertices(&live);
     assert!(now.0 != built.0 && now.1 == built.1, "the pass moved the vertices and left their UVs ({:?} -> {:?})", built.1, now.1);
