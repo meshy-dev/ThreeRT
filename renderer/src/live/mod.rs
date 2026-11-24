@@ -131,21 +131,25 @@ struct LiveParams {
     misc2: [f32; 4],
     mode: [u32; 4],
     post: [f32; 4],
-    /// Auto exposure (UE histogram): low / high fraction, histogram log2 min / max.
+    /// Auto exposure's metering: low / high fraction of the histogram, its log2 luminance min / max.
     ae: [f32; 4],
     /// Compensation (2^bias), min / max average luminance, mode (0 manual, 1 auto).
     ae2: [f32; 4],
-    /// Speed up / down (EV/s), frame time (s), snap to target (1).
+    /// Speed toward brighter / darker scenes (EV/s), frame time (s), snap to target (1).
     ae3: [f32; 4],
     /// Local exposure: highlight contrast, shadow contrast, blurred-luminance blend, detail strength.
     lx: [f32; 4],
     /// Traced (internal) width, height.
     isz: [u32; 4],
-    /// Bloom stage radii (texels of each stage's level) and tints, stages 0..3 then 4, 5.
-    br: [f32; 4],
-    br2: [f32; 4],
-    bt: [f32; 4],
-    bt2: [f32; 4],
+    /// Bloom (`post::BloomPlan`): the weight of pyramid level 0..3; of 4, 5, the wide pass's reach (texels of the
+    /// coarsest level; 0 = nothing to sum), the weight of the five-pixel kernel of the output's own pixels.
+    bl: [f32; 4],
+    bl2: [f32; 4],
+    /// The wide Gaussians 0..5, a (weight, 1 / (2 sigma^2)) pair each.
+    bw: [[f32; 4]; 3],
+    /// Local exposure's wide blur of log luminance: the weight of level 0..3; of 4, 5, its wide Gaussian's pair.
+    lb: [f32; 4],
+    lb2: [f32; 4],
     /// Depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -.
     dof: [f32; 4],
     /// This frame's sub-pixel jitter (every camera ray's: x, y in 0 .. 1 of a traced pixel), -, -.
@@ -267,12 +271,12 @@ pub struct LiveCore {
     pub frame: u32,
     pub history_len: f32,
     reset: bool,
-    /// Bloom stage radii / tints (`bloom_stages`).
-    bloom: ([f32; 6], [f32; 6]),
+    /// What the bloom passes do for the preset at the view's size.
+    bloom: post::BloomPlan,
     vignette: f32,
     /// Chromatic aberration, film grain, bloom threshold, longest motion blur (output pixels).
     post: [f32; 4],
-    /// Motion blur (UE MotionBlurAmount, MotionBlurTargetFPS; amount 0 = off).
+    /// Motion blur: the shutter as a fraction of the frame time (0 = off), the target frame rate (0 = the real one).
     blur: (f32, f32),
     /// Last submission of each frame still on the GPU (at most two frames in flight).
     inflight: std::collections::VecDeque<wgpu::SubmissionIndex>,
@@ -449,16 +453,28 @@ fn exposure_snap() -> bool {
     *F.get_or_init(|| std::env::var("THREERT_EXPOSURE_SNAP").is_ok_and(|v| v == "1"))
 }
 
-/// UE's physical CoC model (DiaphragmDOFUtils.cpp, FPhysicalCocModel::Compile): focal length from the sensor height
-/// (sensor width / aspect) and the vertical FOV, the CoC of infinity on the sensor f^2 / (N (focus - f)), as a radius in
-/// output pixels; max radius r.DOF.Kernel.Max{Fore,Back}groundRadius = 2.5 % of the width. Off without a focus distance.
+/// The lens for live.wgsl's `dof_coc`, from the camera's depth-of-field settings (`desc::Dof`: focus distance in
+/// metres, f-stop, sensor width in mm) and the view (vertical FOV, output size): `LiveParams::dof` = the circle of
+/// confusion's radius for a point at infinity (output pixels; 0 = off), the focus distance (m), the largest radius
+/// (output pixels: 2.5 % of the width).
+///
+/// A thin lens of focal length f and aperture diameter f / N focused at distance s images a point at distance z as
+/// a disc of diameter c = (f / N) f / (s - f) |z - s| / z on the sensor (the thin-lens equation 1/f = 1/s + 1/s' and
+/// similar triangles at the aperture; Potmesil & Chakravarty 1981, "A lens and aperture camera model for synthetic
+/// image generation", and any optics text): c_inf (1 - s / z) with c_inf = f^2 / (N (s - f)), negative in front of
+/// the focus plane. The focal length is the one that gives the view's
+/// vertical FOV on a sensor of the given width and the output's aspect; a sensor width is `w` output pixels.
 fn dof_params(dof: Option<&crate::desc::Dof>, tan_half_fov: f32, w: u32, h: u32) -> [f32; 4] {
-    let Some(d) = dof.filter(|d| d.focus_distance > 0.0 && d.f_stop > 0.0 && d.sensor_width > 0.0) else { return [0.0; 4] };
-    let aspect = w as f32 / h as f32;
-    let sensor_h = d.sensor_width / aspect;
-    let f = 0.5 * sensor_h / tan_half_fov;
-    let diameter = f * f / (d.f_stop * (d.focus_distance * 1000.0 - f).max(1e-3));
-    [diameter * 0.5 / sensor_h / aspect * w as f32, d.focus_distance, 0.025 * w as f32, 0.0]
+    let Some(d) = dof else { return [0.0; 4] };
+    if !(d.f_stop > 0.0 && d.sensor_width > 0.0 && d.focus_distance > 0.0 && tan_half_fov > 0.0) {
+        return [0.0; 4];
+    }
+    let sensor_height = d.sensor_width * h as f32 / w as f32;
+    let f = 0.5 * sensor_height / tan_half_fov; // mm
+    let s = (d.focus_distance * 1000.0).max(f * 1.001); // mm
+    let c_inf = f * f / (d.f_stop * (s - f)); // mm on the sensor
+    let largest = 0.025 * w as f32;
+    [(0.5 * c_inf / d.sensor_width * w as f32).max(1e-6), d.focus_distance, largest, 0.0]
 }
 
 /// Light LOD (`emitter_lod`): emitters within this distance of the camera keep their sampling weight, farther ones
@@ -494,13 +510,22 @@ fn halton(mut i: u32, base: u32) -> f32 {
 const CACHE_SAMPLES: f32 = 256.0;
 const CACHE_FRAMES: f32 = 32.0;
 const CACHE_FRAMES_LIT: f32 = 4.0;
-/// The most frames a pixel's history holds while the scene's lighting changes: short enough to follow the change by
-/// itself (a real-time denoiser's bound: NRD's default is 30), so no edit has to cut it. Against main's rules (24
-/// frames for good in a scene with spark lights, every pixel cut to 16 at a lighting edit, an on / off anti-lag), dE
-/// against the offline render or the converged frame: the Bistro slice half a second after its explosion 6.04 for
-/// 6.58, at rest 2.82 for 2.79; Kabukichō 2 s and 4 s after its signs close 6.70 and 2.92 for 6.56 and 2.82. At 64
-/// frames the explosion read 5.72 and the signs 7.82 and 3.37.
-const HISTORY_LIVE: f32 = 32.0;
+/// The most frames a pixel's history holds while the scene's lighting changes (`live_lighting`). What live.wgsl's
+/// change chart follows (a light switched, a shadow that passes) does not wait for this bound, and what its drift
+/// follows (a light that falls or rises steadily) is taken out of the history without shortening it ("The response
+/// of the histories" there); the bound is for what both leave alone: a change too small or too noisy to tell, and
+/// any change on pixels lit by rare bright samples. Those trail the light by this many frames, and every pixel's
+/// noise while anything in the scene moves is that of a mean over this many.
+/// Measured on the integrated tree, 2026-11-24, with the chart and the drift as they are, for 48 / 32 / 24 frames:
+/// bench-window's tokyo-dusk (the sun setting over ten seconds, the frame against the same moment held; dE at 6, 7
+/// and 8 s) 1.23 / 0.69 / 0.55, 1.15 / 0.64 / 0.53, 1.11 / 0.61 / 0.51 (the previous release, whose bound was 32:
+/// 1.12 / 0.60 / 0.50; without the drift 2.61 / 1.44 / 0.87 at 48 and 1.73 / 0.83 / 0.58 at 32); bench-temporal's
+/// lighting edit and bench-object-ghosting moved by 0.05 dE or less between 32 and 24, mostly down (the lamp's
+/// bounce 32 frames after it went out 0.79 and 0.76, the runner 0.3 s after its run 0.31 and 0.29). In the tree
+/// before it had specular light, the noise a shorter bound costs where nothing changes while something else moves
+/// (the top fifth of the frame in the dragged device's shots and in the runner's), for 60 / 48 / 32: dE 0.24 / 0.24 /
+/// 0.26 and 0.76 / 0.77 / 0.80.
+const HISTORY_LIVE: f32 = 24.0;
 /// The most once the scene has settled: holding still, the frame converges on the offline render.
 const HISTORY_FRAMES: f32 = 4096.0;
 
@@ -580,7 +605,7 @@ impl LiveCore {
         let mut core = LiveCore {
             kernel: None,
             more_features: Default::default(),
-            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: Default::default(), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();
         Ok(core)
@@ -725,11 +750,11 @@ impl LiveCore {
             );
             self.post_key = key;
         }
-        self.bloom = bloom_stages(pp, self.w, self.h);
+        self.bloom = post::BloomPlan::new(pp, self.w, self.h);
         self.vignette = pp.vignette;
         // THREERT_NO_GRAIN=1: no film grain (a fresh random pattern every frame; comparisons between frames see it as error).
         let grain = if std::env::var("THREERT_NO_GRAIN").is_ok_and(|v| v == "1") { 0.0 } else { pp.film_grain };
-        // THREERT_MOTION_BLUR=1: UE's default motion blur whatever the preset says; =amount,max,targetFps: those.
+        // THREERT_MOTION_BLUR=1: the default motion blur (`desc::MotionBlur`) whatever the preset says; =amount,max,targetFps: those.
         let mb = match std::env::var("THREERT_MOTION_BLUR").ok().as_deref() {
             Some("1") => crate::desc::MotionBlur::default(),
             Some(v) => match v.split(',').map(|x| x.trim().parse::<f32>()).collect::<Result<Vec<_>, _>>().as_deref() {

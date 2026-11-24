@@ -1128,7 +1128,7 @@ impl LiveCore {
             self.sc.up.kernel.features = self.kernel_features();
         }
         // Lighting changed: for 45 frames the histories hold HISTORY_LIVE frames at most (`live_lighting`), and where the
-        // change is strong the temporal pass cuts the history locally (anti-lag).
+        // temporal passes' change charts find one they cut the history locally (live.wgsl "The response of the histories").
         if d.materials || d.lights || d.objects || changes.environment {
             self.lit_changed = self.frame.max(1);
         }

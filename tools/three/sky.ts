@@ -2,9 +2,9 @@
 // native renderer so the *scene's* semantics are the same on both sides:
 //  - `gradientRadiance`: the analytic SkyGradient dome (renderer/src/sky.rs `bake_gradient`), baked into an equirect
 //    DataTexture for the background and a PMREM for image based lighting;
-//  - `sunTransmittance`: the atmosphere's transmittance toward the sun (sky.rs `sun_transmittance_ue`, UE
-//    FAtmosphereSetup::GetTransmittanceAtGroundLevel). With a SkyAtmosphere the DSL's DirectionalLight intensity is the
-//    illuminance above the atmosphere (UE semantics), so the sun reaching the ground is `lux x T`.
+//  - `sunTransmittance`: the atmosphere's transmittance toward the sun (sky.rs `Atmosphere::sun_transmittance`). With a
+//    SkyAtmosphere the DSL's DirectionalLight intensity is the illuminance above the atmosphere, so the sun reaching
+//    the ground is `lux x T`.
 // The atmosphere's sky radiance itself is three.js's own (the Preetham `Sky` addon), see SKY_NITS_PER_LUX.
 
 export type V3 = [number, number, number];
@@ -143,35 +143,75 @@ export function bakeEquirect(width: number, height: number, radiance: (d: V3) =>
 
 // ------------------------------------------------------------------------------------------------ atmosphere
 
-/** Transmittance from the ground (0.5 km) toward the sun (direction toward the sun, Y up): sky.rs, UE Earth defaults. */
-export function sunTransmittance(sunDir: V3, rayleighScale = 1, mieScale = 1): V3 {
-  const bottom = 6360, top = 6420;
-  const rayleigh: V3 = [0.005802 * rayleighScale, 0.013558 * rayleighScale, 0.0331 * rayleighScale];
-  const mieExt = 0.003996 * mieScale + 0.000444;
-  const ozone: V3 = [0.00065, 0.001881, 0.000085];
-  const elev = Math.asin(Math.max(-1, Math.min(1, sunDir[1])));
-  const pos = [0, 0, bottom + 0.5], dir = [Math.cos(elev), 0, Math.sin(elev)];
-  // ray / sphere (radius top), nearest positive hit
-  const b = pos[0] * dir[0] + pos[1] * dir[1] + pos[2] * dir[2];
-  const c = pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2] - top * top;
-  const disc = b * b - c;
-  let tmax = -1;
-  if (disc >= 0) {
-    const s = Math.sqrt(disc), t0 = -b - s, t1 = -b + s;
-    tmax = t0 < 0 && t1 < 0 ? -1 : t0 < 0 ? Math.max(t1, 0) : Math.max(t0, 0);
-  }
-  const od: V3 = [0, 0, 0];
-  if (tmax > 0) {
-    const n = 15, step = tmax / n;
-    for (let i = 0; i < n; i++) {
-      const p = [pos[0] + dir[0] * step * i, pos[1] + dir[1] * step * i, pos[2] + dir[2] * step * i];
-      const h = Math.hypot(p[0], p[1], p[2]) - bottom;
-      const dr = Math.exp((-1 / 8) * h), dm = Math.max(Math.exp((-1 / 1.2) * h), 0);
-      const doz = sat(1 - Math.abs(h - 25) / 15);
-      for (let k = 0; k < 3; k++) od[k] += step * (dm * mieExt + rayleigh[k] * dr + doz * ozone[k]);
+// The share of the sun's light (RGB) that reaches the ground through Earth's atmosphere: the same quantity as the
+// native renderer's `Atmosphere::sun_transmittance` (renderer/src/sky.rs), computed the same way, so a scene's sun has
+// the same colour on both sides (tools/three/test/sky.test.ts holds the two to the same numbers). See sky.rs for the
+// sources of the constants (Hillaire 2020, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique",
+// Table 1 and section 4; Bruneton's 2017 "Precomputed Atmospheric Scattering" demo) and for the design. Lengths in km.
+const R_GROUND = 6360, R_TOP = 6460;
+const H_RAYLEIGH = 8, H_MIE = 1.2;
+const RAYLEIGH_SCATTERING: V3 = [5.802e-3, 13.558e-3, 33.1e-3];
+const MIE_SCATTERING = 3.996e-3, MIE_ABSORPTION = 0.444e-3;
+const OZONE_ABSORPTION: V3 = [0.65e-3, 1.881e-3, 0.085e-3];
+const OZONE_CENTRE = 25, OZONE_HALF_WIDTH = 15;
+/** sky.rs SOFT_GROUND: how far under the ground's surface the sun's ray may pass, km. */
+const SOFT_GROUND = 5;
+/** sky.rs SUN_VEIL_COLUMN, SUN_VEIL_ALTITUDE: the calibration of the sun's light on the ground to the previous release. */
+const SUN_VEIL_COLUMN = 1.65, SUN_VEIL_ALTITUDE = 55;
+/** Gauss-Legendre, 8 points on [-1, 1] (Abramowitz & Stegun 1964, Table 25.4; the positive half): node, weight. */
+const GL8 = [
+  [0.1834346424956498, 0.362683783378362],
+  [0.525532409916329, 0.3137066458778873],
+  [0.7966664774136267, 0.2223810344533745],
+  [0.9602898564975362, 0.1012285362903763],
+];
+
+/** The distance from radius `r` along a ray of zenith cosine `mu` to the top of the atmosphere. */
+const distanceToTop = (r: number, mu: number) => -r * mu + Math.sqrt(Math.max(r * r * (mu * mu - 1) + R_TOP * R_TOP, 0));
+
+/** Columns of air, haze and ozone from radius `r` to the top along a ray that points up or level (sky.rs `columns_exact`). */
+function columns(r: number, mu: number): V3 {
+  const panels = 12, d = distanceToTop(r, mu);
+  const n: V3 = [0, 0, 0];
+  for (let p = 0; p < panels; p++) {
+    const centre = (p + 0.5) / panels, half = 0.5 / panels;
+    for (const [x, w] of GL8) {
+      for (const s of [-1, 1]) {
+        const u = centre + s * half * x;
+        const t = d * u * u;
+        const h = Math.sqrt(r * r + t * t + 2 * r * mu * t) - R_GROUND;
+        const k = w * half * 2 * d * u;
+        n[0] += k * Math.exp(-h / H_RAYLEIGH);
+        n[1] += k * Math.exp(-h / H_MIE);
+        n[2] += k * Math.max(1 - Math.abs(h - OZONE_CENTRE) / OZONE_HALF_WIDTH, 0);
+      }
     }
   }
-  return [Math.exp(-od[0]), Math.exp(-od[1]), Math.exp(-od[2])];
+  return n;
+}
+
+/**
+ * The share of the sun's light (RGB) that reaches the ground from `sunDir` (toward the sun, Y up), with the
+ * atmosphere's Rayleigh and Mie scattering scaled (SkyAtmosphere `rayleighScale`, `mieScale`).
+ */
+export function sunTransmittance(sunDir: V3, rayleighScale = 1, mieScale = 1): V3 {
+  const mu = Math.max(-1, Math.min(1, sunDir[1] / (Math.hypot(sunDir[0], sunDir[1], sunDir[2]) || 1)));
+  // A sun below the horizon: its ray passes under the surface, to radius p at its lowest, through the soft ground
+  // (sky.rs `slant`): the columns of the level ray from p twice, less the mirrored ray's from the ground.
+  let n: V3, ground = 0;
+  if (mu >= 0) n = columns(R_GROUND, mu);
+  else {
+    const p = R_GROUND * Math.sqrt(Math.max(1 - mu * mu, 0));
+    if (p <= R_GROUND - SOFT_GROUND) return [0, 0, 0];
+    const level = columns(p, 0), mirror = columns(R_GROUND, -mu);
+    n = [0, 1, 2].map((c) => Math.max(2 * level[c] - mirror[c], 0)) as V3;
+    ground = ((R_GROUND - p) / 2) ** 4;
+  }
+  const rayleigh = RAYLEIGH_SCATTERING.map((b) => b * Math.max(rayleighScale, 0));
+  const mie = MIE_SCATTERING * Math.max(mieScale, 0) + MIE_ABSORPTION;
+  const level = R_GROUND / (R_GROUND + SUN_VEIL_ALTITUDE);
+  const veil = SUN_VEIL_COLUMN / Math.sqrt(1 - level * level * (1 - mu * mu));
+  return [0, 1, 2].map((c) => Math.exp(-(rayleigh[c] * n[0] + mie * n[1] + OZONE_ABSORPTION[c] * n[2] + ground + veil * (rayleigh[c] + mie)))) as V3;
 }
 
 /**

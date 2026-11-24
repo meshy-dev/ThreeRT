@@ -18,6 +18,7 @@
   },
   "post": {
     "tonemapper": {
+      "_note": "Unreal's Film settings of the look this preset is compared with (ue5/scripts send them to Unreal). The renderer's tone curve (post.rs ToneCurve) is fitted to that look and reads none of them.",
       "type": "ue-filmic",
       "slope": 0.88,
       "toe": 0.55,
@@ -70,7 +71,7 @@
     "clampIndirect": 16.0,
     "russianRouletteDepth": 2,
     "energyCompensation": 0.0,
-    "_energyCompensationNote": "0 = UE 5.8 DefaultLit parity (measured vs UE path tracer); 1 = energy-conserving GGX (passes white furnace)"
+    "_energyCompensationNote": "how much of the specular lobe's multiple-scattering compensation (Turquin 2019: lobe x (1 + f0 (1 - E) / E)): 0 = the single-scattering GGX lobe, what real-time engines render by default (measured equal to UE 5.8 DefaultLit in UE's path tracer); 1 = energy conserving (passes the white furnace test)"
   },
   "ue": {
     "method": "lumen",

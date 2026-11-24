@@ -1372,6 +1372,19 @@ pub fn gpu_light_shown(l: &Light, m: Mat4, power: f32, shown: bool) -> Option<Gp
     Some(gl)
 }
 
+/// A spot light's cone for the kernel (`local_light`): the cosine of the outer cone's half angle `angle` (radians),
+/// outside which there is no light, and 1 / (the inner cone's cosine - it): `lightAngleScale` of glTF 2.0
+/// KHR_lights_punctual's reference attenuation (the difference no less than 0.001, as there: a cone without penumbra
+/// has an edge that wide), the offset left to the kernel's subtraction.
+/// `penumbra` (0..1) is the share of the angle over which the light fades: three.js's `SpotLight.penumbra` ("Percent
+/// of the spotlight cone that is attenuated due to penumbra"), whose inner cone is `angle` x (1 - `penumbra`) (three.js
+/// WebGLLights: `penumbraCos`), glTF's `innerConeAngle`.
+pub fn spot_cone(angle: f32, penumbra: f32) -> (f32, f32) {
+    let angle = angle.clamp(0.0, std::f32::consts::PI);
+    let (cos_outer, cos_inner) = (angle.cos(), (angle * (1.0 - penumbra.clamp(0.0, 1.0))).cos());
+    (cos_outer, 1.0 / (cos_inner - cos_outer).max(1e-3))
+}
+
 pub fn gpu_light(l: &Light, m: Mat4, power: f32) -> Option<GpuLight> {
     let pos = m.transform_point3(Vec3::ZERO);
     let dir = m.transform_vector3(Vec3::NEG_Z).normalize();
@@ -1401,14 +1414,12 @@ pub fn gpu_light(l: &Light, m: Mat4, power: f32) -> Option<GpuLight> {
         }
         Light::Spot { color, intensity, radius, range, angle, penumbra, cast_shadow, volumetric_scattering, specular_scale } => {
             let intensity = intensity * power;
-            // UE: inner = outer * (1 - penumbra); falloff = saturate((cos - cosOuter) / (cosInner - cosOuter))^2
-            let cos_outer = angle.cos();
-            let cos_inner = (angle * (1.0 - penumbra)).cos();
+            let (cos_outer, inv_width) = spot_cone(*angle, *penumbra);
             GpuLight {
                 pos: [pos.x, pos.y, pos.z, 2.0],
                 dir: [dir.x, dir.y, dir.z, *radius],
                 color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, *range],
-                ext: [cos_outer, 1.0 / (cos_inner - cos_outer).max(1e-4), 0.0, *cast_shadow as u32 as f32],
+                ext: [cos_outer, inv_width, 0.0, *cast_shadow as u32 as f32],
                 x: [*volumetric_scattering, *specular_scale, 0.0, 0.0],
             }
         }
@@ -2827,6 +2838,40 @@ pub fn tri_attr(n: [Vec3; 3], uv: [Vec2; 3], tangent: Option<CornerTangents>, ma
         x: [0.0; 4],
         t1: t(1),
         t2: t(2),
+    }
+}
+
+#[cfg(test)]
+mod spot_cone_tests {
+    use super::*;
+
+    /// The kernel's falloff (pathtrace.wgsl `local_light`) at an angle from the spot's axis.
+    fn falloff(angle: f32, penumbra: f32, at: f32) -> f32 {
+        let (cos_outer, inv_width) = spot_cone(angle, penumbra);
+        let t = ((at.cos() - cos_outer) * inv_width).clamp(0.0, 1.0);
+        t * t
+    }
+
+    /// Nothing outside the cone, everything inside the inner cone (angle x (1 - penumbra)), and between them glTF
+    /// KHR_lights_punctual's reference attenuation; a cone without penumbra is hard.
+    #[test]
+    fn the_cone_fades_over_the_penumbra() {
+        let (angle, penumbra) = (52f32.to_radians(), 0.4);
+        assert_eq!(falloff(angle, penumbra, angle + 1e-3), 0.0);
+        assert_eq!(falloff(angle, penumbra, 1.2), 0.0);
+        assert_eq!(falloff(angle, penumbra, angle * 0.6 - 1e-3), 1.0);
+        assert_eq!(falloff(angle, penumbra, 0.0), 1.0);
+        for at in [0.6f32, 0.7, 0.8, 0.9] {
+            let (ci, co) = ((angle * 0.6).cos(), angle.cos());
+            let scale = 1.0 / (ci - co).max(0.001);
+            let want = (at.cos() * scale - co * scale).clamp(0.0, 1.0).powi(2);
+            assert!((falloff(angle, penumbra, at) - want).abs() < 1e-5 && want > 0.0 && want < 1.0, "{at}: {want}");
+        }
+        assert_eq!(falloff(0.35, 0.0, 0.34), 1.0);
+        assert_eq!(falloff(0.35, 0.0, 0.3501), 0.0);
+        // The kernel reads the pair from the light's `ext.xy`.
+        let l = gpu_light(&Light::Spot { color: [1.0; 3], intensity: 1.0, radius: 0.0, range: 0.0, angle, penumbra, cast_shadow: true, volumetric_scattering: 1.0, specular_scale: 1.0 }, Mat4::IDENTITY, 1.0).unwrap();
+        assert_eq!((l.ext[0], l.ext[1]), spot_cone(angle, penumbra));
     }
 }
 

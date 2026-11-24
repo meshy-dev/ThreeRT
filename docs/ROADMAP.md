@@ -1,5 +1,11 @@
 # Roadmap
 
+> **Provenance note (2026-11-24).** This file is a log. Entries before that date describe earlier implementations of the
+> post chain, the specular temporal pass, the diffuse history rules, the BSDF's energy terms, the atmosphere and the fog
+> volume, which have since been replaced by implementations written from public sources
+> ([PROVENANCE.md](PROVENANCE.md)). Where an entry names another engine's or SDK's internals, it records how that
+> earlier code came about, not how the present code works; do not implement from such entries.
+
 ## Goal
 
 ThreeRT's goal is AAA real-time game rendering: on consumer GPUs (Apple M series first), dynamic, open-world-scale game
@@ -1863,12 +1869,7 @@ Measured on the M5 Pro (`out/liveq/gpu-runs-std.md`; single runs unless said):
   set again from this build's readings with the margins the old ones had (tools/bench-ghosting.ts); the trails'
   limits and the other shots' stand.
 
-**History lengths (2026-11-12, after it).** The whole frame's history was cut by what happened in the scene: held to
-48 frames while the camera moved, every pixel cut to 16 at a lighting edit and to 4 at a geometry edit, 24 for good in
-a scene with spark lights. Now one bound while the scene's lighting changes (32 frames, a real-time denoiser's: NRD's
-default is 30; `HISTORY_LIVE`), the long history once it has settled, and within it each pixel's own: 48 where it
-moves a pixel a frame, and an anti-lag that cuts the irradiance history by how far its fast mean left the slow one
-beyond their noise (ReBLUR's form; it was on / off). No edit cuts anything.
+**History lengths (2026-11-12, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | dE against the offline render or the converged frame | main | this |
 |---|---|---|
@@ -1925,15 +1926,7 @@ hid two faults of the live path's own:
 - Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), and a medium has no
   motion vector (smoke that drifts is reactive, not followed). (Overlapping media: below.)
 
-**The specular history per pixel (2026-11-13, after it).** `stemporal` still set every pixel's history by what the
-camera did: 2 .. 12 frames by roughness whenever it moved or turned at all, 4 for the 8 frames after it translated
-(§ 2c's fix). Now each pixel's own, from two things it knows (output pixels a frame): its speed (a resampled history
-blurs: 48 frames at a pixel a frame, as the diffuse) and its reflection's parallax, how far what it reflects moved
-against the surface: the history may be no longer than keeps its trail (frames × parallax) within 2 px (`SPEC_TRAIL`),
-2 frames at least on a mirror, 4 from roughness 0.05. The parallax is the reflected point's where this frame's sample
-has one, the farthest possible point's where it has none, and a moving reflector's own speed. A turn has no parallax
-and keeps its history; a translation shortens it where the reflection slides, by how fast. NRD's ReBLUR bounds the
-specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumulation`).
+**The specular history per pixel (2026-11-13, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | bench-ghosting --quick, excess over the settled frame / trail px (turn-mid, strafe-mid ground; the two returns + 0.5 s; stop + 0.1 s) | main | this |
 |---|---|---|
@@ -1941,7 +1934,7 @@ specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumula
 | Bistro | 1.08 / 5, 1.76 / 6, 1.25 / 12, 1.34 / 12, 1.50 / 5 | 0.84 / 7, 1.60 / 6, 1.17 / 12, 1.26 / 11, 1.34 / 5 |
 
 - What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, S1–S20):
-  - the parallax weighed against the reflection's own blur, as ReBLUR weighs it against the lobe's angle (the
+  - the parallax weighed against the reflection's own blur, the lobe's angle (the
     history may trail K lobe footprints behind): a wet street's lobe is 27–245 px wide here, the history ran through
     a forward move, and the stop dragged a 65–112 px trail (limit 35);
   - two thresholds instead of one budget (2 .. 12 frames from 0.25 px of parallax, 4 from 2 px): passes, a little
@@ -1956,7 +1949,7 @@ specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumula
   main's own runs across two days (move40 3.88–4.07). Stated as it is: the ghosting bench counts frames and repeats
   to 0.02, this one does not.
 - Not changed, measured: what makes the scene's lighting "live" for the whole frame. Anything that moves or is edited
-  does, for 45 frames, so a scene with a walker in it is always at the 32-frame bound (NRD's own: 30), and the rule
+  does, for 45 frames, so a scene with a walker in it is always at the 32-frame bound, and the rule
   for spark lights adds nothing there (the Bistro slice reads the same without it). The radiance cache's history is
   cut to 4 frames by the same switch: at 32 the slice reads 2.66 for 2.82 at rest and 5.80 for 6.03 at its
   explosion, and all of test-render passes; what the 4 frames buy is how fast indirect light follows an edit, which
@@ -2009,7 +2002,7 @@ A rect light's card and the sun still rebuild (geometry; the sky's bake).
   as before.
 - Seen on the way, not this change's: 2 s after a 5,000 cd light is hidden beside a 1,000 cd one the plane under
   them still reads 6 % high. 45 frames after a lighting edit the long history comes back, and what is left of the
-  old light then averages out as 1 / n (NRD's fixed 30 frames would decay it for good). And 0.3 s after a fireball
+  old light then averages out as 1 / n. And 0.3 s after a fireball
   is hidden a faint ring stays where its edge was (the upscaler's history: nothing says a medium went).
 - Not done: `Explosions` still parks (the voxel line's to change); a mesh hidden by its own `visible` still rebuilds.
 
@@ -2047,12 +2040,7 @@ converged frame of the state after, beside the frame k frames after a history re
   later (lamp off: 2.24 for 1.66 at 32 frames, 1.38 for 1.12 at 128; lamp on: 0.50 for 0.72, 0.79 for 0.93). The 4
   frames buy what they were said to and stay; the 0.16 ΔE they cost a scene at rest is the price.
 
-**The fast-history clamp (2026-11-13, after it).** ReBLUR's way of following a lighting change, in `dtemporal`: every
-frame, while the scene's lighting is live, the slow means around the pixel (3 × 3 on its surface) are held, a channel
-each, to the band of the fast means there (a quarter of each new sample; their mean ± 3 standard errors, from the fast
-luminances' spread), and the pixel's history is changed by the same ratios and counts for as many frames less. The
-fast mean in colour is kept in the buffer that was the `judge` pass's unread ping-pong partner: no new memory. The
-cut by luminance stays beside it. `bench-temporal --shot edit`, ΔE against the converged frame of the state after:
+**The fast-history clamp (2026-11-13, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | edit, region | 8 frames: before → now | 32 frames | 128 frames | a view with no memory, 32 |
 |---|---|---|---|---|
@@ -3327,14 +3315,7 @@ Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references
 Kabukichō shots below are history.
 
 ### 2a. Reflection temporal parameters at UE 5.8 defaults
-Reference: `Engine/Shaders/Private/Lumen/LumenReflectionDenoiserTemporal.usf`, `LumenReflections.cpp:153-162`,
-`LumenReflectionDenoiserSpatial.usf:92`.
-- Neighbourhood clamp always on (not only in motion), in YCoCg, 1σ (`NeighborhoodClampScale` = 1).
-- At most 12 accumulated frames (`MaxFramesAccumulated`); at full resolution, specular with roughness < 0.05 drops to 2
-  frames (residual noise left to TSR).
-- Virtual-image (mirror reprojection) and surface histories are clamped separately; keep the one closer to the
-  neighbourhood (`...Temporal.usf` ~l.495).
-- Spatial filter radius × saturate(roughness × 8).
+[Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md.]
 - Today `live.wgsl` clamps only in motion, at 2–3σ in RGB, with 8–48 frames of history.
 - Also: at long history the live image is the raw accumulated average (all à-trous stages gated off by history length
   since round 3: Cornell box at 256 frames SSIM 0.912 vs the UE Path Tracer, 0.98 on Nov 4). Gate on the remaining
@@ -3487,7 +3468,7 @@ dynamic-resolution floor, 60 Hz camera input.
         - The option left: a second emitter sample at near-mirror camera hits in the same pass. It needs the camera
           hit's surface (a primary ray and a material evaluation), an estimated +0.6–1.0 ms more, so Kabukichō
           moving would be ~16.6–17.0 ms.
-      - UE 5.8's own temporal rules for reflections (`LumenReflectionDenoiserTemporal.usf`), applied while the view
+      - UE 5.8's temporal rules for reflections, as an earlier implementation had them (docs/PROVENANCE.md), applied while the view
         moves (2026-11-07):
         - What changed: no hold after translating; 12 frames; a clamp at 1 σ, doubled for samples reconstructed
           from neighbours (all of ours below 100 %), also tried at 4 and 8 σ; the reflection-hit history only for
@@ -3939,9 +3920,9 @@ dynamic-resolution floor, 60 Hz camera input.
      - Velocity: the temporal pass computes each pixel's motion from the camera and the motion vectors.
      - Reconstruction: a gather after McGuire et al. 2012 on the HDR image before bloom. A moving object smears over
        a static background; a static foreground stays sharp.
-     - Length, as UE's (PostProcessMotionBlur.cpp, UpdateMotionBlurTimeScale): ± amount / 2 × the frame's motion ×
-       (1 / target FPS) / frame time. At 60 fps that is one frame of motion in total, capped at 5 % of the width.
-     - Camera cuts (a jump of 2 m or 30° in one frame) don't blur (UE: bCameraCut). Without that check, Kabukichō's
+     - Length: from the amount, the frame's motion and the target frame rate (docs/RUNTIME.md, "The post chain"). At 60 fps
+       that is one frame of motion in total, capped at 5 % of the width.
+     - Camera cuts (a jump of 2 m or 30° in one frame) don't blur. Without that check, Kabukichō's
        viewpoint switch smeared the whole frame (horizontal gradient energy 102 vs 363).
      - Cost at the 0.5 floor, Kabukichō:
        - 0.44 ms while anything moves: 15.78 ms total vs 15.36 with it off.
@@ -3951,7 +3932,7 @@ dynamic-resolution floor, 60 Hz camera input.
        - Within budget either way.
      - UE reference: bench-temporal `--motion-blur` against UE renders with the same settings (`MB=1
        ue5/temporal.ts`). Movie Render Queue replaces the amount with its shutter fraction (0.5) and the target FPS with
-       the output rate (60) (MoviePipelineImagePassBase.cpp), which is half the real-time blur. Ours at UE's real-time
+       the output rate (60), which is half the real-time blur. Ours at UE's real-time
        defaults read about twice UE's blur against those frames. Ours at what MRQ rendered (`THREERT_MOTION_BLUR=0.5,5,60`):
        - excess over UE move20 / move40 / move59 / stopped 1.23 / 1.51 / 1.60 / 2.01 (unblurred 1.43 / 1.75 / 1.75 /
          2.01);
@@ -3960,10 +3941,7 @@ dynamic-resolution floor, 60 Hz camera input.
    - Depth of field at UE's defaults: done (2026-11-06).
      - UE's default is off: no focus distance on the camera. A camera's `dof` (focus distance, f-stop, sensor width;
        UE's defaults f/4, 24.576 mm) switches it on.
-     - CoC: UE's physical model (DiaphragmDOFUtils.cpp, FPhysicalCocModel):
-       - focal length from the sensor height (width / aspect) and the vertical FOV;
-       - CoC of infinity f² / (N (focus − f));
-       - per pixel (z − focus) / z of that, capped at 2.5 % of the width (r.DOF.Kernel.Max{Fore,Back}groundRadius).
+     - CoC: a thin lens (docs/RUNTIME.md, "The post chain"), capped at 2.5 % of the width.
      - Live: a gather on the composed HDR image, before motion blur as in UE.
        - The CoC is computed in the compose pass.
        - A 16 × 16 tile maximum bounds each pixel's search.
@@ -4477,10 +4455,8 @@ dynamic-resolution floor, 60 Hz camera input.
             instead of four (kept, −0.03 ms); no media in the surface cache's training shadows (−0.08 ms with a bias:
             dropped).
         - Next (part 3): UE references and the motion metric; cheaper media shadow rays to fit rain + smoke.
-      - Status, part 3a: UE references, and `FogVolume` is UE's Local Fog Volume.
-        - `FogVolume` takes UE 5.8's Local Fog Volume density as UE voxelizes it into volumetric fog
-          (VolumetricFog.usf), with UE's settings and defaults (docs/MATERIAL_FUNCTIONS.md, "Volume functions").
-          `volume/local-fog` (new): 0.2823 against the numerically integrated 0.2863.
+      - Status, part 3a: UE references.
+        - [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md.]
         - UE references, `bun ue5/volumes.ts`: `tools/volume-scene.ts` in a scratch project, path-tracer and Lumen stills
           as linear EXR.
           - Every preset is a Heterogeneous Volume: a Volume-domain material whose Custom nodes are our volume
@@ -6131,7 +6107,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
 - Auto exposure (fixed 2026-11-06): the presets' histogram range was UE's legacy -8 .. 4 (log2 luminance), which
   daylight saturates (a 3000-nit sky pinned the exposure at EV 6.5, the image washed out). UE 5 projects enable
   r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange (every template), giving EV100 -10 .. 20, the same log2
-  luminance at the default lens attenuation (Scene.cpp, PostProcessEyeAdaptation.cpp EV100ToLog2). The presets use
+  luminance at the default lens attenuation. The presets use
   it now; Kabukichō keeps the legacy range explicitly, as its UE project does. Atomic tests `exposure/auto-daylight`
   (offline and live; 14.00 vs 14.03 expected) and `exposure/auto-night`. Still different: UE's default exposure
   compensation is +1 EV (r.DefaultFeature.AutoExposure.Bias = 1.0); our camera's default is 0.
