@@ -2887,12 +2887,18 @@ four vertices), one instance, a BLAS of its own built again after the particle p
 systems, those the lights are sampled by (their triangles are the instance's emitters) and translucent ones (an
 instance of the translucency pass's TLAS each) alike; a particle keeps its own object, which a hit finds from its
 instance's and its triangle. The world-space form is gone from the build, the layout, the passes and the kernel.
-TBD-PT
+The cost is a BLAS build and a TLAS instance a system, where all systems shared four BLASes at most. A frame's GPU
+time on Bistro with opaque particles added (1280 x 720, an M5 Pro; runs alternated): 16 systems of 1024
+particles, 21.25 to 21.48 ms for 21.15 to 21.63 (no difference); 256 systems of 64, 21.44 to 21.55 ms for 21.07 to
+21.11 (+0.41 ms, 1.9 %: 0.16 ms of it in the trace).
 Not changed: a system that comes or goes, a particle function or program, still rebuild the scene.
 Tests: the build's five kinds of system (`a_particle_system_is_a_mesh_of_quads_and_an_instance`); a particle's
 previous positions and the motion at its pixels beside another system; `translucent/systems` (two translucent
 systems, their order reversed between the image's sides).
-Mutations: TBD-PM
+Mutations: 28 (the build and the layout, the passes' previous positions, the kernel's object of a particle, the
+builds after the passes, the translucency pass). One had no test, a pass's first frame taking the build's
+positions for its previous ones, and has its assertion now, for both passes; the others failed a test there was,
+one of them by the renderer stopping.
 
 **Volumes and density grids come in place (2026-11-23, after it).** A volume that came, went or was set again
 while a game ran, a still volume's first move, a volume function, a new density grid and a grid program each had
