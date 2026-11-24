@@ -3187,7 +3187,7 @@ mod instance_tests {
     }
 
     /// A posed skinned model's triangles that emit stay in its mesh (tests/render/data/arm-glow.glb: arm.glb with its
-    /// light half emitting): the model is an instance of a mesh that deforms, and they are its instance's emitters,
+    /// light half emitting, and a clip, `vanish`, that scales its tip joint from nothing to its size): the model is an instance of a mesh that deforms, and they are its instance's emitters,
     /// moving ones, each its mesh's triangle as the instance places it. Nothing is a world-space triangle. One placed
     /// without size is an instance no ray sees. No GPU.
     #[test]

@@ -1276,14 +1276,15 @@ impl LiveCore {
     }
 
     /// An instance that came back, or went unseen: its emitters' areas and centres as it stands now (an unseen one's
-    /// are its mesh's own: `placed_emitter`), for their weights.
-    fn weigh_run(&mut self, r: u32) {
+    /// are its mesh's own: `placed_emitter`), for their weights. `all`: those without area too (a mesh that deforms:
+    /// a pose may leave a triangle none, and the next give it some again).
+    fn weigh_run(&mut self, r: u32, all: bool) {
         let LoadedScene { tables, instances, pool_tris, edit, .. } = &mut self.sc;
         let Some(inst) = instances.get(r as usize) else { return };
         let run = emitter_run(&tables.emitter_tris, instances, r);
         for j in run.clone() {
             let e = tables.emitter_tris[j];
-            if e.area > 0.0 {
+            if all || e.area > 0.0 {
                 let (area, c, _) = crate::placed_emitter(inst, &pool_tris[e.tri as usize - edit.pool_first], e.mat, &tables.materials);
                 (tables.emitter_tris[j].area, tables.emitter_tris[j].c) = (area, c);
             }
@@ -1392,7 +1393,7 @@ impl LiveCore {
                     top.moved(top.inst_base() + r, w, Some((inst.cast_shadow, unseen)));
                     build.instances = true;
                     changes.powers.insert(k);
-                    self.weigh_run(r as u32);
+                    self.weigh_run(r as u32, false);
                     // (A skinned model shown is skinned as it is posed now: its mesh kept the pose it was hidden in.)
                     if skinned && !unseen {
                         changes.poses.insert(k);
@@ -1415,7 +1416,7 @@ impl LiveCore {
                     build.instances = true;
                     changes.powers.insert(k);
                     for r in records {
-                        self.weigh_run(r);
+                        self.weigh_run(r, false);
                     }
                     if !unseen {
                         changes.poses.insert(k);
@@ -1482,7 +1483,7 @@ impl LiveCore {
         self.sc.up.heap.write(q, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
         for k in 0..self.flipped.len() {
             if let Some(r) = self.sc.tables.retained.instance(self.flipped[k]).map(|i| i.instance) {
-                self.weigh_run(r);
+                self.weigh_run(r, false);
             }
         }
         self.fill_moved(placed.iter().map(|&(_, i)| i));
@@ -2463,7 +2464,7 @@ impl LiveCore {
         self.fill_moved(lit.iter().map(|l| l.0));
         // (And their weights, by the areas the pose gives them.)
         for l in &lit {
-            self.weigh_run(l.0);
+            self.weigh_run(l.0, true);
         }
         self.pose_spans = posed;
         self.pose_reposed = true;

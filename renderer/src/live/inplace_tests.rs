@@ -3240,7 +3240,8 @@ fn posed_skinned_models_are_meshes_of_their_own() {
 
 /// A posed skinned model with triangles that emit (tests/render/data/arm-glow.glb) is posed in place, and its emitters
 /// follow: the light list's copies are its skinned triangles, the CPU's triangles of them the pose's, their weights
-/// and the picture a build's at the new pose. Under either traversal.
+/// and the picture a build's at the new pose; also through a pose that leaves some of them no area. Under either
+/// traversal.
 #[test]
 fn a_posed_skinned_models_emitters_follow_its_pose() {
     let presets = crate::default_presets_dir();
@@ -3282,6 +3283,20 @@ fn a_posed_skinned_models_emitters_follow_its_pose() {
     }
     let last = picture(&mut live, 48);
     assert!(apart(&loaded, &last) > 0.5, "the pose is in the picture ({:.2} steps)", apart(&loaded, &last));
+    // A pose that leaves some of its emitters no area (the file's other clip scales the joint they follow to nothing),
+    // then one that gives it back: they weigh nothing, then what a build has them weigh again.
+    let clip = |name: &str, time| Some(crate::desc::Animation { clip: name.into(), time, r#loop: true, nodes: Default::default() });
+    let all = its(&live).len();
+    w.set_animation(30, clip("vanish", 0.0)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "its joint scaled to nothing: in place ({:?})", live.fallback);
+    let left = its(&live).len();
+    assert!(left < all, "some of its {all} emitters have no area ({left} have)");
+    lit_as_a_build("its joint scaled to nothing", &mut live, &mut open(&w).unwrap());
+    w.set_animation(30, clip("bend", 0.3)).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "its joint back: in place ({:?})", live.fallback);
+    assert_eq!(its(&live).len(), all, "its emitters have their area again");
+    list_is_its_triangles("its joint back", &live);
+    lit_as_a_build("its joint back", &mut live, &mut open(&w).unwrap());
 }
 
 /// A posed skinned model is hidden and shown in place: hidden, no ray sees its instance and a new pose skins
