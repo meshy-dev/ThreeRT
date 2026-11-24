@@ -201,6 +201,25 @@ test("Mesh.copy and clone: material arrays are independent, but geometry and mat
   assert.equal(single.clone().material, red, "a single material remains shared");
 });
 
+test("Object3D.attach preserves world position with matrixAutoUpdate disabled, as three.js r187", () => {
+  const source = new THREE.Group();
+  source.position.set(5, 0, 0);
+  const target = new THREE.Group();
+  target.position.set(-2, 0, 0);
+  const child = new THREE.Object3D();
+  child.position.set(3, 0, 0);
+  child.updateMatrix();
+  child.matrixAutoUpdate = false;
+  source.add(child);
+
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [8, 0, 0], "source world x: 5 + 3");
+  assert.equal(target.attach(child), target);
+  assert.equal(child.parent, target);
+  assert.deepEqual(child.position.toArray(), [10, 0, 0], "new local x: 8 - (-2)");
+  assert.deepEqual(child.getWorldPosition(new THREE.Vector3()).toArray(), [8, 0, 0], "world position must stay fixed");
+  assert.equal(child.matrix.elements[12], 10, "explicit matrix must use the new local translation");
+});
+
 test("Raycaster: the nearest hit first, front faces of single-sided materials, instanceId, near / far", () => {
   const scene = new THREE.Scene();
   const near = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshStandardMaterial());
