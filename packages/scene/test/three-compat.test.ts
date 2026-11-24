@@ -154,6 +154,25 @@ test("Object3D: clone (geometry shared, own id), attach (world transform kept), 
   assert.ok(o.getWorldDirection(new THREE.Vector3()).distanceTo(new THREE.Vector3(1, 0, 0)) < 1e-9);
 });
 
+test("Object3D.add: notifies the child and then the parent after parenting, as three.js does", () => {
+  const parent = new THREE.Group();
+  const child = new THREE.Object3D();
+  const order: string[] = [];
+  child.addEventListener("added", (event) => {
+    assert.equal(event.target, child);
+    assert.equal(child.parent, parent, "the parent is assigned before the added event");
+    order.push("added");
+  });
+  parent.addEventListener("childadded", (event) => {
+    assert.equal(event.target, parent);
+    assert.equal(event.child, child, "the parent event names the child");
+    assert.equal(child.parent, parent);
+    order.push("childadded");
+  });
+  assert.equal(parent.add(child), parent);
+  assert.deepEqual(order, ["added", "childadded"]);
+});
+
 test("Mesh.copy and clone: material arrays are independent, but geometry and materials are shared, as three.js does", () => {
   const geometry = new THREE.BoxGeometry();
   const red = new THREE.MeshStandardMaterial({ color: 0xff0000 });
