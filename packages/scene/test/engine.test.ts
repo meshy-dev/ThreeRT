@@ -79,6 +79,85 @@ test("later syncs send only what changed", () => {
   assert.equal(((engine.take()[0][2]) as MaterialDesc).alphaTest, 0.4);
 });
 
+test("manual matrixWorld is sent to the renderer, including in-place edits and parent changes", () => {
+  const scene = new Scene();
+  const carrier = new Group();
+  carrier.id = "carrier";
+  carrier.position.x = 5;
+  const manual = new Mesh(new BoxGeometry(1, 1, 1));
+  manual.id = "manual";
+  manual.position.set(1, 2, 3);
+  manual.matrixWorldAutoUpdate = false;
+  manual.matrixWorld.makeTranslation(10, 20, 30);
+  const child = new Mesh(new BoxGeometry(1, 1, 1));
+  child.id = "child";
+  child.position.x = 2;
+  manual.add(child);
+  carrier.add(manual);
+  scene.add(carrier);
+  const camera = new PerspectiveCamera();
+  scene.add(camera);
+  const { engine, b, calls } = bind(scene, camera);
+  const ids = new Map(ofType(calls, "object").map((c) => [(c[2] as ObjectDesc).name, c[1] as number]));
+  const placements = (batch: [string, ...unknown[]][]) =>
+    new Map(ofType(batch, "transform").map((c) => [c[1] as number, c[2] as number[]]));
+  assert.deepEqual(placements(calls).get(ids.get("carrier")!)?.slice(0, 3), [5, 0, 0]);
+  assert.deepEqual(placements(calls).get(ids.get("manual")!)?.slice(0, 3), [5, 20, 30], "10 world x - 5 parent x");
+  assert.deepEqual(placements(calls).get(ids.get("child")!)?.slice(0, 3), [2, 0, 0]);
+  assert.deepEqual(child.getWorldPosition(new Vector3()).toArray(), [12, 20, 30]);
+  b.sync();
+  assert.deepEqual(engine.take(), [], "unchanged manual matrices cause no redundant renderer calls");
+
+  manual.matrixWorld.setPosition(20, 20, 30); // Matrix4 writes do not notify change tracking.
+  b.sync();
+  const edited = engine.take();
+  assert.equal(ofType(edited, "transform").length, 1);
+  assert.deepEqual(placements(edited).get(ids.get("manual")!)?.slice(0, 3), [15, 20, 30]);
+
+  carrier.position.x = 7;
+  b.sync();
+  const moved = engine.take();
+  assert.equal(ofType(moved, "transform").length, 2, "manual object re-bases when its parent moves");
+  assert.deepEqual(placements(moved).get(ids.get("carrier")!)?.slice(0, 3), [7, 0, 0]);
+  assert.deepEqual(placements(moved).get(ids.get("manual")!)?.slice(0, 3), [13, 20, 30]);
+
+  manual.matrixWorldAutoUpdate = true;
+  b.sync();
+  const automatic = engine.take();
+  assert.equal(ofType(automatic, "transform").length, 1);
+  assert.deepEqual(placements(automatic).get(ids.get("manual")!)?.slice(0, 3), [1, 2, 3],
+    "turning automatic updates back on sends local components again");
+  b.sync();
+  assert.deepEqual(engine.take(), []);
+});
+
+test("manual matrixWorld TRS uses parent scale and rejects unrenderable shear", () => {
+  const scene = new Scene();
+  const carrier = new Group();
+  carrier.position.x = 4;
+  carrier.scale.set(2, 2, 2);
+  const manual = new Mesh(new BoxGeometry(1, 1, 1));
+  manual.matrixWorldAutoUpdate = false;
+  manual.matrixWorld.compose(new Vector3(10, 0, 0), new Quaternion(), new Vector3(4, 4, 4));
+  const child = new Mesh(new BoxGeometry(1, 1, 1));
+  child.position.x = 1;
+  manual.add(child);
+  carrier.add(manual);
+  scene.add(carrier);
+  const camera = new PerspectiveCamera();
+  scene.add(camera);
+  const { b, calls } = bind(scene, camera);
+  const name = b.nameOf(manual);
+  const id = ofType(calls, "object").find((c) => (c[2] as ObjectDesc).name === name)![1];
+  const local = ofType(calls, "transform").find((c) => c[1] === id)![2] as number[];
+  assert.deepEqual(local.slice(0, 3), [3, 0, 0], "(10 world - 4 parent) / 2 parent scale");
+  assert.deepEqual(local.slice(7, 10), [2, 2, 2], "4 world scale / 2 parent scale");
+  assert.deepEqual(child.getWorldPosition(new Vector3()).toArray(), [14, 0, 0], "10 + (4 x 1)");
+
+  manual.matrixWorld.set(1, 1, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+  assert.throws(() => b.sync(), /matrixWorld must be a finite, decomposable TRS matrix/);
+});
+
 test("dynamicGeometry meshes: the flag reaches the engine; a new geometry re-creates the object with it", () => {
   const scene = new Scene();
   const mat = new MeshStandardMaterial();

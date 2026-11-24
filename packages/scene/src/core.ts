@@ -405,8 +405,9 @@ export class Object3D {
   }
   /**
    * The local transform as a matrix (three.js): `updateMatrix()` composes it from position / quaternion / scale, which
-   * `updateWorldMatrix` does first while `matrixAutoUpdate` is on. The engine is always sent position / rotation /
-   * scale, so a matrix set by hand moves only what reads it (`matrixWorld`, `setMatrixAt(i, o.matrix)`).
+   * `updateWorldMatrix` does first while `matrixAutoUpdate` is on. Normally the engine is sent local position /
+   * rotation / scale. With `matrixWorldAutoUpdate = false`, the binding instead derives a local transform from the
+   * authored world matrix for the renderer. Editing `matrix` alone still affects only readers of that matrix.
    */
   get matrix(): Matrix4 {
     return (this._matrix ??= new Matrix4());
@@ -418,6 +419,18 @@ export class Object3D {
     return (this._matrixWorld ??= new Matrix4());
   }
   declare private _matrixWorld: Matrix4 | undefined;
+  /** Set (only) while `matrixWorldAutoUpdate` is false: an object that leaves it on carries no field for it. */
+  declare private _matrixWorldManual: true | undefined;
+  /** Set false to retain and render a manually supplied matrixWorld, as in three.js. */
+  get matrixWorldAutoUpdate(): boolean {
+    return !this._matrixWorldManual;
+  }
+  set matrixWorldAutoUpdate(value: boolean) {
+    if (value === this.matrixWorldAutoUpdate) return;
+    if (value) delete this._matrixWorldManual;
+    else this._matrixWorldManual = true;
+    touched(this);
+  }
 
   /**
    * The stable id set by scene code (picking, gameplay events, the editor; the binding names the object by it); until
@@ -652,8 +665,10 @@ export class Object3D {
   updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void {
     if (updateParents && this.parent) this.parent.updateWorldMatrix(true, false);
     if (this.matrixAutoUpdate) this.updateMatrix();
-    if (this.parent) this.matrixWorld.multiplyMatrices(this.parent.matrixWorld, this.matrix);
-    else this.matrixWorld.copy(this.matrix);
+    if (this.matrixWorldAutoUpdate) {
+      if (this.parent) this.matrixWorld.multiplyMatrices(this.parent.matrixWorld, this.matrix);
+      else this.matrixWorld.copy(this.matrix);
+    }
     if (updateChildren) for (const c of this.children) c.updateWorldMatrix(false, true);
   }
 
