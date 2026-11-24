@@ -260,13 +260,6 @@ fn mesh_is_the_cpus(what: &str, c: &LiveCore, id: u32) {
     assert_eq!(got.p, want, "{what}: the mesh's corners through its indices");
 }
 
-/// The world-space triangles that move, on the GPU through their indices, are the CPU's (`LoadedScene::dynamic`).
-fn moving_triangles_are_the_cpus(what: &str, c: &LiveCore) {
-    let (first, rows, _, corners) = &c.sc.dynamic;
-    let got = triangles_on_gpu(c, *first as u64, rows.len() as u64 / 3, 0, None);
-    assert_eq!(got.p, corners.iter().flatten().copied().collect::<Vec<f32>>(), "{what}: the moving triangles' corners through their indices");
-}
-
 /// Mean absolute difference of two pictures, in 8-bit steps.
 fn apart(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
@@ -537,12 +530,11 @@ fn a_mesh_changed_in_place_to_more_vertices_takes_another_run() {
     against_a_build("flat again", &mut live, &w);
 }
 
-/// Two movable rect lights' cards (world-space triangles that move, one card after the other; a still card's
-/// vertices lie before theirs): each moved alone is written where it lies, the other's vertices as they were; the
-/// motion vectors at its pixels are its step back (its previous positions are its own); the picture is a build's.
-/// (Hardware traversal: under software traversal a world-space triangle that moves is a rebuild's.)
+/// Two movable rect lights' cards beside a still one (instances of the card mesh): each moved alone has its instance
+/// where its light is, the others' as they were; the motion vectors at its pixels are its step back; the picture is
+/// a build's.
 #[test]
-fn a_moved_card_beside_another_is_written_where_it_lies() {
+fn a_moved_card_beside_another_is_placed_where_its_light_is() {
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
     let turn = glam::Quat::from_rotation_y(3.3);
@@ -554,22 +546,42 @@ fn a_moved_card_beside_another_is_written_where_it_lies() {
         w.set_transform(id + 100, at[k], turn, Vec3::ONE).unwrap();
     }
     let mut live = match open(&w) {
-        Ok(c) if c.g.hwrt => c,
-        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Ok(c) => c,
         Err(e) => return eprintln!("skipped: {e}"),
     };
     w.take_changes();
-    assert!(live.sc.dynamic.1.len() == 12 && live.sc.dynamic_verts.0 > 0, "two cards that move, four triangles, after vertices that do not");
-    moving_triangles_are_the_cpus("as loaded", &live);
+    // Each card's instance: its transform, and its record's on the GPU.
+    let cards = |live: &LiveCore| -> Vec<(glam::Mat4, scene::GpuInstance)> {
+        (120..123u32)
+            .map(|id| {
+                let i = live.sc.tables.retained.instance(id).expect("a card is an instance").instance as usize;
+                let size = std::mem::size_of::<scene::GpuInstance>() as u64;
+                let r: Vec<scene::GpuInstance> = read_back(live, &live.sc.up.heap.buffer, live.sc.up.heap.at(Table::Instances) + i as u64 * size, size);
+                assert_eq!(r[0].m, live.sc.gpu_instances[i].m, "card {id}: its record on the GPU is the CPU's");
+                (live.sc.instances[i].world, r[0])
+            })
+            .collect()
+    };
+    let placed = |m: glam::Mat4, to: Vec3| m.abs_diff_eq(scene::card_world(glam::Mat4::from_rotation_translation(turn, to), 0.4, 0.3), 1e-6);
+    assert!(live.sc.dynamic.1.is_empty() && live.sc.tris.is_empty(), "a card is no world-space triangle");
+    let first = cards(&live);
+    assert!((0..3).all(|k| placed(first[k].0, at[k])), "as loaded: each card where its light is");
+    assert!(first.iter().all(|c| c.1.m == c.1.p), "as loaded: nothing has moved");
     picture(&mut live, 2);
     for (k, to) in [(2, Vec3::new(0.5, 0.5, 1.4)), (1, Vec3::new(-0.4, 0.3, 1.0)), (2, Vec3::new(0.9, 0.9, 1.1))] {
-        let (what, before, step) = (format!("card {k} moved"), live.sc.dynamic.3.clone(), at[k] - to);
+        let (what, before, step) = (format!("card {k} moved"), cards(&live), at[k] - to);
         at[k] = to;
         w.set_transform(120 + k as u32, to, turn, Vec3::ONE).unwrap();
         assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
-        let moved = (0..4).filter(|&t| live.sc.dynamic.3[t * 3..t * 3 + 3] != before[t * 3..t * 3 + 3]).collect::<Vec<_>>();
-        assert!(moved == [0, 1] || moved == [2, 3], "{what}: its two triangles alone ({moved:?})");
-        moving_triangles_are_the_cpus(&what, &live);
+        let now = cards(&live);
+        for j in 0..3 {
+            if j == k {
+                assert!(placed(now[j].0, to), "{what}: its instance is where its light is");
+                assert_eq!(now[j].1.p, before[j].1.m, "{what}: its record keeps where it was");
+            } else {
+                assert_eq!(now[j].0, before[j].0, "{what}: card {j} stays");
+            }
+        }
         // The frame after: where the card is seen, the way back to where it was.
         live.render(1, |_, _| {});
         let m = &live.targets.kernel.motion;
@@ -3320,7 +3332,7 @@ fn a_posed_skinned_model_is_added_in_place() {
     let prev_size = live.sc.up.prev_vertices.size();
     {
         let i = &live.sc.instances[live.sc.tables.retained.skinned[of(&live, 31)].instance as usize];
-        assert!(live.sc.dynamic.1.len() == 6 && i.prev == i.verts - live.sc.dynamic_verts.0 && i.prev >= 6, "a mesh's previous positions lie after the card's six vertices'");
+        assert!(i.prev == i.verts - live.sc.dynamic_verts.0, "a mesh's previous positions are counted from the first vertex that moves");
     }
 
     // One of a model the scene has, in a pose of its own.
@@ -3348,9 +3360,6 @@ fn a_posed_skinned_model_is_added_in_place() {
     check("posed on", &live, 32, &bend(0.8), &bend(0.3));
     check("the built one posed on", &live, 30, &bend(0.8), &bend(0.0));
     check("the other built one posed on", &live, 31, &bend(0.8), &bend(0.0));
-    // (The card did not move: its previous vertices are its own, whatever the meshes' did.)
-    let card = 6 * crate::indexed::VERTEX_BYTES as u64;
-    assert_eq!(read(&live, &live.sc.up.prev_vertices, 0, card), read(&live, &live.sc.up.vertices, live.sc.dynamic_verts.0 as u64 * crate::indexed::VERTEX_BYTES as u64, card), "the card's previous vertices are its vertices");
     let motion = |c: &mut LiveCore| -> Vec<f32> {
         (c.fixed_dt, c.frame, c.reset) = (Some(1.0 / 60.0), 16, true);
         c.render(1, |_, _| {});
@@ -3650,7 +3659,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
         w.set_object(id, format!("m{id}"), None, Kind::Model { uri: format!("tests/render/data/{uri}.glb"), nodes: None, animation: Some(bend(0.0)), functions: vec![] }, true, false).unwrap();
         w.set_transform(id, Vec3::new(x, -0.6, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(1.1)).unwrap();
     }
-    // (A rect light's card, far below: world-space triangles, which come before the meshes' in the GPU's order.)
+    // (A rect light's card, far below: an instance of a mesh that does not deform.)
     let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 0.2, "height": 0.2, "range": 0 })).unwrap();
     w.set_object(21, "card".into(), None, Kind::Light(card), true, false).unwrap();
     w.set_transform(21, Vec3::new(0.0, -60.0, 0.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
@@ -3660,7 +3669,7 @@ fn the_skinning_pass_writes_what_the_cpu_skin_writes() {
     };
     w.take_changes();
     let hw = live.g.hwrt;
-    assert!(live.sc.edit.pool_first > 0, "a mesh's first triangle on the GPU is not its first in the pool");
+    assert!(live.sc.meshes.iter().any(|m| m.deforms && m.first > 0), "a deforming mesh that is not the pool's first");
     {
         let g = live.sc.tables.retained.skinned.iter().find(|g| g.uri.ends_with("skin-blend.glb")).expect("the model's mesh");
         assert!(g.order.iter().enumerate().any(|(at, &(k, _, _))| at as u32 != k), "the mesh has the model's triangles in another order (by material)");

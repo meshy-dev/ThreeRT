@@ -201,8 +201,8 @@ fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i)
 // no placement (what moves it is copied again: emitter_fill.wgsl); `tri`: its triangle in the triangles' table
 // (attributes: `emitter_attrs`), `inst`: the instance that places it (NO_INST: none), `code`: the light tree's path
 // code (0: not one of the tree's), EMITTER_MOVES if it moves; `part`: as a hit's (`Hit.part`): its section of its
-// instance's mesh, or its own row. Four vec4s, a cache line.
-struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32, part: u32 };
+// instance's mesh, or its own row; `flags`: EMITTER_CARD. Four vec4s, a cache line.
+struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32, part: u32, flags: u32 };
 const EMITTER_TRI_VEC4: u32 = 4u;
 const EMITTER_MOVES: u32 = 0x80000000u;
 fn emitter_tri_at(i: u32) -> EmitterTri {
@@ -210,7 +210,8 @@ fn emitter_tri_at(i: u32) -> EmitterTri {
     let r0 = tables[b];
     let r1 = tables[b + 1u];
     let r2 = tables[b + 2u];
-    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w, tables[b + 3u].x);
+    let r3 = tables[b + 3u];
+    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w, r3.x, r3.y);
 }
 // The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
 // `object_at`, `instance_at` and `medium_at` in every layout.
@@ -330,12 +331,9 @@ fn tri_row(row: u32) -> vec4<u32> {
     return vec4<u32>(words[k], words[k + 1u], words[k + 2u], words[k + 3u]);
 }
 fn tri_flags(row: u32) -> u32 { return words[P.word_first[1].y + row * 4u + 2u]; }
-// Whether an emitter is a rect light's card, which lights one side. (A card is in world space: its row has its
-// material. No mesh is drawn with a card's.)
-fn emitter_is_card(em: EmitterTri) -> bool {
-    if (has(F_INST) && em.inst != NO_INST) { return false; }
-    return material_at(tri_row(em.part).x).tex1.z == MAT_EMITTER_CARD;
-}
+// Whether an emitter is a rect light's card, which lights one side: its entry says (lib.rs `EMITTER_CARD`).
+const EMITTER_CARD: u32 = 1u;
+fn emitter_is_card(em: EmitterTri) -> bool { return (em.flags & EMITTER_CARD) != 0u; }
 // A triangle read whole: its first corner and its edges, and its attributes as a hit has them: normals and UVs a
 // corner; `uv.w`: its section (an instance's: `part`) or its material; `x`: -, its object (an instance's: where its
 // attributes are placed, `inst_x`), -, its emitter entry + 1. `vi`: where its three vertices are in `vertices`

@@ -862,6 +862,8 @@ pub enum MeshKind {
     Skinned(u32),
     /// A geometry's mesh, shared by the objects of the geometry (`Retained::own_mesh`).
     Own,
+    /// The rect lights' card (`card_mesh`).
+    Card,
 }
 
 impl MeshKind {
@@ -1675,6 +1677,8 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), (u32, Arc<Vec<(u32, u32, u32)>>)> = HashMap::new();
     // Flattened instances' triangle ranges.
     let mut tri_instances: Vec<(u32, u32, u32)> = vec![];
+    // The rect lights' card mesh, once a scene has a card (`card_mesh`).
+    let mut card: Option<u32> = None;
     // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT.
     let tinted = w.instanced.iter().any(|(id, t)| t.colors.is_some() && w.shown(*id) && matches!(w.objects.get(id).map(|o| &o.kind), Some(Kind::Instanced { .. })));
     let stride = object_stride(tinted);
@@ -2147,17 +2151,21 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     retained.light_nodes.push(*id);
                 }
                 (Light::Rect { color, intensity, width, height, .. }, None) if shown => {
-                    // Visible one-sided emissive quad (importance sampled as an emitter).
+                    // Its card, a one-sided emissive quad the lights are sampled by as any emitter: an instance of
+                    // the scene's card mesh, sized by its transform (`card_world`), its material its row's. It
+                    // casts no shadow. A move is the instance's.
                     let mat = materials.len() as u32;
                     materials.push(card_material(*color, *intensity));
-                    retained.proxy(*id).card = Some(mat);
-                    let movable = w.movable(*id);
-                    for (v, dir) in card_tris(m, *width, *height) {
-                        push_tri(&mut tris, &mut tri_flags, &mut attrs, v, [dir; 3], [Vec2::ZERO; 3], None, mat, if movable { TRI_NO_SHADOW | TRI_DYNAMIC } else { TRI_NO_SHADOW });
-                    }
-                    if movable {
-                        retained.proxy(*id).draw = Draw::Dynamic(DynamicModel { first, mats: vec![mat; 2], ..Default::default() });
-                    }
+                    let mesh = *card.get_or_insert_with(|| card_mesh(&mut Pool { tris: &mut pool_tris, attrs: &mut pool_attrs, meshes: &mut meshes, sections: &mut sections, instances: &mut instances, rows: &mut rows }));
+                    let pivot = m.transform_point3(Vec3::ZERO);
+                    let (world, gone) = placed_world(card_world(m, *width, *height), pivot);
+                    let (lo, hi) = meshes[mesh as usize].placed_bounds(world);
+                    let oi = (objects.len() / stride) as u32;
+                    objects.extend_from_slice(&object_row(pivot, if gone { 0.0 } else { n.power }, hi - lo, n.custom, [1.0; 3])[..stride]);
+                    *retained.proxy(*id) = Proxy { object: Some(oi), card: Some(mat), draw: Draw::Instance(InstanceRef { instance: instances.len() as u32, mesh: MeshKind::Card, moves: w.movable(*id) }) };
+                    let mine = [row_of(mat, &materials)];
+                    instances.push(Instance { mesh, world, object: oi, cast_shadow: false, name: n.name.clone(), sub: None, hidden: gone, masked: gone, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine), prev: 0, verts: 0 });
+                    rows.extend(mine);
                 }
                 _ => {}
             },
@@ -2450,17 +2458,35 @@ fn to_rgba(img: &gltf::image::Data) -> Result<image::RgbaImage> {
     image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| anyhow!("bad image"))
 }
 
-/// Triangles of scene-code geometry (three.js conventions: UV v up, flipped to the renderer's v down) under `world`.
-/// A visible rect light's one-sided emissive quad (two triangles, winding so the geometric normal faces the light's
-/// direction), slightly in front of the light.
-fn card_tris(m: Mat4, width: f32, height: f32) -> [([Vec3; 3], Vec3); 2] {
-    let pos = m.transform_point3(Vec3::ZERO);
-    let dir = m.transform_vector3(Vec3::NEG_Z).normalize();
-    let ux = m.transform_vector3(Vec3::X).normalize() * (width * 0.5);
-    let uy = m.transform_vector3(Vec3::Y).normalize() * (height * 0.5);
-    let c = pos + dir * 0.001;
-    let p = [c - ux - uy, c + ux - uy, c + ux + uy, c - ux + uy];
-    [([p[0], p[2], p[1]], dir), ([p[0], p[3], p[2]], dir)]
+/// The visible rect lights' card, a mesh of the pool: a unit quad in a light's own space, 1 mm in front of the light
+/// (which shines down -Z), its two triangles wound so that their geometric normal is the light's direction; one
+/// section. An instance a light sizes it (`card_world`), and the instance's row has the light's material.
+fn card_mesh(pool: &mut Pool) -> u32 {
+    let p = [Vec3A::new(-0.5, -0.5, -0.001), Vec3A::new(0.5, -0.5, -0.001), Vec3A::new(0.5, 0.5, -0.001), Vec3A::new(-0.5, 0.5, -0.001)];
+    let first = pool.tris.len() as u32;
+    for (k, t) in [[p[0], p[2], p[1]], [p[0], p[3], p[2]]].into_iter().enumerate() {
+        pool.tris.push(t);
+        pool.attrs.push(section_attr([Vec3::NEG_Z; 3], [Vec2::ZERO; 3], None, 0, k as u32));
+    }
+    pool.meshes.push(InstMesh { sect_first: pool.sections.len() as u32, sect_count: 1, ..own_inst_mesh(&pool.tris[first as usize..], first) });
+    pool.sections.push(Section { first: 0, count: 2, slot: 0 });
+    pool.meshes.len() as u32 - 1
+}
+
+/// Where a rect light at `m`, `width` by `height`, has its card: the light's axes, each of its own length (a light's
+/// scale does not size it), the card's width and height along the first two.
+pub fn card_world(m: Mat4, width: f32, height: f32) -> Mat4 {
+    let axis = |v: Vec3| m.transform_vector3(v).normalize();
+    Mat4::from_cols((axis(Vec3::X) * width).extend(0.0), (axis(Vec3::Y) * height).extend(0.0), axis(Vec3::Z).extend(0.0), m.transform_point3(Vec3::ZERO).extend(1.0))
+}
+
+/// The transform of the instance that draws object `node`: the object's, or for a rect light its card's.
+pub fn drawn_world(w: &World, node: u32) -> Mat4 {
+    let m = w.world_matrix(node);
+    match w.objects.get(&node).map(|o| &o.kind) {
+        Some(Kind::Light(Light::Rect { width, height, visible: true, .. })) => card_world(m, *width, *height),
+        _ => m,
+    }
 }
 
 /// A dynamic object's triangles at its current transform / pose, with their shading attributes (materials as built):
@@ -2486,9 +2512,6 @@ pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Resu
                 return Ok(None);
             }
             Some(tris.iter().zip(&d.mats).map(|(t, &mat)| (t.p, tri_attr(t.n, t.uv, t.tangent, mat))).collect())
-        }
-        Kind::Light(Light::Rect { width, height, visible: true, .. }) => {
-            Some(card_tris(m, *width, *height).iter().zip(&d.mats).map(|((v, dir), &mat)| (*v, tri_attr([*dir; 3], [Vec2::ZERO; 3], None, mat))).collect())
         }
         _ => None,
     })
@@ -3030,6 +3053,47 @@ mod instance_tests {
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "a copy that mirrors the mesh is an instance as the others");
         assert_eq!(sc.instances.iter().map(|i| i.gpu(0).n[1][3].to_bits()).collect::<Vec<_>>(), [INST_MIRRORED, 0, 0, 0], "and its record says so");
+    }
+
+    /// A visible rect light's card is an instance of one card mesh: the lights share the mesh, each instance has its
+    /// light's size and place, its material in its row, and casts no shadow; its two triangles stand 1 mm in front of
+    /// the light, facing where it shines, and are its emitters, marked as a card's. A light without size has an
+    /// instance no ray sees. No world-space triangle. No GPU.
+    #[test]
+    fn a_rect_lights_card_is_an_instance_of_the_card_mesh() {
+        let mut w = World::default();
+        let rect = |width: f32, height: f32| Kind::Light(serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 0.5, 0.25], "castShadow": true, "intensity": 3, "width": width, "height": height, "range": 0 })).unwrap());
+        w.set_object(1, "a".into(), None, rect(2.0, 1.0), true, false).unwrap();
+        // (Turned to shine along +X, and scaled: a light's scale does not size its card.)
+        w.set_transform(1, Vec3::new(1.0, 2.0, 3.0), glam::Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2), Vec3::new(5.0, 7.0, 9.0)).unwrap();
+        w.set_object(2, "b".into(), None, rect(0.5, 0.5), true, true).unwrap();
+        w.set_object(3, "none".into(), None, rect(0.0, 1.0), true, false).unwrap();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+        let mut sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
+        assert_eq!((sc.tris.len(), sc.meshes.len(), sc.instances.len(), sc.lights.len()), (0, 1, 3, 0), "one mesh, an instance a card, no table light");
+        let m = sc.meshes[0];
+        assert_eq!((m.count, m.sect_count, m.deforms), (2, 1, false));
+        let inst = |id: u32| sc.instances[sc.retained.instance(id).expect("a card is an instance").instance as usize].clone();
+        let (a, b, none) = (inst(1), inst(2), inst(3));
+        assert_eq!([a.mesh, b.mesh, none.mesh], [0; 3], "the cards share the mesh");
+        assert_eq!([(a.cast_shadow, a.hidden), (b.cast_shadow, b.hidden), (none.cast_shadow, none.hidden && none.masked)], [(false, false), (false, false), (false, true)], "no card casts a shadow; one without size is unseen");
+        assert_eq!([sc.retained.instance(1).unwrap().moves, sc.retained.instance(2).unwrap().moves], [false, true], "a movable light's card moves as its instance");
+        // The first card in the world: 2 m along the light's X (the world's Z here), 1 m up, 1 mm in front (+X).
+        let corners: Vec<Vec3> = sc.pool_tris[m.first as usize..(m.first + m.count) as usize].iter().flatten().map(|p| a.world.transform_point3((*p).into())).collect();
+        let (lo, hi) = corners.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        assert!(lo.abs_diff_eq(Vec3::new(1.001, 1.5, 2.0), 1e-5) && hi.abs_diff_eq(Vec3::new(1.001, 2.5, 4.0), 1e-5), "{lo} to {hi}");
+        for t in corners.chunks(3) {
+            assert!((t[1] - t[0]).cross(t[2] - t[0]).normalize().abs_diff_eq(Vec3::X, 1e-5), "a triangle faces where the light shines");
+        }
+        // Each row has its card's own material, which emits; the emitters are the instances'.
+        let mats: Vec<u32> = [&a, &b].iter().map(|i| row_material(&sc.rows[i.rows as usize])).collect();
+        assert!(mats[0] != mats[1] && mats.iter().all(|&k| sc.materials[k as usize].tex1[2] == MAT_EMITTER_CARD) && sc.retained.proxies[&1].card == Some(mats[0]));
+        let p = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        // (A card no ray sees keeps its place in the list, as every hidden instance: its object has no power.)
+        assert_eq!(p.emitter_tris.len(), 6, "two triangles a card");
+        assert!(p.emitter_tris.iter().all(|e| e.card && e.inst != crate::NO_INST) && p.gpu_emitter_tris.iter().all(|e| e.flags == crate::EMITTER_CARD));
     }
 
     /// An instanced object whose material only emits is placed as any other: one shared mesh, which has the emitters,

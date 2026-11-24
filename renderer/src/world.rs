@@ -432,6 +432,14 @@ pub fn material_texture_ids(m: &desc::Material) -> impl Iterator<Item = u32> + '
     [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].into_iter().flatten().chain(m.shader.iter().flat_map(|s| s.textures.iter().flatten().copied()))
 }
 
+/// The size of a rect light's card, if it has one (`visible`).
+fn card_size(l: &desc::Light) -> Option<(u32, u32)> {
+    match l {
+        desc::Light::Rect { width, height, visible: true, .. } => Some((width.to_bits(), height.to_bits())),
+        _ => None,
+    }
+}
+
 fn light_class(l: &desc::Light) -> (u8, bool, bool) {
     match l {
         desc::Light::Directional { cast_shadow, .. } => (0, *cast_shadow, false),
@@ -984,7 +992,8 @@ impl World {
         let was = self.objects.get(&id).is_some_and(|o| self.table_light(id, &o.kind));
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         match &o.kind {
-            Kind::Light(old) if light_class(old) == light_class(&l) || (table && was) => {
+            // (A card of another size is another instance transform: the build's.)
+            Kind::Light(old) if (light_class(old) == light_class(&l) || (table && was)) && card_size(old) == card_size(&l) => {
                 self.changes.lights.insert(id);
             }
             _ => mark_structural(&mut self.changes, line!()),
@@ -1493,6 +1502,17 @@ mod tests {
         }
         w.set_visible(1, false).unwrap();
         assert!(w.hidden_built(1) && !w.hidden_built(2), "a hidden volume keeps its place in the build; a light always has one");
+        // A card's colour is its material's, in place; its size is its instance's transform, the build's. A rect light
+        // without a card is its table entry whatever changes.
+        let rect = |w: f32, color: f32, visible: bool| serde_json::from_value::<desc::Light>(serde_json::json!({ "type": "rect", "color": [color, 1, 1], "castShadow": true, "intensity": 100, "width": w, "height": 1, "range": 0, "visible": visible })).unwrap();
+        w.set_light(3, rect(1.0, 0.5, true)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&3), "a card of another colour: in place");
+        w.set_light(3, rect(2.0, 0.5, true)).unwrap();
+        assert!(w.take_changes().structural, "a card of another size: the build's");
+        w.set_light(4, rect(2.0, 0.5, false)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&4), "a rect light without a card, of another size: in place");
         w.set_visible(3, false).unwrap();
         assert!(w.take_changes().structural, "a rect light's card is geometry");
         // (A group, as a mesh: the renderer hides its meshes' instances, or says it cannot.)

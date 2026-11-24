@@ -1445,7 +1445,7 @@ impl LiveCore {
         for &(node, i) in placed {
             let inst = &mut self.sc.instances[i as usize];
             // (A placement without size, as scene code hides by scaling to 0: at a point, where no ray sees it.)
-            let (w, gone) = scene::placed_world(world.world_matrix(node), inst.world.w_axis.truncate());
+            let (w, gone) = scene::placed_world(scene::drawn_world(world, node), inst.world.w_axis.truncate());
             // (Software traversal: an instance of a mesh that deforms is no unit; its triangles are among the still
             // scene's, in the world, and a rebuild moves them.)
             if !top.has_mesh(inst.mesh) {
@@ -1795,7 +1795,7 @@ impl LiveCore {
                     let area = 0.5 * (b - a).cross(c - a).length();
                     if area > 0.0 {
                         let centre = (a + b + c) / 3.0;
-                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST, part: 0 };
+                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST, part: 0, card: sc.tables.materials[mat as usize].tex1[2] == scene::MAT_EMITTER_CARD };
                         new.push((sc.tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, [a, b, c], 0)));
                         sc.tables.emitter_tris.push(e);
                     }

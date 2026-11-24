@@ -113,7 +113,7 @@ pub fn emitter_tri(k: usize, tri_verts: &[[f32; 4]], a: &scene::GpuTriAttr, mate
     }
     let c = v(0) + (e1 + e2) / 3.0;
     let moves = tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0;
-    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
+    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal: false, in_tree: false, inst: NO_INST, part: 0, card: is_card(m) })
 }
 
 /// An emissive triangle of the emitter CDF: triangle (traversal order), material, object, area.
@@ -138,6 +138,12 @@ pub struct EmitterTri {
     /// Its section of that instance's mesh (0 without one): a mesh's triangle does not say which section it is of,
     /// so a light sample is told here, as a ray is by its hit.
     pub part: u32,
+    /// A rect light's card (its material: `scene::MAT_EMITTER_CARD`): it lights its front side alone.
+    pub card: bool,
+}
+
+fn is_card(m: &scene::GpuMaterial) -> bool {
+    m.tex1[2] == scene::MAT_EMITTER_CARD
 }
 
 /// No instance (pathtrace.wgsl `NO_INST`).
@@ -145,13 +151,15 @@ pub const NO_INST: u32 = u32::MAX;
 
 /// `GpuEmitterTri::code`: the emitter moves (`EmitterTri::moves`). Path codes are below it.
 pub const EMITTER_MOVES: u32 = 1 << 31;
+/// `GpuEmitterTri::flags`: a rect light's card (`EmitterTri::card`).
+pub const EMITTER_CARD: u32 = 1;
 const _: () = assert!((ltree::PATH_BITS + 2) << ltree::PATH_BITS <= EMITTER_MOVES);
 
 /// An emitter's triangle as the kernel's light sampling reads it (pathtrace.wgsl `EmitterTri`; `Table::EmitterTris`,
 /// entry i for `emitter_tris[i]`): in world space, the light list's own copy, so a sample reads no placement. v0, e1,
 /// e2 in world space; its triangle in the triangles' table (attributes); the instance that places it (`NO_INST`: the
 /// triangle is in world space there too); where its weight is (`emitter_codes`) with `EMITTER_MOVES`; its section of
-/// that instance's mesh. 64 bytes.
+/// that instance's mesh; `EMITTER_CARD`. 64 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuEmitterTri {
@@ -162,7 +170,8 @@ pub struct GpuEmitterTri {
     pub e2: [f32; 3],
     pub code: u32,
     pub part: u32,
-    pub spare: [u32; 3],
+    pub flags: u32,
+    pub spare: [u32; 2],
 }
 
 impl GpuEmitterTri {
@@ -171,7 +180,7 @@ impl GpuEmitterTri {
         let v = |r: usize| [rows[r][0], rows[r][1], rows[r][2]];
         // (As a hit has it: with an instance its section, without one its row, which is its triangle's.)
         let part = if e.inst == NO_INST { e.tri } else { e.part };
-        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 }, part, spare: [0; 3] }
+        GpuEmitterTri { v0: v(0), tri: e.tri, e1: v(1), inst: e.inst, e2: v(2), code: code | if e.moves { EMITTER_MOVES } else { 0 }, part, flags: if e.card { EMITTER_CARD } else { 0 }, spare: [0; 2] }
     }
 
     /// As `new`, from its vertices.
@@ -197,13 +206,13 @@ impl GpuEmitterTri {
 /// object's copy not shown) keep their mesh's own area: its object has no power, so they weigh nothing, and the light
 /// tree has them (`switchable_power`) for when the copy is shown.
 pub fn instance_emitters(inst: &scene::Instance, record: u32, tris: &[[glam::Vec3A; 3]], first: u32, numbered: &dyn Fn(usize) -> Option<(usize, u32, u32)>, count: usize, materials: &[scene::GpuMaterial], moves: bool, nominal: Option<f32>) -> Vec<(EmitterTri, [glam::Vec3A; 3])> {
-    let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record, part: 0 };
+    let dead = EmitterTri { tri: first, mat: 0, obj: inst.object, area: 0.0, c: [0.0; 3], moves, nominal: false, in_tree: false, inst: record, part: 0, card: false };
     let mut out = vec![(dead, [glam::Vec3A::ZERO; 3]); count];
     for (k, t) in tris.iter().enumerate() {
         let Some((slot, mat, part)) = numbered(k) else { continue };
         let (area, c, w) = placed_emitter(inst, t, mat, materials);
         // (A particle system's: weighed by its nominal area, whatever size its pass gives it.)
-        out[slot] = (EmitterTri { tri: first + k as u32, mat, area: nominal.unwrap_or(area), c, part, nominal: nominal.is_some(), ..dead }, w);
+        out[slot] = (EmitterTri { tri: first + k as u32, mat, area: nominal.unwrap_or(area), c, part, nominal: nominal.is_some(), card: materials.get(mat as usize).is_some_and(is_card), ..dead }, w);
     }
     out
 }
@@ -1638,7 +1647,7 @@ mod light_lod_tests {
         // the one a load with all of them on builds: the plain build's, its powers summed bottom-up.
         let mats = [scene::GpuMaterial { emissive: [1.0, 1.0, 1.0, 0.0], ..Default::default() }];
         let tris: Vec<EmitterTri> = (0..600u32)
-            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
+            .map(|i| EmitterTri { tri: i, mat: 0, obj: (i % 6 != 0) as u32, area: 0.5, c: [2.0 * i as f32 + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: NO_INST, part: 0, card: false })
             .collect();
         let verts: Vec<[f32; 4]> = (0..600).flat_map(|i| [[2.0 * i as f32, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]).collect();
         let (off, on) = ([[0.0, 0.0, 0.0, 1.0], [0.0; 4]], [[0.0, 0.0, 0.0, 1.0]; 2]);
@@ -1671,7 +1680,7 @@ mod light_lod_tests {
         let mut unit = || (rnd() >> 8) as f32 / (1 << 24) as f32;
         let mats: Vec<scene::GpuMaterial> = (0..4).map(|k| scene::GpuMaterial { emissive: [k as f32 * 3.0, k as f32, 0.5 * k as f32, 0.0], ..Default::default() }).collect();
         let tris: Vec<EmitterTri> = (0..3000)
-            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false, inst: NO_INST, part: 0 })
+            .map(|i| EmitterTri { tri: i, mat: if i % 9 == 0 { 0 } else { 1 + i % 3 }, obj: 0, area: 10f32.powf(-6.0 * unit()), c: [300.0 * unit(), 5.0, 100.0 * unit()], moves: i % 50 == 0, nominal: false, in_tree: false, inst: NO_INST, part: 0, card: false })
             .collect();
         let (t, total, _) = emitter_cdf(&tris, &emitter_order(&tris, None), &mats, &[], 3, [20.0, 0.0, 30.0, 10.0], EmitterCull::default());
         let n = tris.len() as u32;
@@ -1792,9 +1801,9 @@ mod units_tests {
     use crate::world::{Geometry, Kind, World};
     use glam::{Mat4, Quat};
 
-    /// A world with a ground and a light's card (the card's two triangles are the only still ones: a mesh is a unit
-    /// under software traversal), meshes turned and scaled, one that casts no shadow, one hidden, and an instanced mesh
-    /// of five instances of which four are drawn.
+    /// A world with a ground and a light's card (an instance each, as every mesh: units under software traversal, and
+    /// no still triangle), meshes turned and scaled, one that casts no shadow, one hidden, and an instanced mesh of
+    /// five instances of which four are drawn.
     fn world(ground: bool) -> World {
         let mut w = World::default();
         w.set_material(1, serde_json::from_value(serde_json::json!({ "name": "m", "color": [0.5, 0.5, 0.5], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
@@ -1883,6 +1892,11 @@ mod units_tests {
                 let (q, n, uv, tangent) = x.triangle(k, base(k));
                 let v = |r: usize| [p.tri_verts[k * 3 + r][0], p.tri_verts[k * 3 + r][1], p.tri_verts[k * 3 + r][2]];
                 let edge = |c: usize| [q[c][0] - q[0][0], q[c][1] - q[0][1], q[c][2] - q[0][2]];
+                // (The triangle of a still tree over nothing, after the pool: without area either way.)
+                if sc.units.is_some() && sc.tris.is_empty() && k + 1 == sc.attrs.len() {
+                    assert_eq!((edge(1), edge(2), v(1), v(2)), ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]), "{what}: the still tree's own triangle has no area");
+                    continue;
+                }
                 assert_eq!((bits(&q[0]), bits(&edge(1)), bits(&edge(2))), (bits(&v(0)), bits(&v(1)), bits(&v(2))), "{what}: triangle {k}'s first corner and its edges");
                 let skinned_without_normals = n.iter().flatten().all(|c| *c == 0.0);
                 if !skinned_without_normals {
@@ -2057,12 +2071,13 @@ mod units_tests {
         };
         let (su, pu) = build(true);
         let (sf, pf) = build(false);
-        let ground = usize::from(w.objects.contains_key(&10));
-        assert_eq!(su.tris.len(), 2 * ground, "still triangles: the card's only");
+        // (The ground and the light's card come together: `world`.)
+        let ground = 2 * usize::from(w.objects.contains_key(&10));
+        assert_eq!(su.tris.len(), 0, "no still triangle: the card is an instance too");
         let u = su.units.as_ref().expect("the scene has units");
         assert!(sf.units.is_none() && sf.instances.is_empty(), "flattened: no instance is left");
-        // Ten instances and the ground: four meshes shown, one hidden (an instance no ray sees), five of the instanced
-        // mesh of which one is hidden: eight units in the top tree, and the ground.
+        // Ten instances, the ground and the card: four meshes shown, one hidden (an instance no ray sees), five of the
+        // instanced mesh of which one is hidden: eight units in the top tree, the ground and the card.
         assert_eq!((su.instances.len(), u.count as usize), (10 + ground, 8 + ground), "{:?}", su.instances.iter().map(|i| (i.name.clone(), i.hidden)).collect::<Vec<_>>());
         assert!(gpu::instance_features(&su) & gpu::F_UNITS != 0 && gpu::instance_features(&sf) & gpu::F_UNITS == 0);
         assert_eq!((pu.params.motion[2].to_bits(), pu.params.motion[3].to_bits() as usize), (u.layout.top_first, 8 + ground));
