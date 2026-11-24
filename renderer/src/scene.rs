@@ -1014,7 +1014,7 @@ struct RigidPart {
 /// A posed skinned model's mesh: the model's triangles in its own space, a mesh a model. The skinning pass skins it at
 /// each new pose (gpu.rs `skin`: the CPU sends the pose's matrices) and its BLAS is built again; the model moves as
 /// its instance (hardware RT). Never shared: two models in one pose are two meshes (a mesh shared came apart when
-/// one of them took another pose, and that was a rebuild). Only a model none of whose triangles emits.
+/// one of them took another pose, and that was a rebuild).
 #[derive(Clone, Debug)]
 pub struct Skinned {
     pub mesh: u32,
@@ -1947,17 +1947,18 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     continue;
                 }
                 // A posed skinned model is an instance of a mesh of its own, in its own space, which the skinning pass
-                // skins at each new pose (`Skinned`). One with emitting triangles is not yet: skinned alone, below.
-                if instancing && posed && m.determinant() != 0.0 && !(nodes.is_none() && glb.rigid()) {
+                // skins at each new pose (`Skinned`). Its triangles that emit are its instance's emitters, as any
+                // mesh's: the light list takes them again from the skinned vertices at each pose (live/edits.rs
+                // `repose_skinned`). Placed without size it is an instance no ray sees (`placed_world`).
+                if instancing && posed && !(nodes.is_none() && glb.rigid()) {
                     let a = animation.as_ref().unwrap();
                     let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), Some(a))?;
                     let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
                     for (k, t) in local.iter().enumerate() {
-                        // (A mesh that deforms does not keep its emitters: the light list does not follow a pose yet.)
-                        let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
-                        classed[if emits { FLAT } else { class as usize }].push((k, mat));
+                        let (mat, class, _) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
+                        classed[class as usize].push((k, mat));
                     }
-                    if classed[FLAT].is_empty() && !local.is_empty() {
+                    if !local.is_empty() {
                         let (order, sects, mine) = model_sections(&kept(&classed));
                         // (The model's corners in its mesh's order: one copy for every placement of the model.)
                         let mirrors = glb.mirrored(Some(a))?;
@@ -1992,13 +1993,14 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let mesh = meshes.len() as u32 - 1;
                         sections.extend(sects);
                         retained.mesh_rows.insert(mesh, mine.clone());
-                        let (lo, hi) = meshes[mesh as usize].placed_bounds(m);
                         let pivot = m.transform_point3(Vec3::ZERO);
+                        let (world, gone) = placed_world(m, pivot);
+                        let (lo, hi) = meshes[mesh as usize].placed_bounds(world);
                         let size = hi - lo;
                         let oi = (objects.len() / stride) as u32;
-                        objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
+                        objects.extend_from_slice(&object_row(pivot, if gone { 0.0 } else { n.power }, size, n.custom, [1.0; 3])[..stride]);
                         let i = instances.len() as u32;
-                        instances.push(Instance { mesh, world: m, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine), prev: 0, verts: 0 });
+                        instances.push(Instance { mesh, world, object: oi, cast_shadow: rows_cast(&mine, n.cast_shadow), name: n.name.clone(), sub: None, hidden: gone, masked: gone, first_emitter: 0, rows: rows.len() as u32, bits: rows_bits(&mine), prev: 0, verts: 0 });
                         rows.extend(mine);
                         retained.skinned.push(Skinned { mesh, uri: uri.clone(), nodes: nodes.clone(), animation: a.clone(), order: tri_order, object: *id, instance: i, source, palette_len: glb.palette_len() as u32, mirrors });
                         *retained.proxy(*id) = Proxy { object: Some(oi), card: None, draw: Draw::Instance(InstanceRef { instance: i, mesh: MeshKind::Skinned(retained.skinned.len() as u32 - 1), moves: true }) };
@@ -2694,7 +2696,7 @@ pub fn mesh_class(g: &GpuMaterial) -> u32 {
     }
 }
 
-/// `classed`'s last list: the emitters of a mesh that deforms, which leave it (the model is flattened then).
+/// How many classes a model's triangles are of (`classed`'s lists before this one).
 pub const FLAT: usize = 3;
 
 /// The build's arrays a mesh of the pool and its instance are added to.
@@ -3246,6 +3248,41 @@ mod instance_tests {
         let power = |id: u32| sc.objects[sc.retained.proxies[&id].object.unwrap() as usize * object_stride(sc.tinted)][3];
         assert_eq!([power(1), power(2), power(3)], [1.0, 0.0, 0.0], "an unseen model's object has no power");
         assert!(matches!(sc.retained.proxies[&2].draw, Draw::Instance(_)), "it comes back as its instance does");
+    }
+
+    /// A posed skinned model's triangles that emit stay in its mesh (tests/render/data/arm-glow.glb: arm.glb with its
+    /// light half emitting): the model is an instance of a mesh that deforms, and they are its instance's emitters,
+    /// moving ones, each its mesh's triangle as the instance places it. Nothing is a world-space triangle. One placed
+    /// without size is an instance no ray sees. No GPU.
+    #[test]
+    fn a_posed_skinned_models_emitters_are_its_instances() {
+        let mut w = World::default();
+        let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+        w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+        w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+        for (id, scale) in [(1, 1.5), (2, 0.0)] {
+            let animation = Some(desc::Animation { clip: "bend".into(), time: 0.25, r#loop: true, nodes: Default::default() });
+            w.set_object(id, format!("arm{id}"), None, Kind::Model { uri: "tests/render/data/arm-glow.glb".into(), nodes: None, animation, functions: vec![] }, true, false).unwrap();
+            w.set_transform(id, Vec3::new(id as f32 * 3.0, 0.5, -1.0), glam::Quat::from_rotation_y(0.4), Vec3::splat(scale)).unwrap();
+        }
+        let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
+        assert_eq!((sc.tris.len(), sc.instances.len(), sc.retained.skinned.len()), (0, 2, 2), "an instance a model, of a mesh of its own");
+        assert!(sc.meshes.iter().all(|m| m.deforms) && sc.instances.iter().map(|i| (i.hidden, i.masked)).collect::<Vec<_>>() == [(false, false), (true, true)]);
+        let a = sc.instances[0].clone();
+        let m = sc.meshes[a.mesh as usize];
+        let glow = rows_emitters(m.sections(&sc.sections), &sc.rows[a.rows as usize..][..m.sect_count as usize], &sc.materials);
+        assert!(glow > 0 && glow < m.count, "its emitting half: {glow} of {} triangles", m.count);
+        let p = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let pool_first = sc.attrs.len() - sc.pool_tris.len();
+        let mine: Vec<usize> = (0..p.emitter_tris.len()).filter(|&i| p.emitter_tris[i].inst == 0).collect();
+        assert_eq!(mine.len() as u32, glow, "its instance's emitters");
+        for i in mine {
+            let e = &p.emitter_tris[i];
+            assert!(e.moves && !e.card && e.area > 0.0, "emitter {i}: one that moves");
+            let want = sc.pool_tris[e.tri as usize - pool_first].map(|v| a.world.transform_point3(v.into()));
+            let got = p.gpu_emitter_tris[i].vertices().map(Vec3::from);
+            assert!((0..3).all(|c| got[c].abs_diff_eq(want[c], 1e-5)), "emitter {i}: its mesh's triangle where the instance places it");
+        }
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh for the model's second one (`split_coincident`), in a

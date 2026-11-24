@@ -2435,8 +2435,35 @@ impl LiveCore {
             })
             .collect();
         self.keep_prev_spans(&posed.iter().chain(&self.pose_spans).copied().collect::<Vec<_>>());
+        // Their triangles that emit, placed by the new poses here too: the light tree's moving subtree is refit by
+        // them (`move_emitters`). The light list's own copies are taken again on the GPU, from the vertices the pass
+        // writes (`fill_moved`).
+        let mut lit: Vec<(u32, Vec<(usize, [glam::Vec3A; 3])>)> = vec![];
+        for (g, rows) in &work {
+            let sk = &self.sc.tables.retained.skinned[*g as usize];
+            let run = emitter_run(&self.sc.tables.emitter_tris, &self.sc.instances, sk.instance);
+            if run.is_empty() {
+                continue;
+            }
+            let m = self.sc.meshes[sk.mesh as usize];
+            let Some((vertices, index)) = self.sc.skins.get(sk.source as usize).filter(|s| s.1.len() == m.count as usize) else { return Ok(false) };
+            let first = self.sc.edit.pool_first + m.first as usize;
+            let placed = |e: &crate::EmitterTri| {
+                let k = (e.tri as usize).checked_sub(first)?;
+                Some((m.first as usize + k, (*index.get(k)?).map(|v| glam::Vec3A::from(crate::skin::skin_corner(&vertices[v as usize], rows).0))))
+            };
+            lit.push((sk.instance, self.sc.tables.emitter_tris[run].iter().filter_map(placed).collect()));
+        }
         if !self.g.skin(&self.sc.up, &work) {
             return Ok(false);
+        }
+        for &(at, t) in lit.iter().flat_map(|l| &l.1) {
+            self.sc.pool_tris[at] = t;
+        }
+        self.fill_moved(lit.iter().map(|l| l.0));
+        // (And their weights, by the areas the pose gives them.)
+        for l in &lit {
+            self.weigh_run(l.0);
         }
         self.pose_spans = posed;
         self.pose_reposed = true;

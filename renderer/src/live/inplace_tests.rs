@@ -3238,6 +3238,46 @@ fn posed_skinned_models_are_meshes_of_their_own() {
     assert!(apart(&both, &one) > 0.5, "its pose is in the picture ({:.2} steps)", apart(&both, &one));
 }
 
+/// A posed skinned model with triangles that emit (tests/render/data/arm-glow.glb) is posed in place, and its emitters
+/// follow: the light list's copies are its skinned triangles, the CPU's triangles of them the pose's, their weights
+/// and the picture a build's at the new pose. Under either traversal.
+#[test]
+fn a_posed_skinned_models_emitters_follow_its_pose() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let bend = |time| Some(crate::desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
+    let mut w = world();
+    w.set_object(30, "arm".into(), None, Kind::Model { uri: "tests/render/data/arm-glow.glb".into(), nodes: None, animation: bend(0.0), functions: vec![] }, true, false).unwrap();
+    w.set_transform(30, Vec3::new(-0.3, -0.9, 0.8), glam::Quat::from_rotation_y(0.3), Vec3::splat(2.0)).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let sk = live.sc.tables.retained.skinned.iter().find(|s| s.object == 30).expect("a posed skinned model").clone();
+    let its = |c: &LiveCore| c.sc.tables.emitter_tris.iter().filter(|e| e.inst == sk.instance && e.area > 0.0).copied().collect::<Vec<_>>();
+    assert!(live.sc.tris.is_empty() && !its(&live).is_empty() && its(&live).iter().all(|e| e.moves), "its emitters are its instance's, moving ones");
+    list_is_its_triangles("as loaded", &live);
+    let loaded = picture(&mut live, 48);
+    for time in [0.8, 0.3] {
+        let what = format!("posed at {time}");
+        w.set_animation(30, bend(time)).unwrap();
+        assert!(!live.commit(&mut w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        list_is_its_triangles(&what, &live);
+        // (The CPU's triangles of the emitters: the model skinned at the pose.)
+        let cpu = skinned_on_cpu(&live, &sk, &bend(time).unwrap()).p;
+        let m = live.sc.meshes[sk.mesh as usize];
+        for e in its(&live) {
+            let k = e.tri as usize - live.sc.edit.pool_first - m.first as usize;
+            let got: Vec<f32> = live.sc.pool_tris[m.first as usize + k].iter().flat_map(|v| v.to_array()).collect();
+            assert!(got.iter().zip(&cpu[k * 9..k * 9 + 9]).all(|(a, b)| (a - b).abs() < 1e-5), "{what}: the CPU has triangle {k} at {got:?}, the pose {:?}", &cpu[k * 9..k * 9 + 9]);
+        }
+        lit_as_a_build(&what, &mut live, &mut open(&w).unwrap());
+    }
+    let last = picture(&mut live, 48);
+    assert!(apart(&loaded, &last) > 0.5, "the pose is in the picture ({:.2} steps)", apart(&loaded, &last));
+}
+
 /// A posed skinned model is hidden and shown in place: hidden, no ray sees its instance and a new pose skins
 /// nothing; shown, it is skinned as it is posed then, where it stands. The picture is a build's each time, under
 /// either traversal.
