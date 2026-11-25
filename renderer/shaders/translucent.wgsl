@@ -71,7 +71,7 @@
         r.base *= srgb_to_linear(c.rgb);
         r.opacity *= c.a;
     }
-    r.emissive = emission(m, emissive_uv(a, m, b.x, b.y), mesh_lod(emissive_density(tri_verts[ti * 3u + 1u].xyz, tri_verts[ti * 3u + 2u].xyz, a, m), 1.0, 1.0) + lod - LOD_BIAS) * obj_power(a);
+    r.emissive = emission(m, emissive_uv(a, m, b.x, b.y), mesh_lod(emissive_density(td.e1, td.e2, a, m), 1.0, 1.0) + lod - LOD_BIAS) * obj_power(a);
     if (has(F_FUNC) && m.tex1.w > 0) {
         r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, NO_INST, row, b.x, b.y, view, lod), m, r);
     }

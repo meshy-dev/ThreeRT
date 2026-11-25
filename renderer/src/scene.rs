@@ -2422,12 +2422,20 @@ pub fn gltf_material(gm: Option<gltf::Material>, images: &[gltf::image::Data], k
     let unlit = gm.extension_value("KHR_materials_unlit").is_some();
     let base_color = if unlit && e.iter().any(|&c| c > 0.0) { [e[0] * strength, e[1] * strength, e[2] * strength, 1.0] } else { pbr.base_color_factor() };
     let (e, strength) = if unlit { ([0.0; 3], 0.0) } else { (e, strength) };
+    // Base UV transform (falling back to metallicRoughness if baseColor is absent) is shared across base, normal,
+    // occlusion, and metallic-roughness maps; textureInfo.texCoord / transform.texCoord overrides are not handled yet.
     let base_tf = pbr
         .base_color_texture()
         .and_then(|t| t.texture_transform())
         .or_else(|| pbr.metallic_roughness_texture().and_then(|t| t.texture_transform()));
+    if let Some(t) = base_tf.as_ref().filter(|t| t.rotation() != 0.0) {
+        eprintln!("gltf_material ({key}): ignoring non-zero base KHR_texture_transform rotation ({})", t.rotation());
+    }
     let (base_scale, base_offset) = base_tf.map(|t| (t.scale(), t.offset())).unwrap_or(([1.0, 1.0], [0.0, 0.0]));
     let emissive_tf = gm.emissive_texture().and_then(|t| t.texture_transform());
+    if let Some(t) = emissive_tf.as_ref().filter(|t| t.rotation() != 0.0) {
+        eprintln!("gltf_material ({key}): ignoring non-zero emissive KHR_texture_transform rotation ({})", t.rotation());
+    }
     let (em_scale, em_offset) = emissive_tf.map(|t| (t.scale(), t.offset())).unwrap_or(([1.0, 1.0], [0.0, 0.0]));
     Ok(GpuMaterial {
         base_color,
@@ -3251,5 +3259,34 @@ mod instance_tests {
         // Hidden by their own `visible`, they keep a place while there is room after those shown (shown in place).
         let b = build_with(MAX_MEDIA as u32 - 2, 4).unwrap();
         assert_eq!((b.media.len(), b.media.iter().filter(|m| m.a[1] == MEDIUM_HIDDEN).count()), (MAX_MEDIA, 2));
+    }
+
+    #[test]
+    fn gltf_emissive_texture_transform_sets_emissive_uv_only() {
+        let json = br#"{
+            "asset": { "version": "2.0" },
+            "images": [{ "mimeType": "image/png" }],
+            "textures": [{ "source": 0 }],
+            "materials": [{
+                "emissiveFactor": [1.0, 1.0, 1.0],
+                "emissiveTexture": {
+                    "index": 0,
+                    "extensions": {
+                        "KHR_texture_transform": {
+                            "offset": [0.25, 0.5],
+                            "scale": [2.0, 3.0]
+                        }
+                    }
+                }
+            }]
+        }"#;
+        let gltf = gltf::Gltf::from_slice(json).unwrap();
+        let mat = gltf.document.materials().next().unwrap();
+        let img = gltf::image::Data { pixels: vec![255, 255, 255, 255], format: gltf::image::Format::R8G8B8A8, width: 1, height: 1 };
+        let mut tex_idx = 0i32;
+        let gpu = gltf_material(Some(mat), &[img], "test", &mut |_, _, _| { let id = tex_idx; tex_idx += 1; Ok(id) }, &HashMap::new()).unwrap();
+        assert_eq!(gpu.emissive_uv, [2.0, 3.0, 0.25, 0.5]);
+        assert_eq!(gpu.uv, [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(gpu.uv2[..2], [0.0, 0.0]);
     }
 }
