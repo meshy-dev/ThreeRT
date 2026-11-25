@@ -309,7 +309,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         base: room_base,
         rows: Holes::new(rows.len(), rows.len() + room.records),
         row_runs: Default::default(),
-        pool_first: 0,
         blobs,
         // (The previous positions at the build: the vertices that move. No room: it grows with the first deforming
         // mesh an edit places.)

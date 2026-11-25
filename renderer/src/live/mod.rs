@@ -664,7 +664,7 @@ impl LiveCore {
         }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
         let buffers = [&up.vertices, &up.prev_vertices, &up.heap.buffer, &up.words.buffer].iter().map(|b| b.size()).sum::<u64>();
-        let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
+        let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>();
         let mb = |b: f64| (b / (1 << 20) as f64 * 10.0).round() / 10.0;
         serde_json::json!({
             "tris": [e.tris.used(), e.tris.cap], "records": [e.records.used(), e.records.cap], "objects": [e.objects.used(), e.objects.cap],

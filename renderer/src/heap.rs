@@ -77,12 +77,10 @@ pub enum Stream {
     /// The triangles' vertices (indexed.rs): three words a triangle, in the triangles' GPU order. What a hit and a
     /// candidate's test read, and what the BLASes are built from.
     Indices,
-    /// The rows of the triangles that have one (`indexed::TriRow`, `Indexed::gpu_rows`): four words each.
-    Triangles,
 }
 
 impl Section for Stream {
-    const COUNT: usize = 6;
+    const COUNT: usize = 5;
     const UNIT: u64 = 4;
     const LABEL: &'static str = "words";
     fn index(self) -> usize {

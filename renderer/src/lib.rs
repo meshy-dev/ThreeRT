@@ -94,7 +94,7 @@ pub struct EmitterTri {
     pub area: f32,
     /// Centroid (light LOD: distance to the reference camera position).
     pub c: [f32; 3],
-    /// On a moving object (TRI_DYNAMIC): no light LOD, its centroid would go stale (the kernel skips it too).
+    /// On a moving object: no light LOD, its centroid would go stale (the kernel skips it too).
     pub moves: bool,
     /// A particle's: `area` is the nominal one (Particles emitterArea), what the CDF weighs it by; its pass places
     /// its triangle, of whatever size.
@@ -523,13 +523,10 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     // The meshes' triangles, in model space, one mesh after another (`Scene::pool_tris`), a BLAS or a tree a mesh.
     let mut tri_verts: Vec<[f32; 4]> = Vec::with_capacity(sc.pool_tris.len() * 3);
     let mut attrs = Vec::with_capacity(sc.pool_attrs.len());
-    // Deforming meshes come first (scene build): flagged dynamic, their previous vertices kept for motion vectors.
-    let deforming = scene::deforming_pool(&sc.meshes);
-    for (k, (t, a)) in sc.pool_tris.iter().zip(&sc.pool_attrs).enumerate() {
+    for (t, a) in sc.pool_tris.iter().zip(&sc.pool_attrs) {
         let [a0, b, c] = *t;
         let (e1, e2): (Vec3A, Vec3A) = (b - a0, c - a0);
-        // (No class on a mesh's triangle: its instances' rows say which sections are cutouts or glass.)
-        tri_verts.push([a0.x, a0.y, a0.z, f32::from_bits(if k < deforming { scene::TRI_DYNAMIC } else { 0 })]);
+        tri_verts.push([a0.x, a0.y, a0.z, 0.0]);
         tri_verts.push([e1.x, e1.y, e1.z, 0.0]);
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
@@ -713,7 +710,6 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         // (z, w: software traversal's units: the top tree's root and their count, as bits; trace_units.wgsl. y is
         // `render --signals`'.)
         motion: sc.units.as_ref().map_or([0.0; 4], |u| [0.0, 0.0, f32::from_bits(u.layout.top_first), f32::from_bits(u.count)]),
-        group_first: [[0; 4]; 2],
         light_lod: [0.0; 4],
         emit_power: [total, 0.0, 0.0, 0.0],
         aerial: [0.0; 4],
@@ -742,8 +738,7 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     // Software traversal: the trees' leaves, every triangle as it was laid out for its tree above (v0, e1, e2), with
     // its section and its index there.
     if !hwrt {
-        let rows = &sc.indexed.rows;
-        sc.indexed.leaves = tri_verts.chunks_exact(3).zip(rows).map(|(t, r)| [[t[0][0], t[0][1], t[0][2], f32::from_bits(r[0])], [t[1][0], t[1][1], t[1][2], f32::from_bits(r[3])], [t[2][0], t[2][1], t[2][2], 0.0]]).collect();
+        sc.indexed.leaves = tri_verts.chunks_exact(3).zip(&sc.attrs).map(|(t, a)| [[t[0][0], t[0][1], t[0][2], a.uv[3]], [t[1][0], t[1][1], t[1][2], a.x[3]], [t[2][0], t[2][1], t[2][2], 0.0]]).collect();
     }
     timings.push(("index_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
     timings.push(("vertices".into(), sc.indexed.vertices.len() as f64));
@@ -763,7 +758,6 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         sc.gpu_instances[r].info[2] = i.verts;
         sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
-    params.word_first[1][2] = sc.indexed.dynamic.0;
     Prepared { tri_verts, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, moving_mats }
 }
 
@@ -810,9 +804,6 @@ fn index_geometry(sc: &scene::Scene, tri_verts: &[[f32; 4]]) -> indexed::Indexed
     }
     out.dynamic = (0, deforming);
     assert_eq!((out.indices.len(), tri_verts.len()), (sc.attrs.len(), sc.attrs.len() * 3), "a row of indices a triangle");
-    // A row a triangle: its section and its index in it (whether it deforms is its instance's to say:
-    // `scene::INST_DEFORMS`).
-    out.rows = sc.attrs.iter().map(|a| [a.uv[3].to_bits(), 0, 0, a.x[3].to_bits()]).collect();
     out
 }
 
@@ -1647,7 +1638,7 @@ mod units_tests {
             let mut sc = scene::build(&w, std::path::Path::new(".."), &default_presets_dir(), None).unwrap();
             let p = prepare_as(hwrt, &mut sc, &mut vec![]);
             let x = &sc.indexed;
-            assert_eq!((x.indices.len(), x.rows.len()), (sc.attrs.len(), sc.attrs.len()), "{what}");
+            assert_eq!(x.indices.len(), sc.attrs.len(), "{what}");
             // (A triangle's mesh: its vertices count from the mesh's first.)
             let base = |k: usize| sc.meshes.iter().zip(&x.meshes).find(|(m, _)| m.count > 0 && (m.first as usize..(m.first + m.count) as usize).contains(&k)).map_or(0, |(_, v)| v.0);
             let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
@@ -1662,13 +1653,10 @@ mod units_tests {
                 }
                 assert_eq!(bits(&uv.concat()), bits(&[a.n0[3], a.n1[3], a.n2[3], a.uv[0], a.uv[1], a.uv[2]]), "{what}: triangle {k}'s UVs");
                 assert_eq!(tangent.map(|t| bits(&t)), [a.t, a.t1, a.t2].map(|t| bits(&t)), "{what}: triangle {k}'s tangents, a corner each, or none");
-                // (Its section and its index in it, nothing else.)
-                let row = [a.uv[3].to_bits(), 0, 0, a.x[3].to_bits()];
-                assert_eq!(x.rows[k], row, "{what}: triangle {k}'s row");
                 // Software traversal: the triangle as its tree's leaf has it, with its section and its index there.
                 if !hwrt {
                     let corners = q.map(|c| Vec3A::new(c[0], c[1], c[2]));
-                    assert_eq!(x.leaves[k].map(|r| bits(&r)), indexed::leaf(corners, [row[0], row[3]]).map(|r| bits(&r)), "{what}: triangle {k}'s leaf");
+                    assert_eq!(x.leaves[k].map(|r| bits(&r)), indexed::leaf(corners, [a.uv[3].to_bits(), a.x[3].to_bits()]).map(|r| bits(&r)), "{what}: triangle {k}'s leaf");
                 }
             }
             assert_eq!(x.leaves.len(), if hwrt { 0 } else { x.indices.len() }, "{what}: a leaf a triangle under software traversal, none under hardware traversal");

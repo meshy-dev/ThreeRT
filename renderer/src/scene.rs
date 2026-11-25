@@ -165,11 +165,6 @@ pub fn section_emitters(sections: &[Section], rows: &[Row], materials: &[GpuMate
         .collect()
 }
 
-/// Pool triangles of the deforming meshes, which the build puts first in the pool.
-pub fn deforming_pool(meshes: &[InstMesh]) -> usize {
-    meshes.iter().filter(|m| m.deforms).map(|m| m.count as usize).sum()
-}
-
 impl InstMesh {
     /// Its BLAS geometries (`sections`: the scene's): one a section, its first triangle in the mesh and how many.
     /// Every one is flagged opaque, whatever an instance's materials are (a query forces opacity; a cutout's and

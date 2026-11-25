@@ -1,8 +1,6 @@
-//! The scene's geometry as the GPU holds it: vertices kept once, a triangle three indices and a row. The build still
-//! makes triangles with corners of their own (`Scene::tris`, `attrs`); what they share is found here, scope by scope:
-//! a mesh's triangles share within the mesh, the still world-space triangles among themselves, what the CPU writes
-//! whole each frame (the dynamic world-space triangles) has three vertices a triangle, and a particle system's
-//! mesh four a quad.
+//! The scene's geometry as the GPU holds it: vertices kept once, a triangle three indices. The build makes triangles
+//! with corners of their own (`Scene::pool_tris`, `attrs`); what they share is found here, mesh by mesh: a mesh's
+//! triangles share within the mesh, and a particle system's mesh has four vertices a quad.
 
 use crate::scene::GpuTriAttr;
 use glam::Vec3A;
@@ -14,16 +12,10 @@ use std::hash::Hash;
 pub type Vertex = [[f32; 4]; 3];
 pub const VERTEX_BYTES: usize = std::mem::size_of::<Vertex>();
 
-/// The row of a triangle no instance places (software traversal's, of an instance that is no unit): its material, its
-/// object, its flags (`scene::TRI_*`), its emitter entry + 1. A mesh's triangle needs none on the GPU: a ray's hit
-/// says which section of its mesh it is in, and the rest is its instance's. (The build has one for every triangle,
-/// a mesh's with its section and its index there: `Indexed::rows`.)
-pub type TriRow = [u32; 4];
-
 /// A triangle as a software tree keeps it in its leaves, the tree's own copy (hardware traversal's acceleration
 /// structures keep theirs): (v0, id), (v1 - v0, id), (v2 - v0, -), so a candidate's test reads one place. The ids:
-/// a world-space triangle's flags (`scene::TRI_*`), -; a mesh's section, and its index in the section. Three vec4s a
-/// triangle, in the triangles' order (a tree's leaves name runs of it).
+/// its section of its mesh, and its index in the section. Three vec4s a triangle, in the triangles' order (a tree's
+/// leaves name runs of it).
 pub type Leaf = [[f32; 4]; 3];
 pub const LEAF_BYTES: usize = std::mem::size_of::<Leaf>();
 
@@ -175,11 +167,8 @@ pub struct Indexed {
     pub vertices: Vec<Vertex>,
     /// A triangle's three vertices, counted from its mesh's first vertex.
     pub indices: Vec<[u32; 3]>,
-    pub rows: Vec<TriRow>,
     /// Software traversal: every triangle as its tree's leaf has it. Empty under hardware traversal.
     pub leaves: Vec<Leaf>,
-    /// The meshes' first triangle: those before it are in world space.
-    pub pool_first: u32,
     /// By mesh (`Scene::meshes`): its first vertex and how many it has.
     pub meshes: Vec<(u32, u32)>,
     /// By skin source (`Scene::skin_sources`): the model's vertices a mesh of it is skinned from (`source_vertices`)
@@ -191,11 +180,6 @@ pub struct Indexed {
 }
 
 impl Indexed {
-    /// The rows the GPU holds: the world-space triangles' (a mesh's triangles have none).
-    pub fn gpu_rows(&self) -> &[TriRow] {
-        &self.rows[..(self.pool_first as usize).min(self.rows.len())]
-    }
-
     /// A scope's vertices after those there are, its triangles after those there are, their indices raised by `by`
     /// (0: they count from the scope's first vertex). The scope's first vertex.
     pub fn push(&mut self, s: Scope, by: u32) -> u32 {

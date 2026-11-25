@@ -323,7 +323,6 @@ impl LiveCore {
             }
             p.jitter = [jitter.0, jitter.1, if self.rays { 0.0 } else { 1.0 }, 0.0];
             if moving {
-                // The kernel finds the first dynamic triangle in Params::group_first (group 4), a u32.
                 p.motion[0] = 1.0;
             }
             if self.cache.is_some() {

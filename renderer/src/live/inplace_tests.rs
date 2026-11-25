@@ -1072,10 +1072,9 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
     let (tables, up) = (&c.sc.tables, &c.sc.up);
     let size = std::mem::size_of::<crate::GpuEmitterTri>();
     let list = read(&up.heap.buffer, up.heap.at(Table::EmitterTris), (tables.emitter_tris.len() * size) as u64);
-    // (The triangles as the kernel reads them: three indices each; the vertices; the rows of those that have one.)
+    // (The triangles as the kernel reads them: three indices each; the vertices.)
     let vertices: Vec<crate::indexed::Vertex> = read_back(c, &up.vertices, 0, up.vertices.size());
     let index: Vec<u32> = read_back(c, &up.words.buffer, up.words.at(Stream::Indices), up.words.cap(Stream::Indices));
-    let tri_rows: Vec<[u32; 4]> = read_back(c, &up.words.buffer, up.words.at(Stream::Triangles), up.words.cap(Stream::Triangles) / 16 * 16);
     // (Software traversal: the trees' leaves, whose ids say a mesh's triangle's section and its index there.)
     let leaves: Vec<crate::indexed::Leaf> = if c.g.hwrt { vec![] } else { read_back(c, &up.bg_parts.leaves, 0, up.bg_parts.leaves.size() / crate::indexed::LEAF_BYTES as u64 * crate::indexed::LEAF_BYTES as u64) };
     let codes = crate::emitter_codes(&tables.emitter_tris, &crate::emitter_order(&tables.emitter_tris, tables.light_tree.as_ref()), tables.light_tree.as_ref());
@@ -1096,40 +1095,33 @@ fn list_is_its_triangles(what: &str, c: &LiveCore) {
         if e.area <= 0.0 {
             continue;
         }
-        // (A mesh's indices count from its instance's first vertex; a world-space triangle's from the first of all.)
-        let base = if e.inst == crate::NO_INST { 0 } else { c.sc.instances[e.inst as usize].verts };
+        // (A mesh's indices count from its instance's first vertex.)
+        let base = c.sc.instances[e.inst as usize].verts;
         let p: [glam::Vec3A; 3] = std::array::from_fn(|k| glam::Vec3A::from_slice(&vertices[(base + index[e.tri as usize * 3 + k]) as usize][0][..3]));
-        if e.inst == crate::NO_INST {
-            // (A triangle no instance places has a row: its material, its object, its flags, its emitter + 1. The
-            // list's record names the row: the triangle's own.)
-            assert_eq!(r, crate::GpuEmitterTri::of(e, p, code & !crate::EMITTER_MOVES), "{what}: emitter {i} of the list against its triangle {}", e.tri);
-            assert_eq!((r.part, tri_rows[e.tri as usize][3]), (e.tri, i as u32 + 1), "{what}: emitter {i}'s record names its triangle's row, and the row the emitter");
-        } else {
-            // (The record as the GPU has it.)
-            let (inst, record) = (&c.sc.instances[e.inst as usize], bytemuck::pod_read_unaligned::<scene::GpuInstance>(&records[e.inst as usize * record_size..][..record_size]));
-            let placed = [inst.world.transform_point3(p[0].into()), inst.world.transform_vector3((p[1] - p[0]).into()), inst.world.transform_vector3((p[2] - p[0]).into())];
-            assert_eq!(record.info[2], inst.verts, "{what}: instance {}'s record has its mesh's first vertex", e.inst);
-            assert_eq!((r.tri, r.inst, r.code, r.part), (e.tri, e.inst, code, e.part), "{what}: emitter {i}'s words (its triangle, its instance, its code, its section)");
-            for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
-                assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
-            }
-            // Its section's row as the GPU has it says the material and where the section's emitters start, the
-            // triangle its index among them: its place after the section's first triangle (hardware traversal), or
-            // what its tree's leaf says (software traversal: a tree has a mesh's triangles in its own order).
-            let at = (record.info[3] + e.part) as usize;
-            let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
-            assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
-            assert_eq!(record.info[3], inst.rows, "{what}: instance {}'s record has its rows", e.inst);
-            assert!(inst.first_emitter <= i as u32, "{what}: emitter {i} is of instance {}'s run, from {}", e.inst, inst.first_emitter);
-            let rank = if c.g.hwrt {
-                e.tri.wrapping_sub(row[1])
-            } else {
-                let l = &leaves[e.tri as usize];
-                assert_eq!(l[0][3].to_bits(), e.part, "{what}: triangle {}'s leaf has its section", e.tri);
-                l[1][3].to_bits()
-            };
-            assert_eq!((row[2].wrapping_add(rank), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
+        // (The record as the GPU has it.)
+        let (inst, record) = (&c.sc.instances[e.inst as usize], bytemuck::pod_read_unaligned::<scene::GpuInstance>(&records[e.inst as usize * record_size..][..record_size]));
+        let placed = [inst.world.transform_point3(p[0].into()), inst.world.transform_vector3((p[1] - p[0]).into()), inst.world.transform_vector3((p[2] - p[0]).into())];
+        assert_eq!(record.info[2], inst.verts, "{what}: instance {}'s record has its mesh's first vertex", e.inst);
+        assert_eq!((r.tri, r.inst, r.code, r.part), (e.tri, e.inst, code, e.part), "{what}: emitter {i}'s words (its triangle, its instance, its code, its section)");
+        for (got, want) in [r.v0, r.e1, r.e2].into_iter().zip(placed) {
+            assert!((glam::Vec3::from(got) - want).length() <= 1e-4 * (1.0 + want.length()), "{what}: emitter {i}'s triangle {got:?}, its instance places it at {want:?}");
         }
+        // Its section's row as the GPU has it says the material and where the section's emitters start, the
+        // triangle its index among them: its place after the section's first triangle (hardware traversal), or
+        // what its tree's leaf says (software traversal: a tree has a mesh's triangles in its own order).
+        let at = (record.info[3] + e.part) as usize;
+        let row: scene::Row = bytemuck::pod_read_unaligned(&gpu_rows[at * 16..][..16]);
+        assert_eq!(row, c.sc.rows[at], "{what}: row {at} on the GPU is the scene's");
+        assert_eq!(record.info[3], inst.rows, "{what}: instance {}'s record has its rows", e.inst);
+        assert!(inst.first_emitter <= i as u32, "{what}: emitter {i} is of instance {}'s run, from {}", e.inst, inst.first_emitter);
+        let rank = if c.g.hwrt {
+            e.tri.wrapping_sub(row[1])
+        } else {
+            let l = &leaves[e.tri as usize];
+            assert_eq!(l[0][3].to_bits(), e.part, "{what}: triangle {}'s leaf has its section", e.tri);
+            l[1][3].to_bits()
+        };
+        assert_eq!((row[2].wrapping_add(rank), scene::row_material(&row)), (i as u32, e.mat), "{what}: triangle {} of instance {} finds its emitter, of its row's material", e.tri, e.inst);
         alive += 1;
     }
     assert!(alive > 0, "{what}: the list has emitters");
@@ -3269,7 +3261,7 @@ fn a_posed_skinned_models_emitters_follow_its_pose() {
         let cpu = skinned_on_cpu(&live, &sk, &bend(time).unwrap()).p;
         let m = live.sc.meshes[sk.mesh as usize];
         for e in its(&live) {
-            let k = e.tri as usize - live.sc.edit.pool_first - m.first as usize;
+            let k = e.tri as usize - m.first as usize;
             let got: Vec<f32> = live.sc.pool_tris[m.first as usize + k].iter().flat_map(|v| v.to_array()).collect();
             assert!(got.iter().zip(&cpu[k * 9..k * 9 + 9]).all(|(a, b)| (a - b).abs() < 1e-5), "{what}: the CPU has triangle {k} at {got:?}, the pose {:?}", &cpu[k * 9..k * 9 + 9]);
         }
