@@ -10,6 +10,9 @@
 //!   threert-render serve [--presets DIR]      # JSON-lines jobs on stdin, keeps the GPU device and game runtimes warm
 //!   threert-render play | live <bundle.js>    # native window / headless real-time (view.rs, live/)
 //!   threert-render setup <bundle.js>          # setup cost in the embedded runtime
+//!   threert-render stats <bundle.js> [--assets DIR] [--room id] [--seed n]
+//!                         # scene characterisation without a GPU: objects, geometries,
+//!                         # materials, textures, triangles, emitters
 //!   threert-render edit-check <bundle.js> --events '[{"type":..,"payload":..}]'
 //!   threert-render info                       # print adapter info
 
@@ -41,6 +44,9 @@ struct Job {
     hdr: Option<PathBuf>,
     /// A live job's approximations (`gpu::A_*` bits; None: the device's).
     approx: Option<u32>,
+    reconstruction: Option<live::Reconstruction>,
+    /// Fixed internal resolution for a live job, as a fraction of its output size.
+    scale: Option<f32>,
     /// `--signals PREFIX`: PREFIX-diffuse.raw / -specular.raw / -emission.raw, the image's linear signals apart as the
     /// live denoiser splits them (RGB f32, output size; live snapshots to `*.signals` write the same).
     signals: Option<PathBuf>,
@@ -149,6 +155,8 @@ fn main() -> Result<()> {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let presets = flag("--presets").map(PathBuf::from).unwrap_or_else(default_presets_dir);
+    // (What scene code's `readAsset` reads under, for every command that runs a game.)
+    threert_render::script::set_asset_root(&PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into())));
     match cmd {
         "info" => {
             let g = gpu::Gpu::new()?;
@@ -179,6 +187,8 @@ fn main() -> Result<()> {
                 size: (flag("--width").map(|s| s.parse()).transpose()?, flag("--height").map(|s| s.parse()).transpose()?),
                 hdr: flag("--hdr").map(PathBuf::from),
                 approx: None,
+                reconstruction: None,
+                scale: None,
                 signals: flag("--signals").map(PathBuf::from),
             };
             let stats = render(&g, &job, &presets, init_ms, &mut Hosts::default())?;
@@ -245,6 +255,24 @@ fn main() -> Result<()> {
             let w = host.world.borrow();
             println!("{}", serde_json::json!({ "engine": "quickjs", "bundle_load_ms": load_ms, "setup_ms": setup_ms, "objects": w.objects.len(), "geometries": w.geometries.len(), "materials": w.materials.len(), "textures": w.textures.len(), "info": host.info }));
         }
+        "stats" => {
+            // Scene characterisation without a GPU: the world is built in the embedded runtime, then the CPU
+            // scene build + prepare count the geometry and the emitters (the same `prepare_as` the render and
+            // live paths run, with the hardware-traversal flags). No adapter, no device, no upload.
+            let t0 = Instant::now();
+            let host = ScriptHost::new(&std::fs::read_to_string(args.get(2).ok_or_else(|| anyhow!("game bundle required"))?)?)?;
+            let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let assets = PathBuf::from(flag("--assets").unwrap_or_else(|| ".".into()));
+            let setup_ms = host.setup(&flag("--room").unwrap_or_else(|| "local".into()), flag("--seed").map(|v| v.parse()).transpose()?)?;
+            let w = host.world.borrow();
+            let tb = Instant::now();
+            let mut sc = scene::build(&w, &assets, &presets, None)?;
+            let prep = threert_render::prepare_as(true, &mut sc, &mut vec![]);
+            let prepare_ms = tb.elapsed().as_secs_f64() * 1000.0;
+            // Same counts the render stats report (scene.rs `stats`).
+            let triangles = sc.stats.get("triangles").map_or(0, |t| *t as u64);
+            println!("{}", serde_json::json!({ "engine": "quickjs", "bundle_load_ms": load_ms, "setup_ms": setup_ms, "prepare_ms": prepare_ms, "objects": w.objects.len(), "geometries": w.geometries.len(), "materials": w.materials.len(), "textures": w.textures.len(), "triangles": triangles, "instances": sc.instances.len(), "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "emitters": prep.emitter_tris.len(), "info": host.info }));
+        }
         "edit-check" => {
             // threert-render edit-check <bundle.js> [--assets DIR] --events '[{"type":..,"payload":..}, ..]'
             // The events' parameter edits, applied in place, must leave the GPU tables exactly as a fresh build of the
@@ -309,7 +337,7 @@ fn main() -> Result<()> {
         "serve" => {
             // One job per stdin line: {id, game: bundle path (or game module + runtime: runtime module), assets, room,
             // seed, state?, seq?, out, spp?, denoise?, overrides?, camera?, preset?, width?, height?, time?, hdr? (raw f32
-            // RGB linear radiance, nits), live? (frames of the real-time renderer instead, `render_live`), approx? (a
+            // RGB linear radiance, nits), live? (frames of the real-time renderer, with optional scale and reconstruction), approx? (a
             // live job's approximations, `gpu::A_*` bits; the device's without)}; one result line
             // each: {id, ok, stats} or
             // {id, ok: false, error, missing?: [files to put under the asset root before retrying]}.
@@ -340,6 +368,8 @@ fn main() -> Result<()> {
                         time: v["time"].as_f64().map(|t| t as f32),
                         size: (v["width"].as_u64().map(|x| x as u32), v["height"].as_u64().map(|x| x as u32)),
                         hdr: v["hdr"].as_str().map(PathBuf::from),
+                        reconstruction: v.get("reconstruction").filter(|r| !r.is_null()).map(live::Reconstruction::from_json).transpose()?,
+                        scale: v["scale"].as_f64().map(|s| s as f32),
                         approx: v["approx"].as_u64().map(|x| x as u32),
                         signals: v["signals"].as_str().map(PathBuf::from),
                     };
@@ -368,7 +398,7 @@ fn main() -> Result<()> {
 
 
 /// A `serve` job with `live: frames`: the real-time renderer (radiance cache, temporal and denoising passes) runs that
-/// many frames at 100 % scale on the scene's camera, the game's frame script (if any) before each at 60 fps; `hdr` gets
+/// many frames at the job's scale on the scene's camera, the game's frame script (if any) before each at 60 fps; `hdr` gets
 /// its linear radiance, `out` the displayed image.
 fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u32, hosts: &mut Hosts) -> Result<serde_json::Value> {
     let t0 = Instant::now();
@@ -395,7 +425,9 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     };
     g.set_approx(job.approx);
     let mut core = live::LiveCore::new(g, &w, &job.game.assets, presets, width, height)?;
-    core.set_scale(1.0);
+    host.attach_rendering(&mut core);
+    if let Some(mode) = &job.reconstruction { core.set_reconstruction(mode.clone()); }
+    core.set_scale(job.scale.unwrap_or(1.0));
     drop(w);
     // A frame script runs at 60 fps: the renderer's frame time is the same (motion blur, exposure adaptation).
     if host.has_frame() {
@@ -423,8 +455,13 @@ fn render_live(slot: &mut Option<gpu::Gpu>, job: &Job, presets: &Path, frames: u
     }
     let ev100 = core.read_ev100()?;
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let info = serde_json::json!({
+        "width": width, "height": height, "frames": frames, "scale": core.render_scale,
+        "reconstruction": core.reconstruction().name(), "requested_reconstruction": core.requested_reconstruction().name(),
+        "ev100": ev100, "timings_ms": { "total_ms": ms }
+    });
     *slot = Some(core.g);
-    Ok(serde_json::json!({ "width": width, "height": height, "frames": frames, "ev100": ev100, "timings_ms": { "total_ms": ms } }))
+    Ok(info)
 }
 
 /// PREFIX-diffuse.raw, -specular.raw, -emission.raw (RGB f32 each).
@@ -483,7 +520,7 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
     if job.signals.is_some() {
         params.motion[1] = 1.0;
     }
-    let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
+    let frame = g.render(&sc, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, threert_render::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, params, spp, &mut timings)?;
     if let Some(prefix) = &job.signals {
         // The raw (undenoised) means: diffuse = color less specular and emission.
         let diffuse: Vec<f32> = frame.color.iter().zip(&frame.specular).zip(&frame.emission).flat_map(|((c, s), e)| [0, 1, 2].map(|k| (c[k] - s[k] - e[k]).max(0.0))).collect();
@@ -520,10 +557,10 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
 
     let t = Instant::now();
     let img = post::Image { w, h, px: color };
-    // Local exposure's middle grey follows the exposure compensation (UE: auto bias; manual: bias = -EV100).
+    // Local exposure's pivot over middle grey (post::finish): auto exposure's compensation; none under manual exposure.
     let compensation = match &sc.camera.exposure {
         threert_render::desc::Exposure::Auto { compensation, .. } => 2f32.powf(*compensation),
-        threert_render::desc::Exposure::Manual { ev100 } => 2f32.powf(-ev100),
+        threert_render::desc::Exposure::Manual { .. } => 1.0,
     };
     let rgba = post::finish(&img, exposure, compensation, &preset.post);
     timings.push(("post_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
@@ -552,8 +589,8 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
         "scene": sc.name,
         "out": job.out,
         "width": w, "height": h, "spp": spp,
-        "triangles": sc.stats.get("triangles").map_or(sc.tris.len(), |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "sections": sc.sections.len(), "rows": sc.rows.len(), "pool_triangles": sc.pool_tris.len(),
-        "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "flat_triangles": sc.tris.len(), "bvh_nodes": prep.nodes.len(), "emitters": prep.emitter_tris.len(), "lights": sc.lights.len(), "textures": sc.textures.len(),
+        "triangles": sc.stats.get("triangles").map_or(0, |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "sections": sc.sections.len(), "rows": sc.rows.len(), "pool_triangles": sc.pool_tris.len(),
+        "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "bvh_nodes": prep.nodes.len(), "emitters": prep.emitter_tris.len(), "lights": sc.lights.len(), "textures": sc.textures.len(),
         "adapter": g.adapter_info.name, "backend": format!("{:?}", g.adapter_info.backend), "hwrt": g.hwrt,
         "ev100": ev100, "denoise": denoiser, "preset": preset.name,
         "samples_per_sec": (w * h) as f64 * spp as f64 / (trace_ms / 1000.0).max(1e-9),

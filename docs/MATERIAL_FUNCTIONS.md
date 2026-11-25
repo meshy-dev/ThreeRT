@@ -5,7 +5,7 @@ A material function is a WGSL body attached to a material, run by the path trace
 a Custom-HLSL node. The DSL declares it once with named parameters and texture slots, and each material instance binds
 its own values. Expressiveness lives in code instead of in a growing list of built-in material fields, so a UE master
 material can be ported line for line (the standard library's nine street materials, below, were ported this way from
-the master materials of a UE 5.8 night-street level).
+the master materials we wrote for this project's own UE 5.8 night-street level).
 
 ```ts
 import { MaterialFunction, MeshStandardMaterial, Texture } from "@threert/scene";
@@ -75,7 +75,7 @@ or only adjust a part.
 |---|---|
 | `wp` | world position (m) |
 | `n`, `ng` | vertex / geometric normal, facing the viewer |
-| `t`, `b` | tangent (+u), bitangent (image up) |
+| `t`, `b` | tangent (+u), bitangent (image up): the surface's own at the point (a model's vertices', a file's or made for it) or, for geometry without tangents, its triangle's |
 | `uv`, `uvd` | mesh UV0 (v down); `exp2(uvd)` = UV units per metre (pass it to `msample` for the mip) |
 | `view` | unit vector toward the ray origin |
 | `op`, `ob` | object pivot and world bounds size (UE `ObjectPositionWS` / `ObjectBounds`) |
@@ -146,10 +146,11 @@ vec4(0)); <code> return o; }`:
 | `custom` | the material function's `i.custom` for this particle; `i.op` / `i.ob` are its center and bounds |
 
 Parameters are `$Name`, as in material functions. A particle function has no state: it is a function of time, the camera
-and its random numbers, so every client places the same particles and a frame can be re-rendered. Each particle is two
-dynamic triangles and an object of its own; a compute pass (`renderer/shaders/particles.wgsl`) writes them (positions,
-shading normal and tangent from `u` / `v`), last frame's positions (motion vectors) and the BLAS input, then the dynamic
-BLASes and the TLAS are rebuilt. Moving the node moves `i.pivot`. Offline renders
+and its random numbers, so every client places the same particles and a frame can be re-rendered. A particle system is
+a mesh of its own, a quad a particle, and one instance of it; each particle has an object of its own. A compute pass
+(`renderer/shaders/particles.wgsl`) writes the mesh's vertices (positions, shading normal and tangent from `u` / `v`)
+and last frame's positions (motion vectors), then the system's BLAS and the TLAS are built again. Moving the node
+moves `i.pivot`. Offline renders
 place the particles once, at the scene time. Particles need hardware ray tracing (with software traversal they stay
 collapsed at the pivot) and cast no shadow by default.
 
@@ -191,8 +192,8 @@ sparks.customData = [f.state.boomAt, 0, 0, 0];
 A particle node whose material is `transparent` (three.js's flag) is drawn by the translucency pass instead
 (`renderer/shaders/translucent.wgsl`), as UE draws translucent materials:
 
-- **Outside the scene.** Its triangles are in no acceleration structure the path tracer uses, only in their own. They
-  cast no shadow and show in no reflection, refraction or GI (UE's default for translucency; docs/ROADMAP.md, Known
+- **Outside the scene.** Its mesh is in no acceleration structure the path tracer uses, only in the pass's own (an
+  instance of it a system). They cast no shadow and show in no reflection, refraction or GI (UE's default for translucency; docs/ROADMAP.md, Known
   parity gaps).
 - **Over the image.** Per output pixel, after the temporal filter (live) or over the converged image (offline), a ray
   goes as far as the opaque surface the pixel shows. Then:
@@ -340,17 +341,34 @@ any number of times:
 The kernel compiles all of it out when no scene node is a volume (feature bit F_MEDIA): existing scenes render
 byte-identical and pay nothing.
 
-`FogVolume` in the standard library is UE 5.8's Local Fog Volume, as UE voxelizes it into volumetric fog
-(VolumetricFog.usf). It takes UE's settings under the same names and defaults: `radialExtinction`,
-`heightExtinction`, `heightFalloff`, `heightOffset`, `albedo`, `emissive` and `phaseG`.
-- In the unit sphere (radius 1), the radial part is RadialFogExtinction × saturate(1 − d)^0.82, and the height part is
-  HeightFogExtinction × exp(−HeightFogFalloff × (z − HeightFogOffset)).
-- The two combine as coverages, not as a sum: with A = e^−height and B = e^−radial, the extinction is
-  −log(A + B − AB) per metre.
-- So fog needs both parts: with no height part there is no fog. UE's default falloff of 1000 cuts the sphere flat at
-  the offset.
-- The node's scale is the diameter: UE's scale 1.2 (a 1.2 m radius) is `scale.set(2.4, 2.4, 2.4)`.
-- `volume/local-fog` checks the density against the optical depth integrated numerically: 0.2823 for 0.2863.
+`FogVolume` is a sphere of fog (the node's scale is its diameter). Its settings have the names and meanings of the
+settings of Unreal's Local Fog Volume (its documentation page "Local Fog Volumes"), so a scene can carry the numbers
+over:
+
+| option | default | meaning |
+|---|---|---|
+| `radialExtinction` | 1 | extinction (1/m) at the centre of the part that fades toward the sphere's surface |
+| `heightExtinction` | 1 | extinction (1/m) of the part that fades with height, at the height `heightOffset` |
+| `heightFalloff` | 1000 | how fast the height part falls off upward, per unit of the unit sphere (radius 1) |
+| `heightOffset` | 0 | the height the height part is measured from, in the unit sphere (0 = the centre, 1 = the top) |
+| `albedo` | white | scattering / extinction |
+| `emissive` | black | emitted radiance per unit extinction, nits |
+| `phaseG` | 0.2 | the Henyey-Greenstein g |
+
+The density is ThreeRT's own. With `u` the point in the unit sphere (radius 1, y up):
+
+```
+radial     = radialExtinction × (1 − |u|²)
+height     = heightExtinction × exp(−heightFalloff × (u.y − heightOffset))
+extinction = radial × (1 − exp(−height / radial))
+```
+
+The fog is where both parts are. The combination follows the thinner of the two smoothly, and is never denser than
+either: where the height part is thin the fog is the height part, where it is dense the fog is the radial part. With
+the default falloff of 1000 the height part is a flat cut: the sphere's fog below `heightOffset`, nothing above it.
+A falloff of a few units gives a pool that thins upward. `fogVolumeExtinction(options, u)` gives the same number in
+TypeScript. The volume's majorant is set from the options (the radial part at the centre with the height part at
+its densest in the sphere), so a `FogVolume` needs none.
 
 Layer A checks it against analytic values:
 - `volume/box-transmittance`: Beer–Lambert;
@@ -385,7 +403,7 @@ in front of its wall, lit by the moon alone, reads +5.7 % live over the offline 
 isotropic phase function (the smoke's is HG 0.2), a third from the 8-step march's transmittance.
 
 The standard library has three volume presets:
-- `FogVolume`: UE 5.8's Local Fog Volume (its density formula and settings, above).
+- `FogVolume`: a sphere of fog that fades towards its edge and with height (above).
 - `SmokeColumn`: fBm noise drifting upward, thinning toward the edge and top.
 - `Fireball`: grows from `customData[0]`, emits by temperature, cools to smoke, can repeat.
 
@@ -417,7 +435,9 @@ cloud.scale.set(8, 8, 8);
 - **Rendering.** As any medium: delta tracking and ratio tracking offline; live, the camera rays' march and the volume
   voxels' in-scattering (above). A medium with a grid is marched in 64 steps instead of 8 (a grid has detail 8 steps
   miss), and its empty steps skip the voxel lookup.
-- **Changing it from the game.** Write `grid.data`, set `grid.needsUpdate`: uploaded in place, no rebuild.
+- **Changing it from the game.** Write `grid.data`, set `grid.needsUpdate`: uploaded in place. A volume with a
+  grid the scene had not, a grid of another size or with another program, comes in place too (the scene's grids
+  are made again together; docs/RUNTIME.md "What comes in place").
 - **Simulating it.** With a `GridProgram`, the grid changes on the GPU every frame (`renderer/shaders/grid_sim.wgsl`,
   WGSL compute only). The grid then holds a second field B of four numbers, the program's own (a velocity, say).
   - The program is a WGSL body run once per cell, with `$Name` parameters. It gets the cell's `s.a` and `s.b` and
@@ -433,8 +453,9 @@ cloud.scale.set(8, 8, 8);
     a program that adds what a source gives adds it once). At most 64 a frame.
   - Offline, a still at scene time t runs the program for round(t × 60) frames (at most 36,000) from the setup's
     sources, then renders.
-  - A rebuild of the live scene keeps what the program has simulated, while the grid is the same grid: its size and
-    its program (new parameters keep it). A new size or another program starts it again from its data.
+  - What the program has simulated stays while the grid is the same grid: its size and its program (new
+    parameters and a change of the program's code keep it), across the scene's grids being made again and across a
+    rebuild of the live scene. A new size or another program starts it again from its data.
 
 ```ts
 // The whole of an advection: each cell takes what was upstream of it.
@@ -643,8 +664,7 @@ What procedural surfaces are, today (ROADMAP § 6 step 1):
 - Not light-sampled: an emissive procedural surface lights others only through their BSDF rays (as emissive media).
 - Always instances: moving a `ProceduralMesh` rewrites its record and TLAS transform, never rebuilds the scene; its
   motion vectors come from the previous transform. Replacing its boxes or data (`needsUpdate`) rebuilds.
-- Live primary visibility is traced (the raster experiment draws triangles only), and a click picks the boxes (the CPU
-  does not run the function).
+- A click picks the boxes (the CPU does not run the function).
 
 Hits carry `PROC_BIT | material << 23 | box` as their triangle, the octahedral object-space normal (15 bits per
 component) in u, the attribute in v and the mesh's record (pathtrace.wgsl `proc_hit`), so `surface()` takes them apart

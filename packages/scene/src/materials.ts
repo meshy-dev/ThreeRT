@@ -1,7 +1,8 @@
 // Standard material library: Three-like constructors for the materials scenes keep needing (wet ground with puddles and
 // rain ripples, neon signs, facades with lit windows, LED screens, painted metal, ...), so an agent fills in parameters
 // instead of writing shading code. Each is a MaterialFunction (docs/MATERIAL_FUNCTIONS.md) taken from the master
-// materials of a UE 5.8 night-street level (Custom HLSL, written against UE space via ue_pos / ue_vec, cm); the
+// materials of this project's own night-street level in Unreal (Custom HLSL that we wrote there, against UE space via
+// ue_pos / ue_vec, cm); the
 // constructors take metres and three.js names (`map`, `roughnessMap`, `normalMap`, `color`, `roughness` as the map's
 // multiplier) and convert. Colours: linear triples or sRGB hex, like `Color`. Parameters are read when a material is
 // made; `set({...})` changes them later.
@@ -796,8 +797,8 @@ const SURFACE = new MaterialFunction("std_surface", {
   params: {
     WorldScale: 0, NormalScale: 1, Wet: 0, Flags: 0,
     PuddleScale: 1, PuddleAmount: 0, GrimeAmount: 0, GrimeScale: 1,
-    WinTop: 1e4, WinSeed: 0,
-    UV: [1, 1, 0, 0], Win0: [3.2, 2.4, 1.5, 1.6], Win1: [4, 0.45, 0.9, 40],
+    WinTop: 1e4, WinSeed: 0, FootHeight: 0, FootAmount: 0,
+    UV: [1, 1, 0, 0], Win0: [3.2, 2.4, 1.5, 1.6], Win1: [4, 0.45, 0.9, 40], Fade: [0, 0, 1, 0],
   },
   textures: ["Map", "RoughnessMap", "MetalnessMap", "NormalMap", "EmissiveMap"],
   helpers: SURFACE_HELPERS,
@@ -856,6 +857,22 @@ const SURFACE = new MaterialFunction("std_surface", {
             let pn = t * (tn.x * $NormalScale) + b * (tn.y * $NormalScale) + n * tn.z;
             if (dot(pn, pn) > 1e-12 && dot(pn, ng) > 0.0) { n = normalize(pn); }
         }
+    }
+    // Weathering by cause on walls (mesh UVs in metres, v up from the wall's foot): splash and rising damp at the foot,
+    // darker and browner up to a ragged tide line; and the faces toward the sun's side bleached.
+    // (the height: the geometry's v, up; i.uv is v down, 1 - v)
+    let up = 1.0 - i.uv.y;
+    if ($FootHeight > 0.0 && !world && abs(ng.y) < 0.5 && up > 0.0) {
+        let top = $FootHeight * (0.7 + 0.6 * std_fbm(vec2<f32>(i.uv.x * 0.9, 3.7)));
+        let k = (1.0 - smoothstep(0.15 * top, top, up)) * $FootAmount;
+        let tide = smoothstep(0.85 * top, top, up) * (1.0 - smoothstep(top, 1.08 * top, up)) * $FootAmount;
+        col = col * mix(vec3<f32>(1.0), vec3<f32>(0.64, 0.6, 0.54), k) + vec3<f32>(0.03) * tide;
+        rough = mix(rough, 1.0, 0.5 * k);
+    }
+    if ($Fade.w > 0.0 && abs(ng.y) < 0.5) {
+        let f = clamp(dot(ng, $Fade.xyz), 0.0, 1.0) * $Fade.w;
+        let l = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+        col = mix(col, vec3<f32>(l * 1.12 + 0.02), 0.45 * f);
     }
     if ($GrimeAmount > 0.0 && i.near) {
         let g = std_grime(p, ng, $GrimeScale) * $GrimeAmount;
@@ -964,6 +981,15 @@ export interface SurfaceParameters {
   grime?: { amount: number; scale: number };
   /** Lit windows on the vertical faces (`facadeWindows({...})`). */
   windows?: FacadeWindows;
+  /**
+   * Weathering by cause on vertical faces, not a tiled noise:
+   * - `foot`: splash and rising damp at a wall's foot, `height` m up to a ragged tide line, darker and browner by up to
+   *   `amount` (0..1) at the bottom. Reads the height from the mesh UVs: metres, v up from the wall's foot (a wall
+   *   drawn in its own frame); faces with v < 0 (a reveal's) and world-mapped surfaces are left as they are.
+   * - `fade`: faces toward `toward` (a unit horizontal direction: the sun's side, south in the northern hemisphere)
+   *   bleached, lighter and greyer, by up to `amount` (0..1).
+   */
+  weathering?: { foot?: { height: number; amount: number }; fade?: { toward: [number, number, number]; amount: number } };
   side?: "front" | "double";
 }
 
@@ -998,6 +1024,8 @@ export class SurfaceMaterial extends LibraryMaterial<SurfaceParameters> {
         PuddleScale: Math.max(p.puddles?.scale ?? 1, 0.05), PuddleAmount: p.puddles?.amount ?? 0,
         GrimeAmount: p.grime?.amount ?? 0, GrimeScale: Math.max(p.grime?.scale ?? 1, 0.05),
         WinTop: w?.top ?? 1e4, WinSeed: w?.seed ?? 0,
+        FootHeight: Math.max(p.weathering?.foot?.height ?? 0, 0), FootAmount: p.weathering?.foot?.amount ?? 0,
+        Fade: p.weathering?.fade ? ([...p.weathering.fade.toward, p.weathering.fade.amount] as V4) : [0, 0, 1, 0],
         UV: [...(first?.repeat ?? [1, 1]), ...(first?.offset ?? [0, 0])] as V4,
         Win0: w ? [w.floorHeight, w.bayWidth, w.windowWidth, w.windowHeight] : [0, 0, 0, 0],
         Win1: w ? [w.groundHeight, w.litChance, w.sill, w.brightness] : [0, 0, 0, 0],

@@ -1,5 +1,5 @@
 //! The merged binding layout: the kernel with at most eight storage buffers a stage, WebGPU's default limit
-//! (`maxStorageBuffersPerShaderStage`). The kernel binds 21 as it is written: more than a browser gives a page.
+//! (`maxStorageBuffersPerShaderStage`). The kernel binds 20 as it is written: more than a browser gives a page.
 //! (The live passes need none of this: each binds at most eight, live/layout.rs, and a page binds them as they are.)
 //!
 //! The kernel's source has both layouts: pathtrace.wgsl declares its tables' views and its group-1 buffers in an
@@ -42,38 +42,6 @@ pub const GUARD_WORDS: u32 = 4;
 /// written only.
 pub const DEFERRED_BINDING: u32 = 9;
 
-/// The uniform tables (`gpu::GpuOptions::uniform_tables`; docs/RUNTIME.md "Android"): the tables the kernel reads
-/// from uniform buffers, copies of their sections, instead of from views of the sections. Qualcomm's Adreno 740 driver
-/// (Vulkan, Android 13) gave the kernel other buffers' contents for these four when each was a read-only storage
-/// buffer: a model's textures came out as another table's numbers, instance records sent hits to the wrong
-/// triangles, an emissive object's power read as something else's and lit nothing. As uniform buffers they read
-/// right. (Whether they read right as views of the tables' buffer, which no device has run yet, is not known:
-/// until one has, Android keeps the copies.)
-///
-/// In the kernel (pathtrace.wgsl, `@if(uniform_tables)`) the four are sized uniform arrays at their own bindings, and
-/// every index into them is held to the array (`tex_info_at` and the others: `min(i, last)`). A scene with more
-/// entries than an array holds reads the last one for the rest (the renderer says so when it uploads one,
-/// `Gpu::upload`); nothing is read outside the buffer, which the kernel's unchecked indexing would otherwise do.
-///
-/// An array's length (a uniform buffer's array is sized) is what 64 KiB hold, the size every device gives a uniform
-/// binding (WebGPU's `maxUniformBufferBindingSize`, Vulkan's least `maxUniformBufferRange` on the phones this is
-/// for), and for the media what a scene may have (`scene::MAX_MEDIA`). In a scene's terms: 2,048 textures, 1,365
-/// objects (1,024 with instance colours), 409 instance records, every medium.
-pub struct UniformTable {
-    pub table: Table,
-    /// Its array in the kernel, the array's binding (group 0) and length, and its element's bytes.
-    pub name: &'static str,
-    pub binding: u32,
-    pub len: u32,
-    pub stride: u64,
-}
-pub const UNIFORM_TABLES: [UniformTable; 4] = [
-    UniformTable { table: Table::TexInfo, name: "tex_info", binding: 15, len: 4096, stride: 16 },
-    UniformTable { table: Table::Objects, name: "objects", binding: 16, len: 4096, stride: 16 },
-    UniformTable { table: Table::Instances, name: "instances", binding: 17, len: 409, stride: 160 },
-    UniformTable { table: Table::Media, name: "media", binding: 18, len: 32, stride: 224 },
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,7 +78,7 @@ mod tests {
     /// Kernel variants in the merged layout: valid WGSL, no entry point with more than eight storage buffers, none
     /// declared beyond them (a pipeline layout counts what is declared), no length of a view's buffer in the source,
     /// and `MergedLive`'s members where the renderer puts their sections.
-    /// The layout as written has 22 (21 under hardware traversal, which has no trees' buffer). Because the merged
+    /// The layout as written has 22 (20 under hardware traversal, which has neither of the trees' buffers). Because the merged
     /// blocks declare none of the views or of group 1's buffers by their own names, a read or write of one past its
     /// accessor does not compile here (and naga says where), whatever the other layouts take.
     #[test]
@@ -118,10 +86,10 @@ mod tests {
         let (m, info) = parse(&variant(0, false));
         let (used, declared) = storage_buffers(&m, &info);
         assert_eq!(declared, 22, "the kernel as written");
-        // (`main` no longer adds to the cache's sums: `finish` trains it.)
-        assert_eq!(used.iter().map(|u| u.1).max(), Some(21), "{used:?}");
+        // (`main` no longer adds to the cache's sums: `finish` trains it. Without units it reads no node.)
+        assert_eq!(used.iter().map(|u| u.1).max(), Some(20), "{used:?}");
         let hw = kernel_wgsl(&kernel_template(), &KernelVariant::new(true, Default::default(), 0));
-        assert_eq!(hw.matches("var<storage").count(), 21 + 4, "hardware traversal: no trees' buffer (and the translucency pass's four)");
+        assert_eq!(hw.matches("var<storage").count(), 20 + 4, "hardware traversal: neither of the trees' buffers (and the translucency pass's four)");
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = variant(features, true);
             assert!(!src.contains("arrayLength"), "the lengths are the parameters'");
@@ -129,52 +97,12 @@ mod tests {
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
             assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "features {features:#x}: {used:?}");
-            assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(8), "the trace reads all eight");
+            let read = if features & crate::gpu::F_UNITS != 0 { 8 } else { 7 };
+            assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(read), "the trace reads all eight a page has with units (the trees' leaves the eighth), no tree without");
+            assert_eq!(declared, 8, "features {features:#x}");
             // The struct's members are the first sections; its last, the vec4s, begins where the cache's values do.
             let (at, _) = crate::heap::Heap::<crate::heap::Live>::starts_for(&crate::gpu::live_sizes(1, 64, 64, 64, 64));
             assert_eq!(layout(&m, "MergedLive").0, at[..4]);
-        }
-    }
-
-    /// Every kernel variant with the uniform tables: valid WGSL; the four tables are uniform buffers at their own
-    /// bindings, sized as the Rust side makes their buffers; the storage buffers are as written; and each of the
-    /// four is indexed once, in its accessor, held to its array, so nothing is read outside a uniform buffer.
-    #[test]
-    fn the_uniform_tables_are_four_sized_uniform_arrays() {
-        let globals = |m: &naga::Module, uniform: bool| -> Vec<(String, u32, u32)> {
-            let mut out: Vec<(String, u32, u32)> = m
-                .global_variables
-                .iter()
-                .filter(|(_, v)| if uniform { v.space == naga::AddressSpace::Uniform } else { matches!(v.space, naga::AddressSpace::Storage { .. }) })
-                .map(|(_, v)| {
-                    let b = v.binding.as_ref().expect("a bound global");
-                    let bytes = match &m.types[v.ty].inner {
-                        naga::TypeInner::Array { size: naga::ArraySize::Constant(n), stride, .. } => n.get() * stride,
-                        _ => 0,
-                    };
-                    (v.name.clone().unwrap_or_default(), b.group * 100 + b.binding, bytes)
-                })
-                .collect();
-            out.sort_by_key(|g| g.1);
-            out
-        };
-        let (written, _) = parse(&variant(0, false));
-        for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
-            let src = kernel_wgsl(&kernel_template(), &KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), features) });
-            let (m, info) = parse(&src);
-            assert_eq!(storage_buffers(&m, &info).1, 18, "features {features:#x}");
-            let tables: Vec<(String, u32, u32)> = globals(&m, true).into_iter().filter(|g| g.0 != "P").collect();
-            let want: Vec<(String, u32, u32)> = UNIFORM_TABLES.iter().map(|t| (t.name.to_string(), t.binding, (t.stride * t.len as u64) as u32)).collect();
-            assert_eq!(tables, want, "features {features:#x}");
-            // The storage buffers that stay: the same names at the same bindings as the kernel as written.
-            let kept = |m: &naga::Module| globals(m, false).into_iter().map(|g| (g.0, g.1)).filter(|g| !want.iter().any(|w| w.0 == g.0)).collect::<Vec<_>>();
-            assert_eq!(kept(&m), kept(&written), "features {features:#x}");
-            for t in &UNIFORM_TABLES {
-                let name = t.name;
-                let upper = name.to_uppercase();
-                assert_eq!(src.matches(&format!("{name}[")).count(), 1, "{name}: indexed in its accessor only (features {features:#x})");
-                assert!(src.contains(&format!("{name}[min(i, UT_{upper} - 1u)]")), "{name}: held to its array");
-            }
         }
     }
 
@@ -245,8 +173,8 @@ mod tests {
             assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain) - counted(&plain));
             let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
-            // (As written: the guard's count and `finish`'s records too. Merged: still eight.)
-            assert_eq!(declared as u32, if merged { STORAGE_BUFFERS } else { 23 }, "{used:?}");
+            // (As written: the guard's count and `finish`'s records too. Merged: the eight a page has.)
+            assert_eq!(declared as u32, if merged { 8 } else { 23 }, "{used:?}");
         }
         // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`; a
         // counted loop left alone, one bounded by a variable or assigning its counter guarded.
@@ -259,15 +187,13 @@ mod tests {
         assert_eq!(first("for (var k"), "if (e) {", "{g}");
     }
 
-    /// The constants a variant imports are the ones it is given, by name: a guard's limit, the uniform tables'
-    /// lengths. The merged layout has none of its own.
+    /// The constants a variant imports are the ones it is given, by name: the guard's words and its limit. The
+    /// merged layout has none of its own.
     #[test]
     fn the_variant_gives_what_it_imports() {
         let v = KernelVariant { merged: true, guard: Some(9), ..KernelVariant::new(false, Default::default(), 0) };
         assert_eq!(v.constants(), vec![("GUARD_WORDS".into(), GUARD_WORDS), ("LOOP_GUARD_LIMIT".into(), 9)]);
         assert_eq!(KernelVariant { merged: true, ..Default::default() }.constants(), vec![("GUARD_WORDS".into(), GUARD_WORDS)]);
-        let u = KernelVariant { uniform_tables: true, ..KernelVariant::new(false, Default::default(), 0) }.constants();
-        assert_eq!(u, vec![("UT_TEX_INFO".into(), 4096), ("UT_OBJECTS".into(), 4096), ("UT_INSTANCES".into(), 409), ("UT_MEDIA".into(), 32)]);
         assert!(KernelVariant::default().constants().is_empty());
     }
 

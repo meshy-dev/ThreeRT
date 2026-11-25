@@ -1,9 +1,9 @@
 // Stateful GPU particles (gpu.rs `GpuParticlesGpu`; ROADMAP § 6 step 5a): each `GpuParticles` node's particles live in
 // a state buffer on the GPU (position and age, velocity and life, colour and size), emitted, updated, collided and
 // retired here every frame; the CPU keeps no particle. Like `Particles` (particles.wgsl), a particle is a quad of two
-// dynamic triangles and its own object (pivot, bounds, per-particle data: its colour, the material function's
-// `i.custom`); this pass writes the kernel's triangle data, last frame's positions (motion vectors), the BLAS input and
-// the objects, and the dynamic BLASes are rebuilt after it.
+// triangles of its system's mesh and its own object (pivot, bounds, per-particle data: its colour, the material
+// function's `i.custom`); this pass writes the kernel's triangle data, last frame's positions (motion vectors), the
+// BLAS input and the objects, and the systems' BLASes are rebuilt after it.
 //
 // A particle program is two WGSL bodies (`ParticleProgram` in @threert/scene), parameters `$Name` in `p`:
 //     fn pe_<name>(i: EIn, p: array<vec4<f32>, 8>) -> PState { var s: PState; <emit code> return s; }
@@ -50,21 +50,21 @@ struct PP {
     grid_n: vec4<u32>,
 };
 
-// a: (first triangle in the GPU order, capacity, first object, program); b: (seed, first dynamic triangle, this frame's
-// first emitted slot, emitted count); c: pivot, w = collision flags (1 plane, 2 voxels); d: (plane height, restitution,
-// friction, -); e: (first spawn, spawned count, frame number, -); p: parameters.
+// a: (its mesh's first vertex (four a particle), capacity, first object, program); b: (seed, where its vertices'
+// previous positions begin, this frame's first emitted slot, emitted count); c: pivot, w = collision flags (1 plane, 2 voxels); d:
+// (plane height, restitution, friction, -); e: (first spawn, spawned count, frame number, -); p: parameters.
 struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, d: vec4<f32>, e: vec4<u32>, p: array<vec4<f32>, 8> };
 
 // (`TriAttr`: records.wgsl.)
 
 @group(0) @binding(0) var<uniform> PPS: PP;
 @group(0) @binding(1) var<storage, read> systems: array<System>;
-@group(0) @binding(2) var<storage, read_write> verts: array<vec4<f32>>;
+// The scene's vertices (pathtrace.wgsl `vertices`: three rows each) and those that move as they were the previous
+// frame (their positions are read).
+@group(0) @binding(2) var<storage, read_write> vertices: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> prev_verts: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> blas: array<f32>;
 @group(0) @binding(5) var<storage, read_write> objects: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read_write> attrs: array<TriAttr>;
-// This pass's last positions of its triangles (prev_verts' indexing; a repose re-uploads the dynamic tail).
+// This pass's last positions of its vertices (the previous positions' indexing).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
 // Per particle: (pos, age), (vel, life), color, (size, alive, -, -); from each system's first state.
 @group(0) @binding(8) var<storage, read_write> state: array<vec4<f32>>;
@@ -139,34 +139,15 @@ fn collide(s_in: PState, dt: f32, flags: f32, d: vec4<f32>) -> PState {
     return s;
 }
 
-// One triangle of a quad (particles.wgsl `put_tri`, opaque particles only).
-fn put_tri(t: u32, dyn_first: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, n: vec3<f32>, tg: vec3<f32>, lod_k: f32) {
-    let flags = verts[t * 3u].w;
-    let now = array<vec4<f32>, 3>(vec4<f32>(a, flags), vec4<f32>(b - a, 0.0), vec4<f32>(c - a, 0.0));
-    let first = PPS.env.x > 0.5;
-    for (var k = 0u; k < 3u; k++) {
-        verts[t * 3u + k] = now[k];
-        let j = (t - dyn_first) * 3u + k;
-        prev_verts[j] = select(last[j], now[k], first);
-        last[j] = now[k];
-    }
-    attrs[t].n0.x = n.x;
-    attrs[t].n0.y = n.y;
-    attrs[t].n0.z = n.z;
-    attrs[t].n1.x = n.x;
-    attrs[t].n1.y = n.y;
-    attrs[t].n1.z = n.z;
-    attrs[t].n2.x = n.x;
-    attrs[t].n2.y = n.y;
-    attrs[t].n2.z = n.z;
-    attrs[t].t = vec4<f32>(tg, 1.0);
-    attrs[t].x.x = lod_k;
-    let corners = array<vec3<f32>, 3>(a, b, c);
-    for (var k = 0u; k < 3u; k++) {
-        for (var j = 0u; j < 3u; j++) {
-            blas[t * 9u + k * 3u + j] = corners[k][j];
-        }
-    }
+// One vertex of a system's mesh (particles.wgsl `put_vertex`).
+fn put_vertex(v: u32, j: u32, p: vec3<f32>, n: vec3<f32>, tg: vec3<f32>) {
+    let i = v * 3u;
+    vertices[i] = vec4<f32>(p, vertices[i].w);
+    vertices[i + 1u] = vec4<f32>(n, vertices[i + 1u].w);
+    vertices[i + 2u] = vec4<f32>(tg, 1.0);
+    let now = vec4<f32>(p, 0.0);
+    prev_verts[j * 3u] = select(last[j], now, PPS.env.x > 0.5);
+    last[j] = now;
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -238,10 +219,12 @@ fn gpu_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     let area = length(uxv);
     let n = select(to_cam, uxv / area, area > 1e-12);
     let tg = select(vec3<f32>(1.0, 0.0, 0.0), normalize(u), dot(u, u) > 1e-24);
-    let lod_k = select(0.0, 0.5 * log2(1.0 / (4.0 * area)), area > 1e-12);
-    let t = sys.a.x + 2u * k;
-    put_tri(t, sys.b.y, c00, c10, c11, n, tg, lod_k);
-    put_tri(t + 1u, sys.b.y, c00, c11, c01, n, tg, lod_k);
+    let t = sys.a.x + 4u * k;
+    let j = sys.b.y + 4u * k;
+    put_vertex(t, j, c00, n, tg);
+    put_vertex(t + 1u, j + 1u, c10, n, tg);
+    put_vertex(t + 2u, j + 2u, c11, n, tg);
+    put_vertex(t + 3u, j + 3u, c01, n, tg);
     let oi = (sys.a.z + k) * OBJECT_STRIDE;
     objects[oi] = vec4<f32>(s.pos, objects[oi].w);
     objects[oi + 1u] = vec4<f32>(vec3<f32>(4.0 * half), objects[oi + 1u].w);

@@ -10,7 +10,7 @@
 //! triangle carries) x its weight / its leaf's, so a BSDF ray that hits it weighs its MIS by the same pmf. A node is one
 //! vec4 (one load per child visited): centre and radius as half floats, power, child word.
 //!
-//! Moving emitters (dynamic triangles: a van's lights, a swinging lantern) have a subtree of their own: the root's
+//! Moving emitters (a moving instance's: a van's lights, a swinging lantern) have a subtree of their own: the root's
 //! right child, the static emitters' subtree its left. They move, so their subtree is refit as they do
 //! (`refit_moving`: leaf spheres from their triangles now, then every node's from its children's), keeping its
 //! topology and so the codes their triangles carry. Particles (placed by a GPU pass) follow the tree's entries in the
@@ -433,7 +433,7 @@ mod tests {
     use super::*;
 
     fn tri(i: u32, x: f32) -> (EmitterTri, [[f32; 4]; 3]) {
-        (EmitterTri { tri: i, mat: 0, obj: 0, area: 0.5, c: [x + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: crate::NO_INST }, [[x, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+        (EmitterTri { tri: i, mat: 0, obj: 0, area: 0.5, c: [x + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: crate::NO_INST, part: 0, card: false }, [[x, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
     }
 
     /// Garbage in: emitters whose triangles are not finite, that coincide, or carry weights near f32's limit make a

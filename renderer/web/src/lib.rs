@@ -19,7 +19,7 @@ use glam::Vec3;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::path::Path;
-use threert_render::live::{Camera, LiveCore};
+use threert_render::live::{Camera, LiveCore, RenderingControl, RenderingRequest};
 use threert_render::physics::PhysicsWorld;
 use threert_render::voxel::VoxelWorld;
 use threert_render::world::World;
@@ -32,6 +32,7 @@ struct Engine {
     world: World,
     voxels: VoxelWorld,
     physics: Option<PhysicsWorld>,
+    rendering: RenderingControl,
 }
 
 /// The live view and the canvas it is shown on.
@@ -86,6 +87,18 @@ fn engine<T>(f: impl FnOnce(&mut Engine) -> T) -> T {
 pub fn physics(op: &str, args: &str) -> Result<String, JsValue> {
     let a = desc("physics", args)?;
     engine(|e| api::physics(&mut e.physics, &mut e.world, op, &a)).map_err(thrown)
+}
+
+/// `readAsset`: native only (a page has no asset root on disk; it fetches what it needs): throws.
+#[wasm_bindgen(js_name = readAsset)]
+pub fn read_asset(path: &str, _offset: Option<f64>, _length: Option<f64>) -> Result<Vec<u8>, JsValue> {
+    Err(JsValue::from_str(&format!("readAsset {path}: the native renderer reads assets; a page fetches them")))
+}
+
+/// `preloadModel`: native only (a page has no thread that reads a model ahead): false, nothing is read.
+#[wasm_bindgen(js_name = preloadModel)]
+pub fn preload_model(_uri: &str, _node_sets: Option<String>) -> bool {
+    false
 }
 
 #[wasm_bindgen(js_name = physicsPoses)]
@@ -305,6 +318,20 @@ pub fn settings(d: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Rendering settings (renderer/src/live/rendering.rs) as JSON, from the next frame.
+#[wasm_bindgen(js_name = setRendering)]
+pub fn set_rendering(json: &str) -> Result<(), JsValue> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(failed)?;
+    let r = RenderingRequest::from_json(&v).map_err(failed)?;
+    engine(|e| e.rendering.request(r));
+    Ok(())
+}
+
+#[wasm_bindgen(js_name = renderingStatus)]
+pub fn rendering_status() -> String {
+    engine(|e| e.rendering.status().to_string())
+}
+
 // ---- The session ----
 
 /// The canvas' pixels from the view's output (sRGB BGRA8 per pixel, live.wgsl `out_px`), bilinear to the canvas' size:
@@ -395,6 +422,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, width: u32, height: u32, 
         LiveCore::new(g, &e.world, Path::new(""), Path::new(""), width, height)
     })
     .map_err(failed)?;
+    core.attach_rendering_control(engine(|e| e.rendering.clone()));
     core.dynamic_res = scale <= 0.0;
     if scale > 0.0 {
         core.render_scale = scale.clamp(threert_render::live::MIN_SCALE, 1.0);

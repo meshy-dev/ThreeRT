@@ -100,7 +100,7 @@ pub enum ProcSource {
 /// AABBs a procedural geometry may have: the hit's primitive index has 23 bits (pathtrace.wgsl `PROC_BIT`).
 pub const PROC_MAX_BOXES: usize = (1 << 23) - 1;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TextureSource {
     /// Path relative to the asset root.
     File(String),
@@ -114,7 +114,7 @@ pub enum TextureSource {
     Stream { name: String, width: u32, height: u32, rgba: Arc<Vec<u8>> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Texture {
     pub source: TextureSource,
     pub srgb: bool,
@@ -126,9 +126,9 @@ pub struct Texture {
 #[derive(Clone, Debug)]
 pub enum Kind {
     Group,
-    /// `own_blas` (scene code's `dynamicGeometry`): instanced with its own BLAS, so replacing its geometry, creating or
-    /// removing it is applied in place (live/edits.rs `edit_geometry`) instead of rebuilding the scene; otherwise its
-    /// triangles are flattened into the shared groups.
+    /// `own_blas` (scene code's `dynamicGeometry`): a mesh of its own, so replacing its geometry, creating or removing
+    /// it is applied in place (live/edits.rs `edit_geometry`) instead of rebuilding the scene; otherwise an instance
+    /// of the mesh every object of its geometry shares.
     /// `materials`: one per geometry group (three.js's material array; empty: `material` for every triangle).
     Mesh { geometry: u32, material: u32, own_blas: bool, materials: Vec<u32> },
     /// glTF asset (path relative to the asset root), optionally only some of its nodes (by name).
@@ -201,8 +201,8 @@ pub struct Object {
     /// Per-instance data (UE PerInstanceCustomData): any four numbers scene code gives the object, read by material
     /// functions as `i.custom` (particle functions write one per particle).
     pub custom: [f32; 4],
-    /// UE Mobility "Movable": scripts move it (and everything under it) without rebuilding the scene; its triangles
-    /// are kept apart (dynamic BLASes) and re-transformed in place. Set by scene code, or by the first move.
+    /// UE Mobility "Movable": scripts move it (and everything under it) without rebuilding the scene: its instances'
+    /// transforms. Set by scene code, or by the first move.
     pub movable: bool,
     /// A rigid body drives it (renderer/src/physics.rs): movable, and a mesh among them is placed as an instance of its
     /// own BLAS, so a move is its TLAS transform and no triangle.
@@ -285,6 +285,14 @@ pub struct Changes {
     /// and lights without a card (their table entry goes black). A rebuild where the build left the object out.
     pub shown: HashSet<u32>,
     pub materials: HashSet<u32>,
+    /// Textures that were replaced by another (`World::set_texture`): the materials that name one are made again.
+    pub textures: HashSet<u32>,
+    /// A material function came or changed (`World::set_shader`): the kernel's code.
+    pub functions: bool,
+    /// A volume function came or changed (`World::set_volume_fn`): the kernel's code.
+    pub volume_functions: bool,
+    /// A volume came, went, was set again, or moved for the first time: the media table is made again from the world.
+    pub media: bool,
     /// Objects whose light parameters changed.
     pub lights: HashSet<u32>,
     pub powers: HashSet<u32>,
@@ -334,7 +342,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || self.functions || self.volume_functions || self.media || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -351,6 +359,9 @@ pub fn edits_in_place(k: &Kind) -> bool {
 #[derive(Clone)]
 pub struct World {
     pub objects: BTreeMap<u32, Object>,
+    /// How many objects each object is the parent of (`remove` skips the scan for children of a childless one: a
+    /// streamed city removes thousands of objects a frame among tens of thousands). Kept by `set_object` and `remove`.
+    kids: HashMap<u32, u32>,
     pub geometries: HashMap<u32, Arc<Geometry>>,
     pub textures: HashMap<u32, Texture>,
     pub materials: HashMap<u32, desc::Material>,
@@ -391,6 +402,7 @@ impl Default for World {
     fn default() -> World {
         World {
             objects: BTreeMap::new(),
+            kids: HashMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
             materials: HashMap::new(),
@@ -415,10 +427,17 @@ impl Default for World {
     }
 }
 
-fn same_texture_refs(a: &desc::Material, b: &desc::Material) -> bool {
-    let maps = |m: &desc::Material| [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map];
-    let func = |m: &desc::Material| m.shader.as_ref().map(|s| (s.id.clone(), s.textures.clone()));
-    maps(a) == maps(b) && func(a) == func(b)
+/// The textures a material names: its maps and its function's.
+pub fn material_texture_ids(m: &desc::Material) -> impl Iterator<Item = u32> + '_ {
+    [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].into_iter().flatten().chain(m.shader.iter().flat_map(|s| s.textures.iter().flatten().copied()))
+}
+
+/// The size of a rect light's card, if it has one (`visible`).
+fn card_size(l: &desc::Light) -> Option<(u32, u32)> {
+    match l {
+        desc::Light::Rect { width, height, visible: true, .. } => Some((width.to_bits(), height.to_bits())),
+        _ => None,
+    }
 }
 
 fn light_class(l: &desc::Light) -> (u8, bool, bool) {
@@ -444,7 +463,16 @@ pub(crate) fn check_uri(uri: &str) -> Result<()> {
     Ok(())
 }
 
+/// The scene must be rebuilt (THREERT_EDIT_LOG=1 says where it was decided).
+fn mark_structural(c: &mut Changes, line: u32) {
+    if !c.structural && std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+        eprintln!("world: structural at world.rs:{line}");
+    }
+    c.structural = true;
+}
+
 impl World {
+
     // ------------------------------------------------------------------------------------------ engine API
 
     pub fn set_geometry(&mut self, id: u32, g: Geometry) -> Result<()> {
@@ -468,7 +496,7 @@ impl World {
         let new = self.geometries.insert(id, Arc::new(g)).is_none();
         if !self.changes.structural {
             if !new && self.objects.values().any(|o| matches!(o.kind, Kind::Instanced { geometry, procedural: false, .. } if geometry == id)) {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             } else {
                 self.changes.geometries.insert(id);
             }
@@ -492,35 +520,67 @@ impl World {
         Ok(())
     }
 
+    /// Whether an object of kind `k` is a light that is an entry of the kernel's light table and nothing else: not a
+    /// rect light with a card (its card is triangles), not the atmosphere's sun (the sky's bake has it).
+    fn table_light(&self, id: u32, k: &Kind) -> bool {
+        let sun = matches!(self.environment.sky, desc::Sky::Atmosphere { sun: Some(s), .. } if s == id);
+        matches!(k, Kind::Light(l) if !sun && !matches!(l, desc::Light::Rect { visible: true, .. }))
+    }
+
+    fn environment_uses_texture(&self, id: u32) -> bool {
+        matches!(&self.environment.sky, desc::Sky::Hdri { texture, .. } if *texture == id)
+            || self.environment.background_panorama.as_ref().is_some_and(|b| b.texture == id)
+    }
+
+    /// Creates or replaces a texture. A new one is placed in the texture pages when a material first names it; one
+    /// that changed (its pixels, its wrap, its repeat or offset) has its materials made again, in place
+    /// (`Changes::textures`). The same texture set again changes nothing.
     pub fn set_texture(&mut self, id: u32, t: Texture) -> Result<()> {
         if let TextureSource::File(uri) = &t.source {
             check_uri(uri)?;
         }
+        match self.textures.get(&id) {
+            Some(old) if *old == t => return Ok(()),
+            Some(_) => {
+                self.changes.textures.insert(id);
+                if self.environment_uses_texture(id) {
+                    mark_structural(&mut self.changes, line!());
+                }
+            }
+            None => {}
+        }
         self.textures.insert(id, t);
-        self.changes.structural = true;
         Ok(())
     }
 
+    /// Creates or replaces a material function. In place (`Changes::functions`): the scene's kernel is made with it
+    /// while the frames go on, and a material of it is drawn as it is without a function until then.
     pub fn set_shader(&mut self, name: &str, code: String, helpers: String) {
         if self.shaders.get(name).is_some_and(|(c, h)| *c == code && *h == helpers) {
             return;
         }
         self.shaders.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        self.changes.functions = true;
     }
 
     pub fn set_material(&mut self, id: u32, m: desc::Material) {
         match self.materials.get(&id) {
-            // `transparent` moves particles between the scene and the translucency pass, `vertexColors` decides which
-            // triangles carry colours: a rebuild.
-            Some(old) if same_texture_refs(old, &m) && old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
+            // Its parameters, its textures (a texture the scene has not is placed in the pages then) and its function,
+            // in place. `transparent` moves particles between the scene and the translucency pass, `vertexColors`
+            // decides which triangles carry colours: a rebuild.
+            Some(old) if old.transparent == m.transparent && old.vertex_colors == m.vertex_colors => {
                 self.changes.materials.insert(id);
             }
-            // A new one of plain parameters (no texture, no function, not a particle's): in place.
-            None if [m.map, m.normal_map, m.roughness_map, m.metalness_map, m.ao_map, m.emissive_map, m.transmission_map].iter().all(Option::is_none) && m.shader.is_none() && !m.transparent && !m.vertex_colors => {
+            // A new one that is not a particle's: in place, its textures and its function with it.
+            None if !m.transparent && !m.vertex_colors => {
                 self.changes.new_materials.insert(id);
             }
-            _ => self.changes.structural = true,
+            _ => {
+                if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+                    eprintln!("world: structural: material {id} is a particle's or has vertex colours, new or changed");
+                }
+                mark_structural(&mut self.changes, line!())
+            }
         }
         self.materials.insert(id, m);
     }
@@ -549,9 +609,9 @@ impl World {
         // (Movable as the build sees it: the object or any ancestor, `movable`.)
         let static_parent = parent.is_none_or(|p| !self.objects.contains_key(&p) || !self.movable(p));
         let mesh = matches!(kind, Kind::Mesh { .. });
-        // A new instanced mesh or static model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
+        // A new instanced mesh or model is placed in place too (ROADMAP § 6 step 5; live/edits.rs `edit_geometry`
         // says when it cannot); changing one still rebuilds, but for an instanced mesh's materials (`rematerialed`).
-        let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
+        let placed_new = !self.objects.contains_key(&id) && matches!(kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
         let fresh = (edits_in_place(&kind) || placed_new)
             && (mesh || (!movable && static_parent))
             && match self.objects.get(&id) {
@@ -576,6 +636,26 @@ impl World {
                 self.instanced.remove(&id);
             }
         }
+        // A light that is the light table's alone, new or set again as one under the same parent: its entry, in
+        // place. A new group draws nothing.
+        let relit = self.table_light(id, &kind) && self.objects.get(&id).is_none_or(|o| self.table_light(id, &o.kind) && o.parent == parent);
+        let grouped = matches!(kind, Kind::Group) && !self.objects.contains_key(&id);
+        // A camera, new or set again as one under the same parent: nothing is built from it; the view takes it if
+        // it is the scene's.
+        let filmed = matches!(kind, Kind::Camera(_)) && self.objects.get(&id).is_none_or(|o| matches!(o.kind, Kind::Camera(_)) && o.parent == parent);
+        // A volume, new or set again as one under the same parent: an entry of the media table, in place.
+        let misted = matches!(kind, Kind::Volume { .. }) && self.objects.get(&id).is_none_or(|o| matches!(o.kind, Kind::Volume { .. }) && o.parent == parent);
+        let was_parent = self.objects.get(&id).map(|o| o.parent);
+        if was_parent != Some(parent) {
+            if let Some(Some(p)) = was_parent {
+                if let Some(n) = self.kids.get_mut(&p) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            if let Some(p) = parent {
+                *self.kids.entry(p).or_default() += 1;
+            }
+        }
         let o = match self.objects.remove(&id) {
             Some(o) => Object { name, parent, kind, cast_shadow, movable: movable || o.movable, ..o },
             None => Object { name, parent, kind, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE, visible: true, cast_shadow, power: 1.0, custom: [0.0; 4], movable, driven: false, sway: None, sway_rot: Quat::IDENTITY },
@@ -585,8 +665,19 @@ impl World {
             self.changes.added.insert(id);
         } else if rematerialed {
             self.changes.instanced.insert(id);
+        } else if relit {
+            self.changes.lights.insert(id);
+        } else if grouped {
+        } else if filmed {
+            self.changes.camera |= self.settings.camera == Some(id);
+        } else if misted {
+            self.changes.media = true;
         } else {
-            self.changes.structural = true;
+            if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+                let o = &self.objects[&id];
+                eprintln!("world: structural: object {} ({:?}) set again or not placeable in place (movable {}, parent {:?})", o.name, std::mem::discriminant(&o.kind), o.movable, o.parent);
+            }
+            mark_structural(&mut self.changes, line!());
         }
         self.changes.created.insert(id);
         Ok(())
@@ -610,7 +701,7 @@ impl World {
             o.driven = true;
             o.movable = true;
             if !self.changes.added.contains(&id) {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         Ok(())
@@ -699,12 +790,19 @@ impl World {
             // So are an instanced object's instances (`LiveCore::update_instanced`).
             self.changes.instanced.insert(id);
         } else if posed && self.leaf(id) {
-            self.changes.poses.insert(id);
+            // A posed model moves in place however it is drawn: an instance of its mesh by its transform, world-space
+            // triangles by being skinned again where it stands (the renderer's to tell: live/edits.rs `commit`).
+            self.changes.moved.insert(id);
         } else if light && !sun && self.leaf(id) {
             self.changes.lights.insert(id);
         } else if sun && self.leaf(id) {
             // The atmosphere's sun (time of day): its light rewritten and the sky re-baked in place (live/edits.rs `move_sun`).
             self.changes.sun = true;
+        } else if matches!(o.kind, Kind::Camera(_)) && self.leaf(id) {
+            // (A camera that is not the scene's: nothing is built from it.)
+        } else if matches!(o.kind, Kind::Volume { .. }) && self.leaf(id) {
+            // A volume is its entry of the media table: placed again.
+            self.changes.media = true;
         } else {
             // Fixed geometry moved: from now on it is movable. A mesh, a still model, or a group, is its instances' to move
             // (`Changes::started`); anything else rebuilds once, to set its triangles apart.
@@ -720,7 +818,7 @@ impl World {
                 self.changes.moved.insert(id);
                 self.changes.started.insert(id);
             } else {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
     }
@@ -796,15 +894,15 @@ impl World {
             let in_place = match &o.kind {
                 Kind::Particles { emitter_area, .. } => *emitter_area <= 0.0,
                 Kind::Volume { .. } => true,
-                // (A mesh's or a still model's instance by its mask, a group's each: the renderer says whether it can.)
-                Kind::Mesh { .. } | Kind::Model { animation: None, .. } | Kind::Group => true,
+                // (A mesh's or a model's instances by their masks, a group's each: the renderer says whether it can.)
+                Kind::Mesh { .. } | Kind::Model { .. } | Kind::Group => true,
                 Kind::Light(l) => !sun && !matches!(l, desc::Light::Rect { visible: true, .. }),
                 _ => false,
             };
             if in_place {
                 self.changes.shown.insert(id);
             } else {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         Ok(())
@@ -887,7 +985,7 @@ impl World {
             t.custom = Some(Arc::new(c));
         }
         if t.colors.is_some() != colored {
-            self.changes.structural = true;
+            mark_structural(&mut self.changes, line!());
         } else if !self.changes.created.contains(&id) {
             self.changes.instanced.insert(id);
         }
@@ -895,12 +993,18 @@ impl World {
     }
 
     pub fn set_light(&mut self, id: u32, l: desc::Light) -> Result<()> {
+        // Its entry in the light table, in place: another kind of light or another shadow flag too (the table is
+        // sorted again). A rect light's card that comes or goes is triangles, and the atmosphere's sun is the sky's:
+        // those rebuild where their class changes.
+        let table = self.table_light(id, &Kind::Light(l.clone()));
+        let was = self.objects.get(&id).is_some_and(|o| self.table_light(id, &o.kind));
         let o = self.objects.get_mut(&id).ok_or_else(|| anyhow!("unknown object {id}"))?;
         match &o.kind {
-            Kind::Light(old) if light_class(old) == light_class(&l) => {
+            // (A card of another size is another instance transform: the build's.)
+            Kind::Light(old) if (light_class(old) == light_class(&l) || (table && was)) && card_size(old) == card_size(&l) => {
                 self.changes.lights.insert(id);
             }
-            _ => self.changes.structural = true,
+            _ => mark_structural(&mut self.changes, line!()),
         }
         o.kind = Kind::Light(l);
         Ok(())
@@ -915,7 +1019,7 @@ impl World {
         let (fov, rest) = match &o.kind {
             Kind::Camera(old) => (old.fov != c.fov, old.dof != c.dof || old.exposure != c.exposure),
             _ => {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
                 (false, false)
             }
         };
@@ -957,26 +1061,58 @@ impl World {
         let mut k = 0;
         while k < doomed.len() {
             let p = doomed[k];
-            doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
+            if self.kids.get(&p).is_some_and(|&n| n > 0) {
+                doomed.extend(self.objects.iter().filter(|(_, o)| o.parent == Some(p)).map(|(i, _)| *i));
+            }
             k += 1;
         }
-        // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or static
+        // (the parents of what goes have one child fewer; what goes has none)
+        for d in &doomed {
+            if let Some(Some(p)) = self.objects.get(d).map(|o| o.parent) {
+                if let Some(n) = self.kids.get_mut(&p) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            self.kids.remove(d);
+        }
+        // A mesh, procedural geometry, or a group of those, is removed in place, and so is a lone instanced mesh or
         // model (or never added, if it came in this batch; live/edits.rs `edit_geometry` rebuilds for what it cannot
         // take out).
-        let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { animation: None, .. });
-        if doomed.iter().all(|d| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || (doomed.len() > 1 && matches!(o.kind, Kind::Group)))) {
-            for d in &doomed {
+        // A light of the light table alone: its entry goes, in place. A group draws nothing.
+        let alone = |o: &Object| doomed.len() == 1 && matches!(o.kind, Kind::Instanced { procedural: false, .. } | Kind::Model { .. });
+        // (So does a camera that is not the scene's.)
+        let lit: Vec<bool> = doomed.iter().map(|d| self.objects.get(d).is_some_and(|o| self.table_light(*d, &o.kind))).collect();
+        // (And a volume: its entry of the media table goes.)
+        let spare = |d: &u32, o: &Object| matches!(o.kind, Kind::Camera(_)) && self.settings.camera != Some(*d);
+        let mist = |o: &Object| matches!(o.kind, Kind::Volume { .. });
+        if doomed.iter().zip(&lit).all(|(d, lit)| self.objects.get(d).is_some_and(|o| edits_in_place(&o.kind) || alone(o) || matches!(o.kind, Kind::Group) || *lit || spare(d, o) || mist(o))) {
+            for (d, lit) in doomed.iter().zip(&lit) {
                 self.instanced.remove(d);
-                if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group)) && !self.changes.added.remove(d) {
+                if *lit {
+                    self.objects.remove(d);
+                    self.changes.lights.insert(*d);
+                } else if self.objects.get(d).is_some_and(mist) {
+                    self.objects.remove(d);
+                    self.changes.media = true;
+                } else if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group | Kind::Camera(_))) && !self.changes.added.remove(d) {
                     self.changes.removed.insert(*d);
+                }
+                // What else this batch changed of it goes with it (a pose, a move, its visibility: there is nothing
+                // left to pose, and the renderer would rebuild for an object it cannot find).
+                let c = &mut self.changes;
+                for set in [&mut c.poses, &mut c.moved, &mut c.started, &mut c.shown, &mut c.powers, &mut c.customs, &mut c.instanced] {
+                    set.remove(d);
                 }
             }
             return doomed;
         }
+        if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+            eprintln!("world: structural: removal of {} objects not in place ({:?})", doomed.len(), doomed.iter().take(3).filter_map(|d| self.objects.get(d)).map(|o| (o.name.clone(), std::mem::discriminant(&o.kind))).collect::<Vec<_>>());
+        }
         for &d in &doomed {
             self.instanced.remove(&d);
             if self.objects.remove(&d).is_some() {
-                self.changes.structural = true;
+                mark_structural(&mut self.changes, line!());
             }
         }
         doomed
@@ -1076,7 +1212,8 @@ impl World {
             return;
         }
         self.volume_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        // (The kernel's code, in place: as a material function's, `set_shader`.)
+        self.changes.volume_functions = true;
     }
 
     pub fn set_grid_program(&mut self, name: &str, code: String, helpers: String) {
@@ -1084,11 +1221,12 @@ impl World {
             return;
         }
         self.grid_programs.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        // (The grids' pass, in place: made again with the media table.)
+        self.changes.media = true;
     }
 
     /// Creates or replaces a density grid. New data for a grid of the same size and program is uploaded in place; a
-    /// new grid, another size or another program rebuilds the scene.
+    /// new grid, another size or another program has the scene's grids made again with the media table.
     pub fn set_grid(&mut self, id: u32, dims: [u32; 3], channels: u32, data: Option<&[f32]>, program: Option<(String, Vec<f32>)>) -> Result<()> {
         let cells = dims.iter().map(|&d| d as u64).product::<u64>();
         if dims.iter().any(|&d| d == 0 || d > GRID_MAX_AXIS) || cells > GRID_MAX_CELLS {
@@ -1124,12 +1262,12 @@ impl World {
                 self.grid_dirty.insert(id);
             }
         } else {
-            self.changes.structural = true;
+            self.changes.media = true;
         }
         // (No data with a same grid: its contents stay, e.g. a simulated grid whose parameters were sent again.)
         let keep = if same && data.is_none() { self.grids.get(&id).and_then(|g| g.data.clone()) } else { None };
-        // The same grid still, for what its program has simulated: its size and its program's name (new parameters
-        // rebuild the scene, and the smoke stays).
+        // The same grid still, for what its program has simulated: its size and its program's name (with new
+        // parameters the smoke stays).
         let made = match self.grids.get(&id) {
             Some(g) if g.dims == dims && g.program.as_ref().map(|p| &p.0) == program.as_ref().map(|p| &p.0) => g.made,
             _ => {
@@ -1160,7 +1298,7 @@ impl World {
             return;
         }
         self.geometry_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     pub fn set_particle_program(&mut self, name: &str, emit: String, update: String, helpers: String) {
@@ -1169,7 +1307,7 @@ impl World {
             return;
         }
         self.particle_programs.insert(name.to_string(), v);
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     /// Particles the game spawns into a `GpuParticles` node (8 floats each), taken by the live view's next frame.
@@ -1192,7 +1330,7 @@ impl World {
             return;
         }
         self.particle_fns.insert(name.to_string(), (code, helpers));
-        self.changes.structural = true;
+        mark_structural(&mut self.changes, line!());
     }
 
     /// Objects drawn: visible themselves and all their ancestors.
@@ -1257,9 +1395,34 @@ mod tests {
         assert_eq!(w.objects[&4].position.x, f32::INFINITY, "the transform kept as set");
     }
 
-    /// Density grids: sizes and data are checked; a new grid, another size or another program rebuilds the scene, new
-    /// data for the same grid is uploaded in place (a grid sent again without data keeps what it had); sources go only
-    /// to volumes with a grid, 12 finite floats each, at most GRID_MAX_SOURCES pending.
+    /// What a batch changed of an object goes with the object when the same batch removes it in place: its pose, its
+    /// move, its visibility, its power. (The renderer finds nothing to pose, and would rebuild.)
+    #[test]
+    fn an_object_removed_takes_its_other_changes_with_it() {
+        let mut w = World::default();
+        let pose = |time| Some(desc::Animation { clip: "bend".into(), time, r#loop: true, nodes: Default::default() });
+        for id in [1, 2] {
+            w.set_object(id, format!("m{id}"), None, Kind::Model { uri: "tests/render/data/arm.glb".into(), nodes: None, animation: pose(0.0), functions: vec![] }, true, true).unwrap();
+        }
+        w.take_changes();
+        for id in [1, 2] {
+            w.set_animation(id, pose(0.5)).unwrap();
+            w.set_transform(id, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE).unwrap();
+            w.set_visible(id, false).unwrap();
+        }
+        w.remove(1);
+        let c = w.take_changes();
+        assert!(!c.structural && c.removed.contains(&1), "removed in place");
+        for (what, set) in [("poses", &c.poses), ("moved", &c.moved), ("shown", &c.shown), ("started", &c.started), ("powers", &c.powers), ("customs", &c.customs), ("instanced", &c.instanced)] {
+            assert!(!set.contains(&1), "{what}: nothing of the object removed");
+        }
+        assert!(c.poses.contains(&2) && c.moved.contains(&2) && c.shown.contains(&2), "the other's changes are kept");
+    }
+
+    /// Density grids: sizes and data are checked; a new grid, another size, another program or other parameters are
+    /// the media table's change (the grids are made again in place), new data for the same grid is uploaded in place
+    /// (a grid sent again without data keeps what it had); sources go only to volumes with a grid, 12 finite floats
+    /// each, at most GRID_MAX_SOURCES pending.
     #[test]
     fn density_grids_are_checked_and_updated_in_place() {
         let mut w = World::default();
@@ -1272,23 +1435,32 @@ mod tests {
         assert!(w.grids.is_empty());
         w.take_changes();
         w.set_grid(1, [2, 2, 2], 1, Some(&[0.5; 8]), None).unwrap();
-        assert!(w.take_changes().structural, "a new grid");
+        let media = |w: &mut World| {
+            let c = w.take_changes();
+            assert!(!c.structural, "no rebuild");
+            c.media
+        };
+        assert!(media(&mut w), "a new grid");
         assert_eq!(w.grids[&1].data.as_ref().unwrap()[..5], [0.5, 0.0, 0.0, 0.0, 0.5], "one channel: A's first");
         w.set_grid(1, [2, 2, 2], 4, Some(&[2.0; 32]), None).unwrap();
-        assert!(!w.take_changes().structural && w.grid_dirty.contains(&1), "new data: in place");
+        assert!(!media(&mut w) && w.grid_dirty.contains(&1), "new data: uploaded in place");
         w.grid_dirty.clear();
         w.set_grid(1, [2, 2, 2], 1, None, None).unwrap();
-        assert!(!w.take_changes().structural && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
+        assert!(!media(&mut w) && w.grid_dirty.is_empty() && w.grids[&1].data.as_ref().unwrap()[1] == 2.0, "no data: kept");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![1.0]))).unwrap();
-        assert!(w.take_changes().structural, "another program");
+        assert!(media(&mut w), "another program");
         let made = w.grids[&1].made;
         w.set_grid(1, [2, 2, 2], 1, None, Some(("p".into(), vec![2.0]))).unwrap();
-        assert!(w.take_changes().structural && w.grids[&1].made == made, "new parameters rebuild; it is the same grid still (what it simulated is carried)");
+        assert!(media(&mut w) && w.grids[&1].made == made, "new parameters; it is the same grid still (what it simulated stays)");
         w.set_grid(1, [2, 2, 2], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
         assert!(w.grids[&1].made != made, "another program: another grid");
         let made = w.grids[&1].made;
         w.set_grid(1, [2, 2, 4], 1, None, Some(("q".into(), vec![2.0]))).unwrap();
-        assert!(w.take_changes().structural && w.grids[&1].made != made, "another size");
+        assert!(media(&mut w) && w.grids[&1].made != made, "another size");
+        w.set_grid_program("q", "s.a.x = 1.0;".into(), String::new());
+        assert!(media(&mut w), "a grid program's code");
+        w.set_grid_program("q", "s.a.x = 1.0;".into(), String::new());
+        assert!(!media(&mut w), "the same code again");
         // Sources.
         let volume = |grid| Kind::Volume { function: "f".into(), params: vec![], shape: 0, majorant: 1.0, g: 0.0, homogeneous: false, animated: false, grid };
         w.set_object(5, "plain".into(), None, volume(None), false, false).unwrap();
@@ -1339,6 +1511,17 @@ mod tests {
         }
         w.set_visible(1, false).unwrap();
         assert!(w.hidden_built(1) && !w.hidden_built(2), "a hidden volume keeps its place in the build; a light always has one");
+        // A card's colour is its material's, in place; its size is its instance's transform, the build's. A rect light
+        // without a card is its table entry whatever changes.
+        let rect = |w: f32, color: f32, visible: bool| serde_json::from_value::<desc::Light>(serde_json::json!({ "type": "rect", "color": [color, 1, 1], "castShadow": true, "intensity": 100, "width": w, "height": 1, "range": 0, "visible": visible })).unwrap();
+        w.set_light(3, rect(1.0, 0.5, true)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&3), "a card of another colour: in place");
+        w.set_light(3, rect(2.0, 0.5, true)).unwrap();
+        assert!(w.take_changes().structural, "a card of another size: the build's");
+        w.set_light(4, rect(2.0, 0.5, false)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&4), "a rect light without a card, of another size: in place");
         w.set_visible(3, false).unwrap();
         assert!(w.take_changes().structural, "a rect light's card is geometry");
         // (A group, as a mesh: the renderer hides its meshes' instances, or says it cannot.)
@@ -1413,8 +1596,16 @@ mod tests {
         assert!(!c.structural && c.any() && c.new_materials.contains(&2), "a new material of plain parameters: in place");
         let mut textured = mat();
         textured.map = Some(9);
-        w.set_material(3, textured);
-        assert!(w.take_changes().structural, "one with a texture: a rebuild");
+        w.set_material(3, textured.clone());
+        let c = w.take_changes();
+        assert!(!c.structural && c.new_materials.contains(&3), "one with a texture: in place too (the texture is placed in the pages)");
+        // A new one that is a particle's (`transparent`), or has vertex colours: a rebuild.
+        for (k, what) in ["transparent", "vertex colours"].iter().enumerate() {
+            let mut m = mat();
+            (m.transparent, m.vertex_colors) = (k == 0, k == 1);
+            w.set_material(20 + k as u32, m);
+            assert!(w.take_changes().structural, "a new material with {what}: a rebuild");
+        }
         // (The engine's `object` call gives a mesh a body will drive its own BLAS.)
         w.set_object(2, "box".into(), None, mesh(2, true), true, false).unwrap();
         w.set_driven(2).unwrap();
@@ -1504,7 +1695,34 @@ mod tests {
         w.set_object(16, "lamp".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "range": 0, "radius": 0.01 })).unwrap()), true, false).unwrap();
         w.take_changes();
         w.remove(15);
-        assert!(w.take_changes().structural, "a group with a light");
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&16) && c.removed.is_empty(), "a group with a light: the light's entry goes, in place");
+        // A light alone, and a group alone: in place too. A light set again as one: its entry's change.
+        let lamp = |shadow: bool| Kind::Light(serde_json::from_value(serde_json::json!({ "type": "point", "color": [1, 1, 1], "castShadow": shadow, "intensity": 1, "range": 0, "radius": 0.01 })).unwrap());
+        w.set_object(17, "lamp".into(), None, lamp(true), true, false).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&17), "a new light: its entry, in place");
+        w.set_object(17, "lamp".into(), None, lamp(false), true, false).unwrap();
+        assert!(!w.changes.structural && w.take_changes().lights.contains(&17), "the light set again without its shadow");
+        w.set_object(18, "set".into(), None, Kind::Group, true, false).unwrap();
+        assert!(!w.take_changes().structural, "a new group draws nothing");
+        w.remove(18);
+        w.remove(17);
+        let c = w.take_changes();
+        assert!(!c.structural && c.lights.contains(&17), "a group and a light removed");
+        // A camera that is not the scene's: created, moved and removed, nothing rebuilt.
+        let lens = || Kind::Camera(serde_json::from_value(serde_json::json!({ "fov": 50.0, "near": 0.1, "far": 100.0, "exposure": { "mode": "manual", "ev100": 0.0 } })).unwrap());
+        w.set_object(19, "spare".into(), None, lens(), true, false).unwrap();
+        w.set_transform(19, Vec3::X, Quat::IDENTITY, Vec3::ONE).unwrap();
+        w.remove(19);
+        let c = w.take_changes();
+        assert!(!c.structural && !c.camera && c.removed.is_empty() && c.promoted.is_empty(), "a camera that is not the scene's");
+        // Not in place: something else among them (a rect light with a card is triangles).
+        w.set_object(15, "set".into(), None, Kind::Group, true, false).unwrap();
+        w.set_object(16, "card".into(), Some(15), Kind::Light(serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 1, "height": 1, "visible": true })).unwrap()), true, false).unwrap();
+        assert!(w.take_changes().structural, "a rect light with a card: a rebuild");
+        w.remove(15);
+        assert!(w.take_changes().structural, "a group with a rect light's card");
         // Under a still group in a movable subtree (`movable` walks the ancestors, as the build does).
         w.set_object(8, "rig".into(), None, Kind::Group, true, true).unwrap();
         w.set_object(9, "still".into(), Some(8), Kind::Group, true, false).unwrap();
@@ -1637,9 +1855,46 @@ mod tests {
             let c = w.take_changes();
             assert!(!c.structural && c.materials.contains(&1), "{what}: the material's change");
         }
-        m.map = Some(7);
+        // Its textures too: a map that comes, another, none again.
+        for (map, what) in [(Some(7), "a map"), (Some(8), "another map"), (None, "no map again")] {
+            m.map = map;
+            w.set_material(1, m.clone());
+            let c = w.take_changes();
+            assert!(!c.structural && c.materials.contains(&1), "{what}: the material's change");
+        }
+        // A texture: a new one is nothing until a material names it, the same again is nothing, another under its
+        // number is that texture's change.
+        let texture = |v: u8| Texture { source: TextureSource::Pixels { width: 1, height: 1, rgba: Arc::new(vec![v; 4]) }, srgb: true, wrap: true, repeat: [1.0, 1.0], offset: [0.0, 0.0] };
+        w.set_texture(7, texture(1)).unwrap();
+        w.set_texture(7, texture(1)).unwrap();
+        assert!(!w.take_changes().any(), "a new texture, and the same again: no change");
+        w.set_texture(7, texture(2)).unwrap();
+        let c = w.take_changes();
+        assert!(!c.structural && c.textures.contains(&7) && c.any(), "other pixels: the texture's change");
+        w.set_texture(7, Texture { repeat: [2.0, 1.0], ..texture(2) }).unwrap();
+        assert!(w.take_changes().textures.contains(&7), "another repeat: the texture's change");
+        // A material function: new, the same again (nothing), other code; a material given one.
+        w.set_shader("f", "fn mf_f() {}".into(), String::new());
+        let c = w.take_changes();
+        assert!(!c.structural && c.functions && c.any(), "a new function: the kernel's code, in place");
+        w.set_shader("f", "fn mf_f() {}".into(), String::new());
+        assert!(!w.take_changes().any(), "the same function again: no change");
+        w.set_shader("f", "fn mf_f() { }".into(), String::new());
+        assert!(w.take_changes().functions, "other code: the function's change");
+        m.shader = Some(desc::ShaderRef { id: "f".into(), params: vec![], textures: vec![] });
+        w.set_material(1, m.clone());
+        let c = w.take_changes();
+        assert!(!c.structural && c.materials.contains(&1), "a material given a function: the material's change");
+        m.shader = None;
+        w.set_material(1, m.clone());
+        w.take_changes();
+        // `transparent` moves particles between the scene and the translucency pass: a rebuild.
+        m.transparent = true;
+        w.set_material(1, m.clone());
+        assert!(w.take_changes().structural, "a material that turns transparent: a rebuild");
+        m.transparent = false;
         w.set_material(1, m);
-        assert!(w.take_changes().structural, "texture slots are structural");
+        w.take_changes();
         w.set_object(5, "placed".into(), None, Kind::Mesh { geometry: 1, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
         w.set_transform(5, Vec3::Y, Quat::IDENTITY, Vec3::ONE).unwrap();
         assert!(w.take_changes().promoted.is_empty(), "placing a new object is not a move");

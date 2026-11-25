@@ -3,11 +3,11 @@ import { DensityGrid, GridProgram, Group, MaterialFunction, Mesh, MeshPhysicalMa
 import { BoxGeometry, PlaneGeometry } from "./geometry.ts";
 
 /**
- * Falling rain around the camera, UE's camera-wrapped rain curtain line for line (a UE 5.8 night-street level's rain
- * actor + M_Rain: 16 000 streaks in a 32 x 32 x 22 m box that follows the camera; each falls at its own speed
+ * Falling rain around the camera: the camera-wrapped rain curtain of this project's own night-street level in Unreal
+ * (authored by us there, then transcribed here: its rain actor and material; 16 000 streaks in a 32 x 32 x 22 m box that follows the camera; each falls at its own speed
  * with the wind, wraps around the box, and turns its long side along its velocity and its face to the camera). Units
  * are metres (UE's centimetres / 100), y up. The drops shown follow `scene.rain` (0..1): a drop shows while its random
- * number is below it, as in UE.
+ * number is below it, as in that level.
  */
 const RAIN = new ParticleFunction("rain_curtain", {
   params: { Box: [32, 22, 32, 0], Wind: [0.9, 0.4, 0, 0], Speed: 9.5, Length: 0.55, Width: 0.009, Opacity: 0.32 },
@@ -243,63 +243,82 @@ export class Debris extends Group {
   }
 }
 
-/**
- * UE 5.8's Local Fog Volume as a participating medium, its density as UE voxelizes it into volumetric fog
- * (VolumetricFog.usf, the path Lumen scenes light it through), line for line. In the unit sphere (radius 1; the node's
- * scale is the diameter): a radial part `RadialFogExtinction x saturate(1 - d)^0.82`, a height part
- * `HeightFogExtinction x exp(-HeightFogFalloff x (z - HeightFogOffset))`, combined as coverages: with A = e^-height and
- * B = e^-radial, extinction = -log(A + B - A B) per metre. So fog needs both parts (no height part, no fog), and a
- * steep falloff cuts the sphere off above the offset. Lit by every light, it shadows and scatters (path traced; not only
- * on camera rays like the scene's height fog).
- */
+// A local fog volume's density. With u the point in the volume's unit sphere (u = 2 `i.lp`: radius 1, y up; the node's
+// scale is the diameter in metres):
+//  - the radial part, Radial (1 - |u|^2): the extinction at the centre, fading to nothing at the sphere's surface;
+//  - the height part, Height exp(-Falloff (u.y - Offset)): the extinction at the height Offset, falling off upward;
+//  - the fog is where both are: extinction = radial (1 - exp(-height / radial)). That follows the thinner of the two
+//    smoothly (the height part where it is thin, the radial part where the height part is dense) and is never denser
+//    than either.
+// Own design. The settings and what each means are those of Unreal's Local Fog Volume, per its documentation page
+// "Local Fog Volumes"; that page gives the two parts' combination in words only ("coverage = 1 - transmittance" of
+// both), for a renderer that integrates each part along a view ray. A path tracer needs a density at a point: this.
+// `fogVolumeExtinction` below is the same formula in TypeScript, ue5/scripts/ue_volumes.py has it in HLSL.
 const LOCAL_FOG = new VolumeFunction("local_fog", {
   params: { Radial: 1, Height: 1, Falloff: 1000, Offset: 0, Albedo: [1, 1, 1, 0], Emissive: [0, 0, 0, 0] },
   code: `
     let u = i.lp * 2.0;
-    let fade = clamp(1.0 - length(u), 0.0, 1.0);
-    var ext = 0.0;
-    if (fade > 0.0) {
-        let height = select(0.0, $Height * exp(min(-$Falloff * (u.y - $Offset), 80.0)), $Height > 0.0);
-        let a = exp(-height);
-        let b = exp(-$Radial * pow(fade, 0.82));
-        ext = max(-log(max(a - a * b + b, 1e-30)), 0.0);
-    }
-    o.extinction = ext;
+    let radial = max($Radial, 0.0) * max(1.0 - dot(u, u), 0.0);
+    let height = max($Height, 0.0) * exp(clamp(-$Falloff * (u.y - $Offset), -40.0, 40.0));
+    let x = min(height / max(radial, 1e-9), 40.0);
+    // (1 - exp(-x), by its series where x is small: the difference would lose its digits there.)
+    o.extinction = radial * select(1.0 - exp(-x), x * (1.0 - x * (0.5 - x / 6.0)), x < 0.02);
     o.albedo = $Albedo.rgb;
-    o.emission = $Emissive.rgb * ext;`,
+    o.emission = $Emissive.rgb * o.extinction;`,
 });
 
-/** UE 5.8's Local Fog Volume settings, same names and defaults. */
+/** A local fog volume's settings. */
 export interface FogVolumeOptions {
-  /** RadialFogExtinction, 1/m. */
+  /** Extinction of the part that fades towards the sphere's edge, 1/m: its value at the centre. */
   radialExtinction?: number;
-  /** HeightFogExtinction, 1/m. */
+  /** Extinction of the part that fades with height, 1/m: its value at the height `heightOffset`. */
   heightExtinction?: number;
-  /** HeightFogFalloff and HeightFogOffset, in the unit sphere (radius 1). */
+  /** How fast the height part falls off with height, and the height it is measured from, in the unit sphere (radius 1). */
   heightFalloff?: number;
   heightOffset?: number;
-  /** FogAlbedo, FogEmissive (emitted radiance per unit extinction, nits), FogPhaseG (Henyey-Greenstein). */
+  /** Albedo, emitted radiance per unit extinction (nits), and the phase function's anisotropy (Henyey-Greenstein). */
   albedo?: [number, number, number];
   emissive?: [number, number, number];
   phaseG?: number;
 }
 
-/** `scene.add(new FogVolume())`, a sphere sized by its scale (the diameter: `scale.set(4, 4, 4)` is UE's scale 2). */
+/** What the two parts of a fog volume give together (the volume function's last step): never more than either. */
+function fogOfBoth(radial: number, height: number): number {
+  const x = Math.min(height / Math.max(radial, 1e-9), 40);
+  return radial * (x < 0.02 ? x * (1 - x * (0.5 - x / 6)) : 1 - Math.exp(-x));
+}
+
+/**
+ * The extinction (1/m) of a `FogVolume` of these settings at `u`, a point of its unit sphere (radius 1, y up; the
+ * volume's local position x 2): the volume function's formula, for tests and for games that ask how thick the fog is
+ * somewhere.
+ */
+export function fogVolumeExtinction(o: FogVolumeOptions, u: readonly [number, number, number]): number {
+  const radial = Math.max(o.radialExtinction ?? 1, 0) * Math.max(1 - (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]), 0);
+  const height = Math.max(o.heightExtinction ?? 1, 0) * Math.exp(Math.max(-40, Math.min(40, -(o.heightFalloff ?? 1000) * (u[1] - (o.heightOffset ?? 0)))));
+  return fogOfBoth(radial, height);
+}
+
+/** `scene.add(new FogVolume())`, a sphere sized by its scale (the diameter). */
 export class FogVolume extends VolumeMesh {
   constructor(o: FogVolumeOptions = {}) {
-    const radial = o.radialExtinction ?? 1;
+    const radial = Math.max(o.radialExtinction ?? 1, 0), falloff = o.heightFalloff ?? 1000, offset = o.heightOffset ?? 0;
+    // The densest the fog gets: the two parts' combination grows with each, so it is at most what their largest
+    // values give together: the radial part's at the centre, the height part's at the sphere's bottom (its top with
+    // a negative falloff), -falloff (u.y - offset) being at most |falloff| + falloff offset for u.y in -1 .. 1.
+    const height = Math.max(o.heightExtinction ?? 1, 0) * Math.exp(Math.max(-40, Math.min(40, Math.abs(falloff) + falloff * offset)));
     super({
       shape: "sphere",
       volume: LOCAL_FOG.with({
         Radial: radial,
         Height: o.heightExtinction ?? 1,
-        Falloff: o.heightFalloff ?? 1000,
-        Offset: o.heightOffset ?? 0,
+        Falloff: falloff,
+        Offset: offset,
         Albedo: [...(o.albedo ?? [1, 1, 1]), 0],
         Emissive: [...(o.emissive ?? [0, 0, 0]), 0],
       }),
-      // The combined extinction never exceeds the radial part: -log(A + B - A B) <= -log(B).
-      majorant: Math.max(radial, 1e-4),
+      // (A hair over, for the shader's single precision.)
+      majorant: Math.max(fogOfBoth(radial, height) * 1.0001, 1e-4),
       anisotropy: o.phaseG ?? 0.2,
     });
     this.name = "fog-volume";

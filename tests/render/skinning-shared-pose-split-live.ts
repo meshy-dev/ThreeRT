@@ -1,7 +1,7 @@
-// A shared pose splits: two mannequins built in one pose (A_TPose) share one skinned mesh (scene::PoseGroup). From
-// 0.08 s the frame script poses the first Idle_Loop at 0.5 s and the second Walk_Loop: they no longer share a pose (a
-// rebuild regroups them, each skinned alone). The region where the T pose's arm was (screen left, the forearm) shows
-// the 1-nit sky; a mesh left in its build pose keeps the arm there. The second mannequin stands behind the camera.
+// Two models in one pose come apart: two mannequins built in one pose (A_TPose), each a skinned mesh of its own. From
+// 0.08 s the frame script poses the first Idle_Loop at 0.5 s and the second Walk_Loop: each mesh is skinned again in
+// place. The region where the T pose's arm was (screen left, the forearm) shows the 1-nit sky; a mesh left in its
+// build pose keeps the arm there. The second mannequin stands behind the camera.
 import { GLTFModel } from "@threert/scene";
 import { defineGame } from "@threert/gameplay";
 import { camera, result, sceneWithSky, type TestMeta } from "./lib.ts";
@@ -11,7 +11,7 @@ export const test: TestMeta = {
   metric: { kind: "radiance", region: [0.33, 0.45, 0.39, 0.48], expected: 1, tolerance: 0.02 },
   requires: ["assets/quaternius/ual/UAL1_Standard.glb"],
   live: 30,
-  note: "both built in A_TPose (one group); the frame script poses a Idle_Loop at 0.5 s, b (at z = 8) Walk_Loop",
+  note: "both built in A_TPose; the frame script poses a Idle_Loop at 0.5 s, b (at z = 8) Walk_Loop",
 };
 
 const URI = "assets/quaternius/ual/UAL1_Standard.glb";

@@ -2,9 +2,10 @@
 // ------------------------------------------------------------------------------------------------
 // Translucency pass (gpu.rs `Translucent`; hardware RT only, appended to the kernel module after the trace).
 //
-// Particles drawn with a `transparent` material are in the kernel's triangle tables (after everything else, from
-// TPS.size.z) but in none of the scene's acceleration structures: they cast no shadow and show in no reflection or GI
-// (UE's default for translucency). This pass draws them, per output pixel, over the opaque image:
+// Particles drawn with a `transparent` material are in none of the scene's acceleration structures: they cast no
+// shadow and show in no reflection or GI (UE's default for translucency). They have a TLAS of their own, `tacc`: an
+// instance of it a system's mesh, its custom data the instance's record as in the scene's. This pass draws them,
+// per output pixel, over the opaque image:
 // - depth: the particle ray stops at the opaque surface the pixel sees (live: the traced first hits under the pixel;
 //   offline: a ray), so nothing behind a wall shows;
 // - overlap: ordered blending, the TL_LAYERS nearest particle hits sorted by distance, front to back;
@@ -15,9 +16,9 @@
 // accumulates (colour, transmittance) per sample, laid over the converged image.
 
 @if(hwrt) struct TP {
-    size: vec4<u32>, // output width, height, first translucent triangle, mode (0 offline: accumulate; 1 live: over the image)
+    size: vec4<u32>, // output width, height, -, mode (0 offline: accumulate; 1 live: over the image)
     view: vec4<u32>, // live: traced width, height (the opaque first hits); training budget (points per frame); 1 = at the traced resolution
-    misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, 1 = train only (THREERT_TL_HIDE: what is behind), -, -
+    misc: vec4<f32>, // live: share of hit pixels that train the volume voxels, -, -, -
 };
 
 @if(hwrt) @group(2) @binding(0) var tacc: acceleration_structure;
@@ -54,14 +55,19 @@
     return t;
 }
 
-// Material of a translucent particle at triangle ti (barycentrics b): colour, opacity and emission after maps and its
-// material function.
-@if(hwrt) fn particle_material(ti: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
-    let a = attrs[ti];
-    // (A particle's triangle is in the world: no instance.)
-    let m = material_at(material_of(a, NO_INST));
+// Material of a translucent particle at a hit of `tacc` (its primitive, its instance's record, barycentrics b):
+// colour, opacity and emission after maps and its material function.
+@if(hwrt) fn particle_material(prim: u32, inst: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
+    // Its system's mesh: the triangles from the instance's record's first, one section; its particle's object from
+    // the instance's first.
+    let rec = instance_at(inst);
+    let ti = rec.info.x + prim;
+    let td = tri_data(ti, inst, 0u);
+    var a = td.a;
+    a.x = inst_x(rec.info, a.x);
+    let m = material_at(material_of(a, inst));
     let uv = mesh_uv(a, m, b.x, b.y);
-    let tl = mesh_lod(a, m) + lod - LOD_BIAS;
+    let tl = mesh_lod(mesh_density(td.e1, td.e2, a, m), 1.0, 1.0) + lod - LOD_BIAS;
     var r = mat_base(m);
     if (has(F_TEX) && m.tex0.x >= 0) {
         let c = tex(m.tex0.x, uv, tl);
@@ -70,7 +76,7 @@
     }
     r.emissive = emission(m, uv, tl) * obj_power(a);
     if (has(F_FUNC) && m.tex1.w > 0) {
-        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, NO_INST, b.x, b.y, view, lod), m, r);
+        r = translucent_material_function(m.tex1.w - 1, mat_in_at(ti, inst, 0u, b.x, b.y, view, lod), m, r);
     }
     return r;
 }
@@ -112,6 +118,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The nearest TL_LAYERS hits, by distance.
     var lt: array<f32, TL_LAYERS>;
     var lp: array<u32, TL_LAYERS>;
+    var lc: array<u32, TL_LAYERS>;
     var lb: array<vec2<f32>, TL_LAYERS>;
     var n = 0u;
     var rq: ray_query;
@@ -126,11 +133,13 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (k == 0u || lt[k - 1u] <= c.t) { break; }
             lt[k] = lt[k - 1u];
             lp[k] = lp[k - 1u];
+            lc[k] = lc[k - 1u];
             lb[k] = lb[k - 1u];
             k -= 1u;
         }
         lt[k] = c.t;
         lp[k] = c.primitive_index;
+        lc[k] = c.instance_custom_data;
         lb[k] = c.barycentrics;
         n = min(n + 1u, TL_LAYERS);
     }
@@ -145,8 +154,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     var train = live && rng1(rng_dim(D_CACHE)) < TPS.misc.x;
     let foot = 2.0 * P.cam_pos.w / f32(h);
     for (var k = 0u; k < n; k++) {
-        let ti = TPS.size.z + lp[k];
-        let r = particle_material(ti, lb[k], -d, log2(max(lt[k] * foot, 1e-7)));
+        let r = particle_material(lp[k], lc[k], lb[k], -d, log2(max(lt[k] * foot, 1e-7)));
         let alpha = clamp(r.opacity, 0.0, 1.0);
         if (alpha <= 0.0) { continue; }
         let x = o + d * lt[k];
@@ -167,10 +175,8 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (low) {
         tlow[pix] = vec4<f32>(col, tr);
     } else if (live) {
-        if (TPS.misc.y < 0.5) {
-            let c = timg[pix];
-            timg[pix] = vec4<f32>(c.rgb * tr + col, c.w);
-        }
+        let c = timg[pix];
+        timg[pix] = vec4<f32>(c.rgb * tr + col, c.w);
     } else {
         timg[pix] += vec4<f32>(col, tr);
     }
@@ -182,7 +188,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn translucent_up(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = TPS.size.x;
     let h = TPS.size.y;
-    if (gid.x >= w || gid.y >= h || TPS.misc.y >= 0.5) { return; }
+    if (gid.x >= w || gid.y >= h) { return; }
     let iw = TPS.view.x;
     let ih = TPS.view.y;
     let fx = clamp((f32(gid.x) + 0.5) * f32(iw) / f32(w) - 0.5, 0.0, f32(iw - 1u));

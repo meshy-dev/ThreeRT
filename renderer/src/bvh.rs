@@ -50,21 +50,19 @@ const BINS: usize = 16;
 const MAX_LEAF: usize = 4;
 /// The most items a leaf the surface-area heuristic prefers to a split may hold.
 const SAH_LEAF: usize = 16;
-/// The kernel's stack for this module's trees (pathtrace.wgsl `trace`, `trace_procs`: `array<u32, 48>`). A walk holds
-/// at most one entry a level of its tree, so a tree no deeper than this is walked whole; a push past it would be
-/// dropped (geometry missed, never a hang).
+/// The kernel's stack for a tree of boxes (pathtrace.wgsl `trace_procs`: `array<u32, 48>`). A walk holds at most one
+/// entry a level of its tree, so a tree no deeper than this is walked whole; a push past it would be dropped
+/// (geometry missed, never a hang).
 pub const STACK: usize = 48;
 
-/// The tree over no triangle, as the kernel can walk it. A node with `count: 0` is an interior node to the kernel
-/// (pathtrace.wgsl `trace`): the one-node tree this module used to make for nothing had itself for a left child and,
-/// for a right child, whatever lay after the node buffer's 32 bytes. Where that was zeros the walk ended; where it was
-/// what an earlier scene left there, it might not (a dispatch that does not end: docs/RUNTIME.md "The engine in a
-/// browser"). The encoding has no empty leaf, so this is a leaf of one triangle, triangle 0: with no triangles the
-/// vertex buffer is zeros (gpu.rs `upload`), a triangle without area that no ray meets (`intersect_tri`: its
-/// determinant is 0). One node read, no child, no box.
+/// The tree over no triangle, and what unused room in a node buffer holds (units.rs `FILL`): a node that ends a
+/// walk. A node with `count: 0` is an interior node to the kernel: one of zeros has itself for a left child and the
+/// node after it for a right child, and a walk that lands on it may not end (docs/RUNTIME.md "The engine in a
+/// browser"). The encoding has no empty leaf, so this is a leaf of one triangle, without a box. One node read, no
+/// child.
 pub const EMPTY: GpuNode = GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 1 };
 
-/// The tree over triangles the kernel's software traversal walks (the still scene's), no deeper than `STACK`.
+/// The tree over triangles, no deeper than `STACK`.
 pub fn build(tris: &[[V; 3]]) -> Bvh {
     build_tris(tris, STACK)
 }
@@ -303,11 +301,12 @@ mod tests {
         }
     }
 
-    /// The kernel's software traversal (pathtrace.wgsl `trace`, its loop statement for statement) on the CPU, with
-    /// what the kernel does not have: every read checked, and the steps counted. `tris`: the triangles the vertex
-    /// buffer holds. Returns the triangles the ray is tested against; an error where the kernel would read a node or
-    /// a triangle that is not there, or would not stop. No triangle is ever hit here (the ray keeps its full length),
-    /// so the walk visits at least every node the kernel visits for the same ray.
+    /// The kernel's walk of one tree (pathtrace.wgsl `trace_procs`' loop, statement for statement; a unit's tree is
+    /// walked the same way, units.rs) on the CPU, with what the kernel does not have: every read checked, and the
+    /// steps counted. `tris`: how many items the leaves may name. Returns the items the ray is tested against; an
+    /// error where the kernel would read a node or an item that is not there, or would not stop. Nothing is ever hit
+    /// here (the ray keeps its full length), so the walk visits at least every node the kernel visits for the same
+    /// ray.
     fn walk(nodes: &[GpuNode], tris: usize, o: V, d: V) -> Result<Vec<u32>, String> {
         let node_at = |i: u32| nodes.get(i as usize).copied().ok_or(format!("reads node {i} of {}", nodes.len()));
         let inv_d = V::ONE / V::select(d.abs().cmplt(V::splat(1e-20)), V::splat(1e-20), d);
@@ -362,25 +361,25 @@ mod tests {
     #[test]
     fn the_walk_is_the_kernels_loop() {
         let src = include_str!("../shaders/pathtrace.wgsl");
-        let (_, rest) = src.split_once("fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {").expect("the kernel's trace");
-        let (body, _) = rest.split_once("if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }").expect("the end of the triangles' loop");
+        let (_, rest) = src.split_once("fn trace_procs(o: vec3<f32>, d: vec3<f32>, hit_in: Hit, mode: u32) -> Hit {").expect("the kernel's walk of a tree of boxes");
+        let (body, _) = rest.split_once("\n}\n").expect("its end");
         let lines = [
-            "let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));",
+            "let inv = 1.0 / select(ld, vec3<f32>(1e-20), abs(ld) < vec3<f32>(1e-20));",
             "var stack: array<u32, 48>;",
             "var node = 0u;",
-            "let n = nodes[node];",
-            "if (n.count > 0u) {",
-            "for (var k = 0u; k < n.count; k++) {",
-            "let ti = n.left_or_first + k;",
+            "let w = nb + node * 8u;",
+            "let first_or_left = pword(w + 3u);",
+            "let count = pword(w + 7u);",
+            "if (count > 0u) {",
+            "for (var q = 0u; q < count; q++) {",
+            "let p = pword(ob + first_or_left + q);",
             "if (sp == 0u) { break; }",
             "node = stack[sp];",
-            "let l = n.left_or_first;",
-            "let r = l + 1u;",
-            "let nl = nodes[l];",
-            "let nr = nodes[r];",
-            "var tl = ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);",
-            "var tr = ray_aabb(o, inv_d, nr.bmin, nr.bmax, hit.t);",
+            "let wl = nb + first_or_left * 8u;",
+            "var tl = ray_aabb(lo, inv, proc_vec(wl), proc_vec(wl + 4u), hit.t);",
+            "var tr = ray_aabb(lo, inv, proc_vec(wl + 8u), proc_vec(wl + 12u), hit.t);",
             "if (tl == INF && tr == INF) {",
+            "var far = first_or_left + 1u;",
             "if (tr < tl) {",
             "node = near;",
             "if (tr != INF && sp < 48u) {",
@@ -388,7 +387,7 @@ mod tests {
         ];
         let mut at = 0;
         for l in lines {
-            at += body[at..].find(l).unwrap_or_else(|| panic!("the kernel's trace no longer has `{l}` where the walk expects it"));
+            at += body[at..].find(l).unwrap_or_else(|| panic!("the kernel's walk no longer has `{l}` where the walk expects it"));
         }
         assert!(src.contains("let tn = max(max(tmin_v.x, tmin_v.y), max(tmin_v.z, 0.0));\n    let tf = min(min(tmax_v.x, tmax_v.y), min(tmax_v.z, tmax));\n    return select(INF, tn, tn <= tf);"), "ray_aabb");
         assert!(src.contains("const INF: f32 = 3.0e38;"));
@@ -403,10 +402,6 @@ mod tests {
         }
     }
 
-    /// The kernel walks every tree `build` makes without reading past its nodes or its triangles, and stops: trees
-    /// over no triangle (a scene with nothing in it, or with procedural geometry only), one, a leaf's worth, many.
-    /// The empty scene's vertex buffer holds zeros (gpu.rs `upload`: 512 bytes, so triangles 0..2 are there, without
-    /// area).
     /// Garbage in (as Embree's builders are tested): every tree `build_tris` makes of it is one `check_tree` passes
     /// (the builder checks itself in tests), that the kernel's walk ends on within its buffers, with the items whose
     /// box is not finite after every leaf's range. NaN and infinite vertices among good ones, all of them bad, values
@@ -440,7 +435,7 @@ mod tests {
             assert_eq!(tail, bad, "{what}: the items left out come last");
             for k in 0..200 {
                 let o = V::new(k as f32 - 100.0, 7.0, 3.0);
-                walk(&b.nodes, tris.len().max(3), o, (V::new(0.3, -1.0, 0.2) - o * 0.001).normalize()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                walk(&b.nodes, tris.len(), o, (V::new(0.3, -1.0, 0.2) - o * 0.001).normalize()).unwrap_or_else(|e| panic!("{what}: {e}"));
             }
         }
     }
@@ -476,8 +471,8 @@ mod tests {
         for n in [0usize, 1, 2, 4, 5, 17, 1000] {
             let tris: Vec<[V; 3]> = (0..n).map(|_| { let c = p(20.0); [c + p(1.0), c + p(1.0), c + p(1.0)] }).collect();
             let b = build(&tris);
-            // (An empty scene's buffer: 512 zero bytes are 10 vec4s, three triangles' worth and a third.)
-            let held = if n == 0 { 3 } else { n };
+            // (The tree over nothing is a leaf of one item: `EMPTY`.)
+            let held = n.max(1);
             let mut rays: Vec<(V, V)> = (0..2000).map(|_| (p(60.0), p(2.0).normalize_or(V::X))).collect();
             // Rays through the origin and along the axes (an empty tree's boxes are at the origin).
             for a in [V::X, V::Y, V::Z, V::ONE.normalize(), V::new(1.0, -1.0, 0.0).normalize()] {

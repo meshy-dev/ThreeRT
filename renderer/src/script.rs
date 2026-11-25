@@ -97,6 +97,35 @@ const MAX_POST_BYTES: usize = 1 << 20;
 const MAX_STORE_WRITE_BYTES: usize = 96 << 20;
 const MAX_QUEUE_BYTES: usize = 192 << 20;
 
+/// The asset root scene code may read files under (`__engine.readAsset`): set by the host before a game loads.
+static ASSET_ROOT: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// Where `__engine.readAsset` reads (the host's `--assets`).
+pub fn set_asset_root(root: &std::path::Path) {
+    *ASSET_ROOT.write().unwrap() = Some(root.to_path_buf());
+}
+
+/// `__engine.readAsset(path)`: a file under the asset root, whole, as an ArrayBuffer (a streamed city's tiles, baked data
+/// a game reads as it goes). Relative paths only, no `..`: nothing outside the root.
+fn read_asset(path: &str, range: Option<(u64, usize)>) -> anyhow::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let p = std::path::Path::new(path);
+    anyhow::ensure!(p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir)), "readAsset: {path}: a relative path under the asset root");
+    let root = ASSET_ROOT.read().unwrap().clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let full = root.join(p);
+    match range {
+        None => std::fs::read(&full).map_err(|e| anyhow::anyhow!("readAsset: {path}: {e}")),
+        // (a part of it: a streamed cell's next meshes, without reading the rest)
+        Some((offset, length)) => {
+            let mut f = std::fs::File::open(&full).map_err(|e| anyhow::anyhow!("readAsset: {path}: {e}"))?;
+            f.seek(SeekFrom::Start(offset))?;
+            let mut buf = vec![0u8; length];
+            f.read_exact(&mut buf).map_err(|e| anyhow::anyhow!("readAsset: {path} [{offset}, +{length}]: {e}"))?;
+            Ok(buf)
+        }
+    }
+}
+
 /// `__host_base64_encode(bytes: Uint8Array): string`.
 fn base64_encode<'js>(ctx: Ctx<'js>, bytes: Value<'js>) -> rquickjs::Result<String> {
     use base64::Engine;
@@ -234,6 +263,7 @@ pub struct ScriptHost {
     pub voxels: Rc<RefCell<crate::voxel::VoxelWorld>>,
     /// The physics world (`__engine.physics`; renderer/src/physics.rs): None until scene code makes a physics call.
     pub physics: Rc<RefCell<Option<crate::physics::PhysicsWorld>>>,
+    rendering: crate::live::RenderingControl,
     /// What the game posted for the app (`host.post`: JSON texts), until `take_posts`.
     posts: Rc<RefCell<Vec<String>>>,
     /// The promises rejected with no handler in the entry running now (`Rejected`); empty between entries.
@@ -303,9 +333,19 @@ fn thrown(ctx: &Ctx, e: crate::api::Error) -> rquickjs::Error {
 
 /// The engine API (`globalThis.__engine`), see packages/scene/src/engine.ts: each call's arguments out of QuickJS,
 /// then what the call does (api.rs: the same code a browser's exports run, renderer/web).
-fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>, budget: &Arc<Budget>) -> rquickjs::Result<()> {
+fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<RefCell<crate::voxel::VoxelWorld>>, physics: &Rc<RefCell<Option<crate::physics::PhysicsWorld>>>, budget: &Arc<Budget>, rendering: &crate::live::RenderingControl) -> rquickjs::Result<()> {
     use crate::api;
     let e = Object::new(ctx.clone())?;
+    // Rendering settings (live/rendering.rs): a request as JSON, applied from the next frame; the last frame's status.
+    let control = rendering.clone();
+    e.set("setRendering", Function::new(ctx.clone(), move |ctx: Ctx, json: String| -> rquickjs::Result<()> {
+        let r = serde_json::from_str(&json).map_err(anyhow::Error::from).and_then(|v| crate::live::RenderingRequest::from_json(&v))
+            .map_err(|e| Exception::throw_type(&ctx, &format!("{e:#}")))?;
+        control.request(r);
+        Ok(())
+    })?)?;
+    let control = rendering.clone();
+    e.set("renderingStatus", Function::new(ctx.clone(), move || control.status().to_string())?)?;
     // Physics (renderer/src/physics.rs): one call, `physics(op, args)`, answering in JSON. The world is made by the
     // first call; the engine steps it, scene code cannot.
     let (p, w) = (physics.clone(), world.clone());
@@ -349,6 +389,39 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
     e.set("voxelDebris", Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<TypedArray<'js, f32>> { TypedArray::new(ctx, v.borrow_mut().take_debris()) })?)?;
     let (v, w, d) = (voxels.clone(), world.clone(), budget.clone());
     e.set("voxelFrame", Function::new(ctx.clone(), move |ctx: Ctx, dt: f64| -> rquickjs::Result<String> { let _lent = Lent::new(&ctx, &d)?; api::voxel_frame(&mut v.borrow_mut(), &mut w.borrow_mut(), dt).map_err(|e| thrown(&ctx, e)) })?)?;
+    // readAsset(path, offset?, length?): the file, or `length` bytes of it from `offset`
+    e.set("readAsset", Function::new(ctx.clone(), move |ctx: Ctx<'js>, path: String, offset: rquickjs::function::Opt<f64>, length: rquickjs::function::Opt<f64>| -> rquickjs::Result<rquickjs::ArrayBuffer<'js>> {
+        let range = offset.0.zip(length.0).map(|(o, l)| (o as u64, l as usize));
+        let bytes = read_asset(&path, range).map_err(|e| fail(&ctx, e))?;
+        rquickjs::ArrayBuffer::new(ctx, bytes)
+    })?)?;
+    // preloadModel(uri, nodeSets?): the model file parsed on a worker thread into the process's parse cache (its
+    // buffers, images and tangents), and the triangles of each node set (JSON: [["a", "b"], ...]; null: the whole
+    // model) read, so a still GLTFModel of them added later in place does neither in that frame's commit (a streamed
+    // city's far tiles: ~30-90 ms each). False for a path outside the asset root or node sets that are no such list.
+    e.set("preloadModel", Function::new(ctx.clone(), move |uri: String, sets: rquickjs::function::Opt<String>| -> bool {
+        let p = std::path::Path::new(&uri);
+        if !p.is_relative() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return false;
+        }
+        let sets: Vec<Option<Vec<String>>> = match sets.0 {
+            Some(j) => match serde_json::from_str(&j) {
+                Ok(v) => v,
+                Err(_) => return false,
+            },
+            None => vec![],
+        };
+        let root = ASSET_ROOT.read().unwrap().clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+        rayon::spawn(move || {
+            if crate::scene::model_gltf(&uri, &root).is_err() {
+                return;
+            }
+            for nodes in sets {
+                let _ = crate::scene::prepare_triangles(&uri, &root, nodes);
+            }
+        });
+        true
+    })?)?;
     let w = world.clone();
     // (…, groups?, colors?): the optional arguments as the rest (rquickjs takes seven parameters at most).
     e.set("geometry", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, p: TypedArray<f32>, n: TypedArray<f32>, uv: TypedArray<f32>, idx: TypedArray<u32>, rest: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {
@@ -466,7 +539,15 @@ impl ScriptHost {
 
     fn load(code: impl for<'js> FnOnce(&Ctx<'js>) -> rquickjs::Result<()>) -> Result<ScriptHost> {
         let rt = Runtime::new()?;
-        rt.set_memory_limit(1 << 30);
+        // 1 GiB, or THREERT_SCRIPT_MB (a game that streams a city keeps its resident tiles' arrays)
+        let mb = std::env::var("THREERT_SCRIPT_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1024);
+        rt.set_memory_limit(mb << 20);
+        // QuickJS collects cycles first at 256 KB of heap, then whenever the heap is half as large again as at the last
+        // collection; a collection walks every object (a streamed city: ~0.5 M of them, ~45 ms). The scene package
+        // makes no cycles of its own (its objects are freed as they go), so the first collection waits for 256 MB, or
+        // THREERT_SCRIPT_GC_MB; after it, QuickJS's own rule.
+        let gc_mb = std::env::var("THREERT_SCRIPT_GC_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(256);
+        rt.set_gc_threshold(gc_mb << 20);
         rt.set_max_stack_size(4 << 20);
         let epoch = Instant::now();
         let budget = Arc::new(Budget { epoch, deadline: AtomicU64::new(0), lent: AtomicU64::new(0) });
@@ -490,7 +571,7 @@ impl ScriptHost {
         let ctx = Context::full(&rt)?;
         let world = Rc::new(RefCell::new(World::default()));
         let voxels = Rc::new(RefCell::new(crate::voxel::VoxelWorld::default()));
-        let mut h = ScriptHost { rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), posts: Default::default(), rejected };
+        let mut h = ScriptHost { rt, ctx, budget, epoch, info: serde_json::Value::Null, world, voxels, physics: Default::default(), rendering: Default::default(), posts: Default::default(), rejected };
         let (w, v, ph, d2, posts) = (h.world.clone(), h.voxels.clone(), h.physics.clone(), h.budget.clone(), h.posts.clone());
         let (info, rejections) = h.enter(SETUP_MS, |ctx| {
             let g = ctx.globals();
@@ -514,7 +595,7 @@ impl ScriptHost {
             // tens of megabytes that the script would take seconds over. packages/gameplay/src/files.ts uses them.
             g.set("__host_base64_encode", Function::new(ctx.clone(), base64_encode)?)?;
             g.set("__host_base64_decode", Function::new(ctx.clone(), base64_decode)?)?;
-            install_engine(ctx, &w, &v, &ph, &d2)?;
+            install_engine(ctx, &w, &v, &ph, &d2, &h.rendering)?;
             ctx.eval::<(), _>(PRELUDE)?;
             code(ctx)?;
             host(ctx)?.get::<_, Function>("describe")?.call::<_, String>(())
@@ -536,6 +617,10 @@ impl ScriptHost {
             game_log("error", line);
         }
         r
+    }
+
+    pub fn attach_rendering(&self, core: &mut crate::live::LiveCore) {
+        core.attach_rendering_control(self.rendering.clone());
     }
 
     /// One entry into the script: `f` under a time budget, then the promise jobs the entry left (`run_jobs`), within
@@ -716,9 +801,11 @@ impl ScriptHost {
     /// Sets the frame script's clock to `t` (s) and shows the scene settled at that moment (an offline render at a scene
     /// time; frames from there advance it as before).
     /// Bundles built before `seek` existed have none: nothing to do then.
+    /// Under setup's budget, not a frame's: it is no frame anyone waits on, and its entry also syncs all that setup
+    /// made (a streamed city's hundred cells at the radii an offline render asks for take more than a frame's 50 ms).
     pub fn seek(&self, t: f32) -> Result<()> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_millis() as f64);
-        self.call(FRAME_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
+        self.call(SETUP_MS, |ctx| match host(ctx)?.get::<_, Option<Function>>("seek")? {
             Some(f) => f.call((t as f64, now)),
             None => Ok(()),
         })
@@ -841,7 +928,8 @@ impl GameSession {
     /// Opens the first live view of a loaded session (`load_code`).
     pub fn start_loaded(self, assets: &std::path::Path, g: crate::gpu::Gpu, presets: &std::path::Path, w: u32, h: u32) -> Result<(GameSession, crate::live::LiveCore)> {
         self.realize_voxels(assets)?;
-        let core = crate::live::LiveCore::new(g, &self.host.world.borrow(), assets, presets, w, h)?;
+        let mut core = crate::live::LiveCore::new(g, &self.host.world.borrow(), assets, presets, w, h)?;
+        self.host.attach_rendering(&mut core);
         Ok((self, core))
     }
 
@@ -849,6 +937,7 @@ impl GameSession {
     pub fn open_loaded(self, assets: &std::path::Path, core: &mut crate::live::LiveCore) -> Result<GameSession> {
         self.realize_voxels(assets)?;
         core.open(&self.host.world.borrow(), assets)?;
+        self.host.attach_rendering(core);
         core.seq = 0;
         Ok(self)
     }

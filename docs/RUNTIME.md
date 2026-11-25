@@ -803,7 +803,94 @@ core.write_stream("screen", 640, 360, &rgba)?;                  // LiveCore, bef
   emission from a function keeps the live view's short history, so the screen shows this frame's picture and
   not a blend of the last sixteen.
 - The script side has no call for it: pictures come from the app (`write_stream`), not through the script
-  runtime. A script's own `DataTexture` with `needsUpdate` still rebuilds, as before.
+  runtime. A script's own `DataTexture` with `needsUpdate` is another texture under its number: written over the
+  old one where it is as large, else placed as a new one ("What comes in place", below).
+
+## What comes in place
+
+An edit rewrites what it touches and nothing else; the scene is built again from the world only for what is listed
+at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's log has its reason (`fallback`).
+
+- **Textures.** The pages keep where each texture lies and what they have free (`texpack::Atlas`). A texture a
+  material first names is decoded, placed among them (a shelf it fits, a new shelf, a new layer) and written there,
+  every level; its two rows go into the texture table (`Gpu::place_texture`, `LiveCore::place_textures`). Pages
+  without room become a texture with a layer more or a longer side, and what they held is copied there on the GPU.
+  New pixels of the same size go over the old ones, unless another texture has the same slot. A texture no
+  material names any more keeps its place until the scene is loaded again.
+- **Materials.** A new one, its maps and its function with it; a material given other maps, another function or
+  none. (Not one that is a particle's, `transparent`, or has vertex colours: those say where triangles are kept.)
+- **Material functions.** The scene keeps its functions by number, and one that comes takes the next
+  (`LiveCore::set_functions`). The kernel with them is another module.
+- **The kernel's variant.** A feature a scene first uses (fog, glass, a clear coat, a texture, a cutout or a
+  function on an instance), and other functions, are another variant of the kernel, which the driver compiles for
+  half a second to tens of seconds. The view runs the kernel it has while the scene's is made on another thread
+  (`Gpu::warm_kernel`, `LiveCore::choose_kernel`), and takes it at a frame's start once every pipeline a frame
+  asks of it is there. Until then what the new variant draws is missing: a material of a function the old kernel
+  has not is drawn as one without, fog comes a moment late. In lockstep (benchmarks, tests) and in a browser,
+  which has no thread to give, the frame makes its kernel itself and waits.
+- **Models.** A still model the scene has not got: its materials are made as the build makes them, its textures
+  placed in the pages, its mesh made in the edit's room (`LiveCore::place_models`, `make_mesh`).
+- **Lights.** A light that is an entry of the light table alone (not a rect light with a card, not the
+  atmosphere's sun) comes, goes and changes its kind or its shadow in place: the table is listed in a build's
+  order, sorted, grown where it is full, and the kernel's counts follow.
+- **Volumes.** The media table is made whole from the world, as a build makes it (`LiveCore::set_media`): a volume
+  that comes, goes, is set again or is moved where it stood still. A volume function that comes takes the next
+  number; the kernel's count of media and its media features follow (a scene's first volume is another variant).
+- **Density grids.** The grids follow the volumes that name them (`Gpu::put_grids`). A new grid, another size,
+  another program or a program's code has the atlas and the programs' pass made again, and what the programs had
+  simulated is copied on the GPU to the grids that are the same still; new parameters make nothing again. A
+  program's pass is compiled in the frame it comes in.
+- **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
+
+Still a rebuild: particle systems that come or go, and their functions and programs; a geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
+not grow); a material that becomes a particle's or gets vertex colours; a rect light's card that comes, goes or takes
+another size (its colour is in place, and a movable one's move); as many shadow-casting
+local lights as bring the light tiles or take them away; the scene's first instance, procedural object, instance
+colours or vertex colours (the kernel's data is laid out for them); the atmosphere's sun shown or hidden.
+
+## Streaming: reading assets and adding them in place
+
+A game that streams its world as the camera moves (a city of baked cells: [threert/TokyoRT](https://github.com/threert/TokyoRT))
+reads files under the asset root as it goes and adds what they hold without rebuilding the scene.
+
+- **`readAsset(path, offset?, length?)`** (`@threert/scene`; `__engine.readAsset`): a file under the asset root as an
+  `ArrayBuffer`, whole or `length` bytes from `offset` (relative paths, no `..`). Native renderer only. The root is the
+  host's `--assets`.
+- **The script's heap** is 1 GiB; `THREERT_SCRIPT_MB` sets another size (a resident city keeps its cells' arrays).
+- **The script's objects are few and acyclic.** QuickJS frees an object when its last reference goes; only reference
+  cycles wait for its cycle collector, which walks every object there is (a streamed city's ~0.5 M: ~45 ms, a frame
+  lost). A scene object is 8 JS objects (an instanced mesh 13): what most never use (`up`, `tags`, `userData`,
+  `customData`, `matrix`, `matrixWorld`, an empty `children`) is made when first asked for, and its transform's parts
+  and instance tables reach it through one `WeakRef`, not a back-pointer each. The first collection waits for 256 MB
+  of heap (`THREERT_SCRIPT_GC_MB`), then QuickJS's own rule (the heap half as large again).
+- **The binding syncs what changed.** Objects added under a parent or taken from one since the last sync are bound or
+  dropped with their subtrees; the graph is walked whole only at the first sync. A world removes a childless object
+  without looking for its children (`World::remove` keeps a count of each object's children).
+- **`preloadModel(uri, nodeSets?)`** (`@threert/scene`; `__engine.preloadModel`): parses a GLB under the asset root on
+  a worker thread (its buffers, images and tangents into the process's parse cache) and reads the triangles of each
+  node set given (the `nodes` of the still `GLTFModel`s of it to come). A model of it added a few frames later goes in
+  without that work in its frame's commit: TokyoRT's far tiles, ~80 k triangles and 13 models each, from 30-90 ms of
+  commit to ~10.
+- **In place:** a new mesh (any geometry) with materials the scene has; a still model, of a file the scene has or not,
+  without material functions or with functions the scene's kernel has (its materials are made in place as a build
+  makes them); moving or showing an object the build placed as an instance; new materials without textures that
+  neither emit nor are glass.
+- **Rebuilds:** a new group (place the meshes themselves under groups the scene made); a posed model with material
+  functions, or a model with a function the scene's kernel has not; a material with textures or a function that the
+  scene has not seen (make every material at setup, and put each on a mesh, out of sight if need
+  be); showing an object that was hidden when the scene was built or rebuilt (move it out of sight instead of hiding
+  it); a model of nodes the file lacks (it draws nothing and has no instance to hide).
+- **Emitters cost the commit**: each commit that adds or removes emitting triangles writes the emitter CDF and the
+  light tree's dynamic part over every emitter of the scene. Add a cell's emitting meshes together, and draw far lights
+  with unlit materials (`MeshBasicMaterial`, or glTF `KHR_materials_unlit`, whose emission is then what it shows): they
+  are seen and light nothing.
+- **Instances cost what changed.** An `InstancedMesh` adds its copies as TLAS instances, in place, all of them
+  sharing its geometry's BLAS; a TLAS build writes only the instances that changed since the last one
+  (`renderer/third_party/wgpu-core/PATCH.md`; upstream wgpu wrote every one, every commit), and a frame validates the
+  TLAS's distinct BLASes, not its instances. Place repeated things (a city's windows, grates, street models) as one
+  `InstancedMesh` a piece and material a cell: their triangles once, a few objects a cell. TokyoRT's Shinjuku
+  streams 470,000 instances at a commit of 4.9 ms.
+- `THREERT_EDIT_LOG=1` prints where an edit or a world change decided on a rebuild.
 
 ## The runtime's shape: Rust owns the world, the script engine is a guest
 
@@ -1105,14 +1192,14 @@ ROADMAP § 6 steps 7b and 7c. **Status: runs natively and in Chrome on this mach
 with the loop guard, which stopped nothing). Step 7b brought the edits and the memory; a still frame then paid for
 them (the trace 37 % / 71 % / 16 % longer on the three scenes below), and step 7c took that cost out.
 
-**Where units are used.** In a live session and in a browser (the wasm build), by default. **An offline render
-(`threert-render render`) under software traversal flattens every instance, as before step 7b: its kernel and its
-bytes are main's with nothing set.** `THREERT_UNITS=1` gives an offline render units; `THREERT_UNITS=0` flattens a
-live session too (the A/B). Why the line is there (decided 2026-11-11):
-- an offline render under software traversal is the reference render, and what the catalog's byte gate compares; the
-  gate runs with no variable set, and stays a comparison with main's bytes;
-- what units give (the triangle data of each mesh held once, a faster load, edits in place) is what a session that
-  edits and a browser need; an offline render builds its scene once and edits nothing.
+**Where units are used.** Wherever software traversal is (since 2026-11-25): a session, a browser and an offline
+render alike. Until then an offline render flattened every instance into world-space triangles (the line drawn
+on 2026-11-11, to keep its bytes main's while units were new), and `THREERT_UNITS` chose; what follows that names
+the flattened scene or the variable is of that time. Since the same day no triangle is in world space: the tree
+over the scene's own triangles and its walk (the still scene's, in what follows) are gone, and the units are all
+software traversal walks. An instance of a mesh without a tree is no unit and is not
+drawn: a particle system's (its pass is hardware traversal's), a mesh with a vertex that is not a number (said).
+A scene with more instances than the top tree holds (262,144) draws none of them, and says so.
 
 **What a still frame costs** (software traversal, live, 1280 × 720 traced at half, this machine, guard on in both
 columns; "Measured: the still frame" at the end of this section has every step between the two):
@@ -1137,12 +1224,9 @@ names a record with the instance's rows; hardware traversal fills it), and alrea
 procedural objects (`trace_procs`: the ray into the object's space, a tree of its own).
 
 **What there is now.** Under software traversal an instance stays an instance: a **unit**.
-- **The still scene is the flat tree it was**, walked first, exactly as before. (A scene whose triangles are all
-  units' has for it a leaf of one triangle without area, put after the meshes' triangles: the tree over nothing's
-  leaf names triangle 0, which with units is a mesh's first, in model space.)
 - **A mesh's tree** is built once over its triangles in model space, where they already are (the pool hardware
   traversal builds its BLASes from; under software traversal the mesh's triangles are put in its tree's order, a
-  cutout triangle carrying its flag). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
+  cutout triangle carrying its flag). Its nodes sit in the mesh trees' range of the node buffer; a tree is relocatable
   (child indices count from its root, leaf triangles from its mesh's first).
 - **A unit** is the instance's kernel record (160 B), as under hardware traversal, with three of its unused words
   filled: its mesh tree's root; whether it casts shadows; whether it is placed by a translation alone (the ray then
@@ -1164,7 +1248,7 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   loose at rest are an eighth of the units, or when the scene is small (64 units: a build is microseconds). Tried
   and left out: putting a new unit into the one tree leaf by leaf; after a few thousand pieces had flown, rays
   through the piles read several times what a built tree costs them.
-- **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
+- **The kernel** walks the top tree; at a
   unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. **The top tree and
   the units' trees are walked by one loop**, each turn a node of whichever tree the ray is in: a GPU runs a group of
   rays through a loop together, and with a unit's walk as a loop inside the top walk's, a ray that had left a unit
@@ -1172,13 +1256,15 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   tested first: a ray that meets no unit reads one node, and a scene of one unit has no tree to walk. The hit it
   returns is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
 - **The unit walk is `shaders/trace_units.wgsl`**, in the kernel under `@if(units)` (`F_UNITS`, a source feature,
-  as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk, a call at the end of the still walk, and the still
-  walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
-  kernel never does.
-- Still flattened, as before: meshes that deform (a pose shared by a crowd), every instance of a scene with more
-  of them than a top tree holds (2^18), and every instance of an offline render (`prepare`; a live session's scene
-  goes through `prepare_live`), unless `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this
-  step (the A/B).
+  as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk and the call in `trace`. A scene without
+  units has none of it; hardware traversal's kernel never does.
+- **A mesh that deforms** (a posed skinned model's) is a unit too. Its tree has the shape of a tree built once over
+  its model's bind pose, one shape for every placement of the model (the skinning pass's corners and each such
+  mesh's triangles are in that tree's order), and the boxes of its pose. A new pose places the model's corners on
+  the CPU, takes the boxes again (`units::refit`: a leaf's from its triangles, an interior node's from its
+  children), and writes the nodes where they lie; the pass writes the triangles. Made again for a pose, a tree
+  costs sixty times as much (a character of 13,744 triangles, one core: 3.0 ms against 0.05) and walks 4 to 11 %
+  shorter by its nodes' areas.
 
 **Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
 its BLASes, or the units), so the engine's path is the same under both traversals (`live/edits.rs` `move_instances`,
@@ -1191,11 +1277,12 @@ its BLASes, or the units), so the engine's path is the same under both traversal
 | a mesh of its own is added (a new chunk, a new box) | its triangles and attributes into the edit room in its tree's order, its tree into the mesh range, a record, the top tree |
 | a mesh of its own changes (a voxel edit: the chunks it touched) | those meshes' trees made again (the old tree's nodes given back and filled), their records; no other unit is read |
 | a mesh is removed | its record cleared, its tree given back and filled, the top tree |
+| a skinned model takes a new pose | its mesh's tree's boxes written where they lie (the shape kept), its triangles by the skinning pass, the top tree |
+| a skinned model is hidden, shown or removed | its record, the top tree (shown: skinned as it is posed then) |
 
 The scene is rebuilt, as before this step, by: the first instanced mesh of a scene that has none (its kernel has no
-unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a posed model's
-pose (its triangles are in the still tree) and a rigid group's (its parts are units, placed again by a rebuild
-still); an instance of a mesh that deforms; **room that is
+unit walk: one rebuild, as hardware traversal's first instance is); an edit of a procedural object; a skinned
+model added (hardware traversal adds it in place); **room that is
 full** (the edit room and the tree ranges are sized at the build, a quarter of the scene and at least 65,536
 triangles and 1,024 records, and do not grow under software traversal: under hardware traversal they do; what an
 edit replaces stays behind until the next rebuild, under both; a scene with units and no geometry of its own to
@@ -1211,18 +1298,17 @@ that is not its mesh's tree now (freed, or placed again elsewhere), or a unit si
 not yet used, and a tree given back, hold leaves that end (`units::FILL`), not zeros (zeros are an interior node
 whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
 
-**The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module,
-which the still walk uses too (its own declaration is under `@if(!units)`). Why not a walk's own: an array a function declares is set to zero each time the function is
+**The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module.
+Why not a walk's own: an array a function declares is set to zero each time the function is
 entered, whatever the ray then meets, and a ray's walk is entered many times a pixel. The unit walk's own 64 words
-cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55; the still walk's own 48 cost them 0.36,
-1.1 and 1.5 more, **and cost every flattened scene the same** (a kernel without units is the file as it is, so it
-still pays: "Open" in ROADMAP § 6 step 7c). A walk reads only what it pushed, so what an earlier ray left is never
-read. The still walk uses 48 entries, as before, and leaves the stack empty; a unit's walk pushes above what the
+cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55 (and the 48 of the still scene's walk,
+while there was one, 0.36, 1.1 and 1.5 more). A walk reads only what it pushed, so what an earlier ray left is never
+read. A unit's walk pushes above what the
 top walk has pending. The top tree is at most 19 deep (a built tree 18, which holds 2^18 units, the most a scene is
 given units for; a root over two of them). That leaves 45 for a mesh tree. Binned SAH is not balanced: measured on
 the CPU, its trees over the catalog's models are 17 deep for 37 k triangles, 20 for 502 k, 22 for a 31 k-triangle
 building of Kabukichō, and 42 for the 5.86 M triangles of `zero-day` (a balanced tree there is 21), which as part of
-a flattened scene fitted the still walk's 48. A mesh tree deeper than 45 is built again by median splits, whose
+a flattened scene fitted a stack of 48. A mesh tree deeper than 45 is built again by median splits, whose
 depth is log2(triangles / 4): a worse tree to walk, never a wrong one. A push past the stack is dropped (geometry
 missed, never a hang), and the builders' bounds mean it is not reached; `the_builders_keep_their_depths` holds them
 to it.
@@ -1344,7 +1430,7 @@ and in the merged layout alike, **and the same 23 fail on main's build, with the
   `hidden-in-place-live`, `instance-data`, `lit-normal`, `lit-orientation`, `motion-repose`, `node-custom`,
   `quad-placement`, `shown-in-place-live` (13; `particles/burst-not-yet` expects nothing drawn and passes);
   `gpu-particles/beside-particles`, `plane`, `voxels`, `voxels-live`, `voxels-side` (5); `translucent/depth`,
-  `translucent/order` (translucent particles);
+  `translucent/order`, `translucent/systems` (translucent particles);
 - `volume/lighting`, `volume/lighting-offline` (6 for 1): their subject is one translucent particle in front of a
   6-nit wall, so these two are the same missing particles: the region reads the wall;
 - `surface/windows` (0.3934 for 0.4234): not explained. Its scene is one plane with the library's facade windows
@@ -1407,7 +1493,7 @@ guard's 1.2 ms there is not its form). In Chrome (`tools/web-hello.ts --frames`)
 | `instancing` (1,000, all moving) | 3.39 / 7.89; flat rebuilds the scene every frame (276 ms of CPU a frame; units 6.5) | offline at one instant, 64 spp: ΔE 0.37, SSIM 0.995 |
 | `bistro` (1 unit of 2.83 M triangles) | 23.1 / 22.2 | ΔE 0.69, SSIM 0.990 |
 | `zero-day` (1 unit of 5.87 M) | 14.5 / 12.8 | ΔE 1.20, SSIM 0.963: the scene's own spread, see below |
-| `zero-day-animated` (3,991) | every frame rebuilds the scene (2.6 s), with units as flat: a rigid group's pose, as before step 7b | – |
+| `zero-day-animated` (4,181) | posed in place since 2026-11-20: 16.3 ms at 1280 × 720, half scale, a frame's commit 1.2 ms (before: every frame rebuilt the scene, 2.9 s) | – |
 
 `zero-day`'s picture: two runs of the flat kernel are ΔE 0.11 apart, so units' 1.20 is not noise of one kernel.
 Offline at 1,024 spp the three traversals are as far from one another: units against flat ΔE 0.97, hardware
@@ -1441,19 +1527,19 @@ The path-tracing kernel is one WESL module: `pathtrace.wgsl`, then `records.wgsl
 translation (`@if(flag)` on a declaration or a statement, `@if(flag) { .. } @else { .. }` on a block of
 declarations). wesl-rs (WESL's compiler in Rust, natively and in a browser alike) makes a kernel's WGSL from a
 variant (gpu.rs `KernelVariant`, `kernel_wgsl`): the traversal (`hwrt`), a device's switches (`strict`,
-`cutout_lite`, `cutout_lite2`, `last_direct`, `last_sun`, `light_pick`), software traversal's units (`units`), the binding layout (`merged`, the browser's; `uniform_tables`, Android's) and the loop guard (`guard`).
+`cutout_lite`, `cutout_lite2`, `last_direct`, `last_sun`, `light_pick`), software traversal's units (`units`), the binding layout (`merged`, the browser's; `whole_tables`, Android's) and the loop guard (`guard`).
 pathtrace.wgsl's head names them; a flag the source names that a kernel is not given is an error. A scene's other
 features are bits of `FEAT`, a pipeline-overridable constant: one kernel source for all of them (`OBJECT_STRIDE`
 too is an override, from F_TINT).
 - The numbers a variant is compiled for are WESL constants, which the source imports (`import constants::..`; gpu.rs
-  `KernelVariant::constants`): the uniform tables' lengths, the loop guard's limit. One
-  the source imports and is not given is an error.
+  `KernelVariant::constants`): the loop guard's count's words and its limit. One the source imports and is not
+  given is an error.
 - The kernel reads its tables and its group-1 buffers only through functions (`material_at`, `instance_at`,
   `cache_acc_add`, `refl_store`, ...), declared once in each layout's block, so a layout is its declarations and
   nothing else of the kernel knows which it is in.
 - The loop guard's count goes into every loop by a pass over the variant's syntax tree (gpu.rs `guard_loops`).
-- What more than one shader reads or writes is declared once, in `records.wgsl`: a triangle's attributes
-  (`TriAttr`), a sample of the trace (`Pixel`), the light tiles' constants. The file is part of the kernel, of the
+- What more than one shader reads or writes is declared once, in `records.wgsl`: a triangle's attributes as a hit
+  has them (`TriAttr`), a sample of the trace (`Pixel`), the light tiles' constants. The file is part of the kernel, of the
   particle passes and of the live passes (build.rs reads it with live.wgsl). The particle passes take the object
   table's stride as a pipeline constant, as the kernel does (until 2026-11-15 gpu.rs rewrote a line of their text).
 - The kernel's bind group layouts are written in one place (gpu.rs `kernel_layout_entries`), and a test holds them
@@ -1485,7 +1571,8 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   copies, so a light sample reads no placement; what moves an emitter after the load is copied again on the GPU,
   `emitter_fill.wgsl`).
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
-  colours (`env_cdf_at`, `pword`, `vcolor_word`). Integers are read as integers, not through a float's bits.
+  colours, the instances' rows, and the triangles' indices ("The scene's triangles" below) (`env_cdf_at`,
+  `pword`, `vcolor_word`, `tri_indices`). Integers are read as integers, not through a float's bits.
 
 `Params::table_first` and `word_first` name each section's first element and are written with the parameters
 (`Uploaded::place`). What a scene has more of is another section, not another binding.
@@ -1517,6 +1604,58 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   without, and stays at 29.)
   (Hardware traversal no longer binds software traversal's trees, a placeholder there; the light tiles' lists took
   the binding.)
+
+## The scene's triangles
+
+Vertices and indices, one layout for hardware and software traversal (`renderer/src/indexed.rs`):
+- **Vertices.** `vertices` (binding 1): a record of 48 bytes a vertex, (position, u), (normal, v), (tangent, hand;
+  a hand of 0: none). The BLASes are built from this buffer too (stride 48).
+- **Triangles.** Three indices each, a section of `words` (`Stream::Indices`): what a hit reads, and the BLASes'
+  index buffer. A mesh's indices count from the mesh's first vertex, which its instances' records carry
+  (`info.z`).
+- **A triangle is a mesh's, and has nothing else of its own.** Which section of its mesh it is in, its hit says (`Hit.part`):
+  the geometry of the BLAS it was hit in, or under software traversal its tree's leaf. Its instance's row for
+  the section has the material and where the section's triangles and emitters start; its instance's record has
+  its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
+  light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
+- **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an
+  acceleration structure does: 48 bytes each, in the triangles' order, (v0, id), (v1 - v0, id), (v2 - v0, -). A
+  candidate's test reads nothing else. The ids: its section of its mesh, and its index in
+  the section (a tree has a mesh's triangles in its own order). Written at the build and where an edit places a
+  mesh; after the skinning pass a pass takes a posed mesh's again from its vertices (`leaf_gather.wgsl`).
+- **A hit reads** its triangle's indices and its three vertices' records (`tri_data(triangle, instance, part)`).
+- **What shares.** Corners equal bit for bit in position, normal, UV and tangent are one vertex: each mesh within
+  itself, a skinned mesh by its model's corners.
+- **Particle systems.** A system is a mesh of the pool, four vertices and two triangles a particle, and one
+  instance that places nothing (`scene::particle_mesh`, `INST_PARTICLES`): its pass writes the vertices in the
+  world and their previous positions, and its BLAS is built again after the passes, with the TLAS
+  (`Gpu::build_particles`). A particle has an object of its own, from the instance's on: a hit's is its
+  triangle's index in the mesh / 2 past it (kernel feature `F_PART`). A system the lights are sampled by has an
+  emitter a triangle among its instance's, weighed by half the particle's nominal area and taken again from the
+  vertices every frame. A translucent system's instance is hidden from the scene's TLAS and is an instance of
+  the translucency pass's own. Under software traversal the passes do not run.
+- **Tangents.** A vertex's own: the tangent at a hit is its triangle's three vertices' there, the hand its first
+  vertex's, placed by its instance (`hit_tangent`; read only where a frame is asked, by a normal map or a
+  function). A model's file gives them; a primitive of a file that has UVs and no tangents has them made where it
+  is loaded, a corner each, by the algorithm normal maps are baked against (`tangents.rs`, MikkTSpace; a vertex
+  whose corners come out apart, at a mirrored texture's seam, is a vertex for each). Geometry that is no file's and
+  has no tangents (a scene's own geometries, a light's card) has its frame made where it is hit, from its
+  triangle's edges, its UVs and its first normal.
+- **Motion.** `prev_verts` (binding 6): the vertices that move as they were the previous frame, whole records (a
+  copy on the GPU has no stride; the kernel reads their positions): the deforming meshes', each where its record
+  says (`n2.w`).
+- **Edits.** A mesh an edit places takes a run of triangles and a run of vertices (`EditState::tris`, `verts`);
+  both rooms grow by a copy on the GPU. A mesh changed in place keeps its run where the new vertices fit.
+- **Bytes.** A triangle was 144 bytes for the kernel (48 its vertices, 96 its attributes) and 36 more as the BLAS's
+  input; it is its three indices, 12, and its share of the vertices' 48 each. Vertices a triangle as measured:
+  Tokyo 1.17, Zero Day 1.03, a crowd of skinned walkers 0.98, small scenes of smooth models 0.5 to 0.7, a voxel
+  level's meshes 1.88 (a face's four corners are no other face's). With the BLASes, on the GPU: Tokyo 6.4 GB ->
+  3.9, Zero Day 1.6 -> 0.95.
+- The build still flattens a file's indexed geometry and finds the sharing again (1.2 s on Tokyo's 23 M
+  triangles): carrying a file's indices through is a later step.
+- Under hardware traversal the kernel binds one buffer fewer than it did (a triangle's attributes were a second
+  one): the translucency pass's pipeline, which was at Metal's 29 buffers a stage, is at 28. Under software
+  traversal the leaves take that place: a browser's merged layout uses all eight of its storage buffers, as it did.
 
 ## Random numbers
 
@@ -1596,6 +1735,394 @@ none of them it traces its light there. Two limits are known and held by tests s
   sunlit mirror wall 5 % bright), and a surface seen in a reflection takes the sky's light from it, unshadowed
   below a voxel's size.
 
+## Live rendering settings
+
+The native `play` and `live` commands, `serve` live jobs and the browser take four settings, one for each gap
+between what a frame affords and what is shown (renderer/src/live/rendering.rs):
+
+| setting | the gap | ThreeRT's own | vendor technology it maps |
+|---|---|---|---|
+| `quality` | rays: the render resolution every later stage works from | dynamic resolution | (a budget, not a technique) |
+| `reconstruction` | noise, then pixels | denoiser + temporal upscaler | DLSS SR / RR, MetalFX, FSR, XeSS |
+| `frameGeneration` | frames shown per frame rendered | none | DLSS FG, FSR FG, XeSS FG, MetalFX frame interpolation (none integrated yet) |
+| `latency` | input to photon | one frame queued instead of two | Reflex, Anti-Lag 2, XeLL |
+
+Each is a request: the renderer runs what the device supports, and the status says what ran and why not the rest
+(nothing falls back silently). Neural techniques are not a setting of their own: a neural denoiser or upscaler is a
+reconstruction method, a neural radiance cache would be a lighting option, neural texture compression an asset format.
+
+```sh
+node tools/bundle-game.ts scenes/neon-reflections.ts
+renderer/target/release/threert-render play out/bundles/neon-reflections.js \
+  --quality performance --reconstruction metalfx-denoised,metalfx,builtin --latency on
+```
+
+### Reconstruction: two contracts
+
+A path tracer's frame needs two jobs before post: remove the samples' noise, then bring the image to the output size
+from the history of earlier frames. Vendor technology takes over the second job or both, so there are two kinds of
+provider, which read different signals:
+
+- an **upscaler** (`UpscaleProvider`) reads ThreeRT's *denoised* HDR image, depth, motion, a reactive mask and the
+  jitter, and replaces the upscaling;
+- a **joint denoiser** (`JointProvider`) reads the *noisy* traced lighting and the surface guides it needs to tell
+  lighting from texture (diffuse and specular albedo, normal, roughness, specular hit distance, an overlay of what has
+  no noise to remove), and replaces both. ThreeRT's denoiser does not run.
+
+| `--reconstruction` | denoise | upscale |
+|---|---|---|
+| `builtin` (default) | ThreeRT | ThreeRT (temporal) |
+| `fsr` | ThreeRT | AMD FidelityFX Super Resolution **1** (spatial EASU + RCAS; also on WebGPU) |
+| `metalfx` | ThreeRT | Apple's temporal scaler (macOS 13+, iOS 16+) |
+| `dlss` | ThreeRT | NVIDIA DLSS Super Resolution; DLAA at scale 1 (x86-64 Windows/Linux, RTX on Vulkan, feature `dlss`) |
+| `metalfx-denoised` | Apple's temporal denoised scaler: both (macOS 26+ on Apple silicon, iOS 26+) | |
+| `dlss-rr` | NVIDIA DLSS Ray Reconstruction: both (as `dlss`) | |
+| `off` | none | none: each frame's samples as traced, without history (the joint denoisers' input; for comparison) |
+| `custom:<id>` | a provider an embedding host registered, of either kind | |
+| `auto` | the best this device runs: `metalfx-denoised`, `metalfx` on a Mac or an iPhone; `dlss-rr`, `dlss` with DLSS; else `builtin` | |
+
+A list (`dlss-rr,dlss,fsr`) is an order of preference; `builtin` ends every list. `quality` presets are the vendors'
+ratios exactly (`ultra-performance` is a third: 640 pixels across 1080p, the smallest input DLSS takes, where a typed
+`--scale 0.333` gives 639 and DLSS reports itself unsupported). Diagnostic views use `builtin`. A provider that
+fails while encoding a frame falls back to `builtin` from that frame on.
+
+A provider says which render scales it takes (`scale_range`: MetalFX scales its output up to 3x the input, so a third
+and up; DLSS from its modes' input ranges). Under dynamic resolution (`quality: auto`) the governor does not go below
+the range of the method that runs, nor below that of the first method asked for that did not run for the scale alone:
+it goes up to it, and from there the method runs. (A 2560 x 1440 view that dynamic resolution held at a quarter never
+ran MetalFX before.)
+
+### TypeScript
+
+```ts
+import { rendering, type RenderingStatus } from "@threert/scene";
+
+rendering.set({ quality: "performance", reconstruction: ["metalfx-denoised", "dlss-rr", "builtin"], latency: "auto" });
+const status: RenderingStatus | undefined = rendering.status();
+// status.reconstruction: { requested, active, denoise, upscale, fallback, skipped: [{ method, reason, detail }] }
+```
+
+`set` changes the settings it is given, from the next frame; it returns `true` when a renderer binding took the
+request (not a support check) and throws a `TypeError` for an unknown setting or value. `status()` is the last frame's:
+for each setting what was requested and what ran; for reconstruction also who denoised and who upscaled, and each
+method tried before the one that ran with its reason (`unavailable`: not in this build or platform; `unsupported`: the
+device, OS or size; `provider-error`; `diagnostic-view`) and a sentence of detail. `fallback` is the first method's
+reason (`null` when it ran, or for `auto`). These are device-local view settings, not scene state, and are not
+replicated. A runtime without the live renderer binding returns `false` from `set` and `undefined` from `status`.
+
+### NVIDIA DLSS setup
+
+Install [NVIDIA DLSS SDK 310.9.1](https://github.com/NVIDIA/DLSS/tree/v310.9.1), the Vulkan SDK, and Clang
+(including libclang for bindgen). Set `DLSS_SDK` and `VULKAN_SDK` to their SDK directories, then build:
+
+```sh
+cargo build --release --locked --manifest-path renderer/Cargo.toml --features dlss
+WGPU_BACKEND=vulkan THREERT_DLSS=1 renderer/target/release/threert-render \
+  play out/bundles/neon-reflections.js --quality performance --reconstruction dlss-rr,dlss
+```
+
+NVIDIA's matching runtime libraries (`nvngx_dlss`, and `nvngx_dlssd` for Ray Reconstruction) must be discoverable.
+For distribution, follow the
+[DLSS wrapper's deployment instructions](https://github.com/bevyengine/dlss_wgpu/tree/b35069de8640bfae383e65a46b7d16058b2994d2#distributing-your-app).
+The engine does not bundle NVIDIA's SDK or runtime.
+
+### Apple MetalFX
+
+The temporal scaler requires a supporting Metal device and macOS 13 or iOS 16 or later. Build with the macOS / iOS 26
+SDK or newer to include the denoised scaler, which also requires macOS 26 or iOS 26 at runtime (an iPhone 17 Pro Max
+runs both). The framework is loaded at run time, so one binary runs on systems without it. A plain temporal scaler
+can keep its history across dynamic resolution changes inside its supported range (its inputs are textures of the
+output's size); the denoised scaler starts a new history when input dimensions change.
+
+In the scene viewer, press `M` to switch between `builtin` and `auto` (on a Mac, MetalFX's joint denoiser) and `N`
+to step through every method this platform has. The title bar shows the method that ran and the render scale. Games
+that handle keyboard input keep their key bindings. `tools/denoise-demo/live.sh` opens Kaleido (a mirror hall lit
+only by hundreds of glowing orbs) for this comparison; `tools/denoise-demo/record.ts` and `video.ts` record it.
+
+For smooth mirrors and glass, secondary ray queries put the reflected and transmitted surfaces in the joint
+denoiser's guides (pathtrace.wgsl `surface_guides`). Directly visible sky and emission-dominated pixels are the
+overlay, with the bypass mask 1 on them. Exposure, bloom, depth of field and motion blur process the reconstructed
+HDR image on the GPU.
+
+### Native controls and custom providers
+
+Set `THREERT_RECONSTRUCTION` for a native process that embeds `LiveCore`, call `LiveCore::set_rendering` (or
+`set_reconstruction`), or send `{"cmd":"rendering","reconstruction":["metalfx-denoised","builtin"],"quality":"balanced"}`
+to a running `live` or `play` session (`{"cmd":"reconstruction","mode":"fsr"}` is the same with one setting). Launch
+flags (`--quality`, `--reconstruction`, `--frame-generation`, `--latency`) set the initial values. Viewer `stats` have
+the whole status under `rendering`, and `reconstruction`, `requested_reconstruction` and `reconstruction_fallback`;
+the `live --frame-log` records the method each frame ran and its fallback. Live `serve` jobs accept `reconstruction`
+(a method, a list or `auto`) and a numeric `scale`.
+
+An embedding host implements `UpscaleProvider` or `JointProvider` (renderer/src/live/reconstruction.rs documents
+every texture: format, units, conventions) and calls `LiveCore::register_upscaler("custom:my-scaler", provider)` or
+`register_joint_denoiser`, then selects it from Rust or TypeScript. IDs after `custom:` are 1–48 lowercase ASCII
+letters, digits, or hyphens. `prepare` answers `Prepared::Ready` (with the input textures' size, which may exceed the
+input for a provider that takes a varying input) or `Prepared::Unsupported(reason)`, which goes to the status. The
+provider writes full-output HDR on the live GPU, on the encoder or in a native command buffer it returns; the engine
+still owns packing the signals, post-processing and presentation.
+
+Run `node tools/bench-metalfx.ts` after building the release binary to compare the three MetalFX/built-in paths
+against 256-spp offline references for a still camera and a lateral move. It saves the frames, frame timings and
+image metrics under `out/metalfx/` and checks which implementation actually ran.
+Use `--scene glass` for the refraction workbench or `--scene cornell` for the Cornell box.
+On an Apple M1 running macOS 27.2.1, the glass camera move scored 0.909 SSIM with the built-in path,
+0.944 with MetalFX temporal and 0.940 with joint denoising. At the same 320 × 180 input and 640 × 360
+output, median GPU frame times with the camera held still were 9.69, 9.78 and 10.22 ms respectively.
+On the Cornell box the built-in path scored highest for both camera poses.
+
+## The post chain
+
+`renderer/src/post.rs` (offline: `post::finish`, and the reference) and the last passes of
+`renderer/shaders/live.wgsl` (`lum_down` .. `post`) take scene-linear radiance in nits (Rec.709 primaries, D65) to
+8-bit sRGB. The settings are a preset's `post` block (`desc::PostPreset`), the camera's exposure and depth of field.
+Their names follow Unreal's Post Process Volume settings and mean what its public documentation says, so a scene's
+look can be compared with the same settings in Unreal; the methods are ours, from public sources, with the free
+constants fitted to measurements of the look the presets ask for (`renderer/examples/post_check.rs` is the check;
+licences in `THIRD_PARTY_NOTICES.md`).
+
+In the order a pixel goes through it:
+
+| Step | Settings | What it does | From |
+|---|---|---|---|
+| Exposure | camera `setManualExposure(ev100)` / `setAutoExposure(compensation, minEv100, maxEv100)`; `autoExposure.lowPercent`, `highPercent`, `histogramLogMin`, `histogramLogMax`, `speedUp`, `speedDown` | Manual: scale 2^-EV100 (EV100 0 shows 1 nit as 1.0). Auto: a 64-bin histogram of the log2 luminance of the frame at quarter resolution, within the histogram range (what is outside is not counted); the average luminance between the two percentiles is exposed as middle grey (0.18) x 2^compensation, the average held within what `minEv100` .. `maxEv100` expose as middle grey. Live, the exposure moves to that target at `speedUp` (the scene got brighter) / `speedDown` EV per second, exponentially within the last 1.5 stops, and snaps on a reset. | own design after the settings' documented meaning |
+| Depth of field, motion blur | camera `dof`; `motionBlur.amount`, `max`, `targetFps` | Live passes on the exposed-to-be image (`dof`, `mblur`). The lens is a thin lens: circle of confusion r_inf (1 - s / z), at most 2.5 % of the width. The blur is `amount` of a frame's motion, of a frame at `targetFps` when that is set. | thin-lens optics; own design |
+| Local exposure | `localExposure.highlightContrast`, `shadowContrast`, `detailStrength`, `blurredLuminanceBlend`, `blurredLuminanceKernel` | Log luminance is split into a base (an edge-aware blur at quarter resolution, blended with a wide Gaussian of `blurredLuminanceKernel` % of the width) and the detail left over; the base's distance from middle grey (x auto exposure's compensation) is scaled above / below it, the detail by `detailStrength`. All 1: off. | Durand & Dorsey 2002 |
+| Bloom | `bloom.intensity`, `threshold`, `sizeScale`, `sizes`, `tints` | Added to the picture: `intensity` x 0.175 x the sum over up to six stages of `tints[k]` x a Gaussian blur of standard deviation 0.1 x `sizes[k]` x `sizeScale` percent of the width, of what blooms (everything under a negative threshold; else from the threshold, in exposed luminance, to one unit above it). Offline each Gaussian is taken to its own shape. Live they are a weighted sum of the levels of a 1/4 .. 1/128 pyramid (each stage as the two levels around its width; wider ones summed on the coarsest level; a five-pixel kernel of the output for stages under about two pixels): 12 small passes after `lum_down`. Next to a light hundreds of times brighter than its surroundings the live glow ends a few pixels sooner than offline. | own design; pyramid: Burt & Adelson 1983 |
+| Vignette | `vignette` | cos^4 of the field angle, whose tangent at the corner is 1.425 x the setting (0.4: the corners at 57 %). | cos^4 law |
+| Chromatic aberration | `chromaticAberration` (0 .. 5) | Red is read from a picture magnified by 0.2 % a unit about the centre, blue from one reduced by as much. | own design |
+| Colour grading | `colorGrading.whiteTemp`, `whiteTint`, `saturation`, `contrast`, `shadowsGain`, `highlightsGain` | White balance: Bradford adaptation from the illuminant of that temperature (CIE daylight locus from 4000 K, Planckian below 3000 K; the tint shifts it across the locus) to the 6500 K white. Then, on scene-linear ACEScg: saturation about the luminance, contrast as a power about 0.18, gains weighted to shadows (luminance under 0.09) and highlights (from 0.5, whole from 1). Scalar or RGB; 1 = none. | CIE 15, Krystek 1985, Lam 1985; own design |
+| Tone curve | `colorGrading.expandGamut`, `blueCorrection` | The Academy's reference rendering for an sRGB display (ACES 1.x RRT + ODT: its "glow" and "red modifier", per-channel tone scale in ACEScg between its 0.96 and 0.93 desaturations) with a tone curve of our own, two logistic branches in log exposure (`post::ToneCurve`: toe a power law to black, shoulder closing on 1.04). In front of it: the gamut expansion (bright saturated colours re-read in a wider gamut, by `expandGamut`), and the Academy's blue-light-artifact fix by `blueCorrection`, undone after the curve. Live this and the grading are a 48^3 table over log2 exposure (-10.5 .. 6.5 stops). | ACES 1.3 reference transforms (AMPAS licence); curve and expansion fitted |
+| Film grain | `filmGrain` (0 .. 1) | Zero-mean luminance noise on the encoded value, strongest in the mid-tones, new each frame (`THREERT_NO_GRAIN=1`: none). | own design |
+
+Measured against the previous release's look (its tables and seven reference pictures): the neutral ramp within 0.0004
+in sRGB-encoded value, 6 657 colours at a mean CIE dE2000 of 0.19 (99th percentile 1.1), the grading tables at 0.17 ..
+0.26, the pictures at 0.12 .. 0.39 (99th percentile under 1.9). `node tools/post-live.ts` puts the live passes against
+`post::finish` of the same frame (mean dE2000 0.15 .. 0.57 on the seven scenes at 960 x 540).
+
+## The temporal response of the live denoiser
+
+The live view traces about one path a pixel and accumulates: the diffuse irradiance in `dtemporal`, the specular
+light in `stemporal` (`live.wgsl`; the section "The response of the histories" there has the rules, their sources
+and what was tried). A frame bounds every history (`L.misc.y`: `HISTORY_LIVE`, 24 frames, while the scene's
+lighting changes, 4096 once it has settled); within that, each pixel's history has a length of its own.
+
+- **In motion.** A history that moves over the grid is resampled bilinearly every frame, and each resampling blurs
+  it a little (Karis 2014 calls it reprojection diffusion): a tap at a fraction f of a pixel is a two-point kernel
+  of variance f (1 - f) pixels². The length is bounded so that the blur gathered stays under a budget
+  (`moving_frames`; `MOVE_BLUR`, `SPEC_MOVE_BLUR` pixels²: 64 and 32 frames at half a pixel a frame and faster, more
+  below). Holding still, nothing bounds. The bound trades blur for noise; what a reflection needs in a move of the
+  camera is not this bound but the parallax's (below).
+- **Animated shading** (signs, screens): `ANIM_FRAMES` for the diffuse history.
+- **While the lighting changes** (`L.mode.z`: something moved or was edited in the last 45 frames), a change chart
+  per pixel, and a drift. The renderer cannot trace last frame's path again with its random numbers (the temporal
+  gradient of Schied et al. 2018), so what it has is each frame's sample against the pixel's own history, and the
+  question is a control chart's: has the mean of a noisy stream shifted. The chart is an exponentially weighted
+  moving average watched against a band of its own deviations (NIST e-Handbook of Statistical Methods § 6.3.2.4),
+  with three choices made for one-sample path tracing:
+  - The reading is the sample's *share* against the history, s / (s + h') per channel: 0 for a dark sample, about a
+    half at the history's level, towards 1 far above it. A sample is heavy-tailed (most are dark, a few carry the
+    light); a share is bounded, so no single sample moves the chart by more than a fixed step, and a run of dark
+    samples on a pixel lit by rare bright ones reads as what it is, the usual.
+  - The residual is taken from the pixel's own running mean of that share (its level), so it has mean 0 while the
+    lighting holds, whatever the surface, and residuals of neighbouring pixels can be pooled.
+  - Pooled by recursion: each frame the average is read from the pixel itself and four pixels at distance √5 around
+    where it was, and this frame's residual is added with weight 1/8. About 250 residuals stand behind a pooled
+    value (a pixel's own average has 15), over a radius of a few pixels and about eight frames.
+
+  The chart signals when the pooled average leaves a band (`CHART_K` of its deviations, from the residuals' pooled
+  mean square; at least `CHART_FLOOR`), and the response is Schied et al.'s blend rule (their eq. 15): the weight a
+  becomes a + drop (1 - a). The diffuse chart is kept per channel (a red sign switched off beside a white lamp
+  moves the red channel's share far more than the luminance); the specular one on the mean of the three.
+
+  **The drift.** A chart whose level follows the history sees a change and then gets used to it: under a light that
+  falls a little every frame (a dusk) the shares settle at a lower level, and the history trails the light by its
+  whole length for as long as the fall lasts. What does not get used to it is the plain relative residual
+  (l - h) / h of the luminance, whose mean is 0 for a history that is the samples' mean and minus the lag for one
+  that trails. It is pooled as the chart's average is, each pixel's weighted by how far its samples can be trusted
+  (1 / (1 + cv²), cv their relative deviation), and the response is not a shorter history but a moved one: each
+  frame the history is scaled by 1 + `DRIFT_GAIN` × the pooled residual, less what the pixel's noise allows the
+  pooled value to be by chance. The lag goes and the noise stays that of a full history. The same factor goes to
+  the specular history of rough surfaces. Pixels lit by rare bright samples are left out (a bounded mean of a
+  skewed sample is biased; their weight is small): there the frame's bound alone follows.
+
+  The state of both lasts in `diffuse_fast` (diffuse) and `diffuse_mom`.z (specular) and is kept up while the
+  lighting is settled too, when nothing responds: with `L.mode.z` 0 the diffuse history is the plain mean of its
+  frames, and a still view converges on the offline render.
+
+`stemporal` adds what a reflection needs:
+
+- **Where the history is.** A reflection's image does not move with the surface that shows it but by the depth of
+  what is reflected (Stachowiak 2015). The history is read where the surface point was and, when the two differ by
+  a quarter pixel or more, where the point at the surface's distance plus the reflection's hit distance along the
+  view ray was (the image in a plane mirror; for a surface that moved, carried by twice its move along its normal).
+  This frame's nine samples around decide: each history counts by its distance from their mean in YCoCg, in bands
+  of `SPEC_GAMMA` deviations (Karis 2014's neighbourhood box, as a mean and deviations), times what the roughness
+  says beforehand (the reflection's place on a mirror, the surface's from roughness 0.6).
+- **How long.** Besides the frame's and the motion's bound: by the parallax, the distance between those two places
+  a frame (none in a camera turn), so that the history has not slid against what it shows by more than
+  `SPEC_SLIDE` pixels, more with roughness² (a blurred image hides a slide). Where the sample has no hit distance,
+  the parallax of a far reflection is assumed; rough surfaces are bound too (a lamp's highlight on wet stones
+  slides with the view); on a mirror a share of it counts, and little where the reflection's history was found in
+  its place and agrees. While the lighting changes, also by roughness: shortest (`SPEC_LIVE_GLOSS`) where a
+  reflection is sharp and the filter already reaches, longer on a mirror (`SPEC_LIVE_MIRROR`), the frame's bound on
+  rough surfaces.
+- **What it follows**, while the lighting changes or the reflection moves against its surface, and always on
+  animated shading (waves): the chart, and the neighbourhood's band: the history is clamped into the nine samples'
+  mean ± (`SPEC_GAMMA` deviations + `SPEC_REL` of its own level). Where the light comes by rare bright samples,
+  nine dark ones say nothing against a history that holds their mean; the chart's level knows those pixels (their
+  mean share is far below a half), and there the band is as wide as the history's level: it can be raised, not
+  cut. A reflection that passes is steady while it is there: a history the clamp raises (all nine samples above
+  it) has its level set so, and while the lighting changes a pixel takes the highest level among the pixels its
+  chart pools from, so a passing reflection's rim goes with its middle. On animated shading half of the allowance
+  is kept (`SPEC_ANIM_RARE`): a glint that has moved on is not a rare sample, a glint under a stopped clock is.
+- **The filter's reach** (`sfilt*`): `SPEC_REACH` × roughness² traced pixels (the lobe's width): none on a mirror,
+  all three passes from roughness 0.25.
+
+**Measured** on the integrated tree, 2026-11-24 (this machine; the previous release, the tree with the first
+version of these rules, and now). `test-render`: 271 of 271 pass. The two wall-clock shots (the Bistro move and the
+volumes) vary with what else the GPU is doing (the volumes shot, this build, four runs that evening: 0.33 to
+0.37 at its first frame, and once 0.52 under another session's load); the others run in lockstep and repeat.
+
+`node tools/bench-ghosting.ts --quick --check` (passes; excess ΔE / p95 excess / trail px):
+
+| | previous | first version | now |
+|---|---|---|---|
+| turn-mid ground | 0.85 / 2.8 / 5 | 0.92 / 2.79 / 4 | 0.87 / 2.82 / 6 |
+| strafe-mid ground | 1.6 / 3.9 / 5 | 1.37 / 3.26 / 5 | 1.38 / 3.41 / 5 |
+| turn-return+0.5s all | 1.13 / 3.74 / 10 | 1.13 / 3.65 / 9 | 1.13 / 3.77 / 10 |
+| strafe-return+0.5s all | 1.25 / 3.97 / 10 | 1.22 / 3.74 / 9 | 1.22 / 3.95 / 10 |
+| stop+0.1s ground | 1.34 / 3.38 / 6 | 1.49 / 3.83 / 5 | 1.36 / 3.53 / 5 |
+
+`node tools/bench-object-ghosting.ts --repeat 3` (ΔE / p95 / trail px over the swept band):
+
+| | previous | first version | now |
+|---|---|---|---|
+| device-slide mid | 1.78 / 6.10 / 31 | 1.86 / 6.74 / 31 | 1.79 / 6.58 / 31 |
+| device-slide end | 1.97 / 6.23 / 29 | 1.75 / 6.85 / 29 | 1.79 / 6.72 / 29 |
+| device-slide end+0.1s | 0.95 / 3.38 / 15 | 1.05 / 4.02 / 22 | 1.03 / 3.79 / 23 |
+| device-slide end+0.3s | 0.70 / 1.86 / 3 | 0.73 / 1.99 / 3 | 0.70 / 1.89 / 3 |
+| device-lift mid | 2.39 / 12.26 / 121 | 2.19 / 10.75 / 119 | 2.17 / 10.72 / 117 |
+| device-lift end | 0.96 / 2.60 / 14 | 0.94 / 2.80 / 14 | 0.92 / 2.71 / 14 |
+| device-lift end+0.1s | 0.74 / 1.85 / 7 | 0.72 / 1.99 / 6 | 0.71 / 1.80 / 6 |
+| device-lift end+0.3s | 0.52 / 1.20 / 2 | 0.52 / 1.33 / 2 | 0.50 / 1.09 / 2 |
+| orb-throw mid | 13.12 / 29.26 / 645 | 10.31 / 24.21 / 399 | 9.25 / 23.32 / 346 |
+| orb-throw end | 10.21 / 30.77 / 436 | 8.84 / 28.67 / 399 | 7.35 / 23.51 / 295 |
+| orb-throw end+0.1s | 5.23 / 15.98 / 173 | 5.48 / 14.68 / 281 | 3.75 / 10.62 / 97 |
+| orb-throw end+0.3s | 2.96 / 9.03 / 155 | 3.71 / 9.28 / 191 | 1.96 / 5.72 / 59 |
+| walker-run mid | 0.35 / 1.07 / 15 | 0.40 / 1.07 / 39 | 0.39 / 1.07 / 33 |
+| walker-run end | 0.44 / 1.09 / 29 | 0.48 / 1.11 / 28 | 0.47 / 1.09 / 28 |
+| walker-run end+0.1s | 0.35 / 1.07 / 21 | 0.38 / 1.09 / 15 | 0.37 / 1.08 / 17 |
+| walker-run end+0.3s | 0.29 / 0.93 / 6 | 0.32 / 1.06 / 4 | 0.30 / 0.94 / 3 |
+
+`node tools/bench-temporal.ts --shot edit` (ΔE 32 frames after the switch / luminance over the settled frame's at 32 frames / frames until within 2 % for good, 0: never in 256):
+
+| | previous | first version | now |
+|---|---|---|---|
+| lamp off, pool | 1.39 / 1.137 / 128 | 0.59 / 1.032 / 64 | 0.6 / 1.032 / 64 |
+| lamp off, bounce | 1.03 / 1.177 / 128 | 1.2 / 1.215 / 256 | 0.75 / 1.081 / 64 |
+| lamp off, room | 0.96 / 1.015 / 32 | 1.08 / 1.034 / 64 | 0.85 / 1.012 / 32 |
+| lamp on, pool | 0.93 / 0.977 / 64 | 0.48 / 0.992 / 16 | 0.43 / 0.993 / 16 |
+| lamp on, bounce | 2.61 / 0.758 / 0 | 2.04 / 0.819 / 0 | 1.64 / 0.857 / 256 |
+| lamp on, room | 1.42 / 0.955 / 128 | 1.35 / 0.965 / 64 | 1.05 / 0.975 / 64 |
+| sign off, signfloor | 1.37 / 1.058 / 64 | 0.8 / 0.972 / 128 | 0.9 / 0.972 / 128 |
+| sign off, room | 1.23 / 1.029 / 64 | 1.19 / 1.022 / 64 | 1.14 / 1.006 / 32 |
+| sign on, signfloor | 3.53 / 0.836 / 256 | 0.8 / 0.97 / 64 | 0.88 / 0.964 / 64 |
+| sign on, room | 2.28 / 0.931 / 128 | 1.12 / 0.968 / 64 | 1.14 / 0.97 / 64 |
+
+`node tools/bench-temporal.ts --shot water` (still ΔE / moving ΔE, at scene times 6, 7, 8 s):
+
+| | previous | first version | now |
+|---|---|---|---|
+| water, time held | 1.67 / 1.55 / 1.45 | 0.68 / 0.66 / 0.62 | 1.36 / 1.28 / 1.2 |
+| water, running | 4.62 / 4.71 / 4.48 | 7.08 / 6.99 / 6.77 | 4.15 / 4.11 / 4.13 |
+| reflections, time held | 3.08 / 3.01 / 2.77 | 1.16 / 1.16 / 1.11 | 3.22 / 3.04 / 2.88 |
+| reflections, running | 13.35 / 12.9 / 12.25 | 20.57 / 20.7 / 20.67 | 12.45 / 12.03 / 11.6 |
+
+`node tools/bench-temporal.ts --shot foliage` (still ΔE / moving ΔE, at scene times 6, 7, 8 s):
+
+| | previous | first version | now |
+|---|---|---|---|
+| plants, time held | 0.21 / 0.22 / 0.22 | 0.22 / 0.22 / 0.22 | 0.22 / 0.22 / 0.22 |
+| plants, running | 0.9 / 0.92 / 0.95 | 0.83 / 0.85 / 0.88 | 0.88 / 0.9 / 0.93 |
+| ferns, time held | 0.23 / 0.23 / 0.23 | 0.24 / 0.24 / 0.24 | 0.24 / 0.24 / 0.23 |
+| ferns, running | 1.03 / 1.14 / 0.99 | 0.93 / 1.04 / 0.9 | 0.98 / 1.08 / 0.94 |
+
+`node tools/bench-temporal.ts` --shot volumes (ΔE / p95 at move20, move40, move59, 0.5 s after the stop):
+
+| | previous | first version | now |
+|---|---|---|---|
+| ΔE | 0.33 / 0.36 / 0.37 / 0.22 | 0.42 / 0.56 / 0.56 / 0.32 | 0.33 / 0.36 / 0.36 / 0.22 |
+| p95 | 1.04 / 1.12 / 1.08 / 0.82 | 1.32 / 1.99 / 1.79 / 0.84 | 1.03 / 1.12 / 1.06 / 0.82 |
+
+`node tools/bench-temporal.ts` (the Bistro move) (ΔE / p95 at move20, move40, move59, 0.5 s after the stop):
+
+| | previous | first version | now |
+|---|---|---|---|
+| ΔE | 2.45 / 2.51 / 2.47 / 2.08 | 1.84 / 1.91 / 1.81 / 1.44 | 1.89 / 1.97 / 1.93 / 1.55 |
+| p95 | 7.69 / 7.97 / 7.83 / 6.56 | 6.07 / 6.18 / 5.83 / 4.45 | 6.4 / 6.53 / 6.5 / 5.05 |
+
+`node tools/bench-window.ts` (ΔE / p99 against offline, or for the dusk against the same moment held):
+
+| | previous | first version | now |
+|---|---|---|---|
+| still-bistro, held | 1.81 / 13.62 | 1.83 / 13.93 | 1.83 / 13.92 |
+| still-rooms, held | 0.63 / 1.82 | 0.59 / 1.79 | 0.59 / 1.77 |
+| still-rooms-wide, held | 0.77 / 1.99 | 0.77 / 2 | 0.76 / 1.95 |
+| still-glass, held | 1.28 / 27.19 | 1.27 / 26.89 | 1.27 / 26.87 |
+| rooms-turn, last | 0.89 / 3.44 | 0.92 / 3.94 | 3.32 / 0.9942 |
+| rooms-turn, stop1 | 0.88 / 3.33 | 0.91 / 3.81 | 3.22 / 0.9944 |
+| rooms-turn, stop6 | 0.87 / 3 | 0.9 / 3.43 | 2.9 / 0.995 |
+| rooms-turn, stop30 | 0.89 / 2.5 | 0.93 / 2.77 | 2.44 / 0.9954 |
+| rooms-turn, settled | 1.03 / 2.36 | 1.05 / 2.39 | 2.31 / 0.9957 |
+| slice, 40.5 s | 6.05 / 23.22 | 4.6 / 25.53 | 24.71 / 0.8425 |
+| tokyo-dusk, 6 s, skyline | 1.35 / 11.56 | 1.79 / 14.98 | 1.26 / 11.35 |
+| tokyo-dusk, 6 s | 1.12 / 8.46 | 2.61 / 16.02 | 1.11 / 8.52 |
+| tokyo-dusk, 7 s, skyline | 0.86 / 8.49 | 1.18 / 10.96 | 0.86 / 8.81 |
+| tokyo-dusk, 7 s | 0.6 / 5.46 | 1.44 / 10.27 | 0.61 / 5.48 |
+| tokyo-dusk, 8 s, skyline | 0.31 / 3.87 | 0.51 / 5.39 | 0.4 / 4.95 |
+| tokyo-dusk, 8 s | 0.5 / 5.81 | 0.87 / 6.65 | 0.5 / 5.66 |
+| tokyo-turn, last, tower | 2 / 33.29 | 1.99 / 33.22 | 33.24 / 0.9268 |
+| tokyo-turn, last | 2.43 / 35.84 | 2.4 / 35.69 | 35.69 / 0.9142 |
+| tokyo-turn, stop1, tower | 1.9 / 31.18 | 1.89 / 31.13 | 31.16 / 0.9336 |
+| tokyo-turn, stop1 | 2.3 / 34 | 2.27 / 33.82 | 33.82 / 0.9225 |
+| tokyo-turn, stop6, tower | 1.66 / 26.59 | 1.64 / 26.61 | 26.64 / 0.9506 |
+| tokyo-turn, stop6 | 1.9 / 28.41 | 1.87 / 28.24 | 28.24 / 0.9443 |
+| tokyo-turn, stop30, tower | 1.41 / 22.21 | 1.4 / 22.35 | 22.38 / 0.9647 |
+| tokyo-turn, stop30 | 1.51 / 22.94 | 1.48 / 22.79 | 22.78 / 0.9607 |
+| tokyo-turn, settled, tower | 1.39 / 22.25 | 1.38 / 22.29 | 22.27 / 0.9656 |
+| tokyo-turn, settled | 1.37 / 21.43 | 1.34 / 21.37 | 21.34 / 0.9656 |
+| tokyo-orbit, last, tower | 3.95 / 51.11 | 3.98 / 50.49 | 50.49 / 0.8647 |
+| tokyo-orbit, last | 2.29 / 35.2 | 2.28 / 35.08 | 35.08 / 0.9131 |
+| tokyo-orbit, stop1, tower | 3.8 / 49.36 | 3.82 / 49.2 | 49.36 / 0.875 |
+| tokyo-orbit, stop1 | 2.16 / 33.39 | 2.15 / 33.29 | 33.31 / 0.9213 |
+| tokyo-orbit, stop6, tower | 3.14 / 41.65 | 3.16 / 41.73 | 41.59 / 0.9183 |
+| tokyo-orbit, stop6 | 1.77 / 27.28 | 1.76 / 27.2 | 27.2 / 0.9449 |
+| tokyo-orbit, stop30, tower | 2.64 / 36.45 | 2.64 / 36.03 | 36.19 / 0.9409 |
+| tokyo-orbit, stop30 | 1.4 / 22.1 | 1.39 / 22.01 | 22.05 / 0.9608 |
+| tokyo-orbit, settled, tower | 2.52 / 35.5 | 2.51 / 35.38 | 35.38 / 0.9455 |
+| tokyo-orbit, settled | 1.28 / 20.67 | 1.26 / 20.64 | 20.64 / 0.9659 |
+
+What is still worse than the previous release, and why it is left: the dragged device's p95 at the middle and the
+end of its slide and its row 0.1 s after (the errors there are the screen's text copies and the strip the device
+uncovers, which the upscaler owns: with every rule of this section switched off the same rows read p95 6.84 at
+the end and 4.07 after); the runner's rows by 0.01 to 0.04 and its trail at mid-run (33 px for 15; 42 with the
+rules off); the dusk's skyline at 8 s (the diffuse and specular signals alone read 0.12 and 0.04 there, and the row
+does not move with the frame bound, 0.40 to 0.42 from 16 to 32 frames: what differs is in the directly seen sky and
+lamps); the slice's p99 (24.7 for 23.2, its mean 4.99 for 6.05); the mid-turn on the street (0.87 for 0.85) and
+0.1 s after the stop there (1.36 for 1.34); and
+the frames until the floor beside the switched-off sign stays within 2 % (128 for 64: the histories the chart cut
+are 1 to 3 % low until the rare bright samples have come in again, where the previous release was 6 % high at 32
+frames).
+
+The GPU time of the two passes on Bistro night (1280 × 720, scale 0.5; rounds the project's own check called
+quiet; the machine's GPU was shared, and its clock runs at two speeds, so compare within a round), still / on the
+perf smoke's move: `dtemporal` 0.11 / 0.14 ms (the first version in this tree: 0.11 / 0.14 to 0.19), `stemporal`
+0.12 to 0.13 / 0.19 ms (0.13 / 0.16 to 0.18) with rough surfaces still held to their neighbourhood in a move; with
+that dropped, in rounds under another session's load: 0.14 to 0.15 moving (the first version in the same rounds:
+0.15).
+
+
 ## Moving objects in the live view
 
 The live view's histories (the irradiance and specular ones on the traced grid, the upscaler's colour on the output
@@ -1615,8 +2142,8 @@ over a polished floor, a character running over a sunlit floor, the camera still
   and a carried lock that lands on a moving surface is dropped (`track`): a moving screen's text left copies of
   itself for a jitter sequence.
 - **Reflections follow what moves past them.** While the lighting is live (a moving object sets it), a still
-  surface's specular history is clipped to this frame's neighbourhood (`SPEC_CLIP` deviations plus `SPEC_CLIP_REL`
-  of its luminance): a light carried past a polished floor left its reflection along its path.
+  surface's specular history is held to this frame's neighbourhood and to its change chart ("The temporal response
+  of the live denoiser", `stemporal`): a light carried past a polished floor left its reflection along its path.
 - **Where the light changed, the history waits for it.** While the lighting is live, a traced sample whose light
   jumped since the previous frame (by `LIGHT_CHANGE` of itself and `LIGHT_FLICKER` times its own flicker: a shadow's
   edge passed, a lamp's pool moved) starts its flicker count again (`track`), and the output pixels around it hold
@@ -1628,13 +2155,10 @@ over a polished floor, a character running over a sunlit floor, the camera still
 
 ![Before and after: a dragged device's edge lines and text copies, a thrown light's trail and its streak in the floor's reflection](images/object-ghosting.jpg)
 
-Not covered: the specular clip also cuts a right history where the lighting is live all the time (a crowd's
-reflections are darker than offline's). A short-term specular history to clip against is no answer: at one sample
-a pixel it is noise (tried and dropped: `dtemporal`'s anti-lag note). The clip is transitional: it goes when a
-change in the lighting can be told from noise (last frame's path traced again with its random numbers). A fast
-light's effect on diffuse lighting (a shadow it casts) still lags by a few frames (the diffuse
-history and its anti-lag), and the band just uncovered starts from this frame's samples (more aliased for a frame or
-two, as any disocclusion).
+Not covered: a change of the light too small or too noisy for the change chart and the drift, and any change
+where the light comes by rare samples, trail by the frame's bound (`HISTORY_LIVE`). A fast light's effect on diffuse
+lighting (a shadow it casts) still lags by the two to four frames the chart needs, and the band just uncovered
+starts from this frame's samples (more aliased for a frame or two, as any disocclusion).
 
 ## Glass
 
@@ -1670,7 +2194,7 @@ in a browser") is the last line, not the guarantee: a count above zero is a bug 
 
 | what the kernel walks | built by | what holds it |
 |---|---|---|
-| the still scene's tree (software traversal), a procedural object's boxes' tree | bvh.rs `build_tris`, `build_boxes` | children after their parent and inside the tree (so a walk that goes down and pops what it pushed reaches each node at most once and ends, whatever the boxes say); every node reached once; leaves of 1 to 16 items inside the items; boxes finite (an item whose box is not is in no leaf, after every leaf's range, its index kept); no deeper than the kernel's stack (48: where the levels left could not finish the split the surface-area heuristic wants, the median); `check_tree` in tests and debug builds |
+| a mesh's tree (software traversal), a procedural object's boxes' tree | bvh.rs `build_tris`, `build_boxes` | children after their parent and inside the tree (so a walk that goes down and pops what it pushed reaches each node at most once and ends, whatever the boxes say); every node reached once; leaves of 1 to 16 items inside the items; boxes finite (an item whose box is not is in no leaf, after every leaf's range, its index kept); no deeper than the kernel's stack (48: where the levels left could not finish the split the surface-area heuristic wants, the median); `check_tree` in tests and debug builds |
 | the units' trees, the top tree | units.rs | the same, checked at every build and edit (an incremental path, cheap per unit) |
 | the light tree | ltree.rs | children after their parent; median splits, so the depth is log2 of the entries, within the path codes' 26 bits; leaves of 1 to 4 entries (the child word's two bits); every entry's code leads to its leaf; `LightTree::check` after every build, growth and refit in tests and debug builds. Its walks end by their bounds whatever the data (`LT_PATH_BITS`, the code's depth, four entries) |
 | the emitter CDF's searches | lib.rs | binary searches end on any data (the interval shrinks); the guide table's entries are the CDF's |
@@ -1688,8 +2212,8 @@ Where what is built from enters, it is finite:
   the way) is given to them as three vertices at the origin (`scene::blas_tri`): DXR and Vulkan leave such a vertex
   undefined behaviour and define a degenerate triangle as never hit; its index stays.
 
-Measured (2026-11-14, software traversal's still tree, `bvh_depth` in a session's load line): Bistro 18 levels,
-Kabukichō 26, the Kabukichō district 33: the stack's 48 changes none of them. A tree of boxes spaced in powers of two
+Measured (2026-11-14, the one tree software traversal then had over a whole scene): Bistro 18 levels,
+Kabukichō 26, the Kabukichō district 33: a stack of 48 changes none of them. A tree of boxes spaced in powers of two
 is as deep as SAH makes it unheld, and no deeper than asked held (bvh.rs `a_tree_is_no_deeper_than_its_stack`).
 Garbage in (NaN and infinite vertices, values near f32's limit, a thousand copies of one triangle, a needle;
 emitters likewise) makes trees the checks pass and the kernel's walk ends on (`garbage_in_makes_a_tree_the_kernel_walks`,
@@ -1720,40 +2244,24 @@ on the device", and differs where it says so.
     its own at offset 0 each frame, the emitters' table hung the same: the binding, not its sharing a buffer with
     `tables` or its offset. Read whole: no hang.
   - Without the views the kernel reads all seven from `tables` (binding 4) by the offsets in the parameters
-    (`Params::table_first`), as the merged layout does (pathtrace.wgsl `@if(merged || whole_tables)`), and there are
-    no uniform tables (below), so none of their bounds either. On the device the frame costs what it does with the
-    uniform copies (Foundry at 249 × 140, one bounce: 52 ms read whole, 51 ms with the uniform copies and the other
-    three read whole). `THREERT_TABLE_VIEWS=1` on the device brings back the views (and the uniform copies), for A/B.
+    (`Params::table_first`), as the merged layout does (pathtrace.wgsl `@if(merged || whole_tables)`). On the
+    device the frame cost what it did with the uniform copies (below; Foundry at 249 × 140, one bounce: 52 ms read
+    whole, 51 ms with the copies and the other three read whole). `THREERT_TABLE_VIEWS=1` on the device brings back
+    the views, for A/B.
   - Elsewhere the views stay; `THREERT_TABLE_VIEWS=0` reads the tables whole on any device, to the same image bit
     for bit (`live::instanced_tests::the_tables_read_whole_render_what_the_views_do`, offline and live after a power
     edit).
-- **Uniform tables** (`GpuOptions::uniform_tables`, `THREERT_UNIFORM_TABLES=1|0`; default on Android with the views,
-  `THREERT_TABLE_VIEWS=1`; never with the merged layout or the tables read whole). The driver gave the kernel other buffers' contents for four of its read-only storage buffers, each
-  a binding of its own then: `tex_info` (binding 14), `objects` (15), `instances` (17), `media` (18), all numbered
-  after the acceleration structure (13). As uniform buffers they read right.
-  - Since 2026-11-15 the four are views of their sections of the tables' buffer ("The scene's tables"), still at
-    bindings of their own (15 to 18), and the acceleration structure is the group's last binding (19). The device
-    did not read those views right either (2026-11-16, `THREERT_TABLE_VIEWS=1 THREERT_UNIFORM_TABLES=0`: Range all
-    white), and with the uniform copies the other three views were still wrong (above): Android now reads the
-    tables whole and has no uniform copies; they stay for `THREERT_TABLE_VIEWS=1`.
-  - The kernel's source has them under `@if(uniform_tables)` (pathtrace.wgsl): four sized uniform arrays at
-    bindings 15 to 18 (merged.rs `UNIFORM_TABLES`; their lengths WESL constants), and their accessors hold every
-    index to the array (`min(i, last)`), so nothing is read outside a uniform buffer.
-  - The renderer writes the tables' buffer. `Gpu::sync_tables` copies the four sections into their uniform buffers
-    in a frame's encoder, after the particle passes (which write their objects' entries on the GPU) and before the
-    trace.
-  - A uniform binding holds 64 KiB, so the arrays are bounded: 2,048 textures, 4,096 object entries (1,365 objects;
-    1,024 with instance colours), 409 instance records (model instances, procedural objects, `dynamicGeometry`
-    meshes), all 32 media. A scene with more reads the last entry for the rest, and the renderer says so on stderr
-    when it uploads the scene and once when in-place edits pass a bound. `THREERT_UNIFORM_TABLES=0` binds the
-    views of their sections.
+- **Uniform tables** (removed 2026-11-25). The first way round the same driver: four of the tables (`tex_info`,
+  `objects`, `instances`, `media`) copied each frame into uniform buffers of 64 KiB, which bounded them (409
+  instance records). With the tables read whole no platform had them by default, and they went; the records
+  below that name them and `THREERT_UNIFORM_TABLES` are of that time.
 - **The kernel's other storage buffers stay as they are**, each for its reason:
 
   | buffer | size | decision |
   |---|---|---|
   | `tables` (4) and, with the views, `materials` (12), `lights` (13), `emitters` (14) | megabytes in a lit scene | storage: the device drew right with materials, lights and emitters as storage buffers of their own (bindings 4 to 6, before #89) and reads them right from `tables` whole; not as the views (above) |
   | `words` (5): the environment's CDF, the procedural geometry's data, vertex colours | megabytes | storage; the environment's light sampling is off on Android, below |
-  | `tri_verts` (1), `attrs` (2), `nodes` (3), `prev_verts` (6) | per triangle | storage (megabytes) |
+  | `vertices` (1), `leaves` (2), `nodes` (3), `prev_verts` (6) | per vertex, per triangle, per node | storage (megabytes) |
   | `accum` (11), group 1 (radiance cache, the trace's outputs, `finish`'s records, the loop guard's count) | per pixel, per cache entry | written by the kernel: cannot be uniform |
   | group 2, the translucency pass (`timg`, `vpts`, `vcount`, `tlow`) | per pixel | written by the pass |
   | the particle passes' `systems`, `spawns`, `grid`; the grid programs' `srcs` | small, read-only | storage: other shaders, of eleven bindings at most and no acceleration structure; not known to misread (the fix on the device left them alone) |
@@ -1773,11 +2281,12 @@ on the device", and differs where it says so.
   | `THREERT_LIGHT_PICK` | 0 | past the camera hit, the directional lights and one of the other kinds (local lights, emitters, the sky), weighted by their number: two shadow rays a vertex instead of four; unbiased, noisier | a handheld's host sets it with `THREERT_LAST_DIRECT` |
   | `THREERT_LIGHT_TILES` | Android: 0 | a scene with more than `RIS_EXACT` shadow-casting local lights has no light tiles (`F_LISTS`, #87): its lights are resampled unguided, as before the tiles (not a flag of the source: the scene's feature is left off, gpu.rs `light_tiles_on`) | OpenStrikeRT's Foundry, 249 × 140, one bounce, the tables read whole: 48 ms with the tiles, 31 ms without (30 fps, the 0.4 clients' rate); `THREERT_LIGHT_PICK=1` instead: 38 ms |
 
-  `THREERT_CHECKED=1` (or a mask: 2 bounds, 4 loop bounding, 8 ray-query initialization) compiles the kernel with
-  naga's runtime checks, to tell a driver's fault from the kernel's.
+  The kernel is compiled with wgpu's loop bounding and no other runtime check (ROADMAP § 1a, "The kernel's loops
+  are bounded"). `THREERT_CHECKED` = 0 (none), 1 (every check) or a mask (2 bounds, 4 loop bounding, 8 ray-query
+  initialization) tells a driver's fault from the kernel's.
 - **The pipeline cache** (`GpuOptions::pipeline_cache`, `THREERT_PIPELINE_CACHE=<directory>`; `pipeline_cache.rs`).
   The driver compiles a kernel variant for about ten seconds. With a directory given, the device has a wgpu
-  `PipelineCache` (Vulkan only), every compute pipeline of the engine and the raster pass's are made with it, and it
+  `PipelineCache` (Vulkan only), every compute pipeline of the engine is made with it, and it
   is saved after a kernel variant, a scene's passes and the live passes are compiled. Opening a game a second time
   went from 10.6 s to 0.4 s (the author's; on this source a scene's pipelines compile for 16 to 31 s the first time
   and are there in under a second from the cache, below).
@@ -1836,8 +2345,8 @@ source under ThreeRT for Android 0.4.0, which sets `THREERT_PIPELINE_CACHE` and 
   figure.
 - **Hardware against software traversal** (`THREERT_HWRT=0`, same size and bounce): Sunlit room 78 ms against
   149 ms and Material balls 74 against 96 are faster without ray queries; OpenStrikeRT is 336 against 146. A ray
-  query has a high fixed cost on this driver; ray queries stay the default. `THREERT_RASTER=1` (raster primary
-  visibility): Sunlit room 136 against 149 ms.
+  query has a high fixed cost on this driver; ray queries stay the default. (Raster primary visibility, an
+  experiment since removed, read 136 against 149 ms in the Sunlit room.)
 - **Not looked at on the device:** voxel worlds and procedural geometry (then `env_cdf`'s second half), particles, media,
   a map with cutout foliage (`THREERT_CUTOUT_LITE`'s figures are the author's), `THREERT_ENV_NEE=1`, and the
   motion vectors of moving objects (`prev_verts`): soldiers were looked at standing, not frame by frame in motion.
@@ -1915,7 +2424,7 @@ geometry in JS), where the runtime could move to V8 (deno_core) behind the same 
    are structural today: fine for small scenes or occasional changes, not every frame on a big street.
 2. **Warm room sessions on nodes.** `serve` keeps runtimes per room already; a node could also keep the GPU scene of a
    room between jobs and apply state changes in place, as the live view does.
-3. **Kernel variant warm-up.** An edit that enables a kernel feature (e.g. a dry street getting wet) compiles that
-   variant on first use; pre-compile likely variants in the background.
+3. **Images decoded beside the frames.** A texture or a model that comes in place is decoded on the frame's
+   thread (five 2048 x 2048 images: 0.2 s); the object could wait for a worker instead, as it waits for its kernel.
 4. **UE references for the simple scenes** came from the removed IR adapter (cached in out/ue). New ones need either
    the scenes rebuilt in UE by hand or an engine-API binding on the UE side (the scene code driving UE actors).

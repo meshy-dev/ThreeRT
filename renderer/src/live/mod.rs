@@ -49,8 +49,15 @@ use web_time::Instant;
 
 mod edits;
 mod frame;
+#[cfg(dlss)]
+mod dlss;
+mod fsr;
 mod layout;
+#[cfg(metalfx)]
+mod metalfx;
 mod load;
+mod reconstruction;
+mod rendering;
 #[cfg(not(target_arch = "wasm32"))]
 mod session;
 mod state;
@@ -60,6 +67,9 @@ pub(crate) use targets::live_source;
 pub(crate) use targets::Targets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::{parse_cmd, parse_launch, parse_opts, run, save_bgra};
+pub use reconstruction::{JointGuides, JointProvider, Method, Prepared, Reconstruction, ReconstructionFrame, ReconstructionSize, ReconstructionStatus, Skip, UpscaleProvider};
+pub use rendering::{next_method, FrameGeneration, Latency, Quality, RenderingControl, RenderingRequest, RenderingStatus};
+use reconstruction::Reconstructor;
 use edits::*;
 use frame::*;
 use load::*;
@@ -67,6 +77,8 @@ use state::*;
 use targets::*;
 
 pub struct LiveOpts {
+    /// `--quality`, `--reconstruction`, `--frame-generation`, `--latency` (live/rendering.rs); `--quality` over `scale`.
+    pub rendering: RenderingRequest,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -119,21 +131,25 @@ struct LiveParams {
     misc2: [f32; 4],
     mode: [u32; 4],
     post: [f32; 4],
-    /// Auto exposure (UE histogram): low / high fraction, histogram log2 min / max.
+    /// Auto exposure's metering: low / high fraction of the histogram, its log2 luminance min / max.
     ae: [f32; 4],
     /// Compensation (2^bias), min / max average luminance, mode (0 manual, 1 auto).
     ae2: [f32; 4],
-    /// Speed up / down (EV/s), frame time (s), snap to target (1).
+    /// Speed toward brighter / darker scenes (EV/s), frame time (s), snap to target (1).
     ae3: [f32; 4],
     /// Local exposure: highlight contrast, shadow contrast, blurred-luminance blend, detail strength.
     lx: [f32; 4],
     /// Traced (internal) width, height.
     isz: [u32; 4],
-    /// Bloom stage radii (texels of each stage's level) and tints, stages 0..3 then 4, 5.
-    br: [f32; 4],
-    br2: [f32; 4],
-    bt: [f32; 4],
-    bt2: [f32; 4],
+    /// Bloom (`post::BloomPlan`): the weight of pyramid level 0..3; of 4, 5, the wide pass's reach (texels of the
+    /// coarsest level; 0 = nothing to sum), the weight of the five-pixel kernel of the output's own pixels.
+    bl: [f32; 4],
+    bl2: [f32; 4],
+    /// The wide Gaussians 0..5, a (weight, 1 / (2 sigma^2)) pair each.
+    bw: [[f32; 4]; 3],
+    /// Local exposure's wide blur of log luminance: the weight of level 0..3; of 4, 5, its wide Gaussian's pair.
+    lb: [f32; 4],
+    lb2: [f32; 4],
     /// Depth of field: CoC radius of infinity (output px; 0 = off), focus distance (m), max radius (px), -.
     dof: [f32; 4],
     /// This frame's sub-pixel jitter (every camera ray's: x, y in 0 .. 1 of a traced pixel), -, -.
@@ -149,10 +165,9 @@ struct LiveParams {
 pub(super) const LIST_CANDIDATES: u32 = 2;
 
 /// The kernel's group-1 bind groups over a view's targets: the trace's, and the translucency pass's where the device
-/// has one (`gpu::Gpu::tl_vis_layout`: without `finish`'s records).
-fn kernel_bind_groups(g: &gpu::Gpu, raster: Option<&Raster>, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
-    let vis = raster.map_or(&g.no_vis_view, |r| &r.vis);
-    (gpu::vis_bind_group(&g.device, &g.vis_layout, vis, &targets.kernel, true), g.tl_vis_layout.as_ref().map(|l| gpu::vis_bind_group(&g.device, l, vis, &targets.kernel, false)))
+/// has one (`gpu::Gpu::tl_live_layout`: without `finish`'s records).
+fn kernel_bind_groups(g: &gpu::Gpu, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
+    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, true), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, false)))
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -215,6 +230,8 @@ pub enum Cmd {
     Status(String),
     /// Render scale (0 = dynamic resolution).
     Scale(f32),
+    /// Rendering settings (live/rendering.rs): the fields given change.
+    Rendering(RenderingRequest),
     /// The view at another size, pixels (`LiveCore::resize`; the window host: its window's).
     Resize(u32, u32),
     Quit,
@@ -223,6 +240,12 @@ pub enum Cmd {
 /// The real-time renderer: scene + screen targets + camera/history state. Records one frame at a time; the output
 /// (sRGB BGRA8 per pixel) lands in `targets.out`. Used by the headless runner, the native window viewer and the native clients.
 pub struct LiveCore {
+    reconstructor: Reconstructor,
+    /// The requested render resolution (`render_scale` and `dynamic_res` are what it resolves to).
+    quality: Quality,
+    frame_generation: FrameGeneration,
+    latency: Latency,
+    rendering_control: Option<RenderingControl>,
     /// The game's particle spawns since the last frame (`World::particle_spawns`), for the GPU particle pass.
     particle_spawns: std::collections::BTreeMap<u32, Vec<f32>>,
     /// The sources the game gave its density grids since the last frame (`World::grid_sources`), for the grid pass.
@@ -247,12 +270,12 @@ pub struct LiveCore {
     pub frame: u32,
     pub history_len: f32,
     reset: bool,
-    /// Bloom stage radii / tints (`bloom_stages`).
-    bloom: ([f32; 6], [f32; 6]),
+    /// What the bloom passes do for the preset at the view's size.
+    bloom: post::BloomPlan,
     vignette: f32,
     /// Chromatic aberration, film grain, bloom threshold, longest motion blur (output pixels).
     post: [f32; 4],
-    /// Motion blur (UE MotionBlurAmount, MotionBlurTargetFPS; amount 0 = off).
+    /// Motion blur: the shutter as a fraction of the frame time (0 = off), the target frame rate (0 = the real one).
     blur: (f32, f32),
     /// Last submission of each frame still on the GPU (at most two frames in flight).
     inflight: std::collections::VecDeque<wgpu::SubmissionIndex>,
@@ -290,6 +313,14 @@ pub struct LiveCore {
     pub view_mode: u32,
     /// Lockstep frame time (s; benchmarks): motion blur and exposure adaptation use it instead of the wall clock.
     pub fixed_dt: Option<f32>,
+    /// The kernel the frames run (`choose_kernel`): the scene's (`up.kernel`), or the one before it while the scene's
+    /// is being made on another thread. None: none chosen yet (a view's first frame, the first after a rebuild).
+    pub(super) kernel: Option<gpu::Kernel>,
+    /// Kernel features an edit of this commit asks for that the scene's structure had not (`F_MASKED`: its first
+    /// cutout on an instance; `F_IGLASS`: its first shadow caster with glass among its sections; `F_IFUNC`: its
+    /// first material function on an instance). They switch code on, over data every scene has: the commit adds
+    /// them to the scene's (`instance_features`).
+    pub(super) more_features: std::cell::Cell<u32>,
     pub triangles: usize,
     pub scene_name: String,
     /// Scene time, s: what `advance_time` added up, the dt each frame script gets, so it is the game's clock (`f.time`)
@@ -319,19 +350,12 @@ pub struct LiveCore {
     profile: Option<Profile>,
     /// GPU time per frame without stalls (timestamp queries; None: measured by draining the queue twice a second).
     timer: Option<FrameTimer>,
-    /// Rasterized primary visibility (None: the kernel traces camera rays).
-    raster: Option<Raster>,
     /// World-space radiance cache (pathtrace.wgsl; None: THREERT_CACHE=0, paths trace every bounce).
     cache: Option<RadianceCache>,
     /// Kernel group 1: primary visibility + radiance cache + what the live passes read of a trace.
     kernel_bg: wgpu::BindGroup,
-    /// The same for the translucency pass (`gpu::Gpu::tl_vis_layout`; hardware traversal).
+    /// The same for the translucency pass (`gpu::Gpu::tl_live_layout`; hardware traversal).
     tl_kernel_bg: Option<wgpu::BindGroup>,
-    /// Span (relative to the dynamic tail) re-transformed by the last in-place update whose previous-frame vertices
-    /// (`Uploaded::prev_verts`) still hold the frame before it: synced to the current ones next frame.
-    prev_span: Option<(usize, usize)>,
-    /// An in-place update happened this frame (it keeps `prev_verts` itself).
-    reposed: bool,
     /// Dynamic triangles moved in this commit: the light tree's moving subtree is refit once at its end.
     emitters_moved: bool,
     /// An instanced object's emitting copies changed size or were shown or hidden in this commit: the emitters are
@@ -341,9 +365,9 @@ pub struct LiveCore {
     pending_emitters: Vec<(u32, crate::GpuEmitterTri)>,
     /// Objects whose instance a move hid or brought back this commit (a placement without size): their rows' power.
     flipped: Vec<u32>,
-    /// Likewise for the deforming meshes of shared poses (`repose_groups`): the span they took (relative to the dynamic
-    /// tail, past its end) and whether this frame re-skinned any.
-    pose_span: Option<(usize, usize)>,
+    /// Likewise for posed skinned models' meshes (`repose_skinned`): the spans the last new poses took (each mesh's
+    /// first triangle, the first of its previous vertices, how many) and whether this frame re-skinned any.
+    pose_spans: Vec<(usize, usize, usize)>,
     pose_reposed: bool,
     /// Movable instances moved by the last update (their records' previous-frame rows differ), and whether it was this
     /// frame's.
@@ -394,14 +418,6 @@ fn govern_by_clock() -> bool {
     *F.get_or_init(|| std::env::var("THREERT_GOVERN_CLOCK").map(|v| v == "1").unwrap_or(cfg!(target_os = "android")))
 }
 
-/// THREERT_CACHE_FLAGS: experiment switches of the radiance cache (pathtrace.wgsl `cfl`), 0 = defaults: 2 = no hit
-/// lighting (reflection hits use the cache's total), 4 = no training tiles, 8 = the exact light loop at reflection
-/// hits, 16 = no reflection resolve. THREERT_CACHE=0 turns the cache off.
-fn cache_flags() -> u32 {
-    static F: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("THREERT_CACHE_FLAGS").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
-}
-
 /// THREERT_FREEZE_TIME=1: animation holds still (shader time 0, the frame script gets dt 0: signs, screens, flicker groups),
 /// so frames taken at different times compare (tools/bench-ghosting.ts).
 fn freeze_time() -> bool {
@@ -421,16 +437,28 @@ fn exposure_snap() -> bool {
     *F.get_or_init(|| std::env::var("THREERT_EXPOSURE_SNAP").is_ok_and(|v| v == "1"))
 }
 
-/// UE's physical CoC model (DiaphragmDOFUtils.cpp, FPhysicalCocModel::Compile): focal length from the sensor height
-/// (sensor width / aspect) and the vertical FOV, the CoC of infinity on the sensor f^2 / (N (focus - f)), as a radius in
-/// output pixels; max radius r.DOF.Kernel.Max{Fore,Back}groundRadius = 2.5 % of the width. Off without a focus distance.
+/// The lens for live.wgsl's `dof_coc`, from the camera's depth-of-field settings (`desc::Dof`: focus distance in
+/// metres, f-stop, sensor width in mm) and the view (vertical FOV, output size): `LiveParams::dof` = the circle of
+/// confusion's radius for a point at infinity (output pixels; 0 = off), the focus distance (m), the largest radius
+/// (output pixels: 2.5 % of the width).
+///
+/// A thin lens of focal length f and aperture diameter f / N focused at distance s images a point at distance z as
+/// a disc of diameter c = (f / N) f / (s - f) |z - s| / z on the sensor (the thin-lens equation 1/f = 1/s + 1/s' and
+/// similar triangles at the aperture; Potmesil & Chakravarty 1981, "A lens and aperture camera model for synthetic
+/// image generation", and any optics text): c_inf (1 - s / z) with c_inf = f^2 / (N (s - f)), negative in front of
+/// the focus plane. The focal length is the one that gives the view's
+/// vertical FOV on a sensor of the given width and the output's aspect; a sensor width is `w` output pixels.
 fn dof_params(dof: Option<&crate::desc::Dof>, tan_half_fov: f32, w: u32, h: u32) -> [f32; 4] {
-    let Some(d) = dof.filter(|d| d.focus_distance > 0.0 && d.f_stop > 0.0 && d.sensor_width > 0.0) else { return [0.0; 4] };
-    let aspect = w as f32 / h as f32;
-    let sensor_h = d.sensor_width / aspect;
-    let f = 0.5 * sensor_h / tan_half_fov;
-    let diameter = f * f / (d.f_stop * (d.focus_distance * 1000.0 - f).max(1e-3));
-    [diameter * 0.5 / sensor_h / aspect * w as f32, d.focus_distance, 0.025 * w as f32, 0.0]
+    let Some(d) = dof else { return [0.0; 4] };
+    if !(d.f_stop > 0.0 && d.sensor_width > 0.0 && d.focus_distance > 0.0 && tan_half_fov > 0.0) {
+        return [0.0; 4];
+    }
+    let sensor_height = d.sensor_width * h as f32 / w as f32;
+    let f = 0.5 * sensor_height / tan_half_fov; // mm
+    let s = (d.focus_distance * 1000.0).max(f * 1.001); // mm
+    let c_inf = f * f / (d.f_stop * (s - f)); // mm on the sensor
+    let largest = 0.025 * w as f32;
+    [(0.5 * c_inf / d.sensor_width * w as f32).max(1e-6), d.focus_distance, largest, 0.0]
 }
 
 /// Light LOD (`emitter_lod`): emitters within this distance of the camera keep their sampling weight, farther ones
@@ -466,26 +494,24 @@ fn halton(mut i: u32, base: u32) -> f32 {
 const CACHE_SAMPLES: f32 = 256.0;
 const CACHE_FRAMES: f32 = 32.0;
 const CACHE_FRAMES_LIT: f32 = 4.0;
-/// The most frames a pixel's history holds while the scene's lighting changes: short enough to follow the change by
-/// itself (a real-time denoiser's bound: NRD's default is 30), so no edit has to cut it. Against main's rules (24
-/// frames for good in a scene with spark lights, every pixel cut to 16 at a lighting edit, an on / off anti-lag), dE
-/// against the offline render or the converged frame: the Bistro slice half a second after its explosion 6.04 for
-/// 6.58, at rest 2.82 for 2.79; Kabukichō 2 s and 4 s after its signs close 6.70 and 2.92 for 6.56 and 2.82. At 64
-/// frames the explosion read 5.72 and the signs 7.82 and 3.37.
-const HISTORY_LIVE: f32 = 32.0;
+/// The most frames a pixel's history holds while the scene's lighting changes (`live_lighting`). What live.wgsl's
+/// change chart follows (a light switched, a shadow that passes) does not wait for this bound, and what its drift
+/// follows (a light that falls or rises steadily) is taken out of the history without shortening it ("The response
+/// of the histories" there); the bound is for what both leave alone: a change too small or too noisy to tell, and
+/// any change on pixels lit by rare bright samples. Those trail the light by this many frames, and every pixel's
+/// noise while anything in the scene moves is that of a mean over this many.
+/// Measured on the integrated tree, 2026-11-24, with the chart and the drift as they are, for 48 / 32 / 24 frames:
+/// bench-window's tokyo-dusk (the sun setting over ten seconds, the frame against the same moment held; dE at 6, 7
+/// and 8 s) 1.23 / 0.69 / 0.55, 1.15 / 0.64 / 0.53, 1.11 / 0.61 / 0.51 (the previous release, whose bound was 32:
+/// 1.12 / 0.60 / 0.50; without the drift 2.61 / 1.44 / 0.87 at 48 and 1.73 / 0.83 / 0.58 at 32); bench-temporal's
+/// lighting edit and bench-object-ghosting moved by 0.05 dE or less between 32 and 24, mostly down (the lamp's
+/// bounce 32 frames after it went out 0.79 and 0.76, the runner 0.3 s after its run 0.31 and 0.29). In the tree
+/// before it had specular light, the noise a shorter bound costs where nothing changes while something else moves
+/// (the top fifth of the frame in the dragged device's shots and in the runner's), for 60 / 48 / 32: dE 0.24 / 0.24 /
+/// 0.26 and 0.76 / 0.77 / 0.80.
+const HISTORY_LIVE: f32 = 24.0;
 /// The most once the scene has settled: holding still, the frame converges on the offline render.
 const HISTORY_FRAMES: f32 = 4096.0;
-
-/// THREERT_TL_HIDE (diagnostics): the translucency pass trains the volume voxels but draws nothing, so frames show what is
-/// behind translucent particles; `odd` hides them on odd frames only (rain on / off pairs from one run).
-fn translucent_hidden(frame: u32) -> bool {
-    static F: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    match F.get_or_init(|| std::env::var("THREERT_TL_HIDE").ok().map(|v| v == "odd")) {
-        None => false,
-        Some(false) => true,
-        Some(true) => frame % 2 == 1,
-    }
-}
 
 impl LiveCore {
     /// Advances the scene time by a frame's dt (the frame script's: at most 0.1 s).
@@ -533,17 +559,84 @@ impl LiveCore {
             }
         });
         let timer = (g.timestamps && profile.is_none()).then(|| FrameTimer::new(&g.device));
-        let raster = std::env::var("THREERT_RASTER").is_ok_and(|v| v == "1").then(|| Raster::new(&g, w, h));
         let cache = cache_on.then(|| RadianceCache { bufs: targets.kernel.cache.clone(), resolve: g.cache_resolve_pipeline() });
-        let (kernel_bg, tl_kernel_bg) = kernel_bind_groups(&g, raster.as_ref(), &targets);
+        let (kernel_bg, tl_kernel_bg) = kernel_bind_groups(&g, &targets);
         // (Read whenever a kernel of this session may have the guard: under software traversal a scene's first unit
         // brings it, `gpu::loop_guard_of`.)
         let guard_read = (gpu::loop_guard_of(!g.hwrt).is_some() && targets.kernel.guard.is_some())
             .then(|| (g.device.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard read"), size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), Arc::new(AtomicU32::new(0))));
-        let mut core = LiveCore { pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: ([0.0; 6], [0.0; 6]), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, raster, cache, kernel_bg, tl_kernel_bg, prev_span: None, reposed: false, emitters_moved: false, emitters_reweigh: false,  pose_span: None, pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
+        let reconstructor = Reconstructor::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let reconstructor = {
+            let mut reconstructor = reconstructor;
+            if let Ok(mode) = std::env::var("THREERT_RECONSTRUCTION") {
+                reconstructor.set(Reconstruction::parse(&mode)?);
+            }
+            reconstructor
+        };
+        let mut core = LiveCore {
+            kernel: None,
+            more_features: Default::default(),
+            reconstructor, quality: Quality::Native, frame_generation: FrameGeneration::Off, latency: Latency::Auto, rendering_control: None, pending_emitters: vec![], flipped: vec![], top_builds: 0, particle_spawns: Default::default(), grid_sources: Default::default(), g, passes, targets, sc, view, env, presets: presets.to_path_buf(), assets: assets.to_path_buf(), w, h, seq: 0, aspect: w as f32 / h as f32, cam, prev_cam: cam, frame: 0, history_len: 0.0, reset: true, bloom: Default::default(), vignette: 0.0, post: [0.0; 4], blur: (0.0, 0.0), inflight: Default::default(), gpu_ms: 0.0, gpu_frame: 0, gpu_trace_ms: 0.0, edit_ms: 0.0, instanced_ms: 0.0, build_ms: 0.0, edit_split: EditSplit::default(), rebuild_ms: 0.0, fallback: None, fallbacks: 0, bounces: 4, rays: true, view_mode: std::env::var("THREERT_VIEW_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0), fixed_dt: None, triangles, scene_name, time: 0.0, frame_dt: 1.0 / 60.0, last_frame: Instant::now(), post_key: String::new(), render_scale: 1.0, dynamic_res: false, min_scale: MIN_SCALE, display_scale: 1.0, over_budget: (0, 0), born: Instant::now(), governed: Instant::now(), profile, timer, cache, kernel_bg, tl_kernel_bg, emitters_moved: false, emitters_reweigh: false,  pose_spans: vec![], pose_reposed: false, inst_moving: vec![], inst_moved: false, prev_isz: (0, 0), light_tiles: None, lit_changed: 0, spark_lights: false, shown_spp: 1, cpu_skin_ms: 0.0, cpu_upload_ms: 0.0, gpu_blas_ms: 0.0, cpu_wait_ms: 0.0, guard_trips: guard_read.as_ref().map(|_| 0), guard_read };
         core.spark_lights = core.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         core.apply_post();
         Ok(core)
+    }
+
+    /// Change the rendering settings given (live/rendering.rs); from the next frame.
+    pub fn set_rendering(&mut self, r: RenderingRequest) {
+        if let Some(q) = r.quality {
+            self.set_scale(q.scale().unwrap_or(0.0));
+            self.quality = q;
+        }
+        if let Some(m) = r.reconstruction { self.set_reconstruction(m); }
+        if let Some(f) = r.frame_generation { self.frame_generation = f; }
+        if let Some(l) = r.latency { self.latency = l; }
+    }
+
+    /// A reconstruction request: a method, a preference list, or `Reconstruction::Auto`.
+    pub fn set_reconstruction(&mut self, r: impl Into<Reconstruction>) {
+        if self.reconstructor.set(r.into()) {
+            self.reset_history();
+        }
+    }
+
+    /// The method the last frame ran.
+    pub fn reconstruction(&self) -> Method { self.reconstructor.method() }
+
+    pub fn requested_reconstruction(&self) -> &Reconstruction { &self.reconstructor.requested }
+
+    pub fn reconstruction_status(&self) -> ReconstructionStatus { self.reconstructor.status() }
+
+    pub fn rendering_status(&self) -> RenderingStatus {
+        RenderingStatus {
+            quality: self.quality, scale: self.render_scale, dynamic: self.dynamic_res,
+            reconstruction: self.reconstruction_status(), frame_generation: self.frame_generation, latency: self.latency,
+            frames_in_flight: self.frames_in_flight() as u32,
+        }
+    }
+
+    /// Frames the CPU may record ahead of the GPU: one with low latency on (or frames generated, which need it).
+    pub(crate) fn frames_in_flight(&self) -> usize {
+        match self.latency { Latency::On => 1, Latency::Off | Latency::Auto => 2 }
+    }
+
+    /// Install an upscaler (live/reconstruction.rs), selected as `custom:<id>` like a built-in method.
+    pub fn register_upscaler(&mut self, id: &str, provider: impl UpscaleProvider + 'static) -> Result<()> {
+        self.reconstructor.register_upscaler(id, Box::new(provider))
+    }
+
+    /// Install a joint denoiser (live/reconstruction.rs), selected as `custom:<id>` like a built-in method.
+    pub fn register_joint_denoiser(&mut self, id: &str, provider: impl JointProvider + 'static) -> Result<()> {
+        self.reconstructor.register_joint(id, Box::new(provider))
+    }
+
+    /// Share the settings with a game runtime or a page: its requests apply from the next frame, and it reads each
+    /// frame's status.
+    pub fn attach_rendering_control(&mut self, control: RenderingControl) {
+        if let Some(r) = control.take() { self.set_rendering(r); }
+        control.publish(self.rendering_status());
+        self.rendering_control = Some(control);
     }
 
     pub fn scene_camera(&self) -> Camera {
@@ -570,8 +663,8 @@ impl LiveCore {
             });
         }
         let Some(a) = up.accel.as_ref() else { return serde_json::Value::Null };
-        let buffers = [&up.verts, &up.attrs, &up.prev_verts, &up.heap.buffer, &up.words.buffer, &a.verts].iter().map(|b| b.size()).sum::<u64>();
-        let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>() + e.pool_first as u64;
+        let buffers = [&up.vertices, &up.prev_vertices, &up.heap.buffer, &up.words.buffer].iter().map(|b| b.size()).sum::<u64>();
+        let live: u64 = self.sc.meshes.iter().enumerate().filter(|(k, _)| e.users.get(&(*k as u32)).copied().unwrap_or(0) > 0).map(|(_, m)| m.count as u64).sum::<u64>();
         let mb = |b: f64| (b / (1 << 20) as f64 * 10.0).round() / 10.0;
         serde_json::json!({
             "tris": [e.tris.used(), e.tris.cap], "records": [e.records.used(), e.records.cap], "objects": [e.objects.used(), e.objects.cap],
@@ -600,10 +693,11 @@ impl LiveCore {
         // What the grid programs had simulated goes with the grids that are still the same.
         self.g.carry_grids(&self.sc.up, &s.up);
         self.sc = s;
+        // (Its data is its own kernel's: the load made that one.)
+        self.kernel = None;
         self.spark_lights = self.sc.tables.emitter_tris.iter().any(|e| e.nominal);
         self.inst_moving.clear();
-        self.prev_span = None;
-        self.pose_span = None;
+        self.pose_spans.clear();
         self.emitters_moved = false;
         self.emitters_reweigh = false;
         self.lit_changed = self.frame.max(1);
@@ -627,11 +721,11 @@ impl LiveCore {
             );
             self.post_key = key;
         }
-        self.bloom = bloom_stages(pp, self.w, self.h);
+        self.bloom = post::BloomPlan::new(pp, self.w, self.h);
         self.vignette = pp.vignette;
         // THREERT_NO_GRAIN=1: no film grain (a fresh random pattern every frame; comparisons between frames see it as error).
         let grain = if std::env::var("THREERT_NO_GRAIN").is_ok_and(|v| v == "1") { 0.0 } else { pp.film_grain };
-        // THREERT_MOTION_BLUR=1: UE's default motion blur whatever the preset says; =amount,max,targetFps: those.
+        // THREERT_MOTION_BLUR=1: the default motion blur (`desc::MotionBlur`) whatever the preset says; =amount,max,targetFps: those.
         let mb = match std::env::var("THREERT_MOTION_BLUR").ok().as_deref() {
             Some("1") => crate::desc::MotionBlur::default(),
             Some(v) => match v.split(',').map(|x| x.trim().parse::<f32>()).collect::<Result<Vec<_>, _>>().as_deref() {
@@ -678,6 +772,7 @@ impl LiveCore {
 
     /// Fixed render scale (`s` in SCALE_FLOOR ..= 1), or dynamic resolution (`s` = 0).
     pub fn set_scale(&mut self, s: f32) {
+        self.quality = if s <= 0.0 { Quality::Auto } else { Quality::Scale(s) };
         self.dynamic_res = s <= 0.0;
         if s > 0.0 {
             self.render_scale = s.clamp(SCALE_FLOOR, 1.0);
@@ -723,7 +818,7 @@ impl LiveCore {
             return;
         }
         self.targets.kernel.deferred = Some(gpu::deferred_buffer(&self.g.device, (pixels + pixels / 4).min(self.w as u64 * self.h as u64)));
-        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
     }
 
     /// The view at another size (its host's window, in pixels): the targets that follow the size are made again
@@ -739,14 +834,12 @@ impl LiveCore {
             anyhow::bail!("a view of {w} x {h}: more samples than this device holds in one buffer");
         }
         (self.w, self.h, self.aspect) = (w, h, w as f32 / h as f32);
+        self.reconstructor.invalidate();
         self.targets.resize(&self.g, &self.passes, w, h);
-        if self.raster.is_some() {
-            self.raster = Some(Raster::new(&self.g, w, h));
-        }
         if let Some(c) = &mut self.cache {
             c.bufs = self.targets.kernel.cache.clone();
         }
-        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, self.raster.as_ref(), &self.targets);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
         self.g.set_accum(&mut self.sc.up, &self.targets.accum);
         self.apply_post();
         // As a new view: no history, no frame before this one.
@@ -787,7 +880,10 @@ impl LiveCore {
         // Not in the first 2 s: those frames run while caches fill (Kabukichō's first frames at 0.7 take ~47 ms), and
         // the regular check settles the start as before.
         let warm = self.frame >= 120 || (clock && self.born.elapsed().as_secs_f32() >= 2.0);
-        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > self.min_scale { self.over_budget.0 + 1 } else { 0 };
+        // (The floor: the budget's, or higher where the reconstruction asked for takes no lower scale: MetalFX scales
+        // outputs up to 3x its input, so a third.)
+        let floor = self.min_scale.max(self.reconstructor.scale_floor().unwrap_or(0.0)).min(1.0);
+        self.over_budget.0 = if warm && self.gpu_ms > 1250.0 / fps as f32 && self.render_scale > floor { self.over_budget.0 + 1 } else { 0 };
         let urgent = self.over_budget.0 >= 2;
         // (By the clock only when 30 frames take longer than 0.75 s: at 40 frames a second and above the frame count
         // comes first, as it always did.)
@@ -799,10 +895,10 @@ impl LiveCore {
         self.over_budget.0 = 0;
         let before = self.render_scale;
         let budget = 1000.0 / fps as f32 * 0.9;
-        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(self.min_scale, 1.0);
+        let target = (self.render_scale * (budget / self.gpu_ms).sqrt()).clamp(floor, 1.0);
         // The hysteresis (0.03) does not hold the scale just short of either end: 0.525 with the floor as the target
         // kept the district's return drive at 21-22 ms.
-        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == self.min_scale && self.render_scale > self.min_scale);
+        let to_end = (target == 1.0 && self.render_scale < 1.0 && self.gpu_ms < budget * 0.8) || (target == floor && self.render_scale > floor) || self.render_scale < floor;
         // (The hysteresis, the steps and the grid of scales are a view in points'; on a display of k pixels a point the
         // same share of the rays is 1 / k of the scale. Left absolute, a Retina view held 0.325 at 17.3 ms: its target,
         // 0.30, was inside the hysteresis.)
@@ -811,6 +907,8 @@ impl LiveCore {
             // Down fast when far over budget (a heavy scene just opened), up slowly; straight to the target when urgent.
             let step = if urgent { target - self.render_scale } else { (target - self.render_scale).clamp(if self.gpu_ms > budget * 1.5 { -0.3 } else { -0.15 } / k, 0.1 / k) };
             self.render_scale = ((self.render_scale + step) * 40.0 * k).round() / (40.0 * k);
+            // (On the grid, not below the floor: a step rounded down under a provider's range would lose it again.)
+            if self.render_scale < floor { self.render_scale = floor; }
         }
         if self.render_scale != before {
             // `frame` is already the next frame's index (render advanced it): the first one at the new scale.
@@ -919,6 +1017,26 @@ impl LiveCore {
 
     /// Closest surface under (u, v): (node id, world-space hit point). CPU ray cast over the scene triangles, and over
     /// each instance's model-space mesh with the ray in its space (same ray parameter t).
+    /// A mesh's triangles in its own space, as they are now. One that deforms is skinned by the GPU, and the CPU keeps
+    /// none of its pose: it is skinned here when asked for (a click, a query), once a call (`posed`, by mesh).
+    fn mesh_tris<'a>(&'a self, mesh: u32, posed: &'a mut std::collections::HashMap<u32, Vec<[glam::Vec3A; 3]>>) -> &'a [[glam::Vec3A; 3]] {
+        let m = self.sc.meshes[mesh as usize];
+        let pool = &self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize];
+        if !m.deforms || self.sc.up.skin.is_none() {
+            return pool;
+        }
+        let Some(pg) = self.sc.tables.retained.skinned.iter().find(|g| g.mesh == mesh) else { return pool };
+        if !posed.contains_key(&mesh) {
+            let tris = scene::model_gltf(&pg.uri, &self.assets).and_then(|model| model.triangles(glam::Mat4::IDENTITY, pg.nodes.as_deref(), Some(&pg.animation)));
+            match tris {
+                // (The mesh's triangles are the model's, less what the build left out of it.)
+                Ok(t) if pg.order.iter().all(|&(k, _, _)| (k as usize) < t.len()) => posed.insert(mesh, pg.order.iter().map(|&(k, _, _)| t[k as usize].p.map(glam::Vec3A::from)).collect()),
+                _ => return pool,
+            };
+        }
+        &posed[&mesh]
+    }
+
     /// The object under view point (u, v): its name, the hit point, and for an instanced object the instance's index.
     pub fn pick(&self, u: f32, v: f32) -> Option<(String, Vec3, Option<u32>)> {
         let (o, d) = self.ray(u, v);
@@ -951,9 +1069,8 @@ impl LiveCore {
             }
             best
         };
-        let (mut t, i) = closest(&self.sc.tris, o, d);
-        let mut node = self.sc.tri_nodes.iter().find(|(_, a, b)| (*a as usize..*b as usize).contains(&i)).map(|n| n.0.as_str());
-        let mut sub = self.sc.tri_instances.iter().find(|(a, b, _)| (*a as usize..*b as usize).contains(&i)).map(|r| r.2);
+        let (mut t, mut node, mut sub) = (f32::INFINITY, None, None);
+        let mut posed = Default::default();
         for inst in self.sc.instances.iter().filter(|i| !i.hidden) {
             let m = self.sc.meshes[inst.mesh as usize];
             let inv = inst.world.inverse();
@@ -964,7 +1081,7 @@ impl LiveCore {
             if far < near.max(0.0) || near > t {
                 continue;
             }
-            let (ti, _) = closest(&self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize], lo, ld);
+            let (ti, _) = closest(&self.mesh_tris(inst.mesh, &mut posed), lo, ld);
             if ti < t {
                 t = ti;
                 node = Some(inst.name.as_str());
@@ -996,14 +1113,13 @@ impl LiveCore {
 
     /// World-space triangles of a node (empty for lights without geometry, cameras, hidden nodes).
     pub fn node_tris(&self, id: &str) -> Vec<[glam::Vec3A; 3]> {
-        // World-space triangles (what the build flattened of an instance's mesh among them), then its instanced mesh.
-        let mut out: Vec<[glam::Vec3A; 3]> = scene::node_ranges(&self.sc.tri_nodes, id).flat_map(|r| self.sc.tris[r].iter().copied()).collect();
+        let mut out = vec![];
         // A model's first instance; every drawn instance of an instanced object.
         let mut of_node = self.sc.instances.iter().filter(|i| i.name == id && !i.hidden);
         let first = of_node.next();
+        let mut posed = Default::default();
         for inst in first.into_iter().chain(of_node.filter(|i| i.sub.is_some())) {
-            let m = self.sc.meshes[inst.mesh as usize];
-            out.extend(self.sc.pool_tris[m.first as usize..(m.first + m.count) as usize].iter().map(|t| inst.tri(t)));
+            out.extend(self.mesh_tris(inst.mesh, &mut posed).iter().map(|t| inst.tri(t)));
         }
         out
     }
@@ -1013,6 +1129,8 @@ impl LiveCore {
         let c = &self.cam;
         serde_json::json!({
             "seq": self.seq, "frame": self.frame, "history": self.history_len, "gpu_ms": self.gpu_ms,
+            "reconstruction": self.reconstruction().name(), "requested_reconstruction": self.requested_reconstruction().name(),
+            "reconstruction_fallback": self.reconstructor.status().fallback.map(Skip::name), "rendering": self.rendering_status().json(),
             "scene": self.scene_name, "triangles": self.triangles, "bounces": self.bounces, "mode": self.view_mode, "width": self.w, "height": self.h, "scale": self.render_scale,
             "cam": { "pos": c.pos.to_array(), "fwd": c.fwd.to_array(), "up": c.up.to_array(), "right": c.right.to_array(), "tan": c.tan_half_fov, "aspect": self.aspect },
         })
@@ -1262,14 +1380,14 @@ mod instanced_tests {
         if views.merged {
             return eprintln!("skipped: the merged layout reads the tables whole already");
         }
-        assert!(whole.whole_tables && !views.whole_tables && !whole.uniform_tables);
+        assert!(whole.whole_tables && !views.whole_tables);
         let w = lit_world();
         let presets = crate::default_presets_dir();
         let offline = |g: &gpu::Gpu| {
             let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
             (sc.width, sc.height) = (64, 36);
             let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            let frame = g.render(&sc, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
             frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
         };
         let (a, b) = (offline(&views), offline(&whole));
@@ -1293,79 +1411,5 @@ mod instanced_tests {
         let (x, y) = (live(views, &mut w2), live(whole, &mut w3));
         assert!(x.iter().any(|v| *v != 0), "the live frame has a picture");
         assert_eq!(x, y, "the live frames differ between the views and the tables read whole");
-    }
-
-    /// The uniform tables (`gpu::GpuOptions::uniform_tables`: what a device is opened with on Android), on this
-    /// machine's GPU: a lit scene with an instanced mesh renders offline to the default device's image, bit for bit;
-    /// live, the four uniform buffers hold what their tables hold when a frame is traced, and after an edit in place
-    /// what the tables hold then. (Skipped without a GPU.)
-    #[test]
-    fn the_uniform_tables_render_what_the_tables_do() {
-        let open = |uniform: bool| gpu::Gpu::new_with(gpu::GpuOptions { uniform_tables: Some(uniform), ..Default::default() });
-        let (plain, uniform) = match (open(false), open(true)) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(e), _) | (_, Err(e)) => return eprintln!("skipped: {e}"),
-        };
-        if uniform.merged {
-            return eprintln!("skipped: the merged layout has no uniform tables");
-        }
-        assert!(uniform.uniform_tables && !plain.uniform_tables);
-        let mut w = lit_world();
-        let presets = crate::default_presets_dir();
-
-        // Offline: the same bytes.
-        let offline = |g: &gpu::Gpu| {
-            let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
-            (sc.width, sc.height) = (64, 36);
-            let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, &prep.tri_verts, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
-            frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
-        };
-        let (a, b) = (offline(&plain), offline(&uniform));
-        let lit = a.iter().filter(|v| f32::from_bits(**v) > 0.0).count();
-        assert!(lit > a.len() / 16, "the scene is lit ({lit} of {} numbers)", a.len());
-        let differ = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-        assert_eq!(differ, 0, "{differ} of {} numbers differ between the storage tables and the uniform ones", a.len());
-        drop(plain);
-
-        // Live: the uniform buffers follow the tables.
-        let mut core = LiveCore::new(uniform, &w, Path::new("."), &presets, 64, 36).unwrap();
-        w.take_changes();
-        let read = |core: &LiveCore, buf: &wgpu::Buffer, at: u64, bytes: u64| -> Vec<u8> {
-            let d = &core.g.device;
-            let to = d.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-            let mut e = d.create_command_encoder(&Default::default());
-            e.copy_buffer_to_buffer(buf, at, &to, 0, bytes);
-            core.g.queue.submit([e.finish()]);
-            to.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            d.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let bytes = to.slice(..).get_mapped_range().unwrap().to_vec();
-            bytes
-        };
-        // Each table's section and its uniform copy, over what both hold.
-        let pairs = |core: &LiveCore| -> Vec<(Vec<u8>, Vec<u8>)> {
-            let up = &core.sc.up;
-            let copies = up.uniform.as_ref().expect("the uniform tables' buffers");
-            crate::merged::UNIFORM_TABLES.iter().zip(copies).map(|(t, c)| {
-                let n = up.heap.cap(t.table).min(c.size()) & !3;
-                (read(core, &up.heap.buffer, up.heap.at(t.table), n), read(core, c, 0, n))
-            }).collect()
-        };
-        core.render(1, |_, _| {});
-        let first = pairs(&core);
-        for (k, (table, copy)) in first.iter().enumerate() {
-            assert!(!table.is_empty() && table == copy, "table {k} and its uniform buffer differ after a frame");
-        }
-        assert!(first[1].0.iter().any(|b| *b != 0), "the objects' table has the scene's objects");
-        // The panel moves in place: its object's entry and its instance's record change, and the next frame's
-        // uniform buffers have them.
-        w.set_transform(11, Vec3::new(0.3, 0.2, 0.75), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
-        assert!(!core.commit(&mut w).unwrap(), "moved in place");
-        core.render(1, |_, _| {});
-        let moved = pairs(&core);
-        for (k, (table, copy)) in moved.iter().enumerate() {
-            assert!(table == copy, "table {k} and its uniform buffer differ after an edit");
-        }
-        assert!(moved[1].1 != first[1].1 || moved[2].1 != first[2].1, "the move reached the uniform buffers");
     }
 }

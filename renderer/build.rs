@@ -9,6 +9,22 @@ use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, 
 use std::fmt::Write;
 
 fn main() {
+    // `cfg(dlss)`: the `dlss` feature on a target NGX supports (x86-64 Windows or Linux); elsewhere it builds nothing.
+    println!("cargo:rustc-check-cfg=cfg(dlss)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if std::env::var_os("CARGO_FEATURE_DLSS").is_some() && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") && (os == "windows" || os == "linux") {
+        println!("cargo:rustc-cfg=dlss");
+    }
+    // `cfg(metalfx)`: Apple's platforms, where MetalFX's scalers exist (macOS 13 / iOS 16; the denoised one 26). The
+    // framework is loaded at run time (metalfx.m), so the same binary runs on systems without it.
+    println!("cargo:rustc-check-cfg=cfg(metalfx)");
+    if os == "macos" || os == "ios" {
+        println!("cargo:rustc-cfg=metalfx");
+        println!("cargo:rerun-if-changed=src/live/metalfx.m");
+        cc::Build::new().file("src/live/metalfx.m").flag("-fobjc-arc").compile("threert_metalfx");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Metal");
+    }
     let files = ["shaders/records.wgsl", "shaders/live.wgsl"];
     for path in files {
         println!("cargo:rerun-if-changed={path}");

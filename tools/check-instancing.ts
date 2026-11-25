@@ -1,8 +1,7 @@
 // Instancing consistency check: the same scene of instanced cutout props (tests/checks/instanced-cutouts.ts) rendered
-// three ways. The flattened render (THREERT_INSTANCING=0: world-space triangles, as before instancing) is the reference;
-// hardware instancing and software traversal (which flattens the instances itself) must match it. Mean dE and p99 dE
-// catch whole surfaces gone wrong: cutouts rendered solid (software traversal losing the cutout flag), holes thinned
-// or filled by the alpha test sampling the wrong mip on scaled placements.
+// under hardware traversal, the reference, and under software traversal, which must match it. Mean dE and p99 dE
+// catch whole surfaces gone wrong: cutouts rendered solid (a traversal losing the cutout flag), holes thinned or
+// filled by the alpha test sampling the wrong mip on scaled placements.
 //
 //   node tools/check-instancing.ts [--assets DIR] [--spp 64] [--bin path]   (exit 1 above the limits)
 import { execFileSync } from "node:child_process";
@@ -69,11 +68,10 @@ function fenceGLB(): Uint8Array {
 writeFileSync(join(out, "fence.glb"), fenceGLB());
 const bundle = (await bundleGame(join(repoRoot, "tests/checks/instanced-cutouts.ts"), join(out, "instanced-cutouts.js"))).out;
 
-/** Limits against the flattened render: hardware paths differ by sampling noise only; software traversal also by its
- *  own traversal order (paths decorrelate), not by surfaces. */
+/** Limits against the hardware render: software traversal differs by its own traversal order (paths decorrelate), not
+ *  by surfaces. */
 const runs = [
-  { name: "flattened", env: { THREERT_INSTANCING: "0" } },
-  { name: "instanced", env: {}, limit: { mean: 0.15, p99: 3 } },
+  { name: "hardware", env: {} },
   { name: "software", env: { THREERT_HWRT: "0" }, limit: { mean: 0.6, p99: 6 } },
 ];
 let failed = 0;
@@ -84,10 +82,10 @@ for (const r of runs) {
     console.log(`${r.name}: reference (${stats.triangles} triangles)`);
     continue;
   }
-  const m = JSON.parse(execFileSync(bin, ["compare", join(out, "flattened.png"), png]).toString().trim().split("\n").pop()!);
+  const m = JSON.parse(execFileSync(bin, ["compare", join(out, "hardware.png"), png]).toString().trim().split("\n").pop()!);
   const bad = m.mean_delta_e > r.limit.mean || m.p99_delta_e > r.limit.p99;
   if (bad) failed++;
-  console.log(`${bad ? "FAIL" : "ok  "} ${r.name} vs flattened: dE ${m.mean_delta_e} (≤ ${r.limit.mean}), p99 ${m.p99_delta_e} (≤ ${r.limit.p99}), SSIM ${m.ssim}`);
+  console.log(`${bad ? "FAIL" : "ok  "} ${r.name} vs hardware: dE ${m.mean_delta_e} (≤ ${r.limit.mean}), p99 ${m.p99_delta_e} (≤ ${r.limit.p99}), SSIM ${m.ssim}`);
 }
-console.log(`${out}/{flattened,instanced,software}.png`);
+console.log(`${out}/{hardware,software}.png`);
 if (failed) process.exit(1);

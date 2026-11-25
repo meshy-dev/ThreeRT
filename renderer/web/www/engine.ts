@@ -7,6 +7,8 @@ import type { Engine } from "@threert/scene";
 
 /** The module's exports this file calls (wasm-bindgen's JavaScript for renderer/web: `threert_web.js`). */
 export interface EngineExports {
+  setRendering(json: string): void;
+  renderingStatus(): string;
   physics(op: string, args: string): string;
   physicsPoses(): Float32Array;
   voxelLevel(d: string): void;
@@ -20,6 +22,8 @@ export interface EngineExports {
   voxelContacts(body: number, on: boolean): void;
   voxelGone(): string;
   voxelFrame(dt: number): string;
+  readAsset(path: string, offset?: number, length?: number): Uint8Array;
+  preloadModel(uri: string, nodeSets?: string): boolean;
   geometry(id: number, p: Float32Array, n: Float32Array, uv: Float32Array, idx: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, d: string, data?: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
@@ -71,6 +75,8 @@ const json = (d: unknown) => JSON.stringify(d ?? null);
 /** `__engine` for the page: every call goes to the export of its name. */
 export function webEngine(w: EngineExports): WebEngine {
   return {
+    setRendering: (json) => w.setRendering(json),
+    renderingStatus: () => w.renderingStatus(),
     physics: (op, args) => w.physics(op, json(args)),
     physicsPoses: () => w.physicsPoses(),
     voxelLevel: (d) => w.voxelLevel(json(d)),
@@ -84,6 +90,8 @@ export function webEngine(w: EngineExports): WebEngine {
     voxelContacts: (body, on) => w.voxelContacts(body, on),
     voxelGone: () => w.voxelGone(),
     voxelFrame: (dt) => w.voxelFrame(dt),
+    readAsset: (path, offset, length) => w.readAsset(path, offset, length).buffer as ArrayBuffer,
+    preloadModel: (uri, nodeSets) => w.preloadModel(uri, nodeSets),
     geometry: (id, p, n, uv, idx, groups, colors) => w.geometry(id, p, n, uv, idx, groups, colors),
     texture: (id, d, data) => w.texture(id, json(d), data),
     shader: (name, code, helpers) => w.shader(name, code, helpers),

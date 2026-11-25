@@ -47,10 +47,10 @@ Findings:
 * Against UE's own ground truth (Path Tracer), the native renderer at 32 spp is **as close as or closer than UE Lumen on 3 of 5
   scenes** (Cornell, sun room, neon). Lumen under-lights spot-lit and indirectly lit regions (neon luminance ratio 0.66 vs 0.98 native).
 * `glb-asset` residual is aerial-perspective haze / sky tone in UE PT and distant-texture filtering (UE mip-maps; native supersamples), not material error.
-* UE parity required matching engine details found by reading the 5.8 source: rect lights emit `brightness/(0.5·W·H)`
-  (adapter sets nits/2); DefaultLit's multiscatter compensation is effectively off (fit k = 0 against UE PT; native k = 1
-  passes the white furnace test at 0.97–1.03); UE's Gaussian bloom, `FilmToneMap` + gamut expansion + blue correction, and
-  cos⁴ vignette are ported exactly; sun illuminance uses UE's 15-step ground-level transmittance.
+* UE parity was measured, not assumed: rect lights' radiance convention (the UE adapter sets nits / 2), the multiple-
+  scattering compensation (fit k = 0 against UE's path tracer; native k = 1 passes the white furnace test at 0.97–1.03),
+  and the look of the post chain. The renderer's implementations are its own, from public sources
+  ([PROVENANCE.md](PROVENANCE.md)); an earlier version of this report described ports, which have been replaced.
 * Each discrepancy was isolated with A/B renders against the UE path tracer, e.g. Cornell ΔE 8.0 → 0.93 after the rect-light fix.
 
 ## 3. Speed and cold start
@@ -142,8 +142,8 @@ swapchain, no browser, no streaming). It follows the same idea as UE5's real-tim
 traces 1+ spp with hardware ray queries (primary visibility, GI, soft shadows, reflections; 4 bounces + Russian
 roulette), reprojects and accumulates history validated per pixel by depth/normal (TSR/Lumen-style temporal reuse),
 denoises with an edge-avoiding à-trous filter (two extra wide passes where history is short, the role Lumen's radiance
-cache plays; directly seen emission bypasses it), and applies UE's post chain (UE auto / local exposure, six-stage
-bloom, cos⁴ vignette, filmic tonemap through a 32³ log LUT). The frame is traced, denoised and composed at the render
+cache plays; directly seen emission bypasses it), and applies the post chain (auto / local exposure, bloom, cos⁴
+vignette, a filmic tone curve through a 3D lookup table; docs/RUNTIME.md). The frame is traced, denoised and composed at the render
 resolution with one sub-pixel jitter a frame, and one temporal upscaler takes it to the window's physical pixels (the
 structure of UE's TSR after Lumen; ROADMAP § 1a). Dynamic resolution (down to half of the window's points a side) and
 then samples per frame adapt to the GPU budget. Scene changes from the game keep history (geometry stays valid) and cap it briefly so

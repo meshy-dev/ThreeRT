@@ -17,6 +17,7 @@ import {
 import { BoxGeometry, BufferGeometry, CapsuleGeometry, SphereGeometry } from "./geometry.ts";
 import { Matrix4, Quaternion, Vector3 } from "./math.ts";
 import { ENGINE_IDS, engineColliders } from "./raycaster.ts";
+import type { RenderingBinding } from "./rendering.ts";
 
 /** A joint's state in the binding once the engine let go of it (`Joint.broken`). */
 const BROKEN = "broken";
@@ -196,9 +197,13 @@ export interface SettingsDesc {
 }
 
 /** The engine API. Ids are chosen by the caller (`SceneBinding`); every call takes effect at the engine's next commit. */
-export interface Engine {
+export interface Engine extends RenderingBinding {
   /** `groups`: (first index, index count, material index) per group, for meshes with several materials. */
   /** `colors`: the vertex colours (three.js's `color` attribute), linear RGB per vertex. */
+  /** A file under the asset root, whole or a range (native only; a page's throws): `readAsset` below. */
+  readAsset?(path: string, offset?: number, length?: number): ArrayBuffer;
+  /** A model file parsed on a worker thread ahead of its use (native only): `preloadModel` below. */
+  preloadModel?(uri: string, nodeSets?: string): boolean;
   geometry(id: number, positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, desc: TextureDesc, data: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
@@ -271,7 +276,8 @@ interface Bound {
   name: string;
   parent: number | null;
   kind: string;
-  trs: Float64Array;
+  /** The transform last sent (a plain array: a typed one is two objects, its buffer the second). */
+  trs: number[];
   visible: boolean;
   power: number;
   /** Per-instance data last sent. */
@@ -284,7 +290,9 @@ interface Bound {
   /** Model pose last sent (clip, time, loop). */
   anim: AnimationDesc | null;
   /** An instanced mesh's instances last sent: count, and each attribute with its version. */
-  inst: { count: number; m: [unknown, number]; c: [unknown, number]; d: [unknown, number] } | null;
+  /** An instanced mesh's count and the tables (and their versions) last sent: one record, flat (each instanced mesh's
+   *  was four objects, and the script engine's cycle collector walks every object). */
+  inst: { count: number; m: unknown; mv: number; c: unknown; cv: number; d: unknown; dv: number } | null;
   /** Sync that last reached it in a walk of the graph. */
   epoch: number;
   /** Its rigid body in the engine, and what it was made from (a change makes it anew). */
@@ -355,7 +363,9 @@ export class SceneBinding {
   private settingsKey = "";
   private readonly trs = new Float32Array(10);
   private readonly scratch = new Float64Array(Math.max(HOT, LIGHT_VALUES));
-  private readonly changes: SceneChanges = { objects: new Set(), structure: true };
+  private readonly changes: SceneChanges = { objects: new Set(), structure: true, added: new Set(), removed: new Set() };
+  /** In-place Matrix4 edits have no setter to report a change. Revisit only opted-in objects each sync. */
+  private readonly manualWorld = new Set<Object3D>();
   private readonly untrack: () => void;
   private epoch = 0;
   // Physics: ids of bodies (a body's collider has its id) and joints, the slots of the engine's pose table, the joints
@@ -389,6 +399,7 @@ export class SceneBinding {
   /** Stops tracking the scene's changes (the binding is not used any more). */
   dispose(): void {
     this.untrack();
+    this.manualWorld.clear();
   }
 
   /** The object the engine knows under `name` (picking reports names). */
@@ -413,9 +424,12 @@ export class SceneBinding {
   sync(): SyncStats {
     const stats: SyncStats = { created: 0, updated: 0, removed: 0 };
     const ch = this.changes;
+    for (const o of this.manualWorld) ch.objects.add(o);
     if (ch.structure || !this.objects.has(this.camera)) {
-      // Objects were added or removed: walk the graph (creates new objects, re-parents, removes what is gone).
+      // The whole graph: walk it (creates new objects, re-parents, removes what is gone).
       ch.structure = false;
+      ch.added?.clear();
+      ch.removed?.clear();
       ch.objects.clear();
       const epoch = ++this.epoch;
       const visit = (o: Object3D, parent: number | null) => {
@@ -427,16 +441,46 @@ export class SceneBinding {
       if (this.objects.get(this.camera)?.epoch !== epoch) visit(this.camera, null);
       for (const [o, b] of this.objects) {
         if (b.epoch === epoch) continue;
-        this.dropBody(o, b);
-        if (o instanceof Joint) this.dropJoint(o);
-        this.engine.remove(b.id);
-        this.objects.delete(o);
-        this.byName.delete(b.name);
-        const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
-        if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
-        if (o instanceof Light) this.lights.delete(o);
-        if (o instanceof PerspectiveCamera) this.cameras.delete(o);
-        stats.removed++;
+        this.dropObject(o, b, stats);
+      }
+    } else if (ch.added?.size || ch.removed?.size) {
+      // Objects added or removed since the last sync: their subtrees alone. Removed first (what is no longer under the
+      // scene goes, with everything below it), then added (bound from the highest ancestor the engine has not got).
+      const inScene = (o: Object3D) => {
+        for (let p: Object3D | null = o; p; p = p.parent) if (p === this.scene) return true;
+        return o === this.camera;
+      };
+      const removed = [...(ch.removed ?? [])], added = [...(ch.added ?? [])];
+      ch.removed?.clear();
+      ch.added?.clear();
+      for (const r of removed) {
+        const stack = [r];
+        while (stack.length) {
+          const o = stack.pop()!;
+          const b = this.objects.get(o);
+          if (b && !inScene(o)) this.dropObject(o, b, stats);
+          for (const c of o.children) stack.push(c);
+        }
+      }
+      // what changed of objects the engine has (as the full walk meets them before what is new), then what is new
+      const touched = [...ch.objects].filter((o) => this.objects.has(o));
+      ch.objects.clear();
+      for (const o of touched) {
+        const b = this.objects.get(o);
+        if (b) this.bindObject(o, b.parent, stats);
+      }
+      const visit = (o: Object3D, parent: number | null) => {
+        const b = this.bindObject(o, parent, stats);
+        for (const c of o.children) visit(c, b.id);
+      };
+      const done = new Set<Object3D>();
+      for (const a of added) {
+        if (!inScene(a)) continue;
+        let top = a;
+        while (top.parent && top.parent !== this.scene && !this.objects.has(top.parent)) top = top.parent;
+        if (done.has(top)) continue;
+        done.add(top);
+        visit(top, top.parent && top.parent !== this.scene ? this.objects.get(top.parent)!.id : null);
       }
     } else if (ch.objects.size) {
       const touched = [...ch.objects];
@@ -531,6 +575,21 @@ export class SceneBinding {
   }
 
   /** Creates / re-creates the object in the engine if it is new or changed kind or parent, then sends its state. */
+  /** An object the scene no longer has: out of the engine, its names free again. */
+  private dropObject(o: Object3D, b: Bound, stats: SyncStats): void {
+    this.dropBody(o, b);
+    if (o instanceof Joint) this.dropJoint(o);
+    this.engine.remove(b.id);
+    this.objects.delete(o);
+    this.manualWorld.delete(o);
+    this.byName.delete(b.name);
+    const cut = b.name.lastIndexOf("_"), n = Number(b.name.slice(cut + 1));
+    if (cut > 0 && Number.isInteger(n) && n >= 1 && n < (this.nameFloor.get(b.name.slice(0, cut)) ?? 1)) this.nameFloor.set(b.name.slice(0, cut), n);
+    if (o instanceof Light) this.lights.delete(o);
+    if (o instanceof PerspectiveCamera) this.cameras.delete(o);
+    stats.removed++;
+  }
+
   private bindObject(o: Object3D, parent: number | null, stats: SyncStats): Bound {
     let b = this.objects.get(o);
     const kind = this.kindKey(o);
@@ -538,7 +597,7 @@ export class SceneBinding {
       const created = !b;
       if (!b) {
         const name = this.uniqueName(o);
-        b = { id: this.nextId++, name, parent, kind, trs: new Float64Array(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
+        b = { id: this.nextId++, name, parent, kind, trs: new Array<number>(10).fill(NaN), visible: true, power: 1, custom: "0,0,0,0", sway: "", light: null, camera: "", anim: null, inst: null, epoch: 0, body: null, bodyFailed: null };
         this.objects.set(o, b);
         this.byName.set(name, o);
         if (o instanceof Light) this.lights.set(o, b);
@@ -564,6 +623,8 @@ export class SceneBinding {
     // A new scale changes the size of the bodies below it too (their colliders and joint anchors are made at the
     // object's scale in the world): those under it are made anew at the new size, once the sync has sent every
     // transform.
+    if (o.matrixWorldAutoUpdate) this.manualWorld.delete(o);
+    else this.manualWorld.add(o);
     if (this.sendTransform(o, b, stats)) this.rescaleBodiesBelow(o);
     if (o.visible !== b.visible) {
       b.visible = o.visible;
@@ -645,18 +706,18 @@ export class SceneBinding {
   private sendInstances(o: InstancedMesh, b: Bound, stats: SyncStats): void {
     const cap = o.instanceMatrix.count;
     if (!Number.isInteger(o.count) || o.count < 0 || o.count > cap) throw new TypeError(`${b.name}: count must be an integer from 0 to ${cap}`);
-    const s = (b.inst ??= { count: -1, m: [null, -1], c: [null, -1], d: [null, -1] });
-    const fresh = (a: { version: number; array: Float32Array } | null, last: [unknown, number], size: number, what: string): Float32Array | null => {
-      if (!a || (last[0] === a && last[1] === a.version)) return null;
+    const s = (b.inst ??= { count: -1, m: null, mv: -1, c: null, cv: -1, d: null, dv: -1 });
+    const fresh = (a: { version: number; array: Float32Array } | null, k: "m" | "c" | "d", v: "mv" | "cv" | "dv", size: number, what: string): Float32Array | null => {
+      if (!a || (s[k] === a && s[v] === a.version)) return null;
       const arr = a.array;
       if (arr.length !== cap * size) throw new TypeError(`${b.name}: ${what} must have ${size} numbers for each of the ${cap} instances`);
-      last[0] = a;
-      last[1] = a.version;
+      s[k] = a;
+      s[v] = a.version;
       return arr;
     };
-    const m = fresh(o.instanceMatrix, s.m, 16, "instanceMatrix");
-    const c = fresh(o.instanceColor, s.c, 3, "instanceColor");
-    const d = fresh(o.instanceCustomData, s.d, 4, "instanceCustomData");
+    const m = fresh(o.instanceMatrix, "m", "mv", 16, "instanceMatrix");
+    const c = fresh(o.instanceColor, "c", "cv", 3, "instanceColor");
+    const d = fresh(o.instanceCustomData, "d", "dv", 4, "instanceCustomData");
     if (m || c || d || o.count !== s.count) {
       s.count = o.count;
       this.engine.instances(b.id, o.count, m, c, d);
@@ -666,11 +727,34 @@ export class SceneBinding {
 
   /** Sends the object's transform if it changed. True if its scale did (and it had been sent before). */
   private sendTransform(o: Object3D, b: Bound, stats: SyncStats): boolean {
-    const q = resolveOrientation(o);
     const t = this.trs;
-    t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
-    t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
-    t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    if (o.matrixWorldAutoUpdate) {
+      const q = resolveOrientation(o);
+      t[0] = o.position.x; t[1] = o.position.y; t[2] = o.position.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = o.scale.x; t[8] = o.scale.y; t[9] = o.scale.z;
+    } else {
+      // The renderer's object tree stores local TRS, while matrixWorld is authored in world space.
+      // Its parent is the engine parent, not necessarily Object3D.parent (the scene root is not bound).
+      const local = o.matrixWorld.clone();
+      if (b.parent !== null && o.parent) {
+        o.parent.updateWorldMatrix(true, false);
+        local.premultiply(o.parent.matrixWorld.clone().invert());
+      }
+      const p = new Vector3(), q = new Quaternion(), s = new Vector3();
+      local.decompose(p, q, s);
+      // A sheared or singular matrix cannot be represented by the renderer's TRS API.
+      // Fail explicitly rather than silently draw it somewhere different from matrixWorld.
+      const recomposed = new Matrix4().compose(p, q, s).elements;
+      for (let i = 0; i < 16; i++) {
+        const expected = local.elements[i], actual = recomposed[i];
+        if (!Number.isFinite(expected) || !Number.isFinite(actual) || Math.abs(expected - actual) > 1e-6 * Math.max(1, Math.abs(expected)))
+          throw new TypeError(`${b.name}: matrixWorld must be a finite, decomposable TRS matrix to render`);
+      }
+      t[0] = p.x; t[1] = p.y; t[2] = p.z;
+      t[3] = q.x; t[4] = q.y; t[5] = q.z; t[6] = q.w;
+      t[7] = s.x; t[8] = s.y; t[9] = s.z;
+    }
     let moved = false, posed = false, scaled = false;
     for (let k = 0; k < 10; k++) {
       if (b.trs[k] !== t[k]) {
@@ -1597,6 +1681,27 @@ function samePose(a: AnimationDesc | null, b: AnimationDesc | null): boolean {
   return true;
 }
 
+/**
+ * A file under the asset root, whole or `length` bytes of it from `offset` (`__engine.readAsset`, native renderer only;
+ * docs/RUNTIME.md "Streaming"): what a game reads as it goes, such as a city's baked cells as the camera moves.
+ */
+export function readAsset(path: string, offset?: number, length?: number): ArrayBuffer {
+  const e = (globalThis as { __engine?: Partial<Pick<Engine, "readAsset">> }).__engine;
+  if (!e?.readAsset) throw new Error("readAsset: this host reads no assets (the native renderer does)");
+  return offset === undefined ? e.readAsset(path) : e.readAsset(path, offset, length ?? 0);
+}
+
+/**
+ * Parses a model file (a GLB under the asset root) on a worker thread now, and reads the triangles of each of
+ * `nodeSets` (the `nodes` of the still `GLTFModel`s of it to come; null: the whole file), so that those models added
+ * later go in without that work in their frame (native renderer only; elsewhere, or for a path outside the root,
+ * false and nothing done). What a game streams models in by: its next ones preloaded a few frames ahead.
+ */
+export function preloadModel(uri: string, nodeSets: (string[] | null)[] = []): boolean {
+  const e = (globalThis as { __engine?: Partial<Pick<Engine, "preloadModel">> }).__engine;
+  return e?.preloadModel?.(uri, JSON.stringify(nodeSets)) ?? false;
+}
+
 export function cameraDesc(c: PerspectiveCamera): CameraDesc {
   return { fov: c.fov, near: c.near, far: c.far, exposure: { ...c.exposure }, ...(c.dof ? { dof: { ...c.dof } } : {}) };
 }
@@ -1655,6 +1760,9 @@ function resolveOrientation(o: Object3D): Quaternion {
 /** An engine that records the calls (tests, headless inspection). */
 export class RecordingEngine implements Engine {
   calls: [string, ...unknown[]][] = [];
+  readAsset(path: string): ArrayBuffer {
+    throw new Error(`readAsset ${path}: the recording engine reads no assets`);
+  }
   geometry(...a: Parameters<Engine["geometry"]>) { this.calls.push(["geometry", ...a.filter((x, k) => k < 5 || x || (k === 5 && a[6]))]); }
   texture(...a: Parameters<Engine["texture"]>) { this.calls.push(["texture", ...a]); }
   shader(...a: Parameters<Engine["shader"]>) { this.calls.push(["shader", ...a]); }

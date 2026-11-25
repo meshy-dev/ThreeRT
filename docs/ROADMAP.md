@@ -1,5 +1,11 @@
 # Roadmap
 
+> **Provenance note (2026-11-24).** This file is a log. Entries before that date describe earlier implementations of the
+> post chain, the specular temporal pass, the diffuse history rules, the BSDF's energy terms, the atmosphere and the fog
+> volume, which have since been replaced by implementations written from public sources
+> ([PROVENANCE.md](PROVENANCE.md)). Where an entry names another engine's or SDK's internals, it records how that
+> earlier code came about, not how the present code works; do not implement from such entries.
+
 ## Goal
 
 ThreeRT's goal is AAA real-time game rendering: on consumer GPUs (Apple M series first), dynamic, open-world-scale game
@@ -10,6 +16,24 @@ Every new scene or feature maps to a capability in this goal that has not been p
 No demos that repeat what is already proven.
 
 ## Direction
+
+Direction of 2026-11-25 (the user's, relayed by the supervisor, who rewrites the roadmap by it): the look comes
+first, judged by eye. A day flight recorded after 6a–6c showed no visible gain: the work had been held to "no
+regression" (ΔE / SSIM, frame time), so it added correct but small detail (streaks 3 mm off a wall, hoods seen at
+ΔE 0.07) that the live view's resolution and denoiser erase. The user wants the street level close to a photograph's
+quality soon. So a look item is done only when the Golden Gai pose, as the live view shows it, reads clearly better
+before / after, beside photographs of the place; order: shopfront windows and glass, Golden Gai's mass, the ground,
+the city's edge, then Shibuya. Tone mapping and exposure are left alone for now (the user's call).
+
+Direction of 2026-11-24 (the user's, relayed by the supervisor, who rewrites the roadmap by it): § 0's order changes.
+The streamed city lives in its own repository, [threert/TokyoRT](https://github.com/threert/TokyoRT) (this engine as
+its submodule); its step 2 architecture is in (cells by distance, the kit as instances, in-place adds, incremental
+TLAS), none of step 2's acceptance is met yet. The user's review of a street-level day shot (Golden Gai) found the
+popping between levels the most visible fault, and the street level reading as generated: ground too clean, walls as
+boxes, weathering as tiled noise, windows without depth, props without purpose. So, after the script engine's GC
+hitches: a ΔE / SSIM tool against the offline render, then the popping, then the street level's look (step 6, split
+into 6a–6d), and only then the rest of step 2 (Shibuya stitched in) and steps 3 onward. Every PR reports frame start
+p95 and ΔE / SSIM; detail does not buy back frame time. A supervisor checks the line every two hours.
 
 Direction of 2026-11-10 (the user's, relayed by the supervisor, who rewrites the roadmap by it): the day / night cycle
 and the weather are developed and measured on Tokyo, in this phase (§ 0 steps 1a and 1b), after step 1 and before
@@ -523,7 +547,41 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        - The translucency pass compiles only its particles' material functions: with every function of Tokyo's kernel
          in it, the Metal compiler failed on the `translucent` pipeline once the ground had wetLayer and the rain
          curtain was in the scene.
-  Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7.
+  Order: 1 (complete with its part 3, signs and road markings) → 1a → 1b → 2 → 3 → 4 → 5 → 6 → 7 (until 2026-11-24).
+  Order since 2026-11-24 (the user's; the work in threert/TokyoRT, engine changes here):
+    - (1) step 2's frame budget: the script engine's GC hitches (~100 ms a few times a minute over ~1 M live JS objects)
+        → p99 ≤ 25 ms, no frame over 50 ms, by making fewer objects, not by switching collection off;
+    - (2) a ΔE / SSIM tool for the streamed city: fixed poses, live against our offline render, and streamed against
+        everything resident at full detail (step 2's ΔE ≤ 1.0 / SSIM ≥ 0.98); every PR reports it from here on;
+    - (3) popping between levels (step 2's "streaming invisible"): first the levels agree (colour, material and outline
+        of the same building far, mid and near: the far level's dark Tochō against the mid level's light curtain wall),
+        then a dithered transition for the ~140 m swap; ΔE across a swap at fixed poses;
+        - the dithered transition is deferred (2026-11-24, the supervisor's call on the data): the 140 m swap shows no
+          flicker. Fixed poses offline ΔE 0.00; live, frame by frame through a swap, worst 0.50 / 0.55 against a single
+          frame's noise of 0.44 / 0.47; the tour in lockstep with and without the swap (L0 to 280 m), every 15th frame,
+          at most 0.39 against two runs of the same build's 0.14–0.26 (TokyoRT `tools/quality.ts --swap`). Taken up
+          again if a recording shows a 140 m flicker (replayed in lockstep frame by frame first). The pop seen was the
+          480 m switch (TokyoRT #11).
+        - the 480 m switch after TokyoRT #11 (the far level in the dress's colours): towers SSIM 0.983, within the bar;
+          the skyline 0.967, not. Each far building's own window module (bays, layout, fractions, as the dress draws
+          them) moved it to 0.968 for 8 % more far triangles, so it was not kept: what is left is structure all over
+          (roof rims, rooftop plant, the windows' tone by kind of building, trees), each a little. A far level the dress
+          makes itself (an L2 bake: walls, roofs and flat window quads, ~5–10 M triangles for the area, in place of the
+          source mesher's buildings) would agree by construction; it is a later item. § 0's order goes on to (4).
+    - (4) step 6a–6d below, in that order (6a–6c landed 2026-11-24 as TokyoRT #12, #14–#16; see step 6 for what
+        changed on 2026-11-25);
+    - (5) the rest of step 2: Shibuya stitched in (~20 km²), the drive, expressway and flight paths, resident memory,
+        the first frame;
+    - (6) then 3 → 4 → 5 → 7. Step 1b (weather) waits: its place is the user's to set.
+  Order since 2026-11-25 (the user's, after a day flight showed no visible gain from 6a–6c), replacing (4) above; (1)–(3)
+  stand as recorded:
+    - (4a) 6d, windows and glass, shopfronts first;
+    - (4b) Golden Gai's mass (6e below), the Golden Gai half of 6b folded in;
+    - (4c) the ground again (6f), visible at eye height;
+    - (4d) the city's edge (6g);
+    - (5) and (6) as above. Tone mapping and exposure wait (the user's call).
+    - 2026-11-25, later: 6d–6g and (5) landed (TokyoRT #19–#25); 6h (the ordinary street, to a photograph) goes
+      first, ahead of step 2's remaining performance items (deferred far tiles, memory given back, night routes).
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
      - the far field as proxies (merged, simplified tile meshes; roofs and facades as photo-textured blocks);
@@ -536,6 +594,44 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          height: frame start p95 ≤ 16.7 ms, p99 ≤ 25 ms, no frame over 50 ms;
        - streaming invisible: 5 poses against everything resident at full detail ΔE ≤ 1.0, SSIM ≥ 0.98 (§ 5 item 5's
          bar); popping in motion within the bench-ghosting limits.
+     - Status, part 1 (2026-11-23 → 24, threert/TokyoRT #1–#10; engine #200, #202, #203, #205, #206): one area
+       (Shinjuku, 3.4 × 2.8 km) streamed by level around a flying camera; none of the acceptance is met yet. Step 6's
+       street level was done ahead of it (generated finishes, street models, trees, curtain-wall towers: TokyoRT #1,
+       #5, #6), and step 1b (weather) skipped, both the user's call.
+       - The levels: far (the compiled 256 m tiles, always resident, a quadrant hidden where a nearer level shows it),
+         L1 within 480 m and L0 within 140 m (598 baked 128 m cells: 166 M triangles of their own at L0, 63 M at L1);
+         what repeats is a kit of 8,350 pieces placed as instances (1.7 M copies at L0, 0.45 M at L1; 15 GB of cells
+         where drawing each window out was 23 GB). A cell arrives in place, a frame budget at a time.
+       - Engine: the TLAS built from the instances that changed, as slot ranges (vendored wgpu 30, #200, #203: commit
+         18.9 → 4.9 ms with 470 k instances); the first BLAS build in batches of ≤ 4 M triangles (#202); a scene object
+         8 script objects, none a cycle, so the script's GC no longer pauses (#205: frames with > 30 ms of script in
+         a tour 3 → 0); an offline render's seek under setup's budget (#206).
+       - The tour (`tools/tour.ts`, 90 s of fast flight, M3 Max, MetalFX's denoiser, after the first 20 s): frame
+         interval p50 / p95 / p99 by day 17.4 / 31.9 / 40.6 ms, by night 17.0 / 47.7 / 60.7 ms. Not the bar
+         (p95 16.7, p99 25, none over 50 ms): the slow frames left are commits and acceleration-structure builds.
+         First frame 10–20 s.
+       - Quality (`tools/quality.ts`, `threert-render compare`, ΔE76 / p99 / SSIM, day, 1280 × 720; offline renders
+         at 128 spp, deterministic, so their floor is 0):
+
+         | pose | L0 ↔ L1 at 140 m | L1 ↔ far at 480 m | as streamed vs 2 × radii | live vs offline |
+         |---|---|---|---|---|
+         | Golden Gai alley | 0.00 / 0.0 / 1.000 | 0.00 / 0.0 / 1.000 | 0.04 / 0.8 / 1.000 | 1.47 / 11.5 / 0.935 |
+         | street | 0.00 / 0.0 / 1.000 | 0.01 / 0.4 / 1.000 | 0.04 / 0.7 / 1.000 | 2.07 / 20.7 / 0.951 |
+         | block, 60 m up | 0.00 / 0.0 / 1.000 | 0.11 / 0.8 / 0.996 | 0.12 / 1.0 / 0.996 | 1.69 / 15.8 / 0.953 |
+         | west avenue | 0.00 / 0.0 / 1.000 | 0.08 / 0.9 / 1.000 | 0.08 / 0.9 / 0.999 | 4.94 / 23.7 / 0.860 |
+         | towers, 170 m up | 0.00 / 0.0 / 1.000 | 0.43 / 14.8 / 0.971 | 1.18 / 32.9 / 0.965 | 3.37 / 21.0 / 0.900 |
+         | skyline, 240 m up | 0.01 / 0.4 / 1.000 | 0.85 / 24.2 / 0.965 | 2.79 / 34.5 / 0.876 | 2.77 / 18.8 / 0.899 |
+
+         - The 140 m switch does not show. The 480 m one does: the far level colours buildings from the source app's
+           palette pulled to a cool aerial grey, the dressing in warm, light finishes. That is order item (3)'s first
+           part.
+         - "2 × radii" (L0 to 280 m, L1 to 960 m) stands for everything at full detail: L0 to 300 m is past the
+           renderer's 4 GB vertex buffer.
+         - Streaming in flight, the live frame held at a tour second against the same pose settled (the live view's
+           own noise beside it): 20 s 0.42 / 0.994 (noise 0.39 / 0.995), 45 s while climbing 0.74 / 0.979 (0.48 /
+           0.992), 70 s 0.70 / 0.987 (0.63 / 0.989).
+         - Live against offline is over the bar at every pose: the live path's own distance (denoiser, the sun's
+           glints in glass), the same kind as step 1's table, not streaming.
   3. **The city's lights.** Lit windows that switch on and off, signs, LED screens, street lamps and headlights as
      emitters, 10^5–10^6 across the loaded tiles, in the light tree. Switching an emitter on or off costs no rebuild.
      If the voxel line's "dynamic emission" contract (§ 6 step 3) lands first, use it rather than duplicate it.
@@ -557,6 +653,43 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
      generated facades read flat.
      - Acceptance: street-level poses live vs our offline render no worse than step 1; crops beside photos of the same
        places (qualitative, in the PR); the budget held.
+     - Brought forward (the user's review, 2026-11-24, a Golden Gai day shot): what the street level lacks, in order.
+       Each part lands with a before / after pair at the same day poses, frame start p95 and ΔE / SSIM. Repeated parts
+       go into the kit (instances), so detail costs memory once.
+       - 6a. **Weathering by cause, and the ground.** Ageing that follows rain, gravity, sun, structure and use, not a
+         tiled noise: streaks under sills and air conditioners, splash and grime at the wall's foot, the cleaner band
+         under eaves, sun-faded faces. The ground: gutters, manholes, asphalt patches, seams, dust at the kerb, slight
+         unevenness (gratings and manholes are kit pieces already: their density and placement). The stucco's relief is
+         too coarse and strong where the sun rakes it.
+       - 6b. **Secondary structure on the walls.** Pipes, meters, conduits, vents, layered window frames, eaves, door
+         sills and joints: what keeps a building from reading as a box.
+       - 6c. **Props with a purpose.** Props in groups by what happens there: beer crates, bins, the exhaust duct and the
+         mop bucket at a bar's back door; the A-board, planters and umbrella stand at its front.
+       - 6d. **Windows and glass.** Shopfronts first: rooms with depth behind the glass (interior mapping), the street
+         reflected in it, things standing behind it, dirt on it. Upper windows after. Placeholder posters replaced.
+     - Acceptance for every look item from 2026-11-25 (the user's): a clear, at-a-glance gain at the Golden Gai pose
+       (`tools/quality.ts` pose `goldengai`) as the live view shows it (1280 × 720, its resolution scale, denoised),
+       before / after side by side and beside photographs of the place (references only: no photograph enters the
+       repository or a texture). A gain seen only in an offline zoom does not count. Frame time A/B as before; ΔE /
+       SSIM still reported, no longer the test of a look item. The aim is the street level close to a photograph.
+       - 6d as above, first.
+       - 6e. **Golden Gai's mass.** Above the ground floor: stacked signs, outside stairs, balconies, bundled pipes and
+         cables, clutter, so the outline stops reading as a box. Replaces 6b for Golden Gai's small buildings (6b, #15,
+         dressed only the mid-size ones).
+       - 6f. **The ground, at eye height.** Drain covers along the walls, dark patches, water and grime stains, seams,
+         with contrast enough to read from 1.7 m (6a's ground marks did not).
+       - 6g. **The city's edge.** Above ~140 m the land beyond Shinjuku is a flat grey plain and the city stops ~1 km
+         out: carry it on (far city, haze) so the world does not end in view.
+       - 6h. **The ordinary street, to a photograph** (the user's, 2026-11-25, with a photograph of a two-lane
+         residential street in late-afternoon sun; first, ahead of the performance items). Shibuya, once stitched in
+         (#24), read as bare as Shinjuku had. In order of the frame they fill: concrete poles every ~30 m with
+         crossarms, transformers, boxes and lamp arms, a dozen sagging cables between each; road markings to the
+         Japanese standard (edge and stop lines, the green cycle band, the ◇ crossing-ahead mark, arrows) on worn
+         asphalt; mid-rise flats with balconies in depth (glass or frosted panels, outdoor units, tile / concrete /
+         metal panel), shutters, garage doors and lobbies at ground level; kerbless footways behind a white line, street
+         trees, parked cars, vending machines, sign posts. Judged at a new pose `street-ref` (a comparable street, sun
+         low in the late afternoon: the clock, not the tone mapping) beside the photograph, by eye, as 6d–6g; the Golden
+         Gai pose checked for no regression.
   7. **Milestone 2, the open city.** Shinjuku and Shibuya at night, and by day:
      - a montage per view: our offline render | ThreeRT live | the source three.js app, each tile with its frame rate
        and ΔE / SSIM;
@@ -1509,7 +1642,7 @@ pipeline. The real-time pipeline moves toward Lumen's structure — split signal
     plus a cosine-sampled ray each, ending in the cache again, so it carries every bounce. Pixels that find their voxel
     cold trace one vertex and use that meanwhile. Per voxel the history is capped at 256 samples and 32 frames (4 for
     45 frames after a lighting edit); voxels unused for 120 frames are freed. 2^18 entries, 13.6 MB, resolve 0.14 ms.
-    `THREERT_CACHE=0` turns it off; `THREERT_CACHE_FLAGS` switches its parts for cost attribution.
+    `THREERT_CACHE=0` turns it off.
   - Diffuse history holds irradiance (lighting / albedo, smooth), remodulated by albedo. Albedo and emission history
     is resampled with Catmull-Rom and clamped into this frame's 3 × 3 range (TAA: both are noise-free). It is held to
     4 frames while the view moves and 16 when still, so texture and sign detail no longer blur through repeated
@@ -1777,12 +1910,7 @@ Measured on the M5 Pro (`out/liveq/gpu-runs-std.md`; single runs unless said):
   set again from this build's readings with the margins the old ones had (tools/bench-ghosting.ts); the trails'
   limits and the other shots' stand.
 
-**History lengths (2026-11-12, after it).** The whole frame's history was cut by what happened in the scene: held to
-48 frames while the camera moved, every pixel cut to 16 at a lighting edit and to 4 at a geometry edit, 24 for good in
-a scene with spark lights. Now one bound while the scene's lighting changes (32 frames, a real-time denoiser's: NRD's
-default is 30; `HISTORY_LIVE`), the long history once it has settled, and within it each pixel's own: 48 where it
-moves a pixel a frame, and an anti-lag that cuts the irradiance history by how far its fast mean left the slow one
-beyond their noise (ReBLUR's form; it was on / off). No edit cuts anything.
+**History lengths (2026-11-12, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | dE against the offline render or the converged frame | main | this |
 |---|---|---|
@@ -1839,15 +1967,7 @@ hid two faults of the live path's own:
 - Not done: live GI, reflection and shadow rays still see no media (the stand-in light stays), and a medium has no
   motion vector (smoke that drifts is reactive, not followed). (Overlapping media: below.)
 
-**The specular history per pixel (2026-11-13, after it).** `stemporal` still set every pixel's history by what the
-camera did: 2 .. 12 frames by roughness whenever it moved or turned at all, 4 for the 8 frames after it translated
-(§ 2c's fix). Now each pixel's own, from two things it knows (output pixels a frame): its speed (a resampled history
-blurs: 48 frames at a pixel a frame, as the diffuse) and its reflection's parallax, how far what it reflects moved
-against the surface: the history may be no longer than keeps its trail (frames × parallax) within 2 px (`SPEC_TRAIL`),
-2 frames at least on a mirror, 4 from roughness 0.05. The parallax is the reflected point's where this frame's sample
-has one, the farthest possible point's where it has none, and a moving reflector's own speed. A turn has no parallax
-and keeps its history; a translation shortens it where the reflection slides, by how fast. NRD's ReBLUR bounds the
-specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumulation`).
+**The specular history per pixel (2026-11-13, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | bench-ghosting --quick, excess over the settled frame / trail px (turn-mid, strafe-mid ground; the two returns + 0.5 s; stop + 0.1 s) | main | this |
 |---|---|---|
@@ -1855,7 +1975,7 @@ specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumula
 | Bistro | 1.08 / 5, 1.76 / 6, 1.25 / 12, 1.34 / 12, 1.50 / 5 | 0.84 / 7, 1.60 / 6, 1.17 / 12, 1.26 / 11, 1.34 / 5 |
 
 - What was tried and left out, each measured (`out/liveq/gpu-runs-std.md`, S1–S20):
-  - the parallax weighed against the reflection's own blur, as ReBLUR weighs it against the lobe's angle (the
+  - the parallax weighed against the reflection's own blur, the lobe's angle (the
     history may trail K lobe footprints behind): a wet street's lobe is 27–245 px wide here, the history ran through
     a forward move, and the stop dragged a 65–112 px trail (limit 35);
   - two thresholds instead of one budget (2 .. 12 frames from 0.25 px of parallax, 4 from 2 px): passes, a little
@@ -1870,7 +1990,7 @@ specular history per pixel by parallax too (its source, `REBLUR_TemporalAccumula
   main's own runs across two days (move40 3.88–4.07). Stated as it is: the ghosting bench counts frames and repeats
   to 0.02, this one does not.
 - Not changed, measured: what makes the scene's lighting "live" for the whole frame. Anything that moves or is edited
-  does, for 45 frames, so a scene with a walker in it is always at the 32-frame bound (NRD's own: 30), and the rule
+  does, for 45 frames, so a scene with a walker in it is always at the 32-frame bound, and the rule
   for spark lights adds nothing there (the Bistro slice reads the same without it). The radiance cache's history is
   cut to 4 frames by the same switch: at 32 the slice reads 2.66 for 2.82 at rest and 5.80 for 6.03 at its
   explosion, and all of test-render passes; what the 4 frames buy is how fast indirect light follows an edit, which
@@ -1923,7 +2043,7 @@ A rect light's card and the sun still rebuild (geometry; the sky's bake).
   as before.
 - Seen on the way, not this change's: 2 s after a 5,000 cd light is hidden beside a 1,000 cd one the plane under
   them still reads 6 % high. 45 frames after a lighting edit the long history comes back, and what is left of the
-  old light then averages out as 1 / n (NRD's fixed 30 frames would decay it for good). And 0.3 s after a fireball
+  old light then averages out as 1 / n. And 0.3 s after a fireball
   is hidden a faint ring stays where its edge was (the upscaler's history: nothing says a medium went).
 - Not done: `Explosions` still parks (the voxel line's to change); a mesh hidden by its own `visible` still rebuilds.
 
@@ -1961,12 +2081,7 @@ converged frame of the state after, beside the frame k frames after a history re
   later (lamp off: 2.24 for 1.66 at 32 frames, 1.38 for 1.12 at 128; lamp on: 0.50 for 0.72, 0.79 for 0.93). The 4
   frames buy what they were said to and stay; the 0.16 ΔE they cost a scene at rest is the price.
 
-**The fast-history clamp (2026-11-13, after it).** ReBLUR's way of following a lighting change, in `dtemporal`: every
-frame, while the scene's lighting is live, the slow means around the pixel (3 × 3 on its surface) are held, a channel
-each, to the band of the fast means there (a quarter of each new sample; their mean ± 3 standard errors, from the fast
-luminances' spread), and the pixel's history is changed by the same ratios and counts for as many frames less. The
-fast mean in colour is kept in the buffer that was the `judge` pass's unread ping-pong partner: no new memory. The
-cut by luminance stays beside it. `bench-temporal --shot edit`, ΔE against the converged frame of the state after:
+**The fast-history clamp (2026-11-13, after it).** [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md. The measurements below are that implementation's.]
 
 | edit, region | 8 frames: before → now | 32 frames | 128 frames | a view with no memory, 32 |
 |---|---|---|---|---|
@@ -2776,6 +2891,419 @@ in-place tests' world, rows given back; two models in a shared pose posed again 
 (tests/render/data/arm.glb, a skinned strip of two materials); `geometry/emitter-model-live` (a model's emitting
 section that is not its first, the model a unit under software traversal).
 
+**Textures, models, functions and lights come in place; the kernel is made beside the frames (2026-11-23).**
+A game that brought a texture, a model, a material function or a light while it ran had the scene built again from
+the world, and a feature a scene first used had the next frame wait for the driver's compile. On Bistro (2.8 M
+triangles, 960 x 540, an M5 Pro), the frame the edit landed in:
+
+| | before | now |
+|---|---|---|
+| fog appears (a kernel variant not compiled before) | 0.8 to 2.4 s | no long frame (28 ms at most) |
+| a mesh with a new 256 x 256 texture | 4.5 to 4.6 s | 39 to 56 ms |
+| a mesh with a new material function | 2.3 to 4.2 s | no long frame (19 ms) |
+| a model the scene has not (15 k triangles, five 2048 x 2048 textures) | 4.8 to 5.2 s | 223 to 233 ms, then 85 to 138 ms |
+| a point light comes | 1.5 s | no long frame (19 to 26 ms) |
+| the light goes | 1.3 s | no long frame (17 to 22 ms) |
+
+The texture pages keep where each texture lies (`texpack::Atlas`) and take another without being packed again,
+growing by a copy on the GPU; a still model's materials, textures and mesh are made by the code the build and the
+scene meshes' edits use; functions are numbered in the order they come; a light's entry is added, dropped or
+sorted within the table as a build lists it. A new kernel variant is made on another thread while the view runs
+the one it has (docs/RUNTIME.md "What comes in place" has the rules and what still rebuilds). The model's frame
+is its images' decode, on the frame's thread still.
+Not freed: a texture or a material nothing uses any more keeps its place until the scene loads again (the
+allocator's step).
+Tests: each kind of edit against a build of the edited world, state and picture (`textures_come_and_change_in_place`,
+`a_model_the_scene_has_not_got_comes_in_place`, `material_functions_come_and_change_in_place`,
+`lights_come_and_go_in_place`); a variant made while the frames go on; the atlas's places; the world's rules.
+Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
+Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
+translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
+
+**Nothing reads a world-space triangle (2026-11-25, after it).** Nothing made one any more; what read them is
+deleted. Hardware traversal: the traversal groups and their BLASes, with the feature for a group past 2^24
+triangles and the bit that told a model's TLAS instance from a group's (an instance's custom data is its record).
+Software traversal: the tree over the scene's own triangles and its walk (the kernel's `trace` is the units' walk,
+then the procedural objects'; the node buffer starts with the mesh trees). The kernel: a row a triangle, and what
+a hit without an instance read (the test of a hit's instance stays where its record is read: every hit passes it,
+and without it a frame is 1 to 3 % longer in some scenes, a crowd under the sky 6.36 -> 6.57 ms). The CPU:
+`Scene::tris` and what went with it, posed models as triangles the CPU moved, their emitters, picking over them.
+A deletion: the pictures are the same, with one exception that is not this step's doing. A TLAS's empty slots are
+instances without extent at the world's origin (the patched wgpu's, since 2026-11-23), and on Metal a ray that
+starts there loses its hit, as do a few that pass it: the groups' eight slots were empty in every scene, and with
+them gone a scene whose TLAS has no empty slot renders such rays right (eleven render tests under hardware
+traversal, failing since then, pass). A TLAS with an empty slot (an edit room, an instance removed) still has it.
+
+**Software traversal has units alone (2026-11-25, after it).** An offline render under software traversal
+flattened every instance into world-space triangles (kept so on 2026-11-11, for its bytes to stay main's while
+units were new), and so did a scene with a mesh no tree could be made of or with more instances than a top tree
+holds. Now `prepare` gives software traversal units wherever it is, an offline render's bytes change once, and
+`THREERT_UNITS`, `flatten_instances` and `flatten_deforming` are gone: an instance of a mesh without a tree is
+no unit (a particle system's; a mesh with a vertex that is not a number, which is said). Measured before, offline
+(480 x 270, this machine): the trace 4 to 5 % longer on the large single models and a crowd of 792 instances,
+equal on 812 small ones; the tree build 1.2 to 8 times shorter and the triangle data 10 to 80 % less; the picture
+hardware traversal's (2.4 steps apart a pixel at 128 samples, where the flattened one was 10 from both); a render
+repeats byte for byte. A kernel with units has the loop guard by default, an offline render's too now: about
+10 % of its trace. The rays' test of a prepared scene (`a_scene_with_units_is_its_triangles_to_every_ray`) holds
+the walk to every placed triangle tested one by one, where it held it to the flattened scene's walk.
+
+**The build flattens nothing (2026-11-25, after them).** The last two things it flattened:
+- A posed skinned model with triangles that emit was flattened whole and skinned on the CPU. It is a skinned
+  instance as any other, and the triangles are its instance's emitters: at a new pose the light list's copies are
+  taken again on the GPU from the skinned vertices, the CPU places the emitting triangles alone (the light tree's
+  moving subtree is refit by them) and their weights follow the pose's areas. One placed without size is an
+  instance no ray sees. A cutout on exactly an emitter's vertices is left out of a skinned model's mesh: it is
+  one mesh, where the cutout's holes would take the emitter with them, and what is drawn is the emitter, as where
+  the two are meshes apart.
+- `THREERT_INSTANCING=0`, the flattened reference of the instancing step, is gone with the build's arms it alone
+  reached (a mesh's, an instanced object's copies', a model's). `tools/check-instancing.ts` holds software
+  traversal to hardware traversal's render now.
+
+World-space triangles are left under software traversal alone, where an instance is no unit (lib.rs
+`flatten_instances`, `flatten_deforming`); what read them under hardware traversal is not deleted yet.
+
+**A light's card, a coincident pair and a model without size are instances (2026-11-25, after it).** Three of the
+things the build still flattened into world-space triangles:
+- A visible rect light's card is an instance of one card mesh, a unit quad: its size is its transform's, its
+  material its row's, and it moves as its instance, under software traversal too. An emitter's entry in the light
+  list says whether it is a card's (it lights one side), where the kernel read the triangle's material. A card
+  of another size is the build's: it was taken in place, and only its material changed.
+- A triangle on exactly another's vertices (a cutout on an emitter, glass on what is under it) alone leaves its
+  mesh, for the model's second mesh, with an instance beside the first: a BLAS apart, as the flattened pair was.
+  A posed rigid model with such a part is hidden and removed in place now. A movable still model with one moves
+  by a rebuild (it was re-transformed on the CPU).
+- A model placed without size is an instance no ray sees, as a mesh is.
+
+Flattened still then: a posed skinned model with triangles that emit, and a scene under `THREERT_INSTANCING=0`;
+under software traversal, what has no unit. Which of a pair is drawn is as it was: a scene with the pair near and far
+renders to main's picture, byte for byte, under both traversals.
+
+**Five A/B switches and the uniform tables are removed (2026-11-25).** Switches whose question was answered, or
+that nothing set: `THREERT_EDIT_BLAS` (an edit mesh's BLAS is built fast), `THREERT_LIGHT_GROUPS` (measured:
++4.6 ms of trace without the groups), `THREERT_RIGID_NODES` (measured: 4 to 10 % of GPU time with every node
+apart), `THREERT_CACHE_FLAGS` (the radiance cache's four experiment bits, read at four places in the kernel) and
+`THREERT_TL_HIDE` (a diagnostic of the translucency pass). And the uniform tables, Android's first way round a
+driver that misread four of the kernel's tables (docs/RUNTIME.md "Android"): since the device reads the tables
+whole (2026-11-16) no platform had them by default. Their kernel blocks, the per-frame copies, the bounds and
+their three tests are gone, with `GpuOptions::uniform_tables` and `THREERT_UNIFORM_TABLES`. The records that
+name these switches are of their time. Kept: `THREERT_LTREE` and `THREERT_LT_RIS` (the light
+sampler's kind and its candidate count), `THREERT_TABLE_VIEWS`.
+
+**The raster experiment is removed (2026-11-24, after it).** Primary visibility by rasterization (§ 1's decision
+experiment, `THREERT_RASTER=1`) stayed in the code after its verdict: a render pass of the world-space triangles,
+a texture in the kernel's second bind group, a parameter and a branch at every path's first hit. It drew nothing
+in a scene with a mesh since meshes became instances. All of it is gone; § 1 keeps the experiment's record and
+figures. The kernel's parameter has the frame's jitter and the "rays off" switch still (`jitter`).
+Tests: the "rays off" switch had none and has one (`rays_off_is_another_picture_and_on_again_the_first`: what was
+in shadow is lit, on again the picture is the first); three mutations of the parameter's places, one of which the
+test's first form let through. A live keyframe of a heavy interior reads as before, with and without the loop
+guard.
+
+**A particle system is a mesh and an instance (2026-11-24).** Particles were world-space triangles of their own
+kind: two a particle among the scene's dynamic triangles (the translucent ones after everything else, in a BLAS of
+their own), a row a triangle, their emitters by a nominal area in the triangles' attributes, every size fixed when
+the scene was uploaded. Now a system is what any geometry that deforms is: a mesh of the pool (a quad a particle,
+four vertices), one instance, a BLAS of its own built again after the particle passes. Stateless and stateful
+systems, those the lights are sampled by (their triangles are the instance's emitters) and translucent ones (an
+instance of the translucency pass's TLAS each) alike; a particle keeps its own object, which a hit finds from its
+instance's and its triangle. The world-space form is gone from the build, the layout, the passes and the kernel.
+The cost is a BLAS build and a TLAS instance a system, where all systems shared four BLASes at most. A frame's GPU
+time on Bistro with opaque particles added (1280 x 720, an M5 Pro; runs alternated): 16 systems of 1024
+particles, 21.25 to 21.48 ms for 21.15 to 21.63 (no difference); 256 systems of 64, 21.44 to 21.55 ms for 21.07 to
+21.11 (+0.41 ms, 1.9 %: 0.16 ms of it in the trace).
+Not changed: a system that comes or goes, a particle function or program, still rebuild the scene.
+Tests: the build's five kinds of system (`a_particle_system_is_a_mesh_of_quads_and_an_instance`); a particle's
+previous positions and the motion at its pixels beside another system; `translucent/systems` (two translucent
+systems, their order reversed between the image's sides).
+Mutations: 28 (the build and the layout, the passes' previous positions, the kernel's object of a particle, the
+builds after the passes, the translucency pass). One had no test, a pass's first frame taking the build's
+positions for its previous ones, and has its assertion now, for both passes; the others failed a test there was,
+one of them by the renderer stopping.
+
+**Volumes and density grids come in place (2026-11-23, after it).** A volume that came, went or was set again
+while a game ran, a still volume's first move, a volume function, a new density grid and a grid program each had
+the scene built again. On Bistro (as above), the frame the edit landed in:
+
+| | before | now |
+|---|---|---|
+| a homogeneous volume comes (the scene's first medium) | 1.4 to 1.6 s | no long frame (18 ms at most) |
+| a volume with a 32³ density grid comes | 1.3 to 1.4 s | no long frame (27 ms) |
+| a volume whose 32³ grid a program simulates comes | 1.2 to 1.4 s | 128 ms, the program's pass compiled; 19 ms once the driver has it |
+| the first volume goes | 1.1 to 1.2 s | no long frame (21 ms) |
+| the simulated one goes | 1.2 s | no long frame (18 ms) |
+
+Before, a rebuild that needed a kernel variant the driver had not compiled took 5.1 to 5.4 s instead; now the
+variant is made beside the frames, and the volume is drawn when it is there.
+
+The media table is made whole from the world by the code the build has for it (`LiveCore::set_media`,
+`scene::MediumGpu::of`), volume functions are numbered in the order they come, and the kernel's count of media
+and its media features follow. The density grids follow the volumes that name them (`Gpu::put_grids`), stacked by
+the function the build stacks them with (`scene::grid_of`): when a grid comes, goes, or has another size or
+program, or a program's code changes, the atlas and the programs' pass are made again and what the programs had
+simulated is copied on the GPU to the grids that are the same still; new parameters, and a grid that passes to
+another of its volumes, make nothing again.
+Costs that stay: a grid program's pass is compiled in the frame it comes in (the 128 ms above), and one atlas
+holds every grid, so all are made again when one comes or goes.
+Tests: `volumes_come_and_go_in_place` and `density_grids_come_and_change_in_place`, each edit against a build of
+the edited world, state and picture, with the cells a program had simulated read back; the world's rules.
+Mutations: 23. 20 failed a test. Two had none, a media table that grew and was not bound again (the tests had
+two volumes, the table room for two) and a grid counted the same although its volume was another, and have their
+cases now. One was no fault: where a grid lies follows from the grids before it, and that comparison is gone.
+Found by review: a still volume that was moved left its grid's program running in the box where it had stood; a
+volume edit in place did not hold the lighting's histories short for the frames after it, as a rebuild did (nor
+had a volume shown or hidden in place before this).
+
+**A tangent is a vertex's (2026-11-23).** A triangle had one tangent, its first corner's, and a model whose file
+had none had its frame made a triangle at a time where it was hit: a normal map's detail turned at every edge of a
+curved surface. Now each corner of a file's triangle carries its own through the build, corners that differ in
+tangent are vertices apart, and the kernel takes a hit's tangent from its three vertices at the hit (the hand from
+the first). A primitive of a file with UVs and no tangents has them made where it is loaded, as the glTF
+specification says, by MikkTSpace (`tangents.rs`, on `bevy_mikktspace`, a crate without dependencies), a corner
+each. Made for every such primitive, not only where a material reads a frame: 1.4 to 2.9 M triangles a second on
+one thread, and 0 to 0.4 % more vertices on the files measured, so a material that starts reading a frame needs
+no rebuild. Against the tangents two sample files carry themselves, 897,150 corners: 3 more than a degree off, none
+of the other hand. A scene's own geometries, which have no tangent attribute, keep the frame made at the hit.
+Pictures: offline at 8 samples against the build before, three scenes without normal-mapped models are the same
+bytes; the home showcase (models without tangents under normal maps) differs in 5.4 % of its pixels, by 0.08 steps
+in the mean; the museum in 1.2 %. A frame's GPU time in twelve scenes, one run against the build before: between
+-1.2 % and +0.6 %, which one run does not tell from none.
+Tests: a quad whose file has a tangent of its own on each side, by the gradient a function draws of it
+(`material/function-vertex-tangents`: 1 with one tangent a triangle); two quads whose file gives one hand each, by
+the side their bitangent points to (`material/function-file-hand`); the tangents made for a quad, upright and
+mirrored, and for a primitive whose texture mirrors along an edge (the edge's vertices twice, their joints and
+weights with them); corners apart by tangent or by hand, a skinned mesh's too; a model's triangles, its skin's
+corners and a placed triangle each with a tangent a corner, under a mirroring placement too.
+Mutations: 18 (15 of the build, 3 of the kernel). 15 failed a test there was; one, a hand never read at a hit, none,
+and has the hand's test now; one, a corner without a tangent that says it has one, none, and is asserted now; one
+changed nothing: a branch of the generator that its last pass repeats, removed.
+
+**The kernel's loops are bounded (2026-11-23).** The kernel was the one shader compiled without wgpu's loop
+bounding (every loop given a count its compiler can see the end of); every other pass has it. Its loops end on
+sound data, which is no promise to a compiler that they end. Without the bound, the kernels Metal's compiler made
+lost the state of whole SIMD groups (8 × 4 pixels) on the home showcase, a scene with cutouts, one build and not the
+next. Nine builds of this kernel that differ by a statement that changes nothing (a counter, a
+branch never taken), under the loop guard: in six the guard stopped 14 to 43 invocations a run; with the bound, in
+none. Five builds of the next change's kernel (triangles as vertices and indices) drew 94,000 to 112,000 of the
+picture's 518,400 pixels wrong without the guard; with the bound each drew the right picture. Bounds checks and
+ray-query tracking, turned on alone, changed nothing and stay off. `THREERT_CHECKED=0` is the kernel as it was.
+What it costs: under hardware traversal a frame's GPU time in twelve scenes, alternated twice with the kernel before,
+is -1 % to +4 % (Zero Day +4.0, the neon street +3.8, the colour room +3.6, the crowd +2.9, the others under 2, Tokyo
+-1.0); under software traversal, whose tree walks are loops, the trace of a crowd of 3.3 M triangles is 85.3 -> 90.6 ms
+(+6 %). The pictures and the suites are the ones before.
+**Triangles are vertices and indices (2026-11-22).** Every triangle carried its own three vertices (48 bytes), its
+shading attributes (96) and, under hardware traversal, its positions again as the BLAS's input (36). Now the scene
+has vertices, a record of 48 bytes each (position and u; normal and v; tangent), and a triangle is three indices
+(`renderer/src/indexed.rs`; docs/RUNTIME.md "The scene's triangles"): one layout for both traversals, and the
+BLASes are built from the same vertices through the indices. A mesh's vertices are a run of their own: the
+skinning pass skins a vertex once (it skinned every corner), the particle passes and the light list's fill write
+and read vertices, the previous frame's are kept a vertex, and an edit in place takes a run of vertices with its
+triangles. The kernel binds one buffer fewer.
+A mesh's triangle has no data of its own besides. Its hit says which section of its mesh it is in (the BLAS's
+geometry; under software traversal its tree's leaf); the section's row of its instance has the material, the
+instance's record the object and whether the mesh deforms; the light list's record (64 bytes, was 48) has an
+emitter's section. A triangle no instance places keeps a row of four words.
+Software traversal's trees keep their triangles in their leaves, their own copy as an acceleration structure has
+one (48 bytes a triangle: v0, the edges, its section and its index there): a candidate's test read through the
+indices and the 48-byte vertices cost its trace 6 % (a crowd standing still, 85 -> 90 ms); from the leaves it is
+81 ms. A pass takes a posed mesh's leaves again from its vertices.
+On the GPU, data and BLASes together: Tokyo (23 M triangles) 6.4 GB -> 3.9, Zero Day 1.6 GB -> 0.95, a small scene
+15 MB -> 7.5. The BLASes themselves are as large as they were.
+A frame's GPU time under hardware traversal, twelve scenes alternated twice with the kernel before: the home
+showcase +4.2 %, the colour room +2.0, the museum +1.9, the crowd -2.5, Tokyo -1.2, the others within 1 %.
+What changes in a picture. A triangle's tangent frame, where its file gives none, is made where it is hit, not at
+the build: rounding (offline, software traversal, against the build before: two scenes the same bytes, one with
+411 of 921,600 pixels off by 2 steps at most). Under hardware traversal the driver's tree over indexed geometry is
+another tree, and a few rays at shared edges meet the other triangle: five scenes at 8 samples differ in 3 to
+2,408 pixels, by 3 steps at most but for single samples (8 steps; in one scene one sample, 22 steps over the 11 x 11
+pixels the denoiser spreads it to).
+A skinned vertex whose position is not finite is at its mesh's origin now; its triangles were left out before.
+The build finds the sharing again, 1.2 s on Tokyo (a file's indices are flattened before: historical, a later step).
+Tests: indexed.rs's own (sharing; a seam or a crease; a first corner's tangent; a triangle that is not finite); the
+build's triangles through their indices against the scene's; the in-place tests read every triangle they check
+back through its indices (the light list's emitters with their sections; a skinned mesh's corners, normals, UVs,
+tangents and previous positions against the CPU skin, its record's deforming bit, each triangle's section and its
+index there); a mesh changed in place to more vertices; a moved card beside another, a drifting particle and a
+drifting GPU particle, by their motion vectors; a skinned primitive without normals, by the normal the camera sees;
+emitters in a mesh's second section against the same triangles a mesh each (live, and offline for the weight of a
+ray that meets one); a first frames' bounce off a mesh's second section and off a particle, which the kernel's
+second pass shades; a cutout particle; an emitting particle's two sides beside a light's card;
+`material/function-file-tangent` (a file's tangent is the one a function is given); the rasterized first hit
+(`THREERT_RASTER`, which had no test and is off in any scene with a mesh since meshes are instances) against the
+traced picture.
+Fixed on the way: a still mesh that emits, moved for the first time, had the pass that places moved emitters run
+over the emitters the move had just made, which the light list did not hold yet (its write landed on the list's
+last record); they are made where the mesh stands and the pass leaves them alone.
+Mutations: 28 of the first form (20 failed a test there was, 8 none and have their tests above), 27 of this
+one (17 and 8; one changes nothing, no deforming instance has its materials' classes remade in place; one is
+reached only by a live view without units, `THREERT_UNITS=0`, and has no test) and 17 of the trees' leaves (15
+failed a test, one the walk's transcription alone, one none until the emitters' test had three at right angles).
+Next: tangents a vertex, interpolated (generated where a file has none); vertices packed to 32 bytes; a file's
+indices carried through the build.
+
+**A triangle's texel density is the hit's to compute (2026-11-22).** Every triangle carried a constant for its mip
+choice, half the log of its UV area over its area, made when the scene was built; an instance added an offset for
+its scale, the skinning pass and the particle passes wrote it again each pose and frame. Now the kernel takes it
+from the triangle where it is hit, from its two edges as it stands in the world and its UVs (`mesh_density`), and
+nothing stores or writes it: the attributes' first `x` word and the record's third `info` word are spare. A level
+is one division and one logarithm (`mesh_lod`: the density, a footprint's square, what else divides); it was three
+logarithms. With a logarithm a term the frame cost up to 1.7 % more on the clips with textures or cutouts.
+What changes in a picture: nothing under a uniform scale but rounding (five scenes offline against the build
+before: four the same bytes, one with 21 of 921,600 pixels off by 6 steps at most). An instance scaled otherwise
+has its triangles' own density now; its offset was the cube root of its volume's scale.
+A fault found on the way: a shadow ray through glass on a scaled instance added the instance's offset twice, so a
+pane's colour or transmission map was read some levels off (a pane scaled to 1 / 32: five too high).
+The cutout test of a candidate hit reads its triangle's edges now too, where its material has an alpha map.
+Tests: the kernel's own `mesh_density` and `mesh_lod`, their text run on the GPU for 512 triangles (a millimetre to a hundred metres,
+UVs a hundredth of the texture to a hundred repeats, ones without area) against 64-bit values; a checker on an
+instance scaled 32 times, a square's inside reading its colour (a level five too high reads grey); the checker in
+a cutout's alpha on one scaled 256 times; a shadow through a pane with a colour map, the pane scaled 1 / 32 and 32
+times (the first fails on the build before). Not held by a test: the density a light sample, a material function's input and a
+translucent particle read, and the ray's angle a surface's level is divided by (a wrong level there changes
+noise, or sharpens: no mean sees it).
+12 mutations: eight of the two functions fail the unit test, four of the places that use them fail a render test.
+One did not at first: a cutout three levels too high still has each square's middle on its side of the test, so
+that test's instance is scaled 256 times.
+
+**A posed skinned model is posed in place under software traversal (2026-11-22).** Under software traversal a mesh
+that deforms was written out into the still scene's tree, so every pose rebuilt the scene. Now it is a unit as any
+mesh. Its tree has the shape of a tree built once over its model's bind pose, one shape for every placement of the
+model (the pass's corners and each such mesh's triangles are in that tree's order), and the boxes of its pose. A new
+pose places the model's corners on the CPU, takes the boxes again (`units::refit`), writes the nodes where they lie
+and gives the top tree the unit's new bounds; the skinning pass writes the triangles and attributes as under
+hardware traversal, without the BLAS input. Hidden, shown and removed, it goes as any unit.
+Why the boxes alone: a tree made again for a pose costs sixty times as much (a character of 13,744 triangles, one
+core: 3.0 ms against 0.05) and walks 4 to 11 % shorter by its nodes' areas; the clip's first pose is no better a
+shape than the bind pose.
+Still a rebuild under software traversal: a skinned model added (its triangles and its tree need room, which a
+scene has there only with geometry of its own to edit, and which does not grow there).
+Measured, software traversal. A game with a character posed every frame: every frame rebuilt the scene, 30.6 ms of
+CPU; now none does, 3.2 ms. A crowd of 150 walkers: 2.0 s a frame; now no rebuild, 7.6 ms of commit. What a frame's
+trace pays, nothing moving, at 1280 x 720: four characters filling the view, 4.67 ms before and 5.20 now (+11 %),
+of which 6.5 % is the scene having units at all (its kernel had no unit walk) and 4.9 % the kept shape (the same
+units with trees built for the pose: 4.97); the crowd standing in a street, 85 ms either way.
+What a pose costs the CPU there: the corners' positions (0.2 ms a character of 13,744 triangles, one core) and the
+boxes (0.05). The crowd's commit is 7.6 ms, against 3.3 under hardware traversal, whose BLASes the GPU builds.
+Tests, under both traversals: four models of two files, each mesh's triangles, attributes and previous vertices on
+the GPU against the CPU skin; under software traversal each mesh's tree read back (its model's links, a leaf's box
+its triangles', an interior node's its children's), its bounds its root's, its unit's leaf of the top tree; the
+motion vectors of a pose no longer than the furthest a corner went; one hidden, posed while hidden, shown; one
+removed. A unit test of the boxes taken again (corners that are not finite too).
+22 mutations of the new logic: 20 fail a test under software traversal, one natively (the pass bound again when the
+scene's buffers grow, which they do under hardware traversal alone), and one is equivalent (the pass writing the
+BLAS input under software traversal: the writes fall in a spare word no one reads; the constant saves the work).
+Three lines that told the traversals apart where no test could were taken out: the pose path is one for both.
+
+**A posed skinned model is added and removed in place (2026-11-21).** A character that comes or goes while the game
+runs rebuilt the scene. Now one of a model the scene has is added as the build makes one: a mesh of its own in the
+room for edits, its triangles skinned on the CPU once for the pose it comes in, a job of the skinning pass for its
+next poses (the pass's table grows), skinned from the model's one copy of its corners. Removed, its instance is out
+(the build's or an edit's); one an edit placed gives back its triangles, its record and rows, its previous vertices
+and its job's slot, and the next one placed takes them.
+A mesh that deforms has its previous frame's vertices where its instance says (`scene::Instance::prev`, in its
+record): the kernel found them by the triangle's place among the dynamic triangles, which a mesh in the room does
+not have. Their buffer grows as the triangles' does. The kernel's read is a feature of its own (`F_DEFORM`: a scene
+with a mesh that deforms): in every kernel, a scene without one paid 0.6 % of its GPU frame for it (a flight over a
+city, five pairs of five).
+A fault found on the way: what a batch changed of an object (a pose, a move, its visibility) stayed when the same
+batch removed it, and the renderer rebuilt for an object it could not find. It goes with the object now.
+Still a rebuild: a skinned model the scene has not (its materials and textures load with one), one whose pose
+mirrors other primitives than the scene's, one added hidden and shown later, one added in a scene with particle
+systems (the rooms for edits do not grow there, for any edit: the particle passes hold the scene's buffers), and
+any under software traversal.
+Measured, hardware traversal, a game that spawns a character every half second and takes the oldest away (twelve
+at most): each spawn and each despawn rebuilt the scene, 31 times in 16 s, 46 ms each (the longest frame 79 ms);
+now none does, a frame that spawns or despawns commits in 3.5 ms (4.9 at most) and the longest frame is 21 ms. The
+frame between is the same: eight spawned and then none, at 1280 x 720, the GPU's frame is 10.6 ms either way (the
+trace 3.5, the BLAS builds 0.58).
+Tests: one added against the CPU skin (triangles, attributes, BLAS input, previous vertices) and a build's picture;
+its motion vectors at a new pose against a built one's, none longer than the furthest a corner went; moved, hidden,
+shown; 40 added at once (every room grows), posed on, half of them hidden and shown; 24 more in a commit that
+grows the pass's buffers alone; previous vertices kept mesh by mesh (a model removed before a frame is drawn, two
+whose triangles are neighbours and whose previous vertices are not, one posed twice between frames); one removed
+and the next added in what it had; a built one removed (shown, hidden, posed in the same batch); the three that
+rebuild. The pictures are compared with the build's frames counted from the live view's (a frame's samples go by
+its number: at another count a picture of many thin models is two thirds of a step from itself).
+36 mutations of the new logic: 33 fail a test natively, two under software traversal, and one is equivalent (the
+CPU's copy of an added model's triangles: a fallback no path reads while the model loads). Eight did not at first:
+the scenes had no moving triangles before the meshes, motion vectors were compared with a build's alone (wrong
+alike in both), other rooms grew in every commit that grew the pass's, and no frame was skipped between two edits.
+
+**A posed skinned model is a mesh of its own (2026-11-21).** Models in the same pose (the same clip and time) shared
+one mesh, found by the build; one of them taking another pose had to leave it, and that rebuilt the scene (and a
+rebuild grouped whichever models then happened to be in one pose). A model alone in its pose was no mesh at all:
+world-space triangles, skinned on the CPU. Now every posed skinned model is an instance of a mesh of its own
+(`scene::Skinned`), skinned by the pass at each new pose, never shared: another clip or time is in place whatever the
+others do, and the model is hidden and shown in place by its instance (hidden, a new pose skins nothing; shown, it
+is skinned as it is posed then). What the pass reads of a model is still one copy for all its placements. The
+grouping, its key and the switch that turned it off are gone.
+Still a rebuild: a skinned model added or removed; one hidden when the scene was built, shown; every pose under
+software traversal (the next step). Still world-space triangles skinned on the CPU: a model with emitting triangles.
+Measured, a crowd of 150 walkers (8 walk phases), hardware traversal, the builds in turn at 60 fps: a frame's commit
+3.3 ms with a mesh a walker, against 2.1 with the 8 shared meshes and 2.9 before the pass; the BLAS builds 0.6 ms
+against 0.24. With the CPU skin the same 150 meshes cost 20 ms of commit (40 fps): the reason the pass came first.
+Tests: two models in one pose are two meshes skinned from one copy of the model's corners, posed again in place,
+and one posed alone in place; one hidden, posed and moved while hidden, shown (under software traversal, hidden and
+shown by a rebuild); four models of two files, each mesh's triangles, attributes and BLAS input on the GPU against
+the CPU skin, one posed alone and the others' left as they were, one moved alone. 10 mutations of the new logic:
+nine fail a test natively, the tenth (a model hidden where it has no instance to mask) under software traversal.
+
+**Meshes that deform are skinned on the GPU (2026-11-21).** A new pose of a shared pose's mesh was skinned on the
+CPU and every triangle of it sent again: 180 bytes each (its vertices, its shading attributes, the BLAS's input).
+Now the CPU sends the pose's matrices (48 bytes a joint) and a compute pass skins the mesh where it lies
+(`shaders/skin.wgsl`, `Gpu::skin`): a triangle an invocation, from its model's corners as the file has them
+(`skin::SkinCorner`: position, normal, tangent, four matrices and weights; one copy a model, whatever its poses,
+`Scene::skin_sources`) and the pose's matrices (`skin::Model::palette`: a skin's joints, and the nodes of primitives
+beside it), into the triangles, the attributes' normals, tangent and texel density, and the BLAS's input. The
+commit builds the mesh's BLAS after it, as before (a BLAS is built again: wgpu has no update yet).
+The CPU keeps no triangles of such a pose: a click or a query skins the mesh when it asks (`LiveCore::mesh_tris`).
+A pose that mirrors other primitives than the one the mesh was made for has its triangles in another order: a
+rebuild's. An authored tangent of a skinned vertex follows its joints now (it was placed by the object alone).
+Still on the CPU: a posed model alone in its pose (world-space triangles: the next step makes it a mesh of its own),
+and every pose under software traversal (a rebuild there).
+Measured, a crowd of 150 walkers in 8 shared poses, hardware traversal, alternated: a frame's commit 2.9 ms -> 2.1
+(the upload 0.82 -> 0.18, the skin 0.45 -> 0.30); the trace the same. With every walker a mesh of its own (a switch
+of the experiment, not in the tree): the CPU's frame 24 ms with the CPU skin (15 ms of upload: 40 fps), 7.4 ms with
+the pass (60 fps), against 7.1 with the 8 shared poses.
+A fault found on the way, older than this: a posed model the scene did not call movable was moved by skinning it
+again where it stands, so its move was recorded as a new pose. One that is an instance of a mesh that deforms was
+then not moved at all (no pose had changed), and nothing rebuilt. A posed model's move is a move now
+(`World::note_move`): the renderer moves an instance, and skins world-space triangles again.
+Tests: the pass's output read back from the GPU and compared word by word with the CPU skin after each new pose, for
+two model files in two poses (`tests/render/data/skin-blend.glb`: more triangles than a block of the pass, vertices
+two joints hold, weights that do not sum to one, a primitive with tangents, one without normals, a joint turned
+about an axis that is neither the normals' nor the tangents', a mesh on a node beside the skin that mirrors it,
+materials in an order the mesh does not keep), with world-space triangles before the meshes'; the previous frame's
+vertices, the mesh as the CPU has it when asked, the picture against a build's; a model moved alone, posed and
+moved at once, posed after the scene's buffers grew; a pose that mirrors other primitives, by a rebuild; the
+corners placed by the palette on the CPU against the model's triangles. 27 mutations of the new logic: each fails a
+test (two did not at first: the mesh's triangles were in the model's order and first in the GPU's, in every scene
+the tests had).
+
+**A posed rigid model is edited in place (2026-11-20).** As a mesh and a still model are. Hidden, its parts are
+instances no ray sees, their emitters at no weight, and it is posed and moved on; shown, it is placed where it
+stands (`show_meshes`, `repose_rigid`). Removed, its instances are no object's (`edit_geometry`). One the scene has
+is placed again as an instance of each of its parts' meshes (`Retained::rigid_meshes`), a part a record of the room,
+in a run. Its pose update goes through what is above the instances under either traversal (the TLAS,
+or the units' top tree): under software traversal a new pose or a move was a rebuild's.
+An edit places an instance by one function now (`place_instance`: its rows, its emitters, its record, its place
+above the triangles), for a mesh, a still model and a rigid model's part alike. With it a still model whose mesh
+emits is placed again in place, where that was a rebuild's.
+Its parts are the nodes any clip of the file moves, not those of the clip it plays (`skin::Model::moving_nodes`),
+and the nodes its pose names: another clip is posed in place. Until now the parts were the playing clip's, and a
+model given another clip, or a pose that named another node, was posed in place with the wrong parts (the nodes
+the new pose moves stayed in the part merged for the old one). A pose that names other nodes is a rebuild's
+(`RigidModel::pose`).
+Still a rebuild: one with triangles flattened beside its parts (`flatten_coincident`'s) hidden, removed or placed
+again; a pose that names other nodes than the last; a model hidden when the scene was built, shown; a skinned model
+added, hidden or removed; a model the scene has not, added.
+Measured, software traversal, an interior of 7,300 nodes whose clip plays (4,181 units): every frame rebuilt the
+scene, 2.9 s a frame; now none does, a frame's commit is 1.2 ms and the frame 19 ms (1280 x 720 at half scale).
+Tests, natively and under software traversal, each against a build's light list and picture: a posed rigid model
+hidden, posed and moved while hidden, shown, removed; a still and a posed rigid model with emitters placed again,
+the latter then posed, moved, hidden, shown and removed, its records and rows the room's again and the next one's;
+one with flattened triangles hidden and removed by a rebuild; one given another clip of its file, in place
+(`tests/render/data/two-clips.glb`); one whose pose names a node no clip moves, by a rebuild.
+
 **A posed rigid model is its parts' instances (2026-11-20).** A model posed by a clip that moves nodes, without
 skins, was built in two ways at once: the nodes the clip leaves alone flattened into world-space triangles a
 placement, each node it moves an instance of a mesh made a placement. Now the model is parts (`scene::RigidModel`),
@@ -2907,14 +3435,7 @@ Targets (2026-11-08): bench-temporal, bench-ghosting and their UE MRQ references
 Kabukichō shots below are history.
 
 ### 2a. Reflection temporal parameters at UE 5.8 defaults
-Reference: `Engine/Shaders/Private/Lumen/LumenReflectionDenoiserTemporal.usf`, `LumenReflections.cpp:153-162`,
-`LumenReflectionDenoiserSpatial.usf:92`.
-- Neighbourhood clamp always on (not only in motion), in YCoCg, 1σ (`NeighborhoodClampScale` = 1).
-- At most 12 accumulated frames (`MaxFramesAccumulated`); at full resolution, specular with roughness < 0.05 drops to 2
-  frames (residual noise left to TSR).
-- Virtual-image (mirror reprojection) and surface histories are clamped separately; keep the one closer to the
-  neighbourhood (`...Temporal.usf` ~l.495).
-- Spatial filter radius × saturate(roughness × 8).
+[Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md.]
 - Today `live.wgsl` clamps only in motion, at 2–3σ in RGB, with 8–48 frames of history.
 - Also: at long history the live image is the raw accumulated average (all à-trous stages gated off by history length
   since round 3: Cornell box at 256 frames SSIM 0.912 vs the UE Path Tracer, 0.98 on Nov 4). Gate on the remaining
@@ -3067,7 +3588,7 @@ dynamic-resolution floor, 60 Hz camera input.
         - The option left: a second emitter sample at near-mirror camera hits in the same pass. It needs the camera
           hit's surface (a primary ray and a material evaluation), an estimated +0.6–1.0 ms more, so Kabukichō
           moving would be ~16.6–17.0 ms.
-      - UE 5.8's own temporal rules for reflections (`LumenReflectionDenoiserTemporal.usf`), applied while the view
+      - UE 5.8's temporal rules for reflections, as an earlier implementation had them (docs/PROVENANCE.md), applied while the view
         moves (2026-11-07):
         - What changed: no hold after translating; 12 frames; a clamp at 1 σ, doubled for samples reconstructed
           from neighbours (all of ours below 100 %), also tried at 4 and 8 σ; the reflection-hit history only for
@@ -3519,9 +4040,9 @@ dynamic-resolution floor, 60 Hz camera input.
      - Velocity: the temporal pass computes each pixel's motion from the camera and the motion vectors.
      - Reconstruction: a gather after McGuire et al. 2012 on the HDR image before bloom. A moving object smears over
        a static background; a static foreground stays sharp.
-     - Length, as UE's (PostProcessMotionBlur.cpp, UpdateMotionBlurTimeScale): ± amount / 2 × the frame's motion ×
-       (1 / target FPS) / frame time. At 60 fps that is one frame of motion in total, capped at 5 % of the width.
-     - Camera cuts (a jump of 2 m or 30° in one frame) don't blur (UE: bCameraCut). Without that check, Kabukichō's
+     - Length: from the amount, the frame's motion and the target frame rate (docs/RUNTIME.md, "The post chain"). At 60 fps
+       that is one frame of motion in total, capped at 5 % of the width.
+     - Camera cuts (a jump of 2 m or 30° in one frame) don't blur. Without that check, Kabukichō's
        viewpoint switch smeared the whole frame (horizontal gradient energy 102 vs 363).
      - Cost at the 0.5 floor, Kabukichō:
        - 0.44 ms while anything moves: 15.78 ms total vs 15.36 with it off.
@@ -3531,7 +4052,7 @@ dynamic-resolution floor, 60 Hz camera input.
        - Within budget either way.
      - UE reference: bench-temporal `--motion-blur` against UE renders with the same settings (`MB=1
        ue5/temporal.ts`). Movie Render Queue replaces the amount with its shutter fraction (0.5) and the target FPS with
-       the output rate (60) (MoviePipelineImagePassBase.cpp), which is half the real-time blur. Ours at UE's real-time
+       the output rate (60), which is half the real-time blur. Ours at UE's real-time
        defaults read about twice UE's blur against those frames. Ours at what MRQ rendered (`THREERT_MOTION_BLUR=0.5,5,60`):
        - excess over UE move20 / move40 / move59 / stopped 1.23 / 1.51 / 1.60 / 2.01 (unblurred 1.43 / 1.75 / 1.75 /
          2.01);
@@ -3540,10 +4061,7 @@ dynamic-resolution floor, 60 Hz camera input.
    - Depth of field at UE's defaults: done (2026-11-06).
      - UE's default is off: no focus distance on the camera. A camera's `dof` (focus distance, f-stop, sensor width;
        UE's defaults f/4, 24.576 mm) switches it on.
-     - CoC: UE's physical model (DiaphragmDOFUtils.cpp, FPhysicalCocModel):
-       - focal length from the sensor height (width / aspect) and the vertical FOV;
-       - CoC of infinity f² / (N (focus − f));
-       - per pixel (z − focus) / z of that, capped at 2.5 % of the width (r.DOF.Kernel.Max{Fore,Back}groundRadius).
+     - CoC: a thin lens (docs/RUNTIME.md, "The post chain"), capped at 2.5 % of the width.
      - Live: a gather on the composed HDR image, before motion blur as in UE.
        - The CoC is computed in the compose pass.
        - A 16 × 16 tile maximum bounds each pixel's search.
@@ -4057,10 +4575,8 @@ dynamic-resolution floor, 60 Hz camera input.
             instead of four (kept, −0.03 ms); no media in the surface cache's training shadows (−0.08 ms with a bias:
             dropped).
         - Next (part 3): UE references and the motion metric; cheaper media shadow rays to fit rain + smoke.
-      - Status, part 3a: UE references, and `FogVolume` is UE's Local Fog Volume.
-        - `FogVolume` takes UE 5.8's Local Fog Volume density as UE voxelizes it into volumetric fog
-          (VolumetricFog.usf), with UE's settings and defaults (docs/MATERIAL_FUNCTIONS.md, "Volume functions").
-          `volume/local-fog` (new): 0.2823 against the numerically integrated 0.2863.
+      - Status, part 3a: UE references.
+        - [Removed 2026-11-24: this passage described an earlier implementation that has been replaced; docs/PROVENANCE.md.]
         - UE references, `bun ue5/volumes.ts`: `tools/volume-scene.ts` in a scratch project, path-tracer and Lumen stills
           as linear EXR.
           - Every preset is a Heterogeneous Volume: a Volume-domain material whose Custom nodes are our volume
@@ -5711,7 +6227,7 @@ benchmark level. The order follows the dependencies; a step that meets a further
 - Auto exposure (fixed 2026-11-06): the presets' histogram range was UE's legacy -8 .. 4 (log2 luminance), which
   daylight saturates (a 3000-nit sky pinned the exposure at EV 6.5, the image washed out). UE 5 projects enable
   r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange (every template), giving EV100 -10 .. 20, the same log2
-  luminance at the default lens attenuation (Scene.cpp, PostProcessEyeAdaptation.cpp EV100ToLog2). The presets use
+  luminance at the default lens attenuation. The presets use
   it now; Kabukichō keeps the legacy range explicitly, as its UE project does. Atomic tests `exposure/auto-daylight`
   (offline and live; 14.00 vs 14.03 expected) and `exposure/auto-night`. Still different: UE's default exposure
   compensation is +1 EV (r.DefaultFeature.AutoExposure.Bias = 1.0); our camera's default is 0.

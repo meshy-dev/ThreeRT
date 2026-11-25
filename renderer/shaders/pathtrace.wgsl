@@ -1,6 +1,6 @@
 // ThreeRT native path tracer. One sample per pixel per dispatch, accumulated in `accum`.
 // Shading model mirrors UE5 DefaultLit: Lambert diffuse + GGX / Smith-joint-approx / Schlick(F90 = saturate(50 F0.g)),
-// with UE's GGX multi-scattering energy conservation and diffuse energy preservation.
+// with GGX multiple-scattering energy compensation and diffuse energy preservation.
 // Material / atmosphere extensions: texture pages with ray-cone LOD, alpha cutout, world mapping,
 // wetness / puddles / ripples / grime, procedural facade windows, emissive animation, RIS many-light sampling, height
 // fog with volumetric single scattering. Each is compiled out when the scene does not use it (FEAT).
@@ -15,13 +15,11 @@
 //   units                 software traversal's second level (gpu.rs `F_UNITS`); a scene's other features are bits
 //                         of `FEAT`, a pipeline-overridable constant
 //   merged                the merged binding layout (merged.rs: at most eight storage buffers a stage, a browser's)
-//   uniform_tables        four tables in uniform buffers (merged.rs `UNIFORM_TABLES`: Android's drivers)
 //   whole_tables          the seven typed tables read from the tables' buffer whole, as `merged` reads them, and
 //                         no views of their sections (gpu.rs `GpuOptions::table_views`: Android's drivers)
 //   guard                 the loop guard (gpu.rs `loop_guard_of`, `guard_loops`)
 // The numbers a variant is compiled for are WESL constants (`import constants::`, gpu.rs `KernelVariant::constants`): the
-// uniform tables' lengths, the loop guard's limit.
-@if(uniform_tables) import constants::{UT_TEX_INFO, UT_OBJECTS, UT_INSTANCES, UT_MEDIA};
+// loop guard's words and its limit.
 @if(merged || guard) import constants::GUARD_WORDS;
 @if(guard) import constants::LOOP_GUARD_LIMIT;
 @if(hwrt) enable wgpu_ray_query;
@@ -35,7 +33,6 @@ const TRACE_ANY: u32 = 2u;
 // Any hit on any surface, alpha-cutout triangles taken as opaque (live emitter shadow rays: `emitter_tr`).
 const TRACE_ANY_OPAQUE: u32 = 3u;
 const TRI_MASKED: u32 = 2u;
-const TRI_DYNAMIC: u32 = 4u;
 // Highest texture-page mip (texpack::MIPS - 1) and the ray-cone LOD bias (negative = sharper; accumulation antialiases).
 const TEX_MAX_LEVEL: f32 = 4.0;
 const LOD_BIAS: f32 = 0.5;
@@ -71,13 +68,13 @@ fn approx(a: u32) -> bool { return (APPROX & a) != 0u; }
 // Features the scene uses (gpu::F_*): the rest is compiled out, so plain scenes pay nothing for them.
 override FEAT: u32 = 0xffffffffu;
 const F_MASKED: u32 = 1u;
+const F_PART: u32 = 1024u; // a particle system's mesh among the instances: a hit's object is its particle's (`tri_data`)
 const F_FOG: u32 = 64u;
 const F_VOLUME: u32 = 128u;
 const F_TEX: u32 = 256u;
 const F_FUNC: u32 = 512u;
 const F_GLASS: u32 = 2048u;
 const F_COAT: u32 = 4096u;
-const F_HUGE: u32 = 8192u;
 const F_INST: u32 = 16384u;
 const F_MEDIA: u32 = 32768u;
 const F_PEMIT: u32 = 65536u; // opaque particles' emitters (one not shown has no area)
@@ -90,6 +87,7 @@ const F_BACKGROUND: u32 = 2097152u; // scene.background (`sky_mis`)
 const F_VCOLOR: u32 = 4194304u; // vertex colours (`vcolor`)
 const F_GRID: u32 = 33554432u; // density grids (`vgrid`)
 const F_IFUNC: u32 = 268435456u; // a material function on an instanced mesh: `mat_in_at` places the triangle by its instance
+const F_DEFORM: u32 = 1073741824u; // a mesh that deforms among the instances: its previous vertices by its record (the first hit's motion)
 const F_IGLASS: u32 = 536870912u; // glass among an instance's other sections: a shadow ray steps through it by its row (trace_hw.wgsl), a unit's walk skips it
 const F_LISTS: u32 = 134217728u; // light tiles (`lt_list_start`): a scene whose shadow-casting local lights are resampled
 fn has(f: u32) -> bool { return (FEAT & f) != 0u; }
@@ -111,10 +109,9 @@ struct Params {
     fog_color: vec4<f32>, // ambient inscattering radiance, max opacity
     vol: vec4<f32>,       // volumetric scattering albedo (0 = off), HG anisotropy, extinction scale in range, -
     vol2: vec4<f32>,      // volumetric albedo tint rgb, range (m, 0 = unlimited)
-    raster: vec4<f32>,    // live: primary visibility from the raster pass (1 = on), this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1)
+    jitter: vec4<f32>,    // live: this frame's sub-pixel jitter x, y (every camera ray's); ray tracing off (1); -
     cache: vec4<f32>,     // live radiance cache (1 = on), history cap in samples, history cap in frames, -
-    motion: vec4<f32>,    // live motion vectors: 1 = on, -, -, - (first dynamic triangle: group_first[1].x)
-    group_first: array<vec4<u32>, 2>, // first global triangle of each traversal group ([1].x = the first dynamic one)
+    motion: vec4<f32>,    // live motion vectors: 1 = on; `render --signals`; software traversal's units: the top tree's root, their count (bits)
     light_lod: vec4<f32>, // live light LOD (lib.rs emitter_lod): reference position, d0 (0 = off)
     emit_power: vec4<f32>, // the emitter CDF's power and cull as the CPU built it (lib.rs `EmitterCull`); not read here
     lod_view: vec4<f32>,   // emitter cull's view cone (lib.rs EmitterCull): forward direction, cos of the half-angle
@@ -126,7 +123,7 @@ struct Params {
     ltile2: vec4<u32>,     // the traced size they were built at, -, -
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
     table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, glass energy, emitter triangles
-    word_first: vec4<u32>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, the instances' rows
+    word_first: array<vec4<u32>, 2>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, the instances' rows
     live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, -, -, -
     live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
 };
@@ -142,10 +139,17 @@ struct Material {
 struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>, x: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> tri_verts: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> attrs: array<TriAttr>;
-// (Software traversal's trees: hardware traversal has no binding for them.)
+// The scene's vertices (indexed.rs `Vertex`), each kept once, a record of three rows: (position, u), (normal, v),
+// (tangent, hand; a hand of 0: it has none). A triangle is three of them, by its indices in `words` (`tri_data`).
+@group(0) @binding(1) var<storage, read> vertices: array<vec4<f32>>;
+const VERTEX_VEC4: u32 = 3u;
+// Software traversal's trees (hardware traversal has no binding for them): their nodes, and their leaves'
+// triangles (indexed.rs `Leaf`), the trees' own copy, three vec4s a triangle in the triangles' order: (v0, id),
+// (e1, id), (e2, -). A candidate's test reads nothing else. The ids: its section of its mesh, and its index in the
+// section.
+@if(!hwrt) @group(0) @binding(2) var<storage, read> leaves: array<vec4<f32>>;
 @if(!hwrt) @group(0) @binding(3) var<storage, read> nodes: array<Node>;
+@if(!hwrt) fn leaf_id(ti: u32, k: u32) -> u32 { return bitcast<u32>(leaves[ti * 3u + k].w); }
 @group(0) @binding(7) var textures: texture_2d_array<f32>;
 @group(0) @binding(8) var samp: sampler;
 @group(0) @binding(9) var env_tex: texture_2d<f32>;
@@ -158,9 +162,10 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 // (The CDF is the buffer's first section: from word 0, no offset to read.)
 fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }
 @group(0) @binding(11) var<storage, read_write> accum: array<Pixel>;
-// The dynamic triangles' vertices (kernel layout, from triangle P.group_first[1].x on) as they were the previous frame.
+// The vertices that move as they were the previous frame (their records: the positions are read), from the first of
+// them on.
 @group(0) @binding(6) var<storage, read> prev_verts: array<vec4<f32>>;
-// Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, LOD offset bits, its rows' first).
+// Instances (scene::GpuInstance): world matrix rows, normal matrix rows, (first triangle, object, a spare word, its rows' first).
 struct Instance { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, n0: vec4<f32>, n1: vec4<f32>, n2: vec4<f32>, info: vec4<u32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32> };
 // Bounded participating media (`VolumeMesh`, gpu.rs MediumGpu; F_MEDIA), P.time.w of them: world -> local affine rows,
 // (volume function, shape: 0 box / 1 sphere / 2 none while its node is hidden, homogeneous, 1 = it changes with time: `VolumeFunction` `animated`, a
@@ -177,7 +182,8 @@ struct Medium { w0: vec4<f32>, w1: vec4<f32>, w2: vec4<f32>, a: vec4<u32>, b: ve
 //  - objects, per object (scene node): pivot (world position), world bounds size (UE ObjectPositionWS /
 //    ObjectBounds), then what `OBJECT_STRIDE` says;
 //  - instances (Instance), media (Medium);
-//  - the GGX energy LUT: (E.x, E.y) for 32 roughness x 32 NoV, two per vec4;
+//  - the GGX energy table (`energy_lookup`): the specular lobe's two albedo terms at 32 roughnesses x 32 sqrt(NoV), two
+//    nodes per vec4;
 //  - the glass energy table (`glass_energy`): four values per vec4.
 // The buffer whole is `tables` in every layout (unsigned words: integers are read as they are, floats by a bit
 // cast): the light groups, the light tree and the energy LUT are read from it, and what a scene has more of is
@@ -192,17 +198,19 @@ fn energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].y + i); }
 fn glass_energy_at(i: u32) -> vec4<f32> { return table_f(P.table_first[2].z + i); }
 // An emitter's triangle (lib.rs `GpuEmitterTri`): in world space, the light list's own copy, so a light sample reads
 // no placement (what moves it is copied again: emitter_fill.wgsl); `tri`: its triangle in the triangles' table
-// (attributes: `emitter_attrs`), `inst`: the instance that places it (NO_INST: none), `code`: the light tree's path
-// code (0: not one of the tree's), EMITTER_MOVES if it moves.
-struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32 };
-const EMITTER_TRI_VEC4: u32 = 3u;
+// (attributes: `emitter_attrs`), `inst`: the instance that places it, `code`: the light tree's path code (0: not one
+// of the tree's), EMITTER_MOVES if it moves; `part`: as a hit's (`Hit.part`): its section of its instance's mesh;
+// `flags`: EMITTER_CARD. Four vec4s, a cache line.
+struct EmitterTri { v0: vec3<f32>, tri: u32, e1: vec3<f32>, inst: u32, e2: vec3<f32>, code: u32, part: u32, flags: u32 };
+const EMITTER_TRI_VEC4: u32 = 4u;
 const EMITTER_MOVES: u32 = 0x80000000u;
 fn emitter_tri_at(i: u32) -> EmitterTri {
     let b = P.table_first[2].w + i * EMITTER_TRI_VEC4;
     let r0 = tables[b];
     let r1 = tables[b + 1u];
     let r2 = tables[b + 2u];
-    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w);
+    let r3 = tables[b + 3u];
+    return EmitterTri(bitcast<vec3<f32>>(r0.xyz), r0.w, bitcast<vec3<f32>>(r1.xyz), r1.w, bitcast<vec3<f32>>(r2.xyz), r2.w, r3.x, r3.y);
 }
 // The seven tables read at every hit or light, through `material_at`, `light_at`, `emitter_at`, `tex_info_at`,
 // `object_at`, `instance_at` and `medium_at` in every layout.
@@ -248,33 +256,19 @@ fn emitter_tri_at(i: u32) -> EmitterTri {
     fn material_at(i: u32) -> Material { return materials[i]; }
     fn light_at(i: u32) -> Light { return lights[i]; }
     fn emitter_at(i: u32) -> vec4<f32> { return emitters[i]; }
-    @if(uniform_tables) {
-        // The uniform tables (merged.rs `UNIFORM_TABLES`): these four from sized uniform arrays, copies of their
-        // sections, every index held to the array (a scene with more entries than one holds reads the last for the
-        // rest; nothing outside the buffer is read).
-        @group(0) @binding(15) var<uniform> tex_info: array<vec4<f32>, UT_TEX_INFO>;
-        @group(0) @binding(16) var<uniform> objects: array<vec4<f32>, UT_OBJECTS>;
-        @group(0) @binding(17) var<uniform> instances: array<Instance, UT_INSTANCES>;
-        @group(0) @binding(18) var<uniform> media: array<Medium, UT_MEDIA>;
-        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[min(i, UT_TEX_INFO - 1u)]; }
-        fn object_at(i: u32) -> vec4<f32> { return objects[min(i, UT_OBJECTS - 1u)]; }
-        fn instance_at(i: u32) -> Instance { return instances[min(i, UT_INSTANCES - 1u)]; }
-        fn medium_at(i: u32) -> Medium { return media[min(i, UT_MEDIA - 1u)]; }
-    } @else {
-        @group(0) @binding(15) var<storage, read> tex_info: array<vec4<f32>>;
-        @group(0) @binding(16) var<storage, read> objects: array<vec4<f32>>;
-        @group(0) @binding(17) var<storage, read> instances: array<Instance>;
-        @group(0) @binding(18) var<storage, read> media: array<Medium>;
-        fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
-        fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
-        fn instance_at(i: u32) -> Instance { return instances[i]; }
-        fn medium_at(i: u32) -> Medium { return media[i]; }
-    }
+    @group(0) @binding(15) var<storage, read> tex_info: array<vec4<f32>>;
+    @group(0) @binding(16) var<storage, read> objects: array<vec4<f32>>;
+    @group(0) @binding(17) var<storage, read> instances: array<Instance>;
+    @group(0) @binding(18) var<storage, read> media: array<Medium>;
+    fn tex_info_at(i: u32) -> vec4<f32> { return tex_info[i]; }
+    fn object_at(i: u32) -> vec4<f32> { return objects[i]; }
+    fn instance_at(i: u32) -> Instance { return instances[i]; }
+    fn medium_at(i: u32) -> Medium { return media[i]; }
 }
 // Density grids (gpu.rs F_GRID, `GridsGpu`): field A of every grid, stacked along z; one cell in scenes without.
 @group(0) @binding(10) var grid_tex: texture_3d<f32>;
 // Vertex colours (three.js `vertexColors`; gpu.rs F_VCOLOR): three sRGB 8-bit colours per triangle.
-fn vcolor_word(k: u32) -> u32 { return words[P.word_first.z + k]; }
+fn vcolor_word(k: u32) -> u32 { return words[P.word_first[0].z + k]; }
 fn vcolor(t: u32, u: f32, v: f32) -> vec3<f32> {
     let c0 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u)).rgb);
     let c1 = srgb_to_linear(unpack4x8unorm(vcolor_word(t * 3u + 1u)).rgb);
@@ -291,41 +285,130 @@ fn inst_sign(r: Instance) -> f32 { return select(1.0, -1.0, (bitcast<u32>(r.n1.w
 fn inst_normal(r: Instance, n: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(normalize(vec3<f32>(dot(r.n0.xyz, n.xyz), dot(r.n1.xyz, n.xyz), dot(r.n2.xyz, n.xyz))), n.w);
 }
-// A model-space triangle's `x` (texel density, object, ...) as its instance has it: the instance's texture LOD offset
-// and object (the record's `info`).
+// A model-space triangle's `x` as its instance has it: the instance's object (the record's `info`), and for a
+// particle system's mesh the particle's past it (`tri_data` has which; 0 for every other mesh).
 fn inst_x(info: vec4<u32>, x: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(x.x + bitcast<f32>(info.z), bitcast<f32>(info.y), x.z, x.w);
+    return vec4<f32>(x.x, bitcast<f32>(info.y + bitcast<u32>(x.y)), x.z, x.w);
 }
 // An instance's rows (scene.rs `Row`): four words a section of its mesh, from the record's info.w on. The material
-// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). A triangle of
-// a mesh holds its section in its attributes' uv.w and its index in the section in x.w; a record's n1.w says whether
-// a row of it is a cutout's or glass.
+// with its class bits, the section's first triangle, its first emitter (NO_EMITTER: it does not emit). Which section
+// a triangle of a mesh is in, its hit says (`Hit.part`); a record's n1.w says whether a row of it is a cutout's or
+// glass, and whether its mesh deforms.
 const INST_CUTOUT: u32 = 16u;
 const INST_GLASS: u32 = 32u;
+const INST_DEFORMS: u32 = 64u;
+// The instance's mesh is a particle system's: two triangles and an object a particle, from the record's object on.
+const INST_PARTICLES: u32 = 128u;
 const ROW_MATERIAL: u32 = 0xffffffu;
 const ROW_CUTOUT: u32 = 0x1000000u;
 const ROW_GLASS: u32 = 0x2000000u;
 const NO_EMITTER: u32 = 0xffffffffu;
-fn row_word(first: u32, section: u32, k: u32) -> u32 { return words[P.word_first.w + (first + section) * 4u + k]; }
+fn row_word(first: u32, section: u32, k: u32) -> u32 { return words[P.word_first[0].w + (first + section) * 4u + k]; }
 
-// The material of a triangle, given its attributes and the instance that places it (NO_INST: none). Every read of a
-// hit's material goes through here: where the material is kept is this function's alone. In the row of the triangle's
-// section, which its instance has; on the triangle itself where no instance places it.
+// The material of a triangle, given its attributes and the instance that places it. Every read of a hit's material
+// goes through here: where the material is kept is this function's alone. In the row of the triangle's section,
+// which its instance has.
 fn material_of(a: TriAttr, inst: u32) -> u32 {
-    let m = triangle_material(a);
-    if (has(F_INST) && inst != NO_INST) { return row_word(instance_at(inst).info.w, m, 0u) & ROW_MATERIAL; }
-    return m;
+    if (!has(F_INST) || inst == NO_INST) { return 0u; }
+    return row_word(instance_at(inst).info.w, bitcast<u32>(a.uv.w), 0u) & ROW_MATERIAL;
 }
-// The material a triangle itself holds: one that no instance places.
-fn triangle_material(a: TriAttr) -> u32 { return bitcast<u32>(a.uv.w); }
 
-// A model-space triangle's shading attributes placed by instance r (scene::instance_attr).
+// A triangle's three vertices (indexed.rs), counted from its mesh's first: what a hit and a candidate's test read,
+// and what the acceleration structures are built from.
+fn tri_indices(ti: u32) -> vec3<u32> {
+    let k = P.word_first[1].x + ti * 3u;
+    return vec3<u32>(words[k], words[k + 1u], words[k + 2u]);
+}
+// Whether an emitter is a rect light's card, which lights one side: its entry says (lib.rs `EMITTER_CARD`).
+const EMITTER_CARD: u32 = 1u;
+fn emitter_is_card(em: EmitterTri) -> bool { return (em.flags & EMITTER_CARD) != 0u; }
+// A triangle read whole: its first corner and its edges, and its attributes as a hit has them: normals and UVs a
+// corner; `uv.w`: its section (`part`); `x.y`: its object (where its attributes are placed, `inst_x`: of a particle
+// system's mesh, which particle it is). `vi`: where its three vertices are in `vertices` (their tangents are read
+// where a frame is asked: `hit_tangent`). `inst`, `part`: as a hit has them (`Hit`): its vertices count from its
+// mesh's first.
+struct TriData { a: TriAttr, v0: vec3<f32>, e1: vec3<f32>, e2: vec3<f32>, vi: vec3<u32> }
+fn tri_data(ti: u32, inst: u32, part: u32) -> TriData {
+    var base = 0u;
+    var particle = 0u;
+    if (has(F_INST) && inst != NO_INST) {
+        let r = instance_at(inst);
+        base = r.info.z;
+        // A particle system's mesh: which particle the triangle is (two each, from the mesh's first).
+        if (has(F_PART) && (bitcast<u32>(r.n1.w) & INST_PARTICLES) != 0u) { particle = (ti - r.info.x) >> 1u; }
+    }
+    let i = (tri_indices(ti) + vec3<u32>(base)) * VERTEX_VEC4;
+    let p0 = vertices[i.x];
+    let p1 = vertices[i.y];
+    let p2 = vertices[i.z];
+    var n0 = vertices[i.x + 1u];
+    var n1 = vertices[i.y + 1u];
+    var n2 = vertices[i.z + 1u];
+    let e1 = p1.xyz - p0.xyz;
+    let e2 = p2.xyz - p0.xyz;
+    // A skinned mesh whose model has no normals has zeros: the triangle's own, as it is posed.
+    if (has(F_DEFORM) && all(n0.xyz == vec3<f32>(0.0))) {
+        let f = cross(e1, e2);
+        let l = length(f);
+        var flat = vec3<f32>(0.0);
+        if (l > 0.0 && (bitcast<u32>(l) & 0x7f800000u) != 0x7f800000u) { flat = f / l; }
+        n0 = vec4<f32>(flat, n0.w);
+        n1 = vec4<f32>(flat, n1.w);
+        n2 = vec4<f32>(flat, n2.w);
+    }
+    return TriData(TriAttr(vec4<f32>(n0.xyz, p0.w), vec4<f32>(n1.xyz, n0.w), vec4<f32>(n2.xyz, p1.w), vec4<f32>(n1.w, p2.w, n2.w, bitcast<f32>(part)),
+                            vec4<f32>(0.0, bitcast<f32>(particle), 0.0, 0.0)), p0.xyz, e1, e2, i);
+}
+// The tangent frame at a point of a triangle (barycentrics u, v), in the world: (tangent, hand). Its three vertices'
+// tangents there (a file's, a particle's), the hand its first vertex's; a triangle without tangents (a hand of 0)
+// has its own, from its edges, its UVs and its first normal as `td` has them (its model's space). Then placed by its
+// instance (`inst`; NO_INST: left as it is). Not of unit length where it is its vertices': who asks makes it so
+// against the normal. Asked where a frame is read: a normal map, a function.
+fn hit_tangent(td: TriData, inst: u32, u: f32, v: f32) -> vec4<f32> {
+    let t0 = vertices[td.vi.x + 2u];
+    var t = vec4<f32>(t0.xyz * (1.0 - u - v) + vertices[td.vi.y + 2u].xyz * u + vertices[td.vi.z + 2u].xyz * v, t0.w);
+    if (t0.w == 0.0) {
+        let a = td.a;
+        let uv0 = vec2<f32>(a.n0.w, a.n1.w);
+        let d1 = vec2<f32>(a.n2.w, a.uv.x) - uv0;
+        let d2 = a.uv.yz - uv0;
+        let det = d1.x * d2.y - d2.x * d1.y;
+        if (abs(det) < 1e-12) {
+            var any = vec3<f32>(0.0, 1.0, 0.0);
+            if (abs(a.n0.x) < 0.9) { any = vec3<f32>(1.0, 0.0, 0.0); }
+            t = vec4<f32>(normalize(cross(a.n0.xyz, any)), 1.0);
+        } else {
+            let r = 1.0 / det;
+            let tu = (td.e1 * d2.y - td.e2 * d1.y) * r;
+            let l = length(tu);
+            var tn = vec3<f32>(0.0);
+            if (l > 0.0 && (bitcast<u32>(l) & 0x7f800000u) != 0x7f800000u) { tn = tu / l; }
+            let bt = (td.e2 * d1.x - td.e1 * d2.x) * r;
+            var hand = -1.0;
+            if (dot(cross(a.n0.xyz, tn), bt) < 0.0) { hand = 1.0; }
+            t = vec4<f32>(tn, hand);
+        }
+    }
+    if (has(F_INST) && inst != NO_INST) {
+        let r = instance_at(inst);
+        t = vec4<f32>(unit_or_zero(inst_vec(r, t.xyz)), t.w * inst_sign(r));
+    }
+    return t;
+}
+// A vector of unit length, or zeros where it has no direction (or is not finite).
+fn unit_or_zero(v: vec3<f32>) -> vec3<f32> {
+    let d = dot(v, v);
+    if (d > 0.0 && (bitcast<u32>(d) & 0x7f800000u) != 0x7f800000u) { return normalize(v); }
+    return vec3<f32>(0.0);
+}
+
+// A model-space triangle's shading attributes placed by instance r. (Not its tangents, which
+// are placed where they are read: `hit_tangent`.)
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;
     b.n0 = inst_normal(r, a.n0);
     b.n1 = inst_normal(r, a.n1);
     b.n2 = inst_normal(r, a.n2);
-    b.t = vec4<f32>(normalize(inst_vec(r, a.t.xyz)), a.t.w * inst_sign(r));
     b.x = inst_x(r.info, a.x);
     return b;
 }
@@ -335,7 +418,7 @@ fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
 
 // Path vertex index of the current shading point (cheaper procedural detail / fewer candidates past the first hit).
 var<private> cur_depth: u32;
-// Live "ray tracing off" (P.raster.w, LiveCore::rays): set once the camera's own ray has found its surface. From then
+// Live "ray tracing off" (P.jitter.z, LiveCore::rays): set once the camera's own ray has found its surface. From then
 // on `trace` reports a miss, so nothing is shadowed, a bounce sees the sky and a mirror reflects the sky: what a
 // rasterizer without shadow maps draws, on any GPU, from the same scene and the same shading. The switch is a uniform:
 // no kernel is rebuilt to flip it.
@@ -525,8 +608,12 @@ fn emitter_pmf(ei: u32, em: EmitterTri, x: vec3<f32>, n: vec3<f32>) -> f32 {
 // ------------------------------------------------------------------------------------------------
 // Intersection
 
-// `inst`: the model instance whose model-space triangle `tri` is (F_INST), NO_INST for world-space triangles.
-struct Hit { t: f32, tri: u32, u: f32, v: f32, inst: u32 };
+// `inst`: the instance whose triangle `tri` is, in its mesh's space (a procedural hit's: its object's record; no
+// hit: NO_INST). `part`: the section of its mesh the triangle is in (the acceleration structure's geometry; a
+// unit's tree's leaf's id): its instance's row for it has its material.
+// (What reads a hit's record tests `inst != NO_INST`, which every hit passes: without the test a frame is 1 to 3 %
+// longer in some scenes, a crowd under the sky 6.36 -> 6.57 ms.)
+struct Hit { t: f32, tri: u32, u: f32, v: f32, inst: u32, part: u32 };
 const NO_INST: u32 = 0xffffffffu;
 
 // ------------------------------------------------------------------------------------------------
@@ -550,7 +637,7 @@ struct GOut { t: f32, normal: vec3<f32>, material: u32, attr: vec2<f32> };
 // `pword`: the renderer's own reads (headers, boxes, materials). `gdata`: the geometry function's, of its object's data
 // only, word i.data .. i.data + i.count - 1; anything else reads 0. The kernel is compiled without bounds checks (its
 // indices come from the scene build) and the function is game code: it must not reach past its data.
-fn pword(k: u32) -> u32 { return words[P.word_first.y + k]; }
+fn pword(k: u32) -> u32 { return words[P.word_first[0].y + k]; }
 fn pwordf(k: u32) -> f32 { return bitcast<f32>(pword(k)); }
 var<private> gdata_first: u32;
 var<private> gdata_count: u32;
@@ -611,7 +698,7 @@ fn proc_hit(t: f32, g: GOut, prim: u32, rec: u32) -> Hit {
     // Each half rounded to its upper 15 bits (a carry into the exponent is the right rounding; 0x7fff stays put).
     let ha = min(((a & 0xffffu) + 1u) >> 1u, 0x7fffu);
     let hb = min(((a >> 16u) + 1u) >> 1u, 0x7fffu);
-    return Hit(t, PROC_BIT | (min(g.material, 255u) << 23u) | prim, proc_word(q.x | (q.y << 15u)), proc_word(ha | (hb << 15u)), rec);
+    return Hit(t, PROC_BIT | (min(g.material, 255u) << 23u) | prim, proc_word(q.x | (q.y << 15u)), proc_word(ha | (hb << 15u)), rec, 0u);
 }
 
 // A procedural hit's attribute (GOut.attr): its material function's `i.uv`.
@@ -628,24 +715,7 @@ fn proc_normal(h: Hit) -> vec3<f32> {
     return normalize(vec3<f32>(dot(r.n0.xyz, n), dot(r.n1.xyz, n), dot(r.n2.xyz, n)));
 }
 
-// Live primary visibility rasterized by the viewport (triangle index + 1, 0 = sky) at this frame's jitter.
-@group(1) @binding(0) var vis_tex: texture_2d<u32>;
-
-// The camera ray's hit on a known triangle (two-sided, no t range): the raster pass already resolved visibility.
-fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
-    let a = tri_verts[ti * 3u].xyz;
-    let e1 = tri_verts[ti * 3u + 1u].xyz;
-    let e2 = tri_verts[ti * 3u + 2u].xyz;
-    let p = cross(d, e2);
-    let det = dot(e1, p);
-    let inv = 1.0 / select(det, 1e-20, abs(det) < 1e-20);
-    let s = o - a;
-    let u = dot(s, p) * inv;
-    let q = cross(s, e1);
-    return Hit(dot(e2, q) * inv, ti, clamp(u, 0.0, 1.0), clamp(dot(d, q) * inv, 0.0, 1.0), NO_INST);
-}
-
-// The software BVH walk (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
+// Software traversal (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
 
 @if(!hwrt) fn ray_aabb(o: vec3<f32>, inv_d: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>, tmax: f32) -> f32 {
     let t0 = (bmin - o) * inv_d;
@@ -658,9 +728,10 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
 }
 
 @if(!hwrt) fn intersect_tri(o: vec3<f32>, d: vec3<f32>, i: u32, tmax: f32) -> vec3<f32> {
-    let v0 = tri_verts[i * 3u].xyz;
-    let e1 = tri_verts[i * 3u + 1u].xyz;
-    let e2 = tri_verts[i * 3u + 2u].xyz;
+    let k = i * 3u;
+    let v0 = leaves[k].xyz;
+    let e1 = leaves[k + 1u].xyz;
+    let e2 = leaves[k + 2u].xyz;
     let pv = cross(d, e2);
     let det = dot(e1, pv);
     if (abs(det) < 1e-12) { return vec3<f32>(INF, 0.0, 0.0); }
@@ -676,59 +747,12 @@ fn tri_hit(ti: u32, o: vec3<f32>, d: vec3<f32>) -> Hit {
     return vec3<f32>(t, u, v);
 }
 
-// mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface).
+// mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface). The scene's
+// triangles are its units' (trace_units.wgsl), then the procedural objects.
 @if(!hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
-    var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST);
+    var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
     if (rays_off) { return hit; }
-    let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
-    @if(!units) var stack: array<u32, 48>;
-    var sp = 0u;
-    var node = 0u;
-    loop {
-        let n = nodes[node];
-        if (n.count > 0u) {
-            for (var k = 0u; k < n.count; k++) {
-                let ti = n.left_or_first + k;
-                let flags = bitcast<u32>(tri_verts[ti * 3u].w);
-                if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
-                let r = intersect_tri(o, d, ti, hit.t);
-                if (r.x < hit.t) {
-                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, r.y, r.z, r.x)) { shadow_hole = true; continue; }
-                    hit = Hit(r.x, ti, r.y, r.z, NO_INST);
-                    if (mode != TRACE_CLOSEST) { return hit; }
-                }
-            }
-            if (sp == 0u) { break; }
-            sp--;
-            node = stack[sp];
-            continue;
-        }
-        let l = n.left_or_first;
-        let r = l + 1u;
-        let nl = nodes[l];
-        let nr = nodes[r];
-        var tl = ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);
-        var tr = ray_aabb(o, inv_d, nr.bmin, nr.bmax, hit.t);
-        if (tl == INF && tr == INF) {
-            if (sp == 0u) { break; }
-            sp--;
-            node = stack[sp];
-            continue;
-        }
-        var near = l;
-        var far = r;
-        if (tr < tl) {
-            near = r;
-            far = l;
-            let tmp = tl; tl = tr; tr = tmp;
-        }
-        node = near;
-        if (tr != INF && sp < 48u) {
-            stack[sp] = far;
-            sp++;
-        }
-    }
-    @if(units) hit = trace_units(o, d, inv_d, hit, mode);
+    @if(units) hit = trace_units(o, d, 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20)), hit, mode);
     if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }
     return hit;
 }
@@ -892,9 +916,10 @@ fn glass_hit(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
 }
 
 fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
-    var a = attrs[h.tri];
-    var e1 = tri_verts[h.tri * 3u + 1u].xyz;
-    var e2 = tri_verts[h.tri * 3u + 2u].xyz;
+    let td = tri_data(h.tri, h.inst, h.part);
+    var a = td.a;
+    var e1 = td.e1;
+    var e2 = td.e2;
     var side = 1.0;
     if (has(F_INST) && h.inst != NO_INST) {
         let r = instance_at(h.inst);
@@ -912,8 +937,8 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     if (has(F_VCOLOR) && m.uv.w > 0.0) { g.tint *= vcolor(h.tri, h.u, h.v); }
     if (has(F_TEX) && (m.tex0.x >= 0 || m.uv.z > 0.5)) {
         let uv = mesh_uv(a, m, h.u, h.v);
-        var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-        if (has(F_INST) && h.inst != NO_INST) { lod += bitcast<f32>(instance_at(h.inst).info.z); }
+        let fp = max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7);
+        let lod = mesh_lod(mesh_density(e1, e2, a, m), fp * fp, 1.0) - LOD_BIAS;
         if (m.tex0.x >= 0) { g.tint *= srgb_to_linear(tex(m.tex0.x, uv, lod).rgb); }
         if (m.uv.z > 0.5) { tr *= tex(i32(m.uv.z) - 1, uv, lod).r; }
     }
@@ -926,9 +951,9 @@ fn glass_at(h: Hit, d: vec3<f32>, t: f32) -> GlassAt {
     // through: water/furnace 1.16.)
     let r = (ior - 1.0) / (ior + 1.0);
     let f0 = r * r;
-    let e = energy_lookup(clamp(m.params.y, 0.02, 1.0), c);
-    let w = 1.0 + P.misc.z * f0 * ((1.0 - e.x) / e.x);
-    g.share = tr * (1.0 - w * (e.x * f0 + e.y * (clamp(50.0 * f0, 0.0, 1.0) - f0)));
+    // What the interface lets through: all but the specular lobe's directional albedo at this roughness and angle (as
+    // `lobes` has it: `spec_terms`).
+    g.share = tr * (1.0 - spec_terms(vec3<f32>(f0), energy_lookup(clamp(m.params.y, 0.02, 1.0), c), P.misc.z).e.x);
     return g;
 }
 
@@ -1084,10 +1109,23 @@ fn mesh_uv(a: TriAttr, m: Material, u: f32, v: f32) -> vec2<f32> {
     return (vec2<f32>(a.n0.w, a.n1.w) * w + vec2<f32>(a.n2.w, a.uv.x) * u + a.uv.yz * v) * m.uv.xy + m.uv2.xy;
 }
 
-// log2(texture-UV units per metre) of a triangle's mesh UVs (incl. material repeat).
-fn mesh_lod(a: TriAttr, m: Material) -> f32 {
-    return a.x.x + 0.5 * log2(max(abs(m.uv.x * m.uv.y), 1e-12));
+// The square of a triangle's texel density (texture-UV units per metre, incl. material repeat) as the two it is the
+// ratio of, from the triangle where it is hit: (its UV area x the repeat, its area), its edges e1, e2 as it stands in
+// the world; (the repeat, 1) where one of the two has no size.
+fn mesh_density(e1: vec3<f32>, e2: vec3<f32>, a: TriAttr, m: Material) -> vec2<f32> {
+    let uv0 = vec2<f32>(a.n0.w, a.n1.w);
+    let d1 = vec2<f32>(a.n2.w, a.uv.x) - uv0;
+    let d2 = a.uv.yz - uv0;
+    // (Twice each area: the halves cancel.)
+    let uv_area = abs(d1.x * d2.y - d2.x * d1.y);
+    let area = length(cross(e1, e2));
+    let rep = max(abs(m.uv.x * m.uv.y), 1e-12);
+    let sized = area > 2e-12 && uv_area > 2e-14;
+    return vec2<f32>(select(rep, uv_area * rep, sized), select(1.0, area, sized));
 }
+// The level a texture is read at, less its own size's: half the log of the density times a footprint's square (m^2)
+// over `over` (1: nothing more).
+fn mesh_lod(density: vec2<f32>, footprint2: f32, over: f32) -> f32 { return 0.5 * log2(max(density.x * footprint2 / (density.y * over), 1e-30)); }
 
 // ------------------------------------------------------------------------------------------------
 // Material functions: scene-supplied WGSL (like a UE Custom-HLSL material), docs/MATERIAL_FUNCTIONS.md.
@@ -1168,13 +1206,14 @@ fn obj_tint(oi: u32) -> vec3<f32> { return object_at(oi * OBJECT_STRIDE + 3u).rg
 fn obj_power(a: TriAttr) -> f32 { return object_at(object_of(a) * OBJECT_STRIDE).w; }
 
 // Inputs at a point of triangle ti (barycentrics u, v) for material functions outside full shading (alpha, NEE).
-// `inst`: the instance a mesh's triangle is placed by (as `surface` places it), or NO_INST. (By F_IFUNC, not by
+// `inst`: the instance the triangle is placed by (as `surface` places it); `part`: as a hit's. (By F_IFUNC, not by
 // F_INST: where no instanced mesh has a function the placement is not compiled in.)
-fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
-    var a = attrs[ti];
-    var v0 = tri_verts[ti * 3u].xyz;
-    var e1 = tri_verts[ti * 3u + 1u].xyz;
-    var e2 = tri_verts[ti * 3u + 2u].xyz;
+fn mat_in_at(ti: u32, inst: u32, part: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> MatIn {
+    let td = tri_data(ti, inst, part);
+    var a = td.a;
+    var v0 = td.v0;
+    var e1 = td.e1;
+    var e2 = td.e2;
     var side = 1.0;
     if (has(F_IFUNC) && inst != NO_INST) {
         let r = instance_at(inst);
@@ -1189,9 +1228,13 @@ fn mat_in_at(ti: u32, inst: u32, u: f32, v: f32, view: vec3<f32>, lod: f32) -> M
     let p = v0 + e1 * u + e2 * v;
     let ng = normalize(cross(e1, e2)) * side;
     var n = normalize(a.n0.xyz * w + a.n1.xyz * u + a.n2.xyz * v);
-    let t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
+    // (Its frame placed as its attributes are: by F_IFUNC.)
+    var placed = NO_INST;
+    if (has(F_IFUNC)) { placed = inst; }
+    let tw = hit_tangent(td, placed, u, v);
+    let t = normalize(tw.xyz - n * dot(n, tw.xyz) + vec3<f32>(1e-9));
     let oi = object_of(a);
-    return MatIn(p, n, ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, u, v), mesh_lod(a, m), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
+    return MatIn(p, n, ng, t, cross(n, t) * tw.w, mesh_uv(a, m, u, v), mesh_lod(mesh_density(e1, e2, a, m), 1.0, 1.0), view, object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz,
                  P.time.x, P.time.y, P.time.z, lod, cur_depth, object_at(oi * OBJECT_STRIDE).w, cur_depth == 0u || mirror_path,
                  object_at(oi * OBJECT_STRIDE + 2u));
 }
@@ -1226,18 +1269,26 @@ var<private> nee_alone: bool = false;
 var<private> lights_only: bool = false;
 
 // Alpha-cutout test for candidate hits on masked triangles (mesh UVs, footprint of a camera ray at distance t). `inst`:
-// the model instance a pool triangle belongs to (its scale shifts the texel density, as in `inst_attr`), or NO_INST.
-fn alpha_pass(ti: u32, inst: u32, u: f32, v: f32, t: f32) -> bool {
-    let a = attrs[ti];
+// the instance the triangle belongs to (it places the triangle's edges: its texel density); `part`: as a hit's.
+fn alpha_pass(ti: u32, inst: u32, part: u32, u: f32, v: f32, t: f32) -> bool {
+    let td = tri_data(ti, inst, part);
+    let a = td.a;
     let m = material_at(material_of(a, inst));
     var alpha = m.base_color.a;
-    var lod = mesh_lod(a, m) + log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)) - LOD_BIAS;
-    if (has(F_INST) && inst != NO_INST) { lod += bitcast<f32>(instance_at(inst).info.z); }
     if (has(F_TEX) && m.tex0.x >= 0) {
+        var e1 = td.e1;
+        var e2 = td.e2;
+        if (has(F_INST) && inst != NO_INST) {
+            let r = instance_at(inst);
+            e1 = inst_vec(r, e1);
+            e2 = inst_vec(r, e2);
+        }
+        let fp = max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7);
+        let lod = mesh_lod(mesh_density(e1, e2, a, m), fp * fp, 1.0) - LOD_BIAS;
         alpha *= tex(m.tex0.x, mesh_uv(a, m, u, v), lod).a;
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
-        let i = mat_in_at(ti, inst, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
+        let i = mat_in_at(ti, inst, part, u, v, vec3<f32>(0.0, 1.0, 0.0), log2(max(t * 2.0 * P.cam_pos.w / lod_height(), 1e-7)));
         var b = mat_base(m);
         b.opacity = alpha;
         alpha = alpha_material_function(m.tex1.w - 1, i, m, b).opacity;
@@ -1257,9 +1308,10 @@ fn emission(m: Material, uv: vec2<f32>, lod: f32) -> vec3<f32> {
 fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     if (is_proc(h)) { return surface_proc(o, d, h, width); }
     let i = h.tri;
-    var e1 = tri_verts[i * 3u + 1u].xyz;
-    var e2 = tri_verts[i * 3u + 2u].xyz;
-    var a = attrs[i];
+    let td = tri_data(i, h.inst, h.part);
+    var e1 = td.e1;
+    var e2 = td.e2;
+    var a = td.a;
     var side = 1.0;
     if (has(F_INST) && h.inst != NO_INST) {
         let r = instance_at(h.inst);
@@ -1279,7 +1331,9 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let p = o + d * h.t;
 
     let uv = mesh_uv(a, m, h.u, h.v);
-    let lod = mesh_lod(a, m) + log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
+    let density = mesh_density(e1, e2, a, m);
+    let fp = max(width, 1e-7);
+    let lod = mesh_lod(density, fp * fp, max(abs(dot(ng, d)), 1e-3)) - LOD_BIAS;
 
     var s: Surface;
     s.p = p;
@@ -1310,19 +1364,21 @@ fn surface(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
     let near = cur_depth == 0u || mirror_path;
     if (has(F_TEX) && m.tex0.y >= 0 && near) {
         let tn = tex(m.tex0.y, uv, lod).xyz * 2.0 - 1.0;
-        let tp = a.t.xyz - n * dot(n, a.t.xyz);
+        let tw = hit_tangent(td, h.inst, h.u, h.v);
+        let tp = tw.xyz - n * dot(n, tw.xyz);
         if (dot(tp, tp) > 1e-12) {
             let t = normalize(tp);
-            let b = cross(n, t) * a.t.w;
+            let b = cross(n, t) * tw.w;
             let pn = t * (tn.x * m.params.w) + b * (tn.y * m.params.w) + n * tn.z;
             if (dot(pn, pn) > 1e-12 && dot(pn, ng) > 0.0) { n = normalize(pn); }
         }
     }
     if (has(F_FUNC) && m.tex1.w > 0) {
         let oi = object_of(a);
-        var t = normalize(a.t.xyz - n * dot(n, a.t.xyz) + vec3<f32>(1e-9));
+        let tw = hit_tangent(td, h.inst, h.u, h.v);
+        var t = normalize(tw.xyz - n * dot(n, tw.xyz) + vec3<f32>(1e-9));
         let nv = normalize(a.n0.xyz * w + a.n1.xyz * h.u + a.n2.xyz * h.v) * select(-1.0, 1.0, front || dot(a.n0.xyz, ng) > 0.0);
-        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * a.t.w, mesh_uv(a, m, h.u, h.v), mesh_lod(a, m), -d,
+        let i = MatIn(p, select(-nv, nv, dot(nv, ng) >= 0.0), ng, t, cross(n, t) * tw.w, mesh_uv(a, m, h.u, h.v), mesh_lod(density, 1.0, 1.0), -d,
                       object_at(oi * OBJECT_STRIDE).xyz, object_at(oi * OBJECT_STRIDE + 1u).xyz, P.time.x, P.time.y, P.time.z,
                       log2(max(width, 1e-7)) - 0.5 * log2(max(abs(dot(ng, d)), 1e-3)), cur_depth, object_at(oi * OBJECT_STRIDE).w, near,
                       object_at(oi * OBJECT_STRIDE + 2u));
@@ -1412,23 +1468,48 @@ fn surface_proc(o: vec3<f32>, d: vec3<f32>, h: Hit, width: f32) -> Surface {
 }
 
 // ------------------------------------------------------------------------------------------------
-// BSDF (UE DefaultLit)
+// BSDF
 
+// The specular lobe's directional albedo at a roughness and cos(view), as the two terms of the split sum (Karis,
+// "Real Shading in Unreal Engine 4", SIGGRAPH 2013 course notes, "Environment BRDF"; with f90: Lagarde & de Rousiers
+// 2014, eq. 58): with Schlick's Fresnel the lobe (`d_ggx` x `vis_smith_joint_approx`, single scattering) reflects
+// f0 x .x + f90 x .y of a uniform surround, .x + .y at F = 1.
+// From the table lib.rs `energy_lut` computes (`specular_albedo`): ENERGY_N x ENERGY_N nodes over sqrt(cos(view))
+// (along a row) and the roughness, two nodes a vec4 (32 x 32 over sqrt(cos) and sqrt(alpha): the tables' shape of
+// Kulla & Conty 2017 and Turquin 2019, section 3.1.1); between the nodes, bilinear.
+const ENERGY_N: u32 = 32u;
+fn energy_node(i: u32) -> vec2<f32> {
+    let v = energy_at(i >> 1u);
+    return select(v.xy, v.zw, (i & 1u) == 1u);
+}
 fn energy_lookup(roughness: f32, nov: f32) -> vec2<f32> {
-    let x = clamp(nov * 31.0, 0.0, 31.0);
-    let y = clamp(roughness * 31.0, 0.0, 31.0);
-    let x0 = u32(floor(x)); let y0 = u32(floor(y));
-    let x1 = min(x0 + 1u, 31u); let y1 = min(y0 + 1u, 31u);
-    let fx = x - f32(x0); let fy = y - f32(y0);
-    let a = mix(lut(x0, y0), lut(x1, y0), fx);
-    let b = mix(lut(x0, y1), lut(x1, y1), fx);
-    return mix(a, b, fy);
+    let x = sqrt(clamp(nov, 0.0, 1.0)) * f32(ENERGY_N - 1u);
+    let y = clamp(roughness, 0.0, 1.0) * f32(ENERGY_N - 1u);
+    let x0 = min(u32(x), ENERGY_N - 2u);
+    let y0 = min(u32(y), ENERGY_N - 2u);
+    let i = y0 * ENERGY_N + x0;
+    let fx = x - f32(x0);
+    return mix(mix(energy_node(i), energy_node(i + 1u), fx), mix(energy_node(i + ENERGY_N), energy_node(i + ENERGY_N + 1u), fx), y - f32(y0));
 }
 
-fn lut(x: u32, y: u32) -> vec2<f32> {
-    let i = y * 32u + x;
-    let v = energy_at(i / 2u);
-    return select(v.xy, v.zw, (i & 1u) == 1u);
+// The specular lobe's Fresnel and energy terms for a reflectance at normal incidence `f0`, from the lobe's albedo terms
+// `e` (`energy_lookup`).
+// f90, the reflectance at grazing incidence: 1, fading to 0 as f0 falls below 2 %, less than any real material has, so
+// that a material can switch its specular off: saturate(50 x the mean of f0) (Lagarde & de Rousiers, "Moving Frostbite
+// to Physically Based Rendering", SIGGRAPH 2014 course notes, section 4.10.3, Listing 27, after Schuler, "An Efficient
+// and Physically Plausible Real-Time Shading Model", ShaderX7; Filament's documentation, "Specular occlusion").
+// w, the lobe's scale for the light that leaves the microsurface after more than one bounce, which the single-
+// scattering lobe lacks: 1 + f0 (1 - E) / E, E = e.x + e.y the lobe's albedo at F = 1 (Turquin, "Practical multiple
+// scattering compensation for microfacet models", 2019, eq. 16; the energy to return: Kulla & Conty, "Revisiting
+// Physically Based Shading at Imageworks", SIGGRAPH 2017 course; Filament's documentation, "Energy loss in specular
+// reflectance"). `comp` (P.misc.z) of it: at 0 the lobe is single scattering, at 1 a white (f0 = 1) lobe reflects all
+// it receives (the white furnace test).
+// e, the lobe's directional albedo with both: (f0 e.x + f90 e.y) w.
+struct SpecTerms { f90: f32, w: vec3<f32>, e: vec3<f32> };
+fn spec_terms(f0: vec3<f32>, e: vec2<f32>, comp: f32) -> SpecTerms {
+    let f90 = clamp(dot(f0, vec3<f32>(50.0 / 3.0)), 0.0, 1.0);
+    let w = 1.0 + f0 * (comp * (1.0 / max(e.x + e.y, 1e-3) - 1.0));
+    return SpecTerms(f90, w, (f0 * e.x + f90 * e.y) * w);
 }
 
 // Base layer: diffuse + GGX specular (e_spec: the specular's directional albedo; kd: what it leaves the diffuse
@@ -1456,6 +1537,9 @@ struct Lobes {
 // Not here: the radiance scaling by the indices' ratio squared (as Cycles and glTF's formula: it cancels over a
 // closed solid, and a single-sheet pane, which refracts as a solid here, would be scaled once); thin walls;
 // absorption by distance.
+// Smoother than this a reflection or refraction is sharp enough that an emitter seen through it needs no denoising
+// (`delta_path`; a polished floor's 0.035 still spreads it over pixels).
+const DELTA_ROUGHNESS: f32 = 0.025;
 const GLASS_DELTA: f32 = 0.05; // roughness (RTXPT 0.04, Falcor 0.08)
 
 // Unpolarised Fresnel reflectance: `c` the cosine on the incident side, `eta` = n(far) / n(incident); 1 at total
@@ -1547,6 +1631,8 @@ fn lobes(s: Surface, nov: f32) -> Lobes {
     var l: Lobes;
     let t = s.transmission * (1.0 - s.metallic);
     l.diffuse = s.base * (1.0 - s.metallic) * (1.0 - t);
+    // The dielectric's reflectance at normal incidence: `specular` 0..1 is 0..8 % (Burley, "Physically-Based Shading at
+    // Disney", SIGGRAPH 2012 course notes, section 5.4: 0.5 is the 4 % of common dielectrics, ior 1.5).
     var f0 = 0.08 * s.specular;
     if (t > 0.0) {
         // Glass: F0 from the index of refraction.
@@ -1554,11 +1640,14 @@ fn lobes(s: Surface, nov: f32) -> Lobes {
         f0 = r * r;
     }
     l.f0 = mix(vec3<f32>(f0), s.base, s.metallic);
-    l.f90 = vec3<f32>(clamp(50.0 * l.f0.g, 0.0, 1.0));
-    let e = energy_lookup(s.roughness, nov);
-    // misc.z = multiple-scattering compensation amount (1 = energy conserving, matches the white furnace).
-    l.w = 1.0 + P.misc.z * l.f0 * ((1.0 - e.x) / e.x);
-    l.e_spec = l.w * (e.x * l.f0 + e.y * (l.f90 - l.f0));
+    // The specular lobe's grazing reflectance, its multiple-scattering scale (P.misc.z of it) and its directional
+    // albedo (`spec_terms`); the diffuse under it gets what the lobe does not reflect toward the view, 1 - E_spec
+    // (the specular's missing energy modulates the diffuse: Kulla & Conty 2017, "Microfacet Dielectrics - Diffuse
+    // Term"; here by the view's albedo alone, not theirs of both directions).
+    let st = spec_terms(l.f0, energy_lookup(s.roughness, nov), P.misc.z);
+    l.f90 = vec3<f32>(st.f90);
+    l.w = st.w;
+    l.e_spec = st.e;
     l.kd = 1.0 - l.e_spec;
     if (has(F_GLASS) && t > 0.0) {
         // The share that is not the dielectric keeps this specular lobe (the diffuse, 1 - t of it already, under it).
@@ -1573,9 +1662,10 @@ fn lobes(s: Surface, nov: f32) -> Lobes {
     if (wd <= 0.0) { l.p_spec = 1.0; }
     l.coat_alpha = 1.0;
     if (has(F_COAT) && s.coat > 0.0) {
-        let ec = energy_lookup(s.coat_rough, nov);
         l.coat = s.coat;
-        l.e_coat = s.coat * (ec.x * 0.04 + ec.y * 0.96);
+        // The coat's directional albedo: a single-scattering lobe of F0 0.04 (ior 1.5), F90 1, at its own roughness.
+        let ec = energy_lookup(s.coat_rough, nov);
+        l.e_coat = s.coat * (0.04 * ec.x + ec.y);
         l.coat_alpha = s.coat_rough * s.coat_rough;
     }
     let under = 1.0 - l.e_coat;
@@ -1596,21 +1686,35 @@ fn lobes(s: Surface, nov: f32) -> Lobes {
     return l;
 }
 
+// The microfacet terms of the specular lobes (a2 = alpha^2, alpha = roughness^2: Burley 2012).
+// The GGX (Trowbridge-Reitz) distribution of microfacet normals: Walter et al., "Microfacet Models for Refraction
+// through Rough Surfaces", EGSR 2007, eq. 33, written over cos(theta_h): a2 / (pi ((n.h)^2 (a2 - 1) + 1)^2), the
+// denominator arranged as in Lagarde & de Rousiers 2014, Listing 2 (`D_GGX`). (In f32 a mirror's a2, 1.6e-7 at the
+// roughness floor of 0.02, is a few steps of n.h below 1: light samples see such a lobe coarsely whatever the
+// arrangement; BSDF samples divide by the same D.)
 fn d_ggx(a2: f32, noh: f32) -> f32 {
     let d = (noh * a2 - noh) * noh + 1.0;
     return a2 / (PI * d * d);
 }
 
+// The visibility V = G2 / (4 n.v n.l) of the height-correlated Smith masking-shadowing for GGX (Heitz, "Understanding
+// the Masking-Shadowing Function in Microfacet-Based BRDFs", JCGT 2014: G2 = 1 / (1 + Lambda(v) + Lambda(l)), which is
+// V = 0.5 / (n.l sqrt(a2 + (1 - a2) (n.v)^2) + n.v sqrt(a2 + (1 - a2) (n.l)^2))), with each square root
+// sqrt(a2 + (1 - a2) c^2) replaced by alpha + (1 - alpha) c, exact at c = 0, c = 1, alpha = 0 and alpha = 1: the
+// denominator becomes a blend of 2 n.l n.v and n.l + n.v by alpha (Hammon, "PBR Diffuse Lighting for GGX+Smith
+// Microsurfaces", GDC 2017; Filament, `V_SmithGGXCorrelated_Fast`, Apache-2.0,
+// https://github.com/google/filament/blob/main/shaders/src/surface_brdf.fs). No square root over the directions; the
+// one here turns the lobes' a2 back into alpha. (lib.rs `specular_albedo` and `glass_energy` integrate this form.)
 fn vis_smith_joint_approx(a2: f32, nov: f32, nol: f32) -> f32 {
-    let a = sqrt(a2);
-    let v = nol * (nov * (1.0 - a) + a);
-    let l = nov * (nol * (1.0 - a) + a);
-    return 0.5 / max(v + l, 1e-7);
+    return 0.5 / max(mix(2.0 * nol * nov, nol + nov, sqrt(a2)), 1e-7);
 }
 
+// Fresnel reflectance by Schlick's approximation ("An Inexpensive BRDF Model for Physically-based Rendering", 1994)
+// with a reflectance at grazing incidence: f0 + (f90 - f0) (1 - v.h)^5.
 fn f_schlick(f0: vec3<f32>, f90: vec3<f32>, voh: f32) -> vec3<f32> {
-    let fc = pow(1.0 - voh, 5.0);
-    return f0 + (f90 - f0) * fc;
+    let c = 1.0 - voh;
+    let c2 = c * c;
+    return f0 + (f90 - f0) * (c2 * c2 * c);
 }
 
 // BSDF * NoL with the specular lobe scaled (per-light specular scale)
@@ -1893,36 +1997,38 @@ fn sun_disks(d: vec3<f32>, pdf: f32) -> vec3<f32> {
     return c;
 }
 
-// What light sampling reads of an emitter's attributes (UVs, material, object, texel density), as shading has them
-// at a hit of it: its triangle's, with its instance's object and texture LOD offset if it has one. (Not the normals
-// and the tangent, which stay the mesh's: a light sample reads none, and placing them is work a sample.)
+// What light sampling reads of an emitter's attributes (UVs, material, object), as shading has them at a hit of it:
+// its triangle's, with its instance's object. (Not the normals and the tangent, which stay the mesh's:
+// a light sample reads none, and placing them is work a sample. Its texel density is from the list's own edges.)
 fn emitter_attrs(em: EmitterTri) -> TriAttr {
-    var a = attrs[em.tri];
+    var a = tri_data(em.tri, em.inst, em.part).a;
     if (has(F_INST) && em.inst != NO_INST) { a.x = inst_x(instance_at(em.inst).info, a.x); }
     return a;
 }
+
+// A mesh's triangle's index in its section. Hardware traversal: from the section's first triangle (the instance's
+// row for it, the word a hit's triangle is found by: trace_hw.wgsl `hit_tri`). Software traversal's units: its
+// leaf's id (a tree has a mesh's triangles in its own order).
+@if(hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return h.tri - row_word(rows, h.part, 1u); }
+@if(!hwrt) fn hit_rank(h: Hit, rows: u32) -> u32 { return leaf_id(h.tri, 1u); }
 
 // The MIS weight of a BSDF ray's (pdf `pdf`) hit on an emitter against light sampling in `direct_light`: by the
 // density light sampling has for the point, the probability it picks the emitter (`emitter_pmf`, at the vertex the
 // ray left) over the triangle's area. One it never picks (no entry, no weight: switched off, culled, a procedural
 // surface) is the BSDF ray's alone.
 fn emit_mis(hit: Hit, d: vec3<f32>, pdf: f32) -> f32 {
-    if (is_proc(hit) || P.counts.y == 0u) { return 1.0; }
-    // The hit triangle's emitter: its attributes' x.w is the entry + 1 (0: it is not light-sampled). A triangle an
-    // instance places: x.w is its index in its section, counted from the section's first entry (its row's).
-    let a = attrs[hit.tri];
-    var entry = bitcast<u32>(a.x.w);
-    if (has(F_INST) && hit.inst != NO_INST) {
-        let first = row_word(instance_at(hit.inst).info.w, bitcast<u32>(a.uv.w), 2u);
-        if (first == NO_EMITTER) { return 1.0; }
-        entry += first + 1u;
-    }
-    if (entry == 0u) { return 1.0; }
-    let em = emitter_tri_at(entry - 1u);
+    if (is_proc(hit) || !has(F_INST) || P.counts.y == 0u) { return 1.0; }
+    // The hit triangle's emitter: its index in its section, counted from the section's first entry (its instance's
+    // row's; none: it is not light-sampled).
+    let rows = instance_at(hit.inst).info.w;
+    let first = row_word(rows, hit.part, 2u);
+    if (first == NO_EMITTER) { return 1.0; }
+    let entry = first + hit_rank(hit, rows);
+    let em = emitter_tri_at(entry);
     let cr = cross(em.e1, em.e2);
     let area = 0.5 * length(cr);
     let cos_l = abs(dot(normalize(cr), d));
-    let sel = emitter_pmf(entry - 1u, em, mis_x, mis_n);
+    let sel = emitter_pmf(entry, em, mis_x, mis_n);
     if (!(sel > 0.0)) { return 1.0; }
     return power_heuristic(pdf, sel / max(area, 1e-12) * hit.t * hit.t / max(cos_l, 1e-6));
 }
@@ -1988,8 +2094,13 @@ fn local_light(li: Light, x: vec3<f32>, u: vec2<f32>) -> LS {
         atten *= win * win;
     }
     if (u32(li.pos.w) == 2u) {
-        let m = clamp((dot(-l, li.dir.xyz) - li.ext.x) * li.ext.y, 0.0, 1.0);
-        atten *= m * m;
+        // The cone: nothing outside its half angle (ext.x its cosine), all of the light inside the inner cone, and
+        // between them linear in the cosine of the angle from the axis (ext.y = 1 / the two cosines' difference),
+        // squared: the angular attenuation of glTF 2.0 KHR_lights_punctual (its reference code, which is `getAngleAtt`
+        // of Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering", SIGGRAPH 2014 course notes,
+        // Listing 4). The inner cone from `penumbra`: scene.rs `spot_cone`.
+        let cone = clamp((dot(-l, li.dir.xyz) - li.ext.x) * li.ext.y, 0.0, 1.0);
+        atten *= cone * cone;
     }
     let ls = lp - x;
     let dist = max(length(ls), 1e-6);
@@ -2170,11 +2281,11 @@ fn emitter_radiance(em: EmitterTri, b1: f32, b2: f32, l: vec3<f32>) -> vec3<f32>
     let m = material_at(material_of(a, em.inst));
     // 5 cm footprint: a blurred texel is plenty for lighting and keeps NEE cheap.
     let pw = obj_power(a);
-    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(a, m) + log2(0.05)) * pw;
+    var le = emission(m, mesh_uv(a, m, b1, b2), mesh_lod(mesh_density(em.e1, em.e2, a, m), 0.0025, 1.0)) * pw;
     if (has(F_FUNC) && m.tex1.w > 0) {
         var mb = mat_base(m);
         mb.emissive *= pw;
-        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, em.inst, b1, b2, -l, log2(0.05)), m, mb).emissive;
+        le = emissive_material_function(m.tex1.w - 1, mat_in_at(em.tri, em.inst, em.part, b1, b2, -l, log2(0.05)), m, mb).emissive;
     }
     return le;
 }
@@ -2246,7 +2357,7 @@ fn sample_emitter_ris(x: vec3<f32>, n: vec3<f32>, m: u32, sf: Surface, lb: Lobes
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    let m_card = material_at(material_of(attrs[em.tri], em.inst)).tex1.z == MAT_EMITTER_CARD;
+    let m_card = emitter_is_card(em);
     if (!m_card) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0) { return r; }
     r.le = emitter_radiance(em, pick_b.x, pick_b.y, l);
@@ -2281,7 +2392,7 @@ fn sample_emitter(x: vec3<f32>, n: vec3<f32>, rd: u32) -> ES {
     let dist = sqrt(d2);
     let l = dl / dist;
     var cos_l = dot(ln, -l);
-    if (material_at(material_of(attrs[em.tri], em.inst)).tex1.z != MAT_EMITTER_CARD) { cos_l = abs(cos_l); }
+    if (!emitter_is_card(em)) { cos_l = abs(cos_l); }
     if (cos_l <= 0.0 || (has(F_PEMIT) && !(cos_l > 0.0))) { return r; } // also a particle not shown (no area: NaN)
     r.le = emitter_radiance(em, b1, b2, l);
     r.l = l;
@@ -3086,6 +3197,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     };
     @group(1) @binding(1) var<storage, read_write> ML: MergedLive;
     fn refl_len() -> u32 { return P.live_len.x; }
+    fn refl_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].y + i]; }
     fn refl_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].y + i] = v; }
     fn motion_len() -> u32 { return P.live_len.y; }
     fn motion_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].z + i] = v; }
@@ -3113,6 +3225,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     @group(1) @binding(6) var<storage, read_write> motion_out: array<vec4<f32>>;
     @group(1) @binding(7) var<storage, read_write> direct_out: array<vec4<f32>>;
     fn refl_len() -> u32 { return arrayLength(&refl); }
+    fn refl_load(i: u32) -> vec4<f32> { return refl[i]; }
     fn refl_store(i: u32, v: vec4<f32>) { refl[i] = v; }
     fn motion_len() -> u32 { return arrayLength(&motion_out); }
     fn motion_store(i: u32, v: vec4<f32>) { motion_out[i] = v; }
@@ -3151,8 +3264,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 }
 
 fn resolve_bound() -> bool { return LIVE && refl_len() >= 2u * P.size.x * P.size.y; }
-// THREERT_CACHE_FLAGS bit 16 turns the resolve off (rays then stay in their pixel's specular, the resolve reads zeros).
-fn resolve_on() -> bool { return resolve_bound() && (u32(P.cache.w) & 16u) == 0u; }
+fn resolve_on() -> bool { return resolve_bound() && P.motion.y == 0.0; }
 
 // Density of l under the base specular lobe alone (VNDF sampling).
 fn pdf_spec(s: Surface, lb: Lobes, v: vec3<f32>, l: vec3<f32>) -> f32 {
@@ -3437,7 +3549,7 @@ fn cache_end(s: Surface, d: vec3<f32>, cone: vec2<f32>, thr: vec3<f32>, depth: u
     cur_depth = depth;
     var c = thr * cache_reflectance(lb1) * e.rgb;
     // Resampled lights, not the exact loop camera hits get (that costs 2x here: mirror pixels are scattered).
-    mirror_path = mirror_path && (u32(P.cache.w) & 8u) != 0u;
+    mirror_path = false;
     // (The lights alone: the sky's light is in the cache's indirect part, whole. Its samples taken afresh
     // here against the white-lobe ones the cache left out do not add up on a glossy surface: a white metal
     // ground in a mirror read 0.80 of a uniform sky. The lights' still are: weights of two lobes, right for a
@@ -3453,9 +3565,10 @@ fn cache_end(s: Surface, d: vec3<f32>, cone: vec2<f32>, thr: vec3<f32>, depth: u
     return c;
 }
 
-// A pixel `main` left for `finish`, DEFERRED_VECS vec4<u32>s (floats as their bits): (pixel, DF_ flags | depth << 8,
-// light list + its length, hit triangle) (hit instance, u, v, k_spec.x) (hit point, cone width) (ray direction, cone
-// spread) (path weight, k_spec.y) (the specular ray's weight, k_spec.z).
+// A pixel `main` left for `finish`, DEFERRED_VECS vec4<u32>s (floats as their bits): (pixel, DF_ flags | depth << 8
+// (255 at most) | an instance's hit's section << 16 (scene.rs `MESH_SECTIONS`), light list + its length, hit triangle)
+// (hit instance, u, v, k_spec.x) (hit point, cone width) (ray direction, cone spread) (path weight, k_spec.y) (the
+// specular ray's weight, k_spec.z).
 const DEFERRED_VECS: u32 = 6u;
 const DEFERRED_ROW: u32 = 16384u; // `finish` invocations a dispatch row (gpu.rs DEFERRED_ROW)
 const DF_TRAIN: u32 = 1u;     // of a training tile
@@ -3485,17 +3598,18 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = r0.x;
     let fl = r0.y;
     rng_start(vec2<u32>(pix % P.size.x, pix / P.size.x), P.size.z, P.size.w, 0u);
-    cur_depth = fl >> 8u;
+    let depth = (fl >> 8u) & 0xffu;
+    cur_depth = depth;
     mirror_path = (fl & DF_MIRROR) != 0u;
-    rays_off = LIVE && P.raster.w > 0.5;
+    rays_off = LIVE && P.jitter.z > 0.5;
     if (has(F_LISTS)) {
         lt_list = r0.z & ~(LT_LIST - 1u);
         lt_list_n = r0.z & (LT_LIST - 1u);
         lt_fb = LT_NONE;
     }
     // (The hit point as the ray's origin, at distance 0.)
-    let s = surface(r2.xyz, r3.xyz, Hit(0.0, r0.w, bitcast<f32>(r1.y), bitcast<f32>(r1.z), r1.x), r2.w);
-    let c = cache_end(s, r3.xyz, vec2<f32>(r2.w, r3.w), r4.xyz, fl >> 8u, (fl & DF_TRAIN) != 0u, (fl & DF_HIT_LIGHT) != 0u, (fl & DF_STRAIGHT) != 0u);
+    let s = surface(r2.xyz, r3.xyz, Hit(0.0, r0.w, bitcast<f32>(r1.y), bitcast<f32>(r1.z), r1.x, fl >> 16u), r2.w);
+    let c = cache_end(s, r3.xyz, vec2<f32>(r2.w, r3.w), r4.xyz, depth, (fl & DF_TRAIN) != 0u, (fl & DF_HIT_LIGHT) != 0u, (fl & DF_STRAIGHT) != 0u);
     if ((fl & DF_OUT) == 0u || non_finite(c)) { return; }
     let cs = c * vec3<f32>(bitcast<f32>(r1.w), r4.w, r5.w);
     var px = accum[pix];
@@ -3508,6 +3622,88 @@ fn finish(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (!non_finite(li)) { refl[pix * 2u] += vec4<f32>(li, 0.0); }
     }
     accum[pix] = px;
+}
+
+// Deterministic reconstruction guides at smooth reflectors. Using the random BSDF sample makes
+// glass alternate between two different materials and leaves a hole wherever a diffuse lobe was drawn.
+struct GuideHit { albedo: vec3<f32>, normal: vec3<f32>, rough: f32, distance: f32 };
+fn guide_color(radiance: vec3<f32>) -> vec3<f32> {
+    // Keep a dark background dark and preserve the hue of bright emitters in the albedo guide.
+    return radiance / max(1.0, max(radiance.r, max(radiance.g, radiance.b)));
+}
+fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: bool) -> GuideHit {
+    var o = offset_origin(origin, dir);
+    var d = dir;
+    var first = 0.0;
+    for (var i = 0u; i < 2u; i++) {
+        let h = trace(o, d, INF, TRACE_CLOSEST);
+        if (h.tri == 0xffffffffu) {
+            var sky = env_radiance(d);
+            if (through_glass) { sky = sky_mis(d, 0.0, true); }
+            return GuideHit(guide_color(sky), -d, 1.0, select(first, 1e4, i == 0u));
+        }
+        if (i == 0u) { first = h.t; }
+        let s = surface(o, d, h, footprint + h.t * 2.0 * P.cam_pos.w / lod_height());
+        // Continue through the back face of a clear solid to the material visible behind it.
+        if (i == 0u && through_glass && !s.front && s.transmission > 0.0 && s.roughness < GLASS_DELTA) {
+            let exit_d = refract(d, s.n, s.ior);
+            d = select(reflect(d, s.n), exit_d, dot(exit_d, exit_d) > 0.0);
+            o = offset_origin(s.p, d);
+            continue;
+        }
+        let m = lobes(s, max(dot(s.n, -d), 1e-4));
+        let emission = guide_color(s.emissive);
+        return GuideHit(clamp(max(cache_reflectance(m), emission), vec3<f32>(0.0), vec3<f32>(1.0)), s.n, s.roughness, first);
+    }
+    return GuideHit(vec3<f32>(1.0), -d, 1.0, first);
+}
+
+@compute @workgroup_size(8, 8) fn surface_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (any(gid.xy >= P.size.xy)) { return; }
+    let q = gid.y * P.size.x + gid.x;
+    let px = accum[q];
+    let diffuse = refl_load(2u*q);
+    let specular = refl_load(2u*q+1u);
+    var alb = diffuse.rgb;
+    var normal = px.normal.xyz;
+    var rough = px.emit.w;
+    // Rough surfaces have no single reflected point. A stochastic second-bounce hit would move
+    // their guide even when both the object and camera stand still.
+    accum[q].spec.w = 0.0;
+    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 &&
+        (any(specular.rgb > vec3<f32>(0.005)) || diffuse.w > 0.0)) {
+        cur_depth = 1u;
+        mirror_path = true;
+        let ndc = ((vec2<f32>(gid.xy) + P.jitter.xy) / vec2<f32>(P.size.xy) * 2.0 - 1.0) * vec2<f32>(1.0, -1.0);
+        let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * ndc.x * P.cam_pos.w * P.cam_fwd.w + P.cam_up.xyz * ndc.y * P.cam_pos.w);
+        let x = P.cam_pos.xyz + d * px.color.w;
+        let width = px.color.w * 2.0 * P.cam_pos.w / lod_height();
+        let reflected = guide_hit(x, reflect(d, normal), width, false);
+        accum[q].spec.w = reflected.distance;
+        // At a mirror or clear pane the visible material is the secondary surface. Preserve primary
+        // depth and motion for silhouettes, disocclusions and post; only the denoiser gets virtual guides.
+        let sharp = 1.0 - smoothstep(GLASS_DELTA, 0.18, rough);
+        let reflection = clamp(max(specular.r, max(specular.g, specular.b)), 0.0, 1.0);
+        var virtual_n = reflect(reflected.normal, normal);
+        var virtual_r = reflected.rough;
+        var share = reflection;
+        alb += sharp * specular.rgb * reflected.albedo;
+        if (diffuse.w > 0.0 && specular.w > 0.0) {
+            let refracted = refract(d, normal, specular.w);
+            if (dot(refracted, refracted) > 0.0) {
+                let transmitted = guide_hit(x, refracted, width, true);
+                let weight = diffuse.w * (1.0 - reflection);
+                alb += sharp * weight * px.albedo.rgb * transmitted.albedo;
+                if (weight > reflection) { virtual_n = transmitted.normal; virtual_r = transmitted.rough; }
+                share += weight;
+            }
+        }
+        if (dot(virtual_n, normal) < 0.0) { virtual_n = -virtual_n; }
+        normal = normalize(mix(normal, virtual_n, sharp * min(share, 1.0)));
+        rough = mix(rough, virtual_r, sharp * min(share, 1.0));
+    }
+    refl_store(2u*q, vec4<f32>(alb, bitcast<f32>(oct_enc(select(vec3<f32>(0.0, 0.0, 1.0), normal, dot(normal, normal) > 0.0)))));
+    refl_store(2u*q+1u, vec4<f32>(specular.rgb, rough));
 }
 
 // Live, after the trace: MEDIA_TRAIN_POINTS fresh estimates (point_radiance) into the volume voxels, each at a random
@@ -3582,7 +3778,7 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     cur_depth = 0u;
     mirror_path = false;
     var px = accum[pix];
-    let ndc = vec2<f32>((f32(gid.x) + P.raster.y) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.raster.z) / f32(h) * 2.0);
+    let ndc = vec2<f32>((f32(gid.x) + P.jitter.x) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.jitter.y) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let ft = px.color.w;
     let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true, rng_dim(D_MEDIA));
@@ -3643,15 +3839,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     cur_depth = 0u;
     let cam = rng4(rng_dim(D_CAMERA));
 
-    // Raster primary: one visibility sample per pixel at the frame's jitter (lens sampling would need its own rays).
-    let raster = LIVE && P.raster.x > 0.5 && P.cam_right.w <= 0.0;
     // Live: one sub-pixel jitter a frame for the whole image (live/frame.rs: Halton 2, 3), which the temporal upscaler
-    // resolves (live.wgsl `upscale`) and the raster pass draws at. Offline, every sample draws its own.
+    // resolves (live.wgsl `upscale`). Offline, every sample draws its own.
     var jx = cam.x;
     var jy = cam.y;
     if (LIVE) {
-        jx = P.raster.y;
-        jy = P.raster.z;
+        jx = P.jitter.x;
+        jy = P.jitter.y;
     }
     let ndc = vec2<f32>((f32(gid.x) + jx) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + jy) / f32(h) * 2.0);
     var d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
@@ -3687,6 +3881,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var refl_pdf = 0.0;
     var refl_w = vec3<f32>(0.0);
     var refl_e = vec3<f32>(0.0);
+    var guide_diffuse = vec3<f32>(0.0);
+    var guide_glass = vec2<f32>(0.0); // transmitted share and incident/transmitted index ratio
     var through0 = false;
     // The camera hit is transmissive (glass, water): its reflections stay in the specular signal too (the resolve's
     // neighbours there mostly went through, so it had no rays to rebuild them from: live glass lost its reflection).
@@ -3695,6 +3891,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dl_det = vec3<f32>(0.0);
     dl_det_spec = vec3<f32>(0.0);
     var specular_bounce = true;
+    // Every bounce so far a delta sample off a smooth mirror or clear glass: an emitter the path then hits is seen
+    // sharply (MetalFX denoised takes it as emission: upscaled, not denoised).
+    var delta_path = true;
     // Glass passed since the last scattering vertex: any (behind_glass), and whether an odd number of surfaces (bent).
     // The vertex's shadow rays toward emitters stopped at the glass and those toward the sky at bending glass, so
     // what the path finds there counts in full; behind glass that does not bend (a pane) the sky and the directional
@@ -3712,23 +3911,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mirror_path = false;
     for (var depth = 0u; depth <= P.counts.z; depth++) {
         cur_depth = depth;
-        var hit: Hit;
-        if (raster && depth == 0u) {
-            let id = textureLoad(vis_tex, vec2<i32>(gid.xy), 0).x;
-            if (id == 0u) {
-                hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST);
-            } else {
-                hit = tri_hit(id - 1u, o, d);
-                // The raster pass draws cutout triangles whole: the alpha test decides here, else trace past them.
-                if (has(F_MASKED) && (bitcast<u32>(tri_verts[hit.tri * 3u].w) & TRI_MASKED) != 0u && !alpha_pass(hit.tri, NO_INST, hit.u, hit.v, hit.t)) {
-                    hit = trace(o, d, INF, TRACE_CLOSEST);
-                }
-            }
-        } else {
-            hit = trace(o, d, INF, TRACE_CLOSEST);
-        }
+        var hit = trace(o, d, INF, TRACE_CLOSEST);
         // Ray tracing off: the camera ray above was the last one traced for this pixel.
-        if (depth == 0u) { rays_off = LIVE && P.raster.w > 0.5; }
+        if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
             let t0 = select(0.0, P.fog.w, depth == 0u);
@@ -3799,6 +3984,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 bent = false;
                 straight = false;
                 mirror_path = false;
+                delta_path = false;
                 cone_w += cone_a * tk.t;
                 cone_a += 2.0;
                 if (depth >= P.counts.w) {
@@ -3828,11 +4014,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (depth == 0u) {
             first_t = hit.t;
             let ti = hit.tri;
-            // The first dynamic triangle is the first of traversal group 4 (a u32: an index carried as f32 bits would be a
-            // denormal below 2^23, which a driver may flush to zero).
-            // Dynamic triangles (and deforming instanced meshes, in model space) keep their previous vertices.
-            let deforms = LIVE && P.motion.x > 0.5 && !is_proc(hit) && ti >= P.group_first[1].x && (bitcast<u32>(tri_verts[ti * 3u].w) & TRI_DYNAMIC) != 0u;
-            let kp = (ti - P.group_first[1].x) * 3u;
+            // A deforming mesh keeps its previous vertices in model space, where its instance's record says.
+            var deforms = false;
+            if (LIVE && P.motion.x > 0.5 && !is_proc(hit) && has(F_INST)) {
+                deforms = has(F_DEFORM) && (bitcast<u32>(instance_at(hit.inst).n1.w) & INST_DEFORMS) != 0u;
+            }
             if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
                 // Procedural geometry: its object-space hit point through the previous frame's rows.
                 let r = instance_at(hit.inst);
@@ -3840,18 +4026,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let lp = vec4<f32>(proc_point(r, s.p), 1.0);
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
                 }
-            } else if (LIVE && P.motion.x > 0.5 && has(F_INST) && hit.inst != NO_INST) {
+            } else if (LIVE && P.motion.x > 0.5 && has(F_INST)) {
                 // A movable instance: its model-space hit point (the previous pose's for a deforming mesh) through the
                 // previous frame's transform (p rows; the same as m when it did not move).
                 let r = instance_at(hit.inst);
                 if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
-                    var lp = vec4<f32>(tri_verts[ti * 3u].xyz + tri_verts[ti * 3u + 1u].xyz * hit.u + tri_verts[ti * 3u + 2u].xyz * hit.v, 1.0);
-                    if (deforms) { lp = vec4<f32>(prev_verts[kp].xyz + prev_verts[kp + 1u].xyz * hit.u + prev_verts[kp + 2u].xyz * hit.v, 1.0); }
+                    let ix = tri_indices(ti);
+                    let now = (ix + vec3<u32>(r.info.z)) * VERTEX_VEC4;
+                    var q0 = vertices[now.x].xyz;
+                    var q1 = vertices[now.y].xyz;
+                    var q2 = vertices[now.z].xyz;
+                    // (A deforming mesh's previous positions are where its record says, n2.w, its vertices as the
+                    // mesh has them. F_DEFORM: a scene with such a mesh.)
+                    if (has(F_DEFORM) && deforms) {
+                        let before = (ix + vec3<u32>(bitcast<u32>(r.n2.w))) * VERTEX_VEC4;
+                        q0 = prev_verts[before.x].xyz;
+                        q1 = prev_verts[before.y].xyz;
+                        q2 = prev_verts[before.z].xyz;
+                    }
+                    let lp = vec4<f32>(q0 + (q1 - q0) * hit.u + (q2 - q0) * hit.v, 1.0);
                     mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
                 }
-            } else if (deforms) {
-                let pp = prev_verts[kp].xyz + prev_verts[kp + 1u].xyz * hit.u + prev_verts[kp + 2u].xyz * hit.v;
-                mv = vec4<f32>(pp - s.p, 1.0);
             }
             if (has(F_LISTS)) { lt_list_start(s.p + mv.xyz); }
             albedo = select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
@@ -3872,7 +4067,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let lum = luminance(c);
                 if (lum > clamp_v) { c *= clamp_v / lum; }
             }
-            if (depth == 0u) { e0 += c; }
+            if (depth == 0u || (LIVE && P.motion.y > 0.5 && delta_path)) { e0 += c; }
             radiance += c;
         }
         if (s.card) { break; }
@@ -3899,8 +4094,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Live: the path ends in the radiance cache at its first bounce (`cache_end`).
         if (cache_on() && depth >= 1u && !(has(F_GLASS) && s.transmission > 0.0)) {
-            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u && (u32(P.cache.w) & 2u) == 0u;
-            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u && (u32(P.cache.w) & 4u) == 0u;
+            let hit_light = spec_lobe && rough0 < 0.4 && depth == 1u;
+            let train = (((gid.x >> 3u) + 3u * (gid.y >> 2u) + pcg(P.size.z)) & CACHE_TRAIN_MASK) == 0u;
             @if(merged) { radiance += cache_end(s, d, vec2<f32>(width, cone_a), thr, depth, train, hit_light, straight); }
             @if(!merged) {
                 // Here only what a warm voxel holds; a pixel with more to trace is left for `finish`.
@@ -3909,7 +4104,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (later || train) {
                     let at = atomicAdd(&deferred.n, 1u) * DEFERRED_VECS;
                     if (at + DEFERRED_VECS <= arrayLength(&deferred.recs)) {
-                        let fl = (depth << 8u) | select(0u, DF_TRAIN, train) | select(0u, DF_OUT, later) | select(0u, DF_HIT_LIGHT, hit_light) | select(0u, DF_STRAIGHT, straight)
+                        let fl = (min(depth, 255u) << 8u) | (hit.part << 16u) | select(0u, DF_TRAIN, train) | select(0u, DF_OUT, later) | select(0u, DF_HIT_LIGHT, hit_light) | select(0u, DF_STRAIGHT, straight)
                             | select(0u, DF_MIRROR, mirror_path) | select(0u, DF_RESOLVE, resolve_on() && !through0 && !glass0) | select(0u, DF_REFL_RAY, refl_pdf > 0.0);
                         var lt = 0u;
                         if (has(F_LISTS) && lt_list_n > 0u) { lt = lt_list + lt_list_n; }
@@ -3971,6 +4166,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             through0 = through;
             glass0 = has(F_GLASS) && s.transmission > 0.0;
             refl_e = lb.e_spec;
+            if (LIVE && P.motion.y > 0.5) {
+                // MetalFX takes the directional reflectances of the layered BSDF, including glass and coat.
+                guide_diffuse = lb.diffuse * lb.kd * (1.0 - lb.e_coat);
+                refl_e = cache_reflectance(lb) - guide_diffuse;
+                if (has(F_GLASS)) { guide_glass = vec2<f32>(s.transmission * (1.0 - s.metallic), lb.eta); }
+            }
             if (sampled_spec && !through && lb.coat <= 0.0) {
                 refl_l = l;
                 refl_pdf = pdf_spec(s, lb, v, l);
@@ -3998,6 +4199,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cone_w = width;
         cone_a += 2.0 * s.roughness * s.roughness;
         mirror_path = (depth == 0u || mirror_path) && s.roughness < MIRROR_ROUGHNESS && (sampled_spec || sampled_trans);
+        delta_path = delta_path && s.roughness < DELTA_ROUGHNESS && (sampled_spec || sampled_trans);
         if (depth >= P.counts.w) {
             let q = min(max(thr.x, max(thr.y, thr.z)), 0.95);
             if (rng1(rng_dim(D_RR)) > q) { break; }
@@ -4029,7 +4231,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (P.misc.w < 0.5 && motion_len() >= w * h) {
             motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz)));
         }
-        if (resolve_bound() && P.misc.w < 0.5) {
+        if (P.motion.y > 0.5 && P.misc.w < 0.5 && resolve_bound()) {
+            // The reconstruction consumes the noisy path itself. Its material guides reuse the idle ray slots.
+            refl_store(pix * 2u, vec4<f32>(guide_diffuse, guide_glass.x));
+            refl_store(pix * 2u + 1u, vec4<f32>(refl_e, guide_glass.y));
+        } else if (resolve_bound() && P.misc.w < 0.5) {
             // Radiance along the specular ray: what the path gathered after it, over the ray's weight.
             var li = vec3<f32>(0.0);
             if (resolve && refl_pdf > 0.0) {
