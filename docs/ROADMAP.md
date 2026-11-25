@@ -2920,6 +2920,12 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**A pixel on a mirror has the surface the mirror shows (2026-11-25, after it).** The second step of the frame's
+structure: the first pass follows a camera hit that is a mirror to what it shows, and that surface has the pixel's
+guides, motion vector and signals (docs/RUNTIME.md "The live architecture"). A mirror's picture changes: what it
+shows is filtered, reprojected and upscaled as a surface seen directly, where it was the mirror's specular signal.
+Glass is as it was. Tests: `a_pixel_on_a_mirror_has_the_surface_the_mirror_shows`.
+
 **A live frame's camera rays in a pass of their own (2026-11-25).** The first step of the frame's structure: the
 kernel's `first_hit` traces the camera rays and leaves each pixel's hit and motion vector, and `main` starts its
 paths from the hits (docs/RUNTIME.md "The live architecture"). The pictures are the same. It is there for what

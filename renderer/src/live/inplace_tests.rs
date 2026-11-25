@@ -4968,13 +4968,13 @@ fn the_first_pass_leaves_the_camera_hits() {
 
 /// A pixel on a mirror has the surface the mirror shows. A mirror at 45 degrees before the camera shows a wall to the
 /// side: on the mirror's pixels the distance is the whole way to the wall (the camera hit's own stays in its record),
-/// the normal is the wall's as the pixel sees it (towards the camera), the albedo the wall's. The wall moved along
-/// the view, its motion vectors go sideways: the motion of what the pixel sees.
+/// the normal is the wall's as the pixel sees it (towards the camera), the albedo the wall's under the mirror's tint.
+/// The wall moved along the view, its motion vectors go sideways: the motion of what the pixel sees.
 #[test]
 fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     let mut w = world();
     let mat = |color: [f32; 3], metalness: f32, roughness: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": color, "opacity": 1, "metalness": metalness, "roughness": roughness, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true })).unwrap();
-    w.set_material(40, mat([1.0, 1.0, 1.0], 1.0, 0.0));
+    w.set_material(40, mat([1.0, 0.8, 0.6], 1.0, 0.0));
     w.set_material(41, mat([0.2, 0.6, 0.4], 0.0, 1.0));
     let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
     w.set_geometry(40, quad(0.5)).unwrap();
@@ -5010,7 +5010,7 @@ fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     for &k in &on {
         let (s, own) = (&samples[k], hits[k][0]);
         let (normal, albedo) = (Vec3::new(s[8], s[9], s[10]), Vec3::new(s[4], s[5], s[6]));
-        assert!(s[3] > own + 3.0 && (normal - Vec3::Z).length() < 0.02 && (albedo - Vec3::new(0.2, 0.6, 0.4)).length() < 0.03, "pixel {k}: the mirror {own} away; shown {} away, normal {normal}, albedo {albedo}", s[3]);
+        assert!(s[3] > own + 3.0 && (normal - Vec3::Z).length() < 0.02 && (albedo - Vec3::new(0.2, 0.6 * 0.8, 0.4 * 0.6)).length() < 0.03, "pixel {k}: the mirror {own} away; shown {} away, normal {normal}, albedo {albedo}", s[3]);
     }
     assert!((0..pixels as usize).filter(|&k| chain(&hits[k]) == 0 && samples[k][3] > 0.0).all(|k| samples[k][3].to_bits() == hits[k][0].to_bits()), "off the mirror the distance is the camera hit's");
     // The wall goes 0.3 along the view (z): in the mirror it goes 0.3 sideways (x), and a motion vector is the way back.
