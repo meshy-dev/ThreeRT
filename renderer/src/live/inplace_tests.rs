@@ -589,7 +589,7 @@ fn a_moved_card_beside_another_is_placed_where_its_light_is() {
             .collect()
     };
     let placed = |m: glam::Mat4, to: Vec3| m.abs_diff_eq(scene::card_world(glam::Mat4::from_rotation_translation(turn, to), 0.4, 0.3), 1e-6);
-    assert!(live.sc.dynamic.1.is_empty() && live.sc.tris.is_empty(), "a card is no world-space triangle");
+    assert!(live.sc.tris.is_empty(), "a card is no world-space triangle");
     let first = cards(&live);
     assert!((0..3).all(|k| placed(first[k].0, at[k])), "as loaded: each card where its light is");
     assert!(first.iter().all(|c| c.1.m == c.1.p), "as loaded: nothing has moved");
@@ -1491,7 +1491,6 @@ fn the_light_list_holds_its_triangles() {
         w.take_changes();
         assert_eq!(live.sc.tables.light_tree.as_ref().is_some_and(|t| t.moving_count > 0), tree, "the mover is in the tree's moving subtree");
         assert!(live.sc.tables.emitter_tris.iter().any(|e| e.inst != crate::NO_INST && e.moves), "the mover's emitters are its instance's");
-        assert!(live.sc.up.fills.moved.is_none(), "no triangle is left for the CPU to move");
         list_is_its_triangles("a moving emitter, as loaded", &live);
         w.set_transform(13, Vec3::new(0.1, -0.3, 0.9), glam::Quat::from_rotation_z(0.5), Vec3::ONE).unwrap();
         let rebuilt = live.commit(&mut w).unwrap();
@@ -2669,17 +2668,12 @@ fn a_material_of_world_space_triangles_changes_by_a_rebuild() {
     };
     w.take_changes();
     let index = |c: &LiveCore, id: u32| c.sc.tables.retained.materials[&id];
-    assert!(live.sc.tables.moving_mats.contains(&index(&live, 62)) && !live.sc.tables.moving_mats.contains(&index(&live, 64)), "the particles' material is dynamic triangles', the tile's is not");
+    assert!(live.sc.tables.moving_mats.contains(&index(&live, 62)) && !live.sc.tables.moving_mats.contains(&index(&live, 64)), "the particles' material is the pass's, the tile's is not");
     // The tile's material, which rows alone name: a cutout and back, in place.
     for (test, what) in [(0.5, "becomes a cutout"), (0.0, "is none again")] {
         w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": test })));
         assert!(!live.commit(&mut w).unwrap(), "a material of rows {what}: in place ({:?})", live.fallback);
     }
-    // The same, were it still triangles' too: a rebuild.
-    let k = index(&live, 64);
-    live.sc.tables.static_mats.insert(k);
-    w.set_material(64, plain(serde_json::json!({ "opacity": 0.9, "alphaTest": 0.5 })));
-    assert!(live.commit(&mut w).unwrap(), "a material of still triangles becomes a cutout: a rebuild");
     // The particles' material: it starts emitting, it becomes a cutout.
     w.set_material(62, plain(serde_json::json!({ "emissive": [1.0, 0.8, 0.6], "emissiveIntensity": 20 })));
     assert!(live.commit(&mut w).unwrap(), "the particles' material starts emitting: a rebuild");

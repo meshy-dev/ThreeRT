@@ -834,9 +834,6 @@ pub enum Draw {
     /// static model's instance. An edit that would change it rebuilds.
     #[default]
     Fixed,
-    /// World-space triangles in the dynamic groups, re-transformed (a movable object) or re-skinned (a posed model)
-    /// on the CPU.
-    Dynamic(DynamicModel),
     /// An instance of a model-space mesh (hardware RT, or software traversal's units).
     Instance(InstanceRef),
     /// Procedural geometry: its index in `procs` (its record less the first procedural record).
@@ -933,13 +930,6 @@ impl Retained {
         self.edits_meshes
     }
 
-    /// The triangles re-transformed on the CPU: the dynamic objects' and the rigid models' flattened ones.
-    pub fn dynamics_mut(&mut self) -> impl Iterator<Item = &mut DynamicModel> {
-        self.proxies.values_mut().filter_map(|p| match &mut p.draw {
-            Draw::Dynamic(d) => Some(d),
-            _ => None,
-        })
-    }
 }
 
 /// Where an instanced object's instances are: `capacity` of them from `first` in `instances` (instances of `mesh`) or
@@ -1157,18 +1147,6 @@ pub struct GpuParticleSystem {
     pub pivot: [f32; 3],
     pub rate: f32,
     pub collide: world::ParticleCollide,
-}
-
-/// A dynamic object's triangles (a posed model's, or a movable mesh's or model's the build flattened): their range in build order,
-/// and per triangle the material and flags.
-#[derive(Clone, Default)]
-pub struct DynamicModel {
-    pub first: u32,
-    pub mats: Vec<u32>,
-    pub flags: Vec<u32>,
-    pub object: u32,
-    /// Index of each triangle in the GPU triangle order (`prepare`; empty without hardware RT).
-    pub finals: Vec<u32>,
 }
 
 struct TexCache {
@@ -2172,11 +2150,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             for a in &mut attrs[first as usize..] {
                 a.x[1] = f32::from_bits(oi);
             }
-            let proxy = retained.proxy(*id);
-            proxy.object = Some(oi);
-            if let Draw::Dynamic(d) = &mut proxy.draw {
-                d.object = oi;
-            }
+            retained.proxy(*id).object = Some(oi);
             tri_nodes.push((n.name.clone(), first, tris.len() as u32));
         }
     }
@@ -2222,9 +2196,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         if m.layer[0] > 0.0 {
             *f |= TRI_NO_SHADOW;
         }
-    }
-    for d in retained.dynamics_mut() {
-        d.flags = tri_flags[d.first as usize..d.first as usize + d.mats.len()].to_vec();
     }
     retained.asset_materials = asset_materials;
     Ok(Scene {
@@ -2402,34 +2373,6 @@ pub fn drawn_world(w: &World, node: u32) -> Mat4 {
         Some(Kind::Light(Light::Rect { width, height, visible: true, .. })) => card_world(m, *width, *height),
         _ => m,
     }
-}
-
-/// A dynamic object's triangles at its current transform / pose, with their shading attributes (materials as built):
-/// what an in-place update writes. None: it no longer matches its build (a different kind).
-pub fn dynamic_tris(w: &World, id: u32, d: &DynamicModel, assets: &Path) -> Result<Option<Vec<([Vec3; 3], GpuTriAttr)>>> {
-    let Some(o) = w.objects.get(&id) else { return Ok(None) };
-    let m = w.world_matrix(id);
-    Ok(match &o.kind {
-        Kind::Mesh { geometry, materials, .. } => {
-            let Some(g) = w.geometries.get(geometry) else { return Ok(None) };
-            let (mut tris, mut flags, mut attrs) = (vec![], vec![], vec![]);
-            // The triangles the build drew (groups' only, with several materials), each with the material it had.
-            let drawn = group_materials(g, &vec![0; materials.len()]);
-            append_arrays(g, m, 0, 0, drawn.as_deref(), &mut tris, &mut flags, &mut attrs);
-            for (k, a) in attrs.iter_mut().enumerate() {
-                a.uv[3] = f32::from_bits(d.mats.get(k).copied().unwrap_or(0));
-            }
-            Some(tris.iter().zip(attrs).map(|(t, a)| (t.map(Vec3::from), a)).collect())
-        }
-        Kind::Model { uri, nodes, animation, .. } => {
-            let tris = model_gltf(uri, assets)?.triangles(m, nodes.as_deref(), animation.as_ref())?;
-            if tris.len() != d.mats.len() {
-                return Ok(None);
-            }
-            Some(tris.iter().zip(&d.mats).map(|(t, &mat)| (t.p, tri_attr(t.n, t.uv, t.tangent, mat))).collect())
-        }
-        _ => None,
-    })
 }
 
 /// A model's triangles by class (`classed`: opaque, cutout, glass; each a triangle's index and material): those that

@@ -84,36 +84,11 @@ pub struct Prepared {
     pub emitter_tris: Vec<EmitterTri>,
     /// The light tree over the static emitters (`ltree`).
     pub light_tree: Option<ltree::LightTree>,
-    /// Material -> runs of its flattened static triangles (first, end in the traversal order, object): a material
-    /// that starts emitting gets emitter entries in place from its runs (live/edits.rs `add_material_emitters`).
-    /// `moving_mats`: the materials of dynamic world-space triangles and of particle systems (`Tables::moving_mats`).
-    pub mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
+    /// The particle systems' materials (`Tables::moving_mats`).
     pub moving_mats: std::collections::HashSet<u32>,
-    /// The flattened triangles' build indices in traversal order (`Scene::tris` order: positions for new entries).
-    pub tri_order: Vec<u32>,
     /// The brightest sky texel (luminance) from which the environment is light-sampled (`Params::counts2[1]`): 0 when
     /// there are no emitters. A dynamic sky re-decides with each bake (live/load.rs `DynamicSky`).
     pub env_nee_floor: f32,
-}
-
-/// The emitter entry of triangle `k` (traversal order) with attributes `a`, or None if it does not emit. Particle
-/// triangles are collapsed until the particle pass places them: their nominal area (attrs x.z).
-pub fn emitter_tri(k: usize, tri_verts: &[[f32; 4]], a: &scene::GpuTriAttr, materials: &[scene::GpuMaterial]) -> Option<EmitterTri> {
-    let mat = a.uv[3].to_bits();
-    let m = materials.get(mat as usize)?;
-    let lum = 0.2126 * m.emissive[0] + 0.7152 * m.emissive[1] + 0.0722 * m.emissive[2];
-    if !(lum > 0.0) {
-        return None;
-    }
-    let v = |j: usize| Vec3::new(tri_verts[k * 3 + j][0], tri_verts[k * 3 + j][1], tri_verts[k * 3 + j][2]);
-    let (e1, e2) = (v(1), v(2));
-    let area = 0.5 * e1.cross(e2).length();
-    if !(area * lum > 0.0) {
-        return None;
-    }
-    let c = v(0) + (e1 + e2) / 3.0;
-    let moves = tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0;
-    Some(EmitterTri { tri: k as u32, mat, obj: a.x[1].to_bits(), area, c: c.to_array(), moves, nominal: false, in_tree: false, inst: NO_INST, part: 0, card: is_card(m) })
 }
 
 /// An emissive triangle of the emitter CDF: triangle (traversal order), material, object, area.
@@ -227,12 +202,11 @@ pub fn placed_emitter(inst: &scene::Instance, t: &[glam::Vec3A; 3], mat: u32, ma
     (area, ((w[0] + w[1] + w[2]) / 3.0).to_array(), w)
 }
 
-/// Runs of the light list (first emitter, count) whose triangles something moves after the load; the GPU takes them
-/// again from where the triangles are (gpu.rs `EmitterFill`): the emitters of the triangles the CPU reposes, and the
-/// particles', which their passes place. (An instance that moves has its run filled when it does: live/edits.rs.)
+/// Runs of the light list (first emitter, count) whose triangles something moves every frame; the GPU takes them
+/// again from where the triangles are (gpu.rs `EmitterFill`): the particles', which their passes place. (An instance
+/// that moves has its run filled when it does: live/edits.rs.)
 #[derive(Default)]
 pub struct EmitterRuns {
-    pub moved: Vec<[u32; 2]>,
     pub particles: Vec<[u32; 2]>,
 }
 
@@ -248,7 +222,7 @@ impl EmitterRuns {
             }
             out
         };
-        EmitterRuns { moved: runs(&|e| e.moves && !e.nominal && e.inst == NO_INST), particles: runs(&|e| e.nominal) }
+        EmitterRuns { particles: runs(&|e| e.nominal) }
     }
 }
 
@@ -658,28 +632,14 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         v.resize(sc.attrs.len() * 3, u32::MAX);
         v
     };
-    // Posed models: where each of their triangles landed (they are re-skinned in place, hardware RT only).
-    if hwrt && sc.retained.dynamics_mut().next().is_some() {
-        let first_dynamic: usize = groups[..4].iter().sum();
-        let finals: std::collections::HashMap<u32, u32> = bvh.order[first_dynamic..].iter().enumerate().map(|(k, &i)| (i, (first_dynamic + k) as u32)).collect();
-        for d in sc.retained.dynamics_mut() {
-            d.finals = (0..d.mats.len() as u32).map(|j| finals[&(d.first + j)]).collect();
-        }
-    }
     timings.push(("bvh_ms".into(), t.elapsed().as_secs_f64() * 1000.0));
 
-    // The light list (an emitter's weight = area x luminance of the emissive factor x object power): the flattened
-    // triangles that emit, then, an instance at a time, those of its triangles that emit: a run of the list an
-    // instance, its first in its record, its triangles' numbers counted from it (a model's mesh), or from where its
-    // section's start, which the section's row has (a mesh with sections). Each with its triangle in world space.
+    // The light list (an emitter's weight = area x luminance of the emissive factor x object power): an instance at a
+    // time, those of its triangles that emit: a run of the list an instance, its first in its record, its triangles'
+    // numbers counted from it (a model's mesh), or from where its section's start, which the section's row has (a
+    // mesh with sections). Each with its triangle in world space.
     let mut emitter_tris: Vec<EmitterTri> = vec![];
     let mut gpu_emitter_tris: Vec<GpuEmitterTri> = vec![];
-    for k in 0..pool_first {
-        if let Some(e) = emitter_tri(k, &tri_verts, &sc.attrs[k], &sc.materials) {
-            gpu_emitter_tris.push(GpuEmitterTri::new(&e, &tri_verts[k * 3..][..3], 0));
-            emitter_tris.push(e);
-        }
-    }
     // (And the instances hidden at the build, `Instance::masked`: where they stand when they are shown is theirs to
     // bound then, in the light tree's moving subtree.)
     let moving = sc.retained.moving_records();
@@ -710,27 +670,12 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
             emitter_tris.push(e);
         }
     }
-    // Where each material's flattened static triangles are (runs of the traversal order, with their object), for a
-    // material that starts emitting in the live view (tables.rs `apply`): its emitter entries are made from them in
-    // place, as each instance with a row of it gets its own (live/edits.rs `add_material_emitters`). Not the
-    // materials of dynamic world-space triangles: `moving_mats`. (A mesh that deforms is a model's, whose materials
-    // are the file's: no edit names them.)
-    let mut mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>> = std::collections::HashMap::new();
-    let mut moving_mats: std::collections::HashSet<u32> = Default::default();
-    for (k, a) in sc.attrs[..pool_first].iter().enumerate() {
-        let (mat, obj) = (a.uv[3].to_bits(), a.x[1].to_bits());
-        if tri_verts[k * 3][3].to_bits() & scene::TRI_DYNAMIC != 0 {
-            moving_mats.insert(mat);
-            continue;
-        }
-        let runs = mat_runs.entry(mat).or_default();
-        match runs.last_mut() {
-            Some(r) if r[1] == k as u32 && r[2] == obj => r[1] += 1,
-            _ => runs.push([k as u32, k as u32 + 1, obj]),
-        }
-    }
-    // (Nor a particle system's material: its triangles are its pass's.)
+    // A material that starts emitting in the live view (tables.rs `apply`) gets emitter entries in place, each
+    // instance with a row of it its own (live/edits.rs `add_material_emitters`). Not a particle system's material,
+    // whose triangles are its pass's: `moving_mats`. (A mesh that deforms is a model's, whose materials are the
+    // file's: no edit names them.)
     // (Not a translucent system's, which has no emitter and no class: its material's function changes in place.)
+    let mut moving_mats: std::collections::HashSet<u32> = Default::default();
     for i in sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0 && !i.hidden) {
         moving_mats.insert(scene::row_material(&sc.rows[i.rows as usize]));
     }
@@ -757,11 +702,6 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     let order = emitter_order(&emitter_tris, light_tree.as_ref());
     for (g, code) in gpu_emitter_tris.iter_mut().zip(emitter_codes(&emitter_tris, &order, light_tree.as_ref())) {
         g.code = code;
-    }
-    // A triangle in world space names its emitter in its attributes (x.w = the entry + 1), for the rays that hit it
-    // (emit_mis); a mesh's triangle is numbered among its mesh's, and its instance has the first.
-    for (i, e) in emitter_tris.iter().enumerate().filter(|(_, e)| e.inst == NO_INST) {
-        sc.attrs[e.tri as usize].x[3] = f32::from_bits(i as u32 + 1);
     }
     let emitter_runs = EmitterRuns::of(&emitter_tris);
     let (emitters, total, _) = emitter_cdf(&emitter_tris, &order, &sc.materials, &sc.objects, sc.object_stride(), [0.0; 4], EmitterCull::default());
@@ -890,7 +830,7 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
     params.word_first[1][2] = sc.indexed.dynamic.0;
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, mat_runs, moving_mats, tri_order }
+    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, moving_mats }
 }
 
 /// The scene's triangles, in the GPU's order (`tri_verts`, `sc.attrs`), as vertices and indices (indexed.rs). The

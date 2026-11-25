@@ -985,7 +985,8 @@ impl LiveCore {
             }
             catch_up.flush_section(&self.g.queue, &self.sc.up.heap, Table::Instances);
         }
-        if rigid_ok && (dynamic.is_empty() || (!changes.structural && self.repose(world, &dynamic, &mut top)?)) {
+        // (What moved and is no instance's to move: a rebuild's.)
+        if rigid_ok && dynamic.is_empty() {
             // Moved emitters: their triangles in the list and the light tree's moving subtree around them, once (after
             // every in-place update).
             if std::mem::take(&mut self.emitters_moved) {
@@ -1800,28 +1801,14 @@ impl LiveCore {
         Ok(())
     }
 
-    /// Emitter entries for the materials that started emitting (`Tables::started_emitting`): their flattened static
-    /// triangles (`mat_runs`), positions from `tris`, in the power-share part of the CDF (path code 0, as the light
-    /// tree's moving emitters; ROADMAP § 6 step 3). Returns them (each one's index and triangle) for `write_emitters`.
+    /// Emitter entries for the materials that started emitting (`Tables::started_emitting`), in the power-share part
+    /// of the CDF (path code 0, as the light tree's moving emitters; ROADMAP § 6 step 3). Returns them (each one's
+    /// index and triangle) for `write_emitters`.
     pub(super) fn add_material_emitters(&mut self) -> Vec<(u32, crate::GpuEmitterTri)> {
         let q = &self.g.queue;
         let sc = &mut self.sc;
         let mut new = vec![];
         let started = std::mem::take(&mut sc.tables.started_emitting);
-        for &mat in &started {
-            for &[first, end, obj] in sc.mat_runs.get(&mat).map_or(&[][..], |v| v.as_slice()) {
-                for k in first..end {
-                    let Some(&[a, b, c]) = sc.tri_order.get(k as usize).and_then(|&i| sc.tris.get(i as usize)) else { continue };
-                    let area = 0.5 * (b - a).cross(c - a).length();
-                    if area > 0.0 {
-                        let centre = (a + b + c) / 3.0;
-                        let e = crate::EmitterTri { tri: k, mat, obj, area, c: centre.to_array(), moves: false, nominal: false, in_tree: false, inst: crate::NO_INST, part: 0, card: sc.tables.materials[mat as usize].tex1[2] == scene::MAT_EMITTER_CARD };
-                        new.push((sc.tables.emitter_tris.len() as u32, crate::GpuEmitterTri::of(&e, [a, b, c], 0)));
-                        sc.tables.emitter_tris.push(e);
-                    }
-                }
-            }
-        }
         // The instances with a row of one of them (a mesh's, a model's, an instanced object's copies): each gets its
         // emitters as a new run at the list's end, the sections that emit now one after another, where each starts
         // in its row and the run's first in the instance's record; the run it had, of fewer, stays at no weight.
@@ -1898,37 +1885,27 @@ impl LiveCore {
     /// share of power, its count. With the tree's slot for emitters added in place (scenes that can edit geometry), their
     /// subtree is grown again first and their entries go right after the static ones (ROADMAP § 6 step 4); without it
     /// they stay at the end, by power share. `new`: the emitters made or made again since the last call (each one's
-    /// index and triangle): their triangles into the list, their entries into their triangles' attributes. The tables
+    /// index and triangle): their triangles into the list. The tables
     /// grow (and the scene bind group is made again) when entries were added past them: a scene that adds none keeps
     /// its layout.
     pub(super) fn write_emitters(&mut self, new: &[(u32, crate::GpuEmitterTri)]) {
         self.land_powers_now();
-        let g = &self.g;
-        let LoadedScene { tables: e, base: b, up, pool_tris, tris: flat, tri_order, edit, instances, codes_sent: sent, .. } = &mut self.sc;
+        let LoadedScene { tables: e, base: b, pool_tris, edit, instances, codes_sent: sent, .. } = &mut self.sc;
         let size = std::mem::size_of::<crate::GpuEmitterTri>();
-        let (mut w_tris, mut w_rows) = (Gather::default(), Gather::default());
+        let mut w_tris = Gather::default();
         for (i, t) in new {
             w_tris.put((*i as usize * size) as u64, bytemuck::bytes_of(t));
-            // (A triangle in world space names its emitter; a mesh's is numbered among its mesh's.)
-            if t.inst == crate::NO_INST {
-                w_rows.put((t.tri as usize * 16 + 12) as u64, bytemuck::bytes_of(&(i + 1)));
-            }
         }
-        w_rows.flush_section(&g.queue, &up.words, Stream::Triangles);
         // Emitters added in place, with the tree's slot for them (`ltree::build_slotted`): its subtree grown again over
         // those alive, their entries right after the static ones in the CDF (the tree's order: `emitter_order`) and
         // their path codes with their triangles in the list (written over the code 0 they were made with).
         if let Some(t) = e.light_tree.as_mut() {
             if t.dynamic.is_some() {
                 let (mats, objs, st, pf) = (&e.materials, &e.objects, e.stride, edit.pool_first);
-                // (An emitter's triangle in world space: an instance's is its mesh's, placed.)
+                // (An emitter's triangle in world space: its mesh's, placed by its instance.)
                 let verts = |x: &crate::EmitterTri| {
-                    let k = x.tri as usize;
-                    let t = if k >= pf { pool_tris.get(k - pf).copied() } else { tri_order.get(k).and_then(|&i| flat.get(i as usize)).copied() };
-                    match instances.get(x.inst as usize) {
-                        Some(i) if x.inst != crate::NO_INST => t.map(|t| t.map(|v| glam::Vec3A::from(i.world.transform_point3(v.into())))),
-                        _ => t,
-                    }
+                    let (t, i) = (pool_tris.get((x.tri as usize).checked_sub(pf)?)?, instances.get(x.inst as usize)?);
+                    Some(t.map(|v| glam::Vec3A::from(i.world.transform_point3(v.into()))))
                 };
                 let mut items = vec![];
                 for (i, x) in e.emitter_tris.iter().enumerate() {
@@ -2503,41 +2480,6 @@ impl LiveCore {
         Ok(true)
     }
 
-    /// Re-skins posed models and re-transforms movable objects in place (hardware RT): their triangles and shading
-    /// attributes; the commit builds the dynamic BLASes and the TLAS. Their directly seen surfaces keep a short history for a moment,
-    /// like a power edit (no per-object motion vectors). False when it cannot (not dynamic at build, no hardware RT, a
-    /// different triangle count): the caller rebuilds.
-    pub(super) fn repose(&mut self, world: &World, ids: &std::collections::HashSet<u32>, build: &mut gpu::TopBuild) -> Result<bool> {
-        let dynamic = |p: &mut scene::Proxy| match &mut p.draw {
-            scene::Draw::Dynamic(d) => Some(std::mem::take(d)),
-            _ => None,
-        };
-        // (Their models out of the proxies while `reskin` has the scene, then back.)
-        let proxies = &mut self.sc.tables.retained.proxies;
-        let models: std::collections::HashMap<u32, scene::DynamicModel> = ids.iter().filter_map(|id| Some((*id, dynamic(proxies.get_mut(id)?)?))).collect();
-        let t_skin = Instant::now();
-        let res = if self.sc.up.accel.is_none() || models.len() < ids.len() { Ok(None) } else { self.reskin(world, ids, &models) };
-        self.cpu_skin_ms += t_skin.elapsed().as_secs_f32() * 1000.0;
-        for (id, d) in models {
-            self.sc.tables.retained.proxy(id).draw = scene::Draw::Dynamic(d);
-        }
-        let Some((lo, hi)) = res? else { return Ok(false) };
-        self.emitters_moved = true;
-        let t_up = Instant::now();
-        // Motion vectors: the GPU still holds the previous frame's vertices for this span (and for last update's span,
-        // if different): keep them as `prev_verts` before uploading the new ones.
-        let both = self.prev_span.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi)));
-        self.keep_prev(both);
-        self.prev_span = Some((lo, hi));
-        self.reposed = true;
-        // Upload the touched span of the dynamic tail; the commit builds the dynamic BLASes and the TLAS.
-        self.upload_dynamic(lo, hi);
-        self.sc.up.heap.write(&self.g.queue, Table::Objects, 0, bytemuck::cast_slice(&self.sc.tables.objects));
-        build.dynamic = true;
-        self.cpu_upload_ms += t_up.elapsed().as_secs_f32() * 1000.0;
-        Ok(true)
-    }
-
     /// The emitters of instances that moved (those of a mesh that emits): their runs of the light list taken again on
     /// the GPU, through the records just queued; the light tree's moving subtree after (`move_emitters`).
     pub(super) fn fill_moved(&mut self, records: impl Iterator<Item = u32>) {
@@ -2559,59 +2501,27 @@ impl LiveCore {
         }
     }
 
-    /// The emitters the CPU moves moved: their triangles in the list taken again on the GPU, from the triangles this
-    /// commit uploaded (`gpu::EmitterFills::moved`); and the light tree's moving subtree refit around them (the CPU copy
-    /// of the dynamic tail), its nodes and the root uploaded (`ltree::LightTree::refit_moving`).
+    /// Emitters moved (their instances did, `fill_moved`): the light tree's moving subtree refit around them, its
+    /// nodes and the root uploaded (`ltree::LightTree::refit_moving`).
     pub(super) fn move_emitters(&mut self) {
-        if let Some(f) = &self.sc.up.fills.moved {
-            let mut e = self.g.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("emitter fill") });
-            self.g.fill_emitters(f, &mut e);
-            self.g.queue.submit([e.finish()]);
-        }
-        let first = self.sc.dynamic.0;
-        let (verts, tables) = (&self.sc.dynamic.1, &mut self.sc.tables);
+        let tables = &mut self.sc.tables;
         let tris = &tables.emitter_tris;
         let (q, heap) = (&self.g.queue, &self.sc.up.heap);
         let Some(t) = tables.light_tree.as_mut().filter(|t| t.moving_count > 0) else { return };
         let (instances, pool_tris, pool_first) = (&self.sc.instances, &self.sc.pool_tris, self.sc.edit.pool_first);
         t.refit_moving(&|e| {
             let x = &tris[e];
-            // (An instance's: its mesh's triangle, placed; none while the instance is hidden.)
-            if x.inst != crate::NO_INST {
-                let i = &instances[x.inst as usize];
-                return (!i.hidden).then(|| pool_tris[x.tri as usize - pool_first].map(|v| i.world.transform_point3(v.into()).to_array()));
-            }
-            let r = (x.tri as usize - first) * 3;
-            Some(crate::ltree::tri_vertices(&verts[r..r + 3]))
+            // (Its mesh's triangle, placed; none while the instance is hidden.)
+            let i = instances.get(x.inst as usize)?;
+            (!i.hidden).then(|| pool_tris[x.tri as usize - pool_first].map(|v| i.world.transform_point3(v.into()).to_array()))
         });
         heap.write(q, Table::LightTree, 0, bytemuck::cast_slice(&t.nodes[..1]));
         heap.write(q, Table::LightTree, 2 * 16, bytemuck::cast_slice(&t.nodes[2..3]));
         heap.write(q, Table::LightTree, t.moving_nodes as u64 * 16, bytemuck::cast_slice(&t.nodes[t.moving_nodes..]));
     }
 
-    /// The dynamic tail's triangles `lo..hi` as the CPU has them now (`sc.dynamic`), to the GPU: their vertices, three
-    /// a triangle from the first vertex that moves (their indices and rows are the build's).
-    fn upload_dynamic(&self, lo: usize, hi: usize) {
-        let (_, _, attrs, corners) = &self.sc.dynamic;
-        let vertices = crate::indexed::apart_vertices(&corners[lo * 3..hi * 3], &attrs[lo..hi]);
-        let at = (self.sc.dynamic_verts.0 as usize + lo * 3) * crate::indexed::VERTEX_BYTES;
-        self.g.queue.write_buffer(&self.sc.up.vertices, at as u64, bytemuck::cast_slice(&vertices));
-    }
-
-    /// Copies the GPU's current vertices of a span of the dynamic tail's triangles (three each, the first of the
-    /// vertices that move) into the previous frame's (submitted before any write queued after it, so it reads what the
-    /// last frame traced).
-    pub(super) fn keep_prev(&self, (lo, hi): (usize, usize)) {
-        let up = &self.sc.up;
-        let first = self.sc.dynamic_verts.0 as usize;
-        let mut e = self.g.device.create_command_encoder(&Default::default());
-        let size = crate::indexed::VERTEX_BYTES;
-        e.copy_buffer_to_buffer(&up.vertices, ((first + lo * 3) * size) as u64, &up.prev_vertices, (lo * 3 * size) as u64, ((hi - lo) * 3 * size) as u64);
-        self.g.queue.submit([e.finish()]);
-    }
-
-    /// Likewise for deforming meshes, each where it lies: (its first vertex in the scene's, its first among the
-    /// previous frame's, how many vertices).
+    /// Copies the GPU's current vertices of deforming meshes to the previous frame's, each where it lies: (its first
+    /// vertex in the scene's, its first among the previous frame's, how many vertices).
     pub(super) fn keep_prev_spans(&self, spans: &[(usize, usize, usize)]) {
         if spans.is_empty() {
             return;
@@ -2623,109 +2533,6 @@ impl LiveCore {
             e.copy_buffer_to_buffer(&up.vertices, (verts * size) as u64, &up.prev_vertices, (prev * size) as u64, (n * size) as u64);
         }
         self.g.queue.submit([e.finish()]);
-    }
-
-    /// Skins / transforms the objects into the CPU copy of the dynamic tail; the touched span (relative to the tail), or
-    /// None when one cannot be updated in place.
-    pub(super) fn reskin(&mut self, world: &World, ids: &std::collections::HashSet<u32>, models: &std::collections::HashMap<u32, scene::DynamicModel>) -> Result<Option<(usize, usize)>> {
-        use rayon::prelude::*;
-        if ids.iter().any(|id| !world.shown(*id)) {
-            return Ok(None);
-        }
-        // Objects whose triangles form one run of the dynamic tail (one traversal group) are skinned / re-transformed in
-        // parallel, one task per object, straight into their own spans of the tail and of the CPU triangles (one core
-        // took 17 ms for the crowd scene's 150 walkers, docs/ROADMAP.md § 0): ordered by span, the objects split the
-        // arrays into disjoint slices. The others (e.g. opaque and cutout materials in different groups) one by one.
-        let run = |d: &scene::DynamicModel| !d.finals.is_empty() && d.finals.iter().enumerate().all(|(j, &f)| f == d.finals[0] + j as u32);
-        let (mut runs, scattered): (Vec<u32>, Vec<u32>) = ids.iter().copied().partition(|id| run(&models[id]));
-        runs.sort_by_key(|id| models[id].finals[0]);
-        let assets = &self.assets;
-        let sc = &mut self.sc;
-        let (first, verts, attrs, blas) = &mut sc.dynamic;
-        let first = *first;
-        let (mut lo, mut hi) = (usize::MAX, 0);
-        // The CPU triangles in build order: each object's slice.
-        let mut by_build = runs.clone();
-        by_build.sort_by_key(|id| models[id].first);
-        let mut tris_of: std::collections::HashMap<u32, &mut [[glam::Vec3A; 3]]> = std::collections::HashMap::with_capacity(runs.len());
-        let (mut tr, mut toff): (&mut [[glam::Vec3A; 3]], usize) = (&mut sc.tris[..], 0);
-        for id in &by_build {
-            let d = &models[id];
-            let (t0, n) = (d.first as usize, d.finals.len());
-            let (_, r) = std::mem::take(&mut tr).split_at_mut(t0 - toff);
-            let (t, r) = r.split_at_mut(n);
-            tr = r;
-            toff = t0 + n;
-            tris_of.insert(*id, t);
-        }
-        let (mut vr, mut ar, mut br): (&mut [[f32; 4]], &mut [scene::GpuTriAttr], &mut [[f32; 3]]) = (&mut verts[..], &mut attrs[..], &mut blas[..]);
-        let mut voff = 0usize;
-        let mut jobs = Vec::with_capacity(runs.len());
-        for id in &runs {
-            let d = &models[id];
-            let (k0, n) = (d.finals[0] as usize - first, d.finals.len());
-            let (_, r) = std::mem::take(&mut vr).split_at_mut(k0 * 3 - voff * 3);
-            let (v, r) = r.split_at_mut(n * 3);
-            vr = r;
-            let (_, r) = std::mem::take(&mut ar).split_at_mut(k0 - voff);
-            let (a, r) = r.split_at_mut(n);
-            ar = r;
-            let (_, r) = std::mem::take(&mut br).split_at_mut(k0 * 3 - voff * 3);
-            let (b, r) = r.split_at_mut(n * 3);
-            br = r;
-            voff = k0 + n;
-            (lo, hi) = (lo.min(k0), hi.max(k0 + n));
-            jobs.push((*id, v, a, b, tris_of.remove(id).unwrap()));
-        }
-        let ok: Vec<Result<bool>> = jobs
-            .into_par_iter()
-            .map(|(id, v, a, b, t)| {
-                let d = &models[&id];
-                let Some(tris) = scene::dynamic_tris(world, id, d, assets)? else { return Ok(false) };
-                if tris.len() != d.finals.len() {
-                    return Ok(false);
-                }
-                for (j, (p, at)) in tris.into_iter().enumerate() {
-                    let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
-                    v[j * 3..j * 3 + 3].copy_from_slice(&[[p[0].x, p[0].y, p[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
-                    // (x.w: an emitter's light-tree code, which stays with its triangle.)
-                    a[j] = scene::GpuTriAttr { x: [at.x[0], f32::from_bits(d.object), at.x[2], a[j].x[3]], ..at };
-                    b[j * 3..j * 3 + 3].copy_from_slice(&scene::blas_tri(p.map(|q| q.to_array())));
-                    t[j] = p.map(glam::Vec3A::from);
-                }
-                Ok(true)
-            })
-            .collect();
-        for r in ok {
-            if !r? {
-                return Ok(None);
-            }
-        }
-        for id in &scattered {
-            let d = &models[id];
-            let Some(tris) = scene::dynamic_tris(world, *id, d, assets)? else { return Ok(None) };
-            if tris.len() != d.finals.len() {
-                return Ok(None);
-            }
-            for (j, (p, a)) in tris.into_iter().enumerate() {
-                let k = d.finals[j] as usize - first;
-                let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
-                verts[k * 3..k * 3 + 3].copy_from_slice(&[[p[0].x, p[0].y, p[0].z, f32::from_bits(d.flags[j])], [e1.x, e1.y, e1.z, 0.0], [e2.x, e2.y, e2.z, 0.0]]);
-                attrs[k] = scene::GpuTriAttr { x: [a.x[0], f32::from_bits(d.object), a.x[2], attrs[k].x[3]], ..a };
-                blas[k * 3..k * 3 + 3].copy_from_slice(&scene::blas_tri(p.map(|v| v.to_array())));
-                sc.tris[(d.first + j as u32) as usize] = p.map(glam::Vec3A::from);
-                (lo, hi) = (lo.min(k), hi.max(k + 1));
-            }
-        }
-        for id in ids {
-            let d = &models[id];
-            // Pivot (material functions' object position). Motion vectors carry its history.
-            let pivot = world.world_matrix(*id).transform_point3(glam::Vec3::ZERO);
-            let st = sc.tables.stride;
-            let o = &mut sc.tables.objects[d.object as usize * st];
-            (o[0], o[1], o[2]) = (pivot.x, pivot.y, pivot.z);
-        }
-        Ok((lo < hi).then_some((lo, hi)))
     }
 
     /// Rebuilds the GPU scene from the world.

@@ -17,6 +17,7 @@ pub(super) struct LoadedScene {
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
     /// The vertices that move, the first and how many (`indexed::Indexed::dynamic`); by skin source, the model's
     /// vertices its meshes are skinned from and their triangles' indices (`Indexed::skins`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) dynamic_verts: (u32, u32),
     pub(super) skins: Vec<(Vec<crate::skin::SkinCorner>, Vec<[u32; 3]>)>,
     /// Software traversal with units: the shape of each skin source's meshes' trees (`scene::Scene::skin_trees`): a
@@ -49,10 +50,6 @@ pub(super) struct LoadedScene {
     pub(super) base: gpu::Params,
     /// GPU table copies that parameter edits rewrite in place (`commit`).
     pub(super) tables: tables::Tables,
-    /// CPU copy of the dynamic triangles (posed models: the tail of the GPU triangle order, from its first): rows
-    /// (v0, e1, e2), shading attributes, corners (a triangle that is not finite: at the origin). Their vertices on
-    /// the GPU are made from these (`upload_dynamic`).
-    pub(super) dynamic: (usize, Vec<[f32; 4]>, Vec<scene::GpuTriAttr>, Vec<[f32; 3]>),
     /// Kernel feature inputs of the scene as a whole: whether it has textures, whether it has material functions,
     /// its traversal groups (edits cannot change the groups).
     pub(super) fixed_features: (bool, bool, [usize; crate::GROUPS]),
@@ -70,10 +67,6 @@ pub(super) struct LoadedScene {
     pub(super) edit: EditState,
     /// Power edits' emitter rebuilds on a worker (`EmitterWorker`), for scenes with many emitters.
     pub(super) emit: Option<EmitterWorker>,
-    /// For materials that start emitting (`add_material_emitters`): their flattened static triangles' runs (`prepare`)
-    /// and the flattened triangles' build indices in traversal order (positions in `tris`).
-    pub(super) mat_runs: std::collections::HashMap<u32, Vec<[u32; 3]>>,
-    pub(super) tri_order: Vec<u32>,
     /// The light list's path codes as the GPU has them (`GpuEmitterTri::code`, by emitter): the upload's, then what
     /// `write_emitters` wrote, which writes only those that changed since.
     pub(super) codes_sent: Vec<u32>,
@@ -244,11 +237,9 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let mut tables = tables::Tables::new(&sc, std::mem::take(&mut prep.emitter_tris), prep.light_tree.take());
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");
-    tables.static_mats = prep.mat_runs.keys().copied().collect();
     tables.moving_mats = std::mem::take(&mut prep.moving_mats);
     let emit = EmitterWorker::new(&tables, &g.device);
     tables.defer_powers = emit.is_some();
-    let (mat_runs, tri_order) = (std::mem::take(&mut prep.mat_runs), std::mem::take(&mut prep.tri_order));
     let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
     let shaders = sc.shaders.clone();
     let volume_fns = sc.volume_fns.clone();
@@ -296,13 +287,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (A proxy's index in `procs` is the build's: nothing between the build and here may take one out.)
     assert!(tables.retained.proxies.iter().all(|(id, p)| !matches!(p.draw, scene::Draw::Procedural(j) if procs.get(j as usize).map(|q| q.node) != Some(*id))), "a procedural object's proxy names another's place");
     let triangles = sc.stats.get("triangles").map_or(tris.len(), |t| *t as usize);
-    let first = prep.groups[..4].iter().sum::<usize>();
-    // The kernel's first dynamic triangle (motion vectors, prev_verts) is group 4's first.
-    debug_assert_eq!(prep.params.group_first[1][0] as usize, first);
-    // The dynamic tail: groups 4..8 (the instanced pool follows them).
-    let end = prep.groups.iter().sum::<usize>();
-    let blas = prep.tri_verts[first * 3..end * 3].chunks(3).flat_map(|t| [0, 1, 2].map(|k| if k == 0 { [t[0][0], t[0][1], t[0][2]] } else { [t[0][0] + t[k][0], t[0][1] + t[k][1], t[0][2] + t[k][2]] })).collect();
-    let dynamic = (first, prep.tri_verts[first * 3..end * 3].to_vec(), sc.attrs[first..end].to_vec(), blas);
     let blobs = sc.proc_layout.as_ref().map_or_else(Default::default, |l| l.blobs.iter().map(|(b, off)| (b.hash, l.head.len() + off)).collect());
     let slot = up.accel.as_ref().map_or(0, |a| a.proc_base + procs.len());
     let room_base = (prep.tri_verts.len() / 3, gpu_instances.len(), tables.objects.len() / tables.stride, up.region_words, slot);
@@ -337,5 +321,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, dynamic, edit, emit, mat_runs, tri_order, codes_sent }, view, env))
+    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, edit, emit, codes_sent }, view, env))
 }

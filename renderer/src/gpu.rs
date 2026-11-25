@@ -503,11 +503,10 @@ pub struct EmitterFill {
     longest: u32,
 }
 
-/// A scene's fills: of the emitters the CPU moves (after a commit that moved them), and of the particles' (after
-/// their passes). None where the scene has no such emitters.
+/// A scene's fill a frame: of the particles' emitters, after their passes. None where the scene has no such
+/// emitters.
 #[derive(Default)]
 pub struct EmitterFills {
-    pub moved: Option<EmitterFill>,
     pub particles: Option<EmitterFill>,
 }
 
@@ -3004,7 +3003,7 @@ impl Gpu {
         self.save_pipeline_cache();
         // (What moves emitters after the load needs hardware ray tracing: triangles reposed in place, the particle passes.)
         let fills = match &accel {
-            Some(_) => EmitterFills { moved: self.emitter_fill(&emitter_runs.moved, &b_vertices, &heap, &words), particles: self.emitter_fill(&emitter_runs.particles, &b_vertices, &heap, &words) },
+            Some(_) => EmitterFills { particles: self.emitter_fill(&emitter_runs.particles, &b_vertices, &heap, &words) },
             None => EmitterFills::default(),
         };
         Ok(Uploaded { bg, bg_parts, heap, accum: b_accum, params: b_params, kernel, vertices: b_vertices, prev_vertices: b_prev, accel, units: scene.units.clone(), particles, gpu_particles, skin, fills, grids, translucent, vcolors: !scene.gpu_vcolors.is_empty(), media_nodes: scene.media_nodes.clone(), media_hidden: std::cell::RefCell::new(scene.media.iter().map(|m| m.a[1] == crate::scene::MEDIUM_HIDDEN).collect()), room, words, cdf_words: env_cdf.len(), region_words, env_tex })
@@ -3839,7 +3838,7 @@ impl Gpu {
     /// The bind groups that hold the scene's buffers again, from `up`'s as they are now (one that grew: the tables,
     /// live/edits.rs): the kernel's, the light list's fills', the skinning pass's and the particle passes'.
     pub fn rebind_scene(&self, up: &mut Uploaded) {
-        for f in [&mut up.fills.moved, &mut up.fills.particles].into_iter().flatten() {
+        if let Some(f) = &mut up.fills.particles {
             f.bg = self.emitter_fill_bind_group(&f.runs, &up.vertices, &up.heap, &up.words);
         }
         if let Some(k) = &mut up.skin {

@@ -46,14 +46,11 @@ pub struct Tables {
     /// Materials that have emitter triangles (others cannot start emitting without a rebuild).
     pub(crate) emissive: HashSet<u32>,
     /// A material that starts emitting gets emitter entries in place (the live view sets this up): it is queued in
-    /// `started_emitting` for live/edits.rs `add_material_emitters`, which gives them to its still world-space
-    /// triangles (`prepare`'s `mat_runs`) and to the instances with a row of it. Off: such a material rebuilds.
+    /// `started_emitting` for live/edits.rs `add_material_emitters`, which gives them to the instances with a row of
+    /// it. Off: such a material rebuilds.
     pub emit_in_place: bool,
-    /// Materials of still world-space triangles (what the build flattened): whether one is a cutout decides its
-    /// triangles' traversal group, so that changing is a rebuild's.
-    pub static_mats: HashSet<u32>,
-    /// Materials of dynamic world-space triangles (particles'): their class is the triangle's, and they get no
-    /// emitters in place. One that starts emitting, or whose class changes, rebuilds.
+    /// The particle systems' materials: they get no emitters in place. One that starts emitting, or whose class
+    /// changes, rebuilds.
     pub moving_mats: HashSet<u32>,
     pub started_emitting: Vec<u32>,
     /// Materials whose class changed in the last `apply` (`Dirty::reclassed`).
@@ -84,7 +81,6 @@ impl Tables {
             emitter_tris,
             light_tree,
             emit_in_place: false,
-            static_mats: HashSet::new(),
             moving_mats: HashSet::new(),
             started_emitting: vec![],
             reclassed: vec![],
@@ -174,12 +170,11 @@ impl Tables {
             }
             // A material whose class changes (it turns glass or stops being glass, becomes a cutout or stops being
             // one, gets a function or loses it): the instances with a row of it say so again, in place
-            // (`Dirty::reclassed`). Its world-space triangles cannot: still ones are in a traversal group by whether
-            // they are cutouts, dynamic ones carry their class.
+            // (`Dirty::reclassed`). A particle system's cannot.
             let old = &self.materials[mi as usize];
             let cutout = (gm.uv2[3] > 0.0) != (old.uv2[3] > 0.0);
             let other = (gm.tex1[3] != 0) != (old.tex1[3] != 0) || (gm.layer[0] > 0.0) != (old.layer[0] > 0.0);
-            if (cutout && self.static_mats.contains(&mi)) || ((cutout || other) && self.moving_mats.contains(&mi)) {
+            if (cutout || other) && self.moving_mats.contains(&mi) {
                 return Ok(None);
             }
             if cutout || other {
