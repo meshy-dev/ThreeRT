@@ -100,6 +100,7 @@ export interface EnvironmentDesc {
   sky: SkyDesc;
   /** three.js `scene.background`: what camera rays that miss show (linear rgb, displayed as given), lighting nothing. */
   background?: Vec3;
+  backgroundPanorama?: { texture: number; intensity: number; rotation: number };
   fog?: FogDesc;
   wetness?: number;
   rain?: number;
@@ -1554,7 +1555,9 @@ export class SceneBinding {
     const e: EnvironmentDesc = { sky: this.skyDesc() };
     // three.js's background colour is shown as given: here as radiance at the level of the scene's light, so that it
     // sits with the lit surfaces under any exposure (white: a white diffuse surface in the key light).
-    if (scene.background) e.background = vec3(scene.background).map((c) => c * this.lightLevel()) as Vec3;
+    const panorama = scene.backgroundPanorama;
+    if (panorama) e.backgroundPanorama = { texture: this.textureId(panorama.texture)!, intensity: panorama.intensity, rotation: panorama.rotation };
+    else if (scene.background) e.background = vec3(scene.background).map((c) => c * this.lightLevel()) as Vec3;
     // Ambient lights light the scene, they are not seen: without a background colour, black (three.js's clear colour).
     else if (!scene.environment && e.sky.type !== "atmosphere" && this.ambientSky()) e.background = [0, 0, 0];
     if (scene.fog) {

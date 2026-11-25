@@ -420,7 +420,7 @@ impl Default for World {
             geometry_fns: BTreeMap::new(),
             proc_geometries: HashMap::new(),
             instanced: HashMap::new(),
-            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, wetness: 0.0, rain: 0.0, cloud_cover: 0.0 },
+            environment: desc::Environment { sky: desc::Sky::Color { color: [0.0; 3], intensity: 0.0, sky_light_intensity: 1.0 }, fog: None, background: None, background_panorama: None, wetness: 0.0, rain: 0.0, cloud_cover: 0.0 },
             settings: Settings::default(),
             changes: Changes { structural: true, ..Default::default() },
         }
@@ -527,6 +527,11 @@ impl World {
         matches!(k, Kind::Light(l) if !sun && !matches!(l, desc::Light::Rect { visible: true, .. }))
     }
 
+    fn environment_uses_texture(&self, id: u32) -> bool {
+        matches!(&self.environment.sky, desc::Sky::Hdri { texture, .. } if *texture == id)
+            || self.environment.background_panorama.as_ref().is_some_and(|b| b.texture == id)
+    }
+
     /// Creates or replaces a texture. A new one is placed in the texture pages when a material first names it; one
     /// that changed (its pixels, its wrap, its repeat or offset) has its materials made again, in place
     /// (`Changes::textures`). The same texture set again changes nothing.
@@ -538,6 +543,9 @@ impl World {
             Some(old) if *old == t => return Ok(()),
             Some(_) => {
                 self.changes.textures.insert(id);
+                if self.environment_uses_texture(id) {
+                    mark_structural(&mut self.changes, line!());
+                }
             }
             None => {}
         }
@@ -1114,6 +1122,7 @@ impl World {
         // Fog appearing, turning volumetric or going, and a background appearing or going, are kernel features: another
         // variant of the kernel, not another scene. Another sky is another environment map.
         self.changes.sky |= self.environment.sky != e.sky;
+        self.changes.structural |= self.environment.background_panorama.as_ref().map(|b| b.texture) != e.background_panorama.as_ref().map(|b| b.texture);
         self.changes.environment = true;
         self.environment = e;
     }

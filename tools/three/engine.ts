@@ -811,6 +811,8 @@ export class ThreeEngine implements Engine {
     if (desc.rain) this.drop("rain (ripples)", "scene");
     if (desc.fog?.volumetric) this.drop("volumetric fog (lit in-scattering)", "scene");
     if (desc.fog) this.notes.add("ExponentialHeightFog -> FogExp2 at the camera height (no height falloff)");
+    const panorama = desc.backgroundPanorama && this.textures.get(desc.backgroundPanorama.texture);
+    if (panorama) this.load(panorama);
     const sky = desc.sky;
     if (sky.type === "gradient") {
       const map = sky.clouds?.map;
@@ -834,7 +836,8 @@ export class ThreeEngine implements Engine {
         })());
       }
     }
-    // atmosphere: built in `prepare` (needs the sun's final direction)
+    // Atmosphere: built in `prepare` (needs the sun's final direction).
+    if (sky.type === "atmosphere" && this.sky) this.applyBackgroundPanorama();
   }
 
   private setEquirect(t: THREE.Texture | null, envIntensity: number, bgIntensity: number, rotation: number): void {
@@ -845,13 +848,10 @@ export class ThreeEngine implements Engine {
     if (!t) {
       this.scene.background = bg ? new THREE.Color(bg[0], bg[1], bg[2]) : null;
       this.scene.environment = null;
+      this.applyBackgroundPanorama();
       return;
     }
-    t.mapping = THREE.EquirectangularReflectionMapping;
-    t.magFilter = THREE.LinearFilter;
-    t.minFilter = THREE.LinearFilter;
-    t.generateMipmaps = false;
-    t.needsUpdate = true;
+    this.equirectTexture(t);
     this.scene.background = bg ? new THREE.Color(bg[0], bg[1], bg[2]) : t;
     this.scene.backgroundIntensity = bgIntensity;
     this.scene.backgroundRotation.set(0, rotation, 0);
@@ -859,6 +859,30 @@ export class ThreeEngine implements Engine {
     this.scene.environment = this.envTexture;
     this.scene.environmentIntensity = envIntensity;
     this.scene.environmentRotation.set(0, rotation, 0);
+    this.applyBackgroundPanorama();
+  }
+
+  private applyBackgroundPanorama(): void {
+    const background = this.envDesc?.backgroundPanorama;
+    const t = background && this.textures.get(background.texture)?.base;
+    if (this.sky) {
+      this.sky.visible = !t;
+      this.scene.background = null;
+    }
+    if (background && t) {
+      this.equirectTexture(t);
+      this.scene.background = t;
+      this.scene.backgroundIntensity = background.intensity;
+      this.scene.backgroundRotation.set(0, background.rotation, 0);
+    }
+  }
+
+  private equirectTexture(t: THREE.Texture): void {
+    t.mapping = THREE.EquirectangularReflectionMapping;
+    t.magFilter = THREE.LinearFilter;
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    t.needsUpdate = true;
   }
 
   private removeSky(): void {
@@ -1109,6 +1133,7 @@ export class ThreeEngine implements Engine {
     this.sky = make(false);
     this.sky.frustumCulled = false;
     this.scene.add(this.sky);
+    this.applyBackgroundPanorama();
   }
 
   /**

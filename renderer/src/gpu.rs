@@ -134,6 +134,8 @@ pub struct Params {
     pub env: [f32; 4],
     pub misc: [f32; 4],
     pub sky_color: [f32; 4],
+    /// HDRI longitude offset in turns, lighting scale, visible scale, enabled.
+    pub hdri: [f32; 4],
     pub counts2: [u32; 4],   // directional lights (first in the light list), -, -, -
     pub time: [f32; 4],      // scene time (s), wetness, rain, -
     pub fog: [f32; 4],       // density at fog height (1/m), height falloff (1/m), fog height (m), start distance (m)
@@ -158,7 +160,7 @@ pub struct Params {
     pub procs: [u32; 4],
     /// The sky's aerial perspective (F_AERIAL; `scene::aerial_params`): density multiple, Rayleigh scale, Mie scale, -.
     pub aerial: [f32; 4],
-    /// three.js `scene.background` (F_BACKGROUND): its radiance, 1.
+    /// Camera background (F_BACKGROUND): RGB, 1 for a colour, or longitude offset, intensity, 0, 2 for a panorama.
     pub background: [f32; 4],
     /// The live light tiles (pathtrace.wgsl "Light tiles"; live/frame.rs): 1 with the last frame's lists (0: none
     /// this frame), tiles a row, the grid's offset when they were built (x | y << 16), candidates a
@@ -338,6 +340,7 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
         layout_entry(9, float_texture(wgpu::TextureViewDimension::D2)),
         layout_entry(10, float_texture(wgpu::TextureViewDimension::D3)),
         layout_entry(11, write),
+        layout_entry(20, float_texture(wgpu::TextureViewDimension::D2)),
     ];
     // Software traversal's trees: their leaves' triangles, their nodes.
     if !hwrt {
@@ -381,6 +384,7 @@ pub struct BindParts {
     pub leaves: wgpu::Buffer,
     pub tex_view: wgpu::TextureView,
     pub env_view: wgpu::TextureView,
+    pub background_view: Option<wgpu::TextureView>,
     pub sampler: wgpu::Sampler,
     /// The density grids' atlas (binding 19), or the one-cell texture of a scene without grids.
     pub grid_view: wgpu::TextureView,
@@ -1993,10 +1997,11 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     f
 }
 
+#[derive(Clone)]
 pub struct EnvMap {
     pub width: u32,
     pub height: u32,
-    pub texels: Vec<[f32; 4]>,
+    pub texels: std::sync::Arc<[[f32; 4]]>,
 }
 
 pub struct Frame {
@@ -2592,8 +2597,10 @@ impl Gpu {
         assert!(parts.iter().enumerate().all(|(k, p)| p.0.index() == k), "the tables in `Table`'s order");
         let heap = Heap::filled(d, &parts.map(|p| (p.1.len() + p.2) as u64), |put| parts.iter().for_each(|p| put(p.0, 0, p.1)));
 
-        let env_tex = self.env_texture(env);
+        let env_tex = self.env_texture(env)?;
         let env_view = env_tex.create_view(&Default::default());
+        let background_view = scene.background_map.as_ref()
+            .map(|map| self.env_texture(map).map(|t| t.create_view(&Default::default()))).transpose()?;
         let sampler = d.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -2760,7 +2767,7 @@ impl Gpu {
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
         }
-        let bg_parts = BindParts { nodes: b_nodes, leaves: b_leaves, tex_view, env_view, sampler, grid_view };
+        let bg_parts = BindParts { nodes: b_nodes, leaves: b_leaves, tex_view, env_view, background_view, sampler, grid_view };
         let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, vertices: &b_vertices, heap: &heap, words: &words, prev_vertices: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref() });
         let kernel = Kernel { approx: self.approx, ..Kernel::new(scene) };
         // Translucent particles (hardware RT): the translucency pass's own TLAS, built again after the particle pass:
@@ -3355,7 +3362,9 @@ impl Gpu {
     }
 
     /// An environment map's texture, with its texels.
-    fn env_texture(&self, env: &EnvMap) -> wgpu::Texture {
+    fn env_texture(&self, env: &EnvMap) -> Result<wgpu::Texture> {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        anyhow::ensure!(env.width.max(env.height) <= limit, "environment map {} x {} exceeds device texture limit {limit}", env.width, env.height);
         let t = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("env"),
             size: wgpu::Extent3d { width: env.width, height: env.height, depth_or_array_layers: 1 },
@@ -3367,7 +3376,7 @@ impl Gpu {
             view_formats: &[],
         });
         self.write_env_texels(&t, env);
-        t
+        Ok(t)
     }
 
     fn write_env_texels(&self, t: &wgpu::Texture, env: &EnvMap) {
@@ -3398,13 +3407,15 @@ impl Gpu {
             return true;
         }
         let bytes = cdf.len() as u64 * 4;
-        if bytes > up.words.cap(Stream::EnvCdf) {
-            if !self.buffer_fits(up.words.size_with(Stream::EnvCdf, bytes)) {
-                return false;
-            }
+        let grow = bytes > up.words.cap(Stream::EnvCdf);
+        if grow && !self.buffer_fits(up.words.size_with(Stream::EnvCdf, bytes)) {
+            return false;
+        }
+        let Ok(texture) = self.env_texture(env) else { return false };
+        if grow {
             up.words.grow(&self.device, &self.queue, Stream::EnvCdf, bytes);
         }
-        up.env_tex = self.env_texture(env);
+        up.env_tex = texture;
         up.bg_parts.env_view = up.env_tex.create_view(&Default::default());
         up.words.write(&self.queue, Stream::EnvCdf, 0, bytemuck::cast_slice(cdf));
         up.cdf_words = cdf.len();
@@ -3682,6 +3693,7 @@ impl Gpu {
             view(9, &p.env_view),
             view(10, &p.grid_view),
             buffer_entry(11, b.accum),
+            view(20, p.background_view.as_ref().unwrap_or(&p.env_view)),
         ];
         if !self.hwrt {
             entries.push(buffer_entry(2, &p.leaves));

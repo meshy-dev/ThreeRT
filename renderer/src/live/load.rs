@@ -101,7 +101,7 @@ impl DynamicSky {
                 };
                 let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
                     let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
-                    let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
+                    let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels.into() };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
                     (env, cdf, max)
@@ -253,8 +253,12 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         let _ = g.kernel_pass(&up.kernel, "media_train");
         let _ = g.kernel_pass(&up.kernel, "media_composite");
     }
+    let hdri = match &world.environment.sky {
+        crate::desc::Sky::Hdri { texture, .. } => Some((*texture, prep.env_brightest)),
+        _ => None,
+    };
     let env = Environment {
-        sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
+        sky: SkyState { map: (prep.env.width, prep.env.height), hdri, altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
         settings: sc.environment.clone(),
     };
     let view = ViewState::new(&sc.camera, Arc::new(sc.preset.clone()));

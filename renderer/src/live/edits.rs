@@ -1219,6 +1219,21 @@ impl LiveCore {
     /// and the lights it owns: the atmosphere's sun takes its colour from the bake, a light that is the sun no longer
     /// its own again. False, with nothing changed, when the map's CDF cannot grow in place (`Gpu::put_env`).
     pub(super) fn apply_sky(&mut self, world: &World) -> Result<bool> {
+        let floor = self.env.sky.floor;
+        let hdri_texture = match &world.environment.sky {
+            crate::desc::Sky::Hdri { texture, rotation, intensity, sky_light_intensity } => {
+                // HDRI texture edits mark the world structural, so this path only sees edits to the sky's parameters.
+                if let Some((_, brightest)) = self.env.sky.hdri.filter(|(loaded, _)| loaded == texture) {
+                    let params = &mut self.sc.base;
+                    params.hdri = crate::hdri_params(*rotation, *intensity, *sky_light_intensity);
+                    crate::write_sky_sampling(params, brightest, floor, true);
+                    self.lit_changed = self.frame.max(1);
+                    return Ok(true);
+                }
+                Some(*texture)
+            }
+            _ => None,
+        };
         let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id))?;
         let altitude = world.settings.camera.map_or(self.env.sky.altitude, |id| world.world_matrix(id).w_axis.y.max(0.0));
         let cover = self.env.settings.cloud_cover;
@@ -1226,8 +1241,7 @@ impl LiveCore {
         if !self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env)) {
             return Ok(false);
         }
-        let floor = self.env.sky.floor;
-        baked.write(&mut self.sc.base, floor);
+        let brightest = baked.write(&mut self.sc.base, floor);
         // The lights: what was the sun, and what is.
         let e = &mut self.sc.tables;
         let was = std::mem::replace(&mut e.retained.sun, sun);
@@ -1244,7 +1258,8 @@ impl LiveCore {
             self.sc.up.put_lights(&self.g.queue, &e.lights);
         }
         // (The worker that re-bakes a dynamic sky is this sky's no longer: the next move of the sun starts one.)
-        self.env.sky = SkyState { map: (baked.env.width, baked.env.height), altitude, floor, cover, worker: None };
+        let hdri = hdri_texture.map(|texture| (texture, brightest));
+        self.env.sky = SkyState { map: (baked.env.width, baked.env.height), hdri, altitude, floor, cover, worker: None };
         self.lit_changed = self.frame.max(1);
         Ok(true)
     }

@@ -779,6 +779,53 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     assert!(seen.dot(normal).abs() > 0.999 && (seen.length() - 1.0).abs() < 1e-3, "the picture's middle has the normal {seen}; the triangle's is {normal}");
 }
 
+#[test]
+fn hdri_parameter_edits_reuse_the_uploaded_panorama() {
+    let g = match gpu::Gpu::new() {
+        Ok(g) => g,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    let mut w = world();
+    let panorama = |width, value| crate::world::Texture {
+        source: crate::world::TextureSource::Pixels {
+            width, height: 1, rgba: std::sync::Arc::new([value, value, value, 255].repeat(width as usize)),
+        },
+        srgb: false, wrap: true, repeat: [1.0; 2], offset: [0.0; 2],
+    };
+    w.set_texture(1, panorama(2, 255)).unwrap();
+    w.set_texture(2, panorama(4, 0)).unwrap();
+    let environment = |texture, rotation, intensity, sky_light_intensity| crate::desc::Environment {
+        sky: crate::desc::Sky::Hdri { texture, rotation, intensity, sky_light_intensity },
+        ..World::default().environment
+    };
+    w.set_environment(environment(1, 0.0, 1.0, 1.0));
+    let mut live = LiveCore::new(g, &w, Path::new("."), &crate::default_presets_dir(), 96, 54).unwrap();
+    w.take_changes();
+
+    // Make the source unavailable without issuing a texture edit, so a second decode would fail.
+    w.textures.remove(&1).unwrap();
+    let turn = std::f32::consts::FRAC_PI_2;
+    w.set_environment(environment(1, turn, 2.0, 0.0));
+    assert!(!live.commit(&mut w).unwrap());
+    assert_eq!(live.sc.base.hdri, [0.0, 0.0, 2.0, 1.0]);
+    assert_eq!(live.sc.base.counts2[1], 0);
+
+    w.set_environment(environment(1, turn, 2.0, 0.5));
+    assert!(!live.commit(&mut w).unwrap());
+    assert_eq!(live.sc.base.hdri, [0.0, 1.0, 2.0, 1.0]);
+    assert_eq!(live.sc.base.counts2[1], crate::env_nee_on() as u32);
+
+    w.set_environment(environment(2, turn, 2.0, 0.5));
+    assert!(!live.commit(&mut w).unwrap());
+    assert_eq!(live.env.sky.map, (4, 1));
+    assert_eq!(live.sc.base.counts2[1], 0);
+
+    w.set_texture(2, panorama(6, 255)).unwrap();
+    assert!(live.commit(&mut w).unwrap());
+    assert_eq!(live.env.sky.map, (6, 1));
+    assert_eq!(live.sc.base.counts2[1], crate::env_nee_on() as u32);
+}
+
 /// Each edit, on one view that takes them one after another, against a view built from the world as it is then.
 #[test]
 fn edits_in_place_leave_what_a_build_does() {

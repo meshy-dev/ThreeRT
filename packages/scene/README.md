@@ -70,6 +70,19 @@ This package builds the scene. A ThreeRT client draws it:
 
 Games add state and input with [`@threert/gameplay`](https://www.npmjs.com/package/@threert/gameplay); destructible voxel worlds use [`@threert/voxel`](https://www.npmjs.com/package/@threert/voxel).
 
+## HDRI environments
+
+Use a linear equirectangular OpenEXR or Radiance HDR texture to light the scene, reflect in materials, and show as the sky.
+
+```typescript
+import { HDRIEnvironment, Texture } from "@threert/scene";
+
+scene.environment = new HDRIEnvironment(new Texture("assets/sky.exr", "linear"), 1, Math.PI / 2);
+scene.backgroundPanorama = new HDRIEnvironment(new Texture("assets/camera-sky.exr", "linear"));
+```
+
+Rotation is in radians around +Y. `intensity` scales both the lighting and the visible sky. `skyLightIntensity` scales lighting and reflections only. Set `scene.background` for a solid color or `scene.backgroundPanorama` for a separate image with its own intensity and rotation.
+
 ## Links
 
 [threert.dev](https://threert.dev) · [Docs](https://threert.dev/docs/) · [Showcase](https://threert.dev/showcase/) · [GitHub](https://github.com/meshy-dev/ThreeRT)

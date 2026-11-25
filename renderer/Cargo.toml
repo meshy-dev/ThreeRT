@@ -15,7 +15,7 @@ bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gltf = { version = "1.4", features = ["KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_materials_ior", "KHR_materials_transmission", "extensions"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "exr"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "exr", "hdr"] }
 glam = { version = "0.30", features = ["bytemuck"] }
 rayon = "1.10"
 anyhow = "1"
