@@ -4970,9 +4970,10 @@ fn the_first_pass_leaves_the_camera_hits() {
 /// side: on the mirror's pixels the distance is the whole way to the wall (the camera hit's own stays in its record),
 /// the normal is the wall's as the pixel sees it, the albedo the wall's under the mirror's tint, the light the
 /// mirror's tint times a white mirror's, and the mirror's own glow is light seen directly. A lamp just before the
-/// wall lights what the mirror shows (the path starts where the wall is). With one bounce a path has, the wall in
-/// the mirror is unlit: the mirror took it. The wall moved along the view, its motion vectors go sideways: the
-/// motion of what the pixel sees. A translucent particle before the mirror is drawn, one behind it is not.
+/// wall lights what the mirror shows (the path starts where the wall is). A chain leaves the surface it shows a
+/// bounce: with one bounce a path no mirror is followed. The wall moved along the view, its motion vectors go
+/// sideways: the motion of what the pixel sees. A translucent particle before the mirror is drawn, one behind it is
+/// not.
 #[test]
 fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     // (A faint glow: the card below is told by the centre's colour.)
@@ -5058,14 +5059,17 @@ fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     // A lamp just before the wall: what the mirror shows is lit by it as the wall is.
     let lamped = frame(&scene(tint, None, true));
     assert!(lamped.min_element() > 3.0 * lit.max_element(), "the mirror's pixels with a lamp before the wall hold {lamped}, without {lit}");
-    // One bounce a path: the mirror takes it, and the wall it shows has no light (the wall seen directly has).
+    // A chain is all but one of a path's bounces at most, so the surface it shows is lit: with one bounce a path no
+    // mirror is followed, with two the mirror is and the wall it shows has light.
     let bounces = std::mem::replace(&mut live.bounces, 1);
     live.render(1, |_, _| {});
+    assert!(read(&live).0.iter().all(|h| chain(h) == 0), "with one bounce a path, no mirror is followed");
+    live.bounces = 2;
+    live.render(1, |_, _| {});
     // (This frame's pixels: another jitter.)
-    let (h1, s1, _, d1) = read(&live);
-    let (mirror, beside): (Vec<usize>, Vec<usize>) = (0..pixels as usize).filter(|&k| s1[k][3] > 0.0).partition(|&k| chain(&h1[k]) > 0);
-    let (dark, around) = (light(&s1, &d1, &mirror), light(&s1, &d1, &beside));
-    assert!(mirror.len() > 100 && dark.max_element() < 1e-4 && around.min_element() > 0.1, "with one bounce the mirror's {} pixels hold {dark} (none: the mirror took it), the pixels beside {around}", mirror.len());
+    let (h2, s2, _, d2) = read(&live);
+    let mirror: Vec<usize> = (0..pixels as usize).filter(|&k| chain(&h2[k]) > 0).collect();
+    assert!(mirror.len() > 100 && light(&s2, &d2, &mirror).min_element() > 0.1, "with two bounces the mirror's {} pixels show the wall lit: {}", mirror.len(), light(&s2, &d2, &mirror));
     live.bounces = bounces;
     // The wall goes 0.3 along the view (z): in the mirror it goes 0.3 sideways (x), and a motion vector is the way back.
     w.set_transform(41, Vec3::new(4.0, 0.0, 2.3), turned, Vec3::ONE).unwrap();

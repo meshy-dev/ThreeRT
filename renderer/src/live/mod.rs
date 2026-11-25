@@ -830,6 +830,14 @@ impl LiveCore {
             return;
         }
         self.targets.grow_first(&self.g, &self.passes, (pixels + pixels / 4).min(self.w as u64 * self.h as u64) * each);
+        // (The merged layout's cache is in the buffer made again: the view's cache is that one from here, empty, and
+        // nothing of the frames before stands.)
+        if self.g.merged {
+            if let Some(c) = &mut self.cache {
+                c.bufs = self.targets.kernel.cache.clone();
+            }
+            (self.reset, self.prev_isz) = (true, (0, 0));
+        }
         (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
     }
 

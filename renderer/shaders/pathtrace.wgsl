@@ -3292,7 +3292,7 @@ fn chain_load(pix: u32, chain: u32) -> Chain {
     let d = first_vec_load(at + 5u);
     return Chain(hit_load(at).hit, a.xyz, a.w, mat3x3<f32>(b.xyz, c.xyz, cross(b.xyz, c.xyz) * select(1.0, -1.0, (chain & 1u) == 1u)), vec3<f32>(b.w, c.w, d.w), d.xyz);
 }
-// The longest chain (and no longer than a path).
+// The longest chain (and all but one of a path's bounces at most: the surface it shows is lit and has its bounce).
 const MIRROR_CHAIN: u32 = 8u;
 
 // The loop guard (gpu.rs `loop_guard_of`; docs/RUNTIME.md "The engine in a browser"): every loop of the kernel, the
@@ -3974,7 +3974,7 @@ fn first_hit(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cone_w = 0.0;
     var cone_a = 2.0 * P.cam_pos.w / lod_height();
     var xf = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
-    let longest = select(min(MIRROR_CHAIN, P.counts.z), 0u, !has(F_MIRROR) || P.jitter.z > 0.5 || first_len() < (2u + CHAIN_VECS) * w * h);
+    let longest = select(min(MIRROR_CHAIN, max(P.counts.z, 1u) - 1u), 0u, !has(F_MIRROR) || P.jitter.z > 0.5 || first_len() < (2u + CHAIN_VECS) * w * h);
     for (var b = 0u; b < longest; b++) {
         if (seen.tri == 0xffffffffu || is_proc(seen) || !has(F_INST) || seen.inst == NO_INST) { break; }
         if (!mirror_possible(material_at(row_word(instance_at(seen.inst).info.w, seen.part, 0u) & ROW_MATERIAL))) { break; }
@@ -4161,7 +4161,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Live media are composited after the trace (media_composite); past the camera ray, homogeneous ones (water)
         // attenuate and light the path here. Offline paths track every medium.
-        if (LIVE && has(F_HMEDIA) && depth > 0u) {
+        // (The segment a mirror chain's last mirror shows is one of those.)
+        if (LIVE && has(F_HMEDIA) && (depth > 0u || (has(F_MIRROR) && chain > 0u))) {
             let mh = media_homogeneous(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true, rng_sub(rng_dim(D_MEDIA), 1u));
             radiance += thr * mh.light;
             thr *= mh.tr;
