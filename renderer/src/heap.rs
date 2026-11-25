@@ -92,7 +92,7 @@ impl Section for Stream {
 /// `MergedLive`, whose members are where these sections are: a test holds it). The radiance cache's keys and sums
 /// and the loop guard's count, atomic words at fixed places; then the vec4 arrays, the sections of the struct's last
 /// member: the cache's values, what the live passes read of a trace (the specular-lobe rays, the motion vectors, the
-/// direct light), the light tiles' lists.
+/// direct light), the light tiles' lists, a frame's camera hits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Live {
     CacheKeys,
@@ -103,10 +103,11 @@ pub enum Live {
     Motion,
     Direct,
     Lists,
+    First,
 }
 
 impl Section for Live {
-    const COUNT: usize = 8;
+    const COUNT: usize = 9;
     const UNIT: u64 = 4;
     const LABEL: &'static str = "live";
     fn index(self) -> usize {

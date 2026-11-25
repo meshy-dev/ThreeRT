@@ -244,6 +244,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let codes_sent: Vec<u32> = prep.gpu_emitter_tris.iter().map(|t| t.code).collect();
     let up = g.upload(&sc, &targets.accum, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
+    let _ = g.kernel_pass(&up.kernel, "first_hit");
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
     }

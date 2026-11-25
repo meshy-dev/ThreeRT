@@ -41,6 +41,9 @@ pub const GUARD_WORDS: u32 = 4;
 /// The pixels a live sample leaves for the kernel's `finish` pass (`gpu::KernelBufs::deferred`): the layout as
 /// written only.
 pub const DEFERRED_BINDING: u32 = 9;
+/// A live frame's camera hits (`gpu::KernelBufs::first`; pathtrace.wgsl `first_hits`) in the layout as written; in
+/// the merged one a section (`heap::Live::First`).
+pub const FIRST_BINDING: u32 = 10;
 
 #[cfg(test)]
 mod tests {
@@ -78,18 +81,18 @@ mod tests {
     /// Kernel variants in the merged layout: valid WGSL, no entry point with more than eight storage buffers, none
     /// declared beyond them (a pipeline layout counts what is declared), no length of a view's buffer in the source,
     /// and `MergedLive`'s members where the renderer puts their sections.
-    /// The layout as written has 22 (20 under hardware traversal, which has neither of the trees' buffers). Because the merged
+    /// The layout as written has 23 (21 under hardware traversal, which has neither of the trees' buffers). Because the merged
     /// blocks declare none of the views or of group 1's buffers by their own names, a read or write of one past its
     /// accessor does not compile here (and naga says where), whatever the other layouts take.
     #[test]
     fn the_merged_kernel_fits_eight_storage_buffers() {
         let (m, info) = parse(&variant(0, false));
         let (used, declared) = storage_buffers(&m, &info);
-        assert_eq!(declared, 22, "the kernel as written");
+        assert_eq!(declared, 23, "the kernel as written");
         // (`main` no longer adds to the cache's sums: `finish` trains it. Without units it reads no node.)
         assert_eq!(used.iter().map(|u| u.1).max(), Some(20), "{used:?}");
         let hw = kernel_wgsl(&kernel_template(), &KernelVariant::new(true, Default::default(), 0));
-        assert_eq!(hw.matches("var<storage").count(), 20 + 4, "hardware traversal: neither of the trees' buffers (and the translucency pass's four)");
+        assert_eq!(hw.matches("var<storage").count(), 21 + 4, "hardware traversal: neither of the trees' buffers (and the translucency pass's four)");
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
             let src = variant(features, true);
             assert!(!src.contains("arrayLength"), "the lengths are the parameters'");
@@ -97,11 +100,14 @@ mod tests {
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
             assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "features {features:#x}: {used:?}");
-            let read = if features & crate::gpu::F_UNITS != 0 { 8 } else { 7 };
-            assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(read), "the trace reads all eight a page has with units (the trees' leaves the eighth), no tree without");
+            // (With units the paths and the first pass each read seven of the eight a page has. The paths leave out
+            // the previous frame's vertices, the first pass's for its motion vectors; the first pass, the samples.)
+            let units = (features & crate::gpu::F_UNITS != 0) as usize;
+            let of = |pass: &str| used.iter().find(|u| u.0 == pass).map(|u| u.1);
+            assert_eq!((of("main"), of("first_hit")), (Some(6 + units), Some(5 + 2 * units)), "features {features:#x}");
             assert_eq!(declared, 8, "features {features:#x}");
             // The struct's members are the first sections; its last, the vec4s, begins where the cache's values do.
-            let (at, _) = crate::heap::Heap::<crate::heap::Live>::starts_for(&crate::gpu::live_sizes(1, 64, 64, 64, 64));
+            let (at, _) = crate::heap::Heap::<crate::heap::Live>::starts_for(&crate::gpu::live_sizes(1, [64; 5]));
             assert_eq!(layout(&m, "MergedLive").0, at[..4]);
         }
     }
@@ -142,6 +148,7 @@ mod tests {
         assert!(kernel_template().contains(&format!("const DEFERRED_VECS: u32 = {}u;", crate::gpu::DEFERRED_BYTES / 16)));
         assert!(kernel_template().contains(&format!("const DEFERRED_ROW: u32 = {}u;", crate::gpu::DEFERRED_ROW)));
         assert!(kernel_template().contains(&format!("@group(1) @binding({DEFERRED_BINDING}) var<storage, read_write> deferred: Deferred;")));
+        assert!(kernel_template().contains(&format!("@group(1) @binding({FIRST_BINDING}) var<storage, read_write> first_hits: array<vec4<f32>>;")));
         // What the kernel reads with no offset is its heap's first section.
         assert_eq!((Table::LightTree as usize, crate::heap::Stream::EnvCdf as usize), (0, 0));
         assert!(kernel_template().contains("fn lt_node(i: u32) -> vec4<f32> { return table_f(i); }") && kernel_template().contains("fn env_cdf_at(i: u32) -> f32 { return bitcast<f32>(words[i]); }"));
@@ -173,8 +180,8 @@ mod tests {
             assert_eq!(g.matches("if (loop_guard()) {").count(), loops(&plain) - counted(&plain));
             let (m, info) = parse(&g);
             let (used, declared) = storage_buffers(&m, &info);
-            // (As written: the guard's count and `finish`'s records too. Merged: the eight a page has.)
-            assert_eq!(declared as u32, if merged { 8 } else { 23 }, "{used:?}");
+            // (As written: the guard's count, `finish`'s records and the camera hits too. Merged: the eight a page has.)
+            assert_eq!(declared as u32, if merged { 8 } else { 24 }, "{used:?}");
         }
         // The pass on its own: nested loops, a `continuing` block, comments and braces in them, a loop in an `if`; a
         // counted loop left alone, one bounded by a variable or assigning its counter guarded.

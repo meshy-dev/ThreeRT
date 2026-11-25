@@ -123,7 +123,7 @@ struct Params {
     lt_cam: array<vec4<f32>, 4>, // the camera they were built under: position (w = tan(fov/2)), forward (w = aspect), right, up
     table_first: array<vec4<u32>, 3>, // each table's first vec4 in `tables` (heap.rs `Table`): light tree (0), materials, lights, light groups; emitters, tex_info, objects, instances; media, energy LUT, glass energy, emitter triangles
     word_first: array<vec4<u32>, 2>, // each stream's first word in `words` (heap.rs `Stream`): environment CDF (0), procedural data, vertex colours, the instances' rows
-    live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, -, -, -
+    live_first: array<vec4<u32>, 2>, // the merged layout: each of group 1's vec4 sections' first vec4 in `ML.vecs` (heap.rs `Live`): cache values (0), refl, motion, direct; lists, first hits, (the first hits' vec4s), -
     live_len: vec4<u32>,   // and the vec4s of refl, motion, direct, lists
 };
 
@@ -3156,6 +3156,8 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 //  - direct_out: live deterministic direct light per traced pixel (`dl_det` at the camera hit; w: the light it
 //    reports, "Light tiles");
 //  - light_lists: the light tiles' lists, 64 vec4s a tile, as the live pass `light_tiles` made them last frame;
+//  - first_hits: a live frame's camera hits, 2 per traced pixel (`first_store`): `first_hit` writes them, `main`
+//    starts its paths from them;
 //  - cache_keys, cache_acc, cache_val: the radiance cache (below, at `cache_on`);
 //  - loop_guard_trips: the loop guard's count (first word: the invocations a loop of which was stopped).
 @if(merged) {
@@ -3175,12 +3177,16 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     fn refl_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].y + i]; }
     fn refl_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].y + i] = v; }
     fn motion_len() -> u32 { return P.live_len.y; }
+    fn motion_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].z + i]; }
     fn motion_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].z + i] = v; }
     fn direct_len() -> u32 { return P.live_len.z; }
     fn direct_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[0].w + i]; }
     fn direct_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[0].w + i] = v; }
     fn lists_len() -> u32 { return P.live_len.w; }
     fn list_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[1].x + i]; }
+    fn first_len() -> u32 { return P.live_first[1].z; }
+    fn first_vec_load(i: u32) -> vec4<f32> { return ML.vecs[P.live_first[1].y + i]; }
+    fn first_vec_store(i: u32, v: vec4<f32>) { ML.vecs[P.live_first[1].y + i] = v; }
     fn cache_key_load(i: u32) -> u32 { return atomicLoad(&ML.cache_keys[i]); }
     fn cache_key_claim(i: u32, k: u32) -> bool { let r = atomicCompareExchangeWeak(&ML.cache_keys[i], 0u, k); return r.exchanged || r.old_value == k; }
     fn cache_key_clear(i: u32) { atomicStore(&ML.cache_keys[i], 0u); }
@@ -3203,6 +3209,7 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     fn refl_load(i: u32) -> vec4<f32> { return refl[i]; }
     fn refl_store(i: u32, v: vec4<f32>) { refl[i] = v; }
     fn motion_len() -> u32 { return arrayLength(&motion_out); }
+    fn motion_load(i: u32) -> vec4<f32> { return motion_out[i]; }
     fn motion_store(i: u32, v: vec4<f32>) { motion_out[i] = v; }
     fn direct_len() -> u32 { return arrayLength(&direct_out); }
     fn direct_load(i: u32) -> vec4<f32> { return direct_out[i]; }
@@ -3224,6 +3231,22 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
     // The pixels of this sample that `finish` ends (below `cache_end`): their number, then a record each.
     struct Deferred { n: atomic<u32>, recs: array<vec4<u32>> };
     @group(1) @binding(9) var<storage, read_write> deferred: Deferred;
+    @group(1) @binding(10) var<storage, read_write> first_hits: array<vec4<f32>>;
+    fn first_len() -> u32 { return arrayLength(&first_hits); }
+    fn first_vec_load(i: u32) -> vec4<f32> { return first_hits[i]; }
+    fn first_vec_store(i: u32, v: vec4<f32>) { first_hits[i] = v; }
+}
+
+// A camera hit as the first-hit pass leaves it: (t, u, v, triangle low) (triangle high, instance low, instance high,
+// part). The integers as 16-bit halves: a float keeps those exactly, and its bits are not an integer's to keep.
+fn first_store(pix: u32, h: Hit) {
+    first_vec_store(pix * 2u, vec4<f32>(h.t, h.u, h.v, f32(h.tri & 0xffffu)));
+    first_vec_store(pix * 2u + 1u, vec4<f32>(f32(h.tri >> 16u), f32(h.inst & 0xffffu), f32(h.inst >> 16u), f32(h.part)));
+}
+fn first_load(pix: u32) -> Hit {
+    let a = first_vec_load(pix * 2u);
+    let b = first_vec_load(pix * 2u + 1u);
+    return Hit(a.x, u32(a.w) | (u32(b.x) << 16u), a.y, a.z, u32(b.y) | (u32(b.z) << 16u), u32(b.w));
 }
 
 // The loop guard (gpu.rs `loop_guard_of`; docs/RUNTIME.md "The engine in a browser"): every loop of the kernel, the
@@ -3800,20 +3823,52 @@ fn cache_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ------------------------------------------------------------------------------------------------
 
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+// The camera hit's motion: from the hit point `p` to where that surface point was the previous frame (w = 1), zeros
+// where it stands still.
+fn first_motion(hit: Hit, p: vec3<f32>) -> vec4<f32> {
+    var mv = vec4<f32>(0.0);
+    // A deforming mesh keeps its previous vertices in model space, where its instance's record says.
+    var deforms = false;
+    if (LIVE && P.motion.x > 0.5 && !is_proc(hit) && has(F_INST)) {
+        deforms = has(F_DEFORM) && (bitcast<u32>(instance_at(hit.inst).n1.w) & INST_DEFORMS) != 0u;
+    }
+    if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
+        // Procedural geometry: its object-space hit point through the previous frame's rows.
+        let r = instance_at(hit.inst);
+        if (any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
+            let lp = vec4<f32>(proc_point(r, p), 1.0);
+            mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - p, 1.0);
+        }
+    } else if (LIVE && P.motion.x > 0.5 && has(F_INST)) {
+        // A movable instance: its model-space hit point (the previous pose's for a deforming mesh) through the
+        // previous frame's transform (p rows; the same as m when it did not move).
+        let r = instance_at(hit.inst);
+        if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
+            let ix = tri_indices(hit.tri);
+            let now = (ix + vec3<u32>(r.info.z)) * VERTEX_VEC4;
+            var q0 = vertices[now.x].xyz;
+            var q1 = vertices[now.y].xyz;
+            var q2 = vertices[now.z].xyz;
+            // (A deforming mesh's previous positions are where its record says, n2.w, its vertices as the
+            // mesh has them. F_DEFORM: a scene with such a mesh.)
+            if (has(F_DEFORM) && deforms) {
+                let before = (ix + vec3<u32>(bitcast<u32>(r.n2.w))) * VERTEX_VEC4;
+                q0 = prev_verts[before.x].xyz;
+                q1 = prev_verts[before.y].xyz;
+                q2 = prev_verts[before.z].xyz;
+            }
+            let lp = vec4<f32>(q0 + (q1 - q0) * hit.u + (q2 - q0) * hit.v, 1.0);
+            mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - p, 1.0);
+        }
+    }
+    return mv;
+}
+
+// A pixel's camera ray. `cam`: its random numbers (the jitter offline, the lens).
+struct CamRay { o: vec3<f32>, d: vec3<f32> };
+fn camera_ray(gid: vec2<u32>, cam: vec4<f32>) -> CamRay {
     let w = P.size.x;
     let h = P.size.y;
-    if (gid.x >= w || gid.y >= h) { return; }
-    let pix = gid.y * w + gid.x;
-    // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
-    // turned to sky must not keep what a surface left there.
-    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, f32(LT_NONE), has(F_LISTS)))); }
-    if (has(F_LISTS)) { lt_fb = LT_NONE; }
-    rng_start(gid.xy, P.size.z, P.size.w, 0u);
-    cur_depth = 0u;
-    let cam = rng4(rng_dim(D_CAMERA));
-
     // Live: one sub-pixel jitter a frame for the whole image (live/frame.rs: Halton 2, 3), which the temporal upscaler
     // resolves (live.wgsl `upscale`). Offline, every sample draws its own.
     var jx = cam.x;
@@ -3832,6 +3887,45 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         o += P.cam_right.xyz * (r * cos(phi)) + P.cam_up.xyz * (r * sin(phi));
         d = normalize(focus - o);
     }
+    return CamRay(o, d);
+}
+
+// A live frame's first pass: every pixel's camera ray, which is the frame's (one jitter, no lens: its samples share
+// it). It leaves the hit for `main`'s paths (`first_hits`) and the hit's motion vector, which needs no material: what
+// runs between the two passes has this frame's depth (the hit's t) and motion.
+@compute @workgroup_size(8, 8, 1)
+fn first_hit(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = P.size.x;
+    let h = P.size.y;
+    if (gid.x >= w || gid.y >= h || first_len() < 2u * w * h) { return; }
+    rng_start(gid.xy, P.size.z, P.size.w, 0u);
+    cur_depth = 0u;
+    mirror_path = false;
+    let pix = gid.y * w + gid.x;
+    let cr = camera_ray(gid.xy, rng4(rng_dim(D_CAMERA)));
+    let hit = trace(cr.o, cr.d, INF, TRACE_CLOSEST);
+    first_store(pix, hit);
+    var mv = vec4<f32>(0.0);
+    // (The hit point as `surface` has it.)
+    if (hit.tri != 0xffffffffu) { mv = first_motion(hit, cr.o + cr.d * hit.t); }
+    if (motion_len() >= w * h) { motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz))); }
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = P.size.x;
+    let h = P.size.y;
+    if (gid.x >= w || gid.y >= h) { return; }
+    let pix = gid.y * w + gid.x;
+    // Every pixel's deterministic direct light is written each frame (0 unless the camera hits a surface): a pixel that
+    // turned to sky must not keep what a surface left there.
+    if (LIVE && P.misc.w < 0.5 && direct_len() >= w * h) { direct_store(pix, vec4<f32>(0.0, 0.0, 0.0, select(0.0, f32(LT_NONE), has(F_LISTS)))); }
+    if (has(F_LISTS)) { lt_fb = LT_NONE; }
+    rng_start(gid.xy, P.size.z, P.size.w, 0u);
+    cur_depth = 0u;
+    let cr = camera_ray(gid.xy, rng4(rng_dim(D_CAMERA)));
+    var d = cr.d;
+    var o = cr.o;
 
     var radiance = vec3<f32>(0.0);
     var first_t = 0.0;
@@ -3862,7 +3956,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The camera hit is transmissive (glass, water): its reflections stay in the specular signal too (the resolve's
     // neighbours there mostly went through, so it had no rays to rebuild them from: live glass lost its reflection).
     var glass0 = false;
-    var mv = vec4<f32>(0.0);
     dl_det = vec3<f32>(0.0);
     dl_det_spec = vec3<f32>(0.0);
     var specular_bounce = true;
@@ -3886,7 +3979,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mirror_path = false;
     for (var depth = 0u; depth <= P.counts.z; depth++) {
         cur_depth = depth;
-        var hit = trace(o, d, INF, TRACE_CLOSEST);
+        // A live frame's camera hit is its first pass's (`first_hit`).
+        var hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
+        if (LIVE && depth == 0u) { hit = first_load(pix); } else { hit = trace(o, d, INF, TRACE_CLOSEST); }
         // Ray tracing off: the camera ray above was the last one traced for this pixel.
         if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
@@ -3987,42 +4082,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s = surface(o, d, hit, width);
         if (depth == 0u) {
             first_t = hit.t;
-            let ti = hit.tri;
-            // A deforming mesh keeps its previous vertices in model space, where its instance's record says.
-            var deforms = false;
-            if (LIVE && P.motion.x > 0.5 && !is_proc(hit) && has(F_INST)) {
-                deforms = has(F_DEFORM) && (bitcast<u32>(instance_at(hit.inst).n1.w) & INST_DEFORMS) != 0u;
+            if (has(F_LISTS)) {
+                // (Where the hit was the previous frame: the first pass's motion vector.)
+                var before = s.p;
+                if (LIVE && motion_len() >= w * h) { before += motion_load(pix).xyz; }
+                lt_list_start(before);
             }
-            if (LIVE && P.motion.x > 0.5 && is_proc(hit)) {
-                // Procedural geometry: its object-space hit point through the previous frame's rows.
-                let r = instance_at(hit.inst);
-                if (any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
-                    let lp = vec4<f32>(proc_point(r, s.p), 1.0);
-                    mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
-                }
-            } else if (LIVE && P.motion.x > 0.5 && has(F_INST)) {
-                // A movable instance: its model-space hit point (the previous pose's for a deforming mesh) through the
-                // previous frame's transform (p rows; the same as m when it did not move).
-                let r = instance_at(hit.inst);
-                if (deforms || any(r.p0 != r.m0) || any(r.p1 != r.m1) || any(r.p2 != r.m2)) {
-                    let ix = tri_indices(ti);
-                    let now = (ix + vec3<u32>(r.info.z)) * VERTEX_VEC4;
-                    var q0 = vertices[now.x].xyz;
-                    var q1 = vertices[now.y].xyz;
-                    var q2 = vertices[now.z].xyz;
-                    // (A deforming mesh's previous positions are where its record says, n2.w, its vertices as the
-                    // mesh has them. F_DEFORM: a scene with such a mesh.)
-                    if (has(F_DEFORM) && deforms) {
-                        let before = (ix + vec3<u32>(bitcast<u32>(r.n2.w))) * VERTEX_VEC4;
-                        q0 = prev_verts[before.x].xyz;
-                        q1 = prev_verts[before.y].xyz;
-                        q2 = prev_verts[before.z].xyz;
-                    }
-                    let lp = vec4<f32>(q0 + (q1 - q0) * hit.u + (q2 - q0) * hit.v, 1.0);
-                    mv = vec4<f32>(vec3<f32>(dot(r.p0, lp), dot(r.p1, lp), dot(r.p2, lp)) - s.p, 1.0);
-                }
-            }
-            if (has(F_LISTS)) { lt_list_start(s.p + mv.xyz); }
             albedo = select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
             normal = s.n;
             anim = s.anim;
@@ -4202,9 +4267,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (non_finite(dropped)) { dropped = vec3<f32>(0.0); }
         spec = clamp(spec, vec3<f32>(0.0), max(radiance - e0, vec3<f32>(0.0)));
         let diff = max(radiance - e0 - spec - dropped, vec3<f32>(0.0));
-        if (P.misc.w < 0.5 && motion_len() >= w * h) {
-            motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz)));
-        }
         if (P.motion.y > 0.5 && P.misc.w < 0.5 && resolve_bound()) {
             // The reconstruction consumes the noisy path itself. Its material guides reuse the idle ray slots.
             refl_store(pix * 2u, vec4<f32>(guide_diffuse, guide_glass.x));

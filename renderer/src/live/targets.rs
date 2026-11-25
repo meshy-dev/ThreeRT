@@ -108,11 +108,10 @@ pub struct Targets {
     size: (u32, u32),
 }
 
-/// What a view of `w` x `h` holds of each of the kernel's four buffers that follow its size, bytes (`gpu::KernelBufs`:
-/// the specular rays, the motion vectors, the direct light, the light tiles' lists).
-fn kernel_bytes(w: u32, h: u32) -> [u64; 4] {
+/// What a view of `w` x `h` holds of each of the kernel's buffers that follow its size, bytes (`gpu::VIEW_BUFFERS`).
+fn kernel_bytes(w: u32, h: u32) -> [u64; 5] {
     let n = (w * h) as u64;
-    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16]
+    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16, n * 32]
 }
 
 impl Targets {
@@ -136,13 +135,12 @@ impl Targets {
             wgpu::Extent3d { width: LUT, height: LUT, depth_or_array_layers: LUT },
         );
         let (bufs, out) = Self::own(d, w, h);
-        let [refl, motion, direct, lists] = kernel_bytes(w, h);
         let mut t = Targets {
             params: d.create_buffer(&wgpu::BufferDescriptor { label: Some("live params"), size: std::mem::size_of::<LiveParams>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             accum: g.accum_buffer(w, h),
             bufs,
             out,
-            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, refl, motion, direct, lists),
+            kernel: gpu::KernelBufs::new(d, g.merged, g.guard_room(), cache, kernel_bytes(w, h)),
             translucent_low: None,
             lut_view: lut_tex.create_view(&Default::default()),
             lut_tex,
@@ -162,8 +160,7 @@ impl Targets {
         let d = &g.device;
         (self.bufs, self.out) = Self::own(d, w, h);
         self.accum = g.accum_buffer(w, h);
-        let [refl, motion, direct, lists] = kernel_bytes(w, h);
-        self.kernel = self.kernel.resized(d, refl, motion, direct, lists);
+        self.kernel = self.kernel.resized(d, kernel_bytes(w, h));
         self.translucent_low = None;
         self.size = (w, h);
         self.bgs = self.bind_groups(d, passes);

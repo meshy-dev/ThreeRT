@@ -2920,6 +2920,12 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**A live frame's camera rays in a pass of their own (2026-11-25).** The first step of the frame's structure: the
+kernel's `first_hit` traces the camera rays and leaves each pixel's hit and motion vector, and `main` starts its
+paths from the hits (docs/RUNTIME.md "The live architecture"). The pictures are the same. It is there for what
+comes next: a mirror's first hit replaced by the surface it shows, and light sampling that reads this frame's
+depth and motion before the paths. Test: `the_first_pass_leaves_the_camera_hits`.
+
 **Nothing reads a world-space triangle (2026-11-25, after it).** Nothing made one any more; what read them is
 deleted. Hardware traversal: the traversal groups and their BLASes, with the feature for a group past 2^24
 triangles and the bit that told a model's TLAS instance from a group's (an instance's custom data is its record).

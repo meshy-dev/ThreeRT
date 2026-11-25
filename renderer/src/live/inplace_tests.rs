@@ -4917,3 +4917,51 @@ fn models_with_functions_the_scene_has_come_in_place() {
     w.set_transform(33, Vec3::new(-0.2, -0.5, 1.1), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
     check("a model with a function that came in the same commit", &mut live, &mut w);
 }
+
+/// A live frame's first pass leaves each pixel's camera hit and its paths start from it. On a ball of 80,000
+/// triangles (a triangle's index past 16 bits) the distance the first pass wrote is to the point the normal the
+/// paths wrote names, the instance is the ball's, and the samples hold the same distance; a pixel of sky holds a miss.
+#[test]
+fn the_first_pass_leaves_the_camera_hits() {
+    let (mut w, r, n, at, eye) = (world(), 0.5f32, 200u32, Vec3::new(0.3, -0.2, 2.5), Vec3::new(0.0, 0.0, 5.0));
+    let mut g = Geometry { positions: vec![], normals: vec![], uvs: vec![], indices: vec![], groups: vec![], colors: vec![] };
+    // (Open at the poles: no triangle without area.)
+    for (j, i) in (0..=n).flat_map(|j| (0..=n).map(move |i| (j, i))) {
+        let (th, ph) = (0.05 + (std::f32::consts::PI - 0.1) * j as f32 / n as f32, std::f32::consts::TAU * i as f32 / n as f32);
+        let d = Vec3::new(th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin());
+        g.positions.extend((d * r).to_array());
+        g.normals.extend(d.to_array());
+        g.uvs.extend([0.0, 0.0]);
+    }
+    for a in (0..n).flat_map(|j| (0..n).map(move |i| j * (n + 1) + i)) {
+        g.indices.extend([a, a + 1, a + n + 1, a + 1, a + n + 2, a + n + 1]);
+    }
+    w.set_geometry(30, g).unwrap();
+    w.set_object(30, "ball".into(), None, Kind::Mesh { geometry: 30, material: 1, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(30, at, glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let presets = crate::default_presets_dir();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    live.render(1, |_, _| {});
+    let (iw, ih) = live.internal_size();
+    let pixels = (iw * ih) as u64;
+    let ball = live.sc.tables.retained.instance(30).expect("the ball is an instance").instance;
+    let f = &live.targets.kernel.first;
+    let hits: Vec<[f32; 8]> = read_back(&live, &f.buffer, f.offset, pixels * 32);
+    let samples: Vec<[f32; 20]> = read_back(&live, &live.targets.accum, 0, pixels * gpu::SAMPLE_BYTES);
+    // (pathtrace.wgsl `first_store`: t, u, v, then the triangle, the instance and the part as 16-bit halves.)
+    let (tri, inst) = (|h: &[f32; 8]| h[3] as u32 | (h[4] as u32) << 16, |h: &[f32; 8]| h[5] as u32 | (h[6] as u32) << 16);
+    let on: Vec<usize> = (0..pixels as usize).filter(|&k| inst(&hits[k]) == ball && tri(&hits[k]) != u32::MAX).collect();
+    assert!(on.len() > 200 && on.iter().any(|&k| tri(&hits[k]) >= 1 << 16), "{} pixels on the ball, the last triangle {:?}", on.len(), on.iter().map(|&k| tri(&hits[k])).max());
+    for &k in &on {
+        let (t, normal) = (hits[k][0], Vec3::new(samples[k][8], samples[k][9], samples[k][10]));
+        let to = (at + normal * r - eye).length();
+        assert!((to - t).abs() < 2e-3 && hits[k][1] >= 0.0 && hits[k][2] >= 0.0 && hits[k][1] + hits[k][2] <= 1.0 + 1e-5, "pixel {k}: hit {:?}, its normal {normal} names a point {to} away", hits[k]);
+        assert_eq!(samples[k][3].to_bits(), t.to_bits(), "pixel {k}: the samples' distance is the hit's");
+    }
+    // (No sky in this world: a ray past everything misses.)
+    let missed = hits.iter().filter(|h| tri(h) == u32::MAX).count();
+    assert!(missed > 200 && hits.iter().filter(|h| tri(h) == u32::MAX).all(|h| inst(h) == u32::MAX), "{missed} pixels of nothing, each a miss whole");
+}

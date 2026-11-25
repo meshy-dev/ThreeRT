@@ -117,7 +117,7 @@ impl LiveCore {
             return;
         }
         // (What a frame asks: as the load makes them, and the guides and the translucency pass where it has them.)
-        let mut passes: Vec<&'static str> = vec![];
+        let mut passes: Vec<&'static str> = vec!["first_hit"];
         if !self.g.merged {
             passes.push("finish");
         }
@@ -289,6 +289,8 @@ impl LiveCore {
         let media_composite = media.then(|| g.kernel_pass(kernel, "media_composite"));
         // The pixels a sample's trace leaves at the radiance cache (pathtrace.wgsl `finish`).
         let finish = self.targets.kernel.deferred.as_ref().filter(|_| self.cache.is_some()).map(|d| (g.kernel_pass(kernel, "finish"), d));
+        // The frame's camera rays, before its paths (pathtrace.wgsl `first_hit`).
+        let first = g.kernel_pass(kernel, "first_hit");
         // This frame's sub-pixel jitter (Halton 2, 3), every camera ray's: 8 phases at
         // full resolution, as many more as an output pixel has fewer traced ones (8 / scale^2: the upscaler needs each
         // output pixel visited), in the 12 bits a side the samples carry it in.
@@ -393,9 +395,14 @@ impl LiveCore {
                     e.clear_buffer(&d.buffer, d.offset, Some(4));
                 }
                 let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("live trace"), timestamp_writes: tw });
-                pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &self.sc.up.bg, &[]);
                 pass.set_bind_group(1, &self.kernel_bg, &[]);
+                // (The frame's samples share its camera hits.)
+                if k == 0 {
+                    pass.set_pipeline(&first);
+                    pass.dispatch_workgroups(iw.div_ceil(8), ih.div_ceil(8), 1);
+                }
+                pass.set_pipeline(&pipeline);
                 pass.dispatch_workgroups(iw.div_ceil(8), ih.div_ceil(8), 1);
                 // (Rows over every traced pixel: the invocations past the records' count leave at once.)
                 if let Some((f, _)) = &finish {

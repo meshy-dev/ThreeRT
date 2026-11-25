@@ -321,7 +321,7 @@ const ACCELERATION_STRUCTURE: wgpu::BindingType = wgpu::BindingType::Acceleratio
 /// (what the kernel writes), group 2 (the translucency pass's; hardware traversal). A test holds them to what every
 /// variant of the kernel's source declares (`the_kernels_layouts_are_its_declarations`).
 pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupLayoutEntry>; 3] {
-    use crate::merged::{DEFERRED_BINDING, GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS};
+    use crate::merged::{DEFERRED_BINDING, FIRST_BINDING, GUARD_BINDING, LISTS_BINDING, LIVE_BINDING, TABLE_VIEWS};
     let LayoutShape { hwrt, merged, whole_tables, guard } = shape;
     let (read, write) = (storage_buffer(true), storage_buffer(false));
     // Group 0: the parameters; the vertices; the tables' heap, the words' heap; the previous frame's vertices of
@@ -353,8 +353,8 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
         scene.push(layout_entry(ACC_BINDING, ACCELERATION_STRUCTURE));
     }
     // Group 1: merged, the one buffer (`heap::Live`, the loop guard's count in it); as written, the radiance cache's three, the light tiles' lists, the specular rays, the motion vectors, the
-    // direct light, the pixels left for `finish`, and the loop guard's count where a kernel of this device may have
-    // the guard (one without it does not name the binding).
+    // direct light, the pixels left for `finish`, a frame's camera hits, and the loop guard's count where a kernel of
+    // this device may have the guard (one without it does not name the binding).
     let mut live = vec![];
     if merged {
         live.push(layout_entry(LIVE_BINDING, write));
@@ -362,6 +362,7 @@ pub(crate) fn kernel_layout_entries(shape: LayoutShape) -> [Vec<wgpu::BindGroupL
         live.extend([1, 2, 3, 5, 6, 7].map(|b| layout_entry(b, write)));
         live.push(layout_entry(LISTS_BINDING, read));
         live.push(layout_entry(DEFERRED_BINDING, write));
+        live.push(layout_entry(FIRST_BINDING, write));
         if guard {
             live.push(layout_entry(GUARD_BINDING, write));
         }
@@ -1575,6 +1576,9 @@ pub struct KernelBufs {
     pub motion: Buf,
     pub direct: Buf,
     pub lists: Buf,
+    /// A live frame's camera hits, 32 bytes a traced pixel (pathtrace.wgsl `first_store`): its first pass writes them,
+    /// its paths start from them.
+    pub first: Buf,
     /// The pixels a sample's trace leaves for `finish` (their count, then `DEFERRED_BYTES` each): the layout as
     /// written only. Of one record until a live view makes it for its traced size (`deferred_buffer`).
     pub deferred: Option<Buf>,
@@ -1586,35 +1590,35 @@ pub struct KernelBufs {
 }
 
 impl KernelBufs {
-    /// Each in a buffer of its own: the live passes' four of these bytes, made (and `deferred` of one record: its view
-    /// makes it for what it traces), with this radiance cache and loop guard's count.
-    fn separate(d: &wgpu::Device, cache: CacheBuffers, guard: Option<Buf>, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
-        let sb = |label: &str, size: u64| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
-        KernelBufs { cache, refl: sb("refl", refl), motion: sb("motion", motion), direct: sb("direct", direct), lists: sb("light lists", lists), deferred: Some(deferred_buffer(d, 1)), guard, merged: None }
+    /// Each in a buffer of its own: a view's five of these bytes (`VIEW_BUFFERS`), made (and `deferred` of one
+    /// record: its view makes it for what it traces), with this radiance cache and loop guard's count.
+    fn separate(d: &wgpu::Device, cache: CacheBuffers, guard: Option<Buf>, view: [u64; 5]) -> KernelBufs {
+        let sb = |k: usize| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(VIEW_BUFFERS[k]), size: view[k], usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }));
+        KernelBufs { cache, refl: sb(0), motion: sb(1), direct: sb(2), lists: sb(3), first: sb(4), deferred: Some(deferred_buffer(d, 1)), guard, merged: None }
     }
 
-    /// These for a view of another size: the four that follow the size made again, the radiance cache and the loop
+    /// These for a view of another size: the five that follow the size made again, the radiance cache and the loop
     /// guard's count kept. The merged layout's are one buffer: all of it made again, the cache (as long) empty.
-    pub fn resized(&self, d: &wgpu::Device, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
+    pub fn resized(&self, d: &wgpu::Device, view: [u64; 5]) -> KernelBufs {
         match self.merged {
-            Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, refl, motion, direct, lists),
-            None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), refl, motion, direct, lists),
+            Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, view),
+            None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), view),
         }
     }
 
-    /// For a cache of `entries` and the live passes' four of these bytes.
+    /// For a cache of `entries` and a view's five of these bytes (`VIEW_BUFFERS`).
     /// `guard`: the layout as written has the guard's count (`Gpu::guard_room`).
-    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> KernelBufs {
+    pub fn new(d: &wgpu::Device, merged: bool, guard: bool, entries: u64, view: [u64; 5]) -> KernelBufs {
         if !merged {
             let guard = guard.then(|| Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some("loop guard"), size: crate::merged::GUARD_WORDS as u64 * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })));
-            return KernelBufs::separate(d, CacheBuffers::new(d, entries), guard, refl, motion, direct, lists);
+            return KernelBufs::separate(d, CacheBuffers::new(d, entries), guard, view);
         }
         // (The cache's keys and sums are as long as the kernel's struct says, whatever `entries`: `live_sizes`. A
         // section's range is the bytes asked for: a pass that binds it sees an array of that length.)
-        let bytes = live_sizes(entries, refl, motion, direct, lists);
+        let bytes = live_sizes(entries, view);
         let heap = Heap::<Live>::new(d, &bytes);
         let b = |s: Live| Buf { buffer: heap.buffer.clone(), offset: heap.at(s), size: bytes[s.index()] };
-        KernelBufs { cache: CacheBuffers { keys: b(Live::CacheKeys), acc: b(Live::CacheAcc), val: b(Live::CacheVal) }, refl: b(Live::Refl), motion: b(Live::Motion), direct: b(Live::Direct), lists: b(Live::Lists), deferred: None, guard: Some(b(Live::Guard)), merged: Some(heap) }
+        KernelBufs { cache: CacheBuffers { keys: b(Live::CacheKeys), acc: b(Live::CacheAcc), val: b(Live::CacheVal) }, refl: b(Live::Refl), motion: b(Live::Motion), direct: b(Live::Direct), lists: b(Live::Lists), first: b(Live::First), deferred: None, guard: Some(b(Live::Guard)), merged: Some(heap) }
     }
 
     /// Where the kernel finds the vec4 sections in the merged layout (`Params::live_first`, `live_len`): written with
@@ -1622,7 +1626,7 @@ impl KernelBufs {
     pub fn place(&self, p: &mut Params) {
         let Some(heap) = &self.merged else { return };
         let first = |s: Live| ((heap.at(s) - heap.at(Live::CacheVal)) / 16) as u32;
-        p.live_first = [[first(Live::CacheVal), first(Live::Refl), first(Live::Motion), first(Live::Direct)], [first(Live::Lists), 0, 0, 0]];
+        p.live_first = [[first(Live::CacheVal), first(Live::Refl), first(Live::Motion), first(Live::Direct)], [first(Live::Lists), first(Live::First), (self.first.size / 16) as u32, 0]];
         p.live_len = [&self.refl, &self.motion, &self.direct, &self.lists].map(|b| (b.size / 16) as u32);
     }
 }
@@ -1632,17 +1636,22 @@ pub fn deferred_buffer(d: &wgpu::Device, records: u64) -> Buf {
     Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some("deferred"), size: 16 + records.max(1) * DEFERRED_BYTES, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }))
 }
 
+/// The kernel's buffers that follow a view's size, in the order their bytes are given: the specular-lobe rays, the
+/// motion vectors, the direct light, the light tiles' lists, the camera hits.
+pub const VIEW_BUFFERS: [&str; 5] = ["refl", "motion", "direct", "light lists", "first hits"];
+
 /// The bytes of the merged layout's group-1 buffer's sections (`heap::Live`'s order) for a cache whose values are
-/// `entries` long and the live passes' four of these bytes. The cache's keys and sums and the loop guard's count are
+/// `entries` long and a view's five of these bytes. The cache's keys and sums and the loop guard's count are
 /// members of the kernel's struct, of the kernel's lengths (pathtrace.wgsl `MergedLive`).
-pub(crate) fn live_sizes(entries: u64, refl: u64, motion: u64, direct: u64, lists: u64) -> [u64; 8] {
-    [CACHE_SIZE * 4, CACHE_SIZE * 32, crate::merged::GUARD_WORDS as u64 * 4, entries * 32, refl, motion, direct, lists]
+pub(crate) fn live_sizes(entries: u64, view: [u64; 5]) -> [u64; 9] {
+    [CACHE_SIZE * 4, CACHE_SIZE * 32, crate::merged::GUARD_WORDS as u64 * 4, entries * 32, view[0], view[1], view[2], view[3], view[4]]
 }
 
 /// Group-1 bind group of the kernel: the radiance cache and the reflection resolve's inputs (`KernelBufs`); in the
 /// merged layout, the one buffer.
-/// `deferred`: with `finish`'s records (`live_layout`; the translucency pass's `tl_live_layout` is without).
-pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, deferred: bool) -> wgpu::BindGroup {
+/// `paths`: with what the paths' passes alone use, `finish`'s records and the camera hits (`live_layout`; the
+/// translucency pass's `tl_live_layout` is without).
+pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, paths: bool) -> wgpu::BindGroup {
     fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry { binding, resource: b.binding() }
     }
@@ -1650,7 +1659,8 @@ pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &Ker
         Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &[wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
         None => {
             let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
-            entries.extend(b.deferred.as_ref().filter(|_| deferred).map(|r| e(crate::merged::DEFERRED_BINDING, r)));
+            entries.extend(b.deferred.as_ref().filter(|_| paths).map(|r| e(crate::merged::DEFERRED_BINDING, r)));
+            entries.extend(paths.then(|| e(crate::merged::FIRST_BINDING, &b.first)));
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
             d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &entries })
         }
@@ -2167,12 +2177,12 @@ impl Gpu {
                 layout_entry(6, storage_buffer(true)),
             ],
         });
-        let no_live_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, 64, 64, 64, 64);
+        let no_live_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, [64; 5]);
         let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, true);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&live_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl) = if hwrt {
             let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucent"), entries: &tl_entries });
-            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || e.binding != crate::merged::DEFERRED_BINDING).copied().collect();
+            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || ![crate::merged::DEFERRED_BINDING, crate::merged::FIRST_BINDING].contains(&e.binding)).copied().collect();
             let vl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live, translucent"), entries: &tl_vis });
             let tpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("translucent"), bind_group_layouts: &[Some(&layout), Some(&vl), Some(&l)], immediate_size: 0 });
             let nv = live_bind_group(&device, &vl, &no_live_bufs, false);
@@ -2236,8 +2246,9 @@ impl Gpu {
         self.kernel_passes.lock().unwrap().keys().map(|k| k.2).collect()
     }
 
-    /// A live pass of a scene's kernel variant beside `main`: `finish` (the pixels a sample's trace left), `media_train`
-    /// (the volume voxels) or `media_composite` (camera rays through media, after the trace).
+    /// A live pass of a scene's kernel variant beside `main`: `first_hit` (the frame's camera rays, before its paths),
+    /// `finish` (the pixels a sample's trace left), `media_train` (the volume voxels) or `media_composite` (camera
+    /// rays through media, after the trace).
     pub fn kernel_pass(&self, k: &Kernel, entry: &'static str) -> wgpu::ComputePipeline {
         let (p, made) = self.maker().pass(k, entry, self.cache());
         if made {
