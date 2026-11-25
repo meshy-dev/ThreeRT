@@ -1,13 +1,11 @@
 //! What a ray costs under software traversal, counted on the CPU (no GPU): the kernel's walks as units.rs transcribes
-//! them, over a bundle's scene as `prepare` lays it out, with units and flattened, for the same rays (a frame's kinds:
-//! the camera's, shadow rays to a far and to a near light, one bounce and its shadow rays). Counted per ray: the loop
-//! iterations (what the loop guard counts), the nodes read of each tree, the triangles tested, the unit records read.
-//! The rays are made once from the flattened scene and kept (`/tmp/units-cost`), with its answers: every layout must
-//! give them again.
+//! them, over a bundle's scene as `prepare` lays it out, for a frame's kinds of rays (the camera's, shadow rays to a
+//! far and to a near light, one bounce and its shadow rays). Counted per ray: the loop iterations (what the loop
+//! guard counts), the nodes read of each tree, the triangles tested, the unit records read. The rays are made once
+//! and kept (`/tmp/units-cost`), with their answers: every layout must give them again.
 //!
 //!   UNITS_COST=out/bundles/bistro.js cargo test --release --lib units_cost -- --ignored --nocapture
 //!
-//! `UNITS_COST_FLAT=1`: the flattened scene's counts too (it is built anyway when the rays are not there yet).
 //! `UNITS_COST_VIEW=WxH` (192x108). `UNITS_COST_ASSETS` (`.`).
 use crate::units::cpu::{Kernel, Reads, INF, NO_INST, TRACE_CLOSEST, TRACE_SHADOW};
 use crate::{bvh, default_presets_dir, prepare_as, scene, units};
@@ -41,11 +39,11 @@ struct Ray {
     kind: u32,
 }
 
-fn lay(world: &crate::world::World, assets: &std::path::Path, with_units: bool) -> (Laid, scene::Scene) {
+fn lay(world: &crate::world::World, assets: &std::path::Path) -> (Laid, scene::Scene) {
     let mut sc = scene::build(world, assets, &default_presets_dir(), None).unwrap();
     let (flat, placed) = (sc.tris.len(), sc.instances.iter().map(|i| sc.meshes[i.mesh as usize].count as usize).sum::<usize>());
     let t = Instant::now();
-    let p = prepare_as(false, with_units, &mut sc, &mut vec![]);
+    let p = prepare_as(false, &mut sc, &mut vec![]);
     let s = t.elapsed().as_secs_f64();
     let (top, count) = (p.params.motion[2].to_bits(), p.params.motion[3].to_bits());
     let stored = p.tri_verts.len() / 3;
@@ -233,22 +231,14 @@ fn units_cost() {
     let world = host.world.borrow();
     let stem = std::path::Path::new(&bundle).file_stem().unwrap().to_string_lossy().to_string();
     let kept = std::path::PathBuf::from(format!("/tmp/units-cost/{stem}-{view}.rays"));
-    let mut base = std::fs::read_to_string(kept.with_extension("flat")).ok().and_then(|s| s.trim().parse::<f64>().ok());
-    if !kept.exists() || std::env::var("UNITS_COST_FLAT").is_ok() {
-        let (flat, sc) = lay(&world, &assets, false);
-        if !kept.exists() {
-            std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-            std::fs::write(&kept, bytemuck::cast_slice::<Ray, u8>(&rays(&flat, &sc.camera, w, h))).unwrap();
-        }
-        let rays: Vec<Ray> = bytemuck::pod_collect_to_vec(&std::fs::read(&kept).unwrap());
-        let b = report(&format!("{stem}, flattened"), &flat, &rays, w * h, None);
-        std::fs::write(kept.with_extension("flat"), format!("{b}")).unwrap();
-        base = Some(b);
+    let (with, mut sc) = lay(&world, &assets);
+    if !kept.exists() {
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, bytemuck::cast_slice::<Ray, u8>(&rays(&with, &sc.camera, w, h))).unwrap();
     }
     let rays: Vec<Ray> = bytemuck::pod_collect_to_vec(&std::fs::read(&kept).unwrap());
-    let (with, mut sc) = lay(&world, &assets, true);
     let Some(u) = sc.units.as_mut() else { return println!("{stem}: no units") };
-    report(&format!("{stem}, units"), &with, &rays, w * h, base);
+    report(&format!("{stem}, units"), &with, &rays, w * h, None);
     // The top tree: its build's time, its depth, its cost by the surface-area measure.
     let (mut ms, mut refit) = (vec![], vec![]);
     let mut top = vec![];
@@ -332,7 +322,7 @@ fn units_pile() {
     let stem = std::path::Path::new(&bundle).file_stem().unwrap().to_string_lossy().to_string();
     let mut base = None;
     for &n in &ns {
-        let (mut l, mut sc) = lay(&world, &assets, true);
+        let (mut l, mut sc) = lay(&world, &assets);
         let Some(mut u) = sc.units.take() else { return println!("{stem}: no units") };
         let own = u.count as usize;
         // Room: the top tree's range is the node buffer's last, the records' table is this probe's own.

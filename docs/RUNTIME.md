@@ -1192,14 +1192,12 @@ ROADMAP § 6 steps 7b and 7c. **Status: runs natively and in Chrome on this mach
 with the loop guard, which stopped nothing). Step 7b brought the edits and the memory; a still frame then paid for
 them (the trace 37 % / 71 % / 16 % longer on the three scenes below), and step 7c took that cost out.
 
-**Where units are used.** In a live session and in a browser (the wasm build), by default. **An offline render
-(`threert-render render`) under software traversal flattens every instance, as before step 7b: its kernel and its
-bytes are main's with nothing set.** `THREERT_UNITS=1` gives an offline render units; `THREERT_UNITS=0` flattens a
-live session too (the A/B). Why the line is there (decided 2026-11-11):
-- an offline render under software traversal is the reference render, and what the catalog's byte gate compares; the
-  gate runs with no variable set, and stays a comparison with main's bytes;
-- what units give (the triangle data of each mesh held once, a faster load, edits in place) is what a session that
-  edits and a browser need; an offline render builds its scene once and edits nothing.
+**Where units are used.** Wherever software traversal is (since 2026-11-25): a session, a browser and an offline
+render alike. Until then an offline render flattened every instance into world-space triangles (the line drawn
+on 2026-11-11, to keep its bytes main's while units were new), and `THREERT_UNITS` chose; what follows that names
+the flattened scene or the variable is of that time. An instance of a mesh without a tree is no unit and is not
+drawn: a particle system's (its pass is hardware traversal's), a mesh with a vertex that is not a number (said).
+A scene with more instances than the top tree holds (262,144) draws none of them, and says so.
 
 **What a still frame costs** (software traversal, live, 1280 × 720 traced at half, this machine, guard on in both
 columns; "Measured: the still frame" at the end of this section has every step between the two):

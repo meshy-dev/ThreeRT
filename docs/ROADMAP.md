@@ -2920,6 +2920,19 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**Software traversal has units alone (2026-11-25, after it).** An offline render under software traversal
+flattened every instance into world-space triangles (kept so on 2026-11-11, for its bytes to stay main's while
+units were new), and so did a scene with a mesh no tree could be made of or with more instances than a top tree
+holds. Now `prepare` gives software traversal units wherever it is, an offline render's bytes change once, and
+`THREERT_UNITS`, `flatten_instances` and `flatten_deforming` are gone: an instance of a mesh without a tree is
+no unit (a particle system's; a mesh with a vertex that is not a number, which is said). Measured before, offline
+(480 x 270, this machine): the trace 4 to 5 % longer on the large single models and a crowd of 792 instances,
+equal on 812 small ones; the tree build 1.2 to 8 times shorter and the triangle data 10 to 80 % less; the picture
+hardware traversal's (2.4 steps apart a pixel at 128 samples, where the flattened one was 10 from both); a render
+repeats byte for byte. A kernel with units has the loop guard by default, an offline render's too now: about
+10 % of its trace. The rays' test of a prepared scene (`a_scene_with_units_is_its_triangles_to_every_ray`) holds
+the walk to every placed triangle tested one by one, where it held it to the flattened scene's walk.
+
 **The build flattens nothing (2026-11-25, after them).** The last two things it flattened:
 - A posed skinned model with triangles that emit was flattened whole and skinned on the CPU. It is a skinned
   instance as any other, and the triangles are its instance's emitters: at a new pose the light list's copies are

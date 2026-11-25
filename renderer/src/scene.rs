@@ -3042,7 +3042,7 @@ mod instance_tests {
         // Each row has its card's own material, which emits; the emitters are the instances'.
         let mats: Vec<u32> = [&a, &b].iter().map(|i| row_material(&sc.rows[i.rows as usize])).collect();
         assert!(mats[0] != mats[1] && mats.iter().all(|&k| sc.materials[k as usize].tex1[2] == MAT_EMITTER_CARD) && sc.retained.proxies[&1].card == Some(mats[0]));
-        let p = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let p = crate::prepare_as(true, &mut sc, &mut vec![]);
         // (A card no ray sees keeps its place in the list, as every hidden instance: its object has no power.)
         assert_eq!(p.emitter_tris.len(), 6, "two triangles a card");
         assert!(p.emitter_tris.iter().all(|e| e.card && e.inst != crate::NO_INST) && p.gpu_emitter_tris.iter().all(|e| e.flags == crate::EMITTER_CARD));
@@ -3069,7 +3069,7 @@ mod instance_tests {
         assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits)).collect::<Vec<_>>(), [(0, 0), (1, 0), (2, 0), (3, 0)], "a row a copy");
         let (st, first) = (sc.object_stride(), sc.retained.instanced(2).unwrap().object as usize);
         assert_eq!((0..4).map(|i| sc.objects[(first + i) * st][3]).collect::<Vec<_>>(), [2.0, 2.0, 0.0, 0.0], "a hidden copy's entry has no power");
-        let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let prep = crate::prepare_as(true, &mut sc, &mut vec![]);
         let e = &prep.emitter_tris;
         assert_eq!(e.iter().map(|e| (e.inst, e.obj as usize - first, e.moves, e.area)).collect::<Vec<_>>(), [(0, 0, true, 2.0), (1, 1, true, 0.5), (2, 2, true, 0.5), (3, 3, true, 0.5)]);
         assert_eq!(sc.instances.iter().map(|i| i.first_emitter).collect::<Vec<_>>(), [0, 1, 2, 3]);
@@ -3199,7 +3199,7 @@ mod instance_tests {
             assert_eq!(classes, [0, ROW_CUTOUT, ROW_GLASS], "an opaque, a cutout and a glass section");
             assert_eq!(mine, &sc.retained.mesh_rows[&i.mesh][..], "the mesh's rows, the file's materials");
         }
-        crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        crate::prepare_as(true, &mut sc, &mut vec![]);
         for (r, i) in sc.gpu_instances.iter().zip(&sc.instances) {
             assert_eq!(r.info[3], i.rows, "the record has its rows' first");
             assert_eq!(sc.rows[i.rows as usize..][..3].iter().map(|row| row[1] - r.info[0]).collect::<Vec<_>>(), [0, 2, 4], "a row has where its section starts");
@@ -3258,7 +3258,7 @@ mod instance_tests {
         let m = sc.meshes[a.mesh as usize];
         let glow = rows_emitters(m.sections(&sc.sections), &sc.rows[a.rows as usize..][..m.sect_count as usize], &sc.materials);
         assert!(glow > 0 && glow < m.count, "its emitting half: {glow} of {} triangles", m.count);
-        let p = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let p = crate::prepare_as(true, &mut sc, &mut vec![]);
         let pool_first = sc.attrs.len() - sc.pool_tris.len();
         let mine: Vec<usize> = (0..p.emitter_tris.len()).filter(|&i| p.emitter_tris[i].inst == 0).collect();
         assert_eq!(mine.len() as u32, glow, "its instance's emitters");
@@ -3367,7 +3367,7 @@ mod instance_tests {
         }
         // Its emitters are its instances': the part left alone's two triangles a placement, still ones (in the light
         // tree) until the object first moves.
-        let prep = crate::prepare_as(true, false, &mut sc, &mut vec![]);
+        let prep = crate::prepare_as(true, &mut sc, &mut vec![]);
         let of = |id: u32| { let r = rigid(&sc, id); prep.emitter_tris.iter().filter(|e| Some(e.inst) == r.still).map(|e| e.moves).collect::<Vec<bool>>() };
         assert_eq!((of(1), of(2)), (vec![false; 2], vec![false; 2]));
     }

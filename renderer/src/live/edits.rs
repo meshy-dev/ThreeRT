@@ -2748,9 +2748,9 @@ impl LiveCore {
         let grow = Grow { g: &self.g, ok: up.particles.is_none() && up.gpu_particles.is_none() };
         // (Hardware traversal's TLAS and BLASes, or software traversal's units: `gpu::Top`.)
         let Some(mut top) = gpu::Top::of(&mut up.accel, &mut up.units) else {
-            // Software traversal without units. With units on, that is a scene without an instance yet: the first
-            // one brings the unit walk into the kernel (F_UNITS), as hardware traversal's first brings F_INST.
-            let first = crate::units_on(true) && ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. })));
+            // Software traversal without units: a scene without an instance yet. The first one brings the unit walk
+            // into the kernel (F_UNITS), as hardware traversal's first brings F_INST.
+            let first = ch.added.iter().any(|id| matches!(world.objects.get(id).map(|o| &o.kind), Some(Kind::Mesh { .. } | Kind::Instanced { procedural: false, .. })));
             return Err(if first { "the scene's first instanced mesh (kernel feature)" } else { "software traversal" }.into());
         };
         // The objects to place again: those added, and those whose geometry was replaced.

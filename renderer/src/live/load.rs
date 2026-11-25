@@ -240,7 +240,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (Software traversal with units edits in place as hardware traversal does: `units_wanted`.)
     sc.emitter_slot = gpu::EditRoom::editable(&sc, g.hwrt || crate::units_wanted(g.hwrt, &sc));
     let mut timings = vec![("build_ms".to_string(), t0.elapsed().as_secs_f64() * 1000.0)];
-    let mut prep = crate::prepare_live(g, &mut sc, &mut timings);
+    let mut prep = crate::prepare(g, &mut sc, &mut timings);
     let mut tables = tables::Tables::new(&sc, std::mem::take(&mut prep.emitter_tris), prep.light_tree.take());
     // (THREERT_EDIT_REBUILD=1: every edit rebuilds, a material that starts emitting too: the A/B.)
     tables.emit_in_place = std::env::var("THREERT_EDIT_REBUILD").map_or(true, |v| v != "1");

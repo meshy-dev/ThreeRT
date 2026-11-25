@@ -354,7 +354,7 @@ fn a_ray_that_meets_an_emitter_weighs_it_by_that_triangles_entry() {
         let mut sc = scene::build(&emitters_world(apart), Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         (sc.width, sc.height) = (96, 54);
         // (Under software traversal with units, as a live view has the scene.)
-        let prep = crate::prepare_as(g.hwrt, true, &mut sc, &mut vec![]);
+        let prep = crate::prepare_as(g.hwrt, &mut sc, &mut vec![]);
         let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 64, &mut vec![]).unwrap();
         BESIDE_EMITTERS.map(|[x0, y0, x1, y1]| (y0..y1).flat_map(|y| (x0..x1).map(move |x| y * 96 + x)).map(|k| frame.color[k].iter().sum::<f32>() as f64).sum::<f64>() / (3 * (x1 - x0) * (y1 - y0)) as f64)
     };
@@ -761,7 +761,7 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
         (sc.width, sc.height) = (96, 54);
         // (Under software traversal with units, as a live view has the scene: without them the model is flattened
         // into world-space triangles with the CPU's normals.)
-        let prep = crate::prepare_as(g.hwrt, true, &mut sc, &mut vec![]);
+        let prep = crate::prepare_as(g.hwrt, &mut sc, &mut vec![]);
         (sc, prep)
     };
     // The mesh's triangles whose three vertices have no normal, as the instance places them: the largest.

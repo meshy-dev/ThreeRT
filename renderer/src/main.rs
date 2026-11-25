@@ -267,7 +267,7 @@ fn main() -> Result<()> {
             let w = host.world.borrow();
             let tb = Instant::now();
             let mut sc = scene::build(&w, &assets, &presets, None)?;
-            let prep = threert_render::prepare_as(true, false, &mut sc, &mut vec![]);
+            let prep = threert_render::prepare_as(true, &mut sc, &mut vec![]);
             let prepare_ms = tb.elapsed().as_secs_f64() * 1000.0;
             // Same counts the render stats report (scene.rs `stats`): flat + instanced triangles.
             let triangles = sc.stats.get("triangles").map_or(sc.tris.len() as u64, |t| *t as u64);
