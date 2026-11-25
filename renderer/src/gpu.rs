@@ -1576,8 +1576,9 @@ pub struct KernelBufs {
     pub motion: Buf,
     pub direct: Buf,
     pub lists: Buf,
-    /// A live frame's camera hits, 64 bytes a traced pixel (pathtrace.wgsl `first_store`, and a mirror chain's
-    /// transform after them, `first_xform`): its first pass writes them, its paths start from them.
+    /// A live frame's camera hits, 32 bytes a traced pixel (pathtrace.wgsl `first_store`), and in a scene with a
+    /// mirror 96 more for a mirror chain (`Chain`): its first pass writes them, its paths start from them. Of the
+    /// view's size at 32 bytes until a frame makes it for what it traces (`with_first`).
     pub first: Buf,
     /// The pixels a sample's trace leaves for `finish` (their count, then `DEFERRED_BYTES` each): the layout as
     /// written only. Of one record until a live view makes it for its traced size (`deferred_buffer`).
@@ -1603,6 +1604,26 @@ impl KernelBufs {
         match self.merged {
             Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, view),
             None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), view),
+        }
+    }
+
+    /// These with the camera hits' buffer of `bytes`. As written that buffer alone is another; the merged layout's
+    /// are one buffer, all of it made again (the cache, as long, empty).
+    pub fn with_first(&self, d: &wgpu::Device, bytes: u64) -> KernelBufs {
+        let view = [self.refl.size, self.motion.size, self.direct.size, self.lists.size, bytes];
+        match self.merged {
+            Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, view),
+            None => KernelBufs {
+                cache: self.cache.clone(),
+                refl: self.refl.clone(),
+                motion: self.motion.clone(),
+                direct: self.direct.clone(),
+                lists: self.lists.clone(),
+                first: Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(VIEW_BUFFERS[4]), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })),
+                deferred: self.deferred.clone(),
+                guard: self.guard.clone(),
+                merged: None,
+            },
         }
     }
 

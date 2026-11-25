@@ -1726,19 +1726,22 @@ split alone +0.4 % of a frame's GPU time, within the runs' spread (two of them +
 first pass evaluating the surface too, for the guides, +5 %.
 
 A pixel on a mirror has the surface the mirror shows. Where the camera hit has a mirror's lobe alone (roughness
-under 0.025, metalness 1, no glass, no coat), `first_hit` follows the reflection, through 8 mirrors at most and no more than a path has bounces, and records
-the chain: its length with the hit, its transform after the hits (64 bytes a traced pixel in all). `main` passes
-the chain's mirrors by their reflection, each taking a bounce, and gives the surface the last one shows the camera
-hit's place: the guides (its distance the whole way along the camera ray; its normal and its motion vector as the
-pixel sees them, turned by the chain; its albedo times the mirrors' tint), the light seen directly, the signals'
-split, the path's end in the cache a bounce later. So the filters, the reprojection and the upscaler take a
-mirror as a window onto what it shows. The camera's own hit stays in the record: the translucency pass and the
-media read its distance, since a mirror hides what is behind it. `main` walks the chain again where it could start
-past it, because fog and media are a segment's own in its loop. The material decides: one whose own roughness and
-metalness say a mirror (`mirror_possible`; a scene with such a material has the feature `F_MIRROR`, and another
-scene's kernel none of this code). Only there does the first pass read a surface's textures and function; a
-material that is a mirror by its texture or its function alone is not followed, nor is procedural geometry. A
-curved mirror's motion vectors are a flat one's.
+under 0.025, metalness 1, no glass, no coat), `first_hit` follows the reflection, through 8 mirrors at most and no
+more than a path has bounces, and records the chain (`Chain`, 96 bytes more a traced pixel in a scene with a
+mirror): the hit the last mirror shows and where its ray starts, the chain's transform, what the mirrors and the
+segments between them leave of the light (the mirrors' Fresnel reflectance; fog, haze and water as any later
+segment has them) and the light they add. `main` has the camera's own segment as ever, then starts its path at the
+surface shown, in the camera hit's place: the guides (its distance the whole way along the camera ray; its normal
+and its motion vector as the pixel sees them, turned by the chain; its albedo times the chain's weight), the light
+seen directly, the signals' split, the path's end in the cache a bounce later; each mirror takes one of the
+path's bounces. So the filters, the reprojection and the upscaler take a mirror as a window onto what it shows.
+The camera's own hit stays in the record: the translucency pass and the media read its distance, since a mirror
+hides what is behind it. The material decides: one whose own roughness and metalness say a mirror
+(`mirror_possible`; a scene with such a material has the feature `F_MIRROR`, and another scene's kernel none of
+this code). Only there does the first pass read a surface's textures and function; a material that is a mirror by
+its texture or its function alone is not followed, nor is procedural geometry. A curved mirror's motion vectors
+are a flat one's. Measured on twelve heavy clips with the feature forced on: `main` walking the chain itself, a
+step in the middle of its loop, 3 to 5 % of a frame; the first pass walking it, 0.2 %.
 
 Where a path ends in the cache, `main` takes only what a warm voxel holds. The pixels with more to trace there (a
 training path, a cold voxel's estimate, a reflection hit's lights) leave a record of 96 bytes, and a second pass

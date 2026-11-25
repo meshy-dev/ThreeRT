@@ -111,7 +111,7 @@ pub struct Targets {
 /// What a view of `w` x `h` holds of each of the kernel's buffers that follow its size, bytes (`gpu::VIEW_BUFFERS`).
 fn kernel_bytes(w: u32, h: u32) -> [u64; 5] {
     let n = (w * h) as u64;
-    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16, n * 64]
+    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16, n * 32]
 }
 
 impl Targets {
@@ -150,6 +150,13 @@ impl Targets {
         };
         t.bgs = t.bind_groups(d, passes);
         t
+    }
+
+    /// The kernel's buffers with the camera hits' of `bytes` (`gpu::KernelBufs::with_first`), and the passes' bind
+    /// groups over them (the merged layout's sections are all in another buffer then).
+    pub(super) fn grow_first(&mut self, g: &gpu::Gpu, passes: &Passes, bytes: u64) {
+        self.kernel = self.kernel.with_first(&g.device, bytes);
+        self.bgs = self.bind_groups(&g.device, passes);
     }
 
     /// For another size: what follows it is made again (the samples, the passes' own buffers and the output, the

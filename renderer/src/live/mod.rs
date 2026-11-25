@@ -821,6 +821,18 @@ impl LiveCore {
         (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
     }
 
+    /// Room for a frame's camera hits at `pixels` traced pixels: 32 bytes each, and 96 more for a mirror chain in a
+    /// scene that has a mirror (`gpu::F_MIRROR`; pathtrace.wgsl `Chain`: without the room the first pass follows no
+    /// mirror). The buffer follows the traced size, a quarter larger than asked, as `finish`'s records do.
+    pub(super) fn ensure_first(&mut self, pixels: u64) {
+        let each = if self.sc.up.kernel.features & gpu::F_MIRROR != 0 { 128 } else { 32 };
+        if self.targets.kernel.first.size >= pixels * each {
+            return;
+        }
+        self.targets.grow_first(&self.g, &self.passes, (pixels + pixels / 4).min(self.w as u64 * self.h as u64) * each);
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
+    }
+
     /// The view at another size (its host's window, in pixels): the targets that follow the size are made again
     /// (`Targets::resize`) and bound, the scene with the new samples' buffer; the frames' histories start again. The
     /// scene's data, the radiance cache (the world's), the view's camera, state and render scale stay. A size this
