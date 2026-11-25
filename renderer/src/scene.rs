@@ -1273,7 +1273,7 @@ fn bytes_key(kind: &str, bytes: &[u8]) -> String {
 }
 
 /// Decoded texture image + its cache identity (files: path version; generated: the bytes' content).
-fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image::RgbaImage>)> {
+pub fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image::RgbaImage>)> {
     match &t.source {
         world::TextureSource::File(uri) => {
             let path = crate::files::asset_path(assets, uri);
@@ -1298,6 +1298,31 @@ fn texture_image(t: &world::Texture, assets: &Path) -> Result<(String, Arc<image
 }
 
 /// A model file (cached per file version).
+/// Still models' triangles read ahead (`prepare_triangles`, a game's `preloadModel` with the node sets it will add):
+/// by (uri, nodes), taken by the first model added in place that wants them (live/edits.rs).
+#[allow(clippy::type_complexity)]
+static PREPARED: std::sync::Mutex<Option<HashMap<(String, Option<Vec<String>>), Vec<skin::ModelTri>>>> = std::sync::Mutex::new(None);
+
+/// The model's triangles for `nodes` (all of them: None), read now (a worker thread's job) for a model of them added
+/// later in place: that commit then only sorts them by material and places them.
+pub fn prepare_triangles(uri: &str, assets: &Path, nodes: Option<Vec<String>>) -> Result<()> {
+    let glb = model_gltf(uri, assets)?;
+    let t = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), None)?;
+    let mut c = PREPARED.lock().unwrap();
+    let c = c.get_or_insert_with(HashMap::new);
+    // (bounded: what was read and never added goes)
+    if c.len() > 4096 {
+        c.clear();
+    }
+    c.insert((uri.to_string(), nodes), t);
+    Ok(())
+}
+
+/// Triangles `prepare_triangles` read for (uri, nodes), if it has: taken.
+pub fn take_prepared(uri: &str, nodes: &Option<Vec<String>>) -> Option<Vec<skin::ModelTri>> {
+    PREPARED.lock().unwrap().as_mut()?.remove(&(uri.to_string(), nodes.clone()))
+}
+
 pub fn model_gltf(uri: &str, assets: &Path) -> Result<Arc<skin::Model>> {
     let path = crate::files::asset_path(assets, uri);
     cached_gltf(&file_key(&path), || skin::Model::new(import_gltf(&path).with_context(|| format!("asset {uri}"))?))
@@ -1346,6 +1371,13 @@ pub fn build_material(id: u32, m: &desc::Material, textures: &HashMap<u32, world
 
 /// A material function's binding on a GPU material: the function, its 32 parameters and its textures (`tex(texture,
 /// sRGB requested)`).
+/// What a model's materials and meshes are kept under (`Retained::asset_materials`, `model_mesh`): its file, with its
+/// material functions if it has any (its materials are its own copies of the file's then, and placements share a mesh
+/// only with the same functions).
+pub fn model_key(uri: &str, functions: &[desc::ModelFunction]) -> String {
+    if functions.is_empty() { uri.to_string() } else { format!("{uri}\u{0}{functions:?}") }
+}
+
 pub fn apply_shader(gm: &mut GpuMaterial, sh: &desc::ShaderRef, shaders: &HashMap<String, i32>, tex: &mut dyn FnMut(u32, bool) -> Result<i32>) -> Result<()> {
     let f = *shaders.get(sh.id.as_str()).ok_or_else(|| anyhow!("unknown material function {}", sh.id))?;
     gm.tex1[3] = f + 1;
@@ -1832,7 +1864,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                 let glb = model_gltf(uri, assets)?;
                 let (doc, _, images) = &glb.gltf;
                 // (A model with material functions has its own copies of the file's materials.)
-                let key = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+                let key = model_key(uri, functions);
                 // (Its meshes too: placements share a mesh only with the same functions.)
                 let mesh_key = (key.clone(), nodes.clone());
                 // A material of the file: its index, its class in a mesh (`mesh_class`), whether it only emits.
@@ -1961,7 +1993,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                         let (order, sects, mine) = model_sections(&kept(&classed));
                         // (The model's corners in its mesh's order: one copy for every placement of the model.)
                         let mirrors = glb.mirrored(Some(a))?;
-                        let file = if functions.is_empty() { uri.clone() } else { format!("{uri}\u{0}{functions:?}") };
+                        let file = model_key(uri, functions);
                         let skey = (file, nodes.clone(), mirrors.clone());
                         let (source, tri_order) = match skin_source_of.get(&skey) {
                             Some(s) => s.clone(),
@@ -2463,11 +2495,15 @@ pub fn split_coincident(classed: &mut [Vec<(usize, u32)>; 4], emitting: &std::co
         v.sort_unstable();
         v
     };
-    type Keys = std::collections::HashSet<[[u32; 3]; 3]>;
-    let emitters: Keys = classed[0].iter().filter(|(_, mat)| emitting.contains(mat)).map(|&(k, _)| key(k)).collect();
-    let under: Keys = classed[..2].iter().flatten().map(|&(k, _)| key(k)).collect();
+    type Keys = crate::indexed::FastSet<[[u32; 3]; 3]>;
+    // (each class's keys made only where it has triangles to check: most models have no cutout and no glass)
+    let emitters: Keys = if classed[1].is_empty() { Keys::default() } else { classed[0].iter().filter(|(_, mat)| emitting.contains(mat)).map(|&(k, _)| key(k)).collect() };
+    let under: Keys = if classed[2].is_empty() { Keys::default() } else { classed[..2].iter().flatten().map(|&(k, _)| key(k)).collect() };
     let mut over = vec![];
     for (class, on) in [(1, &emitters), (2, &under)] {
+        if on.is_empty() {
+            continue;
+        }
         let (stay, go): (Vec<_>, Vec<_>) = classed[class].iter().partition(|&&(k, _)| !on.contains(&key(k)));
         classed[class] = stay;
         over.extend(go.into_iter().map(|(k, mat)| (k, mat, class as u32)));

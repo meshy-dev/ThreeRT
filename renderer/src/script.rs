@@ -395,6 +395,33 @@ fn install_engine<'js>(ctx: &Ctx<'js>, world: &Rc<RefCell<World>>, voxels: &Rc<R
         let bytes = read_asset(&path, range).map_err(|e| fail(&ctx, e))?;
         rquickjs::ArrayBuffer::new(ctx, bytes)
     })?)?;
+    // preloadModel(uri, nodeSets?): the model file parsed on a worker thread into the process's parse cache (its
+    // buffers, images and tangents), and the triangles of each node set (JSON: [["a", "b"], ...]; null: the whole
+    // model) read, so a still GLTFModel of them added later in place does neither in that frame's commit (a streamed
+    // city's far tiles: ~30-90 ms each). False for a path outside the asset root or node sets that are no such list.
+    e.set("preloadModel", Function::new(ctx.clone(), move |uri: String, sets: rquickjs::function::Opt<String>| -> bool {
+        let p = std::path::Path::new(&uri);
+        if !p.is_relative() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return false;
+        }
+        let sets: Vec<Option<Vec<String>>> = match sets.0 {
+            Some(j) => match serde_json::from_str(&j) {
+                Ok(v) => v,
+                Err(_) => return false,
+            },
+            None => vec![],
+        };
+        let root = ASSET_ROOT.read().unwrap().clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+        rayon::spawn(move || {
+            if crate::scene::model_gltf(&uri, &root).is_err() {
+                return;
+            }
+            for nodes in sets {
+                let _ = crate::scene::prepare_triangles(&uri, &root, nodes);
+            }
+        });
+        true
+    })?)?;
     let w = world.clone();
     // (…, groups?, colors?): the optional arguments as the rest (rquickjs takes seven parameters at most).
     e.set("geometry", Function::new(ctx.clone(), move |ctx: Ctx<'js>, id: u32, p: TypedArray<f32>, n: TypedArray<f32>, uv: TypedArray<f32>, idx: TypedArray<u32>, rest: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<()> {

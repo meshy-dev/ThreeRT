@@ -1656,15 +1656,21 @@ impl LiveCore {
     fn place_models(&mut self, world: &World, changes: &crate::world::Changes) -> Result<bool> {
         let (mut info, mut view, mut made) = (None, None, false);
         for id in &changes.added {
-            let Some(crate::world::Kind::Model { uri, nodes, functions, .. }) = world.objects.get(id).map(|o| &o.kind) else { continue };
-            if !functions.is_empty() {
+            let Some(crate::world::Kind::Model { uri, nodes, functions, animation }) = world.objects.get(id).map(|o| &o.kind) else { continue };
+            // (A model with material functions: its own copies of the file's materials, the functions' on those that
+            // name them, as the build makes them; only a still one whose functions the scene's kernel has: the rest is
+            // the rebuild's, as `edit_geometry` says.)
+            let shaders = &self.sc.tables.retained.shaders;
+            if !functions.is_empty() && (animation.is_some() || functions.iter().any(|f| !shaders.contains_key(f.shader.id.as_str()))) {
                 continue;
             }
+            let shaders = shaders.clone();
+            let key = scene::model_key(uri, functions);
             let glb = scene::model_gltf(uri, &self.assets)?;
             let (doc, _, images) = &glb.gltf;
             for idx in glb.used_materials(nodes.as_deref()) {
-                let key = (uri.clone(), idx.unwrap_or(usize::MAX));
-                if self.sc.tables.retained.asset_materials.contains_key(&key) {
+                let mkey = (key.clone(), idx.unwrap_or(usize::MAX));
+                if self.sc.tables.retained.asset_materials.contains_key(&mkey) {
                     continue;
                 }
                 let g = &self.g;
@@ -1677,8 +1683,21 @@ impl LiveCore {
                     info = e.info.or(info.take());
                     Ok(e.slot)
                 };
-                let gm = scene::gltf_material(idx.and_then(|i| doc.materials().nth(i)), images, uri, &mut texture, &Default::default())?;
-                self.sc.tables.retained.asset_materials.insert(key, self.sc.tables.materials.len() as u32);
+                let gltf_mat = idx.and_then(|i| doc.materials().nth(i));
+                let name = gltf_mat.as_ref().and_then(|m| m.name()).unwrap_or_default().to_string();
+                let mut gm = scene::gltf_material(gltf_mat, images, uri, &mut texture, &Default::default())?;
+                // The first function whose prefix the material's name starts with, on the glTF shading (its textures
+                // the world's, as the build places them).
+                if let Some(f) = functions.iter().find(|f| name.starts_with(f.prefix.as_str())) {
+                    let assets = &self.assets;
+                    scene::apply_shader(&mut gm, &f.shader, &shaders, &mut |tid, srgb_default| {
+                        let t = world.textures.get(&tid).ok_or_else(|| anyhow::anyhow!("unknown texture {tid}"))?;
+                        let (tkey, img) = scene::texture_image(t, assets)?;
+                        texture((tkey, t.srgb && srgb_default), t.wrap, &mut || Ok(img.clone()))
+                    })
+                    .map_err(|e| e.context(format!("{uri}: material {name}")))?;
+                }
+                self.sc.tables.retained.asset_materials.insert(mkey, self.sc.tables.materials.len() as u32);
                 self.sc.tables.materials.push(gm);
                 made = true;
             }
@@ -2947,9 +2966,12 @@ impl LiveCore {
                     // a posed rigid one, or of a mesh of its own if it is a posed skinned one. A still one the scene
                     // has not got: its mesh is made here, its materials and textures were before (`place_models`); a
                     // posed one the scene has not got is the rebuild's.
-                    if !functions.is_empty() {
-                        return Err("a model with material functions (its materials load with a rebuild)".into());
+                    // (With material functions: a still one whose functions the scene's kernel has, its materials made
+                    // by `place_models`, its mesh kept under the file with its functions, as the build keeps them.)
+                    if !functions.is_empty() && (animation.is_some() || functions.iter().any(|f| !tables.retained.shaders.contains_key(f.shader.id.as_str()))) {
+                        return Err("a model with material functions the scene has not got, or posed (its materials load with a rebuild)".into());
                     }
+                    let key = scene::model_key(uri, functions);
                     if features & gpu::F_INST == 0 || m.determinant() == 0.0 || std::env::var("THREERT_INSTANCING").is_ok_and(|v| v == "0") {
                         return Err("a model the build would flatten (no size, instancing off, or the scene's first instance)".into());
                     }
@@ -3125,17 +3147,36 @@ impl LiveCore {
                         let entry = scene::object_row(m.transform_point3(glam::Vec3::ZERO), o.power, (hi - lo).max(glam::Vec3A::ZERO), o.custom, [1.0; 3]);
                         (None, Placed::Parts(placed), entry)
                     } else {
-                        let mesh = match tables.retained.model_mesh.get(&(uri.clone(), nodes.clone())).copied() {
+                        let mesh = match tables.retained.model_mesh.get(&(key.clone(), nodes.clone())).copied() {
                             Some(k) => k,
                             None => {
                                 // A model the scene has not got: its mesh made here as the build makes it, model-space
                                 // triangles by section, a material of the file (made before: `place_models`).
                                 let t0 = Instant::now();
-                                let local = glb.triangles(glam::Mat4::IDENTITY, nodes.as_deref(), None).map_err(|e| e.to_string())?;
+                                // (read ahead on a worker if the game preloaded them: `preloadModel`)
+                                let local = match scene::take_prepared(uri, nodes) {
+                                    Some(t) => t,
+                                    None => {
+                                        if std::env::var("THREERT_EDIT_LOG").is_ok_and(|v| v == "1") {
+                                            eprintln!("edit: {uri} {nodes:?}: triangles read now (not preloaded)");
+                                        }
+                                        glb.triangles(glam::Mat4::IDENTITY, nodes.as_deref(), None).map_err(|e| e.to_string())?
+                                    }
+                                };
                                 let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
                                 let mut emitting: std::collections::HashSet<u32> = Default::default();
+                                // (each of the file's materials looked up once: the key is the file with its functions)
+                                let mut mat_of: std::collections::HashMap<usize, u32> = Default::default();
                                 for (k, t) in local.iter().enumerate() {
-                                    let mat = *tables.retained.asset_materials.get(&(uri.clone(), t.material.unwrap_or(usize::MAX))).ok_or("a model's material that was not made")?;
+                                    let idx = t.material.unwrap_or(usize::MAX);
+                                    let mat = match mat_of.get(&idx) {
+                                        Some(&m) => m,
+                                        None => {
+                                            let m = *tables.retained.asset_materials.get(&(key.clone(), idx)).ok_or("a model's material that was not made")?;
+                                            mat_of.insert(idx, m);
+                                            m
+                                        }
+                                    };
                                     let gm = &tables.materials[mat as usize];
                                     classed[scene::mesh_class(gm) as usize].push((k, mat));
                                     if scene::emissive(gm) {
@@ -3160,7 +3201,7 @@ impl LiveCore {
                                 let k = make_mesh(&mut cx, data, false, None)?;
                                 new_meshes.push(k);
                                 tables.retained.mesh_rows.insert(k, mine);
-                                tables.retained.model_mesh.insert((uri.clone(), nodes.clone()), k);
+                                tables.retained.model_mesh.insert((key.clone(), nodes.clone()), k);
                                 k
                             }
                         };

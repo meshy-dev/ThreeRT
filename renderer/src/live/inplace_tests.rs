@@ -4825,3 +4825,53 @@ fn density_grids_come_and_change_in_place() {
     check("every volume removed", &mut live, &mut w, &[]);
     assert_eq!((live.g.grids_state(&live.sc.up).0, live.sc.up.kernel.features & (gpu::F_MEDIA | gpu::F_GRID)), (vec![], 0), "no grid: the kernel without its media code");
 }
+
+/// Models with material functions the scene's kernel has come in place (a streamed city's far tiles: each tile's
+/// ground, buildings and windows a model with the city's functions): another of a model the scene has, and one of a
+/// file it has not got, its materials made as a build makes them (its own copies, the function on those its prefix
+/// names), and one with a function that comes in the same commit. Each time no rebuild, and the picture is a build's.
+#[test]
+fn models_with_functions_the_scene_has_come_in_place() {
+    let presets = crate::default_presets_dir();
+    let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let function = |name: &str, rgb: &str| format!("fn mf_{name}(i: MatIn, m: Material, base: MatOut) -> MatOut {{\n    var o = base;\n    o.base = vec3<f32>({rgb});\n    return o;\n}}\n");
+    let tinted = |uri: &str, id: &str| Kind::Model {
+        uri: uri.into(),
+        nodes: None,
+        animation: None,
+        functions: vec![crate::desc::ModelFunction { prefix: String::new(), shader: crate::desc::ShaderRef { id: id.into(), params: vec![], textures: vec![] } }],
+    };
+    let mut w = world();
+    w.set_shader("zz_red", function("zz_red", "0.9, 0.05, 0.05"), String::new());
+    w.set_object(30, "first".into(), None, tinted("tests/render/data/panel.glb", "zz_red"), true, false).unwrap();
+    w.set_transform(30, Vec3::new(-0.5, 0.3, 0.8), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    // (A mesh the scene says it edits: room for what is placed.)
+    w.set_object(28, "own".into(), None, Kind::Mesh { geometry: 3, material: 1, own_blas: true, materials: vec![] }, true, false).unwrap();
+    w.set_transform(28, Vec3::new(0.9, -0.1, 0.4), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let mut live = match open(&w) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let mut last = picture(&mut live, 24);
+    let mut check = |what: &str, live: &mut LiveCore, w: &mut World| {
+        assert!(!live.commit(w).unwrap(), "{what}: in place ({:?})", live.fallback);
+        let mut fresh = open(w).unwrap();
+        forget(live);
+        let (a, b) = (picture(live, 48), picture(&mut fresh, 48));
+        assert!(apart(&a, &b) < 0.5, "{what}: the picture is {:.2} steps from a build's", apart(&a, &b));
+        assert!(apart(&last, &b) > 0.5, "{what}: the picture is {:.2} steps from the one before", apart(&last, &b));
+        last = b;
+    };
+    w.set_object(31, "again".into(), None, tinted("tests/render/data/panel.glb", "zz_red"), true, false).unwrap();
+    w.set_transform(31, Vec3::new(0.5, -0.3, 0.9), glam::Quat::from_rotation_y(0.3), Vec3::splat(0.5)).unwrap();
+    check("another of the model with its function", &mut live, &mut w);
+    w.set_object(32, "other file".into(), None, tinted("tests/render/data/quad.glb", "zz_red"), true, false).unwrap();
+    w.set_transform(32, Vec3::new(0.3, -0.3, 1.0), glam::Quat::IDENTITY, Vec3::splat(1.2)).unwrap();
+    check("a file the scene has not got, with the function", &mut live, &mut w);
+    // (a function that comes with the model: the kernel has it by the time the model's materials are made)
+    w.set_shader("aa_green", function("aa_green", "0.05, 0.9, 0.05"), String::new());
+    w.set_object(33, "new function".into(), None, tinted("tests/render/data/panel.glb", "aa_green"), true, false).unwrap();
+    w.set_transform(33, Vec3::new(-0.2, -0.5, 1.1), glam::Quat::IDENTITY, Vec3::splat(0.5)).unwrap();
+    check("a model with a function that came in the same commit", &mut live, &mut w);
+}

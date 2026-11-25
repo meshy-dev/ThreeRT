@@ -51,9 +51,43 @@ fn corner(a: &GpuTriAttr, c: usize) -> ([f32; 3], [f32; 2], [f32; 4]) {
 
 /// `n` triangles as shared vertices. `vertex(k, c)`: corner c of triangle k: what tells it from every other vertex,
 /// and its record. Two corners are one vertex where their keys are equal.
+/// A hasher for keys of plain words (vertices' bits, triangles' corners), several times SipHash's speed: FxHash's mix
+/// (rustc's). No map keyed with it is iterated, and its keys come from the scene, not from an adversary.
+#[derive(Default, Clone, Copy)]
+pub struct FastHash(u64);
+impl FastHash {
+    #[inline]
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+impl std::hash::Hasher for FastHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for c in bytes.chunks(8) {
+            let mut w = [0u8; 8];
+            w[..c.len()].copy_from_slice(c);
+            self.add(u64::from_le_bytes(w));
+        }
+    }
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
+    }
+}
+pub type FastMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FastHash>>;
+pub type FastSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FastHash>>;
+
 fn share<K: Hash + Eq>(n: usize, vertex: impl Fn(usize, usize) -> (K, Vertex)) -> Scope {
     let mut s = Scope { indices: Vec::with_capacity(n), ..Default::default() };
-    let mut seen: HashMap<K, u32> = HashMap::with_capacity(n);
+    let mut seen: FastMap<K, u32> = FastMap::with_capacity_and_hasher(n, Default::default());
     // (A triangle with a corner that is not finite: three times one vertex at the origin, a triangle without size,
     // which no ray meets. The BLASes are built from these positions.)
     let mut nowhere = None;

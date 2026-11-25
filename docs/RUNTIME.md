@@ -866,11 +866,18 @@ reads files under the asset root as it goes and adds what they hold without rebu
 - **The binding syncs what changed.** Objects added under a parent or taken from one since the last sync are bound or
   dropped with their subtrees; the graph is walked whole only at the first sync. A world removes a childless object
   without looking for its children (`World::remove` keeps a count of each object's children).
-- **In place:** a new mesh (any geometry) with materials the scene has; a model whose file the scene has (another
-  copy); moving or showing an object the build placed as an instance; new materials without textures that neither
-  emit nor are glass.
-- **Rebuilds:** a new group (place the meshes themselves under groups the scene made); a material with textures or a
-  function that the scene has not seen (make every material at setup, and put each on a mesh, out of sight if need
+- **`preloadModel(uri, nodeSets?)`** (`@threert/scene`; `__engine.preloadModel`): parses a GLB under the asset root on
+  a worker thread (its buffers, images and tangents into the process's parse cache) and reads the triangles of each
+  node set given (the `nodes` of the still `GLTFModel`s of it to come). A model of it added a few frames later goes in
+  without that work in its frame's commit: TokyoRT's far tiles, ~80 k triangles and 13 models each, from 30-90 ms of
+  commit to ~10.
+- **In place:** a new mesh (any geometry) with materials the scene has; a still model, of a file the scene has or not,
+  without material functions or with functions the scene's kernel has (its materials are made in place as a build
+  makes them); moving or showing an object the build placed as an instance; new materials without textures that
+  neither emit nor are glass.
+- **Rebuilds:** a new group (place the meshes themselves under groups the scene made); a posed model with material
+  functions, or a model with a function the scene's kernel has not; a material with textures or a function that the
+  scene has not seen (make every material at setup, and put each on a mesh, out of sight if need
   be); showing an object that was hidden when the scene was built or rebuilt (move it out of sight instead of hiding
   it); a model of nodes the file lacks (it draws nothing and has no instance to hide).
 - **Emitters cost the commit**: each commit that adds or removes emitting triangles writes the emitter CDF and the
