@@ -1,4 +1,4 @@
-//! Headless wgpu backend: uploads the flattened scene once, accumulates path-traced samples, reads back HDR.
+//! Headless wgpu backend: uploads the scene once, accumulates path-traced samples, reads back HDR.
 
 use crate::heap::{Heap, Live, Section, Stream, Table};
 use crate::scene::Scene;
@@ -819,7 +819,7 @@ fn skin_bind_group(d: &wgpu::Device, pipeline: &wgpu::ComputePipeline, own: [&wg
 /// what the CPU keeps between frames: where the next emission starts in its ring of slots, the rate's fraction carried.
 pub struct GpuParticlesGpu {
     pipeline: wgpu::ComputePipeline,
-    /// Timestamps around the dynamic BLAS rebuild (`STAMP_WGSL`, as `ParticleGpu`'s).
+    /// Timestamps around the systems' BLAS rebuild (`STAMP_WGSL`, as `ParticleGpu`'s).
     stamp: (wgpu::ComputePipeline, wgpu::BindGroup),
     bg: wgpu::BindGroup,
     params: wgpu::Buffer,
@@ -1847,7 +1847,7 @@ pub const F_FUNC: u32 = 512;
 // (1024: the emitter-reservoir experiment, removed 2026-11-13.)
 pub const F_GLASS: u32 = 2048;
 pub const F_COAT: u32 = 4096;
-// (8192: a traversal group past 2^24 triangles, removed with the groups.)
+// (8192: free.)
 /// The scene has instances (scene::Instance): TLAS instances with their record as custom data, shaded from
 /// model-space triangles through their `instances` record.
 pub const F_INST: u32 = 16384;
@@ -2787,7 +2787,7 @@ impl Gpu {
         };
         // (The particle passes' pipeline constant: vec4s an object entry, 4 with instance colours.)
         let object_stride = [("OBJECT_STRIDE", scene.object_stride() as f64)];
-        // Particle systems (hardware RT: the pass writes the dynamic BLASes' input).
+        // Particle systems (hardware RT: the pass writes their BLASes' input).
         let particles = match &accel {
             Some(a) if !scene.particles.is_empty() => {
                 let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("particles"), source: wgpu::ShaderSource::Wgsl(particle_source(scene).into()) });
@@ -3009,7 +3009,7 @@ impl Gpu {
         Ok((heap, head + blob_words, room))
     }
 
-    /// The particle pass (scene time, camera, frame time, rain, wetness), then the dynamic BLASes and the TLAS rebuilt.
+    /// The particle pass (scene time, camera, frame time, rain, wetness), then the systems' BLASes and the TLAS rebuilt.
     /// `pass_ts`: timestamps (q, q + 1) around the particle pass; `blas_ts`: (q, q + 1) around the BLAS build (the end of
     /// an empty pass before it, the beginning of one after it).
     #[allow(clippy::too_many_arguments)]
@@ -3107,7 +3107,7 @@ impl Gpu {
 
     /// One frame of the stateful GPU particles (gpu_particles.wgsl): each system's emissions (its rate over `dt`, and the
     /// game's spawns, `spawns` per node, 8 floats each), the update, collision and retirement of the rest, their quads;
-    /// with `rebuild`, the dynamic BLASes after (else the stateless pass that follows rebuilds them).
+    /// with `rebuild`, the systems' BLASes after (else the stateless pass that follows rebuilds them).
     #[allow(clippy::too_many_arguments)]
     pub fn run_gpu_particles(&self, up: &Uploaded, cam: [f32; 3], fwd: [f32; 3], time: f32, dt: f32, spawns: &std::collections::BTreeMap<u32, Vec<f32>>, rebuild: bool, e: &mut wgpu::CommandEncoder, ts: Option<(&wgpu::QuerySet, u32)>, blas_ts: Option<(&wgpu::QuerySet, u32)>) {
         let (Some(p), Some(accel)) = (&up.gpu_particles, &up.accel) else { return };

@@ -1195,7 +1195,9 @@ them (the trace 37 % / 71 % / 16 % longer on the three scenes below), and step 7
 **Where units are used.** Wherever software traversal is (since 2026-11-25): a session, a browser and an offline
 render alike. Until then an offline render flattened every instance into world-space triangles (the line drawn
 on 2026-11-11, to keep its bytes main's while units were new), and `THREERT_UNITS` chose; what follows that names
-the flattened scene or the variable is of that time. An instance of a mesh without a tree is no unit and is not
+the flattened scene or the variable is of that time. Since the same day no triangle is in world space: the tree
+over the scene's own triangles and its walk (the still scene's, in what follows) are gone, and the units are all
+software traversal walks. An instance of a mesh without a tree is no unit and is not
 drawn: a particle system's (its pass is hardware traversal's), a mesh with a vertex that is not a number (said).
 A scene with more instances than the top tree holds (262,144) draws none of them, and says so.
 
@@ -1222,12 +1224,9 @@ names a record with the instance's rows; hardware traversal fills it), and alrea
 procedural objects (`trace_procs`: the ray into the object's space, a tree of its own).
 
 **What there is now.** Under software traversal an instance stays an instance: a **unit**.
-- **The still scene is the flat tree it was**, walked first, exactly as before. (A scene whose triangles are all
-  units' has for it a leaf of one triangle without area, put after the meshes' triangles: the tree over nothing's
-  leaf names triangle 0, which with units is a mesh's first, in model space.)
 - **A mesh's tree** is built once over its triangles in model space, where they already are (the pool hardware
   traversal builds its BLASes from; under software traversal the mesh's triangles are put in its tree's order, a
-  cutout triangle carrying its flag). Its nodes sit in the node buffer after the still tree's; a tree is relocatable
+  cutout triangle carrying its flag). Its nodes sit in the mesh trees' range of the node buffer; a tree is relocatable
   (child indices count from its root, leaf triangles from its mesh's first).
 - **A unit** is the instance's kernel record (160 B), as under hardware traversal, with three of its unused words
   filled: its mesh tree's root; whether it casts shadows; whether it is placed by a translation alone (the ray then
@@ -1249,7 +1248,7 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   loose at rest are an eighth of the units, or when the scene is small (64 units: a build is microseconds). Tried
   and left out: putting a new unit into the one tree leaf by leaf; after a few thousand pieces had flown, rays
   through the piles read several times what a built tree costs them.
-- **The kernel** walks the top tree after the still one, with the ray already cut to the still scene's hit; at a
+- **The kernel** walks the top tree; at a
   unit it takes the ray into the unit's space (as `trace_procs` does) and walks the mesh's tree. **The top tree and
   the units' trees are walked by one loop**, each turn a node of whichever tree the ray is in: a GPU runs a group of
   rays through a loop together, and with a unit's walk as a loop inside the top walk's, a ray that had left a unit
@@ -1257,9 +1256,8 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   tested first: a ray that meets no unit reads one node, and a scene of one unit has no tree to walk. The hit it
   returns is the hit hardware traversal returns (the triangle, the record), so nothing after the traversal differs.
 - **The unit walk is `shaders/trace_units.wgsl`**, in the kernel under `@if(units)` (`F_UNITS`, a source feature,
-  as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk, a call at the end of the still walk, and the still
-  walk's stack declaration taken out ("The stack"). A scene without units has none of it; hardware traversal's
-  kernel never does.
+  as vertex colours are; gpu.rs `KernelVariant::flags`): the file's walk and the call in `trace`. A scene without
+  units has none of it; hardware traversal's kernel never does.
 - **A mesh that deforms** (a posed skinned model's) is a unit too. Its tree has the shape of a tree built once over
   its model's bind pose, one shape for every placement of the model (the skinning pass's corners and each such
   mesh's triangles are in that tree's order), and the boxes of its pose. A new pose places the model's corners on
@@ -1267,9 +1265,6 @@ procedural objects (`trace_procs`: the ray into the object's space, a tree of it
   children), and writes the nodes where they lie; the pass writes the triangles. Made again for a pose, a tree
   costs sixty times as much (a character of 13,744 triangles, one core: 3.0 ms against 0.05) and walks 4 to 11 %
   shorter by its nodes' areas.
-- Still flattened, as before: every instance of a scene with more of them than a top tree holds (2^18), and every
-  instance of an offline render (`prepare`; a live session's scene goes through `prepare_live`), unless
-  `THREERT_UNITS=1`. `THREERT_UNITS=0` flattens everything, as before this step (the A/B).
 
 **Edits in place.** The edits that hardware traversal makes in place go through one type (`gpu::Top`: the TLAS and
 its BLASes, or the units), so the engine's path is the same under both traversals (`live/edits.rs` `move_instances`,
@@ -1303,18 +1298,17 @@ that is not its mesh's tree now (freed, or placed again elsewhere), or a unit si
 not yet used, and a tree given back, hold leaves that end (`units::FILL`), not zeros (zeros are an interior node
 whose children are nodes 0 and 1). With no unit shown the count is 0 and the kernel does not enter the top range.
 
-**The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module,
-which the still walk uses too (its own declaration is under `@if(!units)`). Why not a walk's own: an array a function declares is set to zero each time the function is
+**The stack.** One stack of 64 entries for an invocation of a kernel with units: a private variable of the module.
+Why not a walk's own: an array a function declares is set to zero each time the function is
 entered, whatever the ray then meets, and a ray's walk is entered many times a pixel. The unit walk's own 64 words
-cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55; the still walk's own 48 cost them 0.36,
-1.1 and 1.5 more, **and cost every flattened scene the same** (a kernel without units is the file as it is, so it
-still pays: "Open" in ROADMAP § 6 step 7c). A walk reads only what it pushed, so what an earlier ray left is never
-read. The still walk uses 48 entries, as before, and leaves the stack empty; a unit's walk pushes above what the
+cost hello world 0.3 ms a frame, Kabukichō 0.75 and the voxel level 0.55 (and the 48 of the still scene's walk,
+while there was one, 0.36, 1.1 and 1.5 more). A walk reads only what it pushed, so what an earlier ray left is never
+read. A unit's walk pushes above what the
 top walk has pending. The top tree is at most 19 deep (a built tree 18, which holds 2^18 units, the most a scene is
 given units for; a root over two of them). That leaves 45 for a mesh tree. Binned SAH is not balanced: measured on
 the CPU, its trees over the catalog's models are 17 deep for 37 k triangles, 20 for 502 k, 22 for a 31 k-triangle
 building of Kabukichō, and 42 for the 5.86 M triangles of `zero-day` (a balanced tree there is 21), which as part of
-a flattened scene fitted the still walk's 48. A mesh tree deeper than 45 is built again by median splits, whose
+a flattened scene fitted a stack of 48. A mesh tree deeper than 45 is built again by median splits, whose
 depth is log2(triangles / 4): a worse tree to walk, never a wrong one. A push past the stack is dropped (geometry
 missed, never a hang), and the builders' bounds mean it is not reached; `the_builders_keep_their_depths` holds them
 to it.
@@ -1577,8 +1571,8 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   copies, so a light sample reads no placement; what moves an emitter after the load is copied again on the GPU,
   `emitter_fill.wgsl`).
 - `words` (binding 5), 32-bit words (`Stream`): the environment's CDF, the procedural geometry's data, the vertex
-  colours, the instances' rows, and the triangles' indices and rows ("The scene's triangles" below) (`env_cdf_at`,
-  `pword`, `vcolor_word`, `tri_indices`, `tri_row`). Integers are read as integers, not through a float's bits.
+  colours, the instances' rows, and the triangles' indices ("The scene's triangles" below) (`env_cdf_at`,
+  `pword`, `vcolor_word`, `tri_indices`). Integers are read as integers, not through a float's bits.
 
 `Params::table_first` and `word_first` name each section's first element and are written with the parameters
 (`Uploaded::place`). What a scene has more of is another section, not another binding.
@@ -1618,25 +1612,20 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   a hand of 0: none). The BLASes are built from this buffer too (stride 48).
 - **Triangles.** Three indices each, a section of `words` (`Stream::Indices`): what a hit reads, and the BLASes'
   index buffer. A mesh's indices count from the mesh's first vertex, which its instances' records carry
-  (`info.z`); a world-space triangle's count from 0.
-- **A mesh's triangle has nothing else of its own.** Which section of its mesh it is in, its hit says (`Hit.part`):
+  (`info.z`).
+- **A triangle is a mesh's, and has nothing else of its own.** Which section of its mesh it is in, its hit says (`Hit.part`):
   the geometry of the BLAS it was hit in, or under software traversal its tree's leaf. Its instance's row for
   the section has the material and where the section's triangles and emitters start; its instance's record has
   its object and whether its mesh deforms (`INST_DEFORMS`). A light sample is told its emitter's section by the
   light list's record (64 bytes). The record a pixel is left to `finish` by has 16 bits for it (`MESH_SECTIONS`).
-- **Rows** (`Stream::Triangles`, four words). A triangle no instance places (software traversal's, where an
-  instance is no unit: the build places every triangle by an instance)
-  has one: its material, its object, its flags, its emitter + 1. They are all the GPU holds: the world-space
-  triangles'.
 - **Software traversal's leaves** (`leaves`, binding 2; `indexed::Leaf`). A tree keeps its triangles itself, as an
   acceleration structure does: 48 bytes each, in the triangles' order, (v0, id), (v1 - v0, id), (v2 - v0, -). A
-  candidate's test reads nothing else. The ids: a world-space triangle's flags; a mesh's section, and its index in
+  candidate's test reads nothing else. The ids: its section of its mesh, and its index in
   the section (a tree has a mesh's triangles in its own order). Written at the build and where an edit places a
   mesh; after the skinning pass a pass takes a posed mesh's again from its vertices (`leaf_gather.wgsl`).
 - **A hit reads** its triangle's indices and its three vertices' records (`tri_data(triangle, instance, part)`).
-- **What shares.** Corners equal bit for bit in position, normal, UV and tangent are one vertex: the still
-  world-space triangles among themselves, each mesh within itself, a skinned mesh by its model's corners. Triangles
-  the CPU writes whole (those that move in world space) keep three vertices each.
+- **What shares.** Corners equal bit for bit in position, normal, UV and tangent are one vertex: each mesh within
+  itself, a skinned mesh by its model's corners.
 - **Particle systems.** A system is a mesh of the pool, four vertices and two triangles a particle, and one
   instance that places nothing (`scene::particle_mesh`, `INST_PARTICLES`): its pass writes the vertices in the
   world and their previous positions, and its BLAS is built again after the passes, with the TLAS
@@ -1653,8 +1642,8 @@ Vertices and indices, one layout for hardware and software traversal (`renderer/
   has no tangents (a scene's own geometries, a light's card) has its frame made where it is hit, from its
   triangle's edges, its UVs and its first normal.
 - **Motion.** `prev_verts` (binding 6): the vertices that move as they were the previous frame, whole records (a
-  copy on the GPU has no stride; the kernel reads their positions): the moving world-space triangles' first, then
-  the deforming meshes', each where its record says (`n2.w`).
+  copy on the GPU has no stride; the kernel reads their positions): the deforming meshes', each where its record
+  says (`n2.w`).
 - **Edits.** A mesh an edit places takes a run of triangles and a run of vertices (`EditState::tris`, `verts`);
   both rooms grow by a copy on the GPU. A mesh changed in place keeps its run where the new vertices fit.
 - **Bytes.** A triangle was 144 bytes for the kernel (48 its vertices, 96 its attributes) and 36 more as the BLAS's
@@ -2205,7 +2194,7 @@ in a browser") is the last line, not the guarantee: a count above zero is a bug 
 
 | what the kernel walks | built by | what holds it |
 |---|---|---|
-| the still scene's tree (software traversal), a procedural object's boxes' tree | bvh.rs `build_tris`, `build_boxes` | children after their parent and inside the tree (so a walk that goes down and pops what it pushed reaches each node at most once and ends, whatever the boxes say); every node reached once; leaves of 1 to 16 items inside the items; boxes finite (an item whose box is not is in no leaf, after every leaf's range, its index kept); no deeper than the kernel's stack (48: where the levels left could not finish the split the surface-area heuristic wants, the median); `check_tree` in tests and debug builds |
+| a mesh's tree (software traversal), a procedural object's boxes' tree | bvh.rs `build_tris`, `build_boxes` | children after their parent and inside the tree (so a walk that goes down and pops what it pushed reaches each node at most once and ends, whatever the boxes say); every node reached once; leaves of 1 to 16 items inside the items; boxes finite (an item whose box is not is in no leaf, after every leaf's range, its index kept); no deeper than the kernel's stack (48: where the levels left could not finish the split the surface-area heuristic wants, the median); `check_tree` in tests and debug builds |
 | the units' trees, the top tree | units.rs | the same, checked at every build and edit (an incremental path, cheap per unit) |
 | the light tree | ltree.rs | children after their parent; median splits, so the depth is log2 of the entries, within the path codes' 26 bits; leaves of 1 to 4 entries (the child word's two bits); every entry's code leads to its leaf; `LightTree::check` after every build, growth and refit in tests and debug builds. Its walks end by their bounds whatever the data (`LT_PATH_BITS`, the code's depth, four entries) |
 | the emitter CDF's searches | lib.rs | binary searches end on any data (the interval shrinks); the guide table's entries are the CDF's |
@@ -2223,8 +2212,8 @@ Where what is built from enters, it is finite:
   the way) is given to them as three vertices at the origin (`scene::blas_tri`): DXR and Vulkan leave such a vertex
   undefined behaviour and define a degenerate triangle as never hit; its index stays.
 
-Measured (2026-11-14, software traversal's still tree, `bvh_depth` in a session's load line): Bistro 18 levels,
-Kabukichō 26, the Kabukichō district 33: the stack's 48 changes none of them. A tree of boxes spaced in powers of two
+Measured (2026-11-14, the one tree software traversal then had over a whole scene): Bistro 18 levels,
+Kabukichō 26, the Kabukichō district 33: a stack of 48 changes none of them. A tree of boxes spaced in powers of two
 is as deep as SAH makes it unheld, and no deeper than asked held (bvh.rs `a_tree_is_no_deeper_than_its_stack`).
 Garbage in (NaN and infinite vertices, values near f32's limit, a thousand copies of one triangle, a needle;
 emitters likewise) makes trees the checks pass and the kernel's walk ends on (`garbage_in_makes_a_tree_the_kernel_walks`,

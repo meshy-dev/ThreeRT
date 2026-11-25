@@ -269,9 +269,9 @@ fn main() -> Result<()> {
             let mut sc = scene::build(&w, &assets, &presets, None)?;
             let prep = threert_render::prepare_as(true, &mut sc, &mut vec![]);
             let prepare_ms = tb.elapsed().as_secs_f64() * 1000.0;
-            // Same counts the render stats report (scene.rs `stats`): flat + instanced triangles.
-            let triangles = sc.stats.get("triangles").map_or(sc.tris.len() as u64, |t| *t as u64);
-            println!("{}", serde_json::json!({ "engine": "quickjs", "bundle_load_ms": load_ms, "setup_ms": setup_ms, "prepare_ms": prepare_ms, "objects": w.objects.len(), "geometries": w.geometries.len(), "materials": w.materials.len(), "textures": w.textures.len(), "triangles": triangles, "flat_triangles": sc.tris.len(), "instances": sc.instances.len(), "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "emitters": prep.emitter_tris.len(), "info": host.info }));
+            // Same counts the render stats report (scene.rs `stats`).
+            let triangles = sc.stats.get("triangles").map_or(0, |t| *t as u64);
+            println!("{}", serde_json::json!({ "engine": "quickjs", "bundle_load_ms": load_ms, "setup_ms": setup_ms, "prepare_ms": prepare_ms, "objects": w.objects.len(), "geometries": w.geometries.len(), "materials": w.materials.len(), "textures": w.textures.len(), "triangles": triangles, "instances": sc.instances.len(), "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "emitters": prep.emitter_tris.len(), "info": host.info }));
         }
         "edit-check" => {
             // threert-render edit-check <bundle.js> [--assets DIR] --events '[{"type":..,"payload":..}, ..]'
@@ -589,8 +589,8 @@ fn render(g: &gpu::Gpu, job: &Job, presets: &Path, init_ms: f64, hosts: &mut Hos
         "scene": sc.name,
         "out": job.out,
         "width": w, "height": h, "spp": spp,
-        "triangles": sc.stats.get("triangles").map_or(sc.tris.len(), |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "sections": sc.sections.len(), "rows": sc.rows.len(), "pool_triangles": sc.pool_tris.len(),
-        "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "flat_triangles": sc.tris.len(), "bvh_nodes": prep.nodes.len(), "emitters": prep.emitter_tris.len(), "lights": sc.lights.len(), "textures": sc.textures.len(),
+        "triangles": sc.stats.get("triangles").map_or(0, |t| *t as usize), "instances": sc.instances.len(), "meshes": sc.meshes.len(), "sections": sc.sections.len(), "rows": sc.rows.len(), "pool_triangles": sc.pool_tris.len(),
+        "instanced_triangles": sc.stats.get("instanced_triangles").copied().unwrap_or(0.0) as u64, "bvh_nodes": prep.nodes.len(), "emitters": prep.emitter_tris.len(), "lights": sc.lights.len(), "textures": sc.textures.len(),
         "adapter": g.adapter_info.name, "backend": format!("{:?}", g.adapter_info.backend), "hwrt": g.hwrt,
         "ev100": ev100, "denoise": denoiser, "preset": preset.name,
         "samples_per_sec": (w * h) as f64 * spp as f64 / (trace_ms / 1000.0).max(1e-9),

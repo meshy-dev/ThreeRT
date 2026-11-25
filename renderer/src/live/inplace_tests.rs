@@ -589,7 +589,6 @@ fn a_moved_card_beside_another_is_placed_where_its_light_is() {
             .collect()
     };
     let placed = |m: glam::Mat4, to: Vec3| m.abs_diff_eq(scene::card_world(glam::Mat4::from_rotation_translation(turn, to), 0.4, 0.3), 1e-6);
-    assert!(live.sc.tris.is_empty(), "a card is no world-space triangle");
     let first = cards(&live);
     assert!((0..3).all(|k| placed(first[k].0, at[k])), "as loaded: each card where its light is");
     assert!(first.iter().all(|c| c.1.m == c.1.p), "as loaded: nothing has moved");
@@ -759,8 +758,6 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     let built = |w: &World| {
         let mut sc = scene::build(w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         (sc.width, sc.height) = (96, 54);
-        // (Under software traversal with units, as a live view has the scene: without them the model is flattened
-        // into world-space triangles with the CPU's normals.)
         let prep = crate::prepare_as(g.hwrt, &mut sc, &mut vec![]);
         (sc, prep)
     };
@@ -1006,8 +1003,7 @@ fn moves_in_place_leave_what_a_build_does() {
     }
 }
 
-/// An instanced object whose copies emit is gone from the picture once it is removed (its copies were flattened once,
-/// and nothing took them out).
+/// An instanced object whose copies emit is gone from the picture once it is removed.
 #[test]
 fn an_emitting_instanced_object_removed_is_gone() {
     let presets = crate::default_presets_dir();
@@ -2630,10 +2626,9 @@ fn an_instanced_object_given_another_material_has_it_in_its_copies_rows() {
     lit_as_a_build(what, &mut live, &mut open(&w).unwrap());
 }
 
-/// What still changes by a rebuild: a material of world-space triangles. Particles' (dynamic triangles: their class
-/// is theirs, and they get no emitters in place) when it starts emitting or becomes a cutout; one that still
-/// triangles have (the build groups them by whether they are cutouts) when it becomes a cutout. The same change of
-/// a material that only instances' rows name is in place.
+/// What still changes by a rebuild: a particle system's material (its triangles are its pass's: they get no emitters
+/// in place) when it starts emitting or becomes a cutout. The same change of a material that only instances' rows
+/// name is in place.
 #[test]
 fn a_material_of_world_space_triangles_changes_by_a_rebuild() {
     let presets = crate::default_presets_dir();
@@ -3150,7 +3145,7 @@ fn a_posed_rigid_model_with_a_second_mesh_is_hidden_and_removed_in_place() {
     w.take_changes();
     {
         let r = live.sc.tables.retained.rigid(32).expect("a posed rigid model");
-        assert!(live.sc.tris.is_empty() && r.records().iter().any(|&i| live.sc.meshes.iter().any(|m| m.over == live.sc.instances[i as usize].mesh)), "one of its instances is of a part's second mesh");
+        assert!(r.records().iter().any(|&i| live.sc.meshes.iter().any(|m| m.over == live.sc.instances[i as usize].mesh)), "one of its instances is of a part's second mesh");
     }
     let before = picture(&mut live, 48);
     w.set_visible(32, false).unwrap();
@@ -3243,7 +3238,7 @@ fn a_posed_skinned_models_emitters_follow_its_pose() {
     w.take_changes();
     let sk = live.sc.tables.retained.skinned.iter().find(|s| s.object == 30).expect("a posed skinned model").clone();
     let its = |c: &LiveCore| c.sc.tables.emitter_tris.iter().filter(|e| e.inst == sk.instance && e.area > 0.0).copied().collect::<Vec<_>>();
-    assert!(live.sc.tris.is_empty() && !its(&live).is_empty() && its(&live).iter().all(|e| e.moves), "its emitters are its instance's, moving ones");
+    assert!(!its(&live).is_empty() && its(&live).iter().all(|e| e.moves), "its emitters are its instance's, moving ones");
     list_is_its_triangles("as loaded", &live);
     // (The codes the load uploaded are on record: the first write of the weights sends those that change, not all.)
     {
@@ -3359,7 +3354,7 @@ fn a_posed_skinned_model_is_added_in_place() {
         w.set_object(id, format!("m{id}"), None, model(name, bend(0.0)), true, false).unwrap();
         w.set_transform(id, Vec3::new(x, -0.8, 0.8), glam::Quat::IDENTITY, Vec3::splat(1.2)).unwrap();
     }
-    // (A movable rect light's card: world-space triangles that move, whose previous vertices lie before the meshes'.)
+    // (A movable rect light's card: an instance of the cards' mesh.)
     let card = serde_json::from_value(serde_json::json!({ "type": "rect", "color": [1, 1, 1], "castShadow": true, "intensity": 1, "width": 0.3, "height": 0.3, "range": 0 })).unwrap();
     w.set_object(22, "card".into(), None, Kind::Light(card), true, true).unwrap();
     w.set_transform(22, Vec3::new(-2.4, 1.3, 0.6), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
@@ -3717,7 +3712,7 @@ fn a_posed_skinned_model_is_removed_in_place() {
 /// vertices two joints hold, weights that do not sum to one, a primitive with tangents and one without normals, a
 /// mesh on a node beside the skin that mirrors it, a joint turned about an axis that is neither the normals' nor the
 /// tangents', its materials in an order a mesh laid out by material does not keep; and arm.glb), two of each, each
-/// a mesh of its own, in a scene with world-space triangles before the meshes': after each new pose the GPU's
+/// a mesh of its own, in a scene with a movable light's card: after each new pose the GPU's
 /// triangles, shading attributes and BLAS input of each mesh are its model's triangles for the pose, the previous
 /// frame's vertices are the pose before, and the CPU has the mesh as it is now when asked. One posed alone leaves
 /// the others' as they were. Also after the scene's buffers were made again larger, and a pose that mirrors other

@@ -1,11 +1,11 @@
-//! The engine's world (world.rs) + asset files -> flat GPU-ready scene (world-space triangles, materials, textures,
+//! The engine's world (world.rs) + asset files -> GPU-ready scene (meshes and their instances, materials, textures,
 //! lights).
 
 use crate::desc::{self, Light, Sky};
 use crate::skin;
 use crate::world::{self, Kind, World};
 use anyhow::{anyhow, Context, Result};
-use glam::{Mat3, Mat4, Vec2, Vec3, Vec3A};
+use glam::{Mat4, Vec2, Vec3, Vec3A};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,8 +18,6 @@ pub const MAT_UNLIT: i32 = 4;
 pub const TRI_NO_SHADOW: u32 = 1;
 /// Alpha-tested triangle (cutout material): traversal runs an any-hit test.
 pub const TRI_MASKED: u32 = 2;
-/// Triangle of a posed model (animated character): kept in its own acceleration structures, re-skinned in place.
-pub const TRI_DYNAMIC: u32 = 4;
 /// vec4s per object in the objects table (pathtrace.wgsl `OBJECT_STRIDE`): (pivot, power), (bounds size, time of the
 /// last power edit), per-instance data (`custom`); in a scene with instance colours (`Scene::tinted`, the kernel's
 /// F_TINT) a 4th, (colour, -): an instanced object's instance colour (`InstanceTable`), white otherwise. Other scenes
@@ -202,7 +200,7 @@ pub struct Instance {
     /// The scene node's id (picking, selection outlines).
     pub name: String,
     /// An instanced object's instance (`Kind::Instanced`): its index there (picking reports it), and whether it is
-    /// hidden (`instance_world`: TLAS mask 0, never flattened or picked).
+    /// hidden (`instance_world`: TLAS mask 0, never picked).
     pub sub: Option<u32>,
     pub hidden: bool,
     /// Hidden by its object's visibility (`World::shown`) or for a placement without size (`placed_world`), which
@@ -246,43 +244,15 @@ impl Instance {
         let bits = f32::from_bits(self.bits | if mirrors(w) { INST_MIRRORED } else { 0 });
         GpuInstance { m: [row(0), row(1), row(2)], n: [nrow(0, 0.0), nrow(1, bits), nrow(2, f32::from_bits(self.prev))], info: [first, self.object, self.verts, self.rows], p: [row(0), row(1), row(2)] }
     }
-    /// A triangle's attributes as a flattened triangle has them: the material its row names in place of the
-    /// section, and no index in it (`rows`: the instance's).
-    pub fn resolved(&self, a: &GpuTriAttr, rows: &[Row]) -> GpuTriAttr {
-        let mat = rows.get(a.uv[3].to_bits() as usize).map_or(0, row_material);
-        GpuTriAttr { uv: [a.uv[0], a.uv[1], a.uv[2], f32::from_bits(mat)], x: [a.x[0], a.x[1], a.x[2], 0.0], ..*a }
-    }
-    /// Model-space triangle `t` of its mesh in world space (the same transform the flattening path applies).
+    /// Model-space triangle `t` of its mesh in world space.
     pub fn tri(&self, t: &[Vec3A; 3]) -> [Vec3A; 3] {
         t.map(|v| self.world.transform_point3a(v))
-    }
-    /// A triangle of its mesh (vertices `t`, attributes `a`, vertex colours `c`) as flattening has it: in world space
-    /// (`tri`, `instance_attr`), and under a mirroring instance with its second and third vertex changed places, so
-    /// that it faces as the mesh's does (as `append_arrays` flattens a mirrored placement).
-    pub fn flat(&self, t: &[Vec3A; 3], a: &GpuTriAttr, c: Option<[u32; 3]>) -> ([Vec3A; 3], GpuTriAttr, Option<[u32; 3]>) {
-        let (w, b) = (self.tri(t), instance_attr(a, self.world, self.object));
-        if !mirrors(self.world) {
-            return (w, b, c);
-        }
-        // (The UVs are packed along the normals: uv0 in n0.w n1.w, uv1 in n2.w uv.x, uv2 in uv.y uv.z.)
-        let swapped = GpuTriAttr { n1: [b.n2[0], b.n2[1], b.n2[2], b.n1[3]], n2: [b.n1[0], b.n1[1], b.n1[2], b.uv[1]], uv: [b.uv[2], b.n2[3], b.uv[0], b.uv[3]], t1: b.t2, t2: b.t1, ..b };
-        ([w[0], w[2], w[1]], swapped, c.map(|c| [c[0], c[2], c[1]]))
     }
 }
 
 /// A triangle's tangents, one a corner: the direction of u on the surface and the frame's hand (1 or -1). A file's,
 /// or generated (tangents.rs); a triangle without has none (`GpuTriAttr::t`'s hand is 0).
 pub type CornerTangents = [(Vec3, f32); 3];
-
-/// A triangle in a node's own space (vertices, normals, UVs, tangents) placed by `w` as the build flattens it: under
-/// a mirroring `w` the second and third vertex change places, so that it faces as its mesh does, and its tangents'
-/// frame changes hand (`Instance::flat` does the same with a mesh's triangle).
-#[allow(clippy::type_complexity)]
-pub fn placed_tri(w: Mat4, p: &[Vec3; 3], n: &[Vec3; 3], uv: &[Vec2; 3], tangent: Option<CornerTangents>) -> ([Vec3; 3], [Vec3; 3], [Vec2; 3], Option<CornerTangents>) {
-    let nm = Mat3::from_mat4(w).inverse().transpose();
-    let (k, hand) = if mirrors(w) { ([0, 2, 1], -1.0) } else { ([0, 1, 2], 1.0) };
-    (k.map(|i| w.transform_point3(p[i])), k.map(|i| (nm * n[i]).normalize_or_zero()), k.map(|i| uv[i]), tangent.map(|t| k.map(|i| (w.transform_vector3(t[i].0).normalize_or_zero(), t[i].1 * hand))))
-}
 
 /// Bit of an instance record's n1.w, beside the units' flags there (units.rs `UNIT_*`): the instance mirrors its mesh
 /// (the kernel's `inst_sign`).
@@ -506,37 +476,6 @@ pub fn proc_layout(procs: &[ProcObject], sw: bool) -> ProcLayout {
     ProcLayout { head, headers, blobs, blob_of, blob_words, sw }
 }
 
-/// Flags of an instance's pool triangle as a world-space triangle (software traversal): the placement's shadow flag,
-/// the material's cutout, and no shadow for glass (the build's flag pass ran before the instances were flattened).
-pub fn instance_tri_flags(inst: &Instance, a: &GpuTriAttr, materials: &[GpuMaterial]) -> u32 {
-    let m = materials.get(a.uv[3].to_bits() as usize);
-    let shadow = if inst.cast_shadow && !m.is_some_and(|m| m.layer[0] > 0.0) { 0 } else { TRI_NO_SHADOW };
-    shadow | if m.is_some_and(|m| m.uv2[3] > 0.0) { TRI_MASKED } else { 0 }
-}
-
-/// Triangle ranges of node `id` in build order: one, or two for an instanced node flattened by software traversal (its
-/// glass / function part from the build, its mesh appended by `prepare`).
-pub fn node_ranges<'a>(tri_nodes: &'a [(String, u32, u32)], id: &'a str) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
-    tri_nodes.iter().filter(move |(n, _, _)| n == id).map(|(_, a, b)| *a as usize..*b as usize)
-}
-
-/// Model-space shading attributes of a pool triangle placed by `w` (normals by the inverse transpose, tangents by
-/// the matrix, their frame's hand changed by a mirroring one), object `object`.
-pub fn instance_attr(a: &GpuTriAttr, w: Mat4, object: u32) -> GpuTriAttr {
-    let m3 = glam::Mat3::from_mat4(w);
-    let nm = m3.inverse().transpose();
-    let n = |v: [f32; 4]| {
-        let r = (nm * Vec3::new(v[0], v[1], v[2])).normalize_or_zero();
-        [r.x, r.y, r.z, v[3]]
-    };
-    let flip = if mirrors(w) { -1.0 } else { 1.0 };
-    let t = |v: [f32; 4]| {
-        let r = (m3 * Vec3::new(v[0], v[1], v[2])).normalize_or_zero();
-        [r.x, r.y, r.z, v[3] * flip]
-    };
-    GpuTriAttr { n0: n(a.n0), n1: n(a.n1), n2: n(a.n2), uv: a.uv, t: t(a.t), x: [a.x[0], f32::from_bits(object), a.x[2], a.x[3]], t1: t(a.t1), t2: t(a.t2) }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTriAttr {
@@ -665,15 +604,13 @@ pub struct Scene {
     pub time: f32,
     pub width: u32,
     pub height: u32,
-    pub tris: Vec<[Vec3A; 3]>,
-    pub tri_flags: Vec<u32>,
-    /// Vertex colours (`tri_colors`) of the triangles in `tris` and `pool_tris` whose material has `vertexColors`, by
-    /// index (shorter: white past the end); `prepare` lays them out as the GPU's triangles (F_VCOLOR).
-    pub vcolors: Vec<[u32; 3]>,
+    /// Vertex colours (`tri_colors`) of the triangles in `pool_tris` whose material has `vertexColors`, by index
+    /// (shorter: white past the end); `prepare` lays them out as the GPU's triangles (F_VCOLOR).
     pub pool_vcolors: Vec<[u32; 3]>,
     /// The vertex colours as the GPU reads them (`prepare`): three words per triangle in GPU order, none in a scene
     /// without them (gpu.rs F_VCOLOR).
     pub gpu_vcolors: Vec<u32>,
+    /// The triangles' attributes in the GPU's order (`prepare`: `pool_attrs`, as the trees left them).
     pub attrs: Vec<GpuTriAttr>,
     pub materials: Vec<GpuMaterial>,
     pub textures: Vec<Texture>,
@@ -684,15 +621,10 @@ pub struct Scene {
     pub environment: EnvSettings,
     pub preset: desc::Preset,
     pub stats: HashMap<&'static str, f64>,
-    /// Triangle ranges per object (name, first, end), in `tris` order: picking and selection outlines.
-    pub tri_nodes: Vec<(String, u32, u32)>,
-    /// Triangle ranges of flattened instances of instanced objects (first, end, instance index): picking.
-    pub tri_instances: Vec<(u32, u32, u32)>,
     /// Some object has instance colours (`InstanceTable::colors`): the kernel's F_TINT, 4 vec4s an object
     /// (`object_stride`).
     pub tinted: bool,
-    /// Instanced static glTF meshes (model-space triangles, flags, attributes) and their placements. `prepare` appends
-    /// the pool after the flattened triangles (hardware RT) or flattens the instances (software traversal).
+    /// The meshes (model-space triangles, attributes), one after another, and their placements.
     pub pool_tris: Vec<[Vec3A; 3]>,
     pub pool_attrs: Vec<GpuTriAttr>,
     pub meshes: Vec<InstMesh>,
@@ -815,7 +747,7 @@ pub struct Retained {
 #[derive(Clone, Default)]
 pub struct Proxy {
     /// Object-table index (pivot, bounds, power, customData). None: an instanced object (an entry a copy: from
-    /// `InstancedPlace::object` for instances; a flattened one's are the build's alone).
+    /// `InstancedPlace::object`).
     pub object: Option<u32>,
     /// A rect light's visible card: its material.
     pub card: Option<u32>,
@@ -825,8 +757,8 @@ pub struct Proxy {
 /// How a drawn object's geometry is held.
 #[derive(Clone, Default)]
 pub enum Draw {
-    /// As the build placed it, with nothing kept to change it by: triangles flattened into the static groups, a
-    /// static model's instance. An edit that would change it rebuilds.
+    /// As the build placed it, with nothing kept to change it by: a static model's instances. An edit that would
+    /// change it rebuilds.
     #[default]
     Fixed,
     /// An instance of a model-space mesh (hardware RT, or software traversal's units).
@@ -1623,13 +1555,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         materials.push(gm);
     }
 
-    let tris: Vec<[Vec3A; 3]> = vec![];
-    let mut tri_flags: Vec<u32> = vec![];
-    let mut attrs: Vec<GpuTriAttr> = vec![];
     let mut lights: Vec<GpuLight> = vec![];
     let mut camera: Option<CameraData> = None;
     let mut asset_materials: HashMap<(String, usize), u32> = HashMap::new();
-    let mut tri_nodes: Vec<(String, u32, u32)> = vec![];
     let mut particles: Vec<ParticleSystem> = vec![];
     let mut gpu_particles: Vec<GpuParticleSystem> = vec![];
     let particle_programs: Vec<(String, String, String, String)> = w.particle_programs.iter().map(|(k, (e, u, h))| (k.clone(), e.clone(), u.clone(), h.clone())).collect();
@@ -1645,7 +1573,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let grid_programs: Vec<(String, String, String)> = w.grid_programs.iter().map(|(k, (c, h))| (k.clone(), c.clone(), h.clone())).collect();
     let mut objects: Vec<[f32; 4]> = vec![];
     let mut pool_tris: Vec<[Vec3A; 3]> = vec![];
-    let (vcolors, mut pool_vcolors): (Vec<[u32; 3]>, Vec<[u32; 3]>) = (vec![], vec![]);
+    let mut pool_vcolors: Vec<[u32; 3]> = vec![];
     let mut pool_attrs: Vec<GpuTriAttr> = vec![];
     let mut meshes: Vec<InstMesh> = vec![];
     let mut instances: Vec<Instance> = vec![];
@@ -1670,8 +1598,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut skin_sources: Vec<Vec<[skin::SkinCorner; 3]>> = vec![];
     let mut skin_rest: Vec<Vec<skin::PaletteRows>> = vec![];
     let mut skin_source_of: HashMap<(String, Option<Vec<String>>, Vec<bool>), (u32, Arc<Vec<(u32, u32, u32)>>)> = HashMap::new();
-    // Flattened instances' triangle ranges.
-    let tri_instances: Vec<(u32, u32, u32)> = vec![];
     // The rect lights' card mesh, once a scene has a card (`card_mesh`).
     let mut card: Option<u32> = None;
     // Instance colours anywhere: object entries of 4 vec4s, and the kernel's F_TINT.
@@ -1680,7 +1606,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     for id in &order {
         let n = &w.objects[id];
         let m = worlds[id];
-        let first = tris.len() as u32;
         let shown = w.shown(*id);
         match &n.kind {
             Kind::Mesh { geometry, material, own_blas, materials: mesh_mats } => {
@@ -2128,26 +2053,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             Kind::Camera(c) if st.camera == Some(*id) => camera = Some(camera_data(m, c)),
             _ => {}
         }
-        if tris.len() as u32 > first && !matches!(n.kind, Kind::Instanced { .. }) {
-            // Object pivot + world bounds (UE ObjectPositionWS / ObjectBounds) for material functions, and the object's
-            // power (scales everything it emits).
-            let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-            for t in &tris[first as usize..] {
-                for v in t {
-                    lo = lo.min(*v);
-                    hi = hi.max(*v);
-                }
-            }
-            let pivot = m.transform_point3(Vec3::ZERO);
-            let size = hi - lo;
-            let oi = (objects.len() / stride) as u32;
-            objects.extend_from_slice(&object_row(pivot, n.power, size, n.custom, [1.0; 3])[..stride]);
-            for a in &mut attrs[first as usize..] {
-                a.x[1] = f32::from_bits(oi);
-            }
-            retained.proxy(*id).object = Some(oi);
-            tri_nodes.push((n.name.clone(), first, tris.len() as u32));
-        }
     }
 
     let (sky, sun) = sky_data(w, assets, &|id| worlds.get(&id).copied().unwrap_or(Mat4::IDENTITY))?;
@@ -2156,11 +2061,11 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
     let mut stats = HashMap::new();
     stats.insert("load_ms", t0.elapsed().as_secs_f64() * 1000.0);
     let instanced: u64 = instances.iter().map(|i| meshes[i.mesh as usize].count as u64).sum();
-    stats.insert("triangles", (tris.len() as u64 + instanced) as f64);
+    stats.insert("triangles", instanced as f64);
     stats.insert("instances", instances.len() as f64);
     stats.insert("instanced_triangles", instanced as f64);
-    // Deforming meshes (posed skinned models') first in the pool: the previous frame's vertices (`prev_verts`, motion vectors)
-    // cover the dynamic tail and, right after it, them.
+    // Deforming meshes (posed skinned models') first in the pool: the previous frame's vertices (`prev_verts`, motion
+    // vectors) cover them.
     if meshes.iter().any(|m| m.deforms) {
         let (mut pt, mut pa) = (Vec::with_capacity(pool_tris.len()), Vec::with_capacity(pool_attrs.len()));
         let mut pv = vec![];
@@ -2180,18 +2085,7 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
             pool_vcolors = pv;
         }
     }
-    stats.insert("unique_triangles", (tris.len() + pool_tris.len()) as f64);
-    // Cutout materials: their triangles take the any-hit path in traversal. Glass casts no shadow of its own: what a
-    // shadow ray keeps past it is the kernel's (`glass_tr`; in full with `A_GLASS_SHADOWS`).
-    for (f, a) in tri_flags.iter_mut().zip(&attrs) {
-        let m = &materials[a.uv[3].to_bits() as usize];
-        if m.uv2[3] > 0.0 {
-            *f |= TRI_MASKED;
-        }
-        if m.layer[0] > 0.0 {
-            *f |= TRI_NO_SHADOW;
-        }
-    }
+    stats.insert("unique_triangles", pool_tris.len() as f64);
     retained.asset_materials = asset_materials;
     Ok(Scene {
         name: st.name.clone(),
@@ -2201,12 +2095,9 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         time: st.time,
         width: st.width,
         height: st.height,
-        tris,
-        vcolors,
         pool_vcolors,
         gpu_vcolors: vec![],
-        tri_flags,
-        attrs,
+        attrs: vec![],
         materials,
         textures: texcache.textures,
         lights,
@@ -2215,8 +2106,6 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
         environment: EnvSettings::of(w),
         preset,
         stats,
-        tri_nodes,
-        tri_instances,
         tinted,
         retained,
         particles,
@@ -2512,8 +2401,8 @@ pub fn section_mesh(g: &world::Geometry, grouped: bool, first: u32, sect_first: 
             }
         }
     }
-    let (mut t, mut flags, mut a) = (vec![], vec![], vec![]);
-    append_arrays(g, Mat4::IDENTITY, 0, 0, Some(&group), &mut t, &mut flags, &mut a);
+    let (mut t, mut a) = (vec![], vec![]);
+    append_arrays(g, Mat4::IDENTITY, 0, Some(&group), &mut t, &mut a);
     // (`append_arrays` left each triangle's group where its material goes.)
     let group_of = |k: usize| a[k].uv[3].to_bits();
     let mut order: Vec<usize> = (0..t.len()).collect();
@@ -2688,8 +2577,7 @@ pub fn group_materials(g: &world::Geometry, mats: &[u32]) -> Option<Vec<Option<u
 }
 
 /// A geometry's triangles at `world`, with `mat`, or per triangle `per_tri`'s (`group_materials`: None not drawn).
-#[allow(clippy::too_many_arguments)]
-fn append_arrays(g: &world::Geometry, world: Mat4, mat: u32, flags: u32, per_tri: Option<&[Option<u32>]>, tris: &mut Vec<[Vec3A; 3]>, tri_flags: &mut Vec<u32>, attrs: &mut Vec<GpuTriAttr>) {
+fn append_arrays(g: &world::Geometry, world: Mat4, mat: u32, per_tri: Option<&[Option<u32>]>, tris: &mut Vec<[Vec3A; 3]>, attrs: &mut Vec<GpuTriAttr>) {
     let nm = glam::Mat3::from_mat4(world).inverse().transpose();
     let mirrored = world.determinant() < 0.0;
     let p = |i: usize| world.transform_point3(Vec3::new(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]));
@@ -2714,25 +2602,9 @@ fn append_arrays(g: &world::Geometry, world: Mat4, mat: u32, flags: u32, per_tri
                 *v = gn;
             }
         }
-        push_tri(tris, tri_flags, attrs, pos, nrm, [uv(a), uv(b), uv(c)], None, mat, flags);
+        tris.push([pos[0].into(), pos[1].into(), pos[2].into()]);
+        attrs.push(tri_attr(nrm, [uv(a), uv(b), uv(c)], None, mat));
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_tri(
-    tris: &mut Vec<[Vec3A; 3]>,
-    tri_flags: &mut Vec<u32>,
-    attrs: &mut Vec<GpuTriAttr>,
-    p: [Vec3; 3],
-    n: [Vec3; 3],
-    uv: [Vec2; 3],
-    tangent: Option<CornerTangents>,
-    mat: u32,
-    flags: u32,
-) {
-    tris.push([p[0].into(), p[1].into(), p[2].into()]);
-    tri_flags.push(flags);
-    attrs.push(tri_attr(n, uv, tangent, mat));
 }
 
 /// Shading attributes of a triangle: normals, UVs, its tangents if it has them, its material.
@@ -2856,68 +2728,6 @@ mod instance_tests {
         assert_eq!(texture_image(&tex(0), assets).unwrap().0, kb);
     }
 
-    /// An instance's placed triangle and attributes equal flattening the same triangle at the instance transform: as
-    /// the flattening path has them (`Instance::flat`) against the triangle built in world space as `append_arrays`
-    /// builds it, under a transform that keeps the hand and under one that mirrors (the second and third vertex
-    /// change places, the tangent frame changes hand), with distinct normals, UVs, tangents and vertex colours a
-    /// vertex.
-    #[test]
-    fn instance_matches_flattening() {
-        let p = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.5, 0.2)];
-        let n = [Vec3::new(0.0, -0.37, 0.93).normalize(), Vec3::new(0.1, -0.3, 0.9).normalize(), Vec3::new(-0.2, -0.4, 0.8).normalize()];
-        let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.25), Vec2::new(0.5, 1.0)];
-        let colors = [1, 2, 3];
-        let keeps = Mat4::from_scale_rotation_translation(Vec3::splat(2.0), glam::Quat::from_rotation_y(0.7) * glam::Quat::from_rotation_x(-0.3), Vec3::new(5.0, 1.0, -3.0));
-        let tg = [(Vec3::new(1.0, 0.1, 0.0).normalize(), 1.0), (Vec3::new(0.9, 0.0, 0.3).normalize(), 1.0), (Vec3::new(0.8, -0.2, 0.1).normalize(), 1.0)];
-        let local = tri_attr(n, uv, Some(tg), 7);
-        for (w, mirrored) in [(keeps, false), (keeps * Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)), true)] {
-            assert_eq!(mirrors(w), mirrored);
-            let inst = Instance { mesh: 0, world: w, object: 3, cast_shadow: true, name: "x".into(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
-            assert_eq!(inst.gpu(0).n[1][3].to_bits(), if mirrored { INST_MIRRORED } else { 0 }, "the record says whether it mirrors");
-            let (placed, got, got_colors) = inst.flat(&[p[0].into(), p[1].into(), p[2].into()], &local, Some(colors));
-            // The world-space triangle: its vertices in the order the build flattens a placement in.
-            let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
-            let nm = glam::Mat3::from_mat4(w).inverse().transpose();
-            let wp = order.map(|k| w.transform_point3(p[k]));
-            let hand = if mirrored { -1.0 } else { 1.0 };
-            let flat = tri_attr(order.map(|k| (nm * n[k]).normalize()), order.map(|k| uv[k]), Some(order.map(|k| (w.transform_vector3(tg[k].0).normalize(), tg[k].1 * hand))), 7);
-            for k in 0..3 {
-                assert!((Vec3::from(placed[k]) - wp[k]).length() < 1e-5, "mirrored {mirrored}: vertex {k}");
-            }
-            assert!((placed[1] - placed[0]).cross(placed[2] - placed[0]).dot(Vec3A::from(nm * n[0])) > 0.0, "mirrored {mirrored}: it faces as its normals do");
-            for (a, b) in [(got.n0, flat.n0), (got.n1, flat.n1), (got.n2, flat.n2), (got.t, flat.t), (got.t1, flat.t1), (got.t2, flat.t2)] {
-                assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5, "mirrored {mirrored}: {a:?} vs {b:?}");
-                assert_eq!(a[3], b[3], "mirrored {mirrored}: the UV packed there, the tangent frame's hand");
-            }
-            assert_eq!(got.uv, flat.uv, "mirrored {mirrored}");
-            // (`placed_tri` places a triangle the same way.)
-            let (_, pn, puv, ptg) = placed_tri(w, &p, &n, &uv, Some(tg));
-            let by = tri_attr(pn, puv, ptg, 7);
-            for (a, b) in [(by.n0, flat.n0), (by.n1, flat.n1), (by.n2, flat.n2), (by.t, flat.t), (by.t1, flat.t1), (by.t2, flat.t2)] {
-                assert!((Vec3::new(a[0], a[1], a[2]) - Vec3::new(b[0], b[1], b[2])).length() < 1e-5 && a[3] == b[3], "mirrored {mirrored}, placed_tri: {a:?} vs {b:?}");
-            }
-            assert_eq!(got_colors, Some(order.map(|k| colors[k])), "mirrored {mirrored}: the vertex colours follow their vertices");
-            assert_eq!(got.x[1].to_bits(), 3);
-        }
-    }
-
-    /// Software traversal flattens instances: a cutout material's triangles keep TRI_MASKED (any-hit alpha test),
-    /// the placement's shadow flag applies to all.
-    #[test]
-    fn flattened_instance_keeps_cutout_flag() {
-        let opaque = GpuMaterial::default();
-        let mut cutout = GpuMaterial::default();
-        cutout.uv2[3] = 0.5;
-        let mats = [opaque, cutout];
-        let a = |m: u32| tri_attr([Vec3::Z; 3], [Vec2::ZERO, Vec2::X, Vec2::Y], None, m);
-        let inst = |shadow: bool| Instance { mesh: 0, world: Mat4::IDENTITY, object: 0, cast_shadow: shadow, name: "x".into(), sub: None, hidden: false, masked: false, first_emitter: 0, rows: 0, bits: 0, prev: 0, verts: 0 };
-        assert_eq!(instance_tri_flags(&inst(true), &a(0), &mats), 0);
-        assert_eq!(instance_tri_flags(&inst(true), &a(1), &mats), TRI_MASKED);
-        assert_eq!(instance_tri_flags(&inst(false), &a(1), &mats), TRI_MASKED | TRI_NO_SHADOW);
-    }
-
-    /// A node's triangles may come in two ranges (what the build flattened of an instance's mesh, the mesh appended
-    /// by software traversal): selection outlines need both.
     /// An instanced object: one shared mesh, an instance and an object entry per copy (capacity, not count), hidden
     /// past the count and where a matrix scales to 0; a copy may mirror the mesh.
     #[test]
@@ -2933,7 +2743,7 @@ mod instance_tests {
         let m = [Mat4::IDENTITY, Mat4::from_translation(Vec3::X), Mat4::from_scale(Vec3::ZERO), Mat4::from_translation(Vec3::Y)];
         w.set_instances(2, 3, Some(m.iter().flat_map(|m| m.to_cols_array()).collect()), Some(vec![0.5; 12]), None).unwrap();
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.meshes.len(), sc.instances.len(), sc.tris.len(), sc.objects.len() / 4), (1, 4, 0, 4), "tinted: 4 vec4s an object");
+        assert_eq!((sc.meshes.len(), sc.instances.len(), sc.objects.len() / 4), (1, 4, 4), "tinted: 4 vec4s an object");
         assert_eq!(sc.instances.iter().map(|i| (i.sub, i.hidden)).collect::<Vec<_>>(), vec![(Some(0), false), (Some(1), false), (Some(2), true), (Some(3), true)]);
         assert_eq!((sc.objects[4][0], sc.objects[4 + 3]), (1.0, [0.5, 0.5, 0.5, 0.0]));
         assert!(sc.tinted && sc.retained.instanced(2).unwrap().capacity == 4);
@@ -2941,14 +2751,14 @@ mod instance_tests {
         m[0] = -1.0;
         w.set_instances(2, 3, Some(m), None, None).unwrap();
         let sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "a copy that mirrors the mesh is an instance as the others");
+        assert_eq!(sc.instances.len(), 4, "a copy that mirrors the mesh is an instance as the others");
         assert_eq!(sc.instances.iter().map(|i| i.gpu(0).n[1][3].to_bits()).collect::<Vec<_>>(), [INST_MIRRORED, 0, 0, 0], "and its record says so");
     }
 
     /// A visible rect light's card is an instance of one card mesh: the lights share the mesh, each instance has its
     /// light's size and place, its material in its row, and casts no shadow; its two triangles stand 1 mm in front of
     /// the light, facing where it shines, and are its emitters, marked as a card's. A light without size has an
-    /// instance no ray sees. No world-space triangle. No GPU.
+    /// instance no ray sees. No GPU.
     #[test]
     fn a_rect_lights_card_is_an_instance_of_the_card_mesh() {
         let mut w = World::default();
@@ -2962,7 +2772,7 @@ mod instance_tests {
         w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
         w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
         let mut sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.tris.len(), sc.meshes.len(), sc.instances.len(), sc.lights.len()), (0, 1, 3, 0), "one mesh, an instance a card, no table light");
+        assert_eq!((sc.meshes.len(), sc.instances.len(), sc.lights.len()), (1, 3, 0), "one mesh, an instance a card, no table light");
         let m = sc.meshes[0];
         assert_eq!((m.count, m.sect_count, m.deforms), (2, 1, false));
         let inst = |id: u32| sc.instances[sc.retained.instance(id).expect("a card is an instance").instance as usize].clone();
@@ -3003,7 +2813,7 @@ mod instance_tests {
         let m = [Mat4::from_scale(Vec3::splat(2.0)), Mat4::from_translation(Vec3::X), Mat4::from_scale(Vec3::ZERO), Mat4::from_translation(Vec3::Y)];
         w.set_instances(2, 3, Some(m.iter().flat_map(|m| m.to_cols_array()).collect()), None, None).unwrap();
         let mut sc = build(&w, Path::new("."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.meshes.len(), sc.meshes[0].sect_count, sc.instances.len(), sc.tris.len()), (1, 1, 4, 0));
+        assert_eq!((sc.meshes.len(), sc.meshes[0].sect_count, sc.instances.len()), (1, 1, 4));
         assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits)).collect::<Vec<_>>(), [(0, 0), (1, 0), (2, 0), (3, 0)], "a row a copy");
         let (st, first) = (sc.object_stride(), sc.retained.instanced(2).unwrap().object as usize);
         assert_eq!((0..4).map(|i| sc.objects[(first + i) * st][3]).collect::<Vec<_>>(), [2.0, 2.0, 0.0, 0.0], "a hidden copy's entry has no power");
@@ -3038,12 +2848,12 @@ mod instance_tests {
         let meshes = |sc: &Scene| sc.meshes.iter().map(|m| (m.first, m.count, m.sect_count, m.over)).collect::<Vec<_>>();
         assert_eq!(meshes(&mirrored), meshes(&straight));
         assert_eq!(mirrored.pool_tris, straight.pool_tris, "the meshes' triangles are the model's own, whatever places them");
-        assert_eq!((mirrored.instances.len(), mirrored.tris.len()), (straight.instances.len(), straight.tris.len()));
+        assert_eq!(mirrored.instances.len(), straight.instances.len());
         assert_eq!((&mirrored.sections, &mirrored.rows), (&straight.sections, &straight.rows), "and their sections and rows");
         assert!(straight.instances.len() >= 2 && straight.instances.iter().all(|i| i.gpu(0).n[1][3].to_bits() & INST_MIRRORED == 0));
         assert!(mirrored.instances.iter().all(|i| i.gpu(0).n[1][3].to_bits() & INST_MIRRORED != 0), "every instance of a mirrored model mirrors");
         // (The cutout on an emitter: a mesh apart, a still model's and a moving node's, an instance each.)
-        assert!(straight.tris.is_empty() && straight.meshes.iter().filter(|m| m.over != NO_OVER).count() == 2 && straight.instances.len() == 4);
+        assert!(straight.meshes.iter().filter(|m| m.over != NO_OVER).count() == 2 && straight.instances.len() == 4);
     }
 
     /// A mesh of a geometry drawn by its groups lies by section, a group after another: a triangle in no group is not
@@ -3111,7 +2921,7 @@ mod instance_tests {
     }
 
     /// A model's mesh lies by section, a section a material of the file (tests/render/data/frame-pane.glb: an opaque,
-    /// a cutout and a glass quad; placed twice): one mesh of three sections, nothing flattened. Each instance has its
+    /// a cutout and a glass quad; placed twice): one mesh of three sections. Each instance has its
     /// three rows, with the classes, and casts (not all of it is glass); its record has the rows' first, a row where
     /// its section's triangles start; the kernel's features for a cutout and for glass among other sections are set.
     #[test]
@@ -3126,7 +2936,7 @@ mod instance_tests {
         }
         let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!(sc.meshes.iter().map(|m| (m.count, m.sect_count, m.over)).collect::<Vec<_>>(), [(6, 3, NO_OVER)]);
-        assert_eq!((sc.instances.len(), sc.tris.len()), (2, 0));
+        assert_eq!(sc.instances.len(), 2);
         assert_eq!(sc.meshes[0].parts(&sc.sections), [(0, 2), (2, 2), (4, 2)], "a geometry a section");
         assert_eq!(sc.pool_attrs.iter().map(|a| (a.uv[3].to_bits(), a.x[3].to_bits())).collect::<Vec<_>>(), [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)], "a triangle's section and its index in it");
         assert_eq!(sc.instances.iter().map(|i| (i.rows, i.bits, i.cast_shadow)).collect::<Vec<_>>(), [(0, INST_CUTOUT | INST_GLASS, true), (3, INST_CUTOUT | INST_GLASS, true)], "rows of its own an instance");
@@ -3152,7 +2962,7 @@ mod instance_tests {
     }
 
     /// A model placed without size (scene code hides by scaling to 0) is an instance no ray sees, of the model's
-    /// mesh, as one with a size is: nothing of it is a world-space triangle, and its object has no power.
+    /// mesh, as one with a size is, and its object has no power.
     #[test]
     fn a_model_without_size_is_an_instance_no_ray_sees() {
         let mut w = World::default();
@@ -3164,7 +2974,7 @@ mod instance_tests {
             w.set_transform(id, Vec3::new(id as f32 * 5.0, 0.0, 0.0), glam::Quat::IDENTITY, scale).unwrap();
         }
         let sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.tris.len(), sc.meshes.len(), sc.instances.len()), (0, 1, 3), "one mesh, an instance a placement");
+        assert_eq!((sc.meshes.len(), sc.instances.len()), (1, 3), "one mesh, an instance a placement");
         assert_eq!(sc.instances.iter().map(|i| (i.hidden, i.masked)).collect::<Vec<_>>(), [(false, false), (true, true), (true, true)]);
         assert!(sc.instances.iter().all(|i| i.world.is_finite() && glam::Mat3::from_mat4(i.world).determinant() != 0.0), "each stands somewhere");
         let power = |id: u32| sc.objects[sc.retained.proxies[&id].object.unwrap() as usize * object_stride(sc.tinted)][3];
@@ -3174,7 +2984,7 @@ mod instance_tests {
 
     /// A posed skinned model's triangles that emit stay in its mesh (tests/render/data/arm-glow.glb: arm.glb with its
     /// light half emitting, and a clip, `vanish`, that scales its tip joint from nothing to its size): the model is an instance of a mesh that deforms, and they are its instance's emitters,
-    /// moving ones, each its mesh's triangle as the instance places it. Nothing is a world-space triangle. One placed
+    /// moving ones, each its mesh's triangle as the instance places it. One placed
     /// without size is an instance no ray sees. No GPU.
     #[test]
     fn a_posed_skinned_models_emitters_are_its_instances() {
@@ -3188,7 +2998,7 @@ mod instance_tests {
             w.set_transform(id, Vec3::new(id as f32 * 3.0, 0.5, -1.0), glam::Quat::from_rotation_y(0.4), Vec3::splat(scale)).unwrap();
         }
         let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!((sc.tris.len(), sc.instances.len(), sc.retained.skinned.len()), (0, 2, 2), "an instance a model, of a mesh of its own");
+        assert_eq!((sc.instances.len(), sc.retained.skinned.len()), (2, 2), "an instance a model, of a mesh of its own");
         assert!(sc.meshes.iter().all(|m| m.deforms) && sc.instances.iter().map(|i| (i.hidden, i.masked)).collect::<Vec<_>>() == [(false, false), (true, true)]);
         let power = |id: u32| sc.objects[sc.retained.proxies[&id].object.unwrap() as usize * object_stride(sc.tinted)][3];
         assert_eq!([power(1), power(2)], [1.0, 0.0], "the unseen one's object has no power");
@@ -3224,7 +3034,7 @@ mod instance_tests {
             build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap()
         };
         let (with, without) = (scene("arm-glow-decal.glb"), scene("arm-glow.glb"));
-        assert_eq!((with.tris.len(), with.meshes.len(), with.instances.len()), (0, 1, 1));
+        assert_eq!((with.meshes.len(), with.instances.len()), (1, 1));
         assert_eq!(with.pool_tris, without.pool_tris, "the mesh's triangles: the model's without the cutout's");
         let classes = |sc: &Scene| sc.rows.iter().map(|r| r[0] & (ROW_CUTOUT | ROW_GLASS)).collect::<Vec<_>>();
         assert_eq!((classes(&with), with.sections.clone()), (classes(&without), without.sections.clone()), "no section is a cutout's");
@@ -3236,7 +3046,7 @@ mod instance_tests {
     /// A cutout on exactly an emitter's vertices leaves the mesh for the model's second one (`split_coincident`), in a
     /// model that stays and in a rigid model's moving node (tests/render/data/panel-decal.glb: panel.glb, a grey quad
     /// and an emitting one, with a masked quad on the emitting one's vertices): the emitter stays in its mesh, the
-    /// cutout is a mesh apart with an instance beside the first's, and nothing is a world-space triangle.
+    /// cutout is a mesh apart with an instance beside the first's.
     #[test]
     fn a_cutout_on_an_emitter_is_the_models_second_mesh() {
         let mut w = World::default();
@@ -3248,7 +3058,6 @@ mod instance_tests {
         w.set_transform(1, Vec3::new(3.0, 1.0, -2.0), glam::Quat::from_rotation_y(0.5), Vec3::splat(1.5)).unwrap();
         w.set_object(2, "posed".into(), None, model(Some(desc::Animation { clip: "slide".into(), time: 0.25, r#loop: true, nodes: Default::default() })), true, false).unwrap();
         let sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
-        assert_eq!(sc.tris.len(), 0, "no world-space triangle");
         // An object's instances: (triangles of the mesh, whether it has a second mesh, the instance's emitters, its rows' classes).
         let of = |name: &str| {
             sc.instances
@@ -3274,7 +3083,7 @@ mod instance_tests {
     /// A posed rigid model is its parts (tests/render/data/panel-slider.glb: a node its clip leaves alone, a grey quad
     /// and an emitting one, and a node it moves, a grey quad): the nodes left alone one mesh in the model's space,
     /// the moved node a mesh in its own, both shared by the placements of the model with the clip, whatever its time.
-    /// Nothing is flattened. The part left alone's emitters are still ones, movable object or not.
+    /// The part left alone's emitters are still ones, movable object or not.
     #[test]
     fn a_posed_rigid_model_is_instances_of_its_parts_meshes() {
         let mut w = World::default();
@@ -3289,7 +3098,7 @@ mod instance_tests {
         let mut sc = build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap();
         assert_eq!(sc.meshes.iter().map(|m| (m.count, m.sect_count, m.over)).collect::<Vec<_>>(), [(4, 2, NO_OVER), (2, 1, NO_OVER)], "the part left alone (two materials), the moved node");
         assert_eq!((sc.meshes[0].lo.x, sc.meshes[0].hi.x, sc.meshes[1].lo.x, sc.meshes[1].hi.x), (1.0, 9.0, -1.0, 1.0), "the part left alone in the model's space (its node 5 m along x), the moved node in its own");
-        assert_eq!((sc.instances.len(), sc.tris.len()), (4, 0), "two instances a placement, nothing flattened");
+        assert_eq!(sc.instances.len(), 4, "two instances a placement");
         let rigid = |sc: &Scene, id: u32| match &sc.retained.proxies[&id].draw {
             Draw::Rigid(r) => r.clone(),
             _ => panic!("a posed rigid model"),
@@ -3308,14 +3117,6 @@ mod instance_tests {
         let prep = crate::prepare_as(true, &mut sc, &mut vec![]);
         let of = |id: u32| { let r = rigid(&sc, id); prep.emitter_tris.iter().filter(|e| Some(e.inst) == r.still).map(|e| e.moves).collect::<Vec<bool>>() };
         assert_eq!((of(1), of(2)), (vec![false; 2], vec![false; 2]));
-    }
-
-    #[test]
-    fn node_ranges_returns_every_range() {
-        let nodes = vec![("lamp".to_string(), 10, 12), ("box".to_string(), 12, 20), ("lamp".to_string(), 40, 90)];
-        assert_eq!(node_ranges(&nodes, "lamp").collect::<Vec<_>>(), vec![10..12, 40..90]);
-        assert_eq!(node_ranges(&nodes, "box").collect::<Vec<_>>(), vec![12..20]);
-        assert_eq!(node_ranges(&nodes, "none").count(), 0);
     }
 
     /// More volumes shown than the kernel takes (32): the scene is refused, not drawn without the last ones; hidden

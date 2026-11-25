@@ -2,8 +2,7 @@
 // its particles. A particle is a quad of its system's mesh (scene.rs `ParticleSystem`: four vertices) and its own
 // object (pivot, bounds, per-particle data for material functions). The pass writes the vertices (positions and
 // shading attributes; the systems' BLASes are built from them after it), last frame's positions as `prev_verts`
-// (motion vectors; from its own copy `last`, since a repose re-uploads the dynamic tail from the CPU) and the
-// objects.
+// (motion vectors; from its own copy `last`) and the objects.
 //
 // A particle function is a WGSL body (`ParticleFunction` in @threert/scene) run per particle:
 //     fn pf_<name>(i: PIn, p: array<vec4<f32>, 8>) -> POut { var o = POut(...); <code> return o; }

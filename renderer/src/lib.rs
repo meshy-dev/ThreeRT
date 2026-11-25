@@ -531,8 +531,8 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         tri_verts.push([e2.x, e2.y, e2.z, 0.0]);
         attrs.push(*a);
     }
-    // (A deforming mesh's previous vertices lie as its triangles do, counted from the first dynamic triangle: what
-    // gpu.rs `prev_verts` holds at the build. Its instance's record says where.)
+    // (A deforming mesh's previous vertices lie as its vertices do, counted from the first that moves: what gpu.rs
+    // `prev_verts` holds at the build. Its instance's record says where.)
     sc.gpu_instances = sc.instances.iter().map(|i| i.gpu(sc.meshes[i.mesh as usize].first)).collect();
     // A row's section starts here in the triangles' table (hardware traversal: a hit's geometry is its section, its
     // primitive counts from there).
@@ -1769,7 +1769,7 @@ mod units_tests {
     }
 
     /// Software traversal's instances are units wherever a scene is prepared, an offline render's as a session's: the
-    /// kernel has the unit walk, and nothing is a world-space triangle. A scene without an instance has none.
+    /// kernel has the unit walk. A scene without an instance has none.
     #[test]
     fn software_traversals_instances_are_units() {
         let mut sc = scene::build(&world(), std::path::Path::new("."), &default_presets_dir(), None).unwrap();

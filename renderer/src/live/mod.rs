@@ -1069,9 +1069,7 @@ impl LiveCore {
             }
             best
         };
-        let (mut t, i) = closest(&self.sc.tris, o, d);
-        let mut node = self.sc.tri_nodes.iter().find(|(_, a, b)| (*a as usize..*b as usize).contains(&i)).map(|n| n.0.as_str());
-        let mut sub = self.sc.tri_instances.iter().find(|(a, b, _)| (*a as usize..*b as usize).contains(&i)).map(|r| r.2);
+        let (mut t, mut node, mut sub) = (f32::INFINITY, None, None);
         let mut posed = Default::default();
         for inst in self.sc.instances.iter().filter(|i| !i.hidden) {
             let m = self.sc.meshes[inst.mesh as usize];
@@ -1115,8 +1113,7 @@ impl LiveCore {
 
     /// World-space triangles of a node (empty for lights without geometry, cameras, hidden nodes).
     pub fn node_tris(&self, id: &str) -> Vec<[glam::Vec3A; 3]> {
-        // World-space triangles (what the build flattened of an instance's mesh among them), then its instanced mesh.
-        let mut out: Vec<[glam::Vec3A; 3]> = scene::node_ranges(&self.sc.tri_nodes, id).flat_map(|r| self.sc.tris[r].iter().copied()).collect();
+        let mut out = vec![];
         // A model's first instance; every drawn instance of an instanced object.
         let mut of_node = self.sc.instances.iter().filter(|i| i.name == id && !i.hidden);
         let first = of_node.next();

@@ -144,8 +144,8 @@ struct Light { pos: vec4<f32>, dir: vec4<f32>, color: vec4<f32>, ext: vec4<f32>,
 const VERTEX_VEC4: u32 = 3u;
 // Software traversal's trees (hardware traversal has no binding for them): their nodes, and their leaves'
 // triangles (indexed.rs `Leaf`), the trees' own copy, three vec4s a triangle in the triangles' order: (v0, id),
-// (e1, id), (e2, -). A candidate's test reads nothing else. The ids: a world-space triangle's flags (TRI_*); a
-// mesh's section, and its index in the section.
+// (e1, id), (e2, -). A candidate's test reads nothing else. The ids: its section of its mesh, and its index in the
+// section.
 @if(!hwrt) @group(0) @binding(2) var<storage, read> leaves: array<vec4<f32>>;
 @if(!hwrt) @group(0) @binding(3) var<storage, read> nodes: array<Node>;
 @if(!hwrt) fn leaf_id(ti: u32, k: u32) -> u32 { return bitcast<u32>(leaves[ti * 3u + k].w); }
@@ -400,7 +400,7 @@ fn unit_or_zero(v: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 
-// A model-space triangle's shading attributes placed by instance r (scene::instance_attr). (Not its tangents, which
+// A model-space triangle's shading attributes placed by instance r. (Not its tangents, which
 // are placed where they are read: `hit_tangent`.)
 fn inst_attr(r: Instance, a: TriAttr) -> TriAttr {
     var b = a;

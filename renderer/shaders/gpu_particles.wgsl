@@ -1,9 +1,9 @@
 // Stateful GPU particles (gpu.rs `GpuParticlesGpu`; ROADMAP § 6 step 5a): each `GpuParticles` node's particles live in
 // a state buffer on the GPU (position and age, velocity and life, colour and size), emitted, updated, collided and
 // retired here every frame; the CPU keeps no particle. Like `Particles` (particles.wgsl), a particle is a quad of two
-// dynamic triangles and its own object (pivot, bounds, per-particle data: its colour, the material function's
-// `i.custom`); this pass writes the kernel's triangle data, last frame's positions (motion vectors), the BLAS input and
-// the objects, and the dynamic BLASes are rebuilt after it.
+// triangles of its system's mesh and its own object (pivot, bounds, per-particle data: its colour, the material
+// function's `i.custom`); this pass writes the kernel's triangle data, last frame's positions (motion vectors), the
+// BLAS input and the objects, and the systems' BLASes are rebuilt after it.
 //
 // A particle program is two WGSL bodies (`ParticleProgram` in @threert/scene), parameters `$Name` in `p`:
 //     fn pe_<name>(i: EIn, p: array<vec4<f32>, 8>) -> PState { var s: PState; <emit code> return s; }
@@ -64,7 +64,7 @@ struct System { a: vec4<u32>, b: vec4<u32>, c: vec4<f32>, d: vec4<f32>, e: vec4<
 @group(0) @binding(2) var<storage, read_write> vertices: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> prev_verts: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> objects: array<vec4<f32>>;
-// This pass's last positions of its vertices (the previous positions' indexing; a repose re-uploads the dynamic tail).
+// This pass's last positions of its vertices (the previous positions' indexing).
 @group(0) @binding(7) var<storage, read_write> last: array<vec4<f32>>;
 // Per particle: (pos, age), (vel, life), color, (size, alive, -, -); from each system's first state.
 @group(0) @binding(8) var<storage, read_write> state: array<vec4<f32>>;

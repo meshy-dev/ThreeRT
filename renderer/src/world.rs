@@ -126,9 +126,9 @@ pub struct Texture {
 #[derive(Clone, Debug)]
 pub enum Kind {
     Group,
-    /// `own_blas` (scene code's `dynamicGeometry`): instanced with its own BLAS, so replacing its geometry, creating or
-    /// removing it is applied in place (live/edits.rs `edit_geometry`) instead of rebuilding the scene; otherwise its
-    /// triangles are flattened into the shared groups.
+    /// `own_blas` (scene code's `dynamicGeometry`): a mesh of its own, so replacing its geometry, creating or removing
+    /// it is applied in place (live/edits.rs `edit_geometry`) instead of rebuilding the scene; otherwise an instance
+    /// of the mesh every object of its geometry shares.
     /// `materials`: one per geometry group (three.js's material array; empty: `material` for every triangle).
     Mesh { geometry: u32, material: u32, own_blas: bool, materials: Vec<u32> },
     /// glTF asset (path relative to the asset root), optionally only some of its nodes (by name).
@@ -201,8 +201,8 @@ pub struct Object {
     /// Per-instance data (UE PerInstanceCustomData): any four numbers scene code gives the object, read by material
     /// functions as `i.custom` (particle functions write one per particle).
     pub custom: [f32; 4],
-    /// UE Mobility "Movable": scripts move it (and everything under it) without rebuilding the scene; its triangles
-    /// are kept apart (dynamic BLASes) and re-transformed in place. Set by scene code, or by the first move.
+    /// UE Mobility "Movable": scripts move it (and everything under it) without rebuilding the scene: its instances'
+    /// transforms. Set by scene code, or by the first move.
     pub movable: bool,
     /// A rigid body drives it (renderer/src/physics.rs): movable, and a mesh among them is placed as an instance of its
     /// own BLAS, so a move is its TLAS transform and no triangle.

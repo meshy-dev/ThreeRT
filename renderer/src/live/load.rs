@@ -6,12 +6,7 @@ use super::*;
 pub(super) struct LoadedScene {
     /// Load phases (parse, bvh, sky, accel build, upload) in ms.
     pub(super) timings: Vec<(String, f64)>,
-    /// World-space triangles + per-node ranges, kept on the CPU for picking and selection outlines; instanced meshes
-    /// (model space) and their placements likewise.
-    pub(super) tris: Vec<[glam::Vec3A; 3]>,
-    pub(super) tri_nodes: Vec<(String, u32, u32)>,
-    /// Flattened instances of instanced objects: (first, end, instance index), for picking.
-    pub(super) tri_instances: Vec<(u32, u32, u32)>,
+    /// The meshes' triangles (model space) and their placements, kept on the CPU for picking and selection outlines.
     /// (A mesh the GPU skins has its build's pose here, but for its triangles that emit, which a new pose places:
     /// `repose_skinned`. `LiveCore::mesh_tris` has the mesh as it is now.)
     pub(super) pool_tris: Vec<[glam::Vec3A; 3]>,
@@ -270,7 +265,6 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     }
     base.ltile[3] = super::LIST_CANDIDATES;
     base.cam_fwd[3] = w as f32 / h as f32;
-    let (tris, tri_nodes, tri_instances) = (std::mem::take(&mut sc.tris), std::mem::take(&mut sc.tri_nodes), std::mem::take(&mut sc.tri_instances));
     let instance_features = gpu::instance_features(&sc);
     let pool_place: Vec<[u32; 2]> = if up.units.is_some() { sc.pool_attrs.iter().map(|a| [a.uv[3].to_bits(), a.x[3].to_bits()]).collect() } else { vec![] };
     let (pool_tris, meshes, instances) = (std::mem::take(&mut sc.pool_tris), std::mem::take(&mut sc.meshes), std::mem::take(&mut sc.instances));
@@ -285,7 +279,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     let procs = std::mem::take(&mut sc.procs);
     // (A proxy's index in `procs` is the build's: nothing between the build and here may take one out.)
     assert!(tables.retained.proxies.iter().all(|(id, p)| !matches!(p.draw, scene::Draw::Procedural(j) if procs.get(j as usize).map(|q| q.node) != Some(*id))), "a procedural object's proxy names another's place");
-    let triangles = sc.stats.get("triangles").map_or(tris.len(), |t| *t as usize);
+    let triangles = sc.stats.get("triangles").map_or(0, |t| *t as usize);
     let blobs = sc.proc_layout.as_ref().map_or_else(Default::default, |l| l.blobs.iter().map(|(b, off)| (b.hash, l.head.len() + off)).collect());
     // (A record's TLAS instance is at it: model instances, then procedural objects, then the room's.)
     let room_base = (prep.tri_verts.len() / 3, gpu_instances.len(), tables.objects.len() / tables.stride, up.region_words);
@@ -317,5 +311,5 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         verts: Holes::new(vertices, vertices + room.tris * 3),
         free_skinned: vec![],
     };
-    Ok((LoadedScene { timings, triangles, tris, tri_nodes, tri_instances, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, edit, emit, codes_sent }, view, env))
+    Ok((LoadedScene { timings, triangles, pool_tris, dynamic_verts, skins, skin_trees, pool_place, meshes, instances, sections, rows, gpu_instances, procs, proc_first, moving_instances: tables.retained.moves_instances(), instance_features, name: sc.name.clone(), up, base, tables, fixed_features, shaders, translucent_mats, translucent_used, volume_fns, edit, emit, codes_sent }, view, env))
 }

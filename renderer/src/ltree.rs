@@ -10,7 +10,7 @@
 //! triangle carries) x its weight / its leaf's, so a BSDF ray that hits it weighs its MIS by the same pmf. A node is one
 //! vec4 (one load per child visited): centre and radius as half floats, power, child word.
 //!
-//! Moving emitters (dynamic triangles: a van's lights, a swinging lantern) have a subtree of their own: the root's
+//! Moving emitters (a moving instance's: a van's lights, a swinging lantern) have a subtree of their own: the root's
 //! right child, the static emitters' subtree its left. They move, so their subtree is refit as they do
 //! (`refit_moving`: leaf spheres from their triangles now, then every node's from its children's), keeping its
 //! topology and so the codes their triangles carry. Particles (placed by a GPU pass) follow the tree's entries in the

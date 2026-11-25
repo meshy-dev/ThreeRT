@@ -356,7 +356,7 @@ impl LiveCore {
                 }
             }
             // Stateful GPU particles first (their emissions, the game's spawns): with stateless ones the pass below
-            // rebuilds the dynamic BLASes for both, else this one does.
+            // rebuilds the systems' BLASes for both, else this one does.
             if let (Some(_), 0) = (&self.sc.up.gpu_particles, k) {
                 let n = self.passes.pipes.len() as u32 + 2;
                 let stateless = self.sc.up.particles.is_some();

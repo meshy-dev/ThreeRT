@@ -1162,7 +1162,7 @@ impl LiveCore {
     }
 
     /// The kernel features the scene needs as it is now: what its materials and the environment ask for (edits change
-    /// them), with the structural ones the build found (textures, material functions, the traversal groups;
+    /// them), with the structural ones the build found (textures, material functions;
     /// `gpu::instance_features`). A new variant is compiled once, then cached.
     pub(super) fn kernel_features(&self) -> u32 {
         let (textures, functions) = self.sc.fixed_features;
@@ -1357,8 +1357,8 @@ impl LiveCore {
     /// each by its instance's mask above the triangles (a posed rigid model's every part's; a posed skinned model's
     /// own), where no ray sees a
     /// hidden one, and its row's power (`Tables::apply`: a hidden mesh's emitters at no weight). False where
-    /// something under it is drawn another way, or a mesh is not such an instance (the build flattened it, or an edit
-    /// took it out while it was hidden): the caller rebuilds.
+    /// something under it is drawn another way, or a mesh is not such an instance (an edit took it out while it was
+    /// hidden): the caller rebuilds.
     fn show_meshes(&mut self, world: &World, id: u32, children: &std::collections::HashMap<u32, Vec<u32>>, changes: &mut crate::world::Changes, build: &mut gpu::TopBuild) -> bool {
         for k in world.subtree_with(id, children) {
             match &world.objects[&k].kind {
@@ -2076,7 +2076,7 @@ impl LiveCore {
     /// An object given another material (`World::set_object`): every copy's row names it, with its class, and the
     /// copies' emitters go or are made with it.
     /// Returns how many objects it updated; Err: why it cannot (software traversal, an object the build
-    /// flattened or did not place this way, a kernel feature the material needs), and the caller rebuilds.
+    /// did not place this way, a kernel feature the material needs), and the caller rebuilds.
     /// `THREERT_EDIT_REBUILD=1` always rebuilds (A/B).
     pub(super) fn update_instanced(&mut self, world: &World, ids: &[u32], build: &mut gpu::TopBuild) -> std::result::Result<usize, String> {
         use crate::world::Kind;
@@ -2096,7 +2096,7 @@ impl LiveCore {
             let Some(n) = world.objects.get(&id).filter(|_| world.shown(id)) else { continue };
             let Kind::Instanced { capacity, procedural, materials, .. } = &n.kind else { continue };
             let (capacity, procedural) = (*capacity, *procedural);
-            let Some(&place) = sc.tables.retained.instanced(id) else { return Err("an instanced mesh the build flattened".into()) };
+            let Some(&place) = sc.tables.retained.instanced(id) else { return Err("an instanced mesh the build did not place".into()) };
             if place.capacity != capacity || place.mesh.is_none() != procedural {
                 return Err("an instanced mesh the build placed otherwise".into());
             }
@@ -2644,10 +2644,9 @@ impl LiveCore {
             // triangles and its skinning job stay until the next rebuild, as the build's do.)
             let its_own = |i: &scene::InstanceRef| whole(i, instances, meshes) || (matches!(i.mesh, scene::MeshKind::Skinned(_)) && instances.get(i.instance as usize).is_some_and(|x| top.has_mesh(x.mesh)));
             let at = record_of(*id, edit, tables).or_else(|| tables.retained.instance(*id).filter(|i| its_own(i)).map(|i| i.instance as usize));
-            // Drawn, and not at a record an edit can clear (a model of two instances, anything the build flattened): a
-            // rebuild takes it out.
+            // Drawn, and not at a record an edit can clear (a model of two instances): a rebuild takes it out.
             if at.is_none() && tables.retained.proxies.contains_key(id) {
-                return Err("an object the build placed otherwise (a model in parts, something it flattened) removed".into());
+                return Err("an object the build placed otherwise (a model in parts) removed".into());
             }
             // (A skinned model an edit placed: with its mesh's triangles go the room of its previous vertices and its
             // slot among the skinned, which the next one placed takes. The build's stay until the next rebuild.)
@@ -2712,9 +2711,9 @@ impl LiveCore {
             }
             // The mesh it draws now, as an instance at its record: a user fewer once it is placed again (below).
             let was = at.and_then(|r| instances.get(r)).filter(|i| !i.hidden || i.masked).map(|i| i.mesh);
-            // Drawn but not by a TLAS instance of its own: the build flattened it (movable, or a material instances skip).
+            // Drawn but not by an instance an edit can place again (a model the build placed).
             if at.is_none() && tables.retained.proxies.contains_key(&id) {
-                return Err("an object the build flattened".into());
+                return Err("an object the build placed otherwise".into());
             }
             let m = world.world_matrix(id);
             // A mesh that is hidden, or placed without size, is an instance no ray sees, at a point if it has no size
@@ -2955,7 +2954,7 @@ impl LiveCore {
                         let mut placed = vec![];
                         for &(node, mesh) in &parts {
                             if !top.has_mesh(mesh) {
-                                return Err("a model whose mesh is no unit (software traversal flattens it)".into());
+                                return Err("a model whose mesh is no unit (software traversal has no tree for it)".into());
                             }
                             let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();
                             if glass_caster(&mine) {
@@ -3034,7 +3033,7 @@ impl LiveCore {
                         };
                         let im = meshes[mesh as usize];
                         if !top.has_mesh(mesh) {
-                            return Err("a model whose mesh is no unit (it deforms; software traversal flattens it)".into());
+                            return Err("a model whose mesh is no unit (software traversal has no tree for it)".into());
                         }
                         // (Its rows, the mesh's own, are placed with its record below.)
                         let mine = tables.retained.mesh_rows.get(&mesh).ok_or("a model's mesh without its rows")?.clone();

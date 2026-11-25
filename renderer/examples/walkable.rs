@@ -15,8 +15,8 @@ fn main() -> anyhow::Result<()> {
     host.setup("r", None)?;
     let world = host.world.borrow();
     let sc = scene::build(&world, assets, &threert_render::default_presets_dir(), None)?;
-    // World-space triangles: the flattened ones and every instance's pool, transformed.
-    let mut tris: Vec<[Vec3A; 3]> = sc.tris.clone();
+    // World-space triangles: every instance's, placed.
+    let mut tris: Vec<[Vec3A; 3]> = vec![];
     for inst in &sc.instances {
         let m = sc.meshes[inst.mesh as usize];
         for t in &sc.pool_tris[m.first as usize..(m.first + m.count) as usize] {
