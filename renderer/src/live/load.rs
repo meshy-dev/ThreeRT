@@ -241,8 +241,12 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         let _ = g.kernel_pass(&up.kernel, "media_train");
         let _ = g.kernel_pass(&up.kernel, "media_composite");
     }
+    let hdri = match &world.environment.sky {
+        crate::desc::Sky::Hdri { texture, .. } => Some((*texture, prep.env_brightest)),
+        _ => None,
+    };
     let env = Environment {
-        sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
+        sky: SkyState { map: (prep.env.width, prep.env.height), hdri, altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
         settings: sc.environment.clone(),
     };
     let view = ViewState::new(&sc.camera, Arc::new(sc.preset.clone()));

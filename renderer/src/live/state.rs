@@ -89,6 +89,8 @@ pub(super) struct Environment {
 pub(super) struct SkyState {
     /// The environment map's size.
     pub(super) map: (u32, u32),
+    /// The uploaded HDRI's texture ID and peak luminance before scaling.
+    pub(super) hdri: Option<(u32, f32)>,
     /// The camera's altitude it was baked for, m.
     pub(super) altitude: f32,
     /// The brightest texel from which a sky is light-sampled (`Prepared::env_nee_floor`).

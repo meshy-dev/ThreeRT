@@ -1347,8 +1347,8 @@ pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Resul
         Sky::Hdri { texture, intensity, rotation, sky_light_intensity } => SkyData::Hdri {
             map: panorama(w, assets, *texture).context("HDRI environment")?,
             rotation: *rotation,
-            intensity: intensity.max(0.0),
-            sky_light_intensity: sky_light_intensity.max(0.0),
+            intensity: *intensity,
+            sky_light_intensity: *sky_light_intensity,
         },
         Sky::Gradient { zenith, horizon, ground, intensity, horizon_exponent, glow, clouds, .. } => {
             let cloud_map = match clouds.as_ref().and_then(|c| c.map.map(|m| (c, m))) {
