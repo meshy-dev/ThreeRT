@@ -23,6 +23,7 @@ export interface EngineExports {
   voxelGone(): string;
   voxelFrame(dt: number): string;
   readAsset(path: string, offset?: number, length?: number): Uint8Array;
+  preloadModel(uri: string, nodeSets?: string): boolean;
   geometry(id: number, p: Float32Array, n: Float32Array, uv: Float32Array, idx: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, d: string, data?: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
@@ -90,6 +91,7 @@ export function webEngine(w: EngineExports): WebEngine {
     voxelGone: () => w.voxelGone(),
     voxelFrame: (dt) => w.voxelFrame(dt),
     readAsset: (path, offset, length) => w.readAsset(path, offset, length).buffer as ArrayBuffer,
+    preloadModel: (uri, nodeSets) => w.preloadModel(uri, nodeSets),
     geometry: (id, p, n, uv, idx, groups, colors) => w.geometry(id, p, n, uv, idx, groups, colors),
     texture: (id, d, data) => w.texture(id, json(d), data),
     shader: (name, code, helpers) => w.shader(name, code, helpers),

@@ -2925,7 +2925,9 @@ translucency pass, which has its particles' functions alone; the kernel is made 
   instance as any other, and the triangles are its instance's emitters: at a new pose the light list's copies are
   taken again on the GPU from the skinned vertices, the CPU places the emitting triangles alone (the light tree's
   moving subtree is refit by them) and their weights follow the pose's areas. One placed without size is an
-  instance no ray sees.
+  instance no ray sees. A cutout on exactly an emitter's vertices is left out of a skinned model's mesh: it is
+  one mesh, where the cutout's holes would take the emitter with them, and what is drawn is the emitter, as where
+  the two are meshes apart.
 - `THREERT_INSTANCING=0`, the flattened reference of the instancing step, is gone with the build's arms it alone
   reached (a mesh's, an instanced object's copies', a model's). `tools/check-instancing.ts` holds software
   traversal to hardware traversal's render now.

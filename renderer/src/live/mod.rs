@@ -1035,7 +1035,8 @@ impl LiveCore {
         if !posed.contains_key(&mesh) {
             let tris = scene::model_gltf(&pg.uri, &self.assets).and_then(|model| model.triangles(glam::Mat4::IDENTITY, pg.nodes.as_deref(), Some(&pg.animation)));
             match tris {
-                Ok(t) if t.len() == pg.order.len() => posed.insert(mesh, pg.order.iter().map(|&(k, _, _)| t[k as usize].p.map(glam::Vec3A::from)).collect()),
+                // (The mesh's triangles are the model's, less what the build left out of it.)
+                Ok(t) if pg.order.iter().all(|&(k, _, _)| (k as usize) < t.len()) => posed.insert(mesh, pg.order.iter().map(|&(k, _, _)| t[k as usize].p.map(glam::Vec3A::from)).collect()),
                 _ => return pool,
             };
         }

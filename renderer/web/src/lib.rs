@@ -95,6 +95,12 @@ pub fn read_asset(path: &str, _offset: Option<f64>, _length: Option<f64>) -> Res
     Err(JsValue::from_str(&format!("readAsset {path}: the native renderer reads assets; a page fetches them")))
 }
 
+/// `preloadModel`: native only (a page has no thread that reads a model ahead): false, nothing is read.
+#[wasm_bindgen(js_name = preloadModel)]
+pub fn preload_model(_uri: &str, _node_sets: Option<String>) -> bool {
+    false
+}
+
 #[wasm_bindgen(js_name = physicsPoses)]
 pub fn physics_poses() -> Vec<f32> {
     engine(|e| api::physics_poses(&e.physics).to_vec())

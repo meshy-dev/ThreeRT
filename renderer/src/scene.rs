@@ -1934,9 +1934,21 @@ pub fn build(w: &World, assets: &Path, presets_dir: &Path, overrides: Option<&se
                     let a = animation.as_ref().unwrap();
                     let local = glb.triangles(Mat4::IDENTITY, nodes.as_deref(), Some(a))?;
                     let mut classed: [Vec<(usize, u32)>; 4] = Default::default();
+                    let mut emitting: std::collections::HashSet<u32> = Default::default();
                     for (k, t) in local.iter().enumerate() {
-                        let (mat, class, _) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
+                        let (mat, class, emits) = resolve(t.material.and_then(|i| doc.materials().nth(i)))?;
                         classed[class as usize].push((k, mat));
+                        if emits {
+                            emitting.insert(mat);
+                        }
+                    }
+                    // A cutout on exactly an emitter's vertices is left out: a skinned model is one mesh, where the
+                    // cutout's holes would take the emitter with them (`split_coincident`). What is drawn is the
+                    // emitter, as where the two are meshes apart. (Glass on what lies under it stays, as it was.)
+                    for (k, mat, class) in split_coincident(&mut classed, &emitting, &|k| local[k].p) {
+                        if class == 2 {
+                            classed[2].push((k, mat));
+                        }
                     }
                     if !local.is_empty() {
                         let (order, sects, mine) = model_sections(&kept(&classed));
@@ -3257,6 +3269,30 @@ mod instance_tests {
             let got = p.gpu_emitter_tris[i].vertices().map(Vec3::from);
             assert!((0..3).all(|c| got[c].abs_diff_eq(want[c], 1e-5)), "emitter {i}: its mesh's triangle where the instance places it");
         }
+    }
+
+    /// A posed skinned model's cutout on exactly an emitter's vertices is left out of its mesh (tests/render/data/
+    /// arm-glow-decal.glb: arm-glow.glb with a masked primitive on its emitting one's vertices): the mesh, its rows
+    /// and its emitters are the model's without the cutout. No GPU.
+    #[test]
+    fn a_skinned_models_cutout_on_an_emitter_is_left_out() {
+        let scene = |uri: &str| {
+            let mut w = World::default();
+            let cam = serde_json::from_value(serde_json::json!({ "fov": 50, "near": 0.1, "far": 100, "exposure": { "mode": "manual", "ev100": 0 } })).unwrap();
+            w.set_object(9, "camera".into(), None, Kind::Camera(cam), true, false).unwrap();
+            w.set_settings(world::Settings { camera: Some(9), ..Default::default() });
+            let animation = Some(desc::Animation { clip: "bend".into(), time: 0.25, r#loop: true, nodes: Default::default() });
+            w.set_object(1, "arm".into(), None, Kind::Model { uri: format!("tests/render/data/{uri}"), nodes: None, animation, functions: vec![] }, true, false).unwrap();
+            build(&w, Path::new(".."), &crate::default_presets_dir(), None).unwrap()
+        };
+        let (with, without) = (scene("arm-glow-decal.glb"), scene("arm-glow.glb"));
+        assert_eq!((with.tris.len(), with.meshes.len(), with.instances.len()), (0, 1, 1));
+        assert_eq!(with.pool_tris, without.pool_tris, "the mesh's triangles: the model's without the cutout's");
+        let classes = |sc: &Scene| sc.rows.iter().map(|r| r[0] & (ROW_CUTOUT | ROW_GLASS)).collect::<Vec<_>>();
+        assert_eq!((classes(&with), with.sections.clone()), (classes(&without), without.sections.clone()), "no section is a cutout's");
+        assert!(classes(&with).iter().all(|c| *c == 0));
+        let emitters = |sc: &Scene| rows_emitters(sc.meshes[0].sections(&sc.sections), &sc.rows, &sc.materials);
+        assert_eq!((emitters(&with), emitters(&without)), (2, 2));
     }
 
     /// A cutout on exactly an emitter's vertices leaves the mesh for the model's second one (`split_coincident`), in a
