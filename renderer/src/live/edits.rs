@@ -454,7 +454,7 @@ pub(super) fn place_instance(cx: &mut Placing, record: usize, inst: &mut scene::
             starts.get(s as usize).copied().flatten().map(|x| ((x + i) as usize, of[s as usize], s))
         };
         let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-        let made = crate::instance_emitters(inst, record as u32, &cx.pool_tris[a..b], (a) as u32, &numbered, n, &cx.tables.materials, moves, None);
+        let made = crate::instance_emitters(inst, record as u32, &cx.pool_tris[a..b], a as u32, &numbered, n, &cx.tables.materials, moves, None);
         for (j, (e, w)) in made.into_iter().enumerate() {
             cx.new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
             match cx.tables.emitter_tris.get_mut(first + j) {
@@ -886,8 +886,8 @@ impl LiveCore {
         if !changes.promoted.is_empty() {
             eprintln!("live: {} moved, now movable (this once rebuilds; set `movable = true` in the scene code to avoid it)", changes.promoted.join(", "));
         }
-        // Moved movable subtrees: their drawables are re-transformed with the posed models, their lights rewritten in
-        // the light table.
+        // Posed models, and what of the moved movable subtrees no instance moves (a rebuild's, below); their lights
+        // are rewritten in the light table.
         let mut dynamic = changes.poses.clone();
         // Still objects that moved for the first time: their meshes' instances move from now on, or the scene rebuilds.
         for id in std::mem::take(&mut changes.started) {
@@ -909,7 +909,7 @@ impl LiveCore {
                         let masked = inst.is_some_and(|i| self.sc.instances.get(i.instance as usize).is_some_and(|x| x.masked));
                         if world.shown(k) || masked {
                             // Movable models placed as instances move their transform (a posed skinned model too); the rest
-                            // re-transform triangles.
+                            // rebuild.
                             match inst.map(|i| i.instance) {
                                 Some(i) if !changes.poses.contains(&k) || inst.is_some_and(|i| matches!(i.mesh, scene::MeshKind::Skinned(_))) => placed.push((k, i)),
                                 _ => {
@@ -991,7 +991,7 @@ impl LiveCore {
             changes.poses.clear();
             changes.moved.clear();
             // Moving objects move their shadows and reflections over static surfaces: let anti-lag look for it.
-            if !dynamic.is_empty() || !placed.is_empty() || !rigid.is_empty() || !shared.is_empty() || !procs_moved.is_empty() || instanced_done {
+            if !placed.is_empty() || !rigid.is_empty() || !shared.is_empty() || !procs_moved.is_empty() || instanced_done {
                 self.lit_changed = self.frame.max(1);
             }
         }
@@ -2139,7 +2139,7 @@ impl LiveCore {
                         let at = sc.tables.emitter_tris.len();
                         (inst.first_emitter, row[2]) = (at as u32, at as u32);
                         let (a, b) = (mesh.first as usize, (mesh.first + mesh.count) as usize);
-                        let made = crate::instance_emitters(inst, r as u32, &sc.pool_tris[a..b], (a) as u32, &|k| Some((k, mat, 0)), mesh.count as usize, &sc.tables.materials, true, None);
+                        let made = crate::instance_emitters(inst, r as u32, &sc.pool_tris[a..b], a as u32, &|k| Some((k, mat, 0)), mesh.count as usize, &sc.tables.materials, true, None);
                         for (j, (e, w)) in made.into_iter().enumerate() {
                             self.pending_emitters.push(((at + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                             sc.tables.emitter_tris.push(e);
@@ -3181,7 +3181,7 @@ impl LiveCore {
                                 let first = tables.emitter_tris.len();
                                 (inst.first_emitter, row[2]) = (first as u32, first as u32);
                                 let (a, b) = (im.first as usize, (im.first + im.count) as usize);
-                                let made = crate::instance_emitters(&inst, (r0 + i) as u32, &pool_tris[a..b], (a) as u32, &|k| Some((k, mat, 0)), im.count as usize, &tables.materials, true, None);
+                                let made = crate::instance_emitters(&inst, (r0 + i) as u32, &pool_tris[a..b], a as u32, &|k| Some((k, mat, 0)), im.count as usize, &tables.materials, true, None);
                                 for (j, (e, w)) in made.into_iter().enumerate() {
                                     new_emitters.push(((first + j) as u32, crate::GpuEmitterTri::of(&e, w, 0)));
                                     tables.emitter_tris.push(e);
