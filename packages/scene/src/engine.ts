@@ -201,6 +201,8 @@ export interface Engine extends RenderingBinding {
   /** `colors`: the vertex colours (three.js's `color` attribute), linear RGB per vertex. */
   /** A file under the asset root, whole or a range (native only; a page's throws): `readAsset` below. */
   readAsset?(path: string, offset?: number, length?: number): ArrayBuffer;
+  /** A model file parsed on a worker thread ahead of its use (native only): `preloadModel` below. */
+  preloadModel?(uri: string, nodeSets?: string): boolean;
   geometry(id: number, positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array, groups?: Uint32Array | null, colors?: Float32Array | null): void;
   texture(id: number, desc: TextureDesc, data: Uint8Array | null): void;
   shader(name: string, code: string, helpers: string): void;
@@ -1684,6 +1686,17 @@ export function readAsset(path: string, offset?: number, length?: number): Array
   const e = (globalThis as { __engine?: Partial<Pick<Engine, "readAsset">> }).__engine;
   if (!e?.readAsset) throw new Error("readAsset: this host reads no assets (the native renderer does)");
   return offset === undefined ? e.readAsset(path) : e.readAsset(path, offset, length ?? 0);
+}
+
+/**
+ * Parses a model file (a GLB under the asset root) on a worker thread now, and reads the triangles of each of
+ * `nodeSets` (the `nodes` of the still `GLTFModel`s of it to come; null: the whole file), so that those models added
+ * later go in without that work in their frame (native renderer only; elsewhere, or for a path outside the root,
+ * false and nothing done). What a game streams models in by: its next ones preloaded a few frames ahead.
+ */
+export function preloadModel(uri: string, nodeSets: (string[] | null)[] = []): boolean {
+  const e = (globalThis as { __engine?: Partial<Pick<Engine, "preloadModel">> }).__engine;
+  return e?.preloadModel?.(uri, JSON.stringify(nodeSets)) ?? false;
 }
 
 export function cameraDesc(c: PerspectiveCamera): CameraDesc {
