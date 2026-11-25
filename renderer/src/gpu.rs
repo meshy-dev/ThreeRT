@@ -2,7 +2,6 @@
 
 use crate::heap::{Heap, Live, Section, Stream, Table};
 use crate::scene::Scene;
-use crate::GROUPS;
 use anyhow::{anyhow, Result};
 use web_time::Instant;
 use wgpu::util::DeviceExt;
@@ -253,8 +252,6 @@ pub struct PendingProc {
 pub struct TopBuild {
     /// Instances (hardware traversal's TLAS instances, software traversal's units) moved, came or went.
     pub instances: bool,
-    /// The dynamic groups' BLASes: their triangles were re-transformed.
-    pub dynamic: bool,
     /// Instanced meshes' BLASes: new meshes, a skinned model's new pose. (Software traversal: their trees are written
     /// by then; the top tree is made over their bounds.)
     pub meshes: Vec<u32>,
@@ -264,7 +261,7 @@ pub struct TopBuild {
 
 impl TopBuild {
     pub fn any(&self) -> bool {
-        self.instances || self.dynamic || !self.meshes.is_empty() || !self.procs.is_empty()
+        self.instances || !self.meshes.is_empty() || !self.procs.is_empty()
     }
 }
 
@@ -286,35 +283,13 @@ fn mesh_entries<'a>(accel: &'a Accel, meshes: &[u32]) -> Vec<wgpu::BlasBuildEntr
                             first_vertex: accel.mesh_verts[m as usize].0,
                             vertex_stride: VERTEX_STRIDE,
                             index_buffer: Some(&accel.indices),
-                            first_index: Some(accel.index_first + ((accel.pool_first + first as usize) * 3) as u32),
+                            first_index: Some(accel.index_first + first * 3),
                             transform_buffer: None,
                             transform_buffer_offset: None,
                         })
                         .collect(),
                 ),
             }
-        })
-        .collect()
-}
-
-/// The build entries of the dynamic groups' BLASes (groups 4 and up) over their triangles as they are now.
-fn dynamic_entries(accel: &Accel) -> Vec<wgpu::BlasBuildEntry<'_>> {
-    accel
-        .blases
-        .iter()
-        .filter(|b| b.1 >= 4)
-        .map(|(blas, _, first, size)| wgpu::BlasBuildEntry {
-            blas,
-            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
-                size,
-                vertex_buffer: &accel.vertices,
-                first_vertex: 0,
-                vertex_stride: VERTEX_STRIDE,
-                index_buffer: Some(&accel.indices),
-                first_index: Some(accel.index_first + (*first * 3) as u32),
-                transform_buffer: None,
-                transform_buffer_offset: None,
-            }]),
         })
         .collect()
 }
@@ -925,7 +900,7 @@ fn particle_source(scene: &Scene) -> String {
     format!("{RECORDS}{head}{functions}{tail}")
 }
 
-/// Hardware acceleration structures: one BLAS per non-empty traversal group, one TLAS over them.
+/// Hardware acceleration structures: a BLAS a mesh, one TLAS over their instances and the procedural objects'.
 pub struct Accel {
     pub tlas: wgpu::Tlas,
     /// What the BLASes are built from: the vertices (`Uploaded::vertices`: a record's first 12 bytes its position) and
@@ -934,29 +909,18 @@ pub struct Accel {
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub index_first: u32,
-    /// By mesh: its first vertex and how many (`indexed::Indexed::meshes`); and the world-space triangles' vertices.
+    /// By mesh: its first vertex and how many (`indexed::Indexed::meshes`).
     pub mesh_verts: Vec<(u32, u32)>,
-    pub flat_verts: u32,
-    /// (BLAS, group, first triangle, size).
-    blases: Vec<(wgpu::Blas, usize, usize, wgpu::BlasTriangleGeometrySizeDescriptor)>,
     /// One per instanced mesh (model space), referenced by the TLAS's model instances.
     meshes: Vec<wgpu::Blas>,
     /// Per mesh: its (first pool triangle, count) geometries and their sizes (`mesh_entries`).
     mesh_geo: Vec<(Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)>,
-    /// The first pool triangle in the GPU order.
-    pool_first: usize,
-    /// The TLAS index of model instance 0 (the traversal groups' instances come first).
-    pub inst_base: usize,
     /// The build's triangle BLAS bytes per triangle (Metal's sizes): edits' memory estimates (live/mod.rs `room_stats`).
     pub blas_per_tri: f64,
-    /// The TLAS index of the first procedural object's instance (after the model instances; each has its own AABB
-    /// BLAS, which its TLAS instance keeps).
-    pub proc_base: usize,
 }
 
 /// What is above the triangles for an edit in place: hardware traversal's TLAS and BLASes, or software traversal's
-/// units (units.rs). An instance's slot is its TLAS index; its kernel record is the slot less `inst_base` (0 for
-/// units: a unit's slot is its record).
+/// units (units.rs). An instance's slot (its TLAS index, its unit's) is its kernel record.
 pub enum Top<'a> {
     Hw(&'a mut Accel),
     Sw(&'a mut crate::units::Units),
@@ -969,13 +933,6 @@ impl<'a> Top<'a> {
             (Some(a), _) => Some(Top::Hw(a)),
             (None, Some(u)) => Some(Top::Sw(u)),
             _ => None,
-        }
-    }
-
-    pub fn inst_base(&self) -> usize {
-        match self {
-            Top::Hw(a) => a.inst_base,
-            Top::Sw(_) => 0,
         }
     }
 
@@ -993,18 +950,18 @@ impl<'a> Top<'a> {
 
     /// An instance of instanced mesh `k` at `slot`, placed by `world`. (Its bounds are the mesh's BLAS's, or its
     /// tree's: units.rs `Unit`.)
-    pub fn place(&mut self, slot: usize, k: u32, world: glam::Mat4, custom: u32, cast_shadow: bool, hidden: bool) {
+    pub fn place(&mut self, slot: usize, k: u32, world: glam::Mat4, cast_shadow: bool, hidden: bool) {
         match self {
-            Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), custom, instance_mask(cast_shadow, hidden))),
+            Top::Hw(a) => a.tlas[slot] = Some(wgpu::TlasInstance::new(&a.meshes[k as usize], tlas_rows(world), slot as u32, instance_mask(cast_shadow, hidden))),
             Top::Sw(u) => u.set(slot, u.unit(k, world, hidden)),
         }
     }
 
     /// A procedural object's instance at `slot` (its AABB BLAS). Hardware traversal only: software traversal finds
     /// procedural objects by their records (`trace_procs`), and its edits of them rebuild the scene.
-    pub fn place_blas(&mut self, slot: usize, blas: &wgpu::Blas, world: glam::Mat4, custom: u32, mask: u8) {
+    pub fn place_blas(&mut self, slot: usize, blas: &wgpu::Blas, world: glam::Mat4, mask: u8) {
         if let Top::Hw(a) = self {
-            a.tlas[slot] = Some(wgpu::TlasInstance::new(blas, tlas_rows(world), custom, mask));
+            a.tlas[slot] = Some(wgpu::TlasInstance::new(blas, tlas_rows(world), slot as u32, mask));
         }
     }
 
@@ -1837,7 +1794,7 @@ impl Kernel {
         Kernel { functions, hash: h.finish(), ..self.clone() }
     }
 
-    pub fn new(scene: &Scene, groups: [usize; GROUPS]) -> Kernel {
+    pub fn new(scene: &Scene) -> Kernel {
         // (The translucency pass's functions: those of its particles' materials.)
         let used: std::collections::BTreeSet<i32> = scene.translucent_mats().iter().filter_map(|&m| scene.materials.get(m as usize)).map(|m| m.tex1[3] - 1).filter(|&f| f >= 0).collect();
         let functions = Kernel::material_functions(&scene.shaders, &used);
@@ -1868,7 +1825,7 @@ impl Kernel {
         functions.hash(&mut h);
         volume_functions.hash(&mut h);
         geometry_functions.hash(&mut h);
-        Kernel { features: features(scene, groups), functions, volume_functions, geometry_functions, hash: h.finish(), approx: A_LIVE }
+        Kernel { features: features(scene), functions, volume_functions, geometry_functions, hash: h.finish(), approx: A_LIVE }
     }
 }
 
@@ -1893,11 +1850,8 @@ pub const F_FUNC: u32 = 512;
 // (1024: the emitter-reservoir experiment, removed 2026-11-13.)
 pub const F_GLASS: u32 = 2048;
 pub const F_COAT: u32 = 4096;
-/// A traversal group starts beyond 2^24 triangles: hardware instances carry their group index instead of their first
-/// triangle (24-bit custom data), and hits look the offset up in `Params::group_first` (~0.2 ms on Kabukicho, so only
-/// when needed).
-pub const F_HUGE: u32 = 8192;
-/// Instanced glTF meshes (scene::Instance): TLAS instances with custom data INSTANCE_BIT | record index, shaded from
+// (8192: a traversal group past 2^24 triangles, removed with the groups.)
+/// The scene has instances (scene::Instance): TLAS instances with their record as custom data, shaded from
 /// model-space triangles through their `instances` record.
 pub const F_INST: u32 = 16384;
 /// Bounded participating media (`VolumeMesh`; pathtrace.wgsl `media_track`): compiled out where no scene has one.
@@ -1959,26 +1913,11 @@ pub const F_SOURCE: u32 = F_UNITS;
 /// software traversal after the still scene's (F_SOURCE). Never with hardware traversal.
 pub const F_UNITS: u32 = 1 << 26;
 /// The sky's aerial perspective (SkyAtmosphere `aerialPerspective`; pathtrace.wgsl `aerial_tr`) on every path segment
-/// that ends on a surface: compiled out where no scene has it. (Bit 23 is left to INSTANCE_BIT below.)
+/// that ends on a surface: compiled out where no scene has it.
 pub const F_AERIAL: u32 = 1 << 24;
-/// Marks a model instance's custom data (bit 23); group instances then stay below it.
-pub const INSTANCE_BIT: u32 = 1 << 23;
-
-/// Whether some traversal group starts beyond what instance custom data holds (see F_HUGE): 24 bits, or 23 when
-/// model instances take the top bit.
-pub fn huge(groups: [usize; GROUPS], instanced: bool) -> bool {
-    let limit = if instanced { 1 << 23 } else { 1 << 24 };
-    let mut first = 0;
-    groups.iter().any(|&count| {
-        let past = count > 0 && first >= limit;
-        first += count;
-        past
-    })
-}
-
 /// Features a scene needs; `THREERT_FEATURES` (bit mask) restricts them for profiling.
-pub fn features(scene: &Scene, groups: [usize; GROUPS]) -> u32 {
-    features_of(&scene.materials, scene.environment.features(), !scene.textures.is_empty(), !scene.shaders.is_empty(), groups, instance_features(scene))
+pub fn features(scene: &Scene) -> u32 {
+    features_of(&scene.materials, scene.environment.features(), !scene.textures.is_empty(), !scene.shaders.is_empty(), instance_features(scene))
 }
 
 impl Params {
@@ -2030,13 +1969,8 @@ pub fn instance_features(scene: &Scene) -> u32 {
 
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
 /// scene's structure (`instances`: `instance_features`).
-pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures: bool, functions: bool, groups: [usize; GROUPS], instances: u32) -> u32 {
-    // `instances` carries the structural features (instance_features): instancing is its F_INST bit.
-    let instanced = instances & F_INST != 0;
+pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures: bool, functions: bool, instances: u32) -> u32 {
     let mut f = instances | environment;
-    if groups[1] + groups[3] + groups[5] + groups[7] > 0 {
-        f |= F_MASKED;
-    }
     if textures {
         f |= F_TEX;
     }
@@ -2052,12 +1986,8 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     if ms.iter().any(|m| m.tex1[2] == crate::scene::MAT_UNLIT) {
         f |= F_UNLIT;
     }
-    if huge(groups, instanced) {
-        f |= F_HUGE;
-    }
-
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
-        f &= mask | F_HUGE | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' custom data / the object table holds
+        f &= mask | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' records / the object table hold
     }
     // Features compiled in although the scene does not use them (the perf smoke's cost of a contract compiled in but off).
     if let Some(on) = std::env::var("THREERT_FEATURES_ON").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -2590,7 +2520,7 @@ impl Gpu {
     /// Uploads a prepared scene (geometry, materials, textures, environment, acceleration structures) and returns the
     /// bind group used by both the offline and the live kernels. `accum` holds one 80-byte Pixel per output pixel.
     #[allow(clippy::too_many_arguments)]
-    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
+    pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
         // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
@@ -2676,57 +2606,16 @@ impl Gpu {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        // Hardware acceleration structures, one BLAS per traversal group (see `Prepared::groups`): shadow casters have
-        // mask 1, the rest mask 2; alpha-cutout groups are non-opaque so the ray query reports candidates to test.
+        // Hardware acceleration structures: a BLAS a mesh (model space, a geometry a section), a TLAS instance a
+        // placement (its custom data its record; shadow casters mask 1, the rest mask 2), then the procedural objects'.
+        // Every geometry is flagged opaque, a cutout's too: every query forces opacity (trace_hw.wgsl).
         let mut accel = None;
         if self.hwrt {
             let tb = Instant::now();
-            let huge_scene = huge(groups, !scene.gpu_instances.is_empty());
             // (The indices' first word in the words' heap.)
             let index_first = (words.at(Stream::Indices) / 4) as u32;
-            let mut first = 0usize;
-            let groups: Vec<(usize, usize, u8)> = groups
-                .iter()
-                .enumerate()
-                .map(|(g, &count)| {
-                    let r = (first, count, if g % 4 < 2 { 1u8 } else { 2u8 });
-                    first += count;
-                    r
-                })
-                .collect();
-            let pool_first = first;
-            let mut t = d.create_tlas(&wgpu::CreateTlasDescriptor { label: None, max_instances: (GROUPS + scene.instances.len() + scene.procs.len() + room.records) as u32, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
-            let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = groups
-                .iter()
-                .map(|&(_, count, _)| wgpu::BlasTriangleGeometrySizeDescriptor {
-                    vertex_format: wgpu::VertexFormat::Float32x3,
-                    // (A world-space triangle's indices count from vertex 0: any of the world-space vertices.)
-                    vertex_count: ix.flat.max(1),
-                    index_format: Some(wgpu::IndexFormat::Uint32),
-                    index_count: Some((count * 3) as u32),
-                    // (Every geometry is flagged opaque, a cutout's too: every query forces opacity, trace_hw.wgsl.)
-                    flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
-                })
-                .collect();
-            let mut blases = vec![];
-            for (i, (first, count, mask)) in groups.iter().enumerate() {
-                if *count == 0 {
-                    continue;
-                }
-                // Dynamic groups (4..8) are rebuilt whenever something in them moves: built fast rather than traced fast
-                // (the C slice's ~100 k moving triangles: rebuild 4.14 -> 3.1 ms a frame, trace unchanged).
-                let flags = if i >= 4 { wgpu::AccelerationStructureFlags::PREFER_FAST_BUILD } else { wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE };
-                let blas = d.create_blas(
-                    &wgpu::CreateBlasDescriptor { label: None, flags, update_mode: wgpu::AccelerationStructureUpdateMode::Build },
-                    wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![sizes[i].clone()] },
-                );
-                // Custom data = the first triangle, or past 2^24 (F_HUGE) the group: `Params::group_first` has its first.
-                let custom = if huge_scene { i as u32 } else { *first as u32 };
-                t[blases.len()] = Some(wgpu::TlasInstance::new(&blas, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], custom, *mask));
-                blases.push((blas, i, *first, sizes[i].clone()));
-            }
-            // Instanced meshes: one opaque model-space BLAS each, a TLAS instance per placement (custom data
-            // INSTANCE_BIT | record; shadow casters mask 1).
+            // (Room for one at least: a scene of the sky alone.)
+            let mut t = d.create_tlas(&wgpu::CreateTlasDescriptor { label: None, max_instances: (scene.instances.len() + scene.procs.len() + room.records).max(1) as u32, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
             // Per mesh: its geometries, one a section (`InstMesh::parts`): first triangle, count.
             let mesh_parts: Vec<Vec<(u32, u32)>> = scene.meshes.iter().map(|m| m.parts(&scene.sections).into_iter().map(|(at, count)| (m.first + at, count)).collect()).collect();
             // (A translucent particle system's is not flagged opaque: the translucency pass asks for every hit.)
@@ -2748,8 +2637,7 @@ impl Gpu {
                         .collect()
                 })
                 .collect();
-            // Deforming meshes (posed skinned models') are rebuilt every new pose: built fast rather than traced fast, as the dynamic
-            // groups are.
+            // Deforming meshes (posed skinned models') are rebuilt every new pose: built fast rather than traced fast.
             let meshes: Vec<wgpu::Blas> = mesh_sizes
                 .iter()
                 .zip(&scene.meshes)
@@ -2760,27 +2648,25 @@ impl Gpu {
                 .collect();
             // What the triangle BLASes hold (Metal's own sizes; each instanced mesh once). A geometry: its first vertex
             // and how many, its first triangle and how many.
-            let group_parts = groups.iter().filter(|g| g.1 > 0).map(|&(first, count, _)| vec![(0, ix.flat.max(1), first as u32, count as u32)]);
-            let mesh_vertex_parts = mesh_parts.iter().zip(&ix.meshes).map(|(ps, &(vfirst, vcount))| ps.iter().map(|&(first, count)| (vfirst, vcount.max(1), pool_first as u32 + first, count)).collect::<Vec<_>>());
             let mut blas_per_tri = 0.0;
-            let parts: Vec<Vec<(u32, u32, u32, u32)>> = group_parts.chain(mesh_vertex_parts).collect();
+            let parts: Vec<Vec<(u32, u32, u32, u32)>> = mesh_parts.iter().zip(&ix.meshes).map(|(ps, &(vfirst, vcount))| ps.iter().map(|&(first, count)| (vfirst, vcount.max(1), first, count)).collect()).collect();
             if let Some(bytes) = parts.iter().map(|ps| self.tri_blas_bytes(&b_vertices, &words.buffer, index_first, ps)).sum::<Option<u64>>() {
                 timings.push(("tri_blas_mb".into(), bytes as f64 / (1 << 20) as f64));
                 let tris: u64 = parts.iter().flatten().map(|p| p.3 as u64).sum();
                 blas_per_tri = bytes as f64 / tris.max(1) as f64;
             }
-            let base = blases.len();
+            anyhow::ensure!(scene.instances.len() + scene.procs.len() <= 1 << 24, "too many instances for 24-bit custom data");
             for (k, inst) in scene.instances.iter().enumerate() {
                 let w = inst.world;
                 let row = |r: usize| [w.x_axis[r], w.y_axis[r], w.z_axis[r], w.w_axis[r]];
                 let [r0, r1, r2] = [row(0), row(1), row(2)];
                 let xf = [r0[0], r0[1], r0[2], r0[3], r1[0], r1[1], r1[2], r1[3], r2[0], r2[1], r2[2], r2[3]];
-                t[base + k] = Some(wgpu::TlasInstance::new(&meshes[inst.mesh as usize], xf, INSTANCE_BIT | k as u32, instance_mask(inst.cast_shadow, inst.hidden)));
+                t[k] = Some(wgpu::TlasInstance::new(&meshes[inst.mesh as usize], xf, k as u32, instance_mask(inst.cast_shadow, inst.hidden)));
             }
             // Procedural geometry: one AABB BLAS per distinct geometry (object space; kept across uploads by the
             // geometry's hash, so a rebuild builds only new ones), and per mesh a TLAS instance of it after the model
             // instances, whose custom data is the mesh's record; its hits are told apart by their kind.
-            let proc_base = base + scene.instances.len();
+            let proc_base = scene.instances.len();
             let mut built = self.proc_blases.lock().unwrap();
             let mut kept: std::collections::HashMap<[u8; 32], (wgpu::Blas, u64)> = Default::default();
             let mut proc_new: Vec<(usize, wgpu::Buffer, wgpu::BlasAABBGeometrySizeDescriptor)> = vec![];
@@ -2808,26 +2694,15 @@ impl Gpu {
             drop(built);
             for (j, p) in scene.procs.iter().enumerate() {
                 let record = (scene.gpu_instances.len() + j) as u32;
-                anyhow::ensure!(record < INSTANCE_BIT, "too many instances for 23-bit custom data");
                 let k = scene.proc_layout.as_ref().map_or(j, |l| l.blob_of[j]);
                 t[proc_base + j] = Some(wgpu::TlasInstance::new(&geo_blas[k], tlas_rows(p.world), record, instance_mask(p.cast_shadow, p.hidden)));
             }
-            let entries: Vec<wgpu::BlasBuildEntry> = blases
+            let entries: Vec<wgpu::BlasBuildEntry> = meshes
                 .iter()
-                .map(|(blas, _, first, size)| wgpu::BlasBuildEntry {
-                    blas,
-                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
-                        size,
-                        vertex_buffer: &b_vertices,
-                        first_vertex: 0,
-                        vertex_stride: VERTEX_STRIDE,
-                        index_buffer: Some(&words.buffer),
-                        first_index: Some(index_first + (*first * 3) as u32),
-                        transform_buffer: None,
-                        transform_buffer_offset: None,
-                    }]),
-                })
-                .chain(meshes.iter().zip(&mesh_sizes).zip(&mesh_parts).zip(&ix.meshes).map(|(((blas, sizes), parts), &(first_vertex, _))| wgpu::BlasBuildEntry {
+                .zip(&mesh_sizes)
+                .zip(&mesh_parts)
+                .zip(&ix.meshes)
+                .map(|(((blas, sizes), parts), &(first_vertex, _))| wgpu::BlasBuildEntry {
                     blas,
                     geometry: wgpu::BlasGeometries::TriangleGeometries(
                         sizes
@@ -2839,13 +2714,13 @@ impl Gpu {
                                 first_vertex,
                                 vertex_stride: VERTEX_STRIDE,
                                 index_buffer: Some(&words.buffer),
-                                first_index: Some(index_first + ((pool_first + first as usize) * 3) as u32),
+                                first_index: Some(index_first + first * 3),
                                 transform_buffer: None,
                                 transform_buffer_offset: None,
                             })
                             .collect(),
                     ),
-                }))
+                })
                 .chain(proc_new.iter().map(|(k, boxes, size)| wgpu::BlasBuildEntry {
                     blas: &geo_blas[*k],
                     geometry: wgpu::BlasGeometries::AabbGeometries(vec![wgpu::BlasAabbGeometry { size, stride: 24, aabb_buffer: boxes, primitive_offset: 0 }]),
@@ -2883,7 +2758,7 @@ impl Gpu {
             }
             drop(entries);
             let mesh_geo = mesh_parts.into_iter().zip(mesh_sizes).collect();
-            accel = Some(Accel { tlas: t, vertices: b_vertices.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), flat_verts: ix.flat, blases, meshes, mesh_geo, pool_first, inst_base: base, proc_base, blas_per_tri });
+            accel = Some(Accel { tlas: t, vertices: b_vertices.clone(), indices: words.buffer.clone(), index_first, mesh_verts: ix.meshes.clone(), meshes, mesh_geo, blas_per_tri });
             timings.push(("accel_build_ms".into(), tb.elapsed().as_secs_f64() * 1000.0));
         }
         fn e(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -2891,7 +2766,7 @@ impl Gpu {
         }
         let bg_parts = BindParts { nodes: b_nodes, leaves: b_leaves, tex_view, env_view, sampler, grid_view };
         let bg = self.scene_bind_group(&SceneBuffers { params: &b_params, vertices: &b_vertices, heap: &heap, words: &words, prev_vertices: &b_prev, accum: &b_accum, parts: &bg_parts, accel: accel.as_ref() });
-        let kernel = Kernel { approx: self.approx, ..Kernel::new(scene, groups) };
+        let kernel = Kernel { approx: self.approx, ..Kernel::new(scene) };
         // Translucent particles (hardware RT): the translucency pass's own TLAS, built again after the particle pass:
         // an instance of it a system's mesh, the instance's record in its custom data as in the scene's TLAS.
         let layered: Vec<(u32, u32)> = scene.particles.iter().filter(|p| p.translucent).filter_map(|p| scene.instances.iter().position(|i| i.mesh == p.mesh).map(|r| (p.mesh, r as u32))).collect();
@@ -2899,7 +2774,7 @@ impl Gpu {
             Some(a) if !layered.is_empty() => {
                 let mut tlas = d.create_tlas(&wgpu::CreateTlasDescriptor { label: Some("translucent"), max_instances: layered.len() as u32, flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE, update_mode: wgpu::AccelerationStructureUpdateMode::Build });
                 for (k, &(mesh, record)) in layered.iter().enumerate() {
-                    tlas[k] = Some(wgpu::TlasInstance::new(&a.meshes[mesh as usize], [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], INSTANCE_BIT | record, 0xff));
+                    tlas[k] = Some(wgpu::TlasInstance::new(&a.meshes[mesh as usize], [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], record, 0xff));
                 }
                 let params = d.create_buffer(&wgpu::BufferDescriptor { label: Some("translucent params"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 let points = d.create_buffer(&wgpu::BufferDescriptor { label: Some("volume points"), size: VOLUME_TRAIN_CAP as u64 * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
@@ -3720,8 +3595,6 @@ impl Gpu {
         }
     }
 
-    /// Rebuilds the BLASes of the dynamic groups (posed models, after their vertices changed) and the TLAS.
-    /// Rebuilds the TLAS alone (instance transforms changed, no triangles).
     /// `old`'s contents in a new buffer of `size` bytes (its usage and label), copied on the GPU and submitted now, so
     /// writes queued after this land on the copy (live/edits.rs `edit_geometry` growing past its room).
     pub fn grown(&self, old: &wgpu::Buffer, size: u64, label: &str) -> wgpu::Buffer {
@@ -3743,18 +3616,16 @@ impl Gpu {
         accel.tlas = t;
     }
 
-    /// The BLAS vertex buffer grown to `bytes` (`grown`).
     /// Mesh `k` (one an edit no longer draws) made again over `count` triangles from `first`: a new BLAS in its slot.
     pub fn set_mesh(&self, accel: &mut Accel, k: u32, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) {
-        let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
+        let (blas, geo) = self.mesh_blas_for(first, mesh, sections);
         accel.meshes[k as usize] = blas;
         accel.mesh_geo[k as usize] = geo;
         accel.mesh_verts[k as usize] = (mesh.vfirst, mesh.vcount);
     }
 
-    fn mesh_blas_for(&self, accel: &Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
-        let rel = (first - accel.pool_first) as u32;
-        let parts: Vec<(u32, u32)> = mesh.parts(sections).into_iter().map(|(at, count)| (rel + at, count)).collect();
+    fn mesh_blas_for(&self, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> (wgpu::Blas, (Vec<(u32, u32)>, Vec<wgpu::BlasTriangleGeometrySizeDescriptor>)) {
+        let parts: Vec<(u32, u32)> = mesh.parts(sections).into_iter().map(|(at, count)| (first as u32 + at, count)).collect();
         let sizes: Vec<wgpu::BlasTriangleGeometrySizeDescriptor> = parts
             .iter()
             .map(|&(_, c)| wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -3774,7 +3645,7 @@ impl Gpu {
     pub fn add_mesh(&self, accel: &mut Accel, first: usize, mesh: &crate::scene::InstMesh, sections: &[crate::scene::Section]) -> u32 {
         // Built fast rather than traced fast (edits come every frame under destruction; the batches of pieces are rebuilt
         // every frame): `mesh_blas_for`.
-        let (blas, geo) = self.mesh_blas_for(accel, first, mesh, sections);
+        let (blas, geo) = self.mesh_blas_for(first, mesh, sections);
         accel.meshes.push(blas);
         accel.mesh_geo.push(geo);
         accel.mesh_verts.push((mesh.vfirst, mesh.vcount));
@@ -4008,9 +3879,6 @@ impl Gpu {
                 meshes.dedup();
                 let mut entries = mesh_entries(accel, &meshes);
                 entries.extend(b.procs.iter().map(|p| wgpu::BlasBuildEntry { blas: &p.blas, geometry: wgpu::BlasGeometries::AabbGeometries(vec![wgpu::BlasAabbGeometry { size: &p.size, stride: 24, aabb_buffer: &p.boxes, primitive_offset: 0 }]) }));
-                if b.dynamic {
-                    entries.extend(dynamic_entries(accel));
-                }
                 let mut e = self.device.create_command_encoder(&Default::default());
                 e.build_acceleration_structures(entries.iter(), [&accel.tlas]);
                 self.queue.submit([e.finish()]);
@@ -4075,10 +3943,10 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     /// Render `spp` samples. `base` holds everything except the per-dispatch sample index.
     #[allow(clippy::too_many_arguments)]
-    pub fn render(&self, scene: &Scene, groups: [usize; GROUPS], nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
+    pub fn render(&self, scene: &Scene, nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], base: Params, spp: u32, timings: &mut Vec<(String, f64)>) -> Result<Frame> {
         let d = &self.device;
         let (w, h) = (scene.width, scene.height);
-        let up = self.upload(scene, &self.accum_buffer(w, h), groups, nodes, emitters, emitter_tris, emitter_runs, light_tree, env, env_cdf, energy, timings)?;
+        let up = self.upload(scene, &self.accum_buffer(w, h), nodes, emitters, emitter_tris, emitter_runs, light_tree, env, env_cdf, energy, timings)?;
         let pipeline = self.pipeline(&up.kernel, false);
         // Particles: placed once, at the scene time and camera.
         if up.particles.is_some() {
@@ -4243,7 +4111,7 @@ mod tests {
     fn feature_bits_are_distinct() {
         let all = [
             ("F_MASKED", F_MASKED), ("F_FOG", F_FOG), ("F_VOLUME", F_VOLUME), ("F_TEX", F_TEX), ("F_FUNC", F_FUNC),
-            ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_HUGE", F_HUGE), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
+            ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
             ("F_DEFORM", F_DEFORM), ("F_PART", F_PART),
@@ -4700,35 +4568,5 @@ mod tests {
             let (_, k) = m.constants.iter().find(|(_, k)| k.name.as_deref() == Some("OBJECT_STRIDE")).expect("OBJECT_STRIDE");
             assert_eq!(m.global_expressions[k.init], naga::Expression::Literal(naga::Literal::U32(stride as u32)));
         }
-    }
-
-    /// Structural features other than F_INST (opaque particles, media) do not make a scene count as instanced: a group
-    /// starting between 2^23 and 2^24 stays within the non-instanced custom-data limit (no F_HUGE).
-    #[test]
-    fn structural_features_are_not_instancing() {
-        const M: usize = 1 << 23;
-        let groups = [M + 5, 3, 0, 0, 0, 0, 0, 0];
-        assert_eq!(features_of(&[], 0, false, false, groups, F_PEMIT) & F_HUGE, 0);
-        assert_eq!(features_of(&[], 0, false, false, groups, F_MEDIA) & F_HUGE, 0);
-        assert_ne!(features_of(&[], 0, false, false, groups, F_INST) & F_HUGE, 0);
-    }
-
-    #[test]
-    fn huge_when_a_group_starts_past_24_bits() {
-        const M: usize = 1 << 24;
-        // One group of any size: its first triangle is 0.
-        assert!(!huge([M * 3, 0, 0, 0, 0, 0, 0, 0], false));
-        // The second group starts at 2^24 - 1: still fits.
-        assert!(!huge([M - 1, 5, 0, 0, 0, 0, 0, 0], false));
-        // ... at 2^24: does not.
-        assert!(huge([M, 5, 0, 0, 0, 0, 0, 0], false));
-        // Empty groups past 2^24 have no instance.
-        assert!(!huge([M + 7, 0, 0, 0, 0, 0, 0, 0], false));
-        // A 3 x 3 street district of 37.75 M triangles (opaque shadow casters first).
-        assert!(huge([36_000_000, 900_000, 500_000, 352_799, 0, 0, 0, 0], false));
-        // With model instances, group custom data must stay below the instance bit (2^23).
-        assert!(!huge([M - 1, 5, 0, 0, 0, 0, 0, 0], false));
-        assert!(huge([M / 2, 5, 0, 0, 0, 0, 0, 0], true));
-        assert!(!huge([M / 2 - 1, 5, 0, 0, 0, 0, 0, 0], true));
     }
 }

@@ -1390,7 +1390,7 @@ mod instanced_tests {
             let mut sc = crate::scene::build(&w, Path::new("."), &presets, None).unwrap();
             (sc.width, sc.height) = (64, 36);
             let prep = crate::prepare(g, &mut sc, &mut vec![]);
-            let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
+            let frame = g.render(&sc, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 16, &mut vec![]).unwrap();
             frame.color.iter().flatten().map(|v| v.to_bits()).collect::<Vec<u32>>()
         };
         let (a, b) = (offline(&views), offline(&whole));

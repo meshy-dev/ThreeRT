@@ -59,16 +59,10 @@ pub fn default_presets_dir() -> PathBuf {
 }
 
 
-/// Traversal groups (see `group_of`).
-pub const GROUPS: usize = 8;
-
 /// Everything the GPU kernels need for a loaded scene: triangle layout for the active traversal backend, emitter CDF,
 /// baked sky + its sampling CDF, and the base kernel parameters (camera from the scene).
 pub struct Prepared {
     pub tri_verts: Vec<[f32; 4]>,
-    /// Triangle counts of the traversal groups, in order: shadow-casting opaque, shadow-casting cutout,
-    /// non-shadowing opaque, non-shadowing cutout; then the same four for dynamic triangles (posed models).
-    pub groups: [usize; GROUPS],
     pub nodes: Vec<bvh::GpuNode>,
     /// The emitter CDF (`emitter_cdf`): one entry per `emitter_tris`, then the guide table.
     pub emitters: Vec<[f32; 4]>,
@@ -526,20 +520,14 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     if !hwrt {
         sc.procs.retain(|p| !p.blob.boxes.is_empty());
     }
-    // Hardware RT only needs triangles grouped by shadow casting; software traversal needs our BVH.
+    // Software traversal needs our BVH.
     let bvh = if hwrt {
-        let mut order: Vec<u32> = (0..sc.tris.len() as u32).collect();
-        order.sort_by_key(|&i| group_of(sc.tri_flags[i as usize]));
-        bvh::Bvh { nodes: vec![bvh::GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 0 }], order, depth: 0 }
+        bvh::Bvh { nodes: vec![bvh::GpuNode { bmin: [0.0; 3], left_or_first: 0, bmax: [0.0; 3], count: 0 }], order: vec![], depth: 0 }
     } else {
         let b = bvh::build(&sc.tris);
         timings.push(("bvh_depth".into(), b.depth as f64));
         b
     };
-    let mut groups = [0usize; GROUPS];
-    for f in &sc.tri_flags {
-        groups[group_of(*f)] += 1;
-    }
     let mut tri_verts: Vec<[f32; 4]> = Vec::with_capacity(sc.tris.len() * 3);
     let mut attrs = Vec::with_capacity(sc.attrs.len());
     for &i in &bvh.order {
@@ -679,7 +667,6 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     for i in sc.instances.iter().filter(|i| i.bits & scene::INST_PARTICLES != 0 && !i.hidden) {
         moving_mats.insert(scene::row_material(&sc.rows[i.rows as usize]));
     }
-    let tri_order = bvh.order[..pool_first.min(bvh.order.len())].to_vec();
     // Many static emitters: a light tree samples them by importance at the shading point (`ltree`); each one's path
     // code with its triangle in the list (emit_mis). THREERT_LTREE=0: the CDF alone (A/B).
     // (Switched-off objects at full power: `switchable_power`.)
@@ -789,14 +776,9 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
     baked.write(&mut params, env_nee_floor);
     sc.environment.write(&mut params);
     let env = baked.env;
-    let mut first = 0u32;
-    for (g, &count) in groups.iter().enumerate() {
-        params.group_first[g / 4][g % 4] = first;
-        first += u32::try_from(count).expect("more than 2^32 triangles");
-    }
     let energy = energy_lut();
     let t = Instant::now();
-    sc.indexed = index_geometry(sc, &tri_order, &tri_verts, &groups, pool_first, no_still);
+    sc.indexed = index_geometry(sc, &tri_verts, pool_first, no_still);
     // Software traversal: the trees' leaves, every triangle as it was laid out for its tree above (v0, e1, e2), a
     // mesh's with its section and its index there, a world-space one's with its flags.
     if !hwrt {
@@ -830,24 +812,16 @@ pub fn prepare_as(hwrt: bool, sc: &mut scene::Scene, timings: &mut Vec<(String, 
         sc.gpu_instances[r].n[2][3] = f32::from_bits(i.prev);
     }
     params.word_first[1][2] = sc.indexed.dynamic.0;
-    Prepared { tri_verts, groups, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, moving_mats }
+    Prepared { tri_verts, nodes, emitters, gpu_emitter_tris, emitter_runs, env, env_cdf, params, energy, emitter_tris, light_tree, env_nee_floor, moving_mats }
 }
 
-/// The scene's triangles, in the GPU's order (`tri_verts`, `sc.attrs`), as vertices and indices (indexed.rs). The
-/// still world-space triangles share their vertices among themselves, the dynamic ones have three each (the CPU
-/// writes them whole), each mesh of the pool shares within itself (the meshes in parallel; a skinned one by its
-/// model's corners), the translucent particles' have three each. World-space triangles count their vertices from
-/// 0, a mesh's from the mesh's first. The vertices lie in that order, so those that move are one run: the dynamic
-/// world-space triangles', then the deforming meshes' (which are the pool's first).
-fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], groups: &[usize; GROUPS], pool_first: usize, no_still: bool) -> indexed::Indexed {
+/// The scene's triangles, in the GPU's order (`tri_verts`, `sc.attrs`), as vertices and indices (indexed.rs). Each
+/// mesh of the pool shares its vertices within itself (the meshes in parallel; a skinned one by its model's corners),
+/// a particle system's has four a quad. A mesh's triangles count their vertices from the mesh's first. The vertices
+/// lie in the pool's order, so those that move are one run: the deforming meshes', which are the pool's first.
+fn index_geometry(sc: &scene::Scene, tri_verts: &[[f32; 4]], pool_first: usize, no_still: bool) -> indexed::Indexed {
     use rayon::prelude::*;
-    let still: usize = groups[..4].iter().sum();
-    let flat: Vec<[Vec3A; 3]> = order.iter().map(|&i| sc.tris[i as usize]).collect();
     let mut out = indexed::Indexed { meshes: vec![(0, 0); sc.meshes.len()], skins: vec![Default::default(); sc.skin_sources.len()], ..Default::default() };
-    out.push(indexed::shared(&flat[..still], &sc.attrs[..still]), 0);
-    let moving = out.vertices.len() as u32;
-    out.push(indexed::apart(&flat[still..], &sc.attrs[still..pool_first]), moving);
-    out.flat = out.vertices.len() as u32;
     // The pool, mesh by mesh as their triangles lie.
     let source_of: std::collections::HashMap<u32, u32> = sc.retained.skinned.iter().filter(|k| k.mesh != u32::MAX).map(|k| (k.mesh, k.source)).collect();
     let mut meshes: Vec<usize> = (0..sc.meshes.len()).filter(|&m| sc.meshes[m].count > 0).collect();
@@ -878,11 +852,11 @@ fn index_geometry(sc: &scene::Scene, order: &[u32], tri_verts: &[[f32; 4]], grou
         let n = s.vertices.len() as u32;
         out.meshes[m] = (out.push(s, 0), n);
         if sc.meshes[m].deforms {
-            assert_eq!(out.meshes[m].0, moving + (pool_first - still) as u32 * 3 + deforming, "the deforming meshes are the pool's first");
+            assert_eq!(out.meshes[m].0, deforming, "the deforming meshes are the pool's first");
             deforming += n;
         }
     }
-    out.dynamic = (moving, (pool_first - still) as u32 * 3 + deforming);
+    out.dynamic = (0, deforming);
     assert_eq!(out.indices.len(), pool_first + sc.pool_tris.len());
     // The triangle of a still tree over nothing: without area.
     if no_still {
@@ -977,11 +951,6 @@ fn unit_trees(sc: &mut scene::Scene) -> Vec<Option<units::MeshTree>> {
         k.order = list.clone();
     }
     trees
-}
-
-/// Traversal group: shadow casting x alpha cutout, static (0..4) or dynamic (4..8: posed models, own BLASes).
-fn group_of(flags: u32) -> usize {
-    ((((flags & scene::TRI_NO_SHADOW) << 1) | ((flags & scene::TRI_MASKED) >> 1)) + (flags & scene::TRI_DYNAMIC)) as usize
 }
 
 /// Marginal (rows) + conditional (per row) CDFs over luminance * sin(theta).

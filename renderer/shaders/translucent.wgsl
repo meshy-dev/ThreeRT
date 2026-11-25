@@ -55,12 +55,11 @@
     return t;
 }
 
-// Material of a translucent particle at a hit of `tacc` (its primitive, its instance's custom data, barycentrics b):
+// Material of a translucent particle at a hit of `tacc` (its primitive, its instance's record, barycentrics b):
 // colour, opacity and emission after maps and its material function.
-@if(hwrt) fn particle_material(prim: u32, custom: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
+@if(hwrt) fn particle_material(prim: u32, inst: u32, b: vec2<f32>, view: vec3<f32>, lod: f32) -> MatOut {
     // Its system's mesh: the triangles from the instance's record's first, one section; its particle's object from
     // the instance's first.
-    let inst = hit_inst(custom);
     let rec = instance_at(inst);
     let ti = rec.info.x + prim;
     let td = tri_data(ti, inst, 0u);

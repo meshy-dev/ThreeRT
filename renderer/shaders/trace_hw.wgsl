@@ -1,8 +1,7 @@
-// Hardware ray tracing (wgpu ray query). Up to four instances (see Prepared::groups): shadow casters mask 1, the rest
-// mask 2 (glass among them; an instance's glass among its other sections is stepped through by its row). Every
-// geometry is flagged opaque: none reports candidates, and a cutout's hit is confirmed by `alpha_pass`.
-// instance_custom_data holds the instance's first global triangle index, or in scenes where a group starts beyond
-// 2^24 triangles (F_HUGE: custom data has 24 bits) its traversal group, whose first triangle is in P.group_first.
+// Hardware ray tracing (wgpu ray query). A TLAS instance a model instance or a procedural object: shadow casters
+// mask 1, the rest mask 2 (glass among them; an instance's glass among its other sections is stepped through by its
+// row). Every geometry is flagged opaque: none reports candidates, and a cutout's hit is confirmed by `alpha_pass`.
+// instance_custom_data holds the instance's record.
 @if(hwrt) @group(0) @binding(19) var acc: acceleration_structure;
 
 @if(hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
@@ -97,48 +96,30 @@
         return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
     }
     if (has(F_PROC) && it.kind == RAY_QUERY_INTERSECTION_GENERATED) { return proc_hit(it.t, pg, pprim, it.instance_custom_data); }
+    // (A triangle is an instance's: a scene without instances has none.)
+    if (!has(F_INST)) { return Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u); }
+    // Its instance's record is the custom data; ti is its mesh's triangle, in model space, and the geometry it was
+    // hit in its section.
     let ti = hit_tri(it.instance_custom_data, it.geometry_index, it.primitive_index);
-    // Model instance (F_INST, custom data bit 23 | record): ti is its model-space pool triangle, and the geometry it
-    // was hit in its section. A traversal group's triangle is in the world: its row is its own.
-    let inst = hit_inst(it.instance_custom_data);
-    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, inst, select(it.geometry_index, ti, inst == NO_INST));
+    return Hit(it.t, ti, it.barycentrics.x, it.barycentrics.y, it.instance_custom_data, it.geometry_index);
 }
 
 // The first word of the row of the hit `trace_opaque` last found (its material and class bits), NO_ROW where its
 // instance has no rows: the trace's tests of a hit read no attribute and no material then.
 @if(hwrt) var<private> hit_row: u32;
 @if(hwrt) const NO_ROW: u32 = 0xffffffffu;
-// Whether that hit is an alpha-cutout's: its row says, or without a row (a triangle no instance places) its own
-// material has an alpha test, as the build flags TRI_MASKED.
-@if(hwrt) fn cutout_hit(h: Hit) -> bool {
-    if (has(F_INST) && hit_row != NO_ROW) { return (hit_row & ROW_CUTOUT) != 0u; }
-    return material_at(tri_row(h.part).x).uv2.w > 0.0;
-}
+// Whether that hit is an alpha-cutout's: its row says.
+@if(hwrt) fn cutout_hit(h: Hit) -> bool { return hit_row != NO_ROW && (hit_row & ROW_CUTOUT) != 0u; }
 
-// The model-instance record a hit's custom data names (F_INST), or NO_INST for a traversal group.
-@if(hwrt) fn hit_inst(custom: u32) -> u32 {
-    return select(NO_INST, custom & (INSTANCE_BIT - 1u), has(F_INST) && (custom & INSTANCE_BIT) != 0u);
-}
-
-@if(hwrt) const INSTANCE_BIT: u32 = 0x800000u;
-
-// Global triangle of a hit: an instance's pool triangle, or a traversal group's. An instance's geometry is a section
-// of its mesh, and its row has where the section's triangles start (the first section starts where the mesh does);
-// the row's class is read where the trace tests a hit by it.
-@if(hwrt) fn hit_tri(custom: u32, geometry: u32, prim: u32) -> u32 {
-    if (has(F_INST) && (custom & INSTANCE_BIT) != 0u) {
-        let rec = instance_at(custom & (INSTANCE_BIT - 1u));
-        if (has(F_MASKED) || has(F_IGLASS)) { hit_row = row_word(rec.info.w, geometry, 0u); }
-        var first = rec.info.x;
-        if (geometry != 0u) { first = row_word(rec.info.w, geometry, 1u); }
-        return first + prim;
-    }
-    return group_tri(custom, prim);
-}
-
-@if(hwrt) fn group_tri(custom: u32, prim: u32) -> u32 {
-    if (has(F_HUGE)) { return P.group_first[custom >> 2u][custom & 3u] + prim; }
-    return custom + prim;
+// The triangle of a hit of the instance at record `inst`. The geometry is a section of its mesh, and its row has
+// where the section's triangles start (the first section starts where the mesh does); the row's class is read where
+// the trace tests a hit by it.
+@if(hwrt) fn hit_tri(inst: u32, geometry: u32, prim: u32) -> u32 {
+    let rec = instance_at(inst);
+    if (has(F_MASKED) || has(F_IGLASS)) { hit_row = row_word(rec.info.w, geometry, 0u); }
+    var first = rec.info.x;
+    if (geometry != 0u) { first = row_word(rec.info.w, geometry, 1u); }
+    return first + prim;
 }
 
 // gpu.rs `KernelSwitches::strict`: a ray a ray query must not be given (not finite, or a length that is negative or NaN).

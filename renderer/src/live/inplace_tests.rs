@@ -120,7 +120,7 @@ fn forget(core: &mut LiveCore) {
 /// Whether the rays see the instance at `record`: by its mask above the triangles, or its unit.
 fn seen_by_rays(c: &LiveCore, record: u32) -> bool {
     match (&c.sc.up.accel, &c.sc.up.units) {
-        (Some(a), _) => a.tlas[a.inst_base + record as usize].as_ref().is_some_and(|t| t.mask != 0),
+        (Some(a), _) => a.tlas[record as usize].as_ref().is_some_and(|t| t.mask != 0),
         (None, Some(u)) => u.slots.get(record as usize).copied().flatten().is_some_and(|x| !x.hidden),
         _ => false,
     }
@@ -355,7 +355,7 @@ fn a_ray_that_meets_an_emitter_weighs_it_by_that_triangles_entry() {
         (sc.width, sc.height) = (96, 54);
         // (Under software traversal with units, as a live view has the scene.)
         let prep = crate::prepare_as(g.hwrt, &mut sc, &mut vec![]);
-        let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 64, &mut vec![]).unwrap();
+        let frame = g.render(&sc, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 64, &mut vec![]).unwrap();
         BESIDE_EMITTERS.map(|[x0, y0, x1, y1]| (y0..y1).flat_map(|y| (x0..x1).map(move |x| y * 96 + x)).map(|k| frame.color[k].iter().sum::<f32>() as f64).sum::<f64>() / (3 * (x1 - x0) * (y1 - y0)) as f64)
     };
     let (one, each) = (lit(false), lit(true));
@@ -766,10 +766,10 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     };
     // The mesh's triangles whose three vertices have no normal, as the instance places them: the largest.
     let (centre, normal, edge) = {
-        let (sc, prep) = built(&w);
+        let (sc, _) = built(&w);
         let m = sc.meshes.iter().position(|m| m.deforms).expect("a deforming mesh");
         let (im, world, x) = (sc.meshes[m], sc.instances.iter().find(|i| i.mesh as usize == m).unwrap().world, &sc.indexed);
-        let first = prep.groups.iter().sum::<usize>() + im.first as usize;
+        let first = im.first as usize;
         let bare = x.indices[first..first + im.count as usize].iter().filter(|t| t.iter().all(|&v| x.vertices[(im.vfirst + v) as usize][1][..3] == [0.0; 3]));
         let placed = bare.map(|t| t.map(|v| world.transform_point3(Vec3::from_slice(&x.vertices[(im.vfirst + v) as usize][0][..3]))));
         let p = placed.max_by(|a, b| (a[1] - a[0]).cross(a[2] - a[0]).length().total_cmp(&(b[1] - b[0]).cross(b[2] - b[0]).length())).expect("triangles without normals");
@@ -777,7 +777,7 @@ fn a_skinned_primitive_without_normals_is_shaded_by_its_triangles() {
     };
     w.set_transform(4, centre + normal * edge, glam::Quat::from_rotation_arc(Vec3::NEG_Z, -normal), Vec3::ONE).unwrap();
     let (sc, prep) = built(&w);
-    let frame = g.render(&sc, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 1, &mut vec![]).unwrap();
+    let frame = g.render(&sc, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(prep.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, prep.params, 1, &mut vec![]).unwrap();
     let seen = Vec3::from(frame.normal[27 * 96 + 48]);
     assert!(seen.dot(normal).abs() > 0.999 && (seen.length() - 1.0).abs() < 1e-3, "the picture's middle has the normal {seen}; the triangle's is {normal}");
 }

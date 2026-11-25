@@ -76,7 +76,6 @@ const F_TEX: u32 = 256u;
 const F_FUNC: u32 = 512u;
 const F_GLASS: u32 = 2048u;
 const F_COAT: u32 = 4096u;
-const F_HUGE: u32 = 8192u;
 const F_INST: u32 = 16384u;
 const F_MEDIA: u32 = 32768u;
 const F_PEMIT: u32 = 65536u; // opaque particles' emitters (one not shown has no area)

@@ -51,8 +51,7 @@ pub(super) struct LoadedScene {
     /// GPU table copies that parameter edits rewrite in place (`commit`).
     pub(super) tables: tables::Tables,
     /// Kernel feature inputs of the scene as a whole: whether it has textures, whether it has material functions,
-    /// its traversal groups (edits cannot change the groups).
-    pub(super) fixed_features: (bool, bool, [usize; crate::GROUPS]),
+    pub(super) fixed_features: (bool, bool),
     /// The scene's material functions (name, code, helpers), each at its number (`Retained::shaders`): the build's
     /// by name, one that came while the scene runs after them (`set_functions`).
     pub(super) shaders: Vec<(String, String, String)>,
@@ -240,7 +239,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     tables.moving_mats = std::mem::take(&mut prep.moving_mats);
     let emit = EmitterWorker::new(&tables, &g.device);
     tables.defer_powers = emit.is_some();
-    let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty(), prep.groups);
+    let fixed_features = (!sc.textures.is_empty(), !sc.shaders.is_empty());
     let shaders = sc.shaders.clone();
     let volume_fns = sc.volume_fns.clone();
     let translucent_mats = sc.translucent_mats();
@@ -248,7 +247,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     // (The light tree is the tables' by now: its nodes from there.)
     // (The codes the upload writes with the list: `write_emitters` sends those that change after.)
     let codes_sent: Vec<u32> = prep.gpu_emitter_tris.iter().map(|t| t.code).collect();
-    let up = g.upload(&sc, &targets.accum, prep.groups, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
+    let up = g.upload(&sc, &targets.accum, bytemuck::cast_slice(&prep.nodes), &prep.emitters, &prep.gpu_emitter_tris, &prep.emitter_runs, crate::ltree::nodes_of(tables.light_tree.as_ref()), &prep.env, &prep.env_cdf, &prep.energy, &mut timings)?;
     let _ = g.pipeline(&up.kernel, true); // compile the scene's kernel variant now, not in the first frame
     if !g.merged {
         let _ = g.kernel_pass(&up.kernel, "finish");
@@ -288,10 +287,8 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
     assert!(tables.retained.proxies.iter().all(|(id, p)| !matches!(p.draw, scene::Draw::Procedural(j) if procs.get(j as usize).map(|q| q.node) != Some(*id))), "a procedural object's proxy names another's place");
     let triangles = sc.stats.get("triangles").map_or(tris.len(), |t| *t as usize);
     let blobs = sc.proc_layout.as_ref().map_or_else(Default::default, |l| l.blobs.iter().map(|(b, off)| (b.hash, l.head.len() + off)).collect());
-    let slot = up.accel.as_ref().map_or(0, |a| a.proc_base + procs.len());
-    let room_base = (prep.tri_verts.len() / 3, gpu_instances.len(), tables.objects.len() / tables.stride, up.region_words, slot);
-    // A record's TLAS instance is `inst_base` + it (model instances, then procedural objects, then the room's).
-    debug_assert!(up.accel.as_ref().is_none_or(|a| room_base.4 == a.inst_base + room_base.1));
+    // (A record's TLAS instance is at it: model instances, then procedural objects, then the room's.)
+    let room_base = (prep.tri_verts.len() / 3, gpu_instances.len(), tables.objects.len() / tables.stride, up.region_words);
     let room = up.room;
     let mut users: std::collections::HashMap<u32, u32> = Default::default();
     for i in &instances {
@@ -312,7 +309,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         base: room_base,
         rows: Holes::new(rows.len(), rows.len() + room.records),
         row_runs: Default::default(),
-        pool_first: prep.groups.iter().sum(),
+        pool_first: 0,
         blobs,
         // (The previous positions at the build: the vertices that move. No room: it grows with the first deforming
         // mesh an edit places.)
