@@ -337,20 +337,6 @@ pub fn proc_object(w: &World, id: u32, m: Mat4, object: u32, materials: &HashMap
     Ok(Some(ProcObject { node: id, name: n.name.clone(), world: m, object, func, blob, materials, cast_shadow: n.cast_shadow, lo, hi, sub: None, hidden: false }))
 }
 
-/// A triangle as the hardware traversal's acceleration structures take it: as it is, or, with a vertex that is not
-/// finite, three vertices at the origin. DXR and Vulkan leave a non-finite vertex undefined behaviour (only NaN in x
-/// is defined, as an inactive primitive), and a degenerate triangle is one they define as never hit; the triangle
-/// keeps its index. World positions are finite where they enter (world.rs: geometry checked, `world_matrix` and
-/// `instance_world` place what is not at a point): this is for what overflows on the way (docs/RUNTIME.md "What the
-/// kernel trusts"). Software traversal's tree leaves such a triangle out by itself (bvh.rs `build_tris`).
-pub fn blas_tri(t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    if t.iter().flatten().all(|v| v.is_finite()) {
-        t
-    } else {
-        [[0.0; 3]; 3]
-    }
-}
-
 /// Instance `i` of an instanced object at node matrix `m`: its world matrix and whether it is hidden: past the drawn
 /// `count`, or a matrix that is not finite or not invertible (three.js code hides instances by scaling them to 0). A
 /// hidden instance is placed at a point (scale 1e-6, at its translation when finite), so it costs the trace nothing,
@@ -2322,27 +2308,12 @@ fn model_meshes(local: &[crate::skin::ModelTri], classed: &[Vec<(usize, u32)>; 4
     })
 }
 
-/// Whether a material created since the build can be drawn in place (tables.rs `add_materials`): 0 only when it is
-/// opaque, does not emit and is no glass (the build sorts triangles and lights by those).
-pub fn material_class(g: &GpuMaterial) -> u32 {
-    let other = g.layer[0] > 0.0 || g.emissive[..3].iter().any(|e| *e > 0.0);
-    if other {
-        2
-    } else if g.uv2[3] > 0.0 {
-        1
-    } else {
-        0
-    }
-}
-
 /// White, three times: a triangle without vertex colours.
 pub const WHITE: [u32; 3] = [u32::MAX; 3];
 
-/// The vertex colours of `g`'s triangles as `append_arrays` makes them (the same triangles, in the same order; with a
-/// mirroring placement the same vertices swapped), each vertex as sRGB 8-bit RGBA (a palette's colours exactly).
-/// `per_tri` (a mesh with several materials, as `group_materials` gives it): None skips a triangle (as `append_arrays`
-/// does), Some(0) leaves it white (its material has no `vertexColors`, three.js's per-material flag), else coloured.
-pub fn tri_colors(g: &world::Geometry, mirrored: bool, per_tri: Option<&[Option<u32>]>) -> Vec<[u32; 3]> {
+/// The vertex colours of `g`'s triangles as `corners` makes them (the same triangles, in the same order: those with
+/// a group), each vertex as sRGB 8-bit RGBA (a palette's colours exactly); white where the geometry has none.
+pub fn tri_colors(g: &world::Geometry, group: &[Option<u32>]) -> Vec<[u32; 3]> {
     let enc = |c: f32| (crate::post::linear_to_srgb(c.clamp(0.0, 1.0)) * 255.0).round() as u32;
     let col = |i: u32| {
         let k = i as usize * 3;
@@ -2351,15 +2322,7 @@ pub fn tri_colors(g: &world::Geometry, mirrored: bool, per_tri: Option<&[Option<
             None => u32::MAX,
         }
     };
-    g.indices
-        .chunks_exact(3)
-        .enumerate()
-        .filter_map(|(k, t)| match per_tri.map(|v| v.get(k).copied().flatten()) {
-            Some(None) => None,
-            Some(Some(0)) => Some(WHITE),
-            _ => Some(if mirrored { [col(t[0]), col(t[2]), col(t[1])] } else { [col(t[0]), col(t[1]), col(t[2])] }),
-        })
-        .collect()
+    g.indices.chunks_exact(3).zip(group).filter(|(_, drawn)| drawn.is_some()).map(|(t, _)| [col(t[0]), col(t[1]), col(t[2])]).collect()
 }
 
 /// `c` (vertex colours of triangles from index `at` on) into `dst`, white before them where it had none.
@@ -2401,9 +2364,8 @@ pub fn section_mesh(g: &world::Geometry, grouped: bool, first: u32, sect_first: 
             }
         }
     }
-    let (mut t, mut a) = (vec![], vec![]);
-    append_arrays(g, Mat4::IDENTITY, 0, Some(&group), &mut t, &mut a);
-    // (`append_arrays` left each triangle's group where its material goes.)
+    let (t, a) = corners(g, &group);
+    // (`corners` left each triangle's group where its section goes.)
     let group_of = |k: usize| a[k].uv[3].to_bits();
     let mut order: Vec<usize> = (0..t.len()).collect();
     order.sort_by_key(|&k| group_of(k));
@@ -2423,7 +2385,7 @@ pub fn section_mesh(g: &world::Geometry, grouped: bool, first: u32, sect_first: 
     let tris: Vec<[Vec3A; 3]> = order.iter().map(|&k| t[k]).collect();
     let colored = colored && !g.colors.is_empty();
     let colors = colored.then(|| {
-        let c = tri_colors(g, false, Some(&group.iter().map(|x| x.map(|_| 1)).collect::<Vec<_>>()));
+        let c = tri_colors(g, &group);
         order.iter().map(|&k| c[k]).collect()
     });
     let mesh = InstMesh { sect_first, sect_count: sections.len() as u32, colored, ..own_inst_mesh(&tris, first) };
@@ -2558,42 +2520,17 @@ pub fn own_inst_mesh(tris: &[[Vec3A; 3]], first: u32) -> InstMesh {
     InstMesh { first, count, over: NO_OVER, lo, hi, deforms: false, sect_first: 0, sect_count: 0, colored: false, vfirst: 0, vcount: 0 }
 }
 
-/// The GPU material of each triangle of a mesh with several (`Kind::Mesh::materials`, here GPU indices) by its
-/// geometry's groups; None for a triangle in no group (not drawn, as three.js). None for a mesh with one material.
-pub fn group_materials(g: &world::Geometry, mats: &[u32]) -> Option<Vec<Option<u32>>> {
-    if mats.len() <= 1 || g.groups.is_empty() {
-        return None;
-    }
-    let mut out = vec![None; g.indices.len() / 3];
-    for &[start, count, mi] in &g.groups {
-        let m = mats[(mi as usize).min(mats.len() - 1)];
-        for t in (start / 3) as usize..((start + count) / 3) as usize {
-            if let Some(slot) = out.get_mut(t) {
-                *slot = Some(m);
-            }
-        }
-    }
-    Some(out)
-}
-
-/// A geometry's triangles at `world`, with `mat`, or per triangle `per_tri`'s (`group_materials`: None not drawn).
-fn append_arrays(g: &world::Geometry, world: Mat4, mat: u32, per_tri: Option<&[Option<u32>]>, tris: &mut Vec<[Vec3A; 3]>, attrs: &mut Vec<GpuTriAttr>) {
-    let nm = glam::Mat3::from_mat4(world).inverse().transpose();
-    let mirrored = world.determinant() < 0.0;
-    let p = |i: usize| world.transform_point3(Vec3::new(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]));
-    let n = |i: usize| (nm * Vec3::new(g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2])).normalize_or_zero();
+/// A geometry's triangles with corners of their own, in its model's space, and their attributes: the normals of unit
+/// length (the triangle's own where a vertex has none), the UVs, and the triangle's group (`group`; None: not drawn).
+fn corners(g: &world::Geometry, group: &[Option<u32>]) -> (Vec<[Vec3A; 3]>, Vec<GpuTriAttr>) {
+    // (`+ 0.0`: a zero is +0, so corners equal in value are equal in bits, which is what shares a vertex: indexed.rs.)
+    let p = |i: usize| Vec3::new(g.positions[i * 3], g.positions[i * 3 + 1], g.positions[i * 3 + 2]) + Vec3::ZERO;
+    let n = |i: usize| (Vec3::new(g.normals[i * 3], g.normals[i * 3 + 1], g.normals[i * 3 + 2]) + Vec3::ZERO).normalize_or_zero();
     let uv = |i: usize| Vec2::new(g.uvs[i * 2], 1.0 - g.uvs[i * 2 + 1]);
-    tris.reserve(g.indices.len() / 3);
-    for (k, t) in g.indices.chunks_exact(3).enumerate() {
-        let mat = match per_tri {
-            Some(v) => match v.get(k).copied().flatten() {
-                Some(m) => m,
-                None => continue,
-            },
-            None => mat,
-        };
-        let (a, b, c) = if mirrored { (t[0], t[2], t[1]) } else { (t[0], t[1], t[2]) };
-        let (a, b, c) = (a as usize, b as usize, c as usize);
+    let (mut tris, mut attrs) = (Vec::with_capacity(g.indices.len() / 3), Vec::with_capacity(g.indices.len() / 3));
+    for (t, group) in g.indices.chunks_exact(3).zip(group) {
+        let Some(group) = *group else { continue };
+        let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
         let pos = [p(a), p(b), p(c)];
         let gn = (pos[1] - pos[0]).cross(pos[2] - pos[0]).normalize_or_zero();
         let mut nrm = [n(a), n(b), n(c)];
@@ -2603,8 +2540,9 @@ fn append_arrays(g: &world::Geometry, world: Mat4, mat: u32, per_tri: Option<&[O
             }
         }
         tris.push([pos[0].into(), pos[1].into(), pos[2].into()]);
-        attrs.push(tri_attr(nrm, [uv(a), uv(b), uv(c)], None, mat));
+        attrs.push(tri_attr(nrm, [uv(a), uv(b), uv(c)], None, group));
     }
+    (tris, attrs)
 }
 
 /// Shading attributes of a triangle: normals, UVs, its tangents if it has them, its material.
@@ -2663,17 +2601,40 @@ mod instance_tests {
 
     /// The kernel's procedural data (pathtrace.wgsl `proc_box`, `surface_proc`, `trace_procs`): per object a header,
     /// then materials, boxes and data, the header pointing at each.
-    /// Vertex colours per triangle as append_arrays makes the triangles: sRGB 8-bit (0.5 linear -> 188), a mirroring
-    /// placement's swapped vertices, groups' skipped triangles skipped; white where the geometry has none.
+    /// Vertex colours per triangle as `corners` makes the triangles: sRGB 8-bit (0.5 linear -> 188), groups' skipped
+    /// triangles skipped; white where the geometry has none.
     #[test]
     fn tri_colors_follow_the_triangles() {
         let g = world::Geometry { positions: vec![0.0; 12], normals: vec![0.0; 12], uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0] };
         let (r, gr, half, black) = (0xff0000ffu32, 0xff00ff00u32, 0xffbcbcbcu32, 0xff000000u32);
-        assert_eq!(tri_colors(&g, false, None), vec![[r, gr, half], [r, half, black]]);
-        assert_eq!(tri_colors(&g, true, None), vec![[r, half, gr], [r, black, half]]);
-        assert_eq!(tri_colors(&g, false, Some(&[None, Some(1)])), vec![[r, half, black]]);
-        assert_eq!(tri_colors(&g, false, Some(&[Some(0), Some(1)])), vec![WHITE, [r, half, black]], "a group whose material has no vertexColors");
-        assert_eq!(tri_colors(&world::Geometry { colors: vec![], ..g }, false, None), vec![WHITE; 2]);
+        assert_eq!(tri_colors(&g, &[Some(0), Some(1)]), vec![[r, gr, half], [r, half, black]]);
+        assert_eq!(tri_colors(&g, &[None, Some(1)]), vec![[r, half, black]]);
+        assert_eq!(tri_colors(&world::Geometry { colors: vec![], ..g }, &[Some(0), Some(0)]), vec![WHITE; 2]);
+    }
+
+    /// A geometry's corners: a zero is +0 in a position and in a normal (corners equal in value are then equal in
+    /// bits, and share a vertex), a normal is of unit length, a vertex without one has its triangle's, a triangle
+    /// without a group is left out, and a triangle's group is where its section goes.
+    #[test]
+    fn a_geometrys_corners_are_canonical() {
+        let g = world::Geometry {
+            positions: vec![-0.0, 0.0, -0.0, 1.0, -0.0, 0.0, 0.0, 1.0, -0.0, 0.0, 0.0, 0.0],
+            normals: vec![-0.0, -0.0, -2.0, 0.0, 0.0, 0.0, -0.0, 3.0, -0.0, 0.0, 0.0, 1.0],
+            uvs: vec![0.0; 8],
+            indices: vec![0, 1, 2, 0, 2, 3, 3, 2, 1],
+            groups: vec![],
+            colors: vec![],
+        };
+        let (t, a) = corners(&g, &[Some(4), None, Some(7)]);
+        assert_eq!((t.len(), a.iter().map(|a| a.uv[3].to_bits()).collect::<Vec<_>>()), (2, vec![4, 7]), "the triangles with a group, each with its own");
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&t[0].map(|v| v.to_array()).concat()), bits(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]), "no zero of a position is -0");
+        // (The first vertex's normal: its direction at unit length. The second's is none: the triangle's own, +z.)
+        assert_eq!([bits(&a[0].n0[..3]), bits(&a[0].n1[..3]), bits(&a[0].n2[..3])], [bits(&[0.0, 0.0, -1.0]), bits(&[0.0, 0.0, 1.0]), bits(&[0.0, 1.0, 0.0])], "normals: no -0, unit length, the triangle's where there is none");
+        // Two corners that differ in a zero's sign alone are one vertex.
+        let twin = world::Geometry { positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.0, 0.0, -0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0], normals: [0.0, 0.0, 1.0].repeat(6), uvs: vec![0.0; 12], indices: vec![0, 1, 2, 3, 4, 5], groups: vec![], colors: vec![] };
+        let (t, a) = corners(&twin, &[Some(0), Some(0)]);
+        assert_eq!(crate::indexed::shared(&t, &a).vertices.len(), 4, "two triangles on an edge: four vertices");
     }
 
     #[test]

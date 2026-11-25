@@ -2209,7 +2209,7 @@ Where what is built from enters, it is finite:
   a point (`World::world_matrix`), as a hidden instance is placed (`scene::instance_world`): what it draws is not
   seen, and nothing built from it gets a number that is not finite;
 - **the hardware acceleration structures' vertices**: a triangle with a vertex that is not finite (what overflows on
-  the way) is given to them as three vertices at the origin (`scene::blas_tri`): DXR and Vulkan leave such a vertex
+  the way) is given to them as three vertices at the origin (indexed.rs `share`): DXR and Vulkan leave such a vertex
   undefined behaviour and define a degenerate triangle as never hit; its index stays.
 
 Measured (2026-11-14, the one tree software traversal then had over a whole scene): Bistro 18 levels,

@@ -2418,7 +2418,7 @@ debug builds and tests; none checks a tree before every upload, none caps a walk
 - Where data enters: geometry positions finite (`World::set_geometry`), a volume's majorant a finite number > 0 (Rust
   and packages/scene: `Infinity` passed both and its delta tracking never stepped), a world matrix that is not finite
   places its object at a point (as a hidden instance), the hardware acceleration structures' vertices finite
-  (`scene::blas_tri`).
+  (indexed.rs `share`).
 - Garbage-input tests for each builder (NaN, infinite and huge values, coincident and collinear items).
 docs/RUNTIME.md "What the kernel trusts" has the table. Checks: `cargo test --release` with the loop guard, 138 passed;
 render-identity against main, guarded natively, merged and in software traversal, then native without it: 0 of 190
