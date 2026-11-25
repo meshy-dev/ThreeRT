@@ -75,6 +75,7 @@ const F_TEX: u32 = 256u;
 const F_FUNC: u32 = 512u;
 const F_GLASS: u32 = 2048u;
 const F_COAT: u32 = 4096u;
+const F_MIRROR: u32 = 8192u; // a material that can be a mirror alone (`mirror_possible`): the first pass follows it
 const F_INST: u32 = 16384u;
 const F_MEDIA: u32 = 32768u;
 const F_PEMIT: u32 = 65536u; // opaque particles' emitters (one not shown has no area)
@@ -3696,7 +3697,7 @@ fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: b
     // their guide even when both the object and camera stand still.
     accum[q].spec.w = 0.0;
     // (Not behind a mirror chain: there the pixel's guides are already the surface shown.)
-    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 && first_load(q).chain == 0u &&
+    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 && (!has(F_MIRROR) || first_load(q).chain == 0u) &&
         (any(specular.rgb > vec3<f32>(0.005)) || diffuse.w > 0.0)) {
         cur_depth = 1u;
         mirror_path = true;
@@ -3855,9 +3856,11 @@ fn cache_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn mirror_alone(s: Surface) -> bool {
     return s.roughness < DELTA_ROUGHNESS && s.metallic >= 1.0 && s.transmission <= 0.0 && s.coat <= 0.0 && !s.card;
 }
-// Whether a material's record leaves that possible: read before its textures and its function are.
+// Whether a material's own numbers leave that possible (gpu.rs `mirror_possible`, which makes F_MIRROR of it): read
+// before its textures and its function are, which the surfaces of other materials so never are for this. A material
+// that is a mirror by its texture or its function alone is not followed.
 fn mirror_possible(m: Material) -> bool {
-    return (has(F_FUNC) && m.tex1.w > 0) || ((m.params.y < DELTA_ROUGHNESS || (has(F_TEX) && m.tex0.z >= 0)) && m.params.x >= 1.0 && m.layer.x <= 0.0);
+    return m.params.y < DELTA_ROUGHNESS && m.params.x >= 1.0 && m.layer.x <= 0.0;
 }
 
 // The camera hit's motion: from the hit point `p` to where that surface point was the previous frame (w = 1), zeros
@@ -3951,7 +3954,7 @@ fn first_hit(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cone_w = 0.0;
     var cone_a = 2.0 * P.cam_pos.w / lod_height();
     var xf = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
-    let longest = select(min(MIRROR_CHAIN, P.counts.z), 0u, P.jitter.z > 0.5 || first_len() < 4u * w * h);
+    let longest = select(min(MIRROR_CHAIN, P.counts.z), 0u, !has(F_MIRROR) || P.jitter.z > 0.5 || first_len() < 4u * w * h);
     for (var b = 0u; b < longest; b++) {
         if (seen.tri == 0xffffffffu || is_proc(seen) || !has(F_INST) || seen.inst == NO_INST) { break; }
         if (!mirror_possible(material_at(row_word(instance_at(seen.inst).info.w, seen.part, 0u) & ROW_MATERIAL))) { break; }
@@ -4067,8 +4070,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (LIVE && cam_seg) {
             let f = first_load(pix);
             hit = f.hit;
-            chain = f.chain;
-            if (chain > 0u) { xf = first_xform(pix, chain); }
+            if (has(F_MIRROR)) {
+                chain = f.chain;
+                if (chain > 0u) { xf = first_xform(pix, chain); }
+            }
         } else {
             hit = trace(o, d, INF, TRACE_CLOSEST);
         }
@@ -4176,13 +4181,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (has(F_LISTS)) {
                 // (Where the hit was the previous frame: the first pass's motion vector.)
                 var before = s.p;
-                if (chain > 0u) { before = cr.o + cr.d * first_t; }
+                if (has(F_MIRROR) && chain > 0u) { before = cr.o + cr.d * first_t; }
                 if (LIVE && motion_len() >= w * h) { before += motion_load(pix).xyz; }
                 lt_list_start(before);
             }
-            albedo = tint * select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
+            albedo = select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
             normal = s.n;
-            if (chain > 0u) { normal = xf * s.n; }
+            if (has(F_MIRROR) && chain > 0u) {
+                albedo *= tint;
+                normal = xf * s.n;
+            }
             anim = s.anim;
             rough0 = s.roughness;
         }
@@ -4203,12 +4211,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             radiance += c;
         }
         if (s.card) { break; }
-        if (walked < chain) {
-            // A mirror of the chain: on by its reflection, at the weight a sample of it has.
+        if (has(F_MIRROR) && walked < chain) {
+            // A mirror of the chain: on by its reflection, at its Fresnel reflectance (a metal's: its colour at F0).
             let cl = reflect(d, s.n);
-            let clb = lobes(s, max(dot(s.n, -d), 1e-4));
-            let cw = eval_bsdf(s, clb, -d, cl) / max(pdf_bsdf(s, clb, -d, cl), 1e-20);
-            if (non_finite(cw) || all(cw <= vec3<f32>(0.0))) { break; }
+            let cw = f_schlick(s.base, vec3<f32>(1.0), max(dot(s.n, -d), 1e-4));
             thr *= cw;
             tint *= cw;
             vlen += hit.t;
@@ -4318,12 +4324,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             refl_e = lb.e_spec;
             if (LIVE && P.motion.y > 0.5) {
                 // MetalFX takes the directional reflectances of the layered BSDF, including glass and coat.
-                guide_diffuse = tint * lb.diffuse * lb.kd * (1.0 - lb.e_coat);
-                refl_e = tint * cache_reflectance(lb) - guide_diffuse;
+                guide_diffuse = lb.diffuse * lb.kd * (1.0 - lb.e_coat);
+                refl_e = cache_reflectance(lb) - guide_diffuse;
+                if (has(F_MIRROR)) {
+                    guide_diffuse *= tint;
+                    refl_e *= tint;
+                }
                 if (has(F_GLASS)) { guide_glass = vec2<f32>(s.transmission * (1.0 - s.metallic), lb.eta); }
             }
             if (sampled_spec && !through && lb.coat <= 0.0) {
-                refl_l = xf * l;
+                refl_l = l;
+                if (has(F_MIRROR) && chain > 0u) { refl_l = xf * l; }
                 refl_pdf = pdf_spec(s, lb, v, l);
                 refl_w = wgt;
             }

@@ -1859,7 +1859,9 @@ pub const F_FUNC: u32 = 512;
 // (1024: the emitter-reservoir experiment, removed 2026-11-13.)
 pub const F_GLASS: u32 = 2048;
 pub const F_COAT: u32 = 4096;
-// (8192: free.)
+/// A material that can be a mirror alone (`mirror_possible`; pathtrace.wgsl's of the name): a live frame's first
+/// pass follows what it shows, and the kernel has the code for it.
+pub const F_MIRROR: u32 = 8192;
 /// The scene has instances (scene::Instance): TLAS instances with their record as custom data, shaded from
 /// model-space triangles through their `instances` record.
 pub const F_INST: u32 = 16384;
@@ -1976,6 +1978,12 @@ pub fn instance_features(scene: &Scene) -> u32 {
     media | particles | ifunc | iglass | deform | part | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
+/// Whether a material's own numbers leave a mirror alone possible (pathtrace.wgsl `mirror_possible`, `mirror_alone`):
+/// its roughness under the kernel's `DELTA_ROUGHNESS`, metal whole, no glass. (Its textures can only lower them.)
+pub fn mirror_possible(m: &crate::scene::GpuMaterial) -> bool {
+    m.params[1] < 0.025 && m.params[0] >= 1.0 && m.layer[0] <= 0.0
+}
+
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
 /// scene's structure (`instances`: `instance_features`).
 pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures: bool, functions: bool, instances: u32) -> u32 {
@@ -1994,6 +2002,9 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     }
     if ms.iter().any(|m| m.tex1[2] == crate::scene::MAT_UNLIT) {
         f |= F_UNLIT;
+    }
+    if ms.iter().any(mirror_possible) {
+        f |= F_MIRROR;
     }
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
         f &= mask | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' records / the object table hold
@@ -4119,7 +4130,7 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
-            ("F_DEFORM", F_DEFORM), ("F_PART", F_PART),
+            ("F_DEFORM", F_DEFORM), ("F_PART", F_PART), ("F_MIRROR", F_MIRROR),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {
