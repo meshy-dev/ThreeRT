@@ -4253,7 +4253,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         @if(!last_direct && !last_sun) if (depth == last) { break; }
         @if(last_sun && !last_direct) if (depth == last) {
             // gpu.rs `KernelSwitches::last_sun`: the last vertex's light from the directional lights alone.
-            if (depth > 0u) {
+            // (Or what a mirror chain shows, the chain having taken the path's bounces.)
+            if (depth > 0u || chain > 0u) {
                 var dz = thr * sun_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
                 let lum = luminance(dz);
                 if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }
@@ -4263,7 +4264,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         @if(last_direct) if (depth == last) {
             // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.
-            if (depth > 0u) {
+            // (Or what a mirror chain shows, the chain having taken the path's bounces.)
+            if (depth > 0u || chain > 0u) {
                 var dz = thr * direct_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
                 let lum = luminance(dz);
                 if (lum > clamp_v && !straight) { dz *= clamp_v / lum; }

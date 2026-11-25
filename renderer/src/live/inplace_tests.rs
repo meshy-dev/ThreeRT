@@ -4968,19 +4968,22 @@ fn the_first_pass_leaves_the_camera_hits() {
 
 /// A pixel on a mirror has the surface the mirror shows. A mirror at 45 degrees before the camera shows a wall to the
 /// side: on the mirror's pixels the distance is the whole way to the wall (the camera hit's own stays in its record),
-/// the normal is the wall's as the pixel sees it, the albedo the wall's under the mirror's tint, and the light the
-/// mirror's tint times a white mirror's. The wall moved along the view, its motion vectors go sideways: the motion
-/// of what the pixel sees. A translucent particle before the mirror is drawn, one behind it is not.
+/// the normal is the wall's as the pixel sees it, the albedo the wall's under the mirror's tint, the light the
+/// mirror's tint times a white mirror's, and the mirror's own glow is light seen directly. A lamp just before the
+/// wall lights what the mirror shows (the path starts where the wall is). With one bounce a path has, the wall in
+/// the mirror is unlit: the mirror took it. The wall moved along the view, its motion vectors go sideways: the
+/// motion of what the pixel sees. A translucent particle before the mirror is drawn, one behind it is not.
 #[test]
 fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
-    let (tint, shade) = ([1.0f32, 0.8, 0.6], [0.2f32, 0.6, 0.4]);
+    // (A faint glow: the card below is told by the centre's colour.)
+    let (tint, shade, glow) = ([1.0f32, 0.8, 0.6], [0.2f32, 0.6, 0.4], 0.05f32);
     // (The wall a little off the square: its normal as the mirror shows it has every column of the chain's transform.)
     let turned = glam::Quat::from_rotation_y(-110f32.to_radians());
-    let scene = |mirror: [f32; 3], card: Option<f32>| -> World {
+    let scene = |mirror: [f32; 3], card: Option<f32>, bulb: bool| -> World {
         let mut w = world();
-        let mat = |color: [f32; 3], metalness: f32, roughness: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": color, "opacity": 1, "metalness": metalness, "roughness": roughness, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true })).unwrap();
-        w.set_material(40, mat(mirror, 1.0, 0.0));
-        w.set_material(41, mat(shade, 0.0, 1.0));
+        let mat = |color: [f32; 3], metalness: f32, roughness: f32, emissive: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": color, "opacity": 1, "metalness": metalness, "roughness": roughness, "emissive": [1, 1, 1], "emissiveIntensity": emissive, "doubleSided": true })).unwrap();
+        w.set_material(40, mat(mirror, 1.0, 0.0, glow));
+        w.set_material(41, mat(shade, 0.0, 1.0, 0.0));
         let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
         w.set_geometry(40, quad(0.5)).unwrap();
         w.set_geometry(41, quad(2.0)).unwrap();
@@ -4991,17 +4994,24 @@ fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
         w.set_object(41, "side wall".into(), None, mesh(41, 41), true, true).unwrap();
         w.set_transform(41, Vec3::new(4.0, 0.0, 2.0), turned, Vec3::ONE).unwrap();
         if let Some(z) = card {
-            // A translucent card that glows red, on the view's axis at this z.
+            // A translucent card that glows, on the view's axis at this z.
             w.set_shader("glow", "fn mf_glow(i: MatIn, m: Material, base: MatOut) -> MatOut {\n    var o = base;\n    o.base = vec3<f32>(0.9, 0.05, 0.05);\n    o.emissive = vec3<f32>(0.9, 0.05, 0.05) * 40.0;\n    return o;\n}\n".into(), String::new());
             w.set_material(50, serde_json::from_value(serde_json::json!({ "name": "glow", "color": [0.5, 0.5, 0.5], "opacity": 0.9, "transparent": true, "metalness": 0, "roughness": 1, "emissive": [0, 0, 0], "emissiveIntensity": 0, "doubleSided": true, "shader": { "id": "glow", "params": [], "textures": [] } })).unwrap());
             w.set_particle_fn("card", format!("fn pf_card(i: PIn, p: array<vec4<f32>, 8>) -> POut {{ return POut(vec3<f32>(0.0, 0.0, {z:.2}), vec3<f32>(0.12, 0.0, 0.0), vec3<f32>(0.0, 0.12, 0.0), true, vec4<f32>(0.0)); }}"), String::new());
             w.set_object(60, "card".into(), None, Kind::Particles { count: 1, emitter: "card".into(), params: vec![], material: 50, emitter_area: 0.0 }, true, false).unwrap();
         }
+        if bulb {
+            // A point light 0.4 before the wall, where the mirror's centre shows it (and 3 from where a path that
+            // started at the camera would think the wall is).
+            let point = serde_json::from_value(serde_json::json!({ "type": "point", "color": [1.0, 1.0, 1.0], "castShadow": true, "intensity": 400.0, "radius": 0.02, "range": 0.0 })).unwrap();
+            w.set_object(61, "bulb".into(), None, Kind::Light(point), true, false).unwrap();
+            w.set_transform(61, Vec3::new(3.6, 0.0, 2.0), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+        }
         w
     };
     let presets = crate::default_presets_dir();
     let open = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new("."), &presets, 96, 54));
-    let mut w = scene(tint, None);
+    let mut w = scene(tint, None, false);
     let mut live = match open(&w) {
         Ok(c) => c,
         Err(e) => return eprintln!("skipped: {e}"),
@@ -5027,20 +5037,36 @@ fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     let (facing, seen) = (Vec3::new(20f32.to_radians().sin(), 0.0, 20f32.to_radians().cos()), Vec3::new(shade[0] * tint[0], shade[1] * tint[1], shade[2] * tint[2]));
     for &k in &on {
         let (s, own) = (&samples[k], hits[k][0]);
-        let (normal, albedo) = (Vec3::new(s[8], s[9], s[10]), Vec3::new(s[4], s[5], s[6]));
+        let (normal, albedo, emitted) = (Vec3::new(s[8], s[9], s[10]), Vec3::new(s[4], s[5], s[6]), Vec3::new(s[12], s[13], s[14]));
         assert!(s[3] > own + 2.0 && (normal - facing).length() < 0.02 && (albedo - seen).length() < 0.03, "pixel {k}: the mirror {own} away; shown {} away, normal {normal}, albedo {albedo}", s[3]);
+        assert!((emitted - Vec3::splat(glow)).abs().max_element() < 1e-3, "pixel {k}: the mirror's own glow {glow} is seen directly: {emitted}");
     }
     assert!((0..pixels as usize).filter(|&k| chain(&hits[k]) == 0 && samples[k][3] > 0.0).all(|k| samples[k][3].to_bits() == hits[k][0].to_bits()), "off the mirror the distance is the camera hit's");
     // The light of those pixels (the diffuse signal and the sun's direct light) against a white mirror's: the tint
     // at most, and no less than twice the tint (the wall is partly lit by way of the mirror too).
-    let light = |samples: &[[f32; 20]], direct: &[[f32; 4]]| on.iter().fold(Vec3::ZERO, |sum, &k| sum + Vec3::new(samples[k][0] + direct[k][0], samples[k][1] + direct[k][1], samples[k][2] + direct[k][2]));
-    let mut white = open(&scene([1.0; 3], None)).unwrap();
-    white.fixed_dt = Some(1.0 / 60.0);
-    white.render(1, |_, _| {});
-    let (_, ws, _, wd) = read(&white);
-    let (lit, plain) = (light(&samples, &direct), light(&ws, &wd));
+    let light = |samples: &[[f32; 20]], direct: &[[f32; 4]], of: &[usize]| of.iter().fold(Vec3::ZERO, |sum, &k| sum + Vec3::new(samples[k][0] + direct[k][0], samples[k][1] + direct[k][1], samples[k][2] + direct[k][2]));
+    let frame = |w: &World| -> Vec3 {
+        let mut c = open(w).unwrap();
+        c.fixed_dt = Some(1.0 / 60.0);
+        c.render(1, |_, _| {});
+        let (_, s, _, d) = read(&c);
+        light(&s, &d, &on)
+    };
+    let (lit, plain) = (light(&samples, &direct, &on), frame(&scene([1.0; 3], None, false)));
     let (share, tint_v) = (lit / plain, Vec3::from(tint));
     assert!(plain.min_element() > 0.0 && (share - tint_v).max_element() < 0.03 && (tint_v * tint_v - share).max_element() < 0.03, "the mirror's pixels hold {lit}, a white mirror's {plain}: {share} of it, the tint {tint:?}");
+    // A lamp just before the wall: what the mirror shows is lit by it as the wall is.
+    let lamped = frame(&scene(tint, None, true));
+    assert!(lamped.min_element() > 3.0 * lit.max_element(), "the mirror's pixels with a lamp before the wall hold {lamped}, without {lit}");
+    // One bounce a path: the mirror takes it, and the wall it shows has no light (the wall seen directly has).
+    let bounces = std::mem::replace(&mut live.bounces, 1);
+    live.render(1, |_, _| {});
+    // (This frame's pixels: another jitter.)
+    let (h1, s1, _, d1) = read(&live);
+    let (mirror, beside): (Vec<usize>, Vec<usize>) = (0..pixels as usize).filter(|&k| s1[k][3] > 0.0).partition(|&k| chain(&h1[k]) > 0);
+    let (dark, around) = (light(&s1, &d1, &mirror), light(&s1, &d1, &beside));
+    assert!(mirror.len() > 100 && dark.max_element() < 1e-4 && around.min_element() > 0.1, "with one bounce the mirror's {} pixels hold {dark} (none: the mirror took it), the pixels beside {around}", mirror.len());
+    live.bounces = bounces;
     // The wall goes 0.3 along the view (z): in the mirror it goes 0.3 sideways (x), and a motion vector is the way back.
     w.set_transform(41, Vec3::new(4.0, 0.0, 2.3), turned, Vec3::ONE).unwrap();
     assert!(!live.commit(&mut w).unwrap(), "the wall moved: in place ({:?})", live.fallback);
@@ -5052,7 +5078,7 @@ fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
     // wall the mirror shows is further than both. (The translucency pass: hardware traversal.)
     if live.g.hwrt {
         let centre = |card: Option<f32>| -> [i32; 3] {
-            let mut c = open(&scene(tint, card)).unwrap();
+            let mut c = open(&scene(tint, card, false)).unwrap();
             assert_eq!(c.sc.up.translucent.is_some(), card.is_some(), "the card is the translucency pass's");
             let p = picture(&mut c, 8);
             let at = ((c.h / 2 * c.w + c.w / 2) * 4) as usize;
