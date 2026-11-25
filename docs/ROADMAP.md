@@ -580,6 +580,8 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
     - (4c) the ground again (6f), visible at eye height;
     - (4d) the city's edge (6g);
     - (5) and (6) as above. Tone mapping and exposure wait (the user's call).
+    - 2026-11-25, later: 6d–6g and (5) landed (TokyoRT #19–#25); 6h (the ordinary street, to a photograph) goes
+      first, ahead of step 2's remaining performance items (deferred far tiles, memory given back, night routes).
   2. **Streaming.** Tiles resident by distance:
      - geometry, textures and BLASes per tile, in a bounded pool;
      - the far field as proxies (merged, simplified tile meshes; roofs and facades as photo-textured blocks);
@@ -678,6 +680,16 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
          with contrast enough to read from 1.7 m (6a's ground marks did not).
        - 6g. **The city's edge.** Above ~140 m the land beyond Shinjuku is a flat grey plain and the city stops ~1 km
          out: carry it on (far city, haze) so the world does not end in view.
+       - 6h. **The ordinary street, to a photograph** (the user's, 2026-11-25, with a photograph of a two-lane
+         residential street in late-afternoon sun; first, ahead of the performance items). Shibuya, once stitched in
+         (#24), read as bare as Shinjuku had. In order of the frame they fill: concrete poles every ~30 m with
+         crossarms, transformers, boxes and lamp arms, a dozen sagging cables between each; road markings to the
+         Japanese standard (edge and stop lines, the green cycle band, the ◇ crossing-ahead mark, arrows) on worn
+         asphalt; mid-rise flats with balconies in depth (glass or frosted panels, outdoor units, tile / concrete /
+         metal panel), shutters, garage doors and lobbies at ground level; kerbless footways behind a white line, street
+         trees, parked cars, vending machines, sign posts. Judged at a new pose `street-ref` (a comparable street, sun
+         low in the late afternoon: the clock, not the tone mapping) beside the photograph, by eye, as 6d–6g; the Golden
+         Gai pose checked for no regression.
   7. **Milestone 2, the open city.** Shinjuku and Shibuya at night, and by day:
      - a montage per view: our offline render | ThreeRT live | the source three.js app, each tile with its frame rate
        and ΔE / SSIM;
