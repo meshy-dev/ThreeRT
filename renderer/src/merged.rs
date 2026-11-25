@@ -86,8 +86,8 @@ mod tests {
         let (m, info) = parse(&variant(0, false));
         let (used, declared) = storage_buffers(&m, &info);
         assert_eq!(declared, 22, "the kernel as written");
-        // (`main` no longer adds to the cache's sums: `finish` trains it.)
-        assert_eq!(used.iter().map(|u| u.1).max(), Some(21), "{used:?}");
+        // (`main` no longer adds to the cache's sums: `finish` trains it. Without units it reads no node.)
+        assert_eq!(used.iter().map(|u| u.1).max(), Some(20), "{used:?}");
         let hw = kernel_wgsl(&kernel_template(), &KernelVariant::new(true, Default::default(), 0));
         assert_eq!(hw.matches("var<storage").count(), 20 + 4, "hardware traversal: neither of the trees' buffers (and the translucency pass's four)");
         for features in [0, crate::gpu::F_VCOLOR, crate::gpu::F_GRID, crate::gpu::F_TINT | crate::gpu::F_UNLIT | crate::gpu::F_BACKGROUND, crate::gpu::F_SOURCE] {
@@ -97,7 +97,8 @@ mod tests {
             let (used, declared) = storage_buffers(&m, &info);
             assert!(declared as u32 <= STORAGE_BUFFERS, "features {features:#x}: {declared} declared");
             assert!(used.iter().all(|u| u.1 as u32 <= STORAGE_BUFFERS), "features {features:#x}: {used:?}");
-            assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(8), "the trace reads all eight a page has (the trees' leaves the eighth)");
+            let read = if features & crate::gpu::F_UNITS != 0 { 8 } else { 7 };
+            assert_eq!(used.iter().find(|u| u.0 == "main").map(|u| u.1), Some(read), "the trace reads all eight a page has with units (the trees' leaves the eighth), no tree without");
             assert_eq!(declared, 8, "features {features:#x}");
             // The struct's members are the first sections; its last, the vec4s, begins where the cache's values do.
             let (at, _) = crate::heap::Heap::<crate::heap::Live>::starts_for(&crate::gpu::live_sizes(1, 64, 64, 64, 64));

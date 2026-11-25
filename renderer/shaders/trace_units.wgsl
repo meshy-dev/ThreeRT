@@ -11,25 +11,22 @@
 // is placed by a translation alone, its normal rows the identity's: the ray keeps its direction and only its origin
 // moves, which is what the rows would have made of it.
 //
-// `trace` walks the still scene first and calls this with its hit: the ray is already cut to it.
-//
-// The stack is the module's, one for an invocation of the kernel, and in a kernel with units the still walk uses it
-// too (`@if(!units)` takes its own away). An array a function declares is set to zero each time the
-// function is entered, whatever the ray then meets, and a ray's walk is entered many times a pixel: the unit walk's
-// own 64 words cost hello 0.3 ms a frame and the city 0.75, and the still walk's 48 cost every scene as much again,
-// flattened ones too. This one is set to zero once. A walk reads only what it has pushed: what an earlier ray left
-// is never read. The still walk has left it empty; a unit's walk pushes above what the top walk has pending and is
-// done when it is back down to it. 64 entries: 19 for the top tree, 45 for a mesh's (units.rs `STACK`); the still
-// walk uses 48 of them, as before. Every index read here was checked on the CPU when it was written (units.rs
-// `check_mesh`, `check_top`), the depths with them.
+// The stack is the module's, one for an invocation of the kernel. An array a function declares is set to zero each
+// time the function is entered, whatever the ray then meets, and a ray's walk is entered many times a pixel: the
+// unit walk's own 64 words cost hello 0.3 ms a frame and the city 0.75. This one is set to zero once. A walk reads
+// only what it has pushed: what an earlier ray left is never read. A unit's walk pushes above what the top walk has
+// pending and is done when it is back down to it. 64 entries: 19 for the top tree, 45 for a mesh's (units.rs
+// `STACK`). Every index read here was checked on the CPU when it was written (units.rs `check_mesh`, `check_top`),
+// the depths with them.
 //
 // One loop walks both levels: a GPU runs a group of rays through a loop together, and a ray that has left an inner
 // loop waits for the others of its group to leave it; with the unit's walk as a loop inside the top walk's, every
 // ray of a group waited at every unit for the group's slowest (the voxel level, 10,459 units: the trace pass 6.8 ms
-// for as many iterations as the flattened scene's 4.5 ms). Here each turn of the loop is a node of whichever tree
-// the ray is in: `rec` says which (NO_INST: the top tree), and with it the ray (`ro`, `rd`, `rinv`: the world's, or
-// the unit's), what child indices count from (`off`) and the unit's first triangle. A top leaf sets these and goes
-// to the unit's root; when the stack is back down to where the unit was entered (`base`), they are set back.
+// for as many iterations as the same scene flattened to world space took 4.5 ms for). Here each turn of the loop is
+// a node of whichever tree the ray is in: `rec` says which (NO_INST: the top tree), and with it the ray (`ro`, `rd`,
+// `rinv`: the world's, or the unit's), what child indices count from (`off`) and the unit's first triangle. A top
+// leaf sets these and goes to the unit's root; when the stack is back down to where the unit was entered (`base`),
+// they are set back.
 //
 // The root's box is tested before the walk: a ray that meets no unit reads one node, and a scene of one unit is a
 // root that is a leaf, whose record only the rays that meet its box read.

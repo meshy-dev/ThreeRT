@@ -727,7 +727,7 @@ fn proc_normal(h: Hit) -> vec3<f32> {
     return normalize(vec3<f32>(dot(r.n0.xyz, n), dot(r.n1.xyz, n), dot(r.n2.xyz, n)));
 }
 
-// The software BVH walk (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
+// Software traversal (without `hwrt`: trace_hw.wgsl's traversal is the hardware's).
 
 @if(!hwrt) fn ray_aabb(o: vec3<f32>, inv_d: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>, tmax: f32) -> f32 {
     let t0 = (bmin - o) * inv_d;
@@ -759,59 +759,12 @@ fn proc_normal(h: Hit) -> vec3<f32> {
     return vec3<f32>(t, u, v);
 }
 
-// mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface).
+// mode: TRACE_CLOSEST, TRACE_SHADOW (any hit among shadow casters), TRACE_ANY (any hit on any surface). The scene's
+// triangles are its units' (trace_units.wgsl), then the procedural objects.
 @if(!hwrt) fn trace(o: vec3<f32>, d: vec3<f32>, tmax_in: f32, mode: u32) -> Hit {
     var hit = Hit(tmax_in, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
     if (rays_off) { return hit; }
-    let inv_d = 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20));
-    @if(!units) var stack: array<u32, 48>;
-    var sp = 0u;
-    var node = 0u;
-    loop {
-        let n = nodes[node];
-        if (n.count > 0u) {
-            for (var k = 0u; k < n.count; k++) {
-                let ti = n.left_or_first + k;
-                let r = intersect_tri(o, d, ti, hit.t);
-                if (r.x < hit.t) {
-                    let flags = leaf_id(ti, 0u);
-                    if (mode == TRACE_SHADOW && (flags & TRI_NO_SHADOW) != 0u) { continue; }
-                    if (has(F_MASKED) && (flags & TRI_MASKED) != 0u && !cutouts_opaque() && mode != TRACE_ANY_OPAQUE && !alpha_pass(ti, NO_INST, ti, r.y, r.z, r.x)) { shadow_hole = true; continue; }
-                    hit = Hit(r.x, ti, r.y, r.z, NO_INST, ti);
-                    if (mode != TRACE_CLOSEST) { return hit; }
-                }
-            }
-            if (sp == 0u) { break; }
-            sp--;
-            node = stack[sp];
-            continue;
-        }
-        let l = n.left_or_first;
-        let r = l + 1u;
-        let nl = nodes[l];
-        let nr = nodes[r];
-        var tl = ray_aabb(o, inv_d, nl.bmin, nl.bmax, hit.t);
-        var tr = ray_aabb(o, inv_d, nr.bmin, nr.bmax, hit.t);
-        if (tl == INF && tr == INF) {
-            if (sp == 0u) { break; }
-            sp--;
-            node = stack[sp];
-            continue;
-        }
-        var near = l;
-        var far = r;
-        if (tr < tl) {
-            near = r;
-            far = l;
-            let tmp = tl; tl = tr; tr = tmp;
-        }
-        node = near;
-        if (tr != INF && sp < 48u) {
-            stack[sp] = far;
-            sp++;
-        }
-    }
-    @if(units) hit = trace_units(o, d, inv_d, hit, mode);
+    @if(units) hit = trace_units(o, d, 1.0 / select(d, vec3<f32>(1e-20), abs(d) < vec3<f32>(1e-20)), hit, mode);
     if (has(F_PROC)) { return trace_procs(o, d, hit, mode); }
     return hit;
 }

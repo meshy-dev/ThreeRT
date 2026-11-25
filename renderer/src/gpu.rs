@@ -966,7 +966,7 @@ impl<'a> Top<'a> {
     }
 
     /// Whether instanced mesh `k` can be placed: always under hardware traversal (its BLAS); under software traversal
-    /// if it has a tree (a mesh that deforms has none: its instances are flattened).
+    /// if it has a tree (one without is no unit, and is not drawn).
     pub fn has_mesh(&self, k: u32) -> bool {
         match self {
             Top::Hw(_) => true,
@@ -1909,8 +1909,8 @@ fn light_tiles_of(var: Option<&str>, android: bool) -> bool {
 pub const RIS_EXACT: usize = 8;
 /// The features that change the kernel's source (an `@if` flag) rather than switch code in it (`FEAT`).
 pub const F_SOURCE: u32 = F_UNITS;
-/// Software traversal's units (units.rs; shaders/trace_units.wgsl): the second level's walk, spliced into the
-/// software traversal after the still scene's (F_SOURCE). Never with hardware traversal.
+/// Software traversal's units (units.rs; shaders/trace_units.wgsl): the walk of a scene's instances, spliced into
+/// the software traversal (F_SOURCE). Never with hardware traversal.
 pub const F_UNITS: u32 = 1 << 26;
 /// The sky's aerial perspective (SkyAtmosphere `aerialPerspective`; pathtrace.wgsl `aerial_tr`) on every path segment
 /// that ends on a surface: compiled out where no scene has it.
@@ -2523,8 +2523,7 @@ impl Gpu {
     pub fn upload(&self, scene: &Scene, accum: &wgpu::Buffer, nodes: &[u8], emitters: &[[f32; 4]], emitter_tris: &[crate::GpuEmitterTri], emitter_runs: &crate::EmitterRuns, light_tree: &[[f32; 4]], env: &EnvMap, env_cdf: &[f32], energy: &[[f32; 4]], timings: &mut Vec<(String, f64)>) -> Result<Uploaded> {
         let d = &self.device;
         let t0 = Instant::now();
-        // (The vertices too: the kernel's tree over no triangle is a leaf of triangle 0, which these zeros make a
-        // triangle without area; bvh.rs `EMPTY`.)
+        // (A buffer is never empty: zeros where the scene has nothing for it.)
         let buf = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
             let data: &[u8] = if bytes.is_empty() { &[0u8; 512] } else { bytes };
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
@@ -4382,9 +4381,9 @@ mod tests {
         assert!(guard_room(false) && !guard_room(true));
     }
 
-    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS, `units`): without, the still
-    /// walk keeps its stack and there is no unit walk; with, the still walk hands its hit to `trace_units` and its stack
-    /// is the module's (the procedural objects' walk keeps its own). Hardware traversal has neither software walk.
+    /// Software traversal's units are in a kernel only when the scene has them (F_UNITS, `units`): without, there is
+    /// no unit walk; with, `trace` calls `trace_units`, whose stack is the module's (the procedural objects' walk
+    /// keeps its own). Hardware traversal has neither software walk.
     #[test]
     fn units_are_software_traversals_only() {
         let t = kernel_template();
@@ -4392,9 +4391,9 @@ mod tests {
         let u = kernel_wgsl(&t, &KernelVariant::new(false, KernelSwitches::default(), F_UNITS));
         let hw = kernel_wgsl(&t, &KernelVariant::new(true, KernelSwitches::default(), 0));
         assert!(!sw.contains("trace_units") && !hw.contains("trace_units") && !hw.contains("fn trace_procs("));
-        assert_eq!((u.matches("fn trace_units(").count(), u.matches("trace_units(o, d, inv_d, hit, mode)").count()), (1, 1));
+        assert_eq!((u.matches("fn trace_units(").count(), u.matches("hit = trace_units(").count()), (1, 1));
         let stacks = |s: &str| (s.matches("var<private> stack: array<u32, 64>").count(), s.matches("var stack: array<u32, 48>").count());
-        assert_eq!((stacks(&sw), stacks(&u)), ((0, 2), (1, 1)));
+        assert_eq!((stacks(&sw), stacks(&u)), ((0, 1), (1, 1)));
     }
 
     /// With nothing set, every platform but Android opens the device as it was before the options existed: no

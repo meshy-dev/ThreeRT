@@ -1385,7 +1385,7 @@ impl LiveCore {
                         continue;
                     }
                     let Some(mut top) = gpu::Top::of(&mut self.sc.up.accel, &mut self.sc.up.units) else { return false };
-                    // (Software traversal: a mesh that deforms and has no tree is in the still tree, no instance to mask.)
+                    // (Software traversal: a mesh without a tree is no unit: no instance to mask.)
                     if !top.has_mesh(inst.mesh) {
                         return false;
                     }

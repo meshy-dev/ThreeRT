@@ -7,7 +7,7 @@
 //!   UNITS_COST=out/bundles/bistro.js cargo test --release --lib units_cost -- --ignored --nocapture
 //!
 //! `UNITS_COST_VIEW=WxH` (192x108). `UNITS_COST_ASSETS` (`.`).
-use crate::units::cpu::{Kernel, Reads, INF, NO_INST, TRACE_CLOSEST, TRACE_SHADOW};
+use crate::units::cpu::{Kernel, Reads, INF, TRACE_CLOSEST, TRACE_SHADOW};
 use crate::{bvh, default_presets_dir, prepare_as, scene, units};
 use glam::Vec3A;
 use std::time::Instant;
@@ -21,12 +21,11 @@ struct Laid {
     units: u32,
     /// For the report.
     what: String,
-    /// The still scene's triangles (the first so many), and each unit's: its record, its first triangle, how many.
-    still: u32,
+    /// Each unit's triangles: its record, its first triangle, how many.
     unit_tris: Vec<(u32, u32, u32)>,
 }
 
-/// A ray and the flattened scene's answer to it (`t`: the hit's distance, INF for none).
+/// A ray and the scene's answer to it (`t`: the hit's distance, INF for none).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Ray {
@@ -41,7 +40,7 @@ struct Ray {
 
 fn lay(world: &crate::world::World, assets: &std::path::Path) -> (Laid, scene::Scene) {
     let mut sc = scene::build(world, assets, &default_presets_dir(), None).unwrap();
-    let (flat, placed) = (sc.tris.len(), sc.instances.iter().map(|i| sc.meshes[i.mesh as usize].count as usize).sum::<usize>());
+    let placed = sc.instances.iter().map(|i| sc.meshes[i.mesh as usize].count as usize).sum::<usize>();
     let t = Instant::now();
     let p = prepare_as(false, &mut sc, &mut vec![]);
     let s = t.elapsed().as_secs_f64();
@@ -49,21 +48,18 @@ fn lay(world: &crate::world::World, assets: &std::path::Path) -> (Laid, scene::S
     let stored = p.tri_verts.len() / 3;
     // (The triangles as the kernel has them: `prepare`'s vertices, indices and rows.)
     let soup = units::tests::Soup { leaves: sc.indexed.leaves.clone() };
-    let what = format!("{} triangles stored ({:.1} MiB of vertices + attributes), {} nodes ({:.1} MiB), {} units; flattened {} triangles; prepare {s:.2} s", stored, (stored * 144) as f64 / 1048576.0, p.nodes.len(), (p.nodes.len() * 32) as f64 / 1048576.0, sc.units.as_ref().map_or(0, |u| u.count), flat + placed);
+    let what = format!("{} triangles stored ({:.1} MiB of vertices + attributes), {} nodes ({:.1} MiB), {} units; {} triangles placed; prepare {s:.2} s", stored, (stored * 144) as f64 / 1048576.0, p.nodes.len(), (p.nodes.len() * 32) as f64 / 1048576.0, sc.units.as_ref().map_or(0, |u| u.count), placed);
     let instances = if sc.gpu_instances.is_empty() { vec![scene::GpuInstance::default()] } else { sc.gpu_instances.clone() };
     let unit_tris = sc.units.as_ref().map_or(vec![], |u| sc.instances.iter().enumerate().filter(|(r, i)| !i.hidden && u.slots.get(*r).is_some_and(|s| s.is_some())).map(|(r, i)| (r as u32, sc.gpu_instances[r].info[0], sc.meshes[i.mesh as usize].count)).collect());
-    (Laid { nodes: p.nodes, soup, instances, top, units: if sc.units.is_some() { count } else { 0 }, what, still: sc.tris.len() as u32, unit_tris }, sc)
+    (Laid { nodes: p.nodes, soup, instances, top, units: if sc.units.is_some() { count } else { 0 }, what, unit_tris }, sc)
 }
 
 impl Laid {
-    /// The closest hit by every triangle tested one by one, the still scene's in the world and each unit's in the
-    /// unit's space, as the walk tests them: what the walk must find, whatever its trees are.
+    /// The closest hit by every triangle tested one by one, each unit's in the unit's space, as the walk tests them:
+    /// what the walk must find, whatever its trees are.
     fn brute(&self, o: Vec3A, d: Vec3A, tmax: f32) -> f32 {
         let k = Kernel { budget: u64::MAX, ..self.kernel() };
         let mut best = tmax;
-        for ti in 0..self.still {
-            best = best.min(k.intersect_tri(o, d, ti, best).unwrap());
-        }
         for &(rec, first, count) in &self.unit_tris {
             let r = &self.instances[rec as usize];
             let (lo, ld) = (Kernel::proc_point(r, o), Kernel::proc_dir(r, d));
@@ -87,7 +83,7 @@ impl Rng {
     }
 }
 
-/// A frame's rays through the flattened scene `l`: the camera's over a `w` x `h` view; from each hit a shadow ray to
+/// A frame's rays through the scene `l`: the camera's over a `w` x `h` view; from each hit a shadow ray to
 /// a far light (one direction for all: a sun), one to a point a few metres off (a lamp), and a bounce (cosine
 /// distributed); from the bounce's hit the two shadow rays again.
 fn rays(l: &Laid, cam: &scene::CameraData, w: usize, h: usize) -> Vec<Ray> {
@@ -104,7 +100,8 @@ fn rays(l: &Laid, cam: &scene::CameraData, w: usize, h: usize) -> Vec<Ray> {
             let e = |k: usize| { let v = l.soup.leaves[hit.tri as usize][k]; Vec3A::new(v[0], v[1], v[2]) };
             let n = e(1).cross(e(2)).normalize_or_zero();
             // (A unit's triangle is in the unit's space: its normal by the record's normal rows.)
-            let n = if hit.inst == NO_INST { n } else { let r = &l.instances[hit.inst as usize]; Vec3A::new(Vec3A::from_slice(&r.n[0]).dot(n), Vec3A::from_slice(&r.n[1]).dot(n), Vec3A::from_slice(&r.n[2]).dot(n)).normalize_or_zero() };
+            let r = &l.instances[hit.inst as usize];
+            let n = Vec3A::new(Vec3A::from_slice(&r.n[0]).dot(n), Vec3A::from_slice(&r.n[1]).dot(n), Vec3A::from_slice(&r.n[2]).dot(n)).normalize_or_zero();
             let n = if n.dot(d) > 0.0 { -n } else { n };
             (o + d * hit.t + n * 1e-3, n)
         })
@@ -142,7 +139,7 @@ struct Sum {
     rays: u64,
     steps: u64,
     most: u64,
-    r: [u64; 7],
+    r: [u64; 4],
     wrong: u64,
     deepest: usize,
 }
@@ -154,23 +151,23 @@ fn count(l: &Laid, rays: &[Ray]) -> [Sum; 4] {
         let k = l.kernel();
         let hit = k.trace(Vec3A::from(ray.o), Vec3A::from(ray.d), ray.tmax, ray.mode).unwrap_or_else(|e| panic!("the kernel {e}"));
         let t = if hit.tri == 0xffff_ffff { INF } else { hit.t };
-        // A closest hit at the flattened scene's distance (to the rounding of a triangle tested in its own space); a
+        // A closest hit at the kept answer's distance (to the rounding of a triangle tested in its own space); a
         // shadow ray blocked or not as there.
         let same = if ray.mode == TRACE_CLOSEST { (t == INF) == (ray.t == INF) && (t == INF || (t - ray.t).abs() <= 2e-4 * (1.0 + ray.t.min(1e4))) } else { (t == INF) == (ray.t == INF) };
-        let Reads { still_nodes, top_nodes, mesh_nodes, still_verts, mesh_verts, records, still_steps, .. } = k.reads.get();
+        let Reads { top_nodes, mesh_nodes, mesh_verts, records } = k.reads.get();
         for which in [ray.kind as usize, 3] {
             let s = &mut sums[which];
             s.rays += 1;
             s.steps += k.steps.get();
             s.most = s.most.max(k.steps.get());
-            for (a, b) in s.r.iter_mut().zip([still_nodes, top_nodes, mesh_nodes, still_verts / 3, mesh_verts / 3, records, still_steps]) {
+            for (a, b) in s.r.iter_mut().zip([top_nodes, mesh_nodes, mesh_verts / 3, records]) {
                 *a += b;
             }
             s.wrong += !same as u64;
             s.deepest = s.deepest.max(k.deepest.get());
         }
         if !same && sums[3].wrong <= 8 {
-            println!("  differs: a ray of kind {} from {:?} along {:?}, mode {}: {} here (triangle {}, record {}), {} in the flattened scene; every triangle here tested one by one: {}", ray.kind, ray.o, ray.d, ray.mode, t, hit.tri, if hit.inst == NO_INST { -1 } else { hit.inst as i64 }, ray.t, l.brute(Vec3A::from(ray.o), Vec3A::from(ray.d), ray.tmax));
+            println!("  differs: a ray of kind {} from {:?} along {:?}, mode {}: {} here (triangle {}, record {}), {} kept; every triangle here tested one by one: {}", ray.kind, ray.o, ray.d, ray.mode, t, hit.tri, hit.inst as i32, ray.t, l.brute(Vec3A::from(ray.o), Vec3A::from(ray.d), ray.tmax));
         }
     }
     sums
@@ -180,17 +177,17 @@ fn report(name: &str, l: &Laid, rays: &[Ray], pixels: usize, base: Option<f64>) 
     let t = Instant::now();
     let sums = count(l, rays);
     println!("{name}: {}", l.what);
-    println!("  {:<8} {:>8} {:>9} {:>8} | {:>9} {:>9} {:>9} | {:>9} {:>9} {:>8} | {:>9} {:>6}", "rays", "count", "steps", "most", "still nd", "top nd", "mesh nd", "still tri", "mesh tri", "records", "bytes", "wrong");
+    println!("  {:<8} {:>8} {:>9} {:>8} | {:>9} {:>9} | {:>9} {:>8} | {:>9} {:>6}", "rays", "count", "steps", "most", "top nd", "mesh nd", "mesh tri", "records", "bytes", "wrong");
     let mut all = 0.0;
     for (kind, s) in ["camera", "shadow", "bounce", "all"].iter().zip(&sums) {
         let per = |v: u64| v as f64 / s.rays.max(1) as f64;
         // What a ray reads: 32 bytes a node, 48 a triangle, 112 a record's rows.
-        let bytes = 32.0 * per(s.r[0] + s.r[1] + s.r[2]) + 48.0 * per(s.r[3] + s.r[4]) + 112.0 * per(s.r[5]);
-        println!("  {kind:<8} {:>8} {:>9.2} {:>8} | {:>9.2} {:>9.2} {:>9.2} | {:>9.2} {:>9.2} {:>8.3} | {:>9.0} {:>6}", s.rays, per(s.steps), s.most, per(s.r[0]), per(s.r[1]), per(s.r[2]), per(s.r[3]), per(s.r[4]), per(s.r[5]), bytes, s.wrong);
+        let bytes = 32.0 * per(s.r[0] + s.r[1]) + 48.0 * per(s.r[2]) + 112.0 * per(s.r[3]);
+        println!("  {kind:<8} {:>8} {:>9.2} {:>8} | {:>9.2} {:>9.2} | {:>9.2} {:>8.3} | {:>9.0} {:>6}", s.rays, per(s.steps), s.most, per(s.r[0]), per(s.r[1]), per(s.r[2]), per(s.r[3]), bytes, s.wrong);
         all = bytes * s.rays as f64 / pixels as f64;
     }
     let s = &sums[3];
-    println!("  a pixel: {:.0} steps ({:.0} of them the still walk's), {:.0} bytes read{}; the stack's deepest {}; counted in {:.1} s", s.steps as f64 / pixels as f64, s.r[6] as f64 / pixels as f64, all, base.map_or(String::new(), |b| format!(" ({:+.1} % on the flattened scene's)", (all / b - 1.0) * 100.0)), s.deepest, t.elapsed().as_secs_f64());
+    println!("  a pixel: {:.0} steps, {:.0} bytes read{}; the stack's deepest {}; counted in {:.1} s", s.steps as f64 / pixels as f64, all, base.map_or(String::new(), |b| format!(" ({:+.1} % on the first's)", (all / b - 1.0) * 100.0)), s.deepest, t.elapsed().as_secs_f64());
     all
 }
 
