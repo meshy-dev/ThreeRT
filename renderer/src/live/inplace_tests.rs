@@ -4965,3 +4965,59 @@ fn the_first_pass_leaves_the_camera_hits() {
     let missed = hits.iter().filter(|h| tri(h) == u32::MAX).count();
     assert!(missed > 200 && hits.iter().filter(|h| tri(h) == u32::MAX).all(|h| inst(h) == u32::MAX), "{missed} pixels of nothing, each a miss whole");
 }
+
+/// A pixel on a mirror has the surface the mirror shows. A mirror at 45 degrees before the camera shows a wall to the
+/// side: on the mirror's pixels the distance is the whole way to the wall (the camera hit's own stays in its record),
+/// the normal is the wall's as the pixel sees it (towards the camera), the albedo the wall's. The wall moved along
+/// the view, its motion vectors go sideways: the motion of what the pixel sees.
+#[test]
+fn a_pixel_on_a_mirror_has_the_surface_the_mirror_shows() {
+    let mut w = world();
+    let mat = |color: [f32; 3], metalness: f32, roughness: f32| serde_json::from_value(serde_json::json!({ "name": "m", "color": color, "opacity": 1, "metalness": metalness, "roughness": roughness, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true })).unwrap();
+    w.set_material(40, mat([1.0, 1.0, 1.0], 1.0, 0.0));
+    w.set_material(41, mat([0.2, 0.6, 0.4], 0.0, 1.0));
+    let quad = |s: f32| Geometry { positions: vec![-s, -s, 0.0, s, -s, 0.0, s, s, 0.0, -s, s, 0.0], normals: [0.0, 0.0, 1.0].repeat(4), uvs: vec![0.0; 8], indices: vec![0, 1, 2, 0, 2, 3], groups: vec![], colors: vec![] };
+    w.set_geometry(40, quad(0.5)).unwrap();
+    w.set_geometry(41, quad(2.0)).unwrap();
+    let mesh = |geometry, material| Kind::Mesh { geometry, material, own_blas: false, materials: vec![] };
+    w.set_object(40, "mirror".into(), None, mesh(40, 40), true, false).unwrap();
+    w.set_transform(40, Vec3::new(0.0, 0.0, 2.0), glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4), Vec3::ONE).unwrap();
+    // (Movable: what moves has motion vectors.)
+    w.set_object(41, "side wall".into(), None, mesh(41, 41), true, true).unwrap();
+    let turned = glam::Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    w.set_transform(41, Vec3::new(4.0, 0.0, 2.0), turned, Vec3::ONE).unwrap();
+    let presets = crate::default_presets_dir();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    live.fixed_dt = Some(1.0 / 60.0);
+    live.render(1, |_, _| {});
+    let (iw, ih) = live.internal_size();
+    let pixels = (iw * ih) as u64;
+    let read = |live: &LiveCore| -> (Vec<[f32; 8]>, Vec<[f32; 20]>, Vec<[f32; 4]>) {
+        let (f, m) = (&live.targets.kernel.first, &live.targets.kernel.motion);
+        (read_back(live, &f.buffer, f.offset, pixels * 32), read_back(live, &live.targets.accum, 0, pixels * gpu::SAMPLE_BYTES), read_back(live, &m.buffer, m.offset, pixels * 16))
+    };
+    let (hits, samples, _) = read(&live);
+    // (pathtrace.wgsl `first_store`: the chain rides above the part.)
+    let chain = |h: &[f32; 8]| h[7] as u32 >> 16;
+    let on: Vec<usize> = (0..pixels as usize).filter(|&k| chain(&hits[k]) > 0).collect();
+    let centre = (ih / 2 * iw + iw / 2) as usize;
+    assert!(on.len() > 100 && on.contains(&centre) && on.iter().all(|&k| chain(&hits[k]) == 1), "{} pixels on the mirror, each through one mirror", on.len());
+    assert!((hits[centre][0] - 3.0).abs() < 0.1 && (samples[centre][3] - 7.0).abs() < 0.1, "the centre: the mirror {} away, the wall it shows {} (3 and 3 + 4)", hits[centre][0], samples[centre][3]);
+    for &k in &on {
+        let (s, own) = (&samples[k], hits[k][0]);
+        let (normal, albedo) = (Vec3::new(s[8], s[9], s[10]), Vec3::new(s[4], s[5], s[6]));
+        assert!(s[3] > own + 3.0 && (normal - Vec3::Z).length() < 0.02 && (albedo - Vec3::new(0.2, 0.6, 0.4)).length() < 0.03, "pixel {k}: the mirror {own} away; shown {} away, normal {normal}, albedo {albedo}", s[3]);
+    }
+    assert!((0..pixels as usize).filter(|&k| chain(&hits[k]) == 0 && samples[k][3] > 0.0).all(|k| samples[k][3].to_bits() == hits[k][0].to_bits()), "off the mirror the distance is the camera hit's");
+    // The wall goes 0.3 along the view (z): in the mirror it goes 0.3 sideways (x), and a motion vector is the way back.
+    w.set_transform(41, Vec3::new(4.0, 0.0, 2.3), turned, Vec3::ONE).unwrap();
+    assert!(!live.commit(&mut w).unwrap(), "the wall moved: in place ({:?})", live.fallback);
+    live.render(1, |_, _| {});
+    let (hits, _, motion) = read(&live);
+    let moved: Vec<Vec3> = (0..pixels as usize).filter(|&k| chain(&hits[k]) > 0 && motion[k][3] > 0.5).map(|k| Vec3::new(motion[k][0], motion[k][1], motion[k][2])).collect();
+    assert!(moved.len() > 100 && moved.iter().all(|v| (*v - Vec3::new(0.3, 0.0, 0.0)).length() < 2e-3), "{} mirror pixels moved, each by the wall's step as the mirror shows it (the first: {:?})", moved.len(), moved.first());
+}
