@@ -36,7 +36,8 @@
 // Volume voxels (cache_point, point_radiance): pathtrace.wgsl, shared with participating media.
 
 // Live: the nearest opaque first hit around output pixel (x, y): of the 2 x 2 traced pixels under it, the nearest
-// (sky = none), so nothing shows through at an edge.
+// (sky = none), so nothing shows through at an edge. The camera's own hits (`first_depth`): a mirror hides what is
+// behind it, whatever it shows.
 @if(hwrt) fn opaque_depth(x: u32, y: u32) -> f32 {
     let iw = TPS.view.x;
     let ih = TPS.view.y;
@@ -49,7 +50,7 @@
     var t = INF;
     for (var k = 0u; k < 4u; k++) {
         let q = select(y0, y1, k >= 2u) * iw + select(x0, x1, (k & 1u) == 1u);
-        let d = accum[q].color.w;
+        let d = first_depth(q);
         if (d > 0.0) { t = min(t, d); }
     }
     return t;
@@ -107,7 +108,7 @@ fn translucent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let o = P.cam_pos.xyz;
     var tmax = INF;
     if (low) {
-        let od = accum[pix].color.w;
+        let od = first_depth(pix);
         if (od > 0.0) { tmax = od; }
     } else if (live) {
         tmax = opaque_depth(gid.x, gid.y);

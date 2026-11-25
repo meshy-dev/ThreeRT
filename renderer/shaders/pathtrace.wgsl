@@ -3238,16 +3238,43 @@ fn sphere_hit(x: vec3<f32>, l: vec3<f32>, hit: Hit) -> vec3<f32> {
 }
 
 // A camera hit as the first-hit pass leaves it: (t, u, v, triangle low) (triangle high, instance low, instance high,
-// part). The integers as 16-bit halves: a float keeps those exactly, and its bits are not an integer's to keep.
-fn first_store(pix: u32, h: Hit) {
+// part + 65536 x its mirror chain). The integers as 16-bit halves: a float keeps those exactly, and its bits are not
+// an integer's to keep. The chain: how many mirrors the pixel's ray goes on through (`mirror_alone`); what the last
+// one shows is the surface the pixel has for the passes after (its guides, its motion).
+struct FirstHit { hit: Hit, chain: u32 };
+fn first_store(pix: u32, h: Hit, chain: u32) {
     first_vec_store(pix * 2u, vec4<f32>(h.t, h.u, h.v, f32(h.tri & 0xffffu)));
-    first_vec_store(pix * 2u + 1u, vec4<f32>(f32(h.tri >> 16u), f32(h.inst & 0xffffu), f32(h.inst >> 16u), f32(h.part)));
+    first_vec_store(pix * 2u + 1u, vec4<f32>(f32(h.tri >> 16u), f32(h.inst & 0xffffu), f32(h.inst >> 16u), f32(h.part | (chain << 16u))));
 }
-fn first_load(pix: u32) -> Hit {
+fn first_load(pix: u32) -> FirstHit {
     let a = first_vec_load(pix * 2u);
     let b = first_vec_load(pix * 2u + 1u);
-    return Hit(a.x, u32(a.w) | (u32(b.x) << 16u), a.y, a.z, u32(b.y) | (u32(b.z) << 16u), u32(b.w));
+    let pc = u32(b.w);
+    return FirstHit(Hit(a.x, u32(a.w) | (u32(b.x) << 16u), a.y, a.z, u32(b.y) | (u32(b.z) << 16u), pc & 0xffffu), pc >> 16u);
 }
+// The distance to the camera hit itself (0: none), whatever its ray went on to: what stands before a mirror is nearer
+// than this.
+fn first_depth(pix: u32) -> f32 {
+    let a = first_vec_load(pix * 2u);
+    let b = first_vec_load(pix * 2u + 1u);
+    return select(a.x, 0.0, a.w == 65535.0 && b.x == 65535.0);
+}
+// A chain's transform, after the hits (two more vec4s a traced pixel, written where there is a chain): what takes a
+// direction at the surface seen to where the pixel sees it, each mirror's reflection in turn from the camera's.
+// Orthonormal: its first two columns are kept, the third is their cross product, turned for an odd chain.
+fn first_xform_store(pix: u32, x: mat3x3<f32>) {
+    let at = 2u * P.size.x * P.size.y + pix * 2u;
+    first_vec_store(at, vec4<f32>(x[0], 0.0));
+    first_vec_store(at + 1u, vec4<f32>(x[1], 0.0));
+}
+fn first_xform(pix: u32, chain: u32) -> mat3x3<f32> {
+    let at = 2u * P.size.x * P.size.y + pix * 2u;
+    let c0 = first_vec_load(at).xyz;
+    let c1 = first_vec_load(at + 1u).xyz;
+    return mat3x3<f32>(c0, c1, cross(c0, c1) * select(1.0, -1.0, (chain & 1u) == 1u));
+}
+// The longest chain (and no longer than a path).
+const MIRROR_CHAIN: u32 = 8u;
 
 // The loop guard (gpu.rs `loop_guard_of`; docs/RUNTIME.md "The engine in a browser"): every loop of the kernel, the
 // scene's functions' too, begins with `if (loop_guard()) { break; }` (gpu.rs `guard_loops`, a pass over the variant's
@@ -3668,7 +3695,8 @@ fn guide_hit(origin: vec3<f32>, dir: vec3<f32>, footprint: f32, through_glass: b
     // Rough surfaces have no single reflected point. A stochastic second-bounce hit would move
     // their guide even when both the object and camera stand still.
     accum[q].spec.w = 0.0;
-    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 &&
+    // (Not behind a mirror chain: there the pixel's guides are already the surface shown.)
+    if (px.color.w > 0.0 && rough < MIRROR_ROUGHNESS && P.jitter.z == 0.0 && first_load(q).chain == 0u &&
         (any(specular.rgb > vec3<f32>(0.005)) || diffuse.w > 0.0)) {
         cur_depth = 1u;
         mirror_path = true;
@@ -3721,7 +3749,7 @@ fn media_train(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ndc = vec2<f32>((f32(px) + r4.z) / f32(w) * 2.0 - 1.0, 1.0 - (f32(py) + r4.w) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
     let o = P.cam_pos.xyz;
-    let fd = accum[py * w + px].color.w;
+    let fd = first_depth(py * w + px);
     let tmax = select(1.0e30, fd, fd > 0.0);
     // Homogeneous media (water) lie behind the glass the camera sees them through: their points are taken along the
     // straight ray up to the first opaque surface (stopped at the glass, the voxels learned the water's top layer
@@ -3778,7 +3806,7 @@ fn media_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     var px = accum[pix];
     let ndc = vec2<f32>((f32(gid.x) + P.jitter.x) / f32(w) * 2.0 - 1.0, 1.0 - (f32(gid.y) + P.jitter.y) / f32(h) * 2.0);
     let d = normalize(P.cam_fwd.xyz + P.cam_right.xyz * (ndc.x * P.cam_pos.w * P.cam_fwd.w) + P.cam_up.xyz * (ndc.y * P.cam_pos.w));
-    let ft = px.color.w;
+    let ft = first_depth(pix);
     let mm = media_march(P.cam_pos.xyz, d, select(1.0e30, ft, ft > 0.0), true, rng_dim(D_MEDIA));
     if (mm.tr >= 1.0 && all(mm.light == vec3<f32>(0.0))) { return; }
     let samples = P.misc.w + 1.0; // this dispatch runs with the frame's last sample's parameters
@@ -3822,6 +3850,15 @@ fn cache_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ------------------------------------------------------------------------------------------------
+
+// What a live frame's first pass follows: a surface with a mirror's lobe alone (no diffuse lobe, no glass, no coat).
+fn mirror_alone(s: Surface) -> bool {
+    return s.roughness < DELTA_ROUGHNESS && s.metallic >= 1.0 && s.transmission <= 0.0 && s.coat <= 0.0 && !s.card;
+}
+// Whether a material's record leaves that possible: read before its textures and its function are.
+fn mirror_possible(m: Material) -> bool {
+    return (has(F_FUNC) && m.tex1.w > 0) || ((m.params.y < DELTA_ROUGHNESS || (has(F_TEX) && m.tex0.z >= 0)) && m.params.x >= 1.0 && m.layer.x <= 0.0);
+}
 
 // The camera hit's motion: from the hit point `p` to where that surface point was the previous frame (w = 1), zeros
 // where it stands still.
@@ -3904,10 +3941,42 @@ fn first_hit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pix = gid.y * w + gid.x;
     let cr = camera_ray(gid.xy, rng4(rng_dim(D_CAMERA)));
     let hit = trace(cr.o, cr.d, INF, TRACE_CLOSEST);
-    first_store(pix, hit);
+    // Through mirrors to the surface the pixel shows (`main` walks the same chain: the cone as it has it). The
+    // material is read only where its record says it can be a mirror. Not with ray tracing off; not procedural
+    // geometry.
+    var seen = hit;
+    var so = cr.o;
+    var sd = cr.d;
+    var chain = 0u;
+    var cone_w = 0.0;
+    var cone_a = 2.0 * P.cam_pos.w / lod_height();
+    var xf = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+    let longest = select(min(MIRROR_CHAIN, P.counts.z), 0u, P.jitter.z > 0.5 || first_len() < 4u * w * h);
+    for (var b = 0u; b < longest; b++) {
+        if (seen.tri == 0xffffffffu || is_proc(seen) || !has(F_INST) || seen.inst == NO_INST) { break; }
+        if (!mirror_possible(material_at(row_word(instance_at(seen.inst).info.w, seen.part, 0u) & ROW_MATERIAL))) { break; }
+        let width = cone_w + cone_a * seen.t;
+        let s = surface(so, sd, seen, width);
+        if (!mirror_alone(s)) { break; }
+        chain += 1u;
+        cone_w = width;
+        cone_a += 2.0 * s.roughness * s.roughness;
+        // (I - 2 n n^T, a column each.)
+        xf = xf * mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0) - 2.0 * s.n * s.n.x, vec3<f32>(0.0, 1.0, 0.0) - 2.0 * s.n * s.n.y, vec3<f32>(0.0, 0.0, 1.0) - 2.0 * s.n * s.n.z);
+        let l = reflect(sd, s.n);
+        so = offset_origin(s.p, select(s.ng, -s.ng, dot(l, s.ng) < 0.0));
+        sd = l;
+        seen = trace(so, sd, INF, TRACE_CLOSEST);
+    }
+    first_store(pix, hit, chain);
+    // The motion of the surface shown, as the pixel sees it: through the chain.
     var mv = vec4<f32>(0.0);
     // (The hit point as `surface` has it.)
-    if (hit.tri != 0xffffffffu) { mv = first_motion(hit, cr.o + cr.d * hit.t); }
+    if (seen.tri != 0xffffffffu) { mv = first_motion(seen, so + sd * seen.t); }
+    if (chain > 0u) {
+        mv = vec4<f32>(xf * mv.xyz, mv.w);
+        first_xform_store(pix, xf);
+    }
     if (motion_len() >= w * h) { motion_store(pix, select(vec4<f32>(0.0), mv, !non_finite(mv.xyz))); }
 }
 
@@ -3977,22 +4046,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cone_a = 2.0 * P.cam_pos.w / lod_height();
 
     mirror_path = false;
-    for (var depth = 0u; depth <= P.counts.z; depth++) {
+    // A live frame's mirror chain (`first_hit` counted it): the path passes the chain's mirrors by their reflection,
+    // each taking one of its bounces, and stays at depth 0 until the surface the last one shows: that surface has
+    // what a camera hit has (the guides, the light seen directly, the signals' split). `walked`: the mirrors passed;
+    // `vlen`: the way to the last; `tint`: what they took of the light; `xf`: `first_xform`.
+    var chain = 0u;
+    var walked = 0u;
+    var hold = false;
+    var vlen = 0.0;
+    var tint = vec3<f32>(1.0);
+    var xf = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+    var last = P.counts.z;
+    var depth = 0u;
+    loop {
+        if (depth > last) { break; }
         cur_depth = depth;
-        // A live frame's camera hit is its first pass's (`first_hit`).
+        // The camera's own segment. A live frame's camera hit is its first pass's (`first_hit`).
+        let cam_seg = depth == 0u && walked == 0u;
         var hit = Hit(INF, 0xffffffffu, 0.0, 0.0, NO_INST, 0u);
-        if (LIVE && depth == 0u) { hit = first_load(pix); } else { hit = trace(o, d, INF, TRACE_CLOSEST); }
+        if (LIVE && cam_seg) {
+            let f = first_load(pix);
+            hit = f.hit;
+            chain = f.chain;
+            if (chain > 0u) { xf = first_xform(pix, chain); }
+        } else {
+            hit = trace(o, d, INF, TRACE_CLOSEST);
+        }
         // Ray tracing off: the camera ray above was the last one traced for this pixel.
-        if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
+        if (cam_seg) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
-            let t0 = select(0.0, P.fog.w, depth == 0u);
+            let t0 = select(0.0, P.fog.w, cam_seg);
             let t1 = select(hit.t, 2.0e4, hit.tri == 0xffffffffu);
             // Inside the volumetric range (camera rays) the medium is denser by the extinction scale (UE).
             var od = fog_depth(o, d, t0, t1);
             var tv = t1;
             var trv = 1.0;
-            if (has(F_VOLUME) && depth == 0u && P.vol.x > 0.0) {
+            if (has(F_VOLUME) && cam_seg && P.vol.x > 0.0) {
                 tv = select(t1, min(t1, P.vol2.w), P.vol2.w > 0.0);
                 let odv = fog_depth(o, d, t0, max(tv, t0));
                 od += odv * (P.vol.z - 1.0);
@@ -4001,7 +4091,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let tr = max(exp(-od), 1.0 - P.fog_color.w);
             // Interleaved over 8x4 tiles (one SIMD group each, so skipped tiles really idle), rotating per sample:
             // a quarter of the pixels at 4x weight; the low-frequency fog converges in the accumulation.
-            if (has(F_VOLUME) && depth == 0u && P.vol.x > 0.0 && (((gid.x >> 3u) + 2u * (gid.y >> 2u) + pcg(P.size.z)) & VOL_RATE_MASK) == 0u) {
+            if (has(F_VOLUME) && cam_seg && P.vol.x > 0.0 && (((gid.x >> 3u) + 2u * (gid.y >> 2u) + pcg(P.size.z)) & VOL_RATE_MASK) == 0u) {
                 // Firefly clamp: a fog point next to a bright sign is rare and huge; haze is a few nits.
                 var fs = f32(VOL_RATE_MASK + 1u) * fog_scatter(o, d, t0, max(tv, t0), trv, rng_dim(D_FOG));
                 let fl = luminance(fs);
@@ -4023,7 +4113,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         // Live media are composited after the trace (media_composite); past the camera ray, homogeneous ones (water)
         // attenuate and light the path here. Offline paths track every medium.
-        if (LIVE && has(F_HMEDIA) && depth > 0u) {
+        if (LIVE && has(F_HMEDIA) && !cam_seg) {
             let mh = media_homogeneous(o, d, select(hit.t, 1.0e30, hit.tri == 0xffffffffu), true, rng_sub(rng_dim(D_MEDIA), 1u));
             radiance += thr * mh.light;
             thr *= mh.tr;
@@ -4046,7 +4136,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (lum > clamp_v) { c *= clamp_v / lum; }
                 }
                 radiance += c;
-                if (depth == P.counts.z) { break; }
+                if (depth == last) { break; }
                 let nd = sample_hg(d, tk.g);
                 last_pdf = hg_phase(tk.g, dot(nd, d));
                 specular_bounce = false;
@@ -4080,16 +4170,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let width = cone_w + cone_a * hit.t;
         let s = surface(o, d, hit, width);
-        if (depth == 0u) {
-            first_t = hit.t;
+        if (depth == 0u && walked == chain) {
+            // (Behind mirrors: where the pixel sees it, the whole way along the camera ray, its normal turned.)
+            first_t = vlen + hit.t;
             if (has(F_LISTS)) {
                 // (Where the hit was the previous frame: the first pass's motion vector.)
                 var before = s.p;
+                if (chain > 0u) { before = cr.o + cr.d * first_t; }
                 if (LIVE && motion_len() >= w * h) { before += motion_load(pix).xyz; }
                 lt_list_start(before);
             }
-            albedo = select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
+            albedo = tint * select(s.base, s.emissive / max(max(s.emissive.r, max(s.emissive.g, s.emissive.b)), 1e-6), s.card);
             normal = s.n;
+            if (chain > 0u) { normal = xf * s.n; }
             anim = s.anim;
             rough0 = s.roughness;
         }
@@ -4110,8 +4203,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             radiance += c;
         }
         if (s.card) { break; }
-        @if(!last_direct && !last_sun) if (depth == P.counts.z) { break; }
-        @if(last_sun && !last_direct) if (depth == P.counts.z) {
+        if (walked < chain) {
+            // A mirror of the chain: on by its reflection, at the weight a sample of it has.
+            let cl = reflect(d, s.n);
+            let clb = lobes(s, max(dot(s.n, -d), 1e-4));
+            let cw = eval_bsdf(s, clb, -d, cl) / max(pdf_bsdf(s, clb, -d, cl), 1e-20);
+            if (non_finite(cw) || all(cw <= vec3<f32>(0.0))) { break; }
+            thr *= cw;
+            tint *= cw;
+            vlen += hit.t;
+            walked += 1u;
+            last -= 1u;
+            cone_w = width;
+            cone_a += 2.0 * s.roughness * s.roughness;
+            o = offset_origin(s.p, select(s.ng, -s.ng, dot(cl, s.ng) < 0.0));
+            d = cl;
+            hold = true;
+            continue;
+        }
+        @if(!last_direct && !last_sun) if (depth == last) { break; }
+        @if(last_sun && !last_direct) if (depth == last) {
             // gpu.rs `KernelSwitches::last_sun`: the last vertex's light from the directional lights alone.
             if (depth > 0u) {
                 var dz = thr * sun_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
@@ -4121,7 +4232,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             break;
         }
-        @if(last_direct) if (depth == P.counts.z) {
+        @if(last_direct) if (depth == last) {
             // gpu.rs `KernelSwitches::last_direct`: the last vertex's direct light.
             if (depth > 0u) {
                 var dz = thr * direct_light(s, lobes(s, max(dot(s.n, -d), 1e-4)), -d);
@@ -4207,12 +4318,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             refl_e = lb.e_spec;
             if (LIVE && P.motion.y > 0.5) {
                 // MetalFX takes the directional reflectances of the layered BSDF, including glass and coat.
-                guide_diffuse = lb.diffuse * lb.kd * (1.0 - lb.e_coat);
-                refl_e = cache_reflectance(lb) - guide_diffuse;
+                guide_diffuse = tint * lb.diffuse * lb.kd * (1.0 - lb.e_coat);
+                refl_e = tint * cache_reflectance(lb) - guide_diffuse;
                 if (has(F_GLASS)) { guide_glass = vec2<f32>(s.transmission * (1.0 - s.metallic), lb.eta); }
             }
             if (sampled_spec && !through && lb.coat <= 0.0) {
-                refl_l = l;
+                refl_l = xf * l;
                 refl_pdf = pdf_spec(s, lb, v, l);
                 refl_w = wgt;
             }
@@ -4246,6 +4357,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         o = offset_origin(s.p, select(s.ng, -s.ng, dot(l, s.ng) < 0.0));
         d = l;
+        continuing {
+            // (A mirror of the chain leaves the depth where it is.)
+            if (!hold) { depth += 1u; }
+            hold = false;
+        }
     }
 
     // Integer tests: Metal's fast-math folds `x != x` away, so float NaN checks are unreliable.

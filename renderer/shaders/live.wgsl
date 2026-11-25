@@ -40,7 +40,7 @@ struct LiveParams {
 // (`Pixel`, a sample of the trace: records.wgsl, a part of this module. normal.w: `medium_tr`, `medium_share`.)
 
 @group(0) @binding(0) var<uniform> L: LiveParams;
-@group(0) @binding(1) var<storage, read> sample_px: array<Pixel>;          // color.w = first-hit distance (0 = sky)
+@group(0) @binding(1) var<storage, read> sample_px: array<Pixel>;          // color.w = distance to the surface shown (0 = sky): the camera hit's, or the whole way to what a mirror chain shows
 
 // ---- The live passes' buffers, by what they hold and how long.
 //

@@ -1576,8 +1576,8 @@ pub struct KernelBufs {
     pub motion: Buf,
     pub direct: Buf,
     pub lists: Buf,
-    /// A live frame's camera hits, 32 bytes a traced pixel (pathtrace.wgsl `first_store`): its first pass writes them,
-    /// its paths start from them.
+    /// A live frame's camera hits, 64 bytes a traced pixel (pathtrace.wgsl `first_store`, and a mirror chain's
+    /// transform after them, `first_xform`): its first pass writes them, its paths start from them.
     pub first: Buf,
     /// The pixels a sample's trace leaves for `finish` (their count, then `DEFERRED_BYTES` each): the layout as
     /// written only. Of one record until a live view makes it for its traced size (`deferred_buffer`).
@@ -1649,18 +1649,20 @@ pub(crate) fn live_sizes(entries: u64, view: [u64; 5]) -> [u64; 9] {
 
 /// Group-1 bind group of the kernel: the radiance cache and the reflection resolve's inputs (`KernelBufs`); in the
 /// merged layout, the one buffer.
-/// `paths`: with what the paths' passes alone use, `finish`'s records and the camera hits (`live_layout`; the
-/// translucency pass's `tl_live_layout` is without).
-pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, paths: bool) -> wgpu::BindGroup {
+/// `translucent`: for the translucency pass's layout (`tl_live_layout`), which has what that pass reads alone: the
+/// radiance cache, the light tiles' lists and the camera hits.
+pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, translucent: bool) -> wgpu::BindGroup {
     fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry { binding, resource: b.binding() }
     }
     match &b.merged {
         Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &[wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
         None => {
-            let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
-            entries.extend(b.deferred.as_ref().filter(|_| paths).map(|r| e(crate::merged::DEFERRED_BINDING, r)));
-            entries.extend(paths.then(|| e(crate::merged::FIRST_BINDING, &b.first)));
+            let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(crate::merged::FIRST_BINDING, &b.first)];
+            if !translucent {
+                entries.extend([e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)]);
+                entries.extend(b.deferred.as_ref().map(|r| e(crate::merged::DEFERRED_BINDING, r)));
+            }
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
             d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &entries })
         }
@@ -2178,14 +2180,15 @@ impl Gpu {
             ],
         });
         let no_live_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, [64; 5]);
-        let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, true);
+        let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, false);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&live_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl) = if hwrt {
             let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucent"), entries: &tl_entries });
-            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || ![crate::merged::DEFERRED_BINDING, crate::merged::FIRST_BINDING].contains(&e.binding)).copied().collect();
+            // (What the pass reads of group 1: the radiance cache, the light tiles' lists, the camera hits, the loop guard's count. A stage's buffers are counted against Metal's limit.)
+            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || [1, 2, 3, crate::merged::LISTS_BINDING, crate::merged::FIRST_BINDING, crate::merged::GUARD_BINDING].contains(&e.binding)).copied().collect();
             let vl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live, translucent"), entries: &tl_vis });
             let tpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("translucent"), bind_group_layouts: &[Some(&layout), Some(&vl), Some(&l)], immediate_size: 0 });
-            let nv = live_bind_group(&device, &vl, &no_live_bufs, false);
+            let nv = live_bind_group(&device, &vl, &no_live_bufs, true);
             (Some(l), Some(tpl), Some(vl), Some(nv))
         } else {
             (None, None, None, None)

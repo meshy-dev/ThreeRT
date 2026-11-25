@@ -111,7 +111,7 @@ pub struct Targets {
 /// What a view of `w` x `h` holds of each of the kernel's buffers that follow its size, bytes (`gpu::VIEW_BUFFERS`).
 fn kernel_bytes(w: u32, h: u32) -> [u64; 5] {
     let n = (w * h) as u64;
-    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16, n * 32]
+    [n * 32, n * 16, n * 16, layout::light_lists(w, h) as u64 * 16, n * 64]
 }
 
 impl Targets {

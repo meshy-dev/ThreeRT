@@ -167,7 +167,7 @@ pub(super) const LIST_CANDIDATES: u32 = 2;
 /// The kernel's group-1 bind groups over a view's targets: the trace's, and the translucency pass's where the device
 /// has one (`gpu::Gpu::tl_live_layout`: without `finish`'s records).
 fn kernel_bind_groups(g: &gpu::Gpu, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
-    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, true), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, false)))
+    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, false), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, true)))
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
