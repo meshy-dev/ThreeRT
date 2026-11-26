@@ -304,6 +304,9 @@ pub struct Changes {
     pub sun: bool,
     /// Another sky (its kind or its parameters): baked and put in place (live/edits.rs `apply_sky`). With `environment`.
     pub sky: bool,
+    /// Files whose last model left the world in this batch (`World::models`): the live view retires their materials
+    /// and frees the textures nothing names any more (live/edits.rs `retire_models`), unless one came back.
+    pub gone_models: HashSet<String>,
     /// A planet's viewer altitude, the sky otherwise the same (`desc::Sky::Atmosphere::altitude`): re-baked in place
     /// past a step (live/edits.rs `move_altitude`). With `environment`.
     pub altitude: bool,
@@ -365,6 +368,10 @@ pub struct World {
     /// How many objects each object is the parent of (`remove` skips the scan for children of a childless one: a
     /// streamed city removes thousands of objects a frame among tens of thousands). Kept by `set_object` and `remove`.
     kids: HashMap<u32, u32>,
+    /// How many objects are models of each file (`scene::model_key`: the file and its material functions). Kept by
+    /// `set_object` and `remove`; a key's last model gone is `Changes::gone_models`, whose materials the live view
+    /// retires (live/edits.rs `retire_models`).
+    pub models: HashMap<String, u32>,
     pub geometries: HashMap<u32, Arc<Geometry>>,
     pub textures: HashMap<u32, Texture>,
     pub materials: HashMap<u32, desc::Material>,
@@ -406,6 +413,7 @@ impl Default for World {
         World {
             objects: BTreeMap::new(),
             kids: HashMap::new(),
+            models: HashMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
             materials: HashMap::new(),
@@ -651,10 +659,13 @@ impl World {
                 *self.kids.entry(p).or_default() += 1;
             }
         }
-        let o = match self.objects.remove(&id) {
+        let o = match self.take_object(id) {
             Some(o) => Object { name, parent, kind, cast_shadow, movable: movable || o.movable, ..o },
             None => Object { name, parent, kind, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE, visible: true, cast_shadow, power: 1.0, custom: [0.0; 4], movable, driven: false, sway: None, sway_rot: Quat::IDENTITY },
         };
+        if let Kind::Model { uri, functions, .. } = &o.kind {
+            *self.models.entry(crate::scene::model_key(uri, functions)).or_default() += 1;
+        }
         self.objects.insert(id, o);
         if fresh {
             self.changes.added.insert(id);
@@ -1051,6 +1062,22 @@ impl World {
         self.geometries.remove(&id).is_some() | self.proc_geometries.remove(&id).is_some()
     }
 
+    /// Takes object `id` out of `objects`, counting it out of `models` (a file's last model: `Changes::gone_models`).
+    fn take_object(&mut self, id: u32) -> Option<Object> {
+        let o = self.objects.remove(&id)?;
+        if let Kind::Model { uri, functions, .. } = &o.kind {
+            let key = crate::scene::model_key(uri, functions);
+            if let Some(n) = self.models.get_mut(&key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.models.remove(&key);
+                    self.changes.gone_models.insert(key);
+                }
+            }
+        }
+        Some(o)
+    }
+
     pub fn remove(&mut self, id: u32) -> Vec<u32> {
         let mut doomed = vec![id];
         let mut k = 0;
@@ -1084,12 +1111,12 @@ impl World {
             for (d, lit) in doomed.iter().zip(&lit) {
                 self.instanced.remove(d);
                 if *lit {
-                    self.objects.remove(d);
+                    self.take_object(*d);
                     self.changes.lights.insert(*d);
                 } else if self.objects.get(d).is_some_and(mist) {
-                    self.objects.remove(d);
+                    self.take_object(*d);
                     self.changes.media = true;
-                } else if self.objects.remove(d).is_some_and(|o| !matches!(o.kind, Kind::Group | Kind::Camera(_))) && !self.changes.added.remove(d) {
+                } else if self.take_object(*d).is_some_and(|o| !matches!(o.kind, Kind::Group | Kind::Camera(_))) && !self.changes.added.remove(d) {
                     self.changes.removed.insert(*d);
                 }
                 // What else this batch changed of it goes with it (a pose, a move, its visibility: there is nothing
@@ -1106,7 +1133,7 @@ impl World {
         }
         for &d in &doomed {
             self.instanced.remove(&d);
-            if self.objects.remove(&d).is_some() {
+            if self.take_object(d).is_some() {
                 mark_structural(&mut self.changes, line!());
             }
         }
