@@ -642,14 +642,20 @@ The files stay there across runs: that directory is the game's offline cache.
   Another status (204, 404, ...): nothing written, `size` 0. 0: the request failed, `error` says why (the address,
   the path, the network, a body over 64 MiB, a body whose sha256 is not `sha256`).
 - `cached: true`: the file was there already, from the same `url`, or with the same `sha256` (hex, either case);
-  nothing was downloaded. The app keeps what it knows of a file beside it (`play`: `.<name>.fetched`, JSON).
+  nothing was downloaded. The app keeps what it knows of a file beside it (`AssetFetcher`: `.<name>.fetched`, JSON).
 - At most 16 downloads are under way; more wait in the order they came. A canceled request that waits is taken out;
   one under way stops and its partial file is removed. Neither is answered.
 - An app that answers them lists `"assets"` in `launch.caps`.
-- `play` (`src/net.rs`): any address, into `<--assets>/cache/`; a request the window refuses (the path, the address)
-  is answered at the next frame. `live`: the driver is the app; it writes under the same `--assets` and answers.
-  Checked: `src/net.rs` tests (a server on the machine: the download, `cached` by address and by hash, a wrong hash, a
-  404, 24 requests at once, a cancel, paths out of the cache).
+- **The library's piece** (`renderer/src/assets.rs`, cargo feature `assets`, on with `net` and so by default):
+  `AssetFetcher::new(asset_root)` is a `HostServices` (`post`, `poll`, `caps` = `["assets"]`) for any app that holds a
+  `GameSession`: route the game's `assets.*` posts to it, add what `poll` returns to the frame's batch, list its caps
+  in `launch`. `https://` only by default; an app with a network policy gives its check of an address
+  (`with_policy`) and its own HTTP agent (`with_agent`: its resolver, its proxy, its redirects). `counts()` and
+  `pending()` for a status page.
+- `play` uses it with `http://` allowed too, into `<--assets>/cache/`. `live`: the driver is the app; it writes under
+  the same `--assets` and answers. Checked: `assets.rs` tests (a server on the machine: the download, `cached` by
+  address and by hash, a wrong hash, a 404, the default policy's refusal of http, 24 requests at once, a cancel,
+  paths out of the cache).
 
 ### Files
 

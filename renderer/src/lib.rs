@@ -14,6 +14,8 @@ pub mod files;
 pub mod gpu;
 pub mod heap;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "assets")]
+pub mod assets;
 pub mod host;
 pub mod indexed;
 pub mod live;

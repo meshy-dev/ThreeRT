@@ -244,7 +244,14 @@ fn main() -> Result<()> {
             let a = view::parse_args(&args, &presets)?;
             threert_render::files::set_user_root(Some(&a.store));
             let files = threert_render::userfiles::UserFiles::new(Some(a.store.clone()), Some(threert_render::userfiles::queued_picks(a.pick.clone())));
-            let services: Vec<Box<dyn threert_render::host::HostServices>> = vec![Box::new(net::Net::new().with_assets(a.assets.clone())), Box::new(files)];
+            let services: Vec<Box<dyn threert_render::host::HostServices>> = vec![Box::new(net::Net::new()), Box::new(files)];
+            // (Any http(s) address, as for `net.*`.)
+            #[cfg(feature = "assets")]
+            let services = {
+                let mut s = services;
+                s.push(Box::new(threert_render::assets::AssetFetcher::new(a.assets.clone()).with_policy(threert_render::assets::http_or_https())));
+                s
+            };
             view::run(a, Box::new(services))?;
         }
         "setup" => {
