@@ -2058,15 +2058,18 @@ lighting changes, 4096 once it has settled); within that, each pixel's history h
   its place and agrees. While the lighting changes, also by roughness: shortest (`SPEC_LIVE_GLOSS`) where a
   reflection is sharp and the filter already reaches, longer on a mirror (`SPEC_LIVE_MIRROR`), the frame's bound on
   rough surfaces.
-- **What it follows**, while the lighting changes or the reflection moves against its surface, and always on
-  animated shading (waves): the chart, and the neighbourhood's band: the history is clamped into the nine samples'
-  mean ± (`SPEC_GAMMA` deviations + `SPEC_REL` of its own level). Where the light comes by rare bright samples,
-  nine dark ones say nothing against a history that holds their mean; the chart's level knows those pixels (their
-  mean share is far below a half), and there the band is as wide as the history's level: it can be raised, not
-  cut. A reflection that passes is steady while it is there: a history the clamp raises (all nine samples above
-  it) has its level set so, and while the lighting changes a pixel takes the highest level among the pixels its
-  chart pools from, so a passing reflection's rim goes with its middle. On animated shading half of the allowance
-  is kept (`SPEC_ANIM_RARE`): a glint that has moved on is not a rare sample, a glint under a stopped clock is.
+- **What it follows** while the lighting changes: the chart. The history is not held to this frame's nine samples
+  there, nor where a reflection moves against its surface: at one sample a pixel, a band around nine of them cut
+  light that comes by rare bright samples and flickered with them, for nothing the chart does not follow (measured
+  below).
+- **On animated shading** (waves), always: the neighbourhood's band. The surface holds still and its normal does
+  not, so each frame reflects another thing, which the chart does not say: the history is clamped into the nine
+  samples' mean ± (`SPEC_GAMMA` deviations + `SPEC_REL` of its own level). Where the light comes by rare bright
+  samples, nine dark ones say nothing against a history that holds their mean; the chart's level knows those pixels
+  (their mean share is far below a half), and there the band is wider by `SPEC_ANIM_RARE` of the history's level: a
+  glint that has moved on is not a rare sample, a glint under a stopped clock is. While the lighting changes, a
+  history the clamp raises (all nine samples above it) has its level set to a steady one, and a pixel takes the
+  highest level among the pixels its chart pools from.
 - **The filter's reach** (`sfilt*`): `SPEC_REACH` × roughness² traced pixels (the lobe's width): none on a mirror,
   all three passes from roughness 0.25.
 
@@ -2205,6 +2208,14 @@ lamps); the slice's p99 (24.7 for 23.2, its mean 4.99 for 6.05); the mid-turn on
 the frames until the floor beside the switched-off sign stays within 2 % (128 for 64: the histories the chart cut
 are 1 to 3 % low until the rare bright samples have come in again, where the previous release was 6 % high at 32
 frames).
+
+**2026-11-27**, the specular history's band taken off everything but animated shading (before → after, this
+machine, one run): `bench-object-ghosting --scene orb`, ΔE at mid / end / +0.1 s / +0.3 s 9.48 / 8.30 / 4.67 / 2.94
+→ 9.44 / 7.45 / 4.30 / 2.90, trail 334 / 393 / 121 / 63 → 326 / 233 / 63 / 40 px. `bench-temporal --shot edit`:
+'lamp on, bounce' stays within 2 % from 128 frames for 256, the floor beside the sign reads ΔE 0.79 at 32 frames
+for 0.9 (off) and 0.88 (on), the other rows within 0.03. `--shot water` and `bench-ghosting --quick --check`: the
+same numbers. With the band off on animated shading too (not taken), the water's reflections, time held / running
+at 6 s: 1.16 / 20.58 for 3.22 / 12.45.
 
 The GPU time of the two passes on Bistro night (1280 × 720, scale 0.5; rounds the project's own check called
 quiet; the machine's GPU was shared, and its clock runs at two speeds, so compare within a round), still / on the

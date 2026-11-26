@@ -979,7 +979,8 @@ const SPEC_VIRT_ROUGH: f32 = 0.6;
 const SPEC_VIRT_FROM: f32 = 0.3;
 // What the surface's history counts for on a mirror, where it is right only if nothing in the reflection differs.
 const SPEC_SURFACE_MIRROR: f32 = 0.1;
-// The neighbourhood's band, in its deviations, and as a share of the history's level.
+// The neighbourhood's band, in its deviations, and as a share of the level (the samples' mean where it chooses between
+// two histories, the history's own where it clamps one).
 const SPEC_GAMMA: f32 = 1.25;
 const SPEC_REL: f32 = 0.1;
 // The chart level below which a pixel counts as lit by rare samples (a dark neighbourhood is then no evidence against
@@ -1056,21 +1057,25 @@ fn spec_chart_pack(level: f32, e: f32, rms: f32, dither: f32) -> f32 {
 //   filter already reaches (SPEC_GLOSS), longer on a mirror, which has the temporal mean alone against its noise,
 //   and the frame's bound alone on rough surfaces, whose reflection is too blurred to show one. Their histories
 //   take the diffuse history's drift instead (above).
-// - What it follows, while the lighting changes or the reflection moves against its surface, and always on animated
-//   shading: the chart (above), on the mean of the three channels, pooled around where the surface point was; and
-//   the neighbourhood's band: the history is clamped into mean +- (SPEC_GAMMA deviations + a share of its own
-//   level), Karis's neighbourhood clamp (slides 30 to 34) on those statistics, with one more term. One sample a
-//   pixel is heavy-tailed: where the light comes by rare bright samples, nine dark ones around say nothing against
-//   a history that holds their mean, and clipping it to them every frame darkens the reflection for good. The
-//   chart's level knows which pixels those are (the mean share of their samples is far below a half): there the
-//   band is as wide as the history's level (it cannot be clamped down, only up, when all nine are brighter), and
-//   tight only where the samples were steady (a mirror's image of a lamp, which nine dark samples do contradict).
-//   A reflection that passes is steady while it is there: when the clamp raises a history (all nine samples above
-//   it at once) the level is set to a steady one, and a pixel takes the highest level of the pixels its chart
-//   pools from, so that the rim of a passing reflection is treated as its middle. (Without the two, a light thrown
-//   over a polished floor left its reflection along its path, hollowed out: bench-object-ghosting's orb 0.1 s
-//   after it lands, dE / trail 4.88 / 280 px for 3.63 / 96.) What the clamp takes shortens the history by the same
-//   share.
+// - What it follows while the lighting changes: the chart (above), on the mean of the three channels, pooled around
+//   where the surface point was. The history is not held to this frame's nine samples there, nor where a reflection
+//   moves against its surface: one sample a pixel is heavy-tailed, and a band around nine of them cut light that
+//   comes by rare bright samples and flickered with them, for nothing the chart does not follow. (Held to them:
+//   Bistro crowd 4 % darker than the mean of its samples, and bench-object-ghosting's orb, a light thrown over a
+//   polished floor, at its end and 0.1 s after: dE 8.30 / 4.67, trail 393 / 121 px, for 7.45 / 4.30 and 233 / 63.)
+// - On animated shading (waves, ripples), always: the neighbourhood's band. The surface holds still and its normal
+//   does not, so what it reflects is another thing each frame, which the chart does not say: the history is clamped
+//   into mean +- (SPEC_GAMMA deviations + a share of its own level), Karis's neighbourhood clamp (slides 30 to 34)
+//   on those statistics, with one more term. Where the light comes by rare bright samples, nine dark ones around
+//   say nothing against a history that holds their mean, and clipping it to them every frame darkens the
+//   reflection for good. The chart's level knows which pixels those are (the mean share of their samples is far
+//   below a half): there the band is wider by SPEC_ANIM_RARE of the history's level (a glint that has moved on is
+//   not a rare sample; a glint under a stopped clock is), and tight only where the samples were steady. While the
+//   lighting changes, a history the clamp raises (all nine samples above it at once) has its level set to a steady
+//   one, and a pixel takes the highest level of the pixels its chart pools from. What the clamp takes shortens the
+//   history by the same share. (A bound in frames did worse both ways: short, the stopped water is noise; long,
+//   the running water is the blur of its waves. Without the clamp, bench-temporal --shot water's reflections, time
+//   held / running: dE 1.16 / 20.58 for 3.22 / 12.45.)
 @compute @workgroup_size(8, 8, 1)
 fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let iw = L.isz.x;
@@ -1155,9 +1160,8 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    // This frame's samples around: needed to choose between two histories, and to hold one to them while the lighting
-    // changes or the reflection moves against its surface. (A settled scene seen from a still camera, or in a turn,
-    // reads none: its history is the plain mean of its frames.)
+    // This frame's samples around: needed to choose between two histories, and to hold one to them on animated
+    // shading. (Any other pixel reads none.)
     // The light that drifts for the diffuse history drifts for a rough reflection of it too: the same factor, from
     // SPEC_GLOSS on (a sharp reflection is of one thing, and has its own short bound).
     if (live && drifted > 0.0) {
@@ -1165,17 +1169,11 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         h = vec4<f32>(h.rgb * mix(1.0, drifted, share), h.w);
         hv = vec4<f32>(hv.rgb * mix(1.0, drifted, share), hv.w);
     }
-    // Animated shading (waves, ripples): the surface holds still and its normal does not, so what it reflects is
-    // another thing each frame. Its history is held to this frame's samples whether or not the lighting changes,
-    // with SPEC_ANIM_RARE of the allowance for rare samples (a glint that has moved on is not one; a glint under a
-    // stopped clock is). A bound in frames did worse both ways: short, the stopped water is noise; long, the
-    // running water is the blur of its waves.
+    // Animated shading (waves, ripples) that is sharp enough to show it: held to this frame's samples, whether or not
+    // the lighting changes.
     let anim = px.albedo.w > 1.5 && rough < SPEC_GLOSS;
     let two = hv.w > 0.0;
-    // (In a move of the camera: below SPEC_VIRT_ROUGH. A rough surface has the parallax bound alone: held to the
-    // nine samples too, the street 0.1 s after a stop read an excess dE of 1.31 for 1.36, for nine more taps on
-    // every rough pixel in every move.)
-    let held = (live || anim || (par >= SPEC_PAR_MIN && rough < SPEC_VIRT_ROUGH)) && (h.w > 0.0 || two);
+    let held = anim && (h.w > 0.0 || two);
     var clamped = 0.0; // the share of the history the clamp took
     var found = 0.0;   // how far the reflection's history was found, and agrees with this frame
     var risen = 0.0;   // the share by which the clamp raised the history
@@ -1212,11 +1210,9 @@ fn stemporal(@builtin(global_invocation_id) gid: vec3<u32>) {
             let hy = ycocg(h.rgb);
             // (Steadily lit: by the level, and by a history long enough for its level to mean it. While the lighting
             // changes, by the level here or of a pooled pixel beside it, the rim of a passing reflection being lit
-            // as its middle is, and from a history half as long. Not so in a move of the camera under a settled
-            // light, where the reflections slide but nothing comes or goes: bench-ghosting's strafe read an excess
-            // dE of 1.77 with the wider rule for 1.39.)
+            // as its middle is, and from a history half as long.)
             let steady = smoothstep(SPEC_RARE, SPEC_STEADY, select(chart.x, around_level, live)) * chart_mature(select(0.5, 1.0, live) * h.w);
-            let rare = (1.0 - steady) * select(1.0, SPEC_ANIM_RARE, anim);
+            let rare = (1.0 - steady) * SPEC_ANIM_RARE;
             // (Chroma to twice the luma: a saturated colour's Co is.)
             let band = SPEC_GAMMA * dev + (SPEC_REL + rare) * max(hy.x, 0.0) * vec3<f32>(1.0, 2.0, 2.0) + dark;
             let hc = clamp(hy, mean - band, mean + band);
