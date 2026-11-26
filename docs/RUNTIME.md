@@ -1769,7 +1769,9 @@ glass; the cache term, its training (4 x) and each sample (256) are clamped besi
 4 bounces; a camera ray's media are marched and composited after the trace with isotropic in-scatter from the
 cache's voxels, and later segments meet homogeneous media alone; depth of field is a post pass; translucent
 particles are lit from the cache's voxels; past a camera hit's own decisions the sampler is a hash, not Sobol
-(variance only).
+(variance only). A camera ray's fog has three parts: its ambient light is light seen directly (the emission
+signal, unfiltered: as the surface's light it was divided by the surface's albedo and filtered with it), as the
+aerial haze is; its attenuation and its sampled scattering from lights are still the path's.
 
 A live frame is two passes of the kernel. `first_hit` traces every pixel's camera ray, once a frame (one jitter,
 no lens: the frame's samples share it), and leaves the hit (`first_hits`, 32 bytes a traced pixel: distance,
