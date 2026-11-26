@@ -2346,7 +2346,18 @@ export class SkyAtmosphere {
    * it, by day and by night (the glow). Off at 0 (the default): surfaces are seen through clear air.
    */
   aerialPerspective = 0;
-  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; horizonGlow?: ColorLike; horizonGlowIntensity?: number; horizonGlowHeight?: number; aerialPerspective?: number } = {}) {
+  /**
+   * A planet: the viewer's real altitude above the ground (sea level), m, from the street to low orbit, for a scene
+   * whose ground is a globe drawn about a floating origin (the camera kept near the origin, +y the local up there). The
+   * sky is baked from that altitude instead of the camera's height: above the atmosphere's top (100 km) space is
+   * black with the air's thin limb above the horizon; the horizon dips with altitude and the sky is black below it
+   * (the globe's geometry is what shows there). Aerial perspective runs over the sphere below the camera, so it thins
+   * with altitude instead of lying at sea-level density around the camera. Set it as the camera moves: the live view
+   * re-bakes the sky in place (on a worker thread, as for a `dynamic` sun) once it has moved 5 % (at least 250 m)
+   * from the altitude it was baked for. null (the default): a flat world, baked from the camera's height when built.
+   */
+  altitude: number | null = null;
+  constructor(opts: { sun?: DirectionalLight | null; groundAlbedo?: ColorLike; skyLightIntensity?: number; dynamic?: boolean; glow?: ColorLike; glowIntensity?: number; horizonGlow?: ColorLike; horizonGlowIntensity?: number; horizonGlowHeight?: number; aerialPerspective?: number; altitude?: number | null } = {}) {
     this.sun = opts.sun ?? null;
     if (opts.groundAlbedo !== undefined) this.groundAlbedo = new Color(opts.groundAlbedo);
     if (opts.skyLightIntensity !== undefined) this.skyLightIntensity = opts.skyLightIntensity;
@@ -2357,6 +2368,7 @@ export class SkyAtmosphere {
     if (opts.horizonGlowIntensity !== undefined) this.horizonGlowIntensity = opts.horizonGlowIntensity;
     if (opts.horizonGlowHeight !== undefined) this.horizonGlowHeight = opts.horizonGlowHeight;
     if (opts.aerialPerspective !== undefined) this.aerialPerspective = opts.aerialPerspective;
+    if (opts.altitude !== undefined) this.altitude = opts.altitude;
   }
 }
 

@@ -841,6 +841,14 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
   simulated is copied on the GPU to the grids that are the same still; new parameters make nothing again. A
   program's pass is compiled in the frame it comes in.
 - **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
+- **A planet's altitude.** `SkyAtmosphere.altitude` (m) says the scene's ground is a globe about a floating origin and
+  how high the viewer is above it, from the street to low orbit. The sky is baked from there (above the atmosphere's
+  top: black space and the air's limb), its horizon dipped and black below it (`sky::Horizon::Planet`), and aerial
+  perspective runs over the sphere straight below the camera (pathtrace.wgsl `aerial_planet`, its reference and tests
+  in `sky.rs` `aerial_columns`), so that from high up the haze thins instead of lying at sea-level density around the
+  camera. A new altitude alone is not another sky (`Changes::altitude`): the haze takes it at once, and the sky is
+  baked again in place as for a moving sun, on the worker thread, once it is 5 % (at least 250 m) from the altitude
+  it was baked for (`LiveCore::move_altitude`).
 
 Still a rebuild: particle systems that come or go, and their functions and programs; a geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
 not grow); a material that becomes a particle's or gets vertex colours; a rect light's card that comes, goes or takes

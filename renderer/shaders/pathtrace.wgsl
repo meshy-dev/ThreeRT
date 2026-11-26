@@ -1954,7 +1954,8 @@ fn sky_mis(d: vec3<f32>, pdf: f32) -> vec3<f32> {
         wgt = power_heuristic(pdf, env_pdf(d));
     }
     var c = env_radiance(d) * wgt;
-    if (has(F_AERIAL) && pdf <= 0.0) { c = aerial_light(d); }
+    // (On a planet the camera sees the bake itself: space, the limb, black below the dipped horizon.)
+    if (has(F_AERIAL) && pdf <= 0.0 && P.aerial.w <= 0.0) { c = aerial_light(d); }
     if (pdf > 0.0) { c += sun_disks(d, pdf); }
     return c;
 }
@@ -2541,13 +2542,74 @@ fn aerial_od(y0: f32, dy: f32, t: f32, h: f32) -> f32 {
 fn aerial_tr(o: vec3<f32>, d: vec3<f32>, t: f32) -> vec3<f32> {
     let rayleigh = vec3<f32>(5.802e-6, 13.558e-6, 33.1e-6) * P.aerial.y;
     let mie = 3.996e-6 * P.aerial.z + 0.444e-6;
+    if (P.aerial.w > 0.0) {
+        let c = aerial_planet(o - P.cam_pos.xyz, d, t, P.aerial.w);
+        return exp(-P.aerial.x * (rayleigh * c.x + mie * c.y));
+    }
     return exp(-P.aerial.x * (rayleigh * aerial_od(o.y, d.y, t, 8000.0) + mie * aerial_od(o.y, d.y, t, 1200.0)));
+}
+
+// On a planet (SkyAtmosphere.altitude: P.aerial.w, the camera's altitude in m): the air over a sphere of the sky's
+// ground radius whose centre is straight below the camera, so that from high up the haze thins with altitude instead of
+// lying at sea-level density around the camera. The columns of air and haze (m at sea-level density) along the
+// segment from the camera-relative point `q`, by Chapman's function as an erfcx; the derivation, its sources and the
+// tests that hold it to a quadrature: sky.rs `aerial_columns`, of which this is a copy line by line.
+const AERIAL_R: f32 = 6.36e6;
+
+fn aerial_erfcx(y: f32) -> f32 {
+    return 1.1283792 / (y + sqrt(y * y + 0.6166356 * y + 1.2732395)) * (1.0 + 0.0295 * y * y / (1.0 + 0.312 * y * y * y));
+}
+
+fn aerial_column(h: f32, mu: f32, scale: f32) -> f32 {
+    let x = (AERIAL_R + h) / scale;
+    return scale * exp(-max(h, -500.0) / scale) * sqrt(0.5 * PI * x) * aerial_erfcx(max(mu, 0.0) * sqrt(0.5 * x));
+}
+
+// A point's altitude and the zenith cosine of `d` there (`q`: the point less the camera).
+fn aerial_at(q: vec3<f32>, d: vec3<f32>, h0: f32) -> vec2<f32> {
+    let up = q.y + h0;
+    let s2 = q.x * q.x + q.z * q.z;
+    let y = up + AERIAL_R;
+    let r = sqrt(y * y + s2);
+    return vec2<f32>(up + s2 / (r + y), (q.x * d.x + y * d.y + q.z * d.z) / r);
+}
+
+fn aerial_planet(q: vec3<f32>, d: vec3<f32>, t: f32, h0: f32) -> vec2<f32> {
+    let a = aerial_at(q, d, h0);
+    let b = aerial_at(q + d * t, d, h0);
+    let lowest = -(q.x * d.x + (q.y + h0 + AERIAL_R) * d.y + q.z * d.z);
+    let p = aerial_at(q + d * clamp(lowest, 0.0, t), d, h0);
+    var od = vec2<f32>(0.0);
+    for (var i = 0u; i < 2u; i++) {
+        let scale = select(1200.0, 8000.0, i == 0u);
+        var c: f32;
+        if (lowest <= 0.0) {
+            c = aerial_column(a.x, a.y, scale) - aerial_column(b.x, b.y, scale);
+        } else if (lowest >= t) {
+            c = aerial_column(b.x, -b.y, scale) - aerial_column(a.x, -a.y, scale);
+        } else {
+            c = 2.0 * aerial_column(p.x, 0.0, scale) - aerial_column(a.x, -a.y, scale) - aerial_column(b.x, b.y, scale);
+        }
+        od[i] = max(c, 0.0);
+    }
+    return od;
 }
 
 // The sky a little above the horizon (2.3 degrees: clear of the baked sky's fade to its black lower half), or where
 // the ray points if higher: the haze's light, and what camera rays see of the sky near the horizon with F_AERIAL, so
 // that the hazed land meets the sky without the fade's dark seam.
+// On a planet (P.aerial.w > 0) the bake is black below its dipped horizon; the haze's light is the limb's, the air
+// seen edge on in the ray's azimuth: the bake's row the horizon crosses (P.sky_color.w, its v), read back whole (its
+// alpha: the share of the row the sky covers; sky.rs `Horizon::Planet`), for rays up to a row above its centre too (the
+// globe's own silhouette may be there, and the map read between the limb and the row above it is darker than either).
+// Higher, the sky where the ray points.
 fn aerial_light(d: vec3<f32>) -> vec3<f32> {
+    if (P.aerial.w > 0.0 && P.sky_color.w > 0.0 && P.env.x > 0.5) {
+        let uv = env_uv(d);
+        if (uv.y < P.sky_color.w - 1.0 / P.env.z) { return env_radiance(d); }
+        let l = textureSampleLevel(env_tex, samp, vec2<f32>(uv.x, P.sky_color.w), 0.0);
+        return l.rgb / max(l.a, 1e-3);
+    }
     return env_radiance(normalize(vec3<f32>(d.x, max(d.y, 0.04), d.z)));
 }
 

@@ -43,6 +43,14 @@ fn atmosphere(dynamic: bool) -> serde_json::Value {
     serde_json::json!({ "type": "atmosphere", "sun": 20, "groundAlbedo": [0.3, 0.3, 0.3], "rayleighScale": 1, "mieScale": 1, "mieAnisotropy": 0.8, "skyLightIntensity": 1, "dynamic": dynamic })
 }
 
+/// The dynamic atmosphere of a planet seen from `altitude` m, with aerial perspective.
+fn planet(altitude: f32) -> serde_json::Value {
+    let mut a = atmosphere(true);
+    a["altitude"] = serde_json::json!(altitude);
+    a["aerial"] = serde_json::json!(1.0);
+    a
+}
+
 fn manual(ev: f32) -> serde_json::Value {
     serde_json::json!({ "mode": "manual", "ev100": ev })
 }
@@ -815,6 +823,8 @@ fn edits_in_place_leave_what_a_build_does() {
         ("an atmosphere with its sun", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(atmosphere(false)), ..w.environment.clone() }))),
         ("the atmosphere as a dynamic sky (a map of another size)", false, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(atmosphere(true)), ..w.environment.clone() }))),
         ("the sun turned (a sun's move)", true, Box::new(|w| w.set_transform(20, Vec3::ZERO, glam::Quat::from_rotation_x(-0.9) * glam::Quat::from_rotation_y(-0.3), Vec3::ONE).unwrap())),
+        ("a planet's sky (an altitude, aerial perspective)", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(planet(400_000.0)), ..w.environment.clone() }))),
+        ("the planet's altitude moved (re-baked in place)", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(planet(12_000.0)), ..w.environment.clone() }))),
         ("one colour again (the sun is a light of its own)", true, Box::new(|w| w.set_environment(crate::desc::Environment { sky: sky(serde_json::json!({ "type": "color", "color": [1.0, 1.0, 1.0], "intensity": 0.2, "skyLightIntensity": 1 })), ..w.environment.clone() }))),
         ("the light turned and made an atmosphere's sun at once", true, Box::new(|w| {
             w.set_transform(20, Vec3::ZERO, glam::Quat::from_rotation_x(-0.3) * glam::Quat::from_rotation_y(0.8), Vec3::ONE).unwrap();
@@ -4964,4 +4974,27 @@ fn the_first_pass_leaves_the_camera_hits() {
     // (No sky in this world: a ray past everything misses.)
     let missed = hits.iter().filter(|h| tri(h) == u32::MAX).count();
     assert!(missed > 200 && hits.iter().filter(|h| tri(h) == u32::MAX).all(|h| inst(h) == u32::MAX), "{missed} pixels of nothing, each a miss whole");
+}
+
+/// A planet's altitude alone is not another sky: the world says so apart (`Changes::altitude`), and the view bakes
+/// again only past its step (5 %, at least 250 m).
+#[test]
+fn a_planets_altitude_is_not_another_sky() {
+    let mut w = world();
+    w.set_environment(crate::desc::Environment { sky: sky(planet(400_000.0)), ..w.environment.clone() });
+    let c = w.take_changes();
+    assert!(c.sky && !c.altitude, "a planet's sky where there was none: another sky");
+    w.set_environment(crate::desc::Environment { sky: sky(planet(380_000.0)), ..w.environment.clone() });
+    let c = w.take_changes();
+    assert!(c.altitude && !c.sky && c.environment, "the altitude alone");
+    w.set_environment(crate::desc::Environment { sky: sky(planet(380_000.0)), ..w.environment.clone() });
+    assert!(!w.take_changes().altitude, "the same altitude");
+    let mut other = planet(380_000.0);
+    other["rayleighScale"] = serde_json::json!(2.0);
+    w.set_environment(crate::desc::Environment { sky: sky(other), ..w.environment.clone() });
+    let c = w.take_changes();
+    assert!(c.sky && !c.altitude, "the altitude and another parameter: another sky");
+    use super::edits::altitude_moved;
+    assert!(!altitude_moved(400_000.0, 381_000.0) && altitude_moved(400_000.0, 379_000.0));
+    assert!(!altitude_moved(2.0, 200.0) && altitude_moved(2.0, 260.0) && altitude_moved(260.0, 2.0));
 }

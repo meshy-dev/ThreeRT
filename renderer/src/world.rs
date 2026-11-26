@@ -304,6 +304,9 @@ pub struct Changes {
     pub sun: bool,
     /// Another sky (its kind or its parameters): baked and put in place (live/edits.rs `apply_sky`). With `environment`.
     pub sky: bool,
+    /// A planet's viewer altitude, the sky otherwise the same (`desc::Sky::Atmosphere::altitude`): re-baked in place
+    /// past a step (live/edits.rs `move_altitude`). With `environment`.
+    pub altitude: bool,
     /// The scene camera's depth of field or exposure changed: the view's state, taken again in place (live/edits.rs
     /// `apply_view`). Not `camera`: a view its host moved stays where it is.
     pub view: bool,
@@ -342,7 +345,7 @@ pub struct Changes {
 
 impl Changes {
     pub fn any(&self) -> bool {
-        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || self.functions || self.volume_functions || self.media || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
+        self.structural || !self.shown.is_empty() || !self.new_materials.is_empty() || !self.materials.is_empty() || !self.textures.is_empty() || self.functions || self.volume_functions || self.media || !self.lights.is_empty() || !self.powers.is_empty() || !self.customs.is_empty() || self.environment || self.altitude || self.camera || self.sun || self.view || self.settings || !self.poses.is_empty() || !self.moved.is_empty() || !self.instanced.is_empty() || self.edits()
     }
     /// Geometry edits are pending (`geometries`, `added`, `removed`).
     pub fn edits(&self) -> bool {
@@ -1113,7 +1116,22 @@ impl World {
     pub fn set_environment(&mut self, e: desc::Environment) {
         // Fog appearing, turning volumetric or going, and a background appearing or going, are kernel features: another
         // variant of the kernel, not another scene. Another sky is another environment map.
-        self.changes.sky |= self.environment.sky != e.sky;
+        // (A planet's viewer altitude alone re-bakes in place: live/edits.rs `move_altitude`.)
+        let same_but_altitude = match (&self.environment.sky, &e.sky) {
+            (desc::Sky::Atmosphere { altitude: Some(_), .. }, desc::Sky::Atmosphere { altitude: Some(now), .. }) => {
+                let mut was = self.environment.sky.clone();
+                if let desc::Sky::Atmosphere { altitude, .. } = &mut was {
+                    *altitude = Some(*now);
+                }
+                was == e.sky
+            }
+            _ => false,
+        };
+        if same_but_altitude {
+            self.changes.altitude |= self.environment.sky != e.sky;
+        } else {
+            self.changes.sky |= self.environment.sky != e.sky;
+        }
         self.changes.environment = true;
         self.environment = e;
     }
