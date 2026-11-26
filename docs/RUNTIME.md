@@ -1655,8 +1655,9 @@ The kernel's read-only scene data other than triangles is two storage buffers, e
   vertices; and a browser's kernel had seven tables as the sized arrays of a struct, a second copy of each made
   every frame, and was compiled again when a table doubled. The count of bindings is as it was: 22 buffers and
   acceleration structures a stage natively, 28 of Metal's 29 with the translucency pass (29 with the loop guard's).
-  (`finish`'s records are the kernel's 23rd and a frame's camera hits its 24th; the translucency pass, which
-  reads neither, binds group 1 without them, and stays at 29.)
+  (`finish`'s records are the kernel's 23rd and a frame's camera hits its 24th. The translucency pass binds of
+  group 1 what it reads, the radiance cache, the light tiles' lists and the camera hits: 26 buffers, 27 with the
+  loop guard's.)
   (Hardware traversal no longer binds software traversal's trees, a placeholder there; the light tiles' lists took
   the binding.)
 
@@ -1778,6 +1779,29 @@ roughness) stay its to write. What needs this frame's depth and motion before th
 the two. Both layouts; an offline render is one pass. Measured before it was written, twelve heavy clips: the
 split alone +0.4 % of a frame's GPU time, within the runs' spread (two of them +2 %, not explained); with the
 first pass evaluating the surface too, for the guides, +5 %.
+
+A pixel on a mirror has the surface the mirror shows. Where the camera hit has a mirror's lobe alone (roughness
+under 0.025, metalness 1, no glass, no coat), `first_hit` follows the reflection, through 8 mirrors at most and all
+but one of a path's bounces (the surface shown is lit and has its bounce), and records the chain (`Chain`, 96 bytes more a traced pixel in a scene with a
+mirror): the hit the last mirror shows and where its ray starts, the chain's transform, the way to its last
+mirror, what the mirrors and the segments that end at one leave of the light (the mirrors' Fresnel reflectance;
+the fog's and the haze's attenuation, water's between mirrors) and the light they add (a mirror's own emission,
+the fog's and the haze's ambient light). `main` starts its path at the surface shown, in the camera hit's place:
+the guides (its distance the whole way along the camera ray; its normal and its motion vector as the pixel sees
+them, turned by the chain; its albedo times the chain's weight), the light seen directly, the signals' split, the
+path's end in the cache a bounce later; each mirror takes one of the path's bounces. So the filters, the
+reprojection and the upscaler take a mirror as a window onto what it shows. The camera's own hit stays in the
+record: the translucency pass and the media read its distance, since a mirror hides what is behind it.
+
+The material decides: one whose own roughness and metalness say a mirror (`mirror_possible`; a scene with such a
+material has the feature `F_MIRROR`, and another scene's kernel none of this code). Only there does the first pass
+read a surface's textures and function; a material that is a mirror by its texture or its function alone is not
+followed, nor is procedural geometry. A curved mirror's motion vectors are a flat one's, and a mirror's own
+motion is not in them. The segment the last
+mirror shows is `main`'s first: a mirror pixel's sampled fog scattering is that segment's, and the camera's own
+segment has the fog's attenuation and ambient light alone. `main` reads the chain's record where it reads the
+camera hit and again after its loop, for the guides: on twelve heavy clips with the feature forced on that is
+0.9 % of a frame, where the record held through the loop was 5 % and `main` walking the chain itself 3 %.
 
 Where a path ends in the cache, `main` takes only what a warm voxel holds. The pixels with more to trace there (a
 training path, a cold voxel's estimate, a reflection hit's lights) leave a record of 96 bytes, and a second pass
@@ -1903,8 +1927,9 @@ to step through every method this platform has. The title bar shows the method t
 that handle keyboard input keep their key bindings. `tools/denoise-demo/live.sh` opens Kaleido (a mirror hall lit
 only by hundreds of glowing orbs) for this comparison; `tools/denoise-demo/record.ts` and `video.ts` record it.
 
-For smooth mirrors and glass, secondary ray queries put the reflected and transmitted surfaces in the joint
-denoiser's guides (pathtrace.wgsl `surface_guides`). Directly visible sky and emission-dominated pixels are the
+For smooth surfaces and glass, secondary ray queries put the reflected and transmitted surfaces in the joint
+denoiser's guides (pathtrace.wgsl `surface_guides`); a mirror's pixel already has the surface it shows ("The live
+architecture"). Directly visible sky and emission-dominated pixels are the
 overlay, with the bypass mask 1 on them. Exposure, bloom, depth of field and motion blur process the reconstructed
 HDR image on the GPU.
 

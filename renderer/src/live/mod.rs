@@ -167,7 +167,7 @@ pub(super) const LIST_CANDIDATES: u32 = 2;
 /// The kernel's group-1 bind groups over a view's targets: the trace's, and the translucency pass's where the device
 /// has one (`gpu::Gpu::tl_live_layout`: without `finish`'s records).
 fn kernel_bind_groups(g: &gpu::Gpu, targets: &Targets) -> (wgpu::BindGroup, Option<wgpu::BindGroup>) {
-    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, true), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, false)))
+    (gpu::live_bind_group(&g.device, &g.live_layout, &targets.kernel, false), g.tl_live_layout.as_ref().map(|l| gpu::live_bind_group(&g.device, l, &targets.kernel, true)))
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -818,6 +818,26 @@ impl LiveCore {
             return;
         }
         self.targets.kernel.deferred = Some(gpu::deferred_buffer(&self.g.device, (pixels + pixels / 4).min(self.w as u64 * self.h as u64)));
+        (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
+    }
+
+    /// Room for a frame's camera hits at `pixels` traced pixels: 32 bytes each, and 96 more for a mirror chain in a
+    /// scene that has a mirror (`gpu::F_MIRROR`; pathtrace.wgsl `Chain`: without the room the first pass follows no
+    /// mirror). The buffer follows the traced size, a quarter larger than asked, as `finish`'s records do.
+    pub(super) fn ensure_first(&mut self, pixels: u64) {
+        let each = if self.sc.up.kernel.features & gpu::F_MIRROR != 0 { 128 } else { 32 };
+        if self.targets.kernel.first.size >= pixels * each {
+            return;
+        }
+        self.targets.grow_first(&self.g, &self.passes, (pixels + pixels / 4).min(self.w as u64 * self.h as u64) * each);
+        // (The merged layout's cache is in the buffer made again: the view's cache is that one from here, empty, and
+        // nothing of the frames before stands.)
+        if self.g.merged {
+            if let Some(c) = &mut self.cache {
+                c.bufs = self.targets.kernel.cache.clone();
+            }
+            (self.reset, self.prev_isz) = (true, (0, 0));
+        }
         (self.kernel_bg, self.tl_kernel_bg) = kernel_bind_groups(&self.g, &self.targets);
     }
 

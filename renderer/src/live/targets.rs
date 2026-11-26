@@ -152,6 +152,13 @@ impl Targets {
         t
     }
 
+    /// The kernel's buffers with the camera hits' of `bytes` (`gpu::KernelBufs::with_first`), and the passes' bind
+    /// groups over them (the merged layout's sections are all in another buffer then).
+    pub(super) fn grow_first(&mut self, g: &gpu::Gpu, passes: &Passes, bytes: u64) {
+        self.kernel = self.kernel.with_first(&g.device, bytes);
+        self.bgs = self.bind_groups(&g.device, passes);
+    }
+
     /// For another size: what follows it is made again (the samples, the passes' own buffers and the output, the
     /// kernel's four, the translucent particles'), with the bind groups over them. The radiance cache, which is the
     /// world's, the passes' parameters and the tone-map table stay. (The merged layout keeps the cache in one buffer

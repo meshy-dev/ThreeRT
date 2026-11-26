@@ -1576,8 +1576,9 @@ pub struct KernelBufs {
     pub motion: Buf,
     pub direct: Buf,
     pub lists: Buf,
-    /// A live frame's camera hits, 32 bytes a traced pixel (pathtrace.wgsl `first_store`): its first pass writes them,
-    /// its paths start from them.
+    /// A live frame's camera hits, 32 bytes a traced pixel (pathtrace.wgsl `first_store`), and in a scene with a
+    /// mirror 96 more for a mirror chain (`Chain`): its first pass writes them, its paths start from them. Of the
+    /// view's size at 32 bytes until a frame makes it for what it traces (`with_first`).
     pub first: Buf,
     /// The pixels a sample's trace leaves for `finish` (their count, then `DEFERRED_BYTES` each): the layout as
     /// written only. Of one record until a live view makes it for its traced size (`deferred_buffer`).
@@ -1603,6 +1604,26 @@ impl KernelBufs {
         match self.merged {
             Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, view),
             None => KernelBufs::separate(d, self.cache.clone(), self.guard.clone(), view),
+        }
+    }
+
+    /// These with the camera hits' buffer of `bytes`. As written that buffer alone is another; the merged layout's
+    /// are one buffer, all of it made again (the cache, as long, empty).
+    pub fn with_first(&self, d: &wgpu::Device, bytes: u64) -> KernelBufs {
+        let view = [self.refl.size, self.motion.size, self.direct.size, self.lists.size, bytes];
+        match self.merged {
+            Some(_) => KernelBufs::new(d, true, true, self.cache.val.size / 32, view),
+            None => KernelBufs {
+                cache: self.cache.clone(),
+                refl: self.refl.clone(),
+                motion: self.motion.clone(),
+                direct: self.direct.clone(),
+                lists: self.lists.clone(),
+                first: Buf::whole(d.create_buffer(&wgpu::BufferDescriptor { label: Some(VIEW_BUFFERS[4]), size: bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })),
+                deferred: self.deferred.clone(),
+                guard: self.guard.clone(),
+                merged: None,
+            },
         }
     }
 
@@ -1649,18 +1670,20 @@ pub(crate) fn live_sizes(entries: u64, view: [u64; 5]) -> [u64; 9] {
 
 /// Group-1 bind group of the kernel: the radiance cache and the reflection resolve's inputs (`KernelBufs`); in the
 /// merged layout, the one buffer.
-/// `paths`: with what the paths' passes alone use, `finish`'s records and the camera hits (`live_layout`; the
-/// translucency pass's `tl_live_layout` is without).
-pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, paths: bool) -> wgpu::BindGroup {
+/// `translucent`: for the translucency pass's layout (`tl_live_layout`), which has what that pass reads alone: the
+/// radiance cache, the light tiles' lists and the camera hits.
+pub fn live_bind_group(d: &wgpu::Device, layout: &wgpu::BindGroupLayout, b: &KernelBufs, translucent: bool) -> wgpu::BindGroup {
     fn e(binding: u32, b: &Buf) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry { binding, resource: b.binding() }
     }
     match &b.merged {
         Some(heap) => d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &[wgpu::BindGroupEntry { binding: crate::merged::LIVE_BINDING, resource: heap.buffer.as_entire_binding() }] }),
         None => {
-            let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)];
-            entries.extend(b.deferred.as_ref().filter(|_| paths).map(|r| e(crate::merged::DEFERRED_BINDING, r)));
-            entries.extend(paths.then(|| e(crate::merged::FIRST_BINDING, &b.first)));
+            let mut entries = vec![e(1, &b.cache.keys), e(2, &b.cache.acc), e(3, &b.cache.val), e(crate::merged::LISTS_BINDING, &b.lists), e(crate::merged::FIRST_BINDING, &b.first)];
+            if !translucent {
+                entries.extend([e(5, &b.refl), e(6, &b.motion), e(7, &b.direct)]);
+                entries.extend(b.deferred.as_ref().map(|r| e(crate::merged::DEFERRED_BINDING, r)));
+            }
             entries.extend(b.guard.as_ref().map(|g| e(crate::merged::GUARD_BINDING, g)));
             d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("live"), layout, entries: &entries })
         }
@@ -1857,7 +1880,9 @@ pub const F_FUNC: u32 = 512;
 // (1024: the emitter-reservoir experiment, removed 2026-11-13.)
 pub const F_GLASS: u32 = 2048;
 pub const F_COAT: u32 = 4096;
-// (8192: free.)
+/// A material that can be a mirror alone (`mirror_possible`; pathtrace.wgsl's of the name): a live frame's first
+/// pass follows what it shows, and the kernel has the code for it.
+pub const F_MIRROR: u32 = 8192;
 /// The scene has instances (scene::Instance): TLAS instances with their record as custom data, shaded from
 /// model-space triangles through their `instances` record.
 pub const F_INST: u32 = 16384;
@@ -1974,6 +1999,12 @@ pub fn instance_features(scene: &Scene) -> u32 {
     media | particles | ifunc | iglass | deform | part | F_INST | if masked { F_MASKED } else { 0 } | if scene.units.is_some() { F_UNITS } else { 0 }
 }
 
+/// Whether a material's own numbers leave a mirror alone possible (pathtrace.wgsl `mirror_possible`, `mirror_alone`):
+/// its roughness under the kernel's `DELTA_ROUGHNESS`, metal whole, no glass. (Its textures can only lower them.)
+pub fn mirror_possible(m: &crate::scene::GpuMaterial) -> bool {
+    m.params[1] < 0.025 && m.params[0] >= 1.0 && m.layer[0] <= 0.0
+}
+
 /// `features` from the parts parameter edits change (the materials; `environment`: `environment_features`), and the
 /// scene's structure (`instances`: `instance_features`).
 pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures: bool, functions: bool, instances: u32) -> u32 {
@@ -1992,6 +2023,9 @@ pub fn features_of(ms: &[crate::scene::GpuMaterial], environment: u32, textures:
     }
     if ms.iter().any(|m| m.tex1[2] == crate::scene::MAT_UNLIT) {
         f |= F_UNLIT;
+    }
+    if ms.iter().any(mirror_possible) {
+        f |= F_MIRROR;
     }
     if let Some(mask) = std::env::var("THREERT_FEATURES").ok().and_then(|v| v.parse::<u32>().ok()) {
         f &= mask | F_INST | F_PROC | F_TINT; // not optional: they say what the instances' records / the object table hold
@@ -2178,14 +2212,15 @@ impl Gpu {
             ],
         });
         let no_live_bufs = KernelBufs::new(&device, merged, guard_room(hwrt), 1, [64; 5]);
-        let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, true);
+        let no_live = live_bind_group(&device, &live_layout, &no_live_bufs, false);
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout), Some(&live_layout)], immediate_size: 0 });
         let (tl_layout, tl_pipeline_layout, tl_live_layout, no_live_tl) = if hwrt {
             let l = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucent"), entries: &tl_entries });
-            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || ![crate::merged::DEFERRED_BINDING, crate::merged::FIRST_BINDING].contains(&e.binding)).copied().collect();
+            // (What the pass reads of group 1: the radiance cache, the light tiles' lists, the camera hits, the loop guard's count. A stage's buffers are counted against Metal's limit.)
+            let tl_vis: Vec<_> = live_entries.iter().filter(|e| merged || [1, 2, 3, crate::merged::LISTS_BINDING, crate::merged::FIRST_BINDING, crate::merged::GUARD_BINDING].contains(&e.binding)).copied().collect();
             let vl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("live, translucent"), entries: &tl_vis });
             let tpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("translucent"), bind_group_layouts: &[Some(&layout), Some(&vl), Some(&l)], immediate_size: 0 });
-            let nv = live_bind_group(&device, &vl, &no_live_bufs, false);
+            let nv = live_bind_group(&device, &vl, &no_live_bufs, true);
             (Some(l), Some(tpl), Some(vl), Some(nv))
         } else {
             (None, None, None, None)
@@ -4150,7 +4185,7 @@ mod tests {
             ("F_GLASS", F_GLASS), ("F_COAT", F_COAT), ("F_INST", F_INST), ("F_MEDIA", F_MEDIA), ("F_PEMIT", F_PEMIT),
             ("F_HMEDIA", F_HMEDIA), ("F_PROC", F_PROC), ("F_TINT", F_TINT), ("F_UNLIT", F_UNLIT), ("F_BACKGROUND", F_BACKGROUND),
             ("F_VCOLOR", F_VCOLOR), ("F_AERIAL", F_AERIAL), ("F_GRID", F_GRID), ("F_LISTS", F_LISTS), ("F_IFUNC", F_IFUNC), ("F_IGLASS", F_IGLASS),
-            ("F_DEFORM", F_DEFORM), ("F_PART", F_PART),
+            ("F_DEFORM", F_DEFORM), ("F_PART", F_PART), ("F_MIRROR", F_MIRROR),
         ];
         let mut seen = 0u32;
         for (name, bit) in all {

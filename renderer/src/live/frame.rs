@@ -194,6 +194,7 @@ impl LiveCore {
         let size = ReconstructionSize { input: [iw, ih], output: [w, h], dynamic: self.dynamic_res };
         self.reset |= self.reconstructor.prepare(&self.g, &self.targets, size, self.view_mode != 0);
         let reconstruction = self.reconstructor.active;
+        self.ensure_first(iw as u64 * ih as u64);
         self.ensure_deferred(iw as u64 * ih as u64);
         if self.sc.up.translucent.is_some() {
             self.targets.translucent_low(&self.g);
