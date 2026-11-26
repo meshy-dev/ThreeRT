@@ -383,6 +383,7 @@ Messages a game posts:
 | `hud` | `hud` | draws the HUD it describes ("HUD", below). `hud.set` posts it; a game does not post it by hand |
 | `audio.*` | below | plays sound ("Sound", below), with the engine's `audio` module. `audio.play` and the rest post them |
 | `files.*`, `store.*` | below | reads what the player picked, keeps the game's files on the device ("Files", below); each request answered once |
+| `assets.fetch`, `assets.cancel` | below | downloads a file into the asset root's `cache/`, which `readAsset` then reads ("Assets", below) |
 
 Messages an app sends:
 
@@ -392,8 +393,9 @@ Messages an app sends:
 | `net.messages` | `id`, `list: string[]` | the text messages that arrived on `id` since the last frame, in order: one batch a socket a frame |
 | `net.closed` | `id`, `code`, `reason` | the socket closed (the close frame's code; 1005 without one), or failed (1006, `reason` says why) |
 | `net.fetched` | `id`, `status`, `body`, `error?` | the response's status and body as text; `status` 0 and `error` when the request failed |
-| `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`), as `host.caps` (`[]` before, and for an app that lists none) |
+| `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`, `"assets"`), as `host.caps` (`[]` before, and for an app that lists none) |
 | `files.picked`, `files.data`, `store.*` | below | the answers to `files.*` and `store.*` ("Files", below) |
+| `assets.fetched` | below | the answer to an `assets.fetch` ("Assets", below) |
 | `hud.choose` | `item`, `row` | the player clicked or tapped a row of a selectable HUD table ("HUD", below) |
 | `input` | below | once a frame, before the frame script, to a game that asked for input. The node host keeps it; it has no listeners |
 
@@ -419,8 +421,8 @@ The apps in this repository:
 
 | app | input | `net.*` | `launch` | HUD | sound | files, store |
 | --- | --- | --- | --- | --- | --- | --- |
-| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'`; `caps: ["files", "store"]` | not drawn; `--hud-log` prints each description | played (`audio` feature) | `--pick` and `--store` (`src/userfiles.rs`) |
-| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch`, `--caps files,store` | on stdout with every other post | on stdout: the driver's | the driver's; `--store` is where `user:` assets are |
+| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address; `assets.*` into `<--assets>/cache/` | `--launch '{"room":"K7Q4MZ"}'`; `caps: ["assets", "files", "store"]` | not drawn; `--hud-log` prints each description | played (`audio` feature) | `--pick` and `--store` (`src/userfiles.rs`) |
+| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app (`assets.*` too: it writes the file under `--assets` and answers) | `--launch`, `--caps files,store,assets` | on stdout with every other post | on stdout: the driver's | the driver's; `--store` is where `user:` assets are |
 | the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`); no `caps` | DOM over the canvas | Web Audio by the same rules (`audio.ts`) | none |
 
 - `live` speaks the channel as JSON lines, so a game's use of it is testable without a window: on stdin
@@ -622,6 +624,32 @@ frame(f) {
   The three.js view plays it on Web Audio by the same numbers (`tools/three/audio.ts`, held to mix.rs by
   `tools/three/test/audio.test.ts`; its low pass is a biquad, the one difference), resumed on the page's first key or
   click as browsers require. The engine's library in a browser (wasm32) has no `audio` module.
+
+### Assets
+
+A game that streams files it does not ship (a globe's tiles, a place's models) asks the app to download them into its
+asset root, then reads them as any asset (`readAsset`, "Streaming: reading assets and adding them in place", below).
+The files stay there across runs: that directory is the game's offline cache.
+
+| game → app | app → game |
+| --- | --- |
+| `{ t: "assets.fetch", id, url, path, sha256? }` | `{ t: "assets.fetched", id, path, status, size, cached, error? }` |
+| `{ t: "assets.cancel", id }` | nothing: the request is forgotten |
+
+- `path` is relative to the asset root, starts with `cache/`, and has no `.` or `..` parts, backslashes or `:`.
+  `url` is `http://` or `https://` (an app may allow less: a client allows what its network policy does).
+- `status`: the HTTP status. 200: the body is at `path` (written to `<path>.part`, then renamed), `size` bytes.
+  Another status (204, 404, ...): nothing written, `size` 0. 0: the request failed, `error` says why (the address,
+  the path, the network, a body over 64 MiB, a body whose sha256 is not `sha256`).
+- `cached: true`: the file was there already, from the same `url`, or with the same `sha256` (hex, either case);
+  nothing was downloaded. The app keeps what it knows of a file beside it (`play`: `.<name>.fetched`, JSON).
+- At most 16 downloads are under way; more wait in the order they came. A canceled request that waits is taken out;
+  one under way stops and its partial file is removed. Neither is answered.
+- An app that answers them lists `"assets"` in `launch.caps`.
+- `play` (`src/net.rs`): any address, into `<--assets>/cache/`; a request the window refuses (the path, the address)
+  is answered at the next frame. `live`: the driver is the app; it writes under the same `--assets` and answers.
+  Checked: `src/net.rs` tests (a server on the machine: the download, `cached` by address and by hash, a wrong hash, a
+  404, 24 requests at once, a cancel, paths out of the cache).
 
 ### Files
 

@@ -9,16 +9,23 @@
 //!
 //! Built with the `net` feature (on by default; tungstenite and ureq on rustls). Without it every request is answered
 //! with a failure that says so, and the game goes on as it must with an app that has no network.
+//!
+//! Also `assets.*` (docs/RUNTIME.md "Assets"): files downloaded into the asset root's `cache/`, which the game then
+//! reads with `readAsset`; kept across runs, so the cache is what a game has offline.
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use threert_render::host::HostServices;
 
 /// Sockets open at once, requests under way at once.
 const MAX_SOCKETS: usize = 16;
 const MAX_FETCHES: usize = 32;
+/// Downloads under way at once (more wait in order), the largest file one may bring.
+const MAX_ASSETS: usize = 16;
+const MAX_ASSET: u64 = 64 << 20;
 
 /// What a socket's or a request's thread reports, by the game's id for it.
 #[cfg_attr(not(feature = "net"), allow(dead_code))]
@@ -28,6 +35,8 @@ enum Event {
     Closed(Value, u16, String),
     /// Status (0: the request failed), body, the failure.
     Fetched(Value, u16, String, Option<String>),
+    /// An `assets.fetch`'s answer, whole.
+    Asset(Value),
 }
 
 /// What the window tells a socket's thread.
@@ -42,6 +51,64 @@ pub struct Net {
     rx: mpsc::Receiver<Event>,
     sockets: HashMap<String, mpsc::Sender<Out>>,
     fetches: Arc<AtomicUsize>,
+    assets: Assets,
+}
+
+/// The `assets.*` requests: those waiting their turn, in order, and those under way (by id: whether they were
+/// canceled).
+struct Assets {
+    root: PathBuf,
+    waiting: VecDeque<AssetJob>,
+    running: HashMap<String, Arc<AtomicBool>>,
+}
+
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
+struct AssetJob {
+    id: Value,
+    url: String,
+    /// The request's `path` (`cache/...`) and the file it names.
+    path: String,
+    file: PathBuf,
+    sha256: Option<String>,
+}
+
+/// The file an `assets.fetch`'s `path` names under `root`: `cache/` and below, relative, no `.` or `..` parts, no
+/// backslashes; None for any other.
+pub fn cache_file(root: &Path, path: &str) -> Option<PathBuf> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let ok = parts.len() >= 2 && parts[0] == "cache" && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains('\\') && !p.contains(':') && !p.starts_with(".threert-"));
+    ok.then(|| parts.iter().fold(root.to_path_buf(), |f, p| f.join(p)))
+}
+
+/// What is known of a file a download brought (`.<name>.fetched` beside it): where it came from, its hash, its size.
+fn record_of(file: &Path) -> PathBuf {
+    let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    file.with_file_name(format!(".{name}.fetched"))
+}
+
+/// The answer to an `assets.fetch` for a file that is there already: the same address as when it came, or the same
+/// sha256 (the record's, or the file's own when it has no record). None: it is to be downloaded.
+#[cfg_attr(not(feature = "net"), allow(dead_code))]
+fn cached(job: &AssetJob) -> Option<Value> {
+    let size = std::fs::metadata(&job.file).ok().filter(|m| m.is_file())?.len();
+    let record: Option<Value> = std::fs::read(record_of(&job.file)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let want = job.sha256.as_deref().map(str::to_ascii_lowercase);
+    let same = match &record {
+        Some(r) if r["size"].as_u64() == Some(size) => r["url"].as_str() == Some(job.url.as_str()) || (want.is_some() && r["sha256"].as_str() == want.as_deref()),
+        Some(_) => false,
+        None => want.as_ref().is_some_and(|w| size <= MAX_ASSET && std::fs::read(&job.file).is_ok_and(|b| &sha256_hex(&b) == w)),
+    };
+    same.then(|| json!({ "t": "assets.fetched", "id": job.id, "path": job.path, "status": 200, "size": size, "cached": true }))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An answer that says the request failed (status 0) and why.
+fn asset_failed(id: &Value, path: &str, why: &str) -> Value {
+    json!({ "t": "assets.fetched", "id": id, "path": path, "status": 0, "size": 0, "cached": false, "error": why })
 }
 
 /// An id as a map's key: the game's string, or whatever JSON it used.
@@ -55,7 +122,61 @@ impl Net {
         #[cfg(feature = "net")]
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (tx, rx) = mpsc::channel();
-        Net { tx, rx, sockets: HashMap::new(), fetches: Arc::default() }
+        Net { tx, rx, sockets: HashMap::new(), fetches: Arc::default(), assets: Assets { root: PathBuf::from("."), waiting: VecDeque::new(), running: HashMap::new() } }
+    }
+
+    /// `assets.fetch` writes under `root` (the window's `--assets`): `<root>/cache/...`.
+    pub fn with_assets(mut self, root: PathBuf) -> Net {
+        self.assets.root = root;
+        self
+    }
+
+    fn asset_fetch(&mut self, id: Value, m: &Value) {
+        let path = m["path"].as_str().unwrap_or("").to_string();
+        let fail = |why: &str| {
+            let _ = self.tx.send(Event::Asset(asset_failed(&id, &path, why)));
+        };
+        let Some(url) = m["url"].as_str() else { return fail("assets.fetch: no url") };
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return fail(&format!("{url}: an asset's address is http:// or https://"));
+        }
+        let Some(file) = cache_file(&self.assets.root, &path) else { return fail(&format!("assets.fetch: \"{path}\" is not a path under cache/ (no ., .. or backslashes)")) };
+        let k = key(&id);
+        if self.assets.running.contains_key(&k) || self.assets.waiting.iter().any(|j| key(&j.id) == k) {
+            return eprintln!("net: assets.fetch: a request \"{k}\" is under way already");
+        }
+        let sha256 = m["sha256"].as_str().map(str::to_ascii_lowercase);
+        self.assets.waiting.push_back(AssetJob { id, url: url.to_string(), path, file, sha256 });
+        self.start_assets();
+    }
+
+    /// Starts what waits, while fewer than MAX_ASSETS are under way.
+    fn start_assets(&mut self) {
+        while self.assets.running.len() < MAX_ASSETS {
+            let Some(job) = self.assets.waiting.pop_front() else { break };
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.assets.running.insert(key(&job.id), cancel.clone());
+            let events = self.tx.clone();
+            #[cfg(feature = "net")]
+            std::thread::spawn(move || {
+                let answer = cached(&job).unwrap_or_else(|| imp::download(&job, &cancel));
+                let _ = events.send(Event::Asset(answer));
+            });
+            #[cfg(not(feature = "net"))]
+            {
+                let _ = (cancel, events.send(Event::Asset(asset_failed(&job.id, &job.path, NO_NET))));
+            }
+        }
+    }
+
+    /// Forgets a request: one that waits is taken out, one under way stops (its partial file removed). Neither is
+    /// answered.
+    fn asset_cancel(&mut self, id: &Value) {
+        let k = key(id);
+        self.assets.waiting.retain(|j| key(&j.id) != k);
+        if let Some(c) = self.assets.running.get(&k) {
+            c.store(true, Ordering::Relaxed);
+        }
     }
 
     fn open(&mut self, id: Value, m: &Value) {
@@ -124,6 +245,8 @@ impl HostServices for Net {
         match m["t"].as_str() {
             Some("net.open") => self.open(id, m),
             Some("net.fetch") => self.fetch(id, m),
+            Some("assets.fetch") => self.asset_fetch(id, m),
+            Some("assets.cancel") => self.asset_cancel(&id),
             // (To a socket that is not open yet: sent once it is. To one that is gone, or never was: dropped.)
             Some("net.send") => {
                 if let (Some(s), Some(data)) = (self.sockets.get(&key(&id)), m["data"].as_str()) {
@@ -165,9 +288,25 @@ impl HostServices for Net {
                     }
                     out.push(m);
                 }
+                Event::Asset(a) => {
+                    // (A canceled download's answer is dropped: the game forgot it. A request refused at once was
+                    // never under way.)
+                    if self.assets.running.remove(&key(&a["id"])).is_none_or(|c| !c.load(Ordering::Relaxed)) {
+                        out.push(a);
+                    }
+                }
             }
         }
+        self.start_assets();
         out
+    }
+
+    fn caps(&self) -> Vec<&'static str> {
+        if cfg!(feature = "net") {
+            vec!["assets"]
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -186,6 +325,8 @@ mod imp {
     /// To connect and to shake hands; a request in all; a close's answer.
     const CONNECT: Duration = Duration::from_secs(10);
     const FETCH: Duration = Duration::from_secs(30);
+    /// A download of up to 64 MiB in all.
+    const ASSET: Duration = Duration::from_secs(300);
     const CLOSE: Duration = Duration::from_secs(2);
     /// How long a socket's thread waits for the server before it looks at what the game wants sent: what a `net.send`
     /// waits at most.
@@ -284,6 +425,69 @@ mod imp {
         let _ = events.send(Event::Closed(id, code, reason));
     }
 
+    /// An `assets.fetch`'s download: the body into `<file>.part`, checked (its size, its sha256 when the request gave
+    /// one), then renamed to the file and recorded beside it (`record_of`), so that the next request of the same
+    /// address or hash is `cached`. A status other than 200 writes nothing and is answered as it is.
+    pub fn download(job: &super::AssetJob, cancel: &std::sync::atomic::AtomicBool) -> Value {
+        use sha2::Digest;
+        use std::io::{Read, Write};
+        let failed = |why: String| super::asset_failed(&job.id, &job.path, &why);
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(CONNECT)).timeout_global(Some(ASSET)).http_status_as_error(false).build().into();
+        let mut response = match agent.get(&job.url).call() {
+            Ok(r) => r,
+            Err(e) => return failed(format!("{}: {e}", job.url)),
+        };
+        let status = response.status().as_u16();
+        if status != 200 {
+            return serde_json::json!({ "t": "assets.fetched", "id": job.id, "path": job.path, "status": status, "size": 0, "cached": false });
+        }
+        if let Some(dir) = job.file.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return failed(format!("{}: {e}", dir.display()));
+            }
+        }
+        let part = job.file.with_file_name(format!("{}.part", job.file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())));
+        let result = (|| -> Result<(u64, String), String> {
+            let mut out = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+            let mut body = response.body_mut().with_config().limit(super::MAX_ASSET + 1).reader();
+            let (mut hash, mut size, mut buf) = (sha2::Sha256::new(), 0u64, vec![0u8; 1 << 16]);
+            loop {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("canceled".into());
+                }
+                let n = body.read(&mut buf).map_err(|e| if size >= super::MAX_ASSET { format!("{}: larger than 64 MiB", job.url) } else { format!("{}: {e}", job.url) })?;
+                if n == 0 {
+                    break;
+                }
+                size += n as u64;
+                if size > super::MAX_ASSET {
+                    return Err(format!("{}: larger than 64 MiB", job.url));
+                }
+                hash.update(&buf[..n]);
+                out.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", part.display()))?;
+            }
+            out.flush().map_err(|e| e.to_string())?;
+            Ok((size, hash.finalize().iter().map(|b| format!("{b:02x}")).collect()))
+        })();
+        let (size, sha) = match result {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return failed(e);
+            }
+        };
+        if job.sha256.as_ref().is_some_and(|want| *want != sha) {
+            let _ = std::fs::remove_file(&part);
+            return failed(format!("{}: its sha256 is {sha}, not {}", job.url, job.sha256.as_deref().unwrap_or("")));
+        }
+        if let Err(e) = std::fs::rename(&part, &job.file) {
+            let _ = std::fs::remove_file(&part);
+            return failed(format!("{}: {e}", job.file.display()));
+        }
+        let _ = std::fs::write(super::record_of(&job.file), serde_json::json!({ "url": job.url, "sha256": sha, "size": size }).to_string());
+        serde_json::json!({ "t": "assets.fetched", "id": job.id, "path": job.path, "status": 200, "size": size, "cached": false })
+    }
+
     /// One HTTP request: its status and its body as text.
     pub fn fetch(method: &str, url: &str, headers: &[(String, String)], body: Option<String>) -> Result<(u16, String), String> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -340,6 +544,100 @@ mod tests {
             ]
         );
         assert!(net.sockets.is_empty() && net.poll().is_empty());
+    }
+
+    /// Where `assets.fetch` may write: `cache/` and below, nothing that climbs out or hides as a record.
+    #[test]
+    fn asset_paths_stay_in_the_cache() {
+        let root = Path::new("/r");
+        assert_eq!(cache_file(root, "cache/tiles/15/1/2.ert"), Some(PathBuf::from("/r/cache/tiles/15/1/2.ert")));
+        for bad in ["cache", "cache/", "tiles/a", "/cache/a", "cache/../a", "cache/./a", "cache//a", "cache/a\\b", "cache/c:x", "cache/a/..", ""] {
+            assert_eq!(cache_file(root, bad), None, "{bad}");
+        }
+    }
+
+    /// `assets.fetch` against a server on this machine: a file downloaded into the cache and recorded, the same address
+    /// again `cached`, a hash that is not the body's refused (nothing kept), a 404 answered as it is (nothing written),
+    /// more than 16 requests at once all answered, a canceled one not at all, a path out of the cache refused.
+    #[cfg(feature = "net")]
+    #[test]
+    fn assets_come_into_the_cache() {
+        use std::io::{BufRead, BufReader, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let path = line.split(' ').nth(1).unwrap_or("/").to_string();
+                    loop {
+                        let mut h = String::new();
+                        if reader.read_line(&mut h).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let mut stream = stream;
+                    let (status, body) = if path.starts_with("/missing") { ("404 Not Found", String::new()) } else { ("200 OK", format!("body of {path}")) };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                });
+            }
+        });
+        let root = std::env::temp_dir().join(format!("threert-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut net = Net::new().with_assets(root.clone());
+        assert_eq!(net.caps(), vec!["assets"]);
+        let url = |p: &str| format!("http://127.0.0.1:{port}{p}");
+        let wait = |net: &mut Net, n: usize| {
+            let mut got = vec![];
+            for _ in 0..500 {
+                got.extend(net.poll());
+                if got.len() >= n {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            got
+        };
+        net.post(&json!({ "t": "assets.fetch", "id": "a", "url": url("/a.bin"), "path": "cache/x/a.bin" }));
+        let got = wait(&mut net, 1);
+        assert_eq!(got, vec![json!({ "t": "assets.fetched", "id": "a", "path": "cache/x/a.bin", "status": 200, "size": 14, "cached": false })]);
+        assert_eq!(std::fs::read_to_string(root.join("cache/x/a.bin")).unwrap(), "body of /a.bin");
+        // The same address: cached. The same file by its hash, from another address: cached too.
+        net.post(&json!({ "t": "assets.fetch", "id": "b", "url": url("/a.bin"), "path": "cache/x/a.bin" }));
+        let sha = sha256_hex(b"body of /a.bin");
+        net.post(&json!({ "t": "assets.fetch", "id": "c", "url": url("/mirror/a.bin"), "path": "cache/x/a.bin", "sha256": sha.to_uppercase() }));
+        let mut got = wait(&mut net, 2);
+        got.sort_by_key(|m| m["id"].as_str().map(String::from));
+        assert!(got.len() == 2 && got.iter().all(|m| m["cached"] == json!(true) && m["status"] == json!(200) && m["size"] == json!(14)), "{got:?}");
+        // A hash that is not the body's: refused, nothing kept.
+        net.post(&json!({ "t": "assets.fetch", "id": "d", "url": url("/d.bin"), "path": "cache/d.bin", "sha256": "00" }));
+        let got = wait(&mut net, 1);
+        assert!(got[0]["status"] == json!(0) && got[0]["error"].as_str().is_some_and(|e| e.contains("sha256")), "{got:?}");
+        assert!(!root.join("cache/d.bin").exists() && !root.join("cache/d.bin.part").exists());
+        // A 404: as it is, nothing written.
+        net.post(&json!({ "t": "assets.fetch", "id": "e", "url": url("/missing"), "path": "cache/e.bin" }));
+        let got = wait(&mut net, 1);
+        assert!(got[0]["status"] == json!(404) && got[0]["cached"] == json!(false) && !root.join("cache/e.bin").exists(), "{got:?}");
+        // Out of the cache, or not http(s): refused at once.
+        net.post(&json!({ "t": "assets.fetch", "id": "f", "url": url("/f"), "path": "cache/../f" }));
+        net.post(&json!({ "t": "assets.fetch", "id": "g", "url": "file:///etc/hosts", "path": "cache/g" }));
+        let got = wait(&mut net, 2);
+        assert!(got.len() == 2 && got.iter().all(|m| m["status"] == json!(0) && m["error"].is_string()), "{got:?}");
+        // 24 at once: 16 under way, the rest in order; one canceled while it waits is not answered.
+        for i in 0..24 {
+            net.post(&json!({ "t": "assets.fetch", "id": format!("n{i}"), "url": url(&format!("/n{i}")), "path": format!("cache/n/{i}") }));
+        }
+        assert!(net.assets.running.len() == MAX_ASSETS && net.assets.waiting.len() == 8);
+        net.post(&json!({ "t": "assets.cancel", "id": "n20" }));
+        let got = wait(&mut net, 23);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let got: Vec<Value> = got.into_iter().chain(net.poll()).collect();
+        assert_eq!(got.len(), 23, "{got:?}");
+        assert!(got.iter().all(|m| m["status"] == json!(200) && m["id"] != json!("n20")));
+        assert!(!root.join("cache/n/20").exists() && net.assets.running.is_empty() && net.assets.waiting.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Requests the window refuses itself are answered like any other, at the next frame; posts of other families
