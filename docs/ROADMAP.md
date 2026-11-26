@@ -2920,6 +2920,12 @@ Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
 
+**A camera ray's fog light is seen directly (2026-11-26).** The ambient light height fog scatters towards the
+camera joins the emission signal, as the aerial haze does: it was part of the surface's diffuse light, which the
+filters divide by the surface's albedo, so fog before a black surface was lost. The first step of taking fog out
+of the path's signals; its attenuation and its sampled scattering follow with a volume of their own. Test:
+`the_fogs_ambient_light_is_seen_directly`.
+
 **A pixel on a mirror has the surface the mirror shows (2026-11-25, after it).** The second step of the frame's
 structure: the first pass follows a camera hit that is a mirror to what it shows, and that surface has the pixel's
 guides, motion vector and signals (docs/RUNTIME.md "The live architecture"). A mirror's picture changes: what it

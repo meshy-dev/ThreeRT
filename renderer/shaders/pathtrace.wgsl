@@ -4214,7 +4214,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (fl > fmax) { fs *= fmax / fl; }
                 radiance += thr * fs;
             }
-            radiance += thr * (1.0 - tr) * P.fog_color.rgb;
+            let ambient = thr * (1.0 - tr) * P.fog_color.rgb;
+            radiance += ambient;
+            // Live: the camera ray's fog light is light the camera sees directly, not the surface's (as its haze
+            // below): it joins the emission signal, unfiltered, and is not divided by the surface's albedo.
+            if (depth == 0u) { e0 += ambient; }
             thr *= tr;
         }
         if (has(F_AERIAL) && hit.tri != 0xffffffffu) {

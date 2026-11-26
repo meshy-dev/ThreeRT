@@ -5206,3 +5206,46 @@ fn the_world_counts_a_files_models() {
     w.set_object(43, "c".into(), None, model("c.glb"), true, false).unwrap();
     assert!(w.take_changes().gone_models.contains("c.glb") && w.models.get("c.glb") == Some(&1), "gone and back: counted again (the view keeps its materials)");
 }
+
+/// The fog's ambient light on a camera ray is light seen directly. On a black surface in fog, with no light in the
+/// scene, the diffuse signal is empty and the emission signal holds what the fog scatters towards the camera, by the
+/// distance; and the picture shows it (as the surface's light it was divided by an albedo of nothing, and lost).
+#[test]
+fn the_fogs_ambient_light_is_seen_directly() {
+    let (density, colour) = (0.25f32, Vec3::new(0.4, 0.5, 0.7));
+    let mut w = world();
+    // (The lamp and the sun away: the fog's own light alone.)
+    w.set_visible(12, false).unwrap();
+    w.set_visible(20, false).unwrap();
+    let fog: crate::desc::Fog = serde_json::from_value(serde_json::json!({ "density": density, "heightFalloff": 0.0, "height": 0.0, "color": colour.to_array(), "intensity": 1.0 })).unwrap();
+    w.set_environment(crate::desc::Environment { fog: Some(fog), ..w.environment.clone() });
+    w.set_material(42, serde_json::from_value(serde_json::json!({ "name": "black", "color": [0, 0, 0], "opacity": 1, "metalness": 0, "roughness": 1, "emissive": [1, 1, 1], "emissiveIntensity": 0, "doubleSided": true })).unwrap());
+    w.set_object(42, "black".into(), None, Kind::Mesh { geometry: 3, material: 42, own_blas: false, materials: vec![] }, true, false).unwrap();
+    w.set_transform(42, Vec3::new(0.6, -0.5, 1.5), glam::Quat::IDENTITY, Vec3::ONE).unwrap();
+    let presets = crate::default_presets_dir();
+    let mut live = match gpu::Gpu::new().and_then(|g| LiveCore::new(g, &w, Path::new("."), &presets, 96, 54)) {
+        Ok(c) => c,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    live.fixed_dt = Some(1.0 / 60.0);
+    live.render(1, |_, _| {});
+    let (iw, ih) = live.internal_size();
+    let pixels = (iw * ih) as u64;
+    let black = live.sc.tables.retained.instance(42).expect("the black quad is an instance").instance;
+    let f = &live.targets.kernel.first;
+    let hits: Vec<[f32; 8]> = read_back(&live, &f.buffer, f.offset, pixels * 32);
+    let samples: Vec<[f32; 20]> = read_back(&live, &live.targets.accum, 0, pixels * gpu::SAMPLE_BYTES);
+    // (pathtrace.wgsl `first_store`: the instance as 16-bit halves.)
+    let on: Vec<usize> = (0..pixels as usize).filter(|&k| (hits[k][5] as u32 | (hits[k][6] as u32) << 16) == black && hits[k][3] != 65535.0).collect();
+    assert!(on.len() > 30, "{} pixels on the black quad", on.len());
+    for &k in &on {
+        let (s, t) = (&samples[k], hits[k][0]);
+        let (diffuse, seen, fogged) = (Vec3::new(s[0], s[1], s[2]), Vec3::new(s[12], s[13], s[14]), colour * (1.0 - (-density * t).exp()));
+        assert!(diffuse.max_element() < 1e-4 && (seen - fogged).abs().max_element() < 0.02 * fogged.max_element(), "pixel {k}, {t} away: the diffuse signal {diffuse}, the light seen directly {seen}, the fog's {fogged}");
+    }
+    if (iw, ih) == (live.w, live.h) {
+        let p = picture(&mut live, 8);
+        let at = on[on.len() / 2] * 4;
+        assert!(p[at..at + 3].iter().all(|&c| c > 20), "the black quad in fog is drawn in the fog's colour: {:?}", &p[at..at + 4]);
+    }
+}
