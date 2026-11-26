@@ -4351,8 +4351,9 @@ fn model_textures_named(c: &LiveCore) -> std::collections::BTreeMap<(String, usi
 /// A still model the scene has not got comes in place (tests/render/data/textured-quads.glb: a quad with a picture
 /// and a plain one, two materials of the file): its materials are entries after the scene's, its picture is placed
 /// in the pages, its mesh is made in the room; no rebuild, and the view draws what a build of the edited world
-/// draws. Another of it is another instance of that mesh. With the last of them gone the mesh is given back, and the
-/// model comes again in place, its materials and its picture the ones there were.
+/// draws. Another of it is another instance of that mesh. With the last of them gone the mesh is given back, its
+/// materials retired and its picture freed (`retire_models`), and the model comes again in place, its materials in
+/// the entries it left and its picture in the slot it left.
 #[test]
 fn a_model_the_scene_has_not_got_comes_in_place() {
     let presets = crate::default_presets_dir();
@@ -4403,7 +4404,10 @@ fn a_model_the_scene_has_not_got_comes_in_place() {
     w.remove(41);
     check("the models removed", &mut live, &mut w);
     assert!(!live.sc.tables.retained.model_mesh.contains_key(&key) && !live.sc.tables.retained.mesh_rows.contains_key(&mesh), "the mesh is no model's any more");
-    // It comes again: its mesh made again (in the slot the other left), its materials and its picture there still.
+    assert_eq!(live.sc.tables.retained.free_materials.len(), 2, "its two materials retired");
+    assert!(live.g.texture_slots().is_empty(), "its picture freed: no material names it");
+    // It comes again: its mesh made again (in the slot the other left), its materials in the entries they left, its
+    // picture in its slot.
     place(&mut w, 42, Vec3::new(0.2, 0.1, 0.8));
     check("the model again", &mut live, &mut w);
     assert_eq!((live.sc.tables.materials.len(), live.sc.meshes.len(), live.g.pages_state().0.len()), (materials + 2, meshes + 1, 1), "nothing made twice");
@@ -4414,6 +4418,59 @@ fn a_model_the_scene_has_not_got_comes_in_place() {
     w.set_transform(43, Vec3::new(-0.5, -0.4, 0.6), glam::Quat::from_rotation_y(0.4), Vec3::splat(0.05)).unwrap();
     check("a model that emits", &mut live, &mut w);
     list_is_its_triangles("a model that emits", &live);
+}
+
+/// Places that come and go (EarthRT's GLB places: a model of a file comes, the next replaces it): with each file's
+/// last model gone its materials are retired and its pictures freed (`retire_models`), so twelve files one after
+/// another take the same material entries, the same texture slot and the same room in the pages, which do not grow.
+/// The files are copies of tests/render/data/textured-quads.glb under other names (a picture's key is its file's).
+/// After them the view draws what a build of the world draws.
+#[test]
+fn models_that_come_and_go_do_not_grow_the_pages() {
+    let presets = crate::default_presets_dir();
+    let open_at_root = |w: &World| gpu::Gpu::new().and_then(|g| LiveCore::new(g, w, Path::new(".."), &presets, 96, 54));
+    let dir = Path::new("../out/test-places");
+    std::fs::create_dir_all(dir).unwrap();
+    let files: Vec<String> = (0..12)
+        .map(|i| {
+            let uri = format!("out/test-places/quads-{i}.glb");
+            std::fs::copy("../tests/render/data/textured-quads.glb", Path::new("..").join(&uri)).unwrap();
+            uri
+        })
+        .collect();
+    let mut w = world();
+    let mut live = match open_at_root(&w) {
+        Ok(c) if c.g.hwrt => c,
+        Ok(_) => return eprintln!("skipped: no hardware RT"),
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    w.take_changes();
+    let base = live.sc.tables.materials.len();
+    let mut first = None;
+    for (i, uri) in files.iter().enumerate() {
+        if i > 0 {
+            w.remove(100 + i as u32 - 1);
+        }
+        w.set_object(100 + i as u32, format!("place{i}"), None, Kind::Model { uri: uri.clone(), nodes: None, animation: None, functions: vec![] }, true, false).unwrap();
+        w.set_transform(100 + i as u32, Vec3::new(-0.3, 0.2, 0.7), glam::Quat::from_rotation_y(0.3), Vec3::ONE).unwrap();
+        assert!(!live.commit(&mut w).unwrap(), "place {i}: in place ({:?})", live.fallback);
+        let (keys, side, layers, _) = live.g.pages_state();
+        let now = (live.sc.tables.materials.len(), live.g.texture_slots(), keys.len(), side, layers);
+        assert!(keys.iter().any(|k| k.0.contains(&format!("quads-{i}.glb"))), "place {i}: its picture is in the pages: {keys:?}");
+        match &first {
+            None => first = Some(now),
+            Some(f) => assert_eq!(&now, f, "place {i}: the materials, the slots and the pages as the first place left them"),
+        }
+    }
+    assert_eq!(first.unwrap().0, base + 2, "two material entries in all");
+    let mut fresh = open_at_root(&w).unwrap();
+    forget(&mut live);
+    let (a, b) = (picture(&mut live, 48), picture(&mut fresh, 48));
+    assert!(apart(&a, &b) < 0.5, "the picture is {:.2} steps from a build's", apart(&a, &b));
+    // The last one gone: nothing names a texture.
+    w.remove(100 + files.len() as u32 - 1);
+    assert!(!live.commit(&mut w).unwrap());
+    assert!(live.g.texture_slots().is_empty() && live.sc.tables.retained.asset_materials.is_empty());
 }
 
 /// A kernel variant the device has not is made on another thread while the frames go on: the frame after the edit
@@ -4997,4 +5054,27 @@ fn a_planets_altitude_is_not_another_sky() {
     use super::edits::altitude_moved;
     assert!(!altitude_moved(400_000.0, 381_000.0) && altitude_moved(400_000.0, 379_000.0));
     assert!(!altitude_moved(2.0, 200.0) && altitude_moved(2.0, 260.0) && altitude_moved(260.0, 2.0));
+}
+
+/// The world counts the models of each file (`World::models`): a file's last model gone, by removal or by becoming
+/// something else, is `Changes::gone_models`; one that comes back in the same batch is counted again.
+#[test]
+fn the_world_counts_a_files_models() {
+    let mut w = world();
+    let model = |uri: &str| Kind::Model { uri: uri.into(), nodes: None, animation: None, functions: vec![] };
+    w.set_object(40, "a".into(), None, model("a.glb"), true, false).unwrap();
+    w.set_object(41, "a2".into(), None, model("a.glb"), true, false).unwrap();
+    w.set_object(42, "b".into(), None, model("b.glb"), true, false).unwrap();
+    assert_eq!((w.models.get("a.glb"), w.models.get("b.glb")), (Some(&2), Some(&1)));
+    w.take_changes();
+    w.remove(40);
+    assert!(w.take_changes().gone_models.is_empty(), "one of a.glb is left");
+    w.remove(41);
+    w.set_object(42, "b".into(), None, model("c.glb"), true, false).unwrap();
+    let c = w.take_changes();
+    assert_eq!(c.gone_models, ["a.glb".to_string(), "b.glb".to_string()].into(), "the last of a.glb removed, b.glb's turned into c.glb");
+    assert!(!w.models.contains_key("a.glb") && !w.models.contains_key("b.glb") && w.models.get("c.glb") == Some(&1));
+    w.remove(42);
+    w.set_object(43, "c".into(), None, model("c.glb"), true, false).unwrap();
+    assert!(w.take_changes().gone_models.contains("c.glb") && w.models.get("c.glb") == Some(&1), "gone and back: counted again (the view keeps its materials)");
 }

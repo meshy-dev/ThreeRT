@@ -815,8 +815,21 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
   material first names is decoded, placed among them (a shelf it fits, a new shelf, a new layer) and written there,
   every level; its two rows go into the texture table (`Gpu::place_texture`, `LiveCore::place_textures`). Pages
   without room become a texture with a layer more or a longer side, and what they held is copied there on the GPU.
-  New pixels of the same size go over the old ones, unless another texture has the same slot. A texture no
-  material names any more keeps its place until the scene is loaded again.
+  New pixels of the same size go over the old ones, unless another texture has the same slot.
+- **Textures and materials freed.** The world counts the models of each file (`World::models`). When a file's last
+  model leaves, the commit retires the file's materials: their entries name nothing and the next file's materials
+  take them (`Retained::free_materials`). Every texture slot that no material of the table names is then freed
+  (`LiveCore::retire_models`, `Gpu::free_textures`). Its slot and its room in the pages go to the next texture placed:
+  - the smallest free rect that holds it, the rest of the rect cut off (`texpack::Atlas::free`, `place`);
+  - a layer's free room is made again from what it holds, so it does not depend on the order textures came and went:
+    free columns at a shelf's end go back to the shelf, and empty last shelves go.
+
+  This happens before the commit places what it adds, so a GLB place that replaces another takes the entries, the
+  slot and the room the other left, and places that come and go do not grow the pages. Textures a world material
+  names stay, as long as the material is in the world. Checked: `texpack` tests (2,000 places of 256–2,048 texels,
+  ten at a time, with the pages as the first 200 left them; 10,000 rounds of arbitrary sizes after the first 1,000
+  without growth) and `models_that_come_and_go_do_not_grow_the_pages` (twelve GLB files one after another: the same
+  two entries, the same slot, the same pages, the picture a build's).
 - **Materials.** A new one, its maps and its function with it; a material given other maps, another function or
   none. (Not one that is a particle's, `transparent`, or has vertex colours: those say where triangles are kept.)
 - **Material functions.** The scene keeps its functions by number, and one that comes takes the next

@@ -798,6 +798,9 @@ impl LiveCore {
                 }
             }
         }
+        // Files no model is left of: their materials retired, the textures no material names any more freed, before
+        // what this commit adds takes room (the place that replaces another takes its entries and its slots).
+        let retired = !changes.structural && self.retire_models(world, &changes);
         // The textures the new and the changed materials name: those the pages have not got are placed in them now;
         // a texture that was replaced has its materials made again.
         if !changes.structural && (!changes.new_materials.is_empty() || !changes.materials.is_empty() || !changes.textures.is_empty()) {
@@ -1077,7 +1080,7 @@ impl LiveCore {
             }
             return Ok(true);
         };
-        if d.materials {
+        if d.materials || retired {
             self.upload_materials();
         }
         if d.materials || changes.functions {
@@ -1645,6 +1648,48 @@ impl LiveCore {
         Ok(())
     }
 
+    /// The materials of the files whose last model left the world in this commit (`Changes::gone_models`, none of
+    /// them back since): out of `asset_materials`, their entries named no texture and given to the next file's
+    /// materials (`Retained::free_materials`; nothing draws with them: their models' instances are gone). Then every
+    /// texture slot no material of the table names is freed (`Gpu::free_textures`): its slot and its place in the
+    /// pages are the next texture's, so places that come and go do not grow the pages. True when a material changed.
+    fn retire_models(&mut self, world: &World, changes: &crate::world::Changes) -> bool {
+        let gone: Vec<&String> = changes.gone_models.iter().filter(|k| !world.models.contains_key(*k)).collect();
+        if gone.is_empty() {
+            return false;
+        }
+        let t = &mut self.sc.tables;
+        let retired: Vec<((String, usize), u32)> = t.retained.asset_materials.iter().filter(|(k, _)| gone.contains(&&k.0)).map(|(k, i)| (k.clone(), *i)).collect();
+        if retired.is_empty() {
+            return false;
+        }
+        for (k, i) in retired {
+            t.retained.asset_materials.remove(&k);
+            if let Some(m) = t.materials.get_mut(i as usize) {
+                m.tex0 = [-1; 4];
+                (m.tex1[0], m.tex1[1]) = (-1, -1);
+                m.uv[2] = 0.0;
+                m.mt = [-1; 8];
+            }
+            t.retained.free_materials.push(i);
+        }
+        // The slots the table's materials name (`GpuMaterial`: tex0, tex1's first two, the transmission map + 1 in
+        // uv.z, the function's slots).
+        let mut named = std::collections::HashSet::new();
+        for m in &t.materials {
+            named.extend(m.tex0.iter().chain(&m.tex1[..2]).chain(&m.mt).copied().filter(|&s| s >= 0));
+            if m.uv[2] >= 1.0 {
+                named.insert(m.uv[2] as i32 - 1);
+            }
+        }
+        let unnamed: Vec<i32> = self.g.texture_slots().into_iter().filter(|s| !named.contains(s)).collect();
+        if let Some(info) = self.g.free_textures(&unnamed) {
+            self.sc.tables.retained.textures.retain(|_, s| !unnamed.contains(s));
+            self.apply_pages(Some(info), None);
+        }
+        true
+    }
+
     /// The pages after textures were placed in them (`Gpu::place_texture`): every texture's rows (`info`, if one was
     /// placed) in the texture table, the kernel's variant that samples textures, and the bind groups again where the
     /// pages (`view`) or the table are another resource now.
@@ -1717,8 +1762,19 @@ impl LiveCore {
                     })
                     .map_err(|e| e.context(format!("{uri}: material {name}")))?;
                 }
-                self.sc.tables.retained.asset_materials.insert(mkey, self.sc.tables.materials.len() as u32);
-                self.sc.tables.materials.push(gm);
+                // (An entry a retired file left, or a new one.)
+                let tables = &mut self.sc.tables;
+                let at = match tables.retained.free_materials.pop() {
+                    Some(i) => {
+                        tables.materials[i as usize] = gm;
+                        i
+                    }
+                    None => {
+                        tables.materials.push(gm);
+                        tables.materials.len() as u32 - 1
+                    }
+                };
+                tables.retained.asset_materials.insert(mkey, at);
                 made = true;
             }
         }

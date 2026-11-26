@@ -699,6 +699,9 @@ pub struct Retained {
     /// A model file's material -> `materials` index: by (the file, with its functions if it has any; the material's
     /// index in the file, usize::MAX for the file's default one).
     pub asset_materials: HashMap<(String, usize), u32>,
+    /// `materials` entries of files no model is left of (live/edits.rs `retire_models`): the next file's materials
+    /// take them.
+    pub free_materials: Vec<u32>,
     /// Object -> where what it draws landed (`Proxy`): meshes, models, rect-light cards, instanced objects.
     pub proxies: HashMap<u32, Proxy>,
     /// Object of each `lights` entry, same order (`prepare` sorts both).
