@@ -597,7 +597,7 @@ impl Reconstructor {
         let [color, depth, motion, reactive, ..] = &textures.inputs[..] else { unreachable!() };
         let frame = ReconstructionFrame {
             gpu: g, size, color, depth, motion, reactive, output: &textures.output, radiance_unit: unit,
-            jitter: [jitter.0 - 0.5, jitter.1 - 0.5], reset: reset || textures.fresh || textures.exposure != exposure,
+            jitter: [jitter.0 - 0.5, jitter.1 - 0.5], reset: reset || textures.fresh || exposure_jumped(textures.exposure, exposure),
             camera: cam, aspect, world_to_view, view_to_clip,
         };
         let dispatch = match &mut self.providers[i].1 {
@@ -613,7 +613,9 @@ impl Reconstructor {
         };
         let before_post = native.map(|native| [std::mem::replace(e, g.device.create_command_encoder(&Default::default())).finish(), native]);
         textures.fresh = false;
-        textures.exposure = exposure;
+        if textures.exposure == 0.0 || exposure_jumped(textures.exposure, exposure) {
+            textures.exposure = exposure;
+        }
         let mut pass = e.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("reconstruction to post"), ..Default::default() });
         pass.set_pipeline(&pipes.output);
         pass.set_bind_group(0, &textures.post_group, &[]);
@@ -622,6 +624,20 @@ impl Reconstructor {
         Ok(before_post)
     }
 }
+
+/// Whether the exposure moved far enough from the one the provider's history started at (`textures.exposure`) for
+/// that history to be dropped: more than `EXPOSURE_RESET` stops. The inputs are in units of display white
+/// (`radiance_unit` = white / exposure), so the history is in the units of the exposure it was made at; a drift of a
+/// fraction of a stop (auto exposure adapting, as it does every frame in a dim room) only scales it a little, which
+/// the provider's own blend takes up within a few frames. Resetting on every change, as before, threw the history
+/// away every frame under auto exposure: MetalFX-denoised then showed each frame's raw samples (EarthRT's machiya, a
+/// room lit through a garden opening: sparkle everywhere after 200 frames).
+fn exposure_jumped(from: f32, to: f32) -> bool {
+    from <= 0.0 || to <= 0.0 || (to / from).log2().abs() > EXPOSURE_RESET
+}
+
+/// Stops of exposure change past which a provider's history is dropped (`exposure_jumped`).
+const EXPOSURE_RESET: f32 = 1.0;
 
 use wgpu::TextureFormat::*;
 /// [`ReconstructionFrame`]'s inputs, then [`JointGuides`]' (shaders/reconstruction.wgsl `rc_*_inputs`, `rc_guides`).
