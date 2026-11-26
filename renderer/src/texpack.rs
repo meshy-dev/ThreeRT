@@ -35,6 +35,11 @@ pub struct Atlas {
     pub places: Vec<Place>,
     /// By layer, top to bottom: a shelf's y, its height, and the x its next rect starts at.
     shelves: Vec<Vec<(u32, u32, u32)>>,
+    /// Slots whose texture was freed (`free`): the next texture placed takes the lowest.
+    free_slots: Vec<usize>,
+    /// Rects freed textures left, by layer: (layer, x, y, width, height), aligned to ALIGN. A texture placed takes the
+    /// smallest that holds it, the rest of it split in two (to its right, below it: a guillotine cut).
+    free_rects: Vec<(u32, u32, u32, u32, u32)>,
 }
 
 /// The size a texture of `width` x `height` has in the pages: at most `MAX_DIM` a side, and a power of two >= 512
@@ -68,6 +73,10 @@ impl Atlas {
         let s = self.side as f32;
         let mut info = vec![[0.0f32; 4]; self.places.len().max(1) * 2];
         for (i, p) in self.places.iter().enumerate() {
+            // (A freed slot: zeros, as no texture.)
+            if self.free_slots.contains(&i) {
+                continue;
+            }
             let (w, h) = p.size;
             info[i * 2] = [(p.x + GUTTER) as f32 / s, (p.y + GUTTER) as f32 / s, w as f32 / s, h as f32 / s];
             info[i * 2 + 1] = [p.layer as f32, p.wrap as u32 as f32, w as f32, h as f32];
@@ -80,9 +89,19 @@ impl Atlas {
     /// where the texture is wider than they are, or where they have `max_layers` already; what they hold stays where
     /// it is, and a longer side changes every texture's rows (`info`). None: no room at the longest side and
     /// `max_layers`.
-    pub fn place(&mut self, width: u32, height: u32, wrap: bool, max_layers: u32) -> Option<Place> {
+    pub fn place(&mut self, width: u32, height: u32, wrap: bool, max_layers: u32) -> Option<(usize, Place)> {
         let size = content_size(width, height);
         let (w, h) = padded_size(size);
+        // A rect a freed texture left, the smallest that holds it.
+        if let Some(i) = (0..self.free_rects.len()).filter(|&i| self.free_rects[i].3 >= w && self.free_rects[i].4 >= h).min_by_key(|&i| self.free_rects[i].3 as u64 * self.free_rects[i].4 as u64) {
+            let (layer, x, y, fw, fh) = self.free_rects.swap_remove(i);
+            for r in [(layer, x + w, y, fw - w, h), (layer, x, y + h, fw, fh - h)] {
+                if r.3 > 0 && r.4 > 0 {
+                    self.free_rects.push(r);
+                }
+            }
+            return Some(self.take_slot(Place { layer, x, y, padded: (w, h), size, wrap }));
+        }
         if w.max(h) > self.side {
             self.side = w.max(h).next_power_of_two().max(256);
         }
@@ -114,10 +133,101 @@ impl Atlas {
             } else {
                 return None;
             };
-            let place = Place { layer: layer as u32, x, y, padded: (w, h), size, wrap };
-            self.places.push(place);
-            return Some(place);
+            return Some(self.take_slot(Place { layer: layer as u32, x, y, padded: (w, h), size, wrap }));
         }
+    }
+
+    /// A slot for `place`: a freed one (the lowest), or a new one.
+    fn take_slot(&mut self, place: Place) -> (usize, Place) {
+        let slot = match self.free_slots.iter().enumerate().min_by_key(|(_, s)| **s).map(|(i, _)| i) {
+            Some(i) => {
+                let s = self.free_slots.swap_remove(i);
+                self.places[s] = place;
+                s
+            }
+            None => {
+                self.places.push(place);
+                self.places.len() - 1
+            }
+        };
+        (slot, place)
+    }
+
+    /// Frees the texture in `slot`: its slot and its rect are the next textures' (`place`). Its texels stay in the
+    /// pages until another's are written there. False for a slot that holds none.
+    pub fn free(&mut self, slot: usize) -> bool {
+        if slot >= self.places.len() || self.free_slots.contains(&slot) {
+            return false;
+        }
+        let p = self.places[slot];
+        self.free_slots.push(slot);
+        self.rebuild_free(p.layer);
+        true
+    }
+
+    /// A layer's free room made again from what it holds, so that it does not depend on the order textures came and
+    /// went: on a grid of ALIGN texels, the shelves' room less the textures held there. Free columns at the end of a
+    /// shelf go back to it (its next x moves back) and a layer's last empty shelves go, room a texture of any size can
+    /// take again; what is left is cut into rects row by row, each as wide and then as tall as it can be.
+    fn rebuild_free(&mut self, layer: u32) {
+        let n = (self.side / ALIGN) as usize;
+        let cell = |v: u32| (v / ALIGN) as usize;
+        // 1: free, 0: held or outside the shelves.
+        let mut free = vec![0u8; n * n];
+        let Some(shelves) = self.shelves.get_mut(layer as usize) else { return };
+        for s in shelves.iter() {
+            for y in cell(s.0)..cell(s.0 + s.1).min(n) {
+                free[y * n..y * n + cell(s.2).min(n)].fill(1);
+            }
+        }
+        for (i, p) in self.places.iter().enumerate() {
+            if p.layer != layer || self.free_slots.contains(&i) {
+                continue;
+            }
+            for y in cell(p.y)..cell(p.y + p.padded.1).min(n) {
+                free[y * n + cell(p.x)..y * n + cell(p.x + p.padded.0).min(n)].fill(0);
+            }
+        }
+        for s in shelves.iter_mut() {
+            let rows = cell(s.0)..cell(s.0 + s.1).min(n);
+            while s.2 > 0 && rows.clone().all(|y| free[y * n + cell(s.2) - 1] == 1) {
+                s.2 -= ALIGN;
+                for y in rows.clone() {
+                    free[y * n + cell(s.2)] = 0;
+                }
+            }
+        }
+        while shelves.last().is_some_and(|s| s.2 == 0) {
+            shelves.pop();
+        }
+        self.free_rects.retain(|r| r.0 != layer);
+        for y in 0..n {
+            let mut x = 0;
+            while x < n {
+                if free[y * n + x] == 0 {
+                    x += 1;
+                    continue;
+                }
+                let mut w = 0;
+                while x + w < n && free[y * n + x + w] == 1 {
+                    w += 1;
+                }
+                let mut h = 1;
+                while y + h < n && free[(y + h) * n + x..(y + h) * n + x + w].iter().all(|&c| c == 1) {
+                    h += 1;
+                }
+                for yy in y..y + h {
+                    free[yy * n + x..yy * n + x + w].fill(0);
+                }
+                self.free_rects.push((layer, x as u32 * ALIGN, y as u32 * ALIGN, w as u32 * ALIGN, h as u32 * ALIGN));
+                x += w;
+            }
+        }
+    }
+
+    /// Whether `slot` holds a texture.
+    pub fn holds(&self, slot: usize) -> bool {
+        slot < self.places.len() && !self.free_slots.contains(&slot)
     }
 }
 
@@ -188,7 +298,7 @@ fn round_up(v: u32) -> u32 {
 pub fn pack(textures: &[Texture]) -> Packed {
     if textures.is_empty() {
         let img = image::RgbaImage::from_pixel(ALIGN, ALIGN, image::Rgba([255, 255, 255, 255]));
-        let atlas = Atlas { side: ALIGN, places: vec![], shelves: vec![vec![]] };
+        let atlas = Atlas { side: ALIGN, places: vec![], shelves: vec![vec![]], ..Default::default() };
         return Packed { side: ALIGN, layers: vec![mip_chain(img)], info: atlas.info(), streams: vec![], atlas };
     }
     let src: Vec<std::borrow::Cow<image::RgbaImage>> = textures
@@ -239,7 +349,7 @@ pub fn pack(textures: &[Texture]) -> Packed {
         }
     }
     let places = (0..src.len()).map(|i| Place { layer: place[i].0, x: place[i].1, y: place[i].2, padded: padded[i], size: src[i].dimensions(), wrap: textures[i].wrap }).collect();
-    let atlas = Atlas { side, places, shelves };
+    let atlas = Atlas { side, places, shelves, ..Default::default() };
     let info = atlas.info();
     // Fill pages row-parallel: every page row gathers from the textures whose padded rect spans it.
     let pages: Vec<image::RgbaImage> = (0..=layer)
@@ -443,13 +553,17 @@ mod tests {
     fn sound(what: &str, a: &Atlas) {
         let info = a.info();
         for (i, p) in a.places.iter().enumerate() {
+            if !a.holds(i) {
+                assert_eq!((info[i * 2], info[i * 2 + 1]), ([0.0; 4], [0.0; 4]), "{what}: freed slot {i} has no rows");
+                continue;
+            }
             assert!(p.x + p.padded.0 <= a.side && p.y + p.padded.1 <= a.side && p.layer < a.layers(), "{what}: texture {i} in its page: {p:?} of {}", a.side);
             assert_eq!((p.x % ALIGN, p.y % ALIGN, p.padded.0 % ALIGN, p.padded.1 % ALIGN), (0, 0, 0, 0), "{what}: texture {i} on the grid");
             assert!(p.size.0 + 2 * GUTTER <= p.padded.0 && p.size.1 + 2 * GUTTER <= p.padded.1, "{what}: texture {i} has its gutters");
             let s = a.side as f32;
             assert_eq!(info[i * 2], [(p.x + GUTTER) as f32 / s, (p.y + GUTTER) as f32 / s, p.size.0 as f32 / s, p.size.1 as f32 / s], "{what}: texture {i}'s rect");
             assert_eq!(info[i * 2 + 1], [p.layer as f32, p.wrap as u32 as f32, p.size.0 as f32, p.size.1 as f32], "{what}: texture {i}'s layer and size");
-            for (j, q) in a.places.iter().enumerate().skip(i + 1) {
+            for (j, q) in a.places.iter().enumerate().skip(i + 1).filter(|(j, _)| a.holds(*j)) {
                 let apart = p.layer != q.layer || p.x + p.padded.0 <= q.x || q.x + q.padded.0 <= p.x || p.y + p.padded.1 <= q.y || q.y + q.padded.1 <= p.y;
                 assert!(apart, "{what}: textures {i} and {j} overlap: {p:?}, {q:?}");
             }
@@ -469,18 +583,18 @@ mod tests {
         assert_eq!(a.info(), packed.info, "the pack's rows are the atlas's");
         let before = a.places.clone();
         // Beside the last on a shelf (both are as high: the first), then new shelves, then more than the page has.
-        let small = a.place(64, 40, false, 8).unwrap();
+        let small = a.place(64, 40, false, 8).unwrap().1;
         assert_eq!((small.layer, small.x, small.y, small.size, small.wrap), (0, before[0].x + before[0].padded.0, before[0].y, (64, 40), false));
         let mut layers = 1;
         for k in 0..12 {
-            let p = a.place(200, 120, true, 8).unwrap();
+            let p = a.place(200, 120, true, 8).unwrap().1;
             layers = layers.max(p.layer + 1);
             sound(&format!("after {k} more"), &a);
         }
         assert!(layers > 1 && a.side == 512, "the page filled and a layer was added: {layers} layers of {}", a.side);
         assert_eq!(a.places[..3], before[..], "those packed stay where they were");
         // Wider than the pages: a longer side, the places as they were, the rows of the new side.
-        let big = a.place(2048, 1024, true, 8).unwrap();
+        let big = a.place(2048, 1024, true, 8).unwrap().1;
         assert_eq!((a.side, big.size, big.padded), (2048, (2016, 992), (2048, 1024)));
         assert_eq!(a.places[..3], before[..]);
         sound("a longer side", &a);
@@ -488,24 +602,91 @@ mod tests {
         // As many layers as there may be: a full page gets a longer side, not another layer.
         let mut b = pack(&[flat(224, 224)]).atlas;
         assert_eq!((b.side, b.layers()), (256, 1));
-        let p = b.place(224, 224, true, 1).unwrap();
+        let p = b.place(224, 224, true, 1).unwrap().1;
         assert_eq!((b.side, b.layers(), p.layer), (512, 1, 0));
         sound("one layer", &b);
         // The longest side and no layer more: no room.
-        let mut c = Atlas { side: MAX_PAGE, places: vec![], shelves: vec![vec![]] };
+        let mut c = Atlas { side: MAX_PAGE, places: vec![], shelves: vec![vec![]], ..Default::default() };
         assert!((0..4).all(|_| c.place(2048, 2048, true, 1).is_some()) && c.place(16, 16, true, 1).is_none());
         assert_eq!((c.side, c.layers(), c.places.len()), (MAX_PAGE, 1, 4), "what found no room left nothing");
         // A shelf with room beside its last, but lower than the texture, is not its place.
         let mut d = pack(&[flat(100, 60)]).atlas;
-        let tall = d.place(60, 150, true, 8).unwrap();
+        let tall = d.place(60, 150, true, 8).unwrap().1;
         assert!((tall.layer, tall.y) != (0, 0), "not on the shelf that is too low: {tall:?}");
-        d.place(200, 60, true, 8).unwrap();
+        d.place(200, 60, true, 8).unwrap().1;
         sound("a tall one beside a low shelf", &d);
         // Pages without a texture take their first.
         let mut e = pack(&[]).atlas;
-        let first = e.place(100, 60, true, 8).unwrap();
+        let first = e.place(100, 60, true, 8).unwrap().1;
         assert_eq!((e.side, first.layer, first.x, first.y), (256, 0, 0, 0));
         sound("the first", &e);
+    }
+
+    /// Freed textures give their slots and rects to the next: the lowest slot first, the smallest rect that holds
+    /// the texture, the rest of it to the next; the pages grow only when the freed room is not enough. Textures come
+    /// and go a thousand times without the pages growing.
+    #[test]
+    fn freed_textures_give_their_room_to_the_next() {
+        let flat = |w: u32, h: u32| tex(w, h, true, |_, _| [9, 9, 9, 255]);
+        let mut a = pack(&[flat(300, 200), flat(100, 60), flat(200, 200)]).atlas;
+        let before = a.places.clone();
+        assert!(a.free(1) && !a.free(1) && !a.free(7) && !a.holds(1));
+        sound("one freed", &a);
+        // A smaller one: slot 1 again, in the room it left (the pages as they were).
+        let (side, layers) = (a.side, a.layers());
+        let (slot, p) = a.place(40, 20, false, 8).unwrap();
+        assert_eq!((slot, p.layer, a.side, a.layers()), (1, 0, side, layers));
+        sound("a smaller one in it", &a);
+        let (slot, _) = a.place(16, 16, false, 8).unwrap();
+        assert_eq!((slot, a.side, a.layers()), (3, side, layers), "a new slot: none is free");
+        sound("another", &a);
+        // Larger than the room freed: a place of its own.
+        a.free(0);
+        let (slot, big) = a.place(600, 600, true, 8).unwrap();
+        assert_eq!(slot, 0);
+        assert!(big.layer > 0 || a.side > side, "{big:?}");
+        sound("a larger one", &a);
+        // GLB places that come and go (textures of 256-2048 a side, as models have them, ten at a time): the pages
+        // stay as large as the most there were at once needs.
+        let mut g = pack(&[]).atlas;
+        let sizes = [(1024, 1024), (2048, 2048), (512, 512), (1024, 1024), (256, 256), (2048, 1024), (512, 512), (1024, 512)];
+        let mut live: std::collections::VecDeque<usize> = Default::default();
+        let mut most = (0, 0);
+        for k in 0..2000usize {
+            let (w, h) = sizes[(k * 7 + k / 3) % sizes.len()];
+            live.push_back(g.place(w, h, true, 64).unwrap().0);
+            if live.len() > 10 {
+                g.free(live.pop_front().unwrap());
+            }
+            if k == 200 {
+                most = (g.side, g.layers());
+            }
+            if k % 199 == 0 {
+                sound(&format!("place {k}"), &g);
+            }
+        }
+        assert!(g.side == most.0 && g.layers() <= most.1 + 1, "the pages grew: {} layers of {} (after 200 places: {} of {})", g.layers(), g.side, most.1, most.0);
+        assert!(g.places.len() <= 11, "slots are taken again: {}", g.places.len());
+        // Any sizes, freed as soon as placed: the freed room is taken again, so the pages stop growing (what the
+        // pieces of a cut cannot hold takes new room for a while; ten thousand rounds after the first thousand add
+        // nothing).
+        let mut after = (0, 0);
+        for k in 0..11000u32 {
+            let (w, h) = (64 + (k * 37) % 400, 64 + (k * 53) % 300);
+            let (s1, _) = a.place(w, h, true, 64).unwrap();
+            let (s2, _) = a.place(h, w, true, 64).unwrap();
+            if k % 997 == 0 {
+                sound(&format!("round {k}"), &a);
+            }
+            a.free(s1);
+            a.free(s2);
+            if k == 999 {
+                after = (a.side, a.layers());
+            }
+        }
+        sound("after them", &a);
+        assert!(a.places.len() <= 6, "slots are taken again: {}", a.places.len());
+        assert_eq!((a.side, a.layers()), after, "the pages grew after the first thousand rounds");
     }
 
     #[test]

@@ -560,10 +560,25 @@ impl Luts {
     /// The sky's radiance per unit of the sun's illuminance above the atmosphere (sr^-1, RGB), seen from
     /// `altitude_km` above the ground in direction `dir`, the sun in direction `sun` (both unit, planet frame: Z up);
     /// without the sun's disk, with multiple scattering and the ground's bounce.
+    /// A viewer above the atmosphere's top sees the air from where the ray enters it, and black space where it does
+    /// not.
     fn sky(&self, a: &Atmosphere, altitude_km: f32, dir: Vec3, sun: Vec3) -> Vec3 {
-        let r = (R_GROUND + altitude_km.max(0.0) as f64).min(R_TOP - 1e-3);
-        let (mu, mu_sun) = ((dir.z as f64).clamp(-1.0, 1.0), (sun.z as f64).clamp(-1.0, 1.0));
+        let r0 = R_GROUND + altitude_km.max(0.0) as f64;
+        let (mu0, mu_sun0) = ((dir.z as f64).clamp(-1.0, 1.0), (sun.z as f64).clamp(-1.0, 1.0));
         let nu = (dir.dot(sun) as f64).clamp(-1.0, 1.0);
+        let top = R_TOP - 1e-3;
+        let (r, mu, mu_sun) = if r0 <= top {
+            (r0, mu0, mu_sun0)
+        } else {
+            // The near crossing of the top's sphere; the ray's zenith cosines (its own, the sun's) there.
+            let disc = r0 * r0 * (mu0 * mu0 - 1.0) + top * top;
+            if mu0 >= 0.0 || disc <= 0.0 {
+                return Vec3::ZERO;
+            }
+            let t = -r0 * mu0 - disc.sqrt();
+            let r = (r0 * r0 + t * t + 2.0 * r0 * mu0 * t).sqrt();
+            (r, ((r0 * mu0 + t) / r).clamp(-1.0, 1.0), ((r0 * mu_sun0 + t * nu) / r).clamp(-1.0, 1.0))
+        };
         let (ray, lands) = Ray::new(r, mu, mu_sun, nu);
         let (by_air, by_haze) = (Atmosphere::phase_rayleigh(nu), a.phase_mie(nu) * a.mie_scattering);
         // Equation 11 of Hillaire 2020: at each point the sun's light scattered once toward the viewer, by the air's
@@ -594,6 +609,20 @@ pub struct SkyBake {
     pub texels: Vec<[f32; 4]>,
     /// Sun illuminance reaching the ground (lux, RGB), i.e. E_sun * T(ground -> sun).
     pub sun_illuminance: Vec3,
+    /// A planet's bake (`Horizon::Planet`): the texture's v at the centre of the row the dipped horizon crosses, the
+    /// limb's row, where the aerial perspective reads the air's light (pathtrace.wgsl `aerial_light`); 0 otherwise.
+    pub horizon_v: f32,
+}
+
+/// Where the bake's sky ends below.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Horizon {
+    /// A flat world's (a scene's ground plane): the level direction, faded as UE's sky light cube fades it.
+    Level,
+    /// A planet's (`SkyAtmosphere.altitude`: the scene's ground is the globe): the horizon dips with the viewer's
+    /// altitude (19.8 degrees at 400 km), black below it, the texel row it crosses covered in proportion (its alpha:
+    /// the share, so that the limb's own radiance can be read back, `SkyBake::horizon_v`).
+    Planet,
 }
 
 /// The sky's size when its sun moves (`desc::Sky::Atmosphere::dynamic`): a bake takes ~1.5 ms of all cores here (~8 ms
@@ -612,7 +641,7 @@ const SKY_LIGHT_CUBE: f32 = 128.0;
 /// sky fades to black across one texel row of the side faces at the horizon (0.9 deg at a face's centre, 0.63 at its
 /// edges). UE's path tracer shows that fade below every horizon (Khronos layer B: the band beyond a 2 km ground plane).
 pub fn bake_atmosphere(a: &Atmosphere, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32) -> SkyBake {
-    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Glow::default(), 0.0)
+    bake_atmosphere_with(a, &Luts::build(a), sun_dir, sun_lux, altitude_m, width, height, Glow::default(), 0.0, Horizon::Level)
 }
 
 /// The atmosphere's transmittance and multiple-scattering tables: they depend on the atmosphere alone, so a sky whose
@@ -653,11 +682,11 @@ impl Glow {
     }
 }
 
-/// `bake_atmosphere` with tables built once (`SkyTables`), plus the night sky's `glow` above the horizon and a cloud
-/// `cover` (0..1, `overcast`).
+/// `bake_atmosphere` with tables built once (`SkyTables`), plus the night sky's `glow` above the horizon, a cloud
+/// `cover` (0..1, `overcast`) and where the sky ends below (`Horizon`).
 #[allow(clippy::too_many_arguments)]
-pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32) -> SkyBake {
-    bake_atmosphere_with(a, &t.0, sun_dir, sun_lux, altitude_m, width, height, glow, cover)
+pub fn bake_atmosphere_tables(a: &Atmosphere, t: &SkyTables, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32, horizon: Horizon) -> SkyBake {
+    bake_atmosphere_with(a, &t.0, sun_dir, sun_lux, altitude_m, width, height, glow, cover, horizon)
 }
 
 /// The sun's illuminance at the ground (lux, RGB) for a sun of `sun_lux` above the atmosphere under a cloud `cover`,
@@ -690,11 +719,13 @@ pub fn cie_overcast(e_h: Vec3, e: f32) -> Vec3 {
 /// illuminance is OVERCAST_TRANSMITTANCE of what the clear sky and sun give the ground (their luminance, white), the
 /// glow at OVERCAST_GLOW x.
 #[allow(clippy::too_many_arguments)]
-fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32) -> SkyBake {
+fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec3, altitude_m: f32, width: u32, height: u32, glow: Glow, cover: f32, horizon: Horizon) -> SkyBake {
     // Planet frame: Z up. Map Y-up world -> planet frame (x, z, y).
     let to_planet = |d: Vec3| Vec3::new(d.x, d.z, d.y);
     let sun_p = to_planet(sun_dir).normalize();
     let altitude_km = (altitude_m / 1000.0).max(0.005);
+    let row = PI / height as f32;
+    let dip = horizon_elevation(altitude_km);
     let texels: Vec<[f32; 4]> = (0..(width * height) as usize)
         .into_par_iter()
         .map(|i| {
@@ -702,6 +733,20 @@ fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec
             let theta = y / height as f32 * PI;
             let phi = (x / width as f32 - 0.5) * 2.0 * PI;
             let d = Vec3::new(theta.sin() * phi.sin(), theta.cos(), -theta.sin() * phi.cos());
+            if horizon == Horizon::Planet {
+                // The share of the texel's row above the dipped horizon; the sky at the row's centre, or just above
+                // the horizon where that is below it (the limb: the air seen edge on, its brightest).
+                let k = ((PI / 2.0 - theta + 0.5 * row - dip) / row).clamp(0.0, 1.0);
+                if k <= 0.0 {
+                    return [0.0, 0.0, 0.0, 0.0];
+                }
+                let e = (PI / 2.0 - theta).max(dip + 1e-4);
+                let flat = Vec3::new(phi.sin(), 0.0, -phi.cos());
+                let dir = flat * e.cos() + Vec3::Y * e.sin();
+                let l = luts.sky(a, altitude_km, to_planet(dir), sun_p);
+                let l = (l * sun_lux + glow.at(e)) * k;
+                return [l.x, l.y, l.z, k];
+            }
             // Texel rows above the horizon on the side face this direction falls on; within half a row of it the
             // value blends the first row's centre with the black row below.
             let side = d.x.abs().max(d.z.abs()).max(1e-6);
@@ -742,10 +787,86 @@ fn bake_atmosphere_with(a: &Atmosphere, luts: &Luts, sun_dir: Vec3, sun_lux: Vec
             *t = [l.x, l.y, l.z, t[3]];
         }
     }
+    // (A planet's limb row keeps its share in alpha, `Horizon::Planet`.)
+    let planet = horizon == Horizon::Planet;
     for t in &mut texels {
-        t[3] = 1.0;
+        t[3] = if planet && t[3] > 0.0 { t[3] } else { 1.0 };
     }
-    SkyBake { width, height, texels, sun_illuminance: sun_illuminance(a, sun_dir, sun_lux, cover) }
+    // (The row the horizon's zenith angle falls in; on a row's edge, the row above it, wholly sky.)
+    let horizon_v = if planet { ((((PI / 2.0 - dip) / row).ceil() - 1.0).clamp(0.0, height as f32 - 1.0) + 0.5) / height as f32 } else { 0.0 };
+    SkyBake { width, height, texels, sun_illuminance: sun_illuminance(a, sun_dir, sun_lux, cover), horizon_v }
+}
+
+// ------------------------------------------------------------------------------------------------ aerial perspective
+//
+// The kernel's aerial perspective on a planet (pathtrace.wgsl `aerial_planet`, F_AERIAL with an altitude): the air's
+// columns along a segment over a sphere of radius R_GROUND, the viewer `altitude` above it and its centre straight
+// below the camera. This is its reference, line by line in single precision, which the tests hold to a quadrature.
+//
+// The column of a density exp(-h / H) from a point at altitude h, radius r = R + h, along a ray of zenith cosine
+// mu >= 0 to infinity is H exp(-h / H) Ch(x, mu), x = r / H, with Ch Chapman's grazing-incidence function (Chapman
+// 1931, "The absorption and ionising effect of monochromatic radiation in an atmosphere on a rotating earth"). With
+// the altitude along the ray to second order, h(s) = h + mu s + s^2 / (2 r), the integral is Gaussian:
+// Ch(x, mu) = sqrt(pi x / 2) erfcx(mu sqrt(x / 2)), erfcx(y) = exp(y^2) erfc(y) (1 at mu = 0, sqrt(pi x / 2) there,
+// and 1 / mu for a steep ray). erfcx is the bound of Abramowitz & Stegun 1964, 7.1.13, 2 / sqrt(pi) / (y +
+// sqrt(y^2 + 4 / pi)), with a term a y under the root that makes its slope at 0 exact (a = 4 (4 / pi - 1) / sqrt(pi):
+// a level ray's column then changes along it as the density, so that short level segments at the ground are right)
+// and a factor 1 + b y^2 / (1 + c y^3) (own fit, b = 0.0295, c = 0.312): within 0.42 % for y >= 0, where the bound
+// itself is 5.8 % off.
+// A segment from a to b is a difference of such columns: both ends' columns onward when the ray climbs all along it,
+// both ends' columns backward when it descends all along it, and when it passes its lowest point p between them,
+// twice p's level column less the two ends' outward ones.
+
+/// erfcx(y) = exp(y^2) erfc(y), y >= 0 (above).
+fn erfcx_approx(y: f32) -> f32 {
+    1.128_379_2 / (y + (y * y + 0.616_635_6 * y + 1.273_239_5).sqrt()) * (1.0 + 0.0295 * y * y / (1.0 + 0.312 * y * y * y))
+}
+
+/// The column (m at sea-level density) from altitude `h` m along zenith cosine `mu` (>= 0) to infinity, scale height
+/// `scale` m.
+fn aerial_column(h: f32, mu: f32, scale: f32) -> f32 {
+    let x = (R_GROUND as f32 * 1000.0 + h) / scale;
+    scale * (-h.max(-500.0) / scale).exp() * (0.5 * PI * x).sqrt() * erfcx_approx(mu.max(0.0) * (0.5 * x).sqrt())
+}
+
+/// A point's altitude and the zenith cosine of direction `d` there: `q` the point less the camera, `h0` the camera's
+/// altitude (the planet's centre at (0, -(R + h0), 0) from the camera). Small terms first, so that the altitude keeps
+/// its precision a planet's radius from the centre.
+fn aerial_at(q: Vec3, d: Vec3, h0: f32) -> (f32, f32) {
+    let r0 = R_GROUND as f32 * 1000.0;
+    let up = q.y + h0;
+    let s2 = q.x * q.x + q.z * q.z;
+    let y = up + r0;
+    let r = (y * y + s2).sqrt();
+    (up + s2 / (r + y), (q.x * d.x + y * d.y + q.z * d.z) / r)
+}
+
+/// The air's and the haze's columns (m at sea-level density; scale heights 8 km and 1.2 km) from `q` (the point less
+/// the camera) along `d` for `t` m, the camera `h0` m above the planet.
+pub fn aerial_columns(q: Vec3, d: Vec3, t: f32, h0: f32) -> [f32; 2] {
+    let (ha, ma) = aerial_at(q, d, h0);
+    let (hb, mb) = aerial_at(q + d * t, d, h0);
+    // How far along the ray its lowest point is.
+    let r0 = R_GROUND as f32 * 1000.0;
+    let lowest = -(q.x * d.x + (q.y + h0 + r0) * d.y + q.z * d.z);
+    let (hp, _) = aerial_at(q + d * lowest.clamp(0.0, t), d, h0);
+    [8000.0, 1200.0].map(|scale| {
+        let od = if lowest <= 0.0 {
+            aerial_column(ha, ma, scale) - aerial_column(hb, mb, scale)
+        } else if lowest >= t {
+            aerial_column(hb, -mb, scale) - aerial_column(ha, -ma, scale)
+        } else {
+            2.0 * aerial_column(hp, 0.0, scale) - aerial_column(ha, -ma, scale) - aerial_column(hb, mb, scale)
+        };
+        od.max(0.0)
+    })
+}
+
+/// The elevation of a planet's horizon (radians, negative: it dips) for a viewer `altitude_km` above the ground's
+/// sphere: -acos(R / (R + h)), as an arcsine that keeps its precision near the ground.
+pub fn horizon_elevation(altitude_km: f32) -> f32 {
+    let (r, h) = (R_GROUND, altitude_km.max(0.0) as f64);
+    (-(h * (2.0 * r + h)).sqrt() / (r + h)).asin() as f32
 }
 
 /// Analytic dome for night / overcast scenes (UE session: gradient + light-pollution glow + clouds as a sky light).
@@ -872,7 +993,7 @@ pub fn bake_gradient(g: &Gradient, width: u32, height: u32) -> SkyBake {
             [l.x, l.y, l.z, 1.0]
         })
         .collect();
-    SkyBake { width, height, texels, sun_illuminance: Vec3::ZERO }
+    SkyBake { width, height, texels, sun_illuminance: Vec3::ZERO, horizon_v: 0.0 }
 }
 
 #[cfg(test)]
@@ -885,8 +1006,8 @@ mod overcast_tests {
         let t = SkyTables::new(&a);
         let (sun, lux) = (Vec3::new(0.3, 0.5, -0.8).normalize(), Vec3::splat(100_000.0));
         let (w, h) = (256u32, 128u32);
-        let clear = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.0);
-        let oc = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 1.0);
+        let clear = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.0, Horizon::Level);
+        let oc = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 1.0, Horizon::Level);
         let lum = |v: [f32; 4]| 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
         // Horizontal illuminance of a bake (+ its sun).
         let e_h = |b: &SkyBake| -> f32 {
@@ -915,7 +1036,7 @@ mod overcast_tests {
             assert!((c[0] - c[2]).abs() < 1e-3 * c[1], "{c:?}");
         }
         // Half cover: halfway in every texel, the sun at half.
-        let half = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.5);
+        let half = bake_atmosphere_tables(&a, &t, sun, lux, 10.0, w, h, Glow::default(), 0.5, Horizon::Level);
         assert!((half.sun_illuminance - clear.sun_illuminance * 0.5).length() < 1e-3 * clear.sun_illuminance.length());
         let k = (ten * w + 7) as usize;
         assert!((lum(half.texels[k]) - 0.5 * (lum(clear.texels[k]) + lum(oc.texels[k]))).abs() < 1e-3 * lum(clear.texels[k]));
@@ -940,6 +1061,151 @@ mod atmosphere_tests {
     }
     fn luminance(v: Vec3) -> f32 {
         0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z
+    }
+
+    /// From above the atmosphere (`SkyAtmosphere.altitude` up to low orbit): space is black, up and below the limb; the
+    /// limb, the air seen edge on just above the dipped horizon, is lit and blue by day; and the sky does not jump as the
+    /// viewer crosses the atmosphere's top.
+    #[test]
+    fn sky_from_space() {
+        let (a, luts) = (earth(), Luts::build(&earth()));
+        let sun = planet(40.0, 0.0);
+        let dip = horizon_elevation(400.0).to_degrees();
+        assert!((dip + 19.83).abs() < 0.05, "{dip}");
+        // The top's tangent from 400 km: acos(6460 / 6760) = 17.1 degrees down.
+        let top = -(R_TOP / (R_GROUND + 400.0)).acos().to_degrees() as f32;
+        for az in [0.0, 90.0, 180.0] {
+            assert_eq!(luts.sky(&a, 400.0, planet(90.0, az), sun), Vec3::ZERO);
+            assert_eq!(luts.sky(&a, 400.0, planet(top + 0.2, az), sun), Vec3::ZERO);
+            // Below the horizon the ray ends on the globe (the bake blacks it out: `Horizon::Planet`).
+            let limb = luts.sky(&a, 400.0, planet(dip + 0.1, az), sun);
+            assert!(luminance(limb) > 0.01 && limb.z > limb.x, "{az}: {limb:?}");
+            // Thinner higher up the limb.
+            let high = luts.sky(&a, 400.0, planet(dip + 1.5, az), sun);
+            assert!(luminance(high) < 0.5 * luminance(limb), "{az}: {high:?} {limb:?}");
+        }
+        // Across the top: 99.9 and 100.1 km see the same sky (within the change 200 m of height makes).
+        for (e, az) in [(90.0, 0.0), (10.0, 0.0), (-5.0, 180.0), (-10.2, 90.0)] {
+            let (below, above) = (luts.sky(&a, 99.9, planet(e, az), sun), luts.sky(&a, 100.1, planet(e, az), sun));
+            let tol = 0.03 * luminance(below).max(luminance(above)) + 1e-6;
+            assert!((luminance(below) - luminance(above)).abs() <= tol, "{e} {az}: {below:?} {above:?}");
+        }
+    }
+
+    /// A planet's bake: black below the dipped horizon and in space above the limb, the limb's row covered in
+    /// proportion with its share in alpha (`SkyBake::horizon_v`), so that the air's light reads back whole.
+    #[test]
+    fn planet_bake_dips_its_horizon() {
+        let a = earth();
+        let t = SkyTables::new(&a);
+        let (w, h) = DYNAMIC_SKY;
+        for altitude_km in [0.002f32, 10.0, 400.0, 2000.0] {
+            let b = bake_atmosphere_tables(&a, &t, sun_at(30.0), Vec3::splat(120_000.0), altitude_km * 1000.0, w, h, Glow::default(), 0.0, Horizon::Planet);
+            let dip = horizon_elevation(altitude_km.max(0.005));
+            let row_of = |v: f32| (v * h as f32).floor() as u32;
+            let limb = row_of(b.horizon_v);
+            let elevation = |y: u32| PI / 2.0 - (y as f32 + 0.5) / h as f32 * PI;
+            assert!(elevation(limb) - 0.5 * PI / h as f32 <= dip + 1e-5 && dip < elevation(limb) + 0.5 * PI / h as f32 + 1e-5, "{altitude_km}: row {limb}");
+            for y in 0..h {
+                let row = &b.texels[(y * w) as usize..((y + 1) * w) as usize];
+                let lum: f32 = row.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).sum::<f32>() / w as f32;
+                if y > limb {
+                    assert_eq!(lum, 0.0, "{altitude_km}: row {y} below the horizon");
+                } else if y == limb {
+                    assert!(lum > 0.0 && row.iter().all(|t| t[3] > 0.0 && t[3] <= 1.0), "{altitude_km}: the limb's row");
+                } else {
+                    assert!(row.iter().all(|t| t[3] == 1.0));
+                }
+                // Above the top's tangent from orbit: space.
+                if altitude_km > 100.0 && elevation(y) > -(R_TOP / (R_GROUND + altitude_km as f64)).acos() as f32 + 0.03 {
+                    assert_eq!(lum, 0.0, "{altitude_km}: row {y} in space");
+                }
+            }
+            // Read back whole: the limb row's light over its share is the sky just above the horizon.
+            let i = (limb * w + w / 2) as usize;
+            let back = Vec3::new(b.texels[i][0], b.texels[i][1], b.texels[i][2]) / b.texels[i][3];
+            assert!(back.z > 0.0, "{altitude_km}: {back:?}");
+        }
+        // The flat world's bake is as it was: alpha 1, black from just under the level horizon.
+        let flat = bake_atmosphere_tables(&a, &t, sun_at(30.0), Vec3::ONE, 400_000.0, w, h, Glow::default(), 0.0, Horizon::Level);
+        assert!(flat.horizon_v == 0.0 && flat.texels.iter().all(|t| t[3] == 1.0));
+    }
+
+    /// The kernel's haze on a planet (pathtrace.wgsl `aerial_light`): (1 - T) of the limb's radiance in the ray's
+    /// azimuth (the bake's limb row), against the medium's own light scattered toward a viewer 10-400 km up along rays
+    /// that end on the ground (the sky's march over a black ground): within 0.5-1.8 x (in luminance): over where the limb is
+    /// toward the sun (the haze's forward peak) and the ray steep, under for rays that graze the globe near its horizon from orbit.
+    #[test]
+    fn planet_haze_is_the_airs_light() {
+        let a = Atmosphere::earth(1.0, 1.0, 0.8, Vec3::ZERO);
+        let luts = Luts::build(&a);
+        let sun = planet(30.0, 0.0);
+        for h in [10.0f32, 100.0, 400.0] {
+            let dip = horizon_elevation(h).to_degrees();
+            for az in [0.0f32, 90.0, 180.0] {
+                let limb = luts.sky(&a, h, planet(dip + 0.05, az), sun);
+                for e in [-90.0f32, -60.0, -30.0, dip - 2.0] {
+                    let d = planet(e, az);
+                    let air = luts.sky(&a, h, d, sun);
+                    let r = (R_GROUND + h as f64).min(R_TOP - 1e-3);
+                    let (_, t) = Luts::march(&a, Ray::new(r, d.z as f64, sun.z as f64, d.dot(sun) as f64).0, 64, |_, _, _| [0.0; 3]);
+                    let haze = Vec3::new(1.0 - t[0] as f32, 1.0 - t[1] as f32, 1.0 - t[2] as f32) * limb;
+                    let ratio = luminance(haze) / luminance(air);
+                    assert!((0.5..1.8).contains(&ratio), "{h} km, azimuth {az}, elevation {e}: {haze:?} against {air:?}");
+                }
+            }
+        }
+    }
+
+    /// The air's columns along a path over the planet (`aerial_columns`, the kernel's `aerial_planet`) against a
+    /// quadrature of the densities over the exact sphere: from the street to 2,000 km up, segments of 10 m to the
+    /// globe's far side, climbing, descending and passing their lowest point.
+    #[test]
+    fn aerial_columns_over_the_planet() {
+        let r = R_GROUND * 1000.0;
+        let exact = |h0: f64, q: glam::DVec3, d: glam::DVec3, t: f64| -> [f64; 2] {
+            let c = glam::DVec3::new(0.0, -(r + h0), 0.0);
+            let n = 200_000;
+            [8000.0, 1200.0].map(|scale| {
+                let f = |s: f64| (-(((q + d * s) - c).length() - r).max(-500.0) / scale).exp();
+                let hstep = t / n as f64;
+                let mut sum = f(0.0) + f(t);
+                for i in 1..n {
+                    sum += f(i as f64 * hstep) * if i % 2 == 1 { 4.0 } else { 2.0 };
+                }
+                sum * hstep / 3.0
+            })
+        };
+        // Blue Rayleigh and Mie extinction at sea level (per m).
+        let tr = |c: [f64; 2]| (-(33.1e-6 * c[0] + 4.44e-6 * c[1])).exp();
+        let mut worst = 0.0f64;
+        for h0 in [2.0f64, 300.0, 3000.0, 12_000.0, 100_000.0, 400_000.0, 2_000_000.0] {
+            for elevation in [-90.0f64, -60.0, -30.0, -10.0, -3.0, -1.0, 0.0, 1.0, 5.0, 30.0] {
+                let e = elevation.to_radians();
+                let d = glam::DVec3::new(e.cos() * 0.6, e.sin(), -e.cos() * 0.8);
+                for q in [glam::DVec3::ZERO, glam::DVec3::new(3000.0, -h0.min(2000.0) * 0.5, 1000.0)] {
+                    // To the ground, or this far.
+                    let c = glam::DVec3::new(0.0, -(r + h0), 0.0);
+                    let oc = q - c;
+                    let b = oc.dot(d);
+                    let disc = b * b - (oc.length_squared() - r * r);
+                    let ground = if disc > 0.0 && -b - disc.sqrt() > 0.0 { Some(-b - disc.sqrt()) } else { None };
+                    for t in [10.0f64, 1000.0, 10_000.0, 100_000.0, 1_000_000.0, 3_000_000.0] {
+                        let t = ground.map_or(t, |g| t.min(g));
+                        let (want, got) = (exact(h0, q, d, t), aerial_columns(q.as_vec3(), d.as_vec3(), t as f32, h0 as f32));
+                        let got = [got[0] as f64, got[1] as f64];
+                        let err = (tr(want) - tr(got)).abs();
+                        worst = worst.max(err);
+                        assert!(err < 0.005, "h0 {h0} e {elevation} q {q} t {t}: exact {want:?} model {got:?} (transmittance {} / {})", tr(want), tr(got));
+                    }
+                }
+            }
+        }
+        println!("aerial columns: transmittance within {worst:.4}");
+        // From 400 km the air thins out: straight down, three quarters of the blue light comes through (the flat
+        // model with the camera at y = 0 has the whole 400 km at sea-level density: none).
+        let down = aerial_columns(Vec3::ZERO, Vec3::NEG_Y, 400_000.0, 400_000.0);
+        assert!((0.7..0.8).contains(&tr([down[0] as f64, down[1] as f64])), "{down:?}");
     }
 
     #[test]
@@ -1160,7 +1426,7 @@ mod atmosphere_tests {
         let t = SkyTables::new(&a);
         let (w, h) = DYNAMIC_SKY;
         for elevation in [60.0f32, 10.0, 2.0, -3.0] {
-            let bake = bake_atmosphere_tables(&a, &t, sun_at(elevation), Vec3::ONE, 0.0, w, h, Glow::default(), 0.0);
+            let bake = bake_atmosphere_tables(&a, &t, sun_at(elevation), Vec3::ONE, 0.0, w, h, Glow::default(), 0.0, Horizon::Level);
             assert!(bake.texels.iter().all(|t| t.iter().all(|v| v.is_finite() && *v >= 0.0)));
             // (The sun is at u = 0.75: the meridians a quarter turn from it and opposite it.)
             for column in [0, w / 4, w / 2] {
@@ -1473,14 +1739,14 @@ mod atmosphere_tests {
             println!("{name}: tables (SkyTables::new) {:.1} ms", best(15, &|| { SkyTables::new(&a); }));
             let t = SkyTables::new(&a);
             for e in [60.0, 10.0, -3.0] {
-                println!("{name}: bake_atmosphere_tables, sun at {e:3}: 256 x 128 {:.1} ms, 1024 x 512 {:.1} ms", best(15, &|| { bake_atmosphere_tables(&a, &t, sun_at(e), Vec3::ONE, 0.0, 256, 128, Glow::default(), 0.0); }), best(5, &|| { bake_atmosphere_tables(&a, &t, sun_at(e), Vec3::ONE, 0.0, 1024, 512, Glow::default(), 0.0); }));
+                println!("{name}: bake_atmosphere_tables, sun at {e:3}: 256 x 128 {:.1} ms, 1024 x 512 {:.1} ms", best(15, &|| { bake_atmosphere_tables(&a, &t, sun_at(e), Vec3::ONE, 0.0, 256, 128, Glow::default(), 0.0, Horizon::Level); }), best(5, &|| { bake_atmosphere_tables(&a, &t, sun_at(e), Vec3::ONE, 0.0, 1024, 512, Glow::default(), 0.0, Horizon::Level); }));
             }
         };
         run("all cores");
         rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap().install(|| run("3 threads"));
         rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| {
             let t = SkyTables::new(&a);
-            let small = best(300, &|| { bake_atmosphere_tables(&a, &t, sun_at(10.0), Vec3::ONE, 0.0, 64, 32, Glow::default(), 0.0); });
+            let small = best(300, &|| { bake_atmosphere_tables(&a, &t, sun_at(10.0), Vec3::ONE, 0.0, 64, 32, Glow::default(), 0.0, Horizon::Level); });
             println!("one thread: 64 x 32 {small:.3} ms, so 256 x 128 is {:.1} ms of one core and 1024 x 512 {:.0} ms; tables {:.0} ms of one core", small * 16.0, small * 256.0, best(5, &|| { SkyTables::new(&a); }));
         });
     }

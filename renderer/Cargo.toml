@@ -47,9 +47,9 @@ rquickjs = "0.12"
 base64 = "0.23"
 
 # The `threert-render` binary's sockets and HTTP, for the games its window runs (src/net.rs: the `net.*` messages of
-# the host channel, docs/RUNTIME.md). Only the binary uses them, and only with the `net` feature: the library has no
-# network in it, and a program that embeds the library leaves them out with `default-features = false` (the browser
-# module does). TLS is rustls with the ring provider and the webpki roots: no system TLS library.
+# the host channel, docs/RUNTIME.md), with the `net` feature; ureq and rustls also with `assets` (src/assets.rs, the
+# library's one piece with network). A program that embeds the library without them sets `default-features = false`
+# (the browser module does). TLS is rustls with the ring provider and the webpki roots: no system TLS library.
 tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls", "gzip"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
@@ -101,7 +101,10 @@ default = ["net", "audio"]
 audio = ["dep:symphonia", "dep:cpal", "dep:libloading"]
 # WebSockets and HTTP in `threert-render play` (above). Without it the window answers every `net.*` request with a
 # failure that says so.
-net = ["dep:tungstenite", "dep:ureq", "dep:rustls"]
+net = ["dep:tungstenite", "assets"]
+# `assets.*` on the host channel as a library piece (src/assets.rs: `AssetFetcher`, downloads into the asset root's
+# cache/ for any app that holds a GameSession; docs/RUNTIME.md "Assets"): ureq on rustls. On with `net`.
+assets = ["dep:ureq", "dep:rustls"]
 # Intel Open Image Denoise (needs OIDN_DIR at build time and the shared libs at runtime).
 oidn = ["dep:oidn"]
 # NVIDIA DLSS Super Resolution (needs DLSS_SDK and VULKAN_SDK at build time).

@@ -14,6 +14,8 @@ pub mod files;
 pub mod gpu;
 pub mod heap;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "assets")]
+pub mod assets;
 pub mod host;
 pub mod indexed;
 pub mod live;
@@ -925,24 +927,30 @@ pub struct SkyBaked {
     pub color: Vec3,
     pub has_env: bool,
     pub sun: Option<Vec3>,
+    /// A planet's limb row (`sky::SkyBake::horizon_v`), 0 otherwise: `Params::sky_color[3]`.
+    pub horizon_v: f32,
 }
 
-/// Bakes a scene's sky (`cloud_cover`: an atmosphere's; `altitude`: the camera's, m). The last atmosphere and the last
-/// gradient are kept: edits that leave the sky's inputs as they were reuse the bake.
+/// Bakes a scene's sky (`cloud_cover`: an atmosphere's; `altitude`: the camera's, m, unless the sky names a planet's
+/// own). The last atmosphere and the last gradient are kept: edits that leave the sky's inputs as they were reuse the
+/// bake.
 pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBaked {
     match sky {
-        scene::SkyData::Atmosphere { sun_dir, sun_lux, rayleigh, mie, g: mie_g, ground, dynamic, glow, .. } => {
+        scene::SkyData::Atmosphere { sun_dir, sun_lux, rayleigh, mie, g: mie_g, ground, dynamic, glow, altitude: planet } => {
             static LAST: std::sync::Mutex<Option<(Vec<u32>, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
-            let alt = altitude;
+            let (alt, horizon) = match planet {
+                Some(a) => (*a, sky::Horizon::Planet),
+                None => (altitude, sky::Horizon::Level),
+            };
             let (bw, bh) = if *dynamic { sky::DYNAMIC_SKY } else { (1024, 512) };
-            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32, cloud_cover].iter().map(|f| f.to_bits()).collect();
+            let key: Vec<u32> = [*rayleigh, *mie, *mie_g, ground.x, ground.y, ground.z, sun_dir.x, sun_dir.y, sun_dir.z, sun_lux.x, sun_lux.y, sun_lux.z, alt, glow.uniform.x, glow.uniform.y, glow.uniform.z, glow.horizon.x, glow.horizon.y, glow.horizon.z, glow.height, bw as f32, cloud_cover, if planet.is_some() { 1.0 } else { 0.0 }].iter().map(|f| f.to_bits()).collect();
             let mut last = LAST.lock().unwrap();
             let bake = match last.as_ref() {
                 Some((k, b)) if *k == key => b.clone(),
                 _ => {
                     let atm = sky::Atmosphere::earth(*rayleigh, *mie, *mie_g, *ground);
-                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() || cloud_cover > 0.0 {
-                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow, cloud_cover)
+                    let b = std::sync::Arc::new(if *dynamic || !glow.is_zero() || cloud_cover > 0.0 || planet.is_some() {
+                        sky::bake_atmosphere_tables(&atm, &sky::SkyTables::new(&atm), *sun_dir, *sun_lux, alt, bw, bh, *glow, cloud_cover, horizon)
                     } else {
                         sky::bake_atmosphere(&atm, *sun_dir, *sun_lux, alt, bw, bh)
                     });
@@ -950,7 +958,7 @@ pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBak
                     b
                 }
             };
-            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: Some(bake.sun_illuminance) }
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: Some(bake.sun_illuminance), horizon_v: bake.horizon_v }
         }
         scene::SkyData::Gradient(gr) => {
             static LAST: std::sync::Mutex<Option<(sky::Gradient, std::sync::Arc<sky::SkyBake>)>> = std::sync::Mutex::new(None);
@@ -963,10 +971,10 @@ pub fn bake_sky(sky: &scene::SkyData, cloud_cover: f32, altitude: f32) -> SkyBak
                     b
                 }
             };
-            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: None }
+            SkyBaked { env: gpu::EnvMap { width: bake.width, height: bake.height, texels: bake.texels.clone() }, color: Vec3::ZERO, has_env: true, sun: None, horizon_v: 0.0 }
         }
-        scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, color: *c, has_env: false, sun: None },
-        scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, color: Vec3::ZERO, has_env: false, sun: None },
+        scene::SkyData::Color(c) => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[c.x, c.y, c.z, 1.0]] }, color: *c, has_env: false, sun: None, horizon_v: 0.0 },
+        scene::SkyData::None => SkyBaked { env: gpu::EnvMap { width: 1, height: 1, texels: vec![[0.0; 4]] }, color: Vec3::ZERO, has_env: false, sun: None, horizon_v: 0.0 },
     }
 }
 
@@ -975,7 +983,7 @@ impl SkyBaked {
     /// light-sampled (`floor`: `Prepared::env_nee_floor`).
     pub fn write(&self, p: &mut gpu::Params, floor: f32) {
         p.env = [if self.has_env { 1.0 } else { 0.0 }, self.env.width as f32, self.env.height as f32, p.env[3]];
-        p.sky_color = [self.color.x, self.color.y, self.color.z, 0.0];
+        p.sky_color = [self.color.x, self.color.y, self.color.z, self.horizon_v];
         p.counts2[1] = sky_sampled(sky_brightest(&self.env, self.color), floor, self.has_env) as u32;
     }
 }

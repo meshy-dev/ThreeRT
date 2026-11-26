@@ -66,6 +66,14 @@ pub(super) struct LoadedScene {
     pub(super) codes_sent: Vec<u32>,
 }
 
+/// A planet's viewer altitude, when the sky has one (`desc::Sky::Atmosphere::altitude`).
+pub(super) fn sky_altitude(sky: &scene::SkyData) -> Option<f32> {
+    match sky {
+        scene::SkyData::Atmosphere { altitude, .. } => *altitude,
+        _ => None,
+    }
+}
+
 /// Cores the sky's worker thread bakes with: the rest stay with the frame (scripts, uploads, the GPU's driver).
 pub(super) const SKY_THREADS: usize = 3;
 
@@ -76,19 +84,26 @@ pub(super) const SKY_THREADS: usize = 3;
 /// trails the sun by one bake (~10–40 ms at `sky::DYNAMIC_SKY`). Lockstep runs wait for it, so they repeat.
 pub(super) struct DynamicSky {
     pub(super) atm: Arc<crate::sky::Atmosphere>,
-    /// (sun direction, sun illuminance above the atmosphere, cloud cover)
-    pub(super) ask: mpsc::Sender<(glam::Vec3, glam::Vec3, f32)>,
-    pub(super) done: mpsc::Receiver<(gpu::EnvMap, Vec<f32>, f32)>,
+    pub(super) ask: mpsc::Sender<SkyAsk>,
+    pub(super) done: mpsc::Receiver<SkyBaked>,
 }
 
+/// A bake asked of the worker: the sun's direction, its illuminance above the atmosphere, the cloud cover, the
+/// viewer's altitude (m: a planet's, `SkyAtmosphere.altitude`, or the camera's when the sky was built).
+pub(super) type SkyAsk = (glam::Vec3, glam::Vec3, f32, f32);
+
+/// What the worker baked: the environment map, its CDF, its brightest texel, the limb's row (`sky::SkyBake::horizon_v`).
+pub(super) type SkyBaked = (gpu::EnvMap, Vec<f32>, f32, f32);
+
 impl DynamicSky {
-    pub(super) fn new(world: &World, (w, h): (u32, u32), altitude: f32) -> Option<DynamicSky> {
-        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, horizon_glow, sun: Some(_), .. } = &world.environment.sky else {
+    pub(super) fn new(world: &World, (w, h): (u32, u32)) -> Option<DynamicSky> {
+        let crate::desc::Sky::Atmosphere { rayleigh_scale, mie_scale, mie_anisotropy, ground_albedo, glow, horizon_glow, sun: Some(_), altitude, .. } = &world.environment.sky else {
             return None;
         };
+        let horizon = if altitude.is_some() { crate::sky::Horizon::Planet } else { crate::sky::Horizon::Level };
         let atm = Arc::new(crate::sky::Atmosphere::earth(*rayleigh_scale, *mie_scale, *mie_anisotropy, glam::Vec3::from(*ground_albedo)));
         let glow = crate::sky::glow_of(glow, horizon_glow);
-        let (ask, asked) = mpsc::channel::<(glam::Vec3, glam::Vec3, f32)>();
+        let (ask, asked) = mpsc::channel::<SkyAsk>();
         let (tx, done) = mpsc::channel();
         let a = atm.clone();
         std::thread::Builder::new()
@@ -99,12 +114,12 @@ impl DynamicSky {
                     Some(p) => p.install(|| crate::sky::SkyTables::new(&a)),
                     None => crate::sky::SkyTables::new(&a),
                 };
-                let bake = |sun: (glam::Vec3, glam::Vec3, f32)| {
-                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, altitude, w, h, glow, sun.2);
+                let bake = |sun: SkyAsk| {
+                    let b = crate::sky::bake_atmosphere_tables(&a, &tables, sun.0, sun.1, sun.3, w, h, glow, sun.2, horizon);
                     let env = gpu::EnvMap { width: b.width, height: b.height, texels: b.texels };
                     let cdf = crate::build_env_cdf(&env);
                     let max = env.texels.iter().map(|t| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).fold(0.0f32, f32::max);
-                    (env, cdf, max)
+                    (env, cdf, max, b.horizon_v)
                 };
                 // The newest sun only: bakes asked for while one ran are stale.
                 while let Ok(mut sun) = asked.recv() {
@@ -255,7 +270,7 @@ pub(super) fn load_scene(g: &gpu::Gpu, world: &World, assets: &Path, presets: &P
         let _ = g.kernel_pass(&up.kernel, "media_composite");
     }
     let env = Environment {
-        sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sc.camera.position.y.max(0.0), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
+        sky: SkyState { map: (prep.env.width, prep.env.height), altitude: sky_altitude(&sc.sky).unwrap_or(sc.camera.position.y.max(0.0)), floor: prep.env_nee_floor, cover: sc.environment.cloud_cover, worker: None },
         settings: sc.environment.clone(),
     };
     let view = ViewState::new(&sc.camera, Arc::new(sc.preset.clone()));

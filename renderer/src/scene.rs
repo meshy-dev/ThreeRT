@@ -561,8 +561,9 @@ impl EnvSettings {
 pub enum SkyData {
     None,
     Color(Vec3),
-    /// `dynamic`: baked at `sky::DYNAMIC_SKY` (the live view re-bakes it as the sun moves); `glow`: night-sky radiance.
-    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, dynamic: bool, glow: crate::sky::Glow },
+    /// `dynamic`: baked at `sky::DYNAMIC_SKY` (the live view re-bakes it as the sun moves); `glow`: night-sky radiance;
+    /// `altitude`: a planet's viewer altitude (m, `desc::Sky::Atmosphere::altitude`), or a flat world's sky.
+    Atmosphere { sun_dir: Vec3, sun_lux: Vec3, rayleigh: f32, mie: f32, g: f32, ground: Vec3, dynamic: bool, glow: crate::sky::Glow, altitude: Option<f32> },
     Gradient(crate::sky::Gradient),
 }
 
@@ -698,6 +699,9 @@ pub struct Retained {
     /// A model file's material -> `materials` index: by (the file, with its functions if it has any; the material's
     /// index in the file, usize::MAX for the file's default one).
     pub asset_materials: HashMap<(String, usize), u32>,
+    /// `materials` entries of files no model is left of (live/edits.rs `retire_models`): the next file's materials
+    /// take them.
+    pub free_materials: Vec<u32>,
     /// Object -> where what it draws landed (`Proxy`): meshes, models, rect-light cards, instanced objects.
     pub proxies: HashMap<u32, Proxy>,
     /// Object of each `lights` entry, same order (`prepare` sorts both).
@@ -1390,7 +1394,7 @@ pub const MEDIUM_HIDDEN: u32 = 2;
 pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Result<(SkyData, Option<u32>)> {
     let mut sun_id = None;
     let sky = match &w.environment.sky {
-        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, .. } => {
+        Sky::Atmosphere { sun, ground_albedo, rayleigh_scale, mie_scale, mie_anisotropy, dynamic, glow, horizon_glow, altitude, .. } => {
             let sun_light = sun.and_then(|s| w.objects.get(&s).map(|o| (s, o)));
             let (sun_dir, sun_lux) = match sun_light.map(|(s, o)| (matrix(s), &o.kind)) {
                 Some((m, Kind::Light(Light::Directional { color, intensity, .. }))) => (-m.transform_vector3(Vec3::NEG_Z).normalize(), Vec3::from(*color) * *intensity),
@@ -1406,6 +1410,7 @@ pub fn sky_data(w: &World, assets: &Path, matrix: &dyn Fn(u32) -> Mat4) -> Resul
                 ground: Vec3::from(*ground_albedo),
                 dynamic: *dynamic,
                 glow: crate::sky::glow_of(glow, horizon_glow),
+                altitude: altitude.filter(|a| a.is_finite()).map(|a| a.max(0.0)),
             }
         }
         Sky::Color { color, intensity, .. } if *intensity > 0.0 => SkyData::Color(Vec3::from(*color) * *intensity),
@@ -2142,11 +2147,14 @@ pub fn camera_data(m: Mat4, c: &desc::Camera) -> CameraData {
     }
 }
 
-/// `Params::aerial` for a sky: [density multiple, Rayleigh scale, Mie scale, 0] for an atmosphere with aerial perspective,
-/// zeros otherwise (no F_AERIAL).
+/// `Params::aerial` for a sky: [density multiple, Rayleigh scale, Mie scale, a planet's viewer altitude] for an
+/// atmosphere with aerial perspective, zeros otherwise (no F_AERIAL). The altitude (m, at least 1 mm) turns the
+/// kernel's haze to the planet's sphere (pathtrace.wgsl `aerial_planet`); 0: a flat world's.
 pub fn aerial_params(sky: &Sky) -> [f32; 4] {
     match sky {
-        Sky::Atmosphere { aerial, rayleigh_scale, mie_scale, .. } if *aerial > 0.0 => [*aerial, *rayleigh_scale, *mie_scale, 0.0],
+        Sky::Atmosphere { aerial, rayleigh_scale, mie_scale, altitude, .. } if *aerial > 0.0 => {
+            [*aerial, *rayleigh_scale, *mie_scale, altitude.filter(|a| a.is_finite()).map_or(0.0, |a| a.max(1e-3))]
+        }
         _ => [0.0; 4],
     }
 }

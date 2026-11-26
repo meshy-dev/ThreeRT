@@ -798,6 +798,9 @@ impl LiveCore {
                 }
             }
         }
+        // Files no model is left of: their materials retired, the textures no material names any more freed, before
+        // what this commit adds takes room (the place that replaces another takes its entries and its slots).
+        let retired = !changes.structural && self.retire_models(world, &changes);
         // The textures the new and the changed materials name: those the pages have not got are placed in them now;
         // a texture that was replaced has its materials made again.
         if !changes.structural && (!changes.new_materials.is_empty() || !changes.materials.is_empty() || !changes.textures.is_empty()) {
@@ -1014,6 +1017,9 @@ impl LiveCore {
             self.env.settings = scene::EnvSettings::of(world);
             self.env.settings.write(&mut self.sc.base);
         }
+        if changes.altitude && !changes.sky && !changes.structural && !self.move_altitude(world)? {
+            changes.structural = true;
+        }
         if changes.sky && !changes.structural && !self.apply_sky(world)? {
             self.fallback = Some("a sky whose map does not fit the scene's buffers in place".into());
             self.fallbacks += 1;
@@ -1074,7 +1080,7 @@ impl LiveCore {
             }
             return Ok(true);
         };
-        if d.materials {
+        if d.materials || retired {
             self.upload_materials();
         }
         if d.materials || changes.functions {
@@ -1196,7 +1202,7 @@ impl LiveCore {
     pub(super) fn move_sun(&mut self, world: &World) {
         let Some((id, dir, lux)) = scene::atmosphere_sun(world) else { return };
         if self.env.sky.worker.is_none() {
-            self.env.sky.worker = DynamicSky::new(world, self.env.sky.map, self.env.sky.altitude);
+            self.env.sky.worker = DynamicSky::new(world, self.env.sky.map);
         }
         let Some(sky) = self.env.sky.worker.as_ref() else { return };
         let cover = self.env.settings.cloud_cover;
@@ -1205,7 +1211,7 @@ impl LiveCore {
         if e.set_sun_light(world, id, colour) {
             self.sc.up.put_lights(&self.g.queue, &e.lights);
         }
-        let _ = sky.ask.send((dir, lux, cover));
+        let _ = sky.ask.send((dir, lux, cover, self.env.sky.altitude));
         if self.fixed_dt.is_some() {
             if let Ok(b) = sky.done.recv() {
                 self.put_sky(b);
@@ -1214,13 +1220,31 @@ impl LiveCore {
         self.lit_changed = self.frame.max(1);
     }
 
+    /// A planet's viewer altitude changed (`SkyAtmosphere.altitude`, its sky otherwise the same): the kernel's haze took
+    /// it with the environment's settings already; the sky is re-baked, as for a moving sun (`move_sun`: on the worker
+    /// thread, in place), once the altitude is `ALTITUDE_STEP` from the one it was baked for. A sky without a sun
+    /// bakes here (`apply_sky`).
+    pub(super) fn move_altitude(&mut self, world: &World) -> Result<bool> {
+        let crate::desc::Sky::Atmosphere { altitude: Some(altitude), sun, .. } = &world.environment.sky else { return Ok(true) };
+        let altitude = if altitude.is_finite() { altitude.max(0.0) } else { return Ok(true) };
+        if !altitude_moved(self.env.sky.altitude, altitude) {
+            return Ok(true);
+        }
+        self.env.sky.altitude = altitude;
+        if sun.is_some() && scene::atmosphere_sun(world).is_some() {
+            self.move_sun(world);
+            return Ok(true);
+        }
+        self.apply_sky(world)
+    }
+
     /// Another sky (its kind, its parameters, its sun), as a build takes it: baked here, its environment map and CDF
     /// put in place (of another size: a new texture, the scene bound again), the parameters that say how it is read,
     /// and the lights it owns: the atmosphere's sun takes its colour from the bake, a light that is the sun no longer
     /// its own again. False, with nothing changed, when the map's CDF cannot grow in place (`Gpu::put_env`).
     pub(super) fn apply_sky(&mut self, world: &World) -> Result<bool> {
         let (sky, sun) = scene::sky_data(world, &self.assets, &|id| world.world_matrix(id))?;
-        let altitude = world.settings.camera.map_or(self.env.sky.altitude, |id| world.world_matrix(id).w_axis.y.max(0.0));
+        let altitude = super::load::sky_altitude(&sky).unwrap_or_else(|| world.settings.camera.map_or(self.env.sky.altitude, |id| world.world_matrix(id).w_axis.y.max(0.0)));
         let cover = self.env.settings.cloud_cover;
         let baked = crate::bake_sky(&sky, cover, altitude);
         if !self.g.put_env(&mut self.sc.up, &baked.env, &crate::build_env_cdf(&baked.env)) {
@@ -1261,11 +1285,13 @@ impl LiveCore {
         }
     }
 
-    pub(super) fn put_sky(&mut self, (env, cdf, max): (gpu::EnvMap, Vec<f32>, f32)) {
+    pub(super) fn put_sky(&mut self, (env, cdf, max, horizon_v): super::load::SkyBaked) {
         // (The worker bakes at the map's size: written in place.)
         if self.env.sky.worker.is_none() || !self.g.put_env(&mut self.sc.up, &env, &cdf) {
             return;
         }
+        // (A planet's limb row moves with the altitude it was baked for: `aerial_light` reads the map's own.)
+        self.sc.base.sky_color[3] = horizon_v;
         // As the load decides it: the sky is light-sampled unless it is negligible next to the emitters (night), or a
         // baked sky is not light-sampled at all (`sky_sampled`).
         self.sc.base.counts2[1] = crate::sky_sampled(max, self.env.sky.floor, true) as u32;
@@ -1622,6 +1648,48 @@ impl LiveCore {
         Ok(())
     }
 
+    /// The materials of the files whose last model left the world in this commit (`Changes::gone_models`, none of
+    /// them back since): out of `asset_materials`, their entries named no texture and given to the next file's
+    /// materials (`Retained::free_materials`; nothing draws with them: their models' instances are gone). Then every
+    /// texture slot no material of the table names is freed (`Gpu::free_textures`): its slot and its place in the
+    /// pages are the next texture's, so places that come and go do not grow the pages. True when a material changed.
+    fn retire_models(&mut self, world: &World, changes: &crate::world::Changes) -> bool {
+        let gone: Vec<&String> = changes.gone_models.iter().filter(|k| !world.models.contains_key(*k)).collect();
+        if gone.is_empty() {
+            return false;
+        }
+        let t = &mut self.sc.tables;
+        let retired: Vec<((String, usize), u32)> = t.retained.asset_materials.iter().filter(|(k, _)| gone.contains(&&k.0)).map(|(k, i)| (k.clone(), *i)).collect();
+        if retired.is_empty() {
+            return false;
+        }
+        for (k, i) in retired {
+            t.retained.asset_materials.remove(&k);
+            if let Some(m) = t.materials.get_mut(i as usize) {
+                m.tex0 = [-1; 4];
+                (m.tex1[0], m.tex1[1]) = (-1, -1);
+                m.uv[2] = 0.0;
+                m.mt = [-1; 8];
+            }
+            t.retained.free_materials.push(i);
+        }
+        // The slots the table's materials name (`GpuMaterial`: tex0, tex1's first two, the transmission map + 1 in
+        // uv.z, the function's slots).
+        let mut named = std::collections::HashSet::new();
+        for m in &t.materials {
+            named.extend(m.tex0.iter().chain(&m.tex1[..2]).chain(&m.mt).copied().filter(|&s| s >= 0));
+            if m.uv[2] >= 1.0 {
+                named.insert(m.uv[2] as i32 - 1);
+            }
+        }
+        let unnamed: Vec<i32> = self.g.texture_slots().into_iter().filter(|s| !named.contains(s)).collect();
+        if let Some(info) = self.g.free_textures(&unnamed) {
+            self.sc.tables.retained.textures.retain(|_, s| !unnamed.contains(s));
+            self.apply_pages(Some(info), None);
+        }
+        true
+    }
+
     /// The pages after textures were placed in them (`Gpu::place_texture`): every texture's rows (`info`, if one was
     /// placed) in the texture table, the kernel's variant that samples textures, and the bind groups again where the
     /// pages (`view`) or the table are another resource now.
@@ -1694,8 +1762,19 @@ impl LiveCore {
                     })
                     .map_err(|e| e.context(format!("{uri}: material {name}")))?;
                 }
-                self.sc.tables.retained.asset_materials.insert(mkey, self.sc.tables.materials.len() as u32);
-                self.sc.tables.materials.push(gm);
+                // (An entry a retired file left, or a new one.)
+                let tables = &mut self.sc.tables;
+                let at = match tables.retained.free_materials.pop() {
+                    Some(i) => {
+                        tables.materials[i as usize] = gm;
+                        i
+                    }
+                    None => {
+                        tables.materials.push(gm);
+                        tables.materials.len() as u32 - 1
+                    }
+                };
+                tables.retained.asset_materials.insert(mkey, at);
                 made = true;
             }
         }
@@ -3345,4 +3424,13 @@ impl LiveCore {
         Ok(())
     }
 
+}
+
+/// How far a planet's viewer altitude moves before the sky is baked again (`LiveCore::move_altitude`): 5 % of it, and
+/// at least 250 m (the sky from the street and from 250 m up differ by less than the bake's own steps).
+pub(super) const ALTITUDE_STEP: (f32, f32) = (0.05, 250.0);
+
+/// Whether the sky baked at `baked` m is stale at `now` m.
+pub(super) fn altitude_moved(baked: f32, now: f32) -> bool {
+    (now - baked).abs() > (ALTITUDE_STEP.0 * baked.max(now)).max(ALTITUDE_STEP.1)
 }

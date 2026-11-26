@@ -210,6 +210,12 @@ pub enum Sky {
         /// density (0 = off; pathtrace.wgsl `aerial_tr`).
         #[serde(default)]
         aerial: f32,
+        /// The viewer's altitude above the ground (m) on a planet whose ground is the scene's globe (`SkyAtmosphere`
+        /// `altitude`): the sky is baked from there, its horizon dipped (`sky::Horizon::Planet`), and the aerial
+        /// perspective runs over the sphere below the camera. Changing it re-bakes in place past a threshold
+        /// (live/edits.rs `move_altitude`). None: a flat world, the sky baked from the camera's height when built.
+        #[serde(default)]
+        altitude: Option<f32>,
     },
     #[serde(rename_all = "camelCase")]
     Color { color: Vec3, intensity: f32, sky_light_intensity: f32 },

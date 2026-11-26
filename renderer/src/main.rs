@@ -239,11 +239,19 @@ fn main() -> Result<()> {
         "view" | "play" => {
             // The window is the app of the game's host channel: its `net.*` messages are this binary's sockets and
             // HTTP (src/net.rs; a build without the `net` feature answers that it has none), its `files.*` and
-            // `store.*` the paths of `--pick` and the store directory (`--store`, where `user:` assets are too).
+            // `store.*` the paths of `--pick` and the store directory (`--store`, where `user:` assets are too), its
+            // `assets.*` downloads into `<--assets>/cache/`, which `readAsset` then reads.
             let a = view::parse_args(&args, &presets)?;
             threert_render::files::set_user_root(Some(&a.store));
             let files = threert_render::userfiles::UserFiles::new(Some(a.store.clone()), Some(threert_render::userfiles::queued_picks(a.pick.clone())));
             let services: Vec<Box<dyn threert_render::host::HostServices>> = vec![Box::new(net::Net::new()), Box::new(files)];
+            // (Any http(s) address, as for `net.*`.)
+            #[cfg(feature = "assets")]
+            let services = {
+                let mut s = services;
+                s.push(Box::new(threert_render::assets::AssetFetcher::new(a.assets.clone()).with_policy(threert_render::assets::http_or_https())));
+                s
+            };
             view::run(a, Box::new(services))?;
         }
         "setup" => {

@@ -2462,18 +2462,18 @@ impl Gpu {
     /// The slot of texture `t` in the uploaded scene's pages; a texture they have not got is placed in them now
     /// (`texpack::Atlas::place`) and its pixels written there, every level. Nothing is packed again: where the pages
     /// have no room they become a texture with a layer more, or a longer side, and what they hold is copied there
-    /// on the GPU. (A texture the scene no longer uses keeps its place until the scene is loaded again.)
+    /// on the GPU. A slot and a rect that a freed texture left (`free_textures`) are taken first.
     pub fn place_texture(&self, t: &crate::scene::Texture) -> Result<PagesEdit> {
         use crate::texpack::{set_key_of, stream_name, MIPS};
         let mut cache = self.pages.lock().unwrap();
         let pages = cache.as_mut().ok_or_else(|| anyhow!("no scene's pages to place a texture in"))?;
-        if let Some(slot) = pages.keys.iter().position(|k| k.0 == t.key) {
+        if let Some(slot) = pages.keys.iter().position(|k| !k.0.is_empty() && k.0 == t.key) {
             return Ok(PagesEdit { slot: slot as i32, info: None, view: None });
         }
         let (side, layers) = (pages.atlas.side, pages.atlas.layers());
         // (On a copy: one that finds no room leaves the pages' record as it was.)
         let mut atlas = pages.atlas.clone();
-        let place = atlas.place(t.width, t.height, t.wrap, self.device.limits().max_texture_array_layers).ok_or_else(|| anyhow!("no room in the texture pages"))?;
+        let (slot, place) = atlas.place(t.width, t.height, t.wrap, self.device.limits().max_texture_array_layers).ok_or_else(|| anyhow!("no room in the texture pages"))?;
         pages.atlas = atlas;
         let mut view = None;
         if (pages.atlas.side, pages.atlas.layers()) != (side, layers) {
@@ -2495,15 +2495,49 @@ impl Gpu {
         if let Some(n) = stream_name(&t.key) {
             pages.streams.push((n.to_string(), place));
         }
-        pages.keys.push((t.key.clone(), t.width, t.height, t.wrap));
+        let k = (t.key.clone(), t.width, t.height, t.wrap);
+        if slot < pages.keys.len() {
+            pages.keys[slot] = k;
+        } else {
+            pages.keys.push(k);
+        }
         pages.key = set_key_of(pages.keys.iter().map(|k| (k.0.as_str(), k.1, k.2, k.3)));
         pages.info = std::sync::Arc::new(pages.atlas.info());
-        Ok(PagesEdit { slot: pages.keys.len() as i32 - 1, info: Some(pages.info.clone()), view })
+        Ok(PagesEdit { slot: slot as i32, info: Some(pages.info.clone()), view })
+    }
+
+    /// Frees the textures in `slots` (no material names them any more): their slots and rects are the next placed
+    /// textures' (`texpack::Atlas::free`), their rows zeros. The texture table's rows as they are now, if any was
+    /// freed. A stream's texture is never freed (its name keeps it).
+    pub fn free_textures(&self, slots: &[i32]) -> Option<std::sync::Arc<Vec<[f32; 4]>>> {
+        let mut cache = self.pages.lock().unwrap();
+        let pages = cache.as_mut()?;
+        let mut freed = false;
+        for &slot in slots {
+            let s = slot as usize;
+            if slot < 0 || !pages.atlas.holds(s) || crate::texpack::stream_name(&pages.keys[s].0).is_some() {
+                continue;
+            }
+            pages.atlas.free(s);
+            pages.keys[s] = (String::new(), 0, 0, false);
+            freed = true;
+        }
+        if !freed {
+            return None;
+        }
+        pages.key = crate::texpack::set_key_of(pages.keys.iter().map(|k| (k.0.as_str(), k.1, k.2, k.3)));
+        pages.info = std::sync::Arc::new(pages.atlas.info());
+        Some(pages.info.clone())
+    }
+
+    /// The slots that hold a texture now.
+    pub fn texture_slots(&self) -> Vec<i32> {
+        self.pages.lock().unwrap().as_ref().map_or_else(Vec::new, |p| (0..p.atlas.places.len()).filter(|&s| p.atlas.holds(s)).map(|s| s as i32).collect())
     }
 
     /// The slot of the texture of `key` (`scene::Texture::key_of`) in the uploaded scene's pages, if they have it.
     pub fn texture_slot(&self, key: &str) -> Option<i32> {
-        self.pages.lock().unwrap().as_ref()?.keys.iter().position(|k| k.0 == key).map(|s| s as i32)
+        self.pages.lock().unwrap().as_ref()?.keys.iter().position(|k| !k.0.is_empty() && k.0 == key).map(|s| s as i32)
     }
 
     /// New pixels for the texture in `slot`, written over the old ones in the pages: where their size in the pages
@@ -2512,7 +2546,7 @@ impl Gpu {
     pub fn rewrite_texture(&self, slot: i32, t: &crate::scene::Texture) -> bool {
         let mut cache = self.pages.lock().unwrap();
         let Some(pages) = cache.as_mut() else { return false };
-        let Some(place) = pages.atlas.places.get(slot as usize).copied() else { return false };
+        let Some(place) = pages.atlas.places.get(slot as usize).copied().filter(|_| pages.atlas.holds(slot as usize)) else { return false };
         if crate::texpack::content_size(t.width, t.height) != place.size || t.wrap != place.wrap || crate::texpack::stream_name(&t.key).is_some() {
             return false;
         }

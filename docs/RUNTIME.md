@@ -383,6 +383,7 @@ Messages a game posts:
 | `hud` | `hud` | draws the HUD it describes ("HUD", below). `hud.set` posts it; a game does not post it by hand |
 | `audio.*` | below | plays sound ("Sound", below), with the engine's `audio` module. `audio.play` and the rest post them |
 | `files.*`, `store.*` | below | reads what the player picked, keeps the game's files on the device ("Files", below); each request answered once |
+| `assets.fetch`, `assets.cancel` | below | downloads a file into the asset root's `cache/`, which `readAsset` then reads ("Assets", below) |
 
 Messages an app sends:
 
@@ -392,8 +393,9 @@ Messages an app sends:
 | `net.messages` | `id`, `list: string[]` | the text messages that arrived on `id` since the last frame, in order: one batch a socket a frame |
 | `net.closed` | `id`, `code`, `reason` | the socket closed (the close frame's code; 1005 without one), or failed (1006, `reason` says why) |
 | `net.fetched` | `id`, `status`, `body`, `error?` | the response's status and body as text; `status` 0 and `error` when the request failed |
-| `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`), as `host.caps` (`[]` before, and for an app that lists none) |
+| `launch` | `params: { room?, name?, ... }`, `caps?: string[]` | once, after setup: how the app opened the game. Kept as `host.launch` (`{}` before it comes, and for an app that sends none); `caps`, the families of requests the app answers (`"files"`, `"store"`, `"assets"`), as `host.caps` (`[]` before, and for an app that lists none) |
 | `files.picked`, `files.data`, `store.*` | below | the answers to `files.*` and `store.*` ("Files", below) |
+| `assets.fetched` | below | the answer to an `assets.fetch` ("Assets", below) |
 | `hud.choose` | `item`, `row` | the player clicked or tapped a row of a selectable HUD table ("HUD", below) |
 | `input` | below | once a frame, before the frame script, to a game that asked for input. The node host keeps it; it has no listeners |
 
@@ -419,8 +421,8 @@ The apps in this repository:
 
 | app | input | `net.*` | `launch` | HUD | sound | files, store |
 | --- | --- | --- | --- | --- | --- | --- |
-| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address | `--launch '{"room":"K7Q4MZ"}'`; `caps: ["files", "store"]` | not drawn; `--hud-log` prints each description | played (`audio` feature) | `--pick` and `--store` (`src/userfiles.rs`) |
-| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app | `--launch`, `--caps files,store` | on stdout with every other post | on stdout: the driver's | the driver's; `--store` is where `user:` assets are |
+| `threert-render play` (`view.rs`) | keys by physical position, mouse buttons, wheel; the pointer captured for `"look"` (a click; Esc lets go, Esc again quits) | WebSockets and HTTP on a thread each (`src/net.rs`: tungstenite and ureq on rustls; text frames of at most 1 MiB, bodies of at most 4 MiB, 16 sockets, 32 requests at once), any address; `assets.*` into `<--assets>/cache/` | `--launch '{"room":"K7Q4MZ"}'`; `caps: ["assets", "files", "store"]` | not drawn; `--hud-log` prints each description | played (`audio` feature) | `--pick` and `--store` (`src/userfiles.rs`) |
+| `threert-render live` (`live/session.rs`) | whatever the driver sends | none: the driver is the app (`assets.*` too: it writes the file under `--assets` and answers) | `--launch`, `--caps files,store,assets` | on stdout with every other post | on stdout: the driver's | the driver's; `--store` is where `user:` assets are |
 | the three.js view (`tools/three/view.ts`, `host.ts`, `hud.ts`) | keyboard, mouse, the Pointer Lock API | `WebSocket`, `fetch` (the browser's rules: same-origin policy, CORS) | the page's query (`?room=K7Q4MZ&name=Ada`); no `caps` | DOM over the canvas | Web Audio by the same rules (`audio.ts`) | none |
 
 - `live` speaks the channel as JSON lines, so a game's use of it is testable without a window: on stdin
@@ -623,6 +625,38 @@ frame(f) {
   `tools/three/test/audio.test.ts`; its low pass is a biquad, the one difference), resumed on the page's first key or
   click as browsers require. The engine's library in a browser (wasm32) has no `audio` module.
 
+### Assets
+
+A game that streams files it does not ship (a globe's tiles, a place's models) asks the app to download them into its
+asset root, then reads them as any asset (`readAsset`, "Streaming: reading assets and adding them in place", below).
+The files stay there across runs: that directory is the game's offline cache.
+
+| game → app | app → game |
+| --- | --- |
+| `{ t: "assets.fetch", id, url, path, sha256? }` | `{ t: "assets.fetched", id, path, status, size, cached, error? }` |
+| `{ t: "assets.cancel", id }` | nothing: the request is forgotten |
+
+- `path` is relative to the asset root, starts with `cache/`, and has no `.` or `..` parts, backslashes or `:`.
+  `url` is `http://` or `https://` (an app may allow less: a client allows what its network policy does).
+- `status`: the HTTP status. 200: the body is at `path` (written to `<path>.part`, then renamed), `size` bytes.
+  Another status (204, 404, ...): nothing written, `size` 0. 0: the request failed, `error` says why (the address,
+  the path, the network, a body over 64 MiB, a body whose sha256 is not `sha256`).
+- `cached: true`: the file was there already, from the same `url`, or with the same `sha256` (hex, either case);
+  nothing was downloaded. The app keeps what it knows of a file beside it (`AssetFetcher`: `.<name>.fetched`, JSON).
+- At most 16 downloads are under way; more wait in the order they came. A canceled request that waits is taken out;
+  one under way stops and its partial file is removed. Neither is answered.
+- An app that answers them lists `"assets"` in `launch.caps`.
+- **The library's piece** (`renderer/src/assets.rs`, cargo feature `assets`, on with `net` and so by default):
+  `AssetFetcher::new(asset_root)` is a `HostServices` (`post`, `poll`, `caps` = `["assets"]`) for any app that holds a
+  `GameSession`: route the game's `assets.*` posts to it, add what `poll` returns to the frame's batch, list its caps
+  in `launch`. `https://` only by default; an app with a network policy gives its check of an address
+  (`with_policy`) and its own HTTP agent (`with_agent`: its resolver, its proxy, its redirects). `counts()` and
+  `pending()` for a status page.
+- `play` uses it with `http://` allowed too, into `<--assets>/cache/`. `live`: the driver is the app; it writes under
+  the same `--assets` and answers. Checked: `assets.rs` tests (a server on the machine: the download, `cached` by
+  address and by hash, a wrong hash, a 404, the default policy's refusal of http, 24 requests at once, a cancel,
+  paths out of the cache).
+
 ### Files
 
 A game may let its player bring content they own: OpenStrikeRT, for one, plays Counter-Strike 1.x maps from the
@@ -815,8 +849,21 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
   material first names is decoded, placed among them (a shelf it fits, a new shelf, a new layer) and written there,
   every level; its two rows go into the texture table (`Gpu::place_texture`, `LiveCore::place_textures`). Pages
   without room become a texture with a layer more or a longer side, and what they held is copied there on the GPU.
-  New pixels of the same size go over the old ones, unless another texture has the same slot. A texture no
-  material names any more keeps its place until the scene is loaded again.
+  New pixels of the same size go over the old ones, unless another texture has the same slot.
+- **Textures and materials freed.** The world counts the models of each file (`World::models`). When a file's last
+  model leaves, the commit retires the file's materials: their entries name nothing and the next file's materials
+  take them (`Retained::free_materials`). Every texture slot that no material of the table names is then freed
+  (`LiveCore::retire_models`, `Gpu::free_textures`). Its slot and its room in the pages go to the next texture placed:
+  - the smallest free rect that holds it, the rest of the rect cut off (`texpack::Atlas::free`, `place`);
+  - a layer's free room is made again from what it holds, so it does not depend on the order textures came and went:
+    free columns at a shelf's end go back to the shelf, and empty last shelves go.
+
+  This happens before the commit places what it adds, so a GLB place that replaces another takes the entries, the
+  slot and the room the other left, and places that come and go do not grow the pages. Textures a world material
+  names stay, as long as the material is in the world. Checked: `texpack` tests (2,000 places of 256–2,048 texels,
+  ten at a time, with the pages as the first 200 left them; 10,000 rounds of arbitrary sizes after the first 1,000
+  without growth) and `models_that_come_and_go_do_not_grow_the_pages` (twelve GLB files one after another: the same
+  two entries, the same slot, the same pages, the picture a build's).
 - **Materials.** A new one, its maps and its function with it; a material given other maps, another function or
   none. (Not one that is a particle's, `transparent`, or has vertex colours: those say where triangles are kept.)
 - **Material functions.** The scene keeps its functions by number, and one that comes takes the next
@@ -841,6 +888,14 @@ at the end. `THREERT_EDIT_LOG=1` says where a rebuild was decided, and a frame's
   simulated is copied on the GPU to the grids that are the same still; new parameters make nothing again. A
   program's pass is compiled in the frame it comes in.
 - **Groups and cameras.** A new group, and a camera that is not the scene's, draw nothing.
+- **A planet's altitude.** `SkyAtmosphere.altitude` (m) says the scene's ground is a globe about a floating origin and
+  how high the viewer is above it, from the street to low orbit. The sky is baked from there (above the atmosphere's
+  top: black space and the air's limb), its horizon dipped and black below it (`sky::Horizon::Planet`), and aerial
+  perspective runs over the sphere straight below the camera (pathtrace.wgsl `aerial_planet`, its reference and tests
+  in `sky.rs` `aerial_columns`), so that from high up the haze thins instead of lying at sea-level density around the
+  camera. A new altitude alone is not another sky (`Changes::altitude`): the haze takes it at once, and the sky is
+  baked again in place as for a moving sun, on the worker thread, once it is 5 % (at least 250 m) from the altitude
+  it was baked for (`LiveCore::move_altitude`).
 
 Still a rebuild: particle systems that come or go, and their functions and programs; a geometry function; a posed model the scene has not got, and any new model under software traversal (its room does
 not grow); a material that becomes a particle's or gets vertex colours; a rect light's card that comes, goes or takes
