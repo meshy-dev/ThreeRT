@@ -4046,10 +4046,13 @@ fn first_hit(@builtin(global_invocation_id) gid: vec3<u32>) {
         // The segment that ends at this mirror (the camera's own first): its fog and haze as `main` has a segment's,
         // less the camera segment's sampled scattering; water between mirrors.
         if (has(F_FOG) && P.fog.x > 0.0) {
-            let t0 = select(0.0, P.fog.w, chain == 0u);
+            // (The fog's start distance and its volumetric range are the camera's: along a chain, what is left of
+            // them after the way so far.)
+            let t0 = max(P.fog.w - way, 0.0);
             var od = fog_depth(so, sd, t0, seen.t);
-            if (has(F_VOLUME) && chain == 0u && P.vol.x > 0.0) {
-                od += fog_depth(so, sd, t0, max(select(seen.t, min(seen.t, P.vol2.w), P.vol2.w > 0.0), t0)) * (P.vol.z - 1.0);
+            if (has(F_VOLUME) && P.vol.x > 0.0) {
+                let tv = select(seen.t, min(seen.t, max(P.vol2.w - way, 0.0)), P.vol2.w > 0.0);
+                od += fog_depth(so, sd, t0, max(tv, t0)) * (P.vol.z - 1.0);
             }
             let tr = max(exp(-od), 1.0 - P.fog_color.w);
             light += weight * (1.0 - tr) * P.fog_color.rgb;
@@ -4186,15 +4189,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
-            // (The fog's start distance is the camera's: not the segment's a mirror chain shows.)
-            let t0 = select(0.0, P.fog.w, depth == 0u && chain == 0u);
+            // (The fog's start distance and its volumetric range are the camera's: behind a mirror chain, what is
+            // left of them after the way to its last mirror.)
+            let t0 = select(0.0, max(P.fog.w - way, 0.0), depth == 0u);
             let t1 = select(hit.t, 2.0e4, hit.tri == 0xffffffffu);
             // Inside the volumetric range (camera rays) the medium is denser by the extinction scale (UE).
             var od = fog_depth(o, d, t0, t1);
             var tv = t1;
             var trv = 1.0;
             if (has(F_VOLUME) && depth == 0u && P.vol.x > 0.0) {
-                tv = select(t1, min(t1, P.vol2.w), P.vol2.w > 0.0);
+                tv = select(t1, min(t1, max(P.vol2.w - way, 0.0)), P.vol2.w > 0.0);
                 let odv = fog_depth(o, d, t0, max(tv, t0));
                 od += odv * (P.vol.z - 1.0);
                 trv = exp(-odv * P.vol.z);
