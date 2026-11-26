@@ -4186,7 +4186,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (depth == 0u) { rays_off = LIVE && P.jitter.z > 0.5; }
         if (has(F_FOG) && P.fog.x > 0.0) {
             // Height fog on every segment (attenuation + ambient inscattering); lit volumetric scattering on camera rays.
-            let t0 = select(0.0, P.fog.w, depth == 0u);
+            // (The fog's start distance is the camera's: not the segment's a mirror chain shows.)
+            let t0 = select(0.0, P.fog.w, depth == 0u && chain == 0u);
             let t1 = select(hit.t, 2.0e4, hit.tri == 0xffffffffu);
             // Inside the volumetric range (camera rays) the medium is denser by the extinction scale (UE).
             var od = fog_depth(o, d, t0, t1);
