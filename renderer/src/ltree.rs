@@ -120,9 +120,10 @@ fn bounds(vs: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
 fn encode(c: [f32; 3], r: f32) -> [f32; 2] {
     let pack = |a: f32, b: f32| f32::from_bits(half::f16::from_f32(a).to_bits() as u32 | (half::f16::from_f32(b).to_bits() as u32) << 16);
     let hc = c.map(|v| half::f16::from_f32(v).to_f32());
-    let grow = ((hc[0] - c[0]).powi(2) + (hc[1] - c[1]).powi(2) + (hc[2] - c[2]).powi(2)).sqrt();
-    let mut hr = half::f16::from_f32(r + grow);
-    if hr.to_f32() < r + grow {
+    // In f64: in f32 the sum can round down onto a half float, which then holds less than it must (by 1e-10 m).
+    let need = r as f64 + (0..3).map(|k| (hc[k] as f64 - c[k] as f64).powi(2)).sum::<f64>().sqrt();
+    let mut hr = half::f16::from_f64(need);
+    if (hr.to_f32() as f64) < need {
         hr = half::f16::from_bits(hr.to_bits() + 1);
     }
     [pack(hc[0], hc[1]), pack(hc[2], hr.to_f32())]
@@ -467,6 +468,56 @@ mod tests {
 
     fn tri(i: u32, x: f32) -> (EmitterTri, [[f32; 4]; 3]) {
         (EmitterTri { tri: i, mat: 0, obj: 0, area: 0.5, c: [x + 1.0 / 3.0, 1.0 / 3.0, 0.0], moves: false, nominal: false, in_tree: false, inst: crate::NO_INST, part: 0, card: false }, [[x, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+    }
+
+    /// A deterministic stream of numbers in [0, 1).
+    fn stream(seed: u32) -> impl FnMut() -> f32 {
+        let mut s = seed;
+        move || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 8) as f32 / (1 << 24) as f32
+        }
+    }
+
+    /// How far the encoded sphere `e` falls short of holding the sphere (c, r), in f64: <= 0 when it holds it.
+    fn short(e: [f32; 2], c: [f32; 3], r: f32) -> f64 {
+        let (ec, er) = sphere_of(&[e[0], e[1], 0.0, 0.0]);
+        let d = (0..3).map(|k| (ec[k] as f64 - c[k] as f64).powi(2)).sum::<f64>().sqrt();
+        d + r as f64 - er as f64
+    }
+
+    /// The half-float spheres the kernel culls by hold what they bound: a sphere encoded, a box's bounding sphere and
+    /// the union of two (what refits build each node's from), at every scale a scene has (a lamp's filament, a city's
+    /// lights kilometres out), with centres that round by more than the radius, and nested, equal and far apart
+    /// spheres. A sphere that held less would give the emitters it misses an importance from too far away.
+    #[test]
+    fn encoded_spheres_hold_what_they_bound() {
+        let mut rnd = stream(7);
+        for k in 0..20000 {
+            let scale = [1e-3f32, 0.1, 1.0, 30.0, 500.0, 4000.0, 30000.0][k % 7];
+            let mut p = || (rnd() * 2.0 - 1.0) * scale;
+            let c1 = [p(), p(), p()];
+            let c2 = if k % 5 == 0 { c1 } else { [p(), p(), p()] };
+            let mut q = || (rnd() * scale).abs() * if k % 3 == 0 { 1e-3 } else { 1.0 };
+            let (r1, r2) = (q(), q());
+            let e1 = encode(c1, r1);
+            assert!(short(e1, c1, r1) <= 0.0, "encode({c1:?}, {r1}): short by {}", short(e1, c1, r1));
+            let (lo, hi) = ([0, 1, 2].map(|a| c1[a].min(c2[a])), [0, 1, 2].map(|a| c1[a].max(c2[a])));
+            let b = box_sphere(lo, hi);
+            for corner in 0..8 {
+                let v = [0, 1, 2].map(|a| if corner >> a & 1 == 0 { lo[a] } else { hi[a] });
+                assert!(short(b, v, 0.0) <= 0.0, "box {lo:?}..{hi:?}: corner {v:?} short by {}", short(b, v, 0.0));
+            }
+            // The union of the spheres as the tree holds them (decoded), as refit_moving takes them.
+            let (s1, s2) = (sphere_of(&[e1[0], e1[1], 0.0, 0.0]), sphere_of(&{
+                let e = encode(c2, r2);
+                [e[0], e[1], 0.0, 0.0]
+            }));
+            let u = union_sphere(s1, s2);
+            for (c, r) in [s1, s2] {
+                assert!(short(u, c, r) <= 0.0, "union of {s1:?}, {s2:?}: {:?} short of {c:?} {r} by {}", sphere_of(&[u[0], u[1], 0.0, 0.0]), short(u, c, r));
+            }
+        }
     }
 
     /// Garbage in: emitters whose triangles are not finite, that coincide, or carry weights near f32's limit make a
