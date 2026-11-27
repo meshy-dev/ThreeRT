@@ -3792,6 +3792,12 @@ dynamic-resolution floor, 60 Hz camera input.
 
 - **A, atomic tests:** 60–100, one feature each. Header metadata: id, features, reference, metric, temporal.
   Result: pass / fail / unsupported. ~300 ms each; the whole layer under one minute.
+  - GPU-free analytic tests (2026-11-24, `tools/analytic`, in `npm test`, 2 s): the kernel's BSDF, samplers and
+    phase function mirrored in doubles (`kernel.ts`; `test/sync.test.ts` fails when a mirrored WGSL or Rust function
+    changes). Each sampler against its density by chi-square (cosine, GGX VNDF, the base's lobe mixture, rough glass
+    with its dropped samples, Henyey-Greenstein); the white furnace (Lambert 1.0001; metal and plastic within 1 %
+    from cos 0.2 and 3 % below it with compensation, the 32-node energy table's interpolation; rough glass within 1 %);
+    reciprocity of the specular lobe and of the dielectric's reflection and transmission (by eta squared).
 - **B, composite scenes** (2026-11-08): the Khronos glTF Sample Assets, Bistro night and Zero Day.
   Earlier the list was Khronos, Bistro, Kabukichō.
 - **C, a GTA-like slice:** one block with day / night, rain, a drivable car, pedestrians, foliage, a waterfront and an

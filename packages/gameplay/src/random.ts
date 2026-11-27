@@ -26,22 +26,23 @@ export function seededRandom(seed: number, stream = 0): () => number {
 }
 
 /**
- * Runs `fn` with `Math.random` and `Date` (now / no-arg constructor) replaced by deterministic versions.
+ * Runs `fn` with `Math.random` and `Date` (`Date.now()`, `new Date()`, `Date()`) replaced by deterministic versions.
  * Only sound because handlers are synchronous: nothing else can observe the swapped globals.
  */
 export function withDeterminism<T>(now: number, random: () => number, fn: () => T): T {
   const realRandom = Math.random;
   const RealDate = globalThis.Date;
-  class FixedDate extends RealDate {
-    constructor(...args: unknown[]) {
-      super(...((args.length ? args : [now]) as [number]));
-    }
-    static override now(): number {
-      return now;
-    }
-  }
+  // A plain function, not a class: `Date()` without `new` is legal (it returns the time as a string), and its dates
+  // are real ones (`instanceof Date` holds for dates made before or after the swap).
+  const FixedDate = function (this: unknown, ...args: unknown[]): Date | string {
+    if (!new.target) return new RealDate(now).toString();
+    return Reflect.construct(RealDate, args.length ? args : [now], new.target) as Date;
+  } as unknown as DateConstructor & { prototype: Date };
+  FixedDate.prototype = RealDate.prototype;
+  Object.setPrototypeOf(FixedDate, RealDate); // Date.UTC, Date.parse
+  FixedDate.now = () => now;
   Math.random = random;
-  globalThis.Date = FixedDate as DateConstructor;
+  globalThis.Date = FixedDate;
   try {
     return fn();
   } finally {

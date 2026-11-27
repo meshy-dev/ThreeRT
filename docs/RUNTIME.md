@@ -1055,7 +1055,7 @@ changed: the same sources, the same shaders, byte-identical renders. What runs i
   | `LiveCore::render`: GPU timestamps (`harvest`) | mapped asynchronously, read a later frame | works as it is |
   | `LiveCore::render`: without timestamp queries, a frame timed by waiting for it | wait | reads ~0: dynamic resolution needs the `timestamp-query` feature there, or a fixed scale |
   | `LiveCore::render`: `THREERT_PROFILE` | wait + map | not reachable (no environment) |
-  | `repose`, `repose_groups`, `edit_geometry`: `THREERT_PROFILE_BLAS` | wait | not reachable |
+  | `repose`, `edit_geometry` (the commit's `build_top`): `THREERT_PROFILE_BLAS` | wait | not reachable |
   | `Gpu::upload`: after the uploads, and after the BLAS builds | wait | no wait; hardware RT is not in a browser |
   | `Gpu::render`, `render_translucent` (offline), `read_hdr`, `read_signals`, `read_ev100`, `live::run`'s snapshots | wait + map + read | native only |
 - **Threads:** none in a browser. Scene builds (BVH, texture pages, model loading) run on the one thread (rayon falls

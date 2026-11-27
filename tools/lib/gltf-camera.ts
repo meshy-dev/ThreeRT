@@ -34,11 +34,23 @@ const slerp = (a: number[], b: number[], u: number) => {
  *  tan} in glTF space shifted by `offset`; `duration` = the clip's length. Parents are taken at rest. */
 export function gltfCameraPath(file: string, name = "Camera", offset: number[] = [0, 0, 0]) {
   const g = JSON.parse(readFileSync(file, "utf8"));
-  const bin = readFileSync(join(dirname(file), g.buffers[0].uri));
+  const bins = new Map<number, Buffer>();
+  const bin = (i: number) => bins.get(i) ?? bins.set(i, readFileSync(join(dirname(file), decodeURIComponent(g.buffers[i].uri)))).get(i)!;
+  // Accessors as the spec has them: in their view's buffer, at its byteStride (interleaved) or packed, floats or
+  // normalized integers (animation outputs may be either: glTF 2.0 § 3.11, KHR_mesh_quantization).
+  const read: Record<number, [number, (b: Buffer, o: number) => number]> = {
+    5126: [4, (b, o) => b.readFloatLE(o)],
+    5120: [1, (b, o) => Math.max(b.readInt8(o) / 127, -1)],
+    5121: [1, (b, o) => b.readUInt8(o) / 255],
+    5122: [2, (b, o) => Math.max(b.readInt16LE(o) / 32767, -1)],
+    5123: [2, (b, o) => b.readUInt16LE(o) / 65535],
+  };
   const acc = (i: number) => {
     const a = g.accessors[i], v = g.bufferViews[a.bufferView], n = ({ SCALAR: 1, VEC3: 3, VEC4: 4 } as Record<string, number>)[a.type];
-    const f = new Float32Array(bin.buffer, bin.byteOffset + (v.byteOffset ?? 0) + (a.byteOffset ?? 0), a.count * n);
-    return Array.from({ length: a.count }, (_, k) => Array.from(f.subarray(k * n, k * n + n)));
+    const [size, get] = read[a.componentType ?? 5126] ?? [];
+    if (!get) throw new Error(`${file}: accessor ${i}: componentType ${a.componentType} not supported`);
+    const b = bin(v.buffer ?? 0), base = (v.byteOffset ?? 0) + (a.byteOffset ?? 0), stride = v.byteStride ?? n * size;
+    return Array.from({ length: a.count }, (_, k) => Array.from({ length: n }, (_, c) => get(b, base + k * stride + c * size)));
   };
   const ni = g.nodes.findIndex((n: { name?: string; camera?: number }) => n.name === name && n.camera !== undefined);
   if (ni < 0) throw new Error(`${file}: no camera node ${name}`);

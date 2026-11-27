@@ -5,7 +5,7 @@ import {
   type GameDefinition, type GameEvent, type LogEntry, type Store,
 } from "../src/index.ts";
 import { coinGame, event, freshStore } from "./fixtures.ts";
-import { initialWorld } from "../src/index.ts";
+import { initialWorld, withDeterminism } from "../src/index.ts";
 
 const setup = { state: initialWorld(coinGame).state, seed: 42 };
 
@@ -98,4 +98,29 @@ test("verification catches handlers that depend on hidden state", () => {
   commit(store, r);
   const report = verifyLog(leaky, { state: setup.state }, setup.seed, [{ seq: 1, event: e, status: "ok", writes: r.writes }]);
   assert.equal(report.mismatches.length, 1);
+});
+
+test("inside a handler Date() without new is the event's time too, and every date is a Date", () => {
+  const before = new Date(5);
+  const r = withDeterminism(1234, () => 0.5, () => {
+    const d = new Date();
+    return {
+      call: Date(),
+      ofCall: (Date as unknown as (v: number) => string)(99), // arguments are ignored, as by Date()
+      d: d.getTime(),
+      given: new Date(2020, 0, 2).getFullYear(),
+      utc: Date.UTC(2020, 0, 1),
+      parse: Date.parse("1970-01-01T00:00:01Z"),
+      isDate: d instanceof Date && before instanceof Date && Object.prototype.toString.call(d) === "[object Date]",
+    };
+  });
+  assert.deepEqual(r, {
+    call: new Date(1234).toString(),
+    ofCall: new Date(1234).toString(),
+    d: 1234,
+    given: 2020,
+    utc: Date.UTC(2020, 0, 1),
+    parse: 1000,
+    isDate: true,
+  });
 });

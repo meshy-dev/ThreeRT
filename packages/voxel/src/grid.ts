@@ -71,8 +71,9 @@ export class VoxelGrid {
     return b;
   }
 
-  /** The brick's bytes if it exists. */
+  /** The brick's bytes if it exists (none past the grid's range: a neighbour of an edge brick is just empty). */
   peekBrick(bx: number, by: number, bz: number): Uint8Array | undefined {
+    if (Math.abs(bx) >= 512 || Math.abs(by) >= 512 || Math.abs(bz) >= 512) return undefined;
     return this.bricks.get(VoxelGrid.key(bx, by, bz));
   }
 

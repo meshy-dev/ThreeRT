@@ -70,3 +70,18 @@ test("a cuboid is six rectangles; two materials split them; hidden faces are lef
   assert.equal(ground.quads, 8, "the bottom faces lie on solid ground");
   assert.deepEqual(rasterize(ground, 0.25), exposed(g, [0, 0, 0], [20, 9, 13], (_x, y) => y < 0));
 });
+
+test("voxels at the edge of the grid's range are meshed: their outer neighbours are empty, not an error", () => {
+  const g = new VoxelGrid(0.1);
+  g.set(4095, 4095, 4095, 3); // brick (511, 511, 511), the last one there is
+  g.set(-4088, -4088, -4088, 7); // brick (-511, -511, -511), the first
+  const mesh = greedyMesh(g);
+  assert.equal(mesh.faces, 12);
+  assert.equal(mesh.quads, 12);
+  assert.deepEqual([...mesh.parts.keys()], [3, 7]);
+  const xs = (m: number) => [...mesh.parts.get(m)!.positions].filter((_, i) => i % 3 === 0).map((x) => Math.round(x * 10));
+  assert.deepEqual([Math.min(...xs(3)), Math.max(...xs(3))], [4095, 4096]);
+  assert.deepEqual([Math.min(...xs(7)), Math.max(...xs(7))], [-4088, -4087]);
+  assert.equal(g.peekBrick(512, 0, 0), undefined);
+  assert.equal(g.peekBrick(0, -512, 0), undefined);
+});
