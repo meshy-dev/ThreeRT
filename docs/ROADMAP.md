@@ -476,7 +476,8 @@ Earlier direction (2026-11-05, kept for the history below): finish the three.js 
        the light tree in the frame, ~13–15 ms over Tokyo's 1.4 M emitters, ~90 times in the Shiba fly-past (the
        street lamps and the window groups switching).
        - Scenes with many emitters now rebuild both on a worker thread (`EmitterWorker`). The edits land with the
-         result, a few frames later.
+         result, a few frames later. (Removed 2026-11-27: the GPU makes the weights in the edit's frame, "The
+         emitters' weights are made on the GPU".)
        - The fly-past's frame interval p95 went from 29.7 / 28.5 to 17.20 / 17.17 ms, and its commits over 5 ms from
          91 to 0.
      - Acceptance (2026-11-11, branch `tokyo-1a-acceptance`; `node tools/tokyo/accept-1a.ts`, clips by
@@ -2919,6 +2920,22 @@ Tests: each kind of edit against a build of the edited world, state and picture 
 Mutations: 26. 25 failed a test there was; one, a texture put on a shelf too low for it, none, and has its case now.
 Found by review: a translucent particle's material given another function kept the kernel's old dispatch for the
 translucency pass, which has its particles' functions alone; the kernel is made again where those are others.
+
+**The emitters' weights are made on the GPU (2026-11-27).** An emitter's weight (its area × its material's emissive
+luminance × its object's power), the cumulative table, its guide and the light tree's powers were made on the CPU,
+over every emitter, at each power or material edit: 59 to 74 ms in the frame of a material edit in Tokyo's
+time-of-day room (1.63 M emitters), and 53 to 58 ms on a worker thread for a lamp switch, which landed three or
+four frames later. Passes make them now (`emitter_weights.wgsl`) from the GPU's own records, materials and powers,
+in the frame after anything they depend on changed: the edit costs the commit nothing, and that frame 3.5 ms of
+GPU time there (0.1 ms or less at 10 000 to 20 000 emitters). The kernel reads the total and the tail's share from
+the table's header. The CPU still makes the table's order and the tree when emitters are added; a retired run's
+records say so, a particle's record has its nominal area. The worker thread and the deferred powers are gone.
+Scenes whose emitters move make their weights every frame. On the heavy clips the pictures and a frame's GPU time
+are as before (within 2 %). Left for later: only the changed runs (if a city's dusk needs it), and the emissive
+map in the weight (tried on the CPU at load: Zero-Day's ΔE 3.32 → 3.09 and flicker 2.06 → 1.80, the crowd's
+flicker 1.97 → 2.09: not taken as built).
+Tests: `the_gpu_weighs_the_emitters_as_the_cpu_does` and its variant without a tree hold the GPU's tables against
+the CPU's through power and material edits and removals.
 
 **A camera ray's fog light is seen directly (2026-11-26).** The ambient light height fog scatters towards the
 camera joins the emission signal, as the aerial haze does: it was part of the surface's diffuse light, which the
