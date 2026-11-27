@@ -1,7 +1,7 @@
 // three.js-compatible interleaved vertex data: several attributes in one array, `stride` numbers a vertex.
 
 import { BufferAttribute, StaticDrawUsage } from "./geometry.ts";
-import { Vector3, type Matrix4 } from "./math.ts";
+import { Vector3, type Matrix3, type Matrix4 } from "./math.ts";
 
 type NumberArray = BufferAttribute["array"];
 
@@ -141,6 +141,15 @@ export class InterleavedBufferAttribute {
   setXYZW(i: number, x: number, y: number, z: number, w: number): this {
     this.setXYZ(i, x, y, z);
     this._set(i, 3, w);
+    return this;
+  }
+  /** Normals by a normal matrix (Matrix3.getNormalMatrix), renormalised (itemSize 3; three.js). */
+  applyNormalMatrix(m: Matrix3): this {
+    const v = new Vector3();
+    for (let i = 0; i < this.count; i++) {
+      v.set(this.getX(i), this.getY(i), this.getZ(i)).applyNormalMatrix(m);
+      this.setXYZ(i, v.x, v.y, v.z);
+    }
     return this;
   }
   /** Positions by `m` (itemSize 3). */

@@ -1,6 +1,6 @@
 // three.js-compatible geometry generators. Vertex layout and winding match three (CCW front faces).
 
-import { Box3, Matrix4, type Quaternion, Sphere, Vector3 } from "./math.ts";
+import { Box3, type Matrix3, Matrix4, type Quaternion, Sphere, Vector2, Vector3 } from "./math.ts";
 import type { InterleavedBufferAttribute } from "./interleaved.ts";
 
 let geometryIds = 0;
@@ -122,6 +122,32 @@ export class BufferAttribute {
   }
   copyArray(values: ArrayLike<number>): this {
     return this.set(values);
+  }
+  /** Items by `m`: 2D points with its translation (itemSize 2), or vectors (itemSize 3); other sizes are left alone, as three.js does. */
+  applyMatrix3(m: Matrix3): this {
+    if (this.itemSize === 2) {
+      const v = new Vector2();
+      for (let i = 0; i < this.count; i++) {
+        v.set(this.getX(i), this.getY(i)).applyMatrix3(m);
+        this.setXY(i, v.x, v.y);
+      }
+    } else if (this.itemSize === 3) {
+      const v = new Vector3();
+      for (let i = 0; i < this.count; i++) {
+        v.set(this.getX(i), this.getY(i), this.getZ(i)).applyMatrix3(m);
+        this.setXYZ(i, v.x, v.y, v.z);
+      }
+    }
+    return this;
+  }
+  /** Normals by a normal matrix (Matrix3.getNormalMatrix), renormalised (itemSize 3; three.js). */
+  applyNormalMatrix(m: Matrix3): this {
+    const v = new Vector3();
+    for (let i = 0; i < this.count; i++) {
+      v.set(this.getX(i), this.getY(i), this.getZ(i)).applyNormalMatrix(m);
+      this.setXYZ(i, v.x, v.y, v.z);
+    }
+    return this;
   }
   /** Positions by `m` (itemSize 3). */
   applyMatrix4(m: Matrix4): this {

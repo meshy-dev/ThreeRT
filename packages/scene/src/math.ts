@@ -127,6 +127,25 @@ export class Vector3 {
   manhattanLength(): number {
     return Math.abs(this.x) + Math.abs(this.y) + Math.abs(this.z);
   }
+  /** Column `index` of `m` (three.js). */
+  setFromMatrix3Column(m: Matrix3, index: number): this {
+    return this.fromArray(m.elements, index * 3);
+  }
+  /** A colour's linear r, g, b as x, y, z (three.js). */
+  setFromColor(c: { r: number; g: number; b: number }): this {
+    return this.set(c.r, c.g, c.b);
+  }
+  /** Each component uniform in [0, 1) (three.js; Math.random: not for deterministic game setup). */
+  random(): this {
+    return this.set(Math.random(), Math.random(), Math.random());
+  }
+  /** A uniformly random unit vector (three.js: sphere point picking, https://mathworld.wolfram.com/SpherePointPicking.html). */
+  randomDirection(): this {
+    const theta = Math.random() * Math.PI * 2;
+    const u = Math.random() * 2 - 1;
+    const c = Math.sqrt(1 - u * u);
+    return this.set(c * Math.cos(theta), u, c * Math.sin(theta));
+  }
   setLength(length: number): this {
     return this.normalize().multiplyScalar(length);
   }
@@ -400,6 +419,10 @@ export class Quaternion {
   /** Set to the spherical interpolation of `qa` to `qb` at `t` (three.js). */
   slerpQuaternions(qa: Quaternion, qb: Quaternion, t: number): this {
     return this.copy(qa).slerp(qb, t);
+  }
+  /** x, y, z, w from item `index` of a 4-component attribute (three.js). */
+  fromBufferAttribute(attribute: { getX(i: number): number; getY(i: number): number; getZ(i: number): number; getW(i: number): number }, index: number): this {
+    return this.set(attribute.getX(index), attribute.getY(index), attribute.getZ(index), attribute.getW(index));
   }
   equals(q: Quaternion): boolean {
     return q._x === this._x && q._y === this._y && q._z === this._z && q._w === this._w;
@@ -760,6 +783,12 @@ export class Matrix4 {
     const scaleZSq = te[8] * te[8] + te[9] * te[9] + te[10] * te[10];
     return Math.sqrt(Math.max(scaleXSq, scaleYSq, scaleZSq));
   }
+  /** Copies only the translation of `m` (three.js). */
+  copyPosition(m: Matrix4): this {
+    const te = this.elements, me = m.elements;
+    te[12] = me[12]; te[13] = me[13]; te[14] = me[14];
+    return this;
+  }
   /** Transpose in place, as three.js does. */
   transpose(): this {
     const te = this.elements;
@@ -940,6 +969,44 @@ export class Matrix3 {
   getNormalMatrix(m: Matrix4): this {
     return this.setFromMatrix4(m).invert().transpose();
   }
+  /** The three columns into `xAxis`, `yAxis`, `zAxis` (three.js). */
+  extractBasis(xAxis: Vector3, yAxis: Vector3, zAxis: Vector3): this {
+    xAxis.setFromMatrix3Column(this, 0);
+    yAxis.setFromMatrix3Column(this, 1);
+    zAxis.setFromMatrix3Column(this, 2);
+    return this;
+  }
+  /** Writes the transpose into `r`, leaving this matrix as it is (three.js). */
+  transposeIntoArray(r: { [k: number]: number }): this {
+    const m = this.elements;
+    r[0] = m[0]; r[1] = m[3]; r[2] = m[6];
+    r[3] = m[1]; r[4] = m[4]; r[5] = m[7];
+    r[6] = m[2]; r[7] = m[5]; r[8] = m[8];
+    return this;
+  }
+  /** A 2D UV transform: offset, repeat, rotation about the centre (cx, cy), as three.js composes a texture's matrix. */
+  setUvTransform(tx: number, ty: number, sx: number, sy: number, rotation: number, cx: number, cy: number): this {
+    const c = Math.cos(rotation), s = Math.sin(rotation);
+    return this.set(
+      sx * c, sx * s, -sx * (c * cx + s * cy) + cx + tx,
+      -sy * s, sy * c, -sy * (-s * cx + c * cy) + cy + ty,
+      0, 0, 1,
+    );
+  }
+  /** A 2D translation, by (x, y) or by a Vector2 (three.js). */
+  makeTranslation(x: number | { x: number; y: number }, y?: number): this {
+    if (typeof x === "number") return this.set(1, 0, x, 0, 1, y!, 0, 0, 1);
+    return this.set(1, 0, x.x, 0, 1, x.y, 0, 0, 1);
+  }
+  /** A 2D rotation by `theta`, counter-clockwise (three.js). */
+  makeRotation(theta: number): this {
+    const c = Math.cos(theta), s = Math.sin(theta);
+    return this.set(c, -s, 0, s, c, 0, 0, 0, 1);
+  }
+  /** A 2D scale (three.js). */
+  makeScale(x: number, y: number): this {
+    return this.set(x, 0, 0, 0, y, 0, 0, 0, 1);
+  }
   equals(m: Matrix3): boolean {
     return this.elements.every((v, k) => v === m.elements[k]);
   }
@@ -1063,6 +1130,16 @@ export class Color {
     const s = l <= 0.5 ? d / (max + min) : d / (2 - max - min);
     const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
     return Object.assign(target, { h: h / 6, s, l });
+  }
+  /** Shifts hue, saturation and lightness by the given amounts (three.js; the hue wraps, the others clamp). */
+  offsetHSL(h: number, s: number, l: number): this {
+    const hsl = this.getHSL();
+    return this.setHSL(hsl.h + h, hsl.s + s, hsl.l + l);
+  }
+  /** Interpolates hue, saturation and lightness towards `color` (three.js: the hue takes the straight path, not the shorter way round). */
+  lerpHSL(color: Color, alpha: number): this {
+    const a = this.getHSL(), b = color.getHSL();
+    return this.setHSL(a.h + (b.h - a.h) * alpha, a.s + (b.s - a.s) * alpha, a.l + (b.l - a.l) * alpha);
   }
   lerp(c: Color, t: number): this {
     return this.setRGB(this.r + (c.r - this.r) * t, this.g + (c.g - this.g) * t, this.b + (c.b - this.b) * t);
@@ -1296,6 +1373,15 @@ export class Vector2 {
     const x = this.x - center.x, y = this.y - center.y;
     return this.set(x * c - y * s + center.x, x * s + y * c + center.y);
   }
+  /** Transforms this point by a 2D affine `m` (its translation applies; three.js). */
+  applyMatrix3(m: Matrix3): this {
+    const { x, y } = this, e = m.elements;
+    return this.set(e[0] * x + e[3] * y + e[6], e[1] * x + e[4] * y + e[7]);
+  }
+  /** Each component uniform in [0, 1) (three.js; Math.random: not for deterministic game setup). */
+  random(): this {
+    return this.set(Math.random(), Math.random());
+  }
   roundToZero(): this {
     return this.set(Math.trunc(this.x), Math.trunc(this.y));
   }
@@ -1406,6 +1492,61 @@ export class Box3 {
   /** The distance from `point` to this box: 0 inside (three.js). */
   distanceToPoint(point: Vector3): number {
     return this.clampPoint(point).distanceTo(point);
+  }
+  /** The box of every item of a 3-component attribute (three.js). */
+  setFromBufferAttribute(attribute: { count: number; getX(i: number): number; getY(i: number): number; getZ(i: number): number }): this {
+    this.makeEmpty();
+    const p = new Vector3();
+    for (let i = 0; i < attribute.count; i++) this.expandByPoint(p.set(attribute.getX(i), attribute.getY(i), attribute.getZ(i)));
+    return this;
+  }
+  setFromCenterAndSize(center: Vector3, size: Vector3): this {
+    const hx = size.x * 0.5, hy = size.y * 0.5, hz = size.z * 0.5;
+    this.min.set(center.x - hx, center.y - hy, center.z - hz);
+    this.max.set(center.x + hx, center.y + hy, center.z + hz);
+    return this;
+  }
+  /** Grows each side by `vector`'s component on that axis (three.js). */
+  expandByVector(vector: Vector3): this {
+    this.min.sub(vector);
+    this.max.add(vector);
+    return this;
+  }
+  expandByScalar(scalar: number): this {
+    this.min.addScalar(-scalar);
+    this.max.addScalar(scalar);
+    return this;
+  }
+  /** Where `point` sits in the box, 0 at min and 1 at max on each axis (three.js; a flat axis divides by zero). */
+  getParameter(point: Vector3, target = new Vector3()): Vector3 {
+    return target.set(
+      (point.x - this.min.x) / (this.max.x - this.min.x),
+      (point.y - this.min.y) / (this.max.y - this.min.y),
+      (point.z - this.min.z) / (this.max.z - this.min.z),
+    );
+  }
+  /** Whether `plane` passes through the box (three.js). */
+  intersectsPlane(plane: Plane): boolean {
+    const n = plane.normal;
+    let min = 0, max = 0;
+    for (const k of ["x", "y", "z"] as const) {
+      if (n[k] > 0) {
+        min += n[k] * this.min[k];
+        max += n[k] * this.max[k];
+      } else {
+        min += n[k] * this.max[k];
+        max += n[k] * this.min[k];
+      }
+    }
+    return min <= -plane.constant && max >= -plane.constant;
+  }
+  translate(offset: Vector3): this {
+    this.min.add(offset);
+    this.max.add(offset);
+    return this;
+  }
+  equals(box: Box3): boolean {
+    return box.min.equals(this.min) && box.max.equals(this.max);
   }
   /** Whether `sphere` touches this box (three.js). */
   intersectsSphere(sphere: Sphere): boolean {
