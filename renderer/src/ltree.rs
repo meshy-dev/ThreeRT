@@ -39,7 +39,9 @@ pub const LEAF_MAX: usize = 1;
 /// (bright outliers lose weight), so less noise is more light. Bistro ΔE 4.05 -> 3.89, luminance 0.893 -> 0.909;
 /// Zero Day ΔE 3.85 -> 3.77. 4 -> 8 (2026-11-09), once the candidates were resampled by the BSDF (glossy surfaces
 /// choose among more of the small lights in their lobe): the crowd's ΔE at 10 s 10.61 -> 10.31, layer B Bistro 3.34
-/// -> 3.23, bench-ghosting better on every check; no measurable cost (perf smoke drive GPU p50 -0.02 ms).
+/// -> 3.23, bench-ghosting better on every check; no cost on the perf smoke drive (GPU p50 -0.02 ms). Measured again
+/// on heavy clips (2026-11-27): 8 against 4 is 6 to 7 % of a frame on three of them (2 candidates 8 to 11 %, 1: 10
+/// to 15 %); kept for the crowd, whose flicker is 15 % more with 4.
 pub const RIS_OFFLINE: u32 = 6;
 pub const RIS_LIVE: u32 = 8;
 
