@@ -21,8 +21,13 @@ export interface Intersection {
   face: { a: number; b: number; c: number; normal: Vector3; materialIndex: number } | null;
   faceIndex: number | null;
   uv?: Vector2;
+  /** The `uv1` attribute at the point, on a mesh whose geometry has one (three.js). */
+  uv1?: Vector2;
+  /** The point's barycentric coordinates in the triangle (weights of `face.a`, `face.b`, `face.c`; three.js). */
+  barycoord?: Vector3;
   instanceId?: number;
-  /** The surface's normal at the point, in the world (hits of the physics world). */
+  /** The surface's normal at the point: on a mesh hit, the geometry's `normal` attribute interpolated there, in object
+   *  space and turned to face the ray (three.js); on a hit of the physics world, the collider's, in the world. */
   normal?: Vector3;
   /** A hit on one of the engine's own colliders (`object` is a voxel body's object, or `engineColliders` for the
    *  voxel level): the physics world's id of the collider. */
@@ -135,13 +140,14 @@ export class Raycaster {
 
   private visit(o: Object3D, recursive: boolean, out: Intersection[]): void {
     o.updateWorldMatrix(true, false);
-    // (An object on none of the ray's layers is not tested; its children still are, as three.js.)
-    if (onLayers(o, this.layers)) this.test(o, out);
+    // (As three.js: an object on none of the ray's layers is not tested, but its children still are; an object
+    // tested answers with its own `raycast`, false keeping the ray from its children.)
+    if (onLayers(o, this.layers) && o.raycast(this, out) === false) return;
     if (recursive) for (const c of o.children) this.visit(c, true, out);
   }
 
-  /** The ray against the object itself. */
-  private test(o: Object3D, out: Intersection[]): void {
+  /** @internal What a mesh, an instanced mesh or a procedural mesh's `raycast` adds: its hits of the ray. */
+  _raycastOwn(o: Object3D, out: Intersection[]): void {
     if (o instanceof InstancedMesh) {
       if (!(o.geometry instanceof ProceduralGeometry)) {
         const m = new Matrix4();
@@ -173,7 +179,7 @@ export class Raycaster {
     if (!g.boundingBox) g.computeBoundingBox();
     const local = this.local(world);
     if (local.intersectBox(g.boundingBox!) === null) return;
-    const p = g.positions, uv = g.uvs, idx = g.triangleIndices();
+    const p = g.positions, uv = g.uvs, n = g.normals, uv1 = g.getAttribute("uv1"), idx = g.triangleIndices();
     const a = new Vector3(), b = new Vector3(), c = new Vector3();
     // The faces the engine draws: by group only for several materials on a geometry with groups (meshMaterials).
     const groups = materials.length > 1 && g.groups.length ? g.groups : [{ start: 0, count: idx.length, materialIndex: 0 }];
@@ -187,8 +193,18 @@ export class Raycaster {
         const h = this.hit(object, world, local, r.t);
         if (!h) continue;
         const normal = new Vector3().subVectors(c, b).cross(new Vector3().subVectors(a, b)).normalize();
-        const hitUv = uv.length >= p.length / 3 * 2 ? new Vector2(uv[ia * 2] * (1 - r.u - r.v) + uv[ib * 2] * r.u + uv[ic * 2] * r.v, uv[ia * 2 + 1] * (1 - r.u - r.v) + uv[ib * 2 + 1] * r.u + uv[ic * 2 + 1] * r.v) : undefined;
-        out.push({ ...h, object, face: { a: ia, b: ib, c: ic, normal, materialIndex: grp.materialIndex }, faceIndex: i / 3, ...(hitUv ? { uv: hitUv } : {}) });
+        const barycoord = new Vector3(1 - r.u - r.v, r.u, r.v);
+        const hitUv = uv.length >= p.length / 3 * 2 ? interpolate(uv, 2, ia, ib, ic, barycoord, new Vector2()) : undefined;
+        const hitUv1 = uv1 && uv1.itemSize === 2 ? interpolate(uv1.array, 2, ia, ib, ic, barycoord, new Vector2()) : undefined;
+        let hitNormal: Vector3 | undefined;
+        if (n.length >= p.length) {
+          hitNormal = interpolate(n, 3, ia, ib, ic, barycoord, new Vector3());
+          if (hitNormal.dot(local.direction) > 0) hitNormal.multiplyScalar(-1);
+        }
+        out.push({
+          ...h, object, face: { a: ia, b: ib, c: ic, normal, materialIndex: grp.materialIndex }, faceIndex: i / 3,
+          ...(hitUv ? { uv: hitUv } : {}), ...(hitUv1 ? { uv1: hitUv1 } : {}), ...(hitNormal ? { normal: hitNormal } : {}), barycoord,
+        });
       }
     }
   }
@@ -204,6 +220,15 @@ export class Raycaster {
     }
     if (best) out.push({ distance: best.distance, point: best.point, object, face: null, faceIndex: best.k });
   }
+}
+
+/** An attribute's value at a point of triangle (a, b, c) with barycentric coordinates `w` (three.js's
+ *  Triangle.getInterpolatedAttribute). */
+function interpolate<T extends Vector2 | Vector3>(array: ArrayLike<number>, size: 2 | 3, a: number, b: number, c: number, w: Vector3, target: T): T {
+  const at = (k: number) => array[a * size + k] * w.x + array[b * size + k] * w.y + array[c * size + k] * w.z;
+  if (target instanceof Vector3) target.set(at(0), at(1), at(2));
+  else target.set(at(0), at(1));
+  return target;
 }
 
 /** A shape to ask the physics world with (sizes in metres). */

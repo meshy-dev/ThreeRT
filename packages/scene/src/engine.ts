@@ -1221,7 +1221,7 @@ export class SceneBinding {
       this.textures.set(t, id);
       t.needsUpdate = false;
       const raw = t instanceof DataTexture;
-      const desc: TextureDesc = { ...(raw || t.data ? {} : { uri: t.uri }), ...(raw ? { size: [t.width, t.height] as Vec2 } : {}), ...(t instanceof StreamTexture ? { stream: t.stream } : {}), srgb: t.colorSpace === "srgb", wrap: t.wrap !== "clamp", repeat: [...t.repeat], offset: [...t.offset] };
+      const desc: TextureDesc = { ...(raw || t.data ? {} : { uri: t.uri }), ...(raw ? { size: [t.width, t.height] as Vec2 } : {}), ...(t instanceof StreamTexture ? { stream: t.stream } : {}), srgb: t.colorSpace === "srgb", wrap: t.wrap !== "clamp", repeat: [t.repeat.x, t.repeat.y], offset: [t.offset.x, t.offset.y] };
       this.engine.texture(id, desc, raw ? t.pixels : (t.data ?? null));
     }
     return id;

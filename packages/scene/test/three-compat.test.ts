@@ -272,6 +272,65 @@ test("Raycaster: the nearest hit first, front faces of single-sided materials, i
   assert.ok(r2.ray.direction.distanceTo(new THREE.Vector3(0, 0, -1)) < 1e-9);
 });
 
+test("Raycaster: a mesh hit has barycoord, the interpolated normal facing the ray, and uv1, as three.js has them", () => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 2, 0, 0, 0, 2, 0], 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute([0, 0, 1, 1, 0, 0, 0, 1, 0], 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
+  g.setAttribute("uv1", new THREE.Float32BufferAttribute([0.5, 0.5, 1, 0.5, 0.5, 1], 2));
+  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ side: THREE.DoubleSide }));
+  mesh.position.set(1, 0, 0);
+  mesh.rotation.y = 0.3;
+  const near = (a: number[], b: number[]) => a.every((x, i) => Math.abs(x - b[i]) < 1e-9);
+  // (The values three r187 gives for the same mesh and rays.)
+  const w = [0.5383120996154788, 0.2616879003845213, 0.2];
+  const front = new THREE.Raycaster(new THREE.Vector3(1.5, 0.4, 5), new THREE.Vector3(0, 0, -1)).intersectObject(mesh)[0];
+  assert.ok(near(front.barycoord!.toArray(), w), "barycoord: weights of face.a, b, c");
+  assert.ok(near(front.normal!.toArray(), [w[1], w[2], w[0]]), "normal: interpolated, object space");
+  assert.ok(near(front.uv1!.toArray(), [0.6308439501922606, 0.6]));
+  assert.ok(near(front.face!.normal.toArray(), [0, 0, 1]));
+  const back = new THREE.Raycaster(new THREE.Vector3(1.5, 0.4, -5), new THREE.Vector3(0, 0, 1)).intersectObject(mesh)[0];
+  assert.ok(near(back.normal!.toArray(), [-w[1], -w[2], -w[0]]), "turned to face the ray from behind");
+  assert.ok(near(back.face!.normal.toArray(), [0, 0, 1]), "the face normal is not turned");
+  g.deleteAttribute("uv1");
+  assert.equal(new THREE.Raycaster(new THREE.Vector3(1.5, 0.4, 5), new THREE.Vector3(0, 0, -1)).intersectObject(mesh)[0].uv1, undefined);
+});
+
+test("Raycaster: each object answers with its own raycast, which can be replaced and stop the descent, as three.js does", () => {
+  const box = () => new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
+  const parent = box(), child = box();
+  child.position.z = -3;
+  parent.add(child);
+  const rc = new THREE.Raycaster(new THREE.Vector3(0.1, 0.2, 5), new THREE.Vector3(0, 0, -1));
+  const hit = () => rc.intersectObject(parent).map((h) => h.object === parent ? "parent" : "child");
+  assert.deepEqual(hit(), ["parent", "child"]);
+  parent.raycast = () => {};
+  assert.deepEqual(hit(), ["child"], "an object that never answers: its children still do");
+  parent.raycast = () => false;
+  assert.deepEqual(hit(), [], "false: the ray does not go on to its children");
+  parent.raycast = function (this: THREE.Mesh, raycaster, intersects) {
+    THREE.Mesh.prototype.raycast.call(this, raycaster, intersects);
+  };
+  assert.deepEqual(hit(), ["parent", "child"], "Mesh.prototype.raycast, called from a replacement");
+  const group = new THREE.Group();
+  group.add(box());
+  group.raycast = () => false;
+  assert.equal(rc.intersectObject(group).length, 0);
+});
+
+test("Raycaster: an object off the ray's layers is not asked to raycast, and its children still are, as three.js does", () => {
+  const box = () => new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial());
+  const parent = box(), child = box();
+  child.position.z = -3;
+  parent.add(child);
+  parent.layers.set(1);
+  let asked = 0;
+  parent.raycast = () => { asked++; return false; };
+  const hits = new THREE.Raycaster(new THREE.Vector3(0.1, 0.2, 5), new THREE.Vector3(0, 0, -1)).intersectObject(parent);
+  assert.equal(asked, 0);
+  assert.deepEqual(hits.map((h) => h.object), [child]);
+});
+
 test("Object3D.remove: notifies the child and then its old parent after unparenting, as three.js does", () => {
   const [a, b, x, y, z] = ["a", "b", "x", "y", "z"].map((name) => Object.assign(new THREE.Object3D(), { name }));
   const log: string[] = [];
@@ -336,6 +395,30 @@ test("the binding: ambient lights as the environment, black background, three.js
   assert.ok(Math.abs(env2.background![0] - 1) < 1e-9, "a white background at the light's level (pi / pi)");
   assert.ok(Math.abs(env2.fog!.density - Math.log(20) / 20) < 1e-9 && env2.fog!.startDistance === 10 && env2.fog!.heightFalloff === 0);
   assert.ok(compatNotes().some((n) => n.startsWith("mapped: MeshPhongMaterial")));
+});
+
+test("Raycaster: a mesh hit has the interpolated normal (facing the ray), barycoord and uv1, as three.js r187 has them", () => {
+  const close = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => Math.abs(x - b[i]) < 1e-9);
+  // (Expected values from three r187 on the same scene.)
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshStandardMaterial());
+  sphere.position.set(0.5, 0, 0);
+  sphere.rotation.y = 0.4;
+  const h = new THREE.Raycaster(new THREE.Vector3(0.7, 0.3, 5), new THREE.Vector3(0, 0, -1)).intersectObject(sphere)[0];
+  assert.equal(h.faceIndex, 26);
+  assert.ok(Math.abs(h.distance - 4.1518238635745135) < 1e-9);
+  assert.ok(close(h.normal!.toArray(), [-0.14608314623199165, 0.3, 0.8591056237673158]), "object-space vertex normal");
+  assert.ok(close(h.barycoord!.toArray(), [0.3614472298221845, 0.23855277017781545, 0.4]));
+  assert.equal(h.uv1, undefined, "no uv1 attribute, no uv1");
+
+  const g = new THREE.PlaneGeometry(2, 2);
+  g.setAttribute("uv1", new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), 2));
+  const mat = new THREE.MeshStandardMaterial();
+  mat.side = THREE.DoubleSide;
+  const back = new THREE.Raycaster(new THREE.Vector3(0.3, 0.2, -5), new THREE.Vector3(0, 0, 1)).intersectObject(new THREE.Mesh(g, mat))[0];
+  assert.ok(close(back.normal!.toArray(), [0, 0, -1]), "turned to face the ray from behind");
+  assert.ok(close(back.face!.normal.toArray(), [0, 0, 1]), "the face's normal is not turned");
+  assert.ok(close(back.barycoord!.toArray(), [0.35, 0.05, 0.6]));
+  assert.ok(close(back.uv1!.toArray(), [0.65, 0.4]));
 });
 
 test("Raycaster: a single-material mesh is hit outside its geometry groups, as three.js does and the engine draws it", () => {

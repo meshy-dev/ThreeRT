@@ -20,6 +20,8 @@ export const NoColorSpace = "";
 export const RepeatWrapping = 1000;
 export const ClampToEdgeWrapping = 1001;
 export const MirroredRepeatWrapping = 1002;
+export const UnsignedByteType = 1009;
+export const RGBAFormat = 1023;
 
 /** three.js WebGLRenderer: every setting accepted and ignored (`shadowMap.*` included); `render` does nothing. */
 export class WebGLRenderer {

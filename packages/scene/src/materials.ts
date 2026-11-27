@@ -1026,7 +1026,7 @@ export class SurfaceMaterial extends LibraryMaterial<SurfaceParameters> {
         WinTop: w?.top ?? 1e4, WinSeed: w?.seed ?? 0,
         FootHeight: Math.max(p.weathering?.foot?.height ?? 0, 0), FootAmount: p.weathering?.foot?.amount ?? 0,
         Fade: p.weathering?.fade ? ([...p.weathering.fade.toward, p.weathering.fade.amount] as V4) : [0, 0, 1, 0],
-        UV: [...(first?.repeat ?? [1, 1]), ...(first?.offset ?? [0, 0])] as V4,
+        UV: first ? [first.repeat.x, first.repeat.y, first.offset.x, first.offset.y] : [1, 1, 0, 0],
         Win0: w ? [w.floorHeight, w.bayWidth, w.windowWidth, w.windowHeight] : [0, 0, 0, 0],
         Win1: w ? [w.groundHeight, w.litChance, w.sill, w.brightness] : [0, 0, 0, 0],
       },

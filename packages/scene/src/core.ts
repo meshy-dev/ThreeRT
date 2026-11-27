@@ -2,8 +2,9 @@
 // uses physical units (see engine.ts, which binds a scene to the engine).
 
 import { Color, type ColorLike, Euler, Matrix4, Quaternion, Vector2, Vector3 } from "./math.ts";
-import { type BufferGeometry, StaticDrawUsage } from "./geometry.ts";
+import { BufferAttribute, type BufferGeometry } from "./geometry.ts";
 import type { ExposureDesc, Vec3 } from "./engine.ts";
+import type { Intersection, Raycaster } from "./raycaster.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Change tracking: engine bindings (SceneBinding) sync only what changed
@@ -109,6 +110,38 @@ export interface PhysicsDesc {
   sensor?: boolean;
   /** Report its contacts: "contactstart" / "contactend" events on the object, "contacts" on the scene. */
   contacts?: boolean;
+}
+
+/**
+ * three.js EventDispatcher: per-instance listeners by event type. A listener is added once however often it is passed,
+ * and is called with the dispatcher as `this`; during a dispatch the event's `target` is the dispatcher (null after),
+ * and listeners removed or added by a listener do not change who is called for that event. Object3D and the
+ * materials extend it, as other classes can (`class Car extends EventDispatcher<{ type: "start" }>`).
+ */
+type Listener = Function;
+export class EventDispatcher<E extends { type: string } = { type: string; [key: string]: unknown }> {
+  /** @internal By event type (three.js's `_listeners`). */
+  declare _listeners: Record<string, Listener[]> | undefined;
+  addEventListener(type: string, listener: (this: this, event: E) => void): void {
+    const all = (this._listeners ??= {});
+    const l = (all[type] ??= []);
+    if (!l.includes(listener)) l.push(listener);
+  }
+  hasEventListener(type: string, listener: (this: this, event: E) => void): boolean {
+    return this._listeners?.[type]?.includes(listener) ?? false;
+  }
+  removeEventListener(type: string, listener: (this: this, event: E) => void): void {
+    const l = this._listeners?.[type];
+    const i = l ? l.indexOf(listener) : -1;
+    if (i !== -1) l!.splice(i, 1);
+  }
+  dispatchEvent(event: E & { target?: unknown }): void {
+    const l = this._listeners?.[event.type];
+    if (!l) return;
+    event.target = this;
+    for (const f of l.slice()) (f as (this: this, event: E) => void).call(this, event);
+    event.target = null;
+  }
 }
 
 /** An event of an object (`addEventListener`). */
@@ -393,7 +426,7 @@ function quaternionChanged(this: Quaternion): void {
   touched(o);
 }
 
-export class Object3D {
+export class Object3D extends EventDispatcher<ObjectEvent> {
   readonly isObject3D = true;
   type = "Object3D";
   name = "";
@@ -489,7 +522,6 @@ export class Object3D {
   declare private _physics: Readonly<PhysicsDesc> | null | undefined;
   /** @internal */
   declare _body: BoundBody | undefined;
-  declare private _listeners: Map<string, ((e: ObjectEvent) => void)[]> | undefined;
 
   /**
    * The object's rigid body (see "Physics" above): a description, or just its type. In the scene, the object has the
@@ -549,31 +581,9 @@ export class Object3D {
     return s?.sleeping ?? false;
   }
 
-  /**
-   * three.js's EventDispatcher. The engine's events: "contactstart" / "contactend" (`physics.contacts`), and
-   * "outofworld" when the object's body got more than 1,000 km from the origin and was taken out of the physics world
-   * (the object stays in the scene, without a body until its `physics` is set again).
-   */
-  addEventListener(type: string, listener: (e: ObjectEvent) => void): void {
-    const all = (this._listeners ??= new Map());
-    const l = all.get(type);
-    if (!l) all.set(type, [listener]);
-    else if (!l.includes(listener)) l.push(listener);
-  }
-  hasEventListener(type: string, listener: (e: ObjectEvent) => void): boolean {
-    return this._listeners?.get(type)?.includes(listener) ?? false;
-  }
-  removeEventListener(type: string, listener: (e: ObjectEvent) => void): void {
-    const l = this._listeners?.get(type);
-    if (l?.includes(listener)) l.splice(l.indexOf(listener), 1);
-  }
-  dispatchEvent(event: ObjectEvent): void {
-    const l = this._listeners?.get(event.type);
-    if (!l?.length) return;
-    event.target = this;
-    for (const f of [...l]) f(event);
-    event.target = null;
-  }
+  // three.js's EventDispatcher (inherited). The engine's events: "contactstart" / "contactend" (`physics.contacts`),
+  // and "outofworld" when the object's body got more than 1,000 km from the origin and was taken out of the physics
+  // world (the object stays in the scene, without a body until its `physics` is set again).
   set id(v: string | number | undefined) {
     this._id = v === undefined ? undefined : String(v);
   }
@@ -583,6 +593,7 @@ export class Object3D {
   }
 
   constructor() {
+    super();
     // (shared functions, the object weakly: a closure over the object per rotation and quaternion made two cycles and
     // two objects more an object)
     for (const [part, changed] of [[this.rotation, rotationChanged], [this.quaternion, quaternionChanged]] as const) {
@@ -709,6 +720,13 @@ export class Object3D {
   }
 
   /** World matrix from the local transform (three.js): optionally the ancestors' first, the descendants' after. */
+  /**
+   * The object's own hits of `raycaster`'s ray, added to `intersects` (three.js: the Raycaster asks each object it
+   * visits). None here; meshes have theirs. Replace it to change what an object answers (`() => {}`: never hit);
+   * returning false keeps the Raycaster from its children.
+   */
+  raycast(_raycaster: Raycaster, _intersects: Intersection[]): boolean | void {}
+
   updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void {
     if (updateParents && this.parent) this.parent.updateWorldMatrix(true, false);
     if (this.matrixAutoUpdate) this.updateMatrix();
@@ -1084,10 +1102,40 @@ export class Scene extends Object3D {
 export class Texture {
   readonly uuid = `tex${++uid}`;
   uri: string;
-  colorSpace: "srgb" | "linear";
-  repeat: [number, number] = [1, 1];
-  offset: [number, number] = [0, 0];
-  wrap: "repeat" | "clamp" = "repeat";
+  /** `"srgb"` (three.js's `SRGBColorSpace`) is decoded to linear when sampled; anything else (`"linear"`,
+   *  `LinearSRGBColorSpace`, `NoColorSpace`) is sampled as it is. */
+  colorSpace: "srgb" | "linear" | "srgb-linear" | "";
+  private readonly _repeat = new Vector2(1, 1);
+  private readonly _offset = new Vector2(0, 0);
+  /** How many times the texture repeats across the UVs, a `Vector2` as in three.js (`repeat.set(8, 8)`). Assigning a
+   *  `[u, v]` pair or a `Vector2` copies it in. */
+  get repeat(): Vector2 {
+    return this._repeat;
+  }
+  set repeat(value: Vector2 | readonly [number, number]) {
+    if (value instanceof Vector2) this._repeat.copy(value);
+    else this._repeat.set(value[0], value[1]);
+  }
+  /** Where the texture starts in UV space, a `Vector2` as in three.js. Assigning a `[u, v]` pair or a `Vector2` copies it in. */
+  get offset(): Vector2 {
+    return this._offset;
+  }
+  set offset(value: Vector2 | readonly [number, number]) {
+    if (value instanceof Vector2) this._offset.copy(value);
+    else this._offset.set(value[0], value[1]);
+  }
+  /** three.js's wrap modes, per axis. ThreeRT textures repeat unless set otherwise (three.js clamps by default); the
+   *  engine samples a texture with one mode, so it clamps only when both axes are `ClampToEdgeWrapping` (1001), and
+   *  `MirroredRepeatWrapping` samples as `RepeatWrapping`. */
+  wrapS = 1000;
+  wrapT = 1000;
+  /** Both axes at once: `"clamp"` is `ClampToEdgeWrapping` on S and T. */
+  get wrap(): "repeat" | "clamp" {
+    return this.wrapS === 1001 && this.wrapT === 1001 ? "clamp" : "repeat";
+  }
+  set wrap(value: "repeat" | "clamp") {
+    this.wrapS = this.wrapT = value === "clamp" ? 1001 : 1000;
+  }
   /** Raw bytes for generated textures (PNG); external textures are fetched from `uri`. */
   data?: Uint8Array;
   /** Number of times the texture was marked for upload, as in three.js. */
@@ -1101,10 +1149,65 @@ export class Texture {
     if (value === true) this.version++;
     this.dirty = value;
   }
-  constructor(uri: string, colorSpace: "srgb" | "linear" = "srgb") {
+  constructor(uri: string, colorSpace: "srgb" | "linear" | "srgb-linear" | "" = "srgb") {
     this.uri = uri;
     this.colorSpace = colorSpace;
   }
+  readonly isTexture = true;
+  name = "";
+  userData: Record<string, unknown> = {};
+  private _listeners?: Map<string, ((event: TextureEvent) => void)[]>;
+
+  /** Copies what the texture samples (uri / data, color space, repeat, offset, wrap), its name and a JSON copy of its
+   *  userData, and marks it for upload, as three.js does. A `DataTexture`'s pixels stay its own: they are its size. */
+  copy(source: Texture): this {
+    this.uri = source.uri;
+    this.data = source.data;
+    this.colorSpace = source.colorSpace;
+    this.repeat.copy(source.repeat);
+    this.offset.copy(source.offset);
+    this.wrapS = source.wrapS;
+    this.wrapT = source.wrapT;
+    this.name = source.name;
+    this.userData = JSON.parse(JSON.stringify(source.userData));
+    this.needsUpdate = true;
+    return this;
+  }
+  /** A new texture (its own uuid) sampling the same image, as three.js's clone shares its source. */
+  clone(): Texture {
+    return new Texture(this.uri, this.colorSpace).copy(this);
+  }
+
+  addEventListener(type: string, listener: (event: TextureEvent) => void): void {
+    const all = (this._listeners ??= new Map());
+    const listeners = all.get(type);
+    if (!listeners) all.set(type, [listener]);
+    else if (!listeners.includes(listener)) listeners.push(listener);
+  }
+  hasEventListener(type: string, listener: (event: TextureEvent) => void): boolean {
+    return this._listeners?.get(type)?.includes(listener) ?? false;
+  }
+  removeEventListener(type: string, listener: (event: TextureEvent) => void): void {
+    const listeners = this._listeners?.get(type);
+    if (listeners?.includes(listener)) listeners.splice(listeners.indexOf(listener), 1);
+  }
+  dispatchEvent(event: TextureEvent): void {
+    const listeners = this._listeners?.get(event.type);
+    if (!listeners?.length) return;
+    event.target = this;
+    for (const listener of [...listeners]) listener.call(this, event);
+    event.target = null;
+  }
+  /** Fires `dispose`, as three.js does; the engine keeps the texture while a material in the scene uses it. */
+  dispose(): void {
+    this.dispatchEvent({ type: "dispose" });
+  }
+}
+
+export interface TextureEvent {
+  type: string;
+  target?: Texture | null;
+  [key: string]: unknown;
 }
 
 let uid = 0;
@@ -1141,11 +1244,11 @@ export const DoubleSide = 2;
 
 type MaterialEvent = { type: string; target?: MeshStandardMaterial | null };
 
-export class MeshStandardMaterial {
+/** three.js's material events are per instance (EventDispatcher), including dispose notifications. */
+export class MeshStandardMaterial extends EventDispatcher<MaterialEvent> {
   readonly isMaterial = true;
   readonly isMeshStandardMaterial = true;
   readonly uuid = `mat${++uid}`;
-  private _listeners?: Map<string, Array<(event: MaterialEvent) => void>>;
   type: "standard" | "physical" = "standard";
   /** Colours, emission, roughness, metalness, opacity, maps and the material function binding are picked up by the
    *  engine binding automatically; set this after changing anything else (`side`, a map's `repeat`, ...). */
@@ -1186,6 +1289,7 @@ export class MeshStandardMaterial {
   shader: ShaderBinding | null = null;
 
   constructor(params: MeshStandardMaterialParameters = {}) {
+    super();
     this.setValues(params);
   }
 
@@ -1201,31 +1305,6 @@ export class MeshStandardMaterial {
   /** The material drawn double-sided (`side` "double" or DoubleSide). */
   get doubleSided(): boolean {
     return this.side === "double" || this.side === DoubleSide || this.side === BackSide;
-  }
-
-  /** three.js's material events are per instance, including dispose notifications. */
-  addEventListener(type: string, listener: (event: MaterialEvent) => void): void {
-    const all = (this._listeners ??= new Map());
-    const listeners = all.get(type);
-    if (!listeners) all.set(type, [listener]);
-    else if (!listeners.includes(listener)) listeners.push(listener);
-  }
-
-  hasEventListener(type: string, listener: (event: MaterialEvent) => void): boolean {
-    return this._listeners?.get(type)?.includes(listener) ?? false;
-  }
-
-  removeEventListener(type: string, listener: (event: MaterialEvent) => void): void {
-    const listeners = this._listeners?.get(type);
-    if (listeners?.includes(listener)) listeners.splice(listeners.indexOf(listener), 1);
-  }
-
-  dispatchEvent(event: MaterialEvent): void {
-    const listeners = this._listeners?.get(event.type);
-    if (!listeners?.length) return;
-    event.target = this;
-    for (const listener of [...listeners]) listener.call(this, event);
-    event.target = null;
   }
 
   /** Notify owners of this material; shared textures are not disposed. */
@@ -1399,6 +1478,10 @@ export class MeshDepthMaterial extends MeshStandardMaterial {
 export class Mesh extends Object3D {
   readonly isMesh = true;
   override type = "Mesh";
+  /** Its hits of `raycaster`'s ray, added to `intersects` (three.js). */
+  override raycast(raycaster: Raycaster, intersects: Intersection[]): void {
+    raycaster._raycastOwn(this, intersects);
+  }
   declare private _geometry: BufferGeometry;
   declare private _material: MeshStandardMaterial | MeshStandardMaterial[];
   declare private _dynamicGeometry: boolean;
@@ -1851,6 +1934,10 @@ export class ProceduralGeometry {
  */
 export class ProceduralMesh extends Object3D {
   override type = "ProceduralMesh";
+  /** Its hits of `raycaster`'s ray, added to `intersects` (three.js). */
+  override raycast(raycaster: Raycaster, intersects: Intersection[]): void {
+    raycaster._raycastOwn(this, intersects);
+  }
   declare private _geometry: ProceduralGeometry;
   declare private _materials: MeshStandardMaterial[];
   constructor(geometry: ProceduralGeometry, materials: MeshStandardMaterial | MeshStandardMaterial[] = new MeshStandardMaterial()) {
@@ -1878,34 +1965,40 @@ export class ProceduralMesh extends Object3D {
 
 /**
  * Per-instance numbers of an `InstancedMesh` (three.js `InstancedBufferAttribute`): `itemSize` per instance in `array`.
- * After writing `array` (or `setMatrixAt` / `setColorAt` / `setCustomDataAt`), set `needsUpdate`, as in three.js.
+ * A `BufferAttribute` (its accessors: `getX`, `setXYZ`, `copyAt`, ...), its numbers always a Float32Array. After writing
+ * `array` (or `setMatrixAt` / `setColorAt` / `setCustomDataAt`), set `needsUpdate`, as in three.js.
  */
-export class InstancedBufferAttribute {
+export class InstancedBufferAttribute extends BufferAttribute {
   readonly isInstancedBufferAttribute = true;
-  array: Float32Array;
-  readonly itemSize: number;
-  usage = StaticDrawUsage;
-  /** Bumped by `needsUpdate = true`: the binding sends the array again. */
-  version = 0;
+  declare array: Float32Array;
+  /** three.js: how many meshes share each item (1 here: the renderer reads one item per instance). */
+  meshPerAttribute: number;
   /** The instanced mesh whose table it is, weakly (no reference cycle). */
   declare _owner: WeakRef<Object3D> | undefined;
-  constructor(array: ArrayLike<number>, itemSize: number) {
-    this.array = array instanceof Float32Array ? array : Float32Array.from(array);
-    this.itemSize = itemSize;
+  constructor(array: ArrayLike<number>, itemSize: number, normalized = false, meshPerAttribute = 1) {
+    super(array instanceof Float32Array ? array : Float32Array.from(array), itemSize, normalized);
+    this.meshPerAttribute = meshPerAttribute;
     Object.defineProperty(this, "_owner", { value: undefined, writable: true });
   }
-  get count(): number {
-    return this.array.length / this.itemSize;
-  }
-  set needsUpdate(v: boolean) {
+  /** Bumps `version`: the binding sends the array again. */
+  override set needsUpdate(v: boolean) {
     if (!v) return;
     this.version++;
     const o = this._owner?.deref();
     if (o) touched(o);
   }
-  setUsage(usage: number): this {
-    this.usage = usage;
+  /** Takes `source`'s numbers (a copy), item size, normalization, usage, name and meshPerAttribute (three.js). */
+  copy(source: InstancedBufferAttribute): this {
+    this.array = source.array.slice();
+    (this as { itemSize: number }).itemSize = source.itemSize;
+    this.normalized = source.normalized;
+    this.usage = source.usage;
+    this.name = source.name;
+    this.meshPerAttribute = source.meshPerAttribute;
     return this;
+  }
+  override clone(): InstancedBufferAttribute {
+    return new InstancedBufferAttribute(this.array, this.itemSize).copy(this);
   }
 }
 
@@ -1920,6 +2013,10 @@ export class InstancedBufferAttribute {
  */
 export class InstancedMesh extends Object3D {
   override type = "InstancedMesh";
+  /** Its hits of `raycaster`'s ray, added to `intersects` (three.js). */
+  override raycast(raycaster: Raycaster, intersects: Intersection[]): void {
+    raycaster._raycastOwn(this, intersects);
+  }
   readonly isMesh = true;
   readonly isInstancedMesh = true;
   readonly instanceMatrix: InstancedBufferAttribute;
@@ -1995,21 +2092,23 @@ export class InstancedMesh extends Object3D {
     return matrix.fromArray(this.instanceMatrix.array, index * 16);
   }
   /** The first call gives every instance a colour (white). */
-  setColorAt(index: number, color: Color): void {
+  setColorAt(index: number, color: Color): this {
     this.instanceColor ??= new InstancedBufferAttribute(new Float32Array(this.instanceMatrix.count * 3).fill(1), 3);
     color.toArray(this.instanceColor.array, index * 3);
+    return this;
   }
   getColorAt(index: number, color: Color): Color {
     return this._color ? color.fromArray(this._color.array, index * 3) : color.setRGB(1, 1, 1);
   }
   /** The first call gives every instance the mesh's `customData`. */
-  setCustomDataAt(index: number, data: ArrayLike<number>): void {
+  setCustomDataAt(index: number, data: ArrayLike<number>): this {
     if (!this.instanceCustomData) {
       const d = new Float32Array(this.instanceMatrix.count * 4);
       for (let i = 0; i < d.length; i += 4) d.set(this.customData, i);
       this.instanceCustomData = new InstancedBufferAttribute(d, 4);
     }
     for (let k = 0; k < 4; k++) this.instanceCustomData.array[index * 4 + k] = data[k] ?? 0;
+    return this;
   }
   getCustomDataAt(index: number, target: number[] = []): number[] {
     for (let k = 0; k < 4; k++) target[k] = this._instData ? this._instData.array[index * 4 + k] : this.customData[k];
@@ -2017,14 +2116,16 @@ export class InstancedMesh extends Object3D {
   }
   computeBoundingBox(): void {}
   computeBoundingSphere(): void {}
+  /** Fires `dispose` (three.js); the renderer frees the instances when the mesh leaves the scene. */
   dispose(): this {
+    this.dispatchEvent({ type: "dispose" });
     return this;
   }
   /** As Object3D's, the instance tables copied rather than shared (three.js). */
   override copy(source: Object3D, recursive = true): this {
     super.copy(source, recursive);
     if (source instanceof InstancedMesh) {
-      const dup = (a: InstancedBufferAttribute) => this.own(new InstancedBufferAttribute(a.array.slice(), a.itemSize).setUsage(a.usage));
+      const dup = (a: InstancedBufferAttribute) => this.own(a.clone());
       (this as { instanceMatrix: InstancedBufferAttribute }).instanceMatrix = dup(source.instanceMatrix);
       this._color = source._color && dup(source._color);
       this._instData = source._instData && dup(source._instData);
@@ -2429,6 +2530,7 @@ export type Environment = SkyAtmosphere | SkyColor | HDRIEnvironment | SkyGradie
 
 /** UE-style exponential height fog. `color` x `intensity` = ambient inscattering radiance (nits). */
 export class ExponentialHeightFog {
+  name = "";
   density: number;
   heightFalloff: number;
   color: Color;
@@ -2503,6 +2605,10 @@ export class Fog extends ExponentialHeightFog {
     this.density = Math.log(20) / Math.max(this._far - this._near, 1e-3);
     this.startDistance = Math.max(this._near, 0);
   }
+  /** three.js's JSON of a Fog. */
+  toJSON(): { type: "Fog"; name: string; color: number; near: number; far: number } {
+    return { type: "Fog", name: this.name, color: this.color.getHex(), near: this.near, far: this.far };
+  }
 }
 
 /** three.js FogExp2: transmittance exp(-(density d)^2). Mapped to uniform exponential fog of the same e-folding
@@ -2516,23 +2622,55 @@ export class FogExp2 extends ExponentialHeightFog {
     const { heightFalloff, intensity, height, startDistance, maxOpacity } = this;
     return Object.assign(new FogExp2(this.color, this.density), { heightFalloff, intensity, height, startDistance, maxOpacity, volumetric: structuredClone(this.volumetric) });
   }
+  /** three.js's JSON of a FogExp2. */
+  toJSON(): { type: "FogExp2"; name: string; color: number; density: number } {
+    return { type: "FogExp2", name: this.name, color: this.color.getHex(), density: this.density };
+  }
 }
 
 export function vec3(v: Vector3 | Color): Vec3 {
   return v instanceof Vector3 ? [v.x, v.y, v.z] : [v.r, v.g, v.b];
 }
 
-/** Texture generated in code: RGBA8 pixels, handed to the engine as they are. */
+/** Texture generated in code: RGBA8 pixels, handed to the engine as they are.
+ *
+ *  Two forms: ThreeRT's `new DataTexture(width, height, rgba, colorSpace = "srgb")`, and three.js's
+ *  `new DataTexture(data, width, height, format, type, mapping, wrapS, wrapT, magFilter, minFilter, anisotropy, colorSpace)`.
+ *  The three.js form takes `RGBAFormat` / `UnsignedByteType` pixels only (a `Uint8Array` or `Uint8ClampedArray`) and
+ *  keeps three.js's defaults: clamped on both axes and `NoColorSpace` (sampled as linear) unless given. */
 export class DataTexture extends Texture {
+  readonly isDataTexture = true;
   readonly width: number;
   readonly height: number;
   readonly pixels: Uint8Array;
-  constructor(width: number, height: number, rgba: Uint8Array, colorSpace: "srgb" | "linear" = "srgb") {
-    super(`generated:${width}x${height}`, colorSpace);
+  constructor(width: number, height: number, rgba: Uint8Array, colorSpace?: "srgb" | "linear");
+  constructor(data: ArrayBufferView, width?: number, height?: number, format?: number, type?: number, mapping?: number, wrapS?: number, wrapT?: number, magFilter?: number, minFilter?: number, anisotropy?: number, colorSpace?: "srgb" | "srgb-linear" | "");
+  constructor(...args: unknown[]) {
+    const three = ArrayBuffer.isView(args[0]);
+    const width = (three ? (args[1] ?? 1) : args[0]) as number;
+    const height = (three ? (args[2] ?? 1) : args[1]) as number;
+    const data = (three ? args[0] : args[2]) as Uint8Array | Uint8ClampedArray;
+    super(`generated:${width}x${height}`, ((three ? args[11] : args[3]) as Texture["colorSpace"] | undefined) ?? (three ? "" : "srgb"));
+    if (three) {
+      const [format = 1023, type = 1009] = args.slice(3, 5) as (number | undefined)[];
+      if (format !== 1023 || type !== 1009 || !(data instanceof Uint8Array || data instanceof Uint8ClampedArray))
+        throw new RangeError(`DataTexture: only RGBAFormat (1023) UnsignedByteType (1009) pixels in a Uint8Array, not format ${format} type ${type}`);
+      this.wrapS = (args[6] as number | undefined) ?? 1001;
+      this.wrapT = (args[7] as number | undefined) ?? 1001;
+    }
+    const rgba = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     if (rgba.length !== width * height * 4) throw new RangeError(`DataTexture: ${rgba.length} bytes are not ${width}x${height} RGBA8 pixels`);
     this.width = width;
     this.height = height;
     this.pixels = rgba;
+  }
+  /** A new texture sharing these pixels, as three.js's clone shares its source. */
+  override clone(): DataTexture {
+    return new DataTexture(this.width, this.height, this.pixels).copy(this);
+  }
+  /** three.js's `image`: the pixels and their size. */
+  get image(): { data: Uint8Array; width: number; height: number } {
+    return { data: this.pixels, width: this.width, height: this.height };
   }
 }
 
@@ -2547,6 +2685,10 @@ export class StreamTexture extends DataTexture {
     if (!stream || stream.length > 64 || stream.includes("|")) throw new RangeError(`StreamTexture: a stream's name is 1 to 64 characters without "|", not ${JSON.stringify(stream)}`);
     this.stream = stream;
     this.wrap = "clamp";
+  }
+  /** A new texture on the same stream, sharing these pixels until a picture arrives. */
+  override clone(): StreamTexture {
+    return new StreamTexture(this.stream, this.width, this.height, this.pixels).copy(this);
   }
 }
 

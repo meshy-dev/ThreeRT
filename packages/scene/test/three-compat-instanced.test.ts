@@ -14,3 +14,41 @@ test("InstancedMesh: setMatrixAt returns the mesh for chaining, as three.js does
   mesh.instanceMatrix.needsUpdate = true;
   assert.equal(mesh.instanceMatrix.version, version + 1, "the required upload flag still works");
 });
+
+test("InstancedMesh: setColorAt returns the mesh, and dispose fires dispose, as three.js does", () => {
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial(), 2);
+  assert.equal(mesh.setColorAt(1, new THREE.Color(1, 0, 0)), mesh, "setColorAt chains");
+  assert.deepEqual(mesh.getColorAt(1, new THREE.Color()).toArray(), [1, 0, 0]);
+  assert.equal(mesh.setCustomDataAt(0, [1, 2, 3, 4]), mesh, "setCustomDataAt chains too");
+  let fired: unknown = null;
+  mesh.addEventListener("dispose", (e) => (fired = e.target));
+  assert.equal(mesh.dispose(), mesh);
+  assert.equal(fired, mesh, "dispose event with the mesh as target");
+});
+
+test("InstancedBufferAttribute: a BufferAttribute with meshPerAttribute, copy and clone, as three.js has it", () => {
+  const a = new THREE.InstancedBufferAttribute(new Float32Array([1, 2, 3, 4, 5, 6]), 3, false, 2);
+  assert.ok(a instanceof THREE.BufferAttribute, "instanceof BufferAttribute");
+  assert.equal(a.isBufferAttribute, true);
+  assert.equal(a.meshPerAttribute, 2);
+  assert.equal(new THREE.InstancedBufferAttribute([0], 1).meshPerAttribute, 1, "defaults to 1");
+  assert.equal(a.getY(1), 5, "BufferAttribute accessors");
+  a.setXYZ(0, 7, 8, 9);
+  assert.deepEqual([...a.array.subarray(0, 3)], [7, 8, 9]);
+  a.name = "n";
+  const c = a.clone();
+  assert.ok(c instanceof THREE.InstancedBufferAttribute);
+  assert.notEqual(c.array, a.array, "own numbers");
+  assert.deepEqual([c.meshPerAttribute, c.name, c.count, c.itemSize, [...c.array]], [2, "n", 2, 3, [...a.array]]);
+});
+
+test("InstancedBufferAttribute: needsUpdate still re-sends the owning mesh's table", () => {
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial(), 2);
+  mesh.instanceMatrix.setX(0, 2);
+  const v = mesh.instanceMatrix.version;
+  mesh.instanceMatrix.needsUpdate = true;
+  assert.equal(mesh.instanceMatrix.version, v + 1);
+  const copy = mesh.clone();
+  assert.notEqual(copy.instanceMatrix, mesh.instanceMatrix, "clone copies the table");
+  assert.equal(copy.instanceMatrix.getX(0), 2);
+});
