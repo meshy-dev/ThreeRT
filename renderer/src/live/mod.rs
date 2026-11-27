@@ -1226,12 +1226,15 @@ mod timer_tests {
 
     #[test]
     fn a_frame_with_a_reconstruction_provider_ends_with_the_passes_after_it() {
+        let near = |t: [u64; 10], want: f32| { let ms = frame_gpu_ms(&t, 1, 1.0).unwrap(); assert!((ms - want).abs() < 1e-4, "{ms} for {want}"); };
         // The trace, the passes before the provider (the second pair), the provider, the passes after it (the fifth).
-        let t = [2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 11_300_000, 12_000_000];
-        assert_eq!(frame_gpu_ms(&t, 1, 1.0), Some(10.0));
+        near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 11_300_000, 12_000_000], 10.0);
         // A late post pass: the trace, then from the second pair's begin to the fifth's end.
-        let late = [2_000_000, 9_000_000, 29_200_000, 30_500_000, 0, 0, 0, 0, 31_300_000, 32_000_000];
-        assert_eq!(frame_gpu_ms(&late, 1, 1.0), Some(7.0 + 2.8));
+        near([2_000_000, 9_000_000, 29_200_000, 30_500_000, 0, 0, 0, 0, 31_300_000, 32_000_000], 7.0 + 2.8);
+        // The fifth pair of a later frame (35 ms on): the frame to its second pair's end, and the fifth's own length.
+        near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 45_300_000, 46_000_000], 8.5 + 0.7);
+        // Without a provider the fifth pair is zeros: the post pass ends the frame.
+        near([2_000_000, 9_000_000, 9_200_000, 10_500_000, 0, 0, 0, 0, 0, 0], 8.5);
     }
 }
 

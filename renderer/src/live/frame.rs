@@ -23,6 +23,9 @@ pub(super) const TIMER_QUERIES: u32 = 10;
 
 /// Gap (ms) past which a slot's post pass is not its trace's frame's (`frame_gpu_ms`).
 pub(super) const TIMER_GAP_MS: f32 = 2.0;
+/// The same for the passes after a reconstruction provider, past the passes before it. The provider's work is between
+/// them (the joint denoiser's about 1 ms at 960 x 540); another frame's stamps are frames away.
+pub(super) const TIMER_PROVIDER_MS: f32 = 8.0;
 
 /// A frame's GPU time (ms) from its slot's timestamps (trace, post, the emitter weights', particle pass pairs, the post
 /// pass after a provider; zero: not run): from its first pass (particles, the emitters' weights or trace) to the end of
@@ -32,21 +35,30 @@ pub(super) const TIMER_GAP_MS: f32 = 2.0;
 /// next, 4 frames on: the span then read 70–80 ms while frames came every 16.7 ms. A post pass that begins more than
 /// TIMER_GAP_MS past where those traces would end (twice their length) is not this frame's: the frame is counted as
 /// its passes, the further traces at the first one's length.
+///
+/// With a reconstruction provider the post pass is two, the provider between them: the passes before it (the second
+/// pair) and those after it (the fifth). One pair split over the two did not time them: on Metal the stamp of a pass
+/// that writes its begin alone read 10 ms late, and the frame counted as its trace. The fifth pair too is now and
+/// then a later frame's (1 or 2 of the crowd's 1200 frames read 38 ms for 4.2): past TIMER_PROVIDER_MS it counts by
+/// its own length, the provider's work not known then.
 pub(super) fn frame_gpu_ms(t: &[u64; 10], spp: u32, period_ns: f32) -> Option<f32> {
     let start = [t[6], t[4], t[0]].into_iter().filter(|&v| v > 0).min()?;
-    // With a reconstruction provider the post pass is two, the provider between them: the passes before it (the
-    // second pair) and those after it (the fifth). One pair split over the two did not time them: on Metal the stamp
-    // of a pass that writes its begin alone read 10 ms late, and the frame counted as its trace.
-    let end = t[3].max(t[9]);
-    if end <= start {
+    if t[3] <= start {
         return None;
     }
     let ms = |ticks: u64| ticks as f32 * period_ns * 1e-6;
     let (trace, more) = (ms(t[1].saturating_sub(t[0])), spp.max(1) - 1);
-    if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
-        return Some(ms(t[1] - start) + more as f32 * trace + ms(end.saturating_sub(t[2])));
+    let post = if t[2] >= t[1] && ms(t[2] - t[1]) > TIMER_GAP_MS + 2.0 * more as f32 * trace {
+        ms(t[1] - start) + more as f32 * trace + ms(t[3].saturating_sub(t[2]))
+    } else {
+        ms(t[3] - start)
+    };
+    if t[9] == 0 {
+        return Some(post);
     }
-    Some(ms(end - start))
+    let after = ms(t[9].saturating_sub(t[8]));
+    let provider = if t[8] >= t[3] && ms(t[8] - t[3]) <= TIMER_PROVIDER_MS { ms(t[8] - t[3]) } else { 0.0 };
+    Some(post + provider + after)
 }
 
 impl FrameTimer {
