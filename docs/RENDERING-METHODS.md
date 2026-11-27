@@ -77,7 +77,7 @@ The JavaScriptCore guest and the native text path are PocketJS pieces (`pocket-g
 ## README, when Raster lands
 
 The headline stays about three.js and native: **"three.js, native."** — the subtitle names both methods:
-*"From a few-MB desktop app to hardware ray tracing: write the scene you would write in three.js, ship it
+*"From a 5 MB desktop app to hardware ray tracing: write the scene you would write in three.js, ship it
 rasterized on any GPU, or trace every light on ray-tracing hardware."* The current *Three + RT* section
 becomes the Path Traced section; a Raster section shows the same scene file as a native app with its size
 and frame cost.
